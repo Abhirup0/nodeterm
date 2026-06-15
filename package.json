@@ -14,8 +14,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "rebuild": "electron-rebuild -f -w node-pty",
     "make-icon": "node scripts/make-icon.mjs",
-    "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64",
-    "release": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --x64 --publish always",
+    "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.notarize=false",
+    "release": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --x64",
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "build": {
@@ -28,16 +28,16 @@
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.png",
       "hardenedRuntime": true,
+      "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": false,
-      "identity": null,
+      "notarize": true,
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] },
         { "target": "zip", "arch": ["arm64", "x64"] }
       ]
     },
-    "publish": { "provider": "github", "owner": "eneskirca", "repo": "nodeterm" }
+    "publish": { "provider": "generic", "url": "https://nodeterm.dev/updates" }
   },
   "dependencies": {
     "dompurify": "^3.4.10",

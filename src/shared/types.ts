@@ -269,6 +269,23 @@ export interface UpdateApi {
   restart(): void
 }
 
+/** A single news/announcement item, fetched from the remote announcements feed. */
+export interface Announcement {
+  /** Stable unique id; used to remember which items the user has dismissed. */
+  id: string
+  title: string
+  body?: string
+  /** Optional "Learn more" link (opened in the system browser). */
+  url?: string
+  /** Visual emphasis; defaults to 'info'. */
+  level?: 'info' | 'success' | 'warning'
+}
+
+export interface AnnouncementsApi {
+  /** Fetch the announcements feed from the website (returns [] on any failure). */
+  fetch(): Promise<Announcement[]>
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -279,6 +296,7 @@ export interface NodeTerminalApi {
   shell: ShellApi
   fs: FsApi
   updates: UpdateApi
+  announcements: AnnouncementsApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

@@ -1,0 +1,70 @@
+name: Release
+
+# Build, code-sign, and notarize the macOS app on every version tag (e.g. v0.1.1),
+# then publish the artifacts (dmg + zip + latest-mac.yml + blockmaps). Those files
+# are what the self-hosted update feed at https://nodeterm.dev/updates serves.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # allow creating the GitHub Release (canonical artifact store)
+
+jobs:
+  release-mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build, sign & notarize
+        run: npm run release
+        env:
+          # Developer ID Application cert, base64-encoded .p12 + its password.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # Apple notarization credentials.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodeterm-mac
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.yml
+            dist/*.blockmap
+
+      # Canonical copy of every release on GitHub. The update feed itself lives on
+      # nodeterm.dev (see the deploy step below), but keeping a GitHub Release means
+      # there is always a downloadable, versioned backup.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.yml
+            dist/*.blockmap
+
+      # Publish the feed to nodeterm.dev/updates. Fill in for your host. Example for
+      # SSH/rsync (store the private key as the DEPLOY_SSH_KEY secret):
+      #
+      # - name: Deploy update feed to nodeterm.dev
+      #   run: |
+      #     mkdir -p ~/.ssh && echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+      #     chmod 600 ~/.ssh/id_ed25519
+      #     ssh-keyscan nodeterm.dev >> ~/.ssh/known_hosts
+      #     rsync -avz dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap \
+      #       deploy@nodeterm.dev:/var/www/nodeterm.dev/updates/

@@ -44,6 +44,7 @@ import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateBanner } from '../components/UpdateBanner'
+import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
@@ -801,7 +802,10 @@ export function Canvas() {
         onDelete={deleteProject}
       />
 
-      <UpdateBanner />
+      <div className="top-banners">
+        <UpdateBanner />
+        <AnnouncementBanner />
+      </div>
 
       <div className="controls-cluster">
         <button

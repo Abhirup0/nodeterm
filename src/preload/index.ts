@@ -87,6 +87,9 @@ const api: NodeTerminalApi = {
     },
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
   },
+  announcements: {
+    fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
+  },
   onMarkdownToggle: (listener) => {
     const handler = () => listener()
     ipcRenderer.on(IPC.appToggleMarkdown, handler)

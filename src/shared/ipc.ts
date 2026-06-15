@@ -14,6 +14,7 @@ export const IPC = {
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appRestartToUpdate: 'app:restart-to-update',
+  announcementsFetch: 'announcements:fetch',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,

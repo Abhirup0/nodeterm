@@ -10,6 +10,7 @@ import { SettingsStore } from './settings-store'
 import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
+import { fetchAnnouncements } from './announcements'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -87,6 +88,8 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string) => ptyManager.captureSession(persistKey))
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
+
+  ipcMain.handle(IPC.announcementsFetch, () => fetchAnnouncements())
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
