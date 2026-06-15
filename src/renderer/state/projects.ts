@@ -64,14 +64,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
 
   deleteProject(id) {
     const { projects, activeProjectId } = get()
-    if (projects.length <= 1) return activeProjectId // never delete the last project
-
     const index = projects.findIndex((p) => p.id === id)
     const remaining = projects.filter((p) => p.id !== id)
     let nextActive = activeProjectId
     if (activeProjectId === id) {
-      // pick the neighbor that takes this slot (or the new last one)
-      nextActive = remaining[Math.min(index, remaining.length - 1)].id
+      // pick the neighbor that takes this slot, or '' (welcome screen) when none remain
+      nextActive = remaining.length ? remaining[Math.min(index, remaining.length - 1)].id : ''
     }
     set({ projects: remaining, activeProjectId: nextActive })
     return nextActive

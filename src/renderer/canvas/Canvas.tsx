@@ -5,6 +5,7 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  SelectionMode,
   useNodesState,
   useReactFlow,
   type Viewport
@@ -13,19 +14,45 @@ import type { Node } from '@xyflow/react'
 import { TerminalNode } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode } from '../nodes/GroupNode'
+import { EditorNode } from '../nodes/EditorNode'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { CommandPalette, type Command } from '../components/CommandPalette'
+import {
+  IconClaude,
+  IconCollapse,
+  IconDuplicate,
+  IconFit,
+  IconGrid,
+  IconGroup,
+  IconJump,
+  IconMarkdown,
+  IconNote,
+  IconProject,
+  IconSave,
+  IconSelectAll,
+  IconSwitch,
+  IconTerminal,
+  IconTrash,
+  IconUngroup
+} from '../components/icons'
 import { SettingsPanel } from '../components/SettingsPanel'
 import { SourceControlPanel } from '../components/SourceControlPanel'
+import { WelcomeScreen } from '../components/WelcomeScreen'
+import { ShortcutsPanel } from '../components/ShortcutsPanel'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import {
   COLLAPSED_HEIGHT,
+  createClaudeNode,
+  createEditorNode,
   createStickyNode,
   createTerminalNode,
+  duplicateNode,
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
@@ -43,26 +70,44 @@ export function Canvas() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [scOpen, setScOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [explorerOpen, setExplorerOpen] = useState(false)
+  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
   const loadingRef = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
+  // Undo/redo history (snapshots of the nodes array; arrays are immutable per change).
+  const pastRef = useRef<CanvasNode[][]>([])
+  const futureRef = useRef<CanvasNode[][]>([])
+  const committedRef = useRef<CanvasNode[]>([])
+  const draggingRef = useRef(false)
+  const [, bumpHist] = useState(0)
   const { setViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
     useReactFlow()
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  const hasProjects = useProjects((s) => s.projects.length > 0)
   nodesRef.current = nodes
 
   const nodeTypes = useMemo(
-    () => ({ terminal: TerminalNode, sticky: StickyNode, group: GroupNode }),
+    () => ({ terminal: TerminalNode, sticky: StickyNode, group: GroupNode, editor: EditorNode }),
     []
   )
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
-    void useSettings.getState().hydrate()
+    useSettings
+      .getState()
+      .hydrate()
+      .then(() => {
+        if (!useSettings.getState().settings.seenShortcuts) {
+          setShortcutsOpen(true)
+          useSettings.getState().update({ seenShortcuts: true })
+        }
+      })
     window.nodeTerminal.workspace.load().then((ws) => {
       if (cancelled) return
       useProjects.getState().hydrate(ws)
@@ -80,7 +125,13 @@ export function Canvas() {
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
     loadingRef.current = true
-    setNodes(nodeStatesToFlow(project.nodes))
+    const flow = nodeStatesToFlow(project.nodes)
+    setNodes(flow)
+    // Reset history for the newly loaded project.
+    committedRef.current = flow
+    pastRef.current = []
+    futureRef.current = []
+    bumpHist((v) => v + 1)
     viewportRef.current = project.viewport
     setViewport(project.viewport)
     setZoomPct(Math.round(project.viewport.zoom * 100))
@@ -118,6 +169,63 @@ export function Canvas() {
     return () => clearTimeout(t)
   }, [dirty, persist])
 
+  // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
+  useEffect(() => {
+    if (loadingRef.current) {
+      committedRef.current = nodes
+      return
+    }
+    if (draggingRef.current) return
+    const t = setTimeout(() => {
+      if (nodes !== committedRef.current) {
+        pastRef.current.push(committedRef.current)
+        if (pastRef.current.length > 100) pastRef.current.shift()
+        futureRef.current = []
+        committedRef.current = nodes
+        bumpHist((v) => v + 1)
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [nodes])
+
+  const undo = useCallback(() => {
+    if (!pastRef.current.length) return
+    const prev = pastRef.current.pop() as CanvasNode[]
+    futureRef.current.push(committedRef.current)
+    committedRef.current = prev
+    nodesRef.current = prev
+    setNodes(prev)
+    setDirty(true)
+    bumpHist((v) => v + 1)
+  }, [setNodes])
+
+  const redo = useCallback(() => {
+    if (!futureRef.current.length) return
+    const next = futureRef.current.pop() as CanvasNode[]
+    pastRef.current.push(committedRef.current)
+    committedRef.current = next
+    nodesRef.current = next
+    setNodes(next)
+    setDirty(true)
+    bumpHist((v) => v + 1)
+  }, [setNodes])
+
+  // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y = redo (ignored while typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return
+      const k = e.key.toLowerCase()
+      if (k !== 'z' && k !== 'y') return
+      const tag = (document.activeElement?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      e.preventDefault()
+      if (k === 'y' || (k === 'z' && e.shiftKey)) redo()
+      else undo()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undo, redo])
+
   // ---- canvas interactions ----
   const handleNodesChange: typeof onNodesChange = useCallback(
     (changes) => {
@@ -135,13 +243,45 @@ export function Canvas() {
   }, [screenToFlowPosition])
 
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }) => {
+    (center?: { x: number; y: number }, initialCommand?: string) => {
       const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createTerminalNode(ns.length, cwd, center ?? viewCenter())])
+      setNodes((ns) => [
+        ...ns,
+        createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
+      ])
       markDirty()
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
+
+  /** Open a new terminal that runs a command on start (e.g. gh auth login). */
+  const runInTerminal = useCallback((cmd: string) => addTerminal(undefined, cmd), [addTerminal])
+
+  /** Open a file as a code editor node on the canvas. */
+  const openFile = useCallback(
+    (filePath: string) => {
+      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
+  const cloneRepo = useCallback(async () => {
+    const url = window.prompt('Repository URL (https:// or git@):')
+    if (!url) return
+    const parent = await window.nodeTerminal.dialog.selectFolder()
+    if (!parent) return
+    const r = await window.nodeTerminal.git.clone(parent, url)
+    if (!r.ok) {
+      window.alert(`Clone failed: ${r.message}`)
+      return
+    }
+    const name = url.split('/').pop()?.replace(/\.git$/, '') || 'repo'
+    commitActiveToStore()
+    const project = useProjects.getState().addProject(name, r.message)
+    useProjects.getState().setActive(project.id)
+    void writeDisk()
+  }, [commitActiveToStore, writeDisk])
 
   const addSticky = useCallback(
     (center?: { x: number; y: number }) => {
@@ -150,6 +290,34 @@ export function Canvas() {
     },
     [setNodes, markDirty, viewCenter]
   )
+
+  const addClaude = useCallback(
+    (center?: { x: number; y: number }) => {
+      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => [...ns, createClaudeNode(ns.length, cwd, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+
+  // ⌘T = new terminal, ⌘⇧C = new Claude Code (ignored while typing in a field/terminal).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return
+      const tag = (document.activeElement?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      const k = e.key.toLowerCase()
+      if (k === 't' && !e.shiftKey) {
+        e.preventDefault()
+        addTerminal()
+      } else if (k === 'c' && e.shiftKey) {
+        e.preventDefault()
+        addClaude()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [addTerminal, addClaude])
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
@@ -184,6 +352,27 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  // Delete / Backspace asks for confirmation, then deletes the selected nodes.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      const tag = (document.activeElement?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
+      if (!ids.length) return
+      e.preventDefault()
+      setConfirm({
+        message: `Delete ${ids.length} ${ids.length > 1 ? 'nodes' : 'node'}? Open terminal sessions will end.`,
+        onConfirm: () => {
+          deleteNodes(ids)
+          setConfirm(null)
+        }
+      })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [deleteNodes])
+
   const groupSelection = useCallback(
     (ids: string[]) => {
       const groupCount = nodesRef.current.filter((n) => n.type === 'group').length
@@ -196,6 +385,32 @@ export function Canvas() {
   const ungroup = useCallback(
     (groupId: string) => {
       setNodes((ns) => ungroupNodes(ns as CanvasNode[], groupId))
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
+  const toggleMarkdown = useCallback(
+    (ids: string[]) => {
+      const set = new Set(ids)
+      setNodes((ns) =>
+        ns.map((n) =>
+          set.has(n.id) && n.type === 'terminal'
+            ? { ...n, data: { ...n.data, mdMode: !n.data.mdMode } }
+            : n
+        )
+      )
+    },
+    [setNodes]
+  )
+
+  const duplicateNodes = useCallback(
+    (ids: string[]) => {
+      const set = new Set(ids)
+      setNodes((ns) => {
+        const copies = ns.filter((n) => set.has(n.id)).map((n) => duplicateNode(n))
+        return [...ns.map((n) => ({ ...n, selected: false })), ...copies]
+      })
       markDirty()
     },
     [setNodes, markDirty]
@@ -287,6 +502,18 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === ',') {
         e.preventDefault()
         setSettingsOpen(true)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
+        e.preventDefault()
+        setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+        e.preventDefault()
+        setShortcutsOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'c') {
+        // Copy the current page selection (e.g. markdown view) to the clipboard.
+        const tag = (document.activeElement?.tagName || '').toLowerCase()
+        if (tag === 'input' || tag === 'textarea') return
+        const sel = window.getSelection?.()?.toString()
+        if (sel) window.nodeTerminal.clipboard.writeText(sel)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -310,18 +537,32 @@ export function Canvas() {
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
       ...(ids.length > 1
         ? ([
-            { label: 'Group selection', onClick: () => groupSelection(ids) },
+            { label: 'Group selection', icon: <IconGroup />, onClick: () => groupSelection(ids) },
             { type: 'separator' }
           ] as MenuItem[])
         : []),
       { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
       { type: 'separator' },
-      { label: 'Align to grid', onClick: () => alignToGrid(ids) },
-      { label: 'Collapse / Expand', onClick: () => toggleCollapseNodes(ids) },
+      { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
+      { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) },
+      { label: 'Collapse / Expand', icon: <IconCollapse />, onClick: () => toggleCollapseNodes(ids) },
+      ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
+        ? ([
+            { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) }
+          ] as MenuItem[])
+        : []),
       { type: 'separator' },
-      { label: 'Delete', danger: true, onClick: () => deleteNodes(ids) }
+      { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => deleteNodes(ids) }
     ],
-    [groupSelection, setNodesColor, alignToGrid, toggleCollapseNodes, deleteNodes]
+    [
+      groupSelection,
+      setNodesColor,
+      duplicateNodes,
+      alignToGrid,
+      toggleCollapseNodes,
+      toggleMarkdown,
+      deleteNodes
+    ]
   )
 
   const groupItems = useCallback(
@@ -329,8 +570,8 @@ export function Canvas() {
       { type: 'label', label: 'Group' },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
-      { label: 'Ungroup', onClick: () => ungroup(groupId) },
-      { label: 'Delete (keeps nodes)', danger: true, onClick: () => ungroup(groupId) }
+      { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
+      { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
     [setNodesColor, ungroup]
   )
@@ -343,15 +584,16 @@ export function Canvas() {
         x: e.clientX,
         y: e.clientY,
         items: [
-          { label: 'New terminal here', onClick: () => addTerminal(at) },
-          { label: 'New sticky note here', onClick: () => addSticky(at) },
+          { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
+          { label: 'New Claude Code', icon: <IconClaude />, onClick: () => addClaude(at) },
+          { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { type: 'separator' },
-          { label: 'Select all', onClick: selectAll },
-          { label: 'Fit view', onClick: () => fitView({ padding: 0.2, duration: 300 }) }
+          { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
+          { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addSticky, selectAll, fitView]
+    [screenToFlowPosition, addTerminal, addClaude, addSticky, selectAll, fitView]
   )
 
   const onNodeContextMenu = useCallback(
@@ -444,7 +686,6 @@ export function Canvas() {
   const deleteProject = useCallback(
     (id: string) => {
       const store = useProjects.getState()
-      if (store.projects.length <= 1) return
       if (id === store.activeProjectId) commitActiveToStore()
       // End the tmux sessions of every terminal in the deleted project.
       store.getProject(id)?.nodes.forEach((n) => {
@@ -458,11 +699,12 @@ export function Canvas() {
 
   const buildCommands = useCallback((): Command[] => {
     const cmds: Command[] = [
-      { id: 'new-term', label: 'New terminal', section: 'Create', run: () => addTerminal() },
-      { id: 'new-sticky', label: 'New sticky note', run: () => addSticky() },
-      { id: 'new-project', label: 'New project', run: () => addProject() },
-      { id: 'fit', label: 'Fit view', run: () => fitView({ padding: 0.2, duration: 300 }) },
-      { id: 'save', label: 'Save', run: () => void persist() }
+      { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
+      { id: 'new-claude', label: 'New Claude Code', icon: <IconClaude />, run: () => addClaude() },
+      { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
+      { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
+      { id: 'fit', label: 'Fit view', icon: <IconFit />, run: () => fitView({ padding: 0.2, duration: 300 }) },
+      { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() }
     ]
     const store = useProjects.getState()
     store.projects
@@ -472,6 +714,7 @@ export function Canvas() {
           id: `proj-${p.id}`,
           label: `Switch to ${p.name}`,
           hint: 'project',
+          icon: <IconSwitch />,
           run: () => switchProject(p.id)
         })
       )
@@ -482,11 +725,12 @@ export function Canvas() {
           id: `node-${n.id}`,
           label: `Go to ${n.data.title}`,
           hint: ((n.data.tags as string[]) ?? []).join(' '),
+          icon: <IconJump />,
           run: () => goToNode(n)
         })
       )
     return cmds
-  }, [addTerminal, addSticky, addProject, fitView, persist, switchProject, goToNode])
+  }, [addTerminal, addClaude, addSticky, addProject, fitView, persist, switchProject, goToNode])
 
   return (
     <div className="canvas-root">
@@ -500,14 +744,25 @@ export function Canvas() {
       />
 
       <div className="controls-cluster">
-        <button title="Command palette (⌘K)" onClick={() => setPaletteOpen(true)}>
-          ⌕
+        <button
+          className="cluster-search"
+          title="Command palette"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <span className="cluster-search__icon">⌕</span>
+          <span className="kbd">⌘K</span>
+        </button>
+        <button title="Explorer (⌘⇧E)" onClick={() => setExplorerOpen(true)}>
+          🗂
         </button>
         <button title="Source Control" onClick={() => setScOpen(true)}>
           ⎇
         </button>
         <button title="Settings (⌘,)" onClick={() => setSettingsOpen(true)}>
           ⚙
+        </button>
+        <button title="Keyboard shortcuts (⌘/)" onClick={() => setShortcutsOpen(true)}>
+          ?
         </button>
       </div>
 
@@ -517,6 +772,16 @@ export function Canvas() {
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
           onMove={onMove}
+          onNodeDragStart={() => (draggingRef.current = true)}
+          onNodeDragStop={() => {
+            draggingRef.current = false
+            markDirty()
+          }}
+          onSelectionDragStart={() => (draggingRef.current = true)}
+          onSelectionDragStop={() => {
+            draggingRef.current = false
+            markDirty()
+          }}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
@@ -526,15 +791,19 @@ export function Canvas() {
           proOptions={{ hideAttribution: true }}
           deleteKeyCode={null}
           selectionOnDrag
-          panOnDrag={[1, 2]}
+          selectionMode={SelectionMode.Partial}
+          panOnDrag={[1]}
+          panOnScroll
+          zoomOnScroll={false}
+          zoomOnPinch
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
         >
           <Background
             variant={BackgroundVariant.Dots}
             gap={settings.gridSize || GRID}
-            size={1}
-            color="#3a3a3a"
+            size={2.5}
+            color="#4a4a4a"
           />
           <Controls showInteractive={false} position="bottom-left" />
           <MiniMap
@@ -547,6 +816,14 @@ export function Canvas() {
             nodeStrokeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
           />
         </ReactFlow>
+
+        {!hasProjects && (
+          <WelcomeScreen
+            onNewProject={addProject}
+            onOpenFolder={addProjectFromFolder}
+            onCloneRepo={cloneRepo}
+          />
+        )}
       </div>
 
       {menu && (
@@ -559,13 +836,34 @@ export function Canvas() {
 
       {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
 
-      {scOpen && <SourceControlPanel onClose={() => setScOpen(false)} />}
+      {scOpen && (
+        <SourceControlPanel onClose={() => setScOpen(false)} onRunInTerminal={runInTerminal} />
+      )}
+
+      {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
+
+      {explorerOpen && (
+        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} />
+      )}
+
+      {confirm && (
+        <ConfirmDialog
+          message={confirm.message}
+          onConfirm={confirm.onConfirm}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
 
       <Dock
         dirty={dirty}
         zoomPct={zoomPct}
+        canUndo={pastRef.current.length > 0}
+        canRedo={futureRef.current.length > 0}
+        onUndo={undo}
+        onRedo={redo}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
+        onAddClaude={addClaude}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}
         onZoomIn={() => zoomIn({ duration: 150 })}

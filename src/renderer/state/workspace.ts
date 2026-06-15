@@ -12,9 +12,10 @@ export const NODE_COLORS = [
   '#ff9f0a' // systemOrange
 ]
 
-const TERMINAL_SIZE = { width: 440, height: 300 }
+const TERMINAL_SIZE = { width: 600, height: 400 }
 const STICKY_SIZE = { width: 240, height: 200 }
 const GROUP_SIZE = { width: 520, height: 360 }
+const EDITOR_SIZE = { width: 660, height: 460 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -28,9 +29,12 @@ export interface NodeData {
   collapsed?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
+  /** One-shot command run once when the terminal first opens (not persisted). */
+  initialCommand?: string
   shell?: string
   cwd?: string
   text?: string
+  filePath?: string
   [key: string]: unknown
 }
 
@@ -56,7 +60,8 @@ function placeAt(center: { x: number; y: number } | undefined, index: number, w:
 export function createTerminalNode(
   index: number,
   cwd?: string,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  initialCommand?: string
 ): CanvasNode {
   return {
     id: nextId('term'),
@@ -70,7 +75,54 @@ export function createTerminalNode(
       color: NODE_COLORS[index % NODE_COLORS.length],
       group: null,
       tags: [],
-      cwd
+      cwd,
+      initialCommand
+    }
+  }
+}
+
+/** Creates a terminal that launches Claude Code (`claude`) on open. */
+export function createClaudeNode(
+  index: number,
+  cwd?: string,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('term'),
+    type: 'terminal',
+    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
+    width: TERMINAL_SIZE.width,
+    height: TERMINAL_SIZE.height,
+    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    data: {
+      title: 'Claude Code',
+      color: '#d97757',
+      group: null,
+      tags: ['claude'],
+      cwd,
+      initialCommand: 'claude'
+    }
+  }
+}
+
+/** Creates a code editor node for a file. */
+export function createEditorNode(
+  index: number,
+  filePath: string,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('editor'),
+    type: 'editor',
+    position: placeAt(center, index, EDITOR_SIZE.width, EDITOR_SIZE.height),
+    width: EDITOR_SIZE.width,
+    height: EDITOR_SIZE.height,
+    style: { width: EDITOR_SIZE.width, height: EDITOR_SIZE.height },
+    data: {
+      title: filePath.split('/').pop() || 'untitled',
+      color: '#6ac4dc',
+      group: null,
+      filePath
     }
   }
 }
@@ -173,6 +225,21 @@ export function groupSelectedNodes(
   return [group, ...updated]
 }
 
+/** Returns a copy of a node with a fresh id, offset position, and top-level placement. */
+export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
+  const kind: NodeKind = node.type === 'sticky' ? 'sticky' : node.type === 'group' ? 'group' : 'terminal'
+  const prefix = kind === 'terminal' ? 'term' : kind
+  return {
+    ...node,
+    id: nextId(prefix),
+    position: { x: node.position.x + offset, y: node.position.y + offset },
+    selected: true,
+    parentId: undefined,
+    extent: undefined,
+    data: { ...node.data, initialCommand: undefined }
+  }
+}
+
 /** Removes a group frame and restores its children to absolute positions. */
 export function ungroupNodes(nodes: CanvasNode[], groupId: string): CanvasNode[] {
   const group = nodes.find((n) => n.id === groupId)
@@ -219,7 +286,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         expandedHeight: n.size.height,
         shell: n.shell,
         cwd: n.cwd,
-        text: n.text
+        text: n.text,
+        filePath: n.filePath
       }
     }
   })
@@ -228,7 +296,13 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
 /** Serializes live React Flow nodes back into persisted node states. */
 export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
   const sizeFor = (kind: NodeKind) =>
-    kind === 'sticky' ? STICKY_SIZE : kind === 'group' ? GROUP_SIZE : TERMINAL_SIZE
+    kind === 'sticky'
+      ? STICKY_SIZE
+      : kind === 'group'
+        ? GROUP_SIZE
+        : kind === 'editor'
+          ? EDITOR_SIZE
+          : TERMINAL_SIZE
   return nodes.map((n) => {
     const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
     const collapsed = !!n.data.collapsed
@@ -251,7 +325,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
       parentId: n.parentId,
       shell: n.data.shell,
       cwd: n.data.cwd,
-      text: n.data.text
+      text: n.data.text,
+      filePath: n.data.filePath
     }
   })
 }

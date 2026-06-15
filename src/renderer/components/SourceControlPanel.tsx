@@ -5,6 +5,7 @@ import { useProjects } from '../state/projects'
 
 interface SourceControlPanelProps {
   onClose: () => void
+  onRunInTerminal: (cmd: string) => void
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -48,7 +49,7 @@ function DiffBlock({ text }: { text: string }) {
 }
 
 /** Visual Studio-style Source Control: file-level stage/diff/discard + branch switcher. */
-export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
+export function SourceControlPanel({ onClose, onRunInTerminal }: SourceControlPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   const cwd = project?.cwd
   const [status, setStatus] = useState<GitStatus | null>(null)
@@ -60,6 +61,7 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
   const [branchMenu, setBranchMenu] = useState<{ top: number; left: number } | null>(null)
   const [newBranch, setNewBranch] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null)
 
   const git = window.nodeTerminal.git
 
@@ -119,7 +121,13 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
       const key = `${staged ? 's' : 'c'}:${f.path}`
       return (
         <Fragment key={key}>
-          <div className={`scm-file${openKey === key ? ' open' : ''}`}>
+          <div
+            className={`scm-file${openKey === key ? ' open' : ''}`}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setFileMenu({ x: e.clientX, y: e.clientY, path: f.path })
+            }}
+          >
             <span className="scm-letter" style={{ color: STATUS_COLOR[f.status] ?? 'rgba(255,255,255,0.85)' }}>
               {f.status}
             </span>
@@ -201,8 +209,14 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
               ) : (
                 <button
                   className="scm-sync"
-                  disabled={busy || !status.ghAvailable}
-                  title={status.ghAvailable ? '' : 'GitHub CLI (gh) not found'}
+                  disabled={busy || !status.ghAuthed}
+                  title={
+                    !status.ghAvailable
+                      ? 'GitHub CLI (gh) not found'
+                      : !status.ghAuthed
+                        ? 'Sign in to GitHub first'
+                        : ''
+                  }
                   onClick={() => act(() => git.publish(cwd, project?.name || 'repo', true))}
                 >
                   Publish
@@ -211,32 +225,19 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
             </div>
 
             <div className="drawer__body scm-body">
-              {status.staged.length > 0 && (
-                <section className="scm-section">
-                  <div className="scm-section-head">
-                    <span>
-                      STAGED · <b>{status.staged.length}</b>
-                    </span>
-                    <button onClick={() => act(() => git.unstageAll(cwd))}>unstage all</button>
-                  </div>
-                  {renderFiles(status.staged, true)}
-                </section>
-              )}
-
-              <section className="scm-section">
-                <div className="scm-section-head">
-                  <span>
-                    CHANGES · <b>{status.changes.length}</b>
-                  </span>
-                  {status.changes.length > 0 && (
-                    <button onClick={() => act(() => git.stageAll(cwd))}>+ stage all</button>
-                  )}
+              {status.ghAvailable && !status.ghAuthed && (
+                <div className="scm-signin">
+                  <span>Not signed in to GitHub.</span>
+                  <button
+                    onClick={() => {
+                      onRunInTerminal('gh auth login')
+                      onClose()
+                    }}
+                  >
+                    Sign in to GitHub
+                  </button>
                 </div>
-                {status.changes.length === 0 && status.staged.length === 0 && (
-                  <p className="set-note">No changes — working tree clean.</p>
-                )}
-                {renderFiles(status.changes, false)}
-              </section>
+              )}
 
               <section className="scm-commit">
                 <div className="scm-commit-head">
@@ -272,6 +273,33 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
                 </button>
               </section>
 
+              {status.staged.length > 0 && (
+                <section className="scm-section">
+                  <div className="scm-section-head">
+                    <span>
+                      STAGED · <b>{status.staged.length}</b>
+                    </span>
+                    <button onClick={() => act(() => git.unstageAll(cwd))}>unstage all</button>
+                  </div>
+                  {renderFiles(status.staged, true)}
+                </section>
+              )}
+
+              <section className="scm-section">
+                <div className="scm-section-head">
+                  <span>
+                    CHANGES · <b>{status.changes.length}</b>
+                  </span>
+                  {status.changes.length > 0 && (
+                    <button onClick={() => act(() => git.stageAll(cwd))}>+ stage all</button>
+                  )}
+                </div>
+                {status.changes.length === 0 && status.staged.length === 0 && (
+                  <p className="set-note">No changes — working tree clean.</p>
+                )}
+                {renderFiles(status.changes, false)}
+              </section>
+
               {status.recent.length > 0 && (
                 <section className="scm-section">
                   <div className="scm-section-head">
@@ -298,8 +326,15 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
           status &&
           createPortal(
             <>
-              <div className="tab-backdrop" onClick={() => setBranchMenu(null)} />
-              <div className="tab-menu" style={{ top: branchMenu.top, left: branchMenu.left }}>
+              <div
+                className="tab-backdrop"
+                style={{ zIndex: 78 }}
+                onClick={() => setBranchMenu(null)}
+              />
+              <div
+                className="tab-menu"
+                style={{ top: branchMenu.top, left: branchMenu.left, zIndex: 80 }}
+              >
                 {status.branches.map((b) => (
                   <button
                     key={b}
@@ -333,6 +368,44 @@ export function SourceControlPanel({ onClose }: SourceControlPanelProps) {
             document.body
           )}
       </aside>
+
+      {fileMenu &&
+        createPortal(
+          <>
+            <div className="tab-backdrop" style={{ zIndex: 78 }} onClick={() => setFileMenu(null)} />
+            <div className="ctx-menu" style={{ top: fileMenu.y, left: fileMenu.x, zIndex: 80 }}>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  window.nodeTerminal.clipboard.writeText(`${cwd}/${fileMenu.path}`)
+                  setFileMenu(null)
+                }}
+              >
+                Copy Path
+              </button>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  window.nodeTerminal.clipboard.writeText(fileMenu.path)
+                  setFileMenu(null)
+                }}
+              >
+                Copy Relative Path
+              </button>
+              <div className="ctx-sep" />
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  window.nodeTerminal.shell.reveal(`${cwd}/${fileMenu.path}`)
+                  setFileMenu(null)
+                }}
+              >
+                Reveal in Finder
+              </button>
+            </div>
+          </>,
+          document.body
+        )}
     </div>,
     document.body
   )

@@ -1,8 +1,16 @@
+import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { NODE_COLORS } from '../state/workspace'
 
 export type MenuItem =
-  | { type?: 'item'; label: string; onClick: () => void; danger?: boolean; disabled?: boolean }
+  | {
+      type?: 'item'
+      label: string
+      onClick: () => void
+      icon?: ReactNode
+      danger?: boolean
+      disabled?: boolean
+    }
   | { type: 'separator' }
   | { type: 'label'; label: string }
   | { type: 'colors'; onPick: (color: string) => void }
@@ -52,6 +60,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                 onClose()
               }}
             >
+              <span className="ctx-icon">{item.icon}</span>
               {item.label}
             </button>
           )

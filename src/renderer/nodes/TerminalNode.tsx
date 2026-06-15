@@ -2,16 +2,26 @@ import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { transport } from '../terminal/local-transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { NodeTags } from '../components/NodeTags'
+import { Tooltip } from '../components/Tooltip'
 import { useSettings } from '../state/settings'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+
+/** Render terminal output as markdown, sanitized to prevent XSS. */
+function renderMarkdown(src: string): string {
+  const html = marked.parse(src || '', { async: false }) as string
+  return DOMPurify.sanitize(html)
+}
 
 /**
  * A single terminal node: header (collapse + color + title + close), optional tag chips,
  * and a real xterm.js terminal. A hover guard delays entering the terminal so the canvas
- * can be panned across terminals without grabbing focus.
+ * can be panned across terminals without grabbing focus. Cmd/Ctrl+M (while hovered)
+ * toggles a markdown view of the terminal's output.
  */
 export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes } = useReactFlow()
@@ -22,6 +32,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
+  const [naming, setNaming] = useState(false)
+  const [mdHtml, setMdHtml] = useState('')
+  const [editingTitle, setEditingTitle] = useState(false)
+  const hoveredRef = useRef(false)
+  const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
 
@@ -65,6 +80,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           })
         )
         cleanups.push(term.onData((input) => transport.write(sid, input)).dispose)
+        // Run a one-shot command on first open (e.g. "gh auth login"), then forget it.
+        if (data.initialCommand) {
+          transport.write(sid, `${data.initialCommand}\n`)
+          updateNodeData(id, { initialCommand: undefined })
+        }
       })
 
     const resize = () => {
@@ -135,16 +155,39 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     setArmed(true)
     termRef.current?.blur()
   }
-  const enterNow = () => {
+  // While armed, a mousedown might start a node drag — pause the dwell timer so the
+  // terminal doesn't grab focus mid-drag; restart it on release.
+  const onGuardDown = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
-    setArmed(false)
-    termRef.current?.focus()
   }
+
+  const nameWithAi = async () => {
+    setNaming(true)
+    const r = await window.nodeTerminal.pty.generateName(id, (data.cwd as string) ?? '')
+    setNaming(false)
+    if (r.ok) updateNodeData(id, { title: r.message })
+  }
+
+  // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
+  useEffect(() => {
+    return window.nodeTerminal.onMarkdownToggle(() => {
+      if (hoveredRef.current) updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))
+    })
+  }, [id, updateNodeData])
+
+  // When markdown mode turns on, capture the terminal output and render it.
+  useEffect(() => {
+    if (data.mdMode) {
+      void window.nodeTerminal.pty.capture(id).then((t) => setMdHtml(renderMarkdown(t)))
+    }
+  }, [data.mdMode, id])
 
   return (
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}
       style={{ borderTopColor: data.color }}
+      onMouseEnter={() => (hoveredRef.current = true)}
+      onMouseLeave={() => (hoveredRef.current = false)}
     >
       <NodeResizer minWidth={260} minHeight={160} isVisible={selected && !collapsed} color="#0a84ff" />
 
@@ -172,12 +215,33 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             ))}
           </div>
         )}
-        <input
-          className="term-node__title nodrag"
-          value={data.title}
-          spellCheck={false}
-          onChange={(e) => updateNodeData(id, { title: e.target.value })}
-        />
+        {editingTitle ? (
+          <input
+            className="term-node__title nodrag"
+            value={data.title}
+            spellCheck={false}
+            autoFocus
+            onChange={(e) => updateNodeData(id, { title: e.target.value })}
+            onBlur={() => setEditingTitle(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === 'Escape') setEditingTitle(false)
+            }}
+          />
+        ) : (
+          <span
+            className="term-node__title-text nodrag"
+            title="Click to rename"
+            onClick={() => setEditingTitle(true)}
+          >
+            {data.title || 'Untitled'}
+          </span>
+        )}
+        {!editingTitle && <span className="term-node__spacer" />}
+        <Tooltip label="Name with AI (from terminal output)">
+          <button className="term-node__ai nodrag" disabled={naming} onClick={nameWithAi}>
+            {naming ? '…' : '✦'}
+          </button>
+        </Tooltip>
         <button
           className="term-node__close"
           title="Close (ends the session)"
@@ -197,8 +261,22 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
       <div className="term-node__body" onMouseEnter={onBodyEnter} onMouseLeave={onBodyLeave}>
         <div className="term-node__xterm nodrag nowheel" ref={bodyRef} />
-        {armed && (
-          <div className="term-hover-guard nodrag nowheel" onMouseDown={enterNow} title="Click to focus" />
+        {armed && !mdMode && (
+          <div
+            className="term-hover-guard"
+            onMouseDown={onGuardDown}
+            onMouseUp={onBodyEnter}
+            title="Drag to move · scroll to pan · hover to focus"
+          />
+        )}
+        {mdMode && (
+          <div className="term-md nodrag nowheel">
+            <div className="term-md__bar">
+              <span>Markdown</span>
+              <span className="term-md__hint">⌘M to exit</span>
+            </div>
+            <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
+          </div>
         )}
       </div>
     </div>

@@ -184,6 +184,20 @@ export class PtyManager {
     this.sessions.delete(sessionId)
   }
 
+  /** Capture a session's recent visible output (for AI naming). Empty if no tmux session. */
+  captureSession(persistKey: string): string {
+    if (!this.tmuxPath) return ''
+    try {
+      return execFileSync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', '-200'],
+        { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }
+      )
+    } catch {
+      return ''
+    }
+  }
+
   /** Permanently end a node's persistent tmux session (called when the user closes it). */
   destroySession(persistKey: string): void {
     if (!this.tmuxPath) return

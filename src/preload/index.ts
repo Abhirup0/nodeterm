@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { clipboard, contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
   NodeTerminalApi,
@@ -13,6 +13,8 @@ const api: NodeTerminalApi = {
     resize: (sessionId, cols, rows) => ipcRenderer.send(IPC.ptyResize, sessionId, cols, rows),
     kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
+    generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
+    capture: (persistKey) => ipcRenderer.invoke(IPC.ptyCapture, persistKey),
     onData: (sessionId, listener) => {
       const channel = IPC.ptyData(sessionId)
       const handler = (_e: unknown, data: string) => listener(data)
@@ -40,6 +42,7 @@ const api: NodeTerminalApi = {
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
+    clone: (parentDir, url) => ipcRenderer.invoke(IPC.gitClone, parentDir, url),
     commit: (cwd, message) => ipcRenderer.invoke(IPC.gitCommit, cwd, message),
     push: (cwd) => ipcRenderer.invoke(IPC.gitPush, cwd),
     pull: (cwd) => ipcRenderer.invoke(IPC.gitPull, cwd),
@@ -55,6 +58,23 @@ const api: NodeTerminalApi = {
     switchBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitSwitchBranch, cwd, name),
     createBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitCreateBranch, cwd, name),
     generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd)
+  },
+  clipboard: {
+    writeText: (text: string) => clipboard.writeText(text)
+  },
+  shell: {
+    reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
+    openPath: (path: string) => ipcRenderer.send(IPC.shellOpenPath, path)
+  },
+  fs: {
+    list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),
+    read: (filePath: string) => ipcRenderer.invoke(IPC.fsRead, filePath),
+    write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
+  },
+  onMarkdownToggle: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on(IPC.appToggleMarkdown, handler)
+    return () => ipcRenderer.removeListener(IPC.appToggleMarkdown, handler)
   }
 }
 

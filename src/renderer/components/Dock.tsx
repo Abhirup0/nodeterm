@@ -1,10 +1,16 @@
 import { useState } from 'react'
+import claudeIcon from '../assets/claude.svg'
 
 interface DockProps {
   dirty: boolean
   zoomPct: number
+  canUndo: boolean
+  canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
+  onAddClaude: () => void
+  onUndo: () => void
+  onRedo: () => void
   onSave: () => void
   onFitView: () => void
   onZoomIn: () => void
@@ -18,8 +24,13 @@ interface DockProps {
 export function Dock({
   dirty,
   zoomPct,
+  canUndo,
+  canRedo,
   onAddTerminal,
   onAddSticky,
+  onAddClaude,
+  onUndo,
+  onRedo,
   onSave,
   onFitView,
   onZoomIn,
@@ -43,6 +54,10 @@ export function Dock({
               <TerminalIcon />
               <span>Terminal</span>
             </button>
+            <button onClick={pick(onAddClaude)}>
+              <ClaudeIcon />
+              <span>Claude Code</span>
+            </button>
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
@@ -56,6 +71,15 @@ export function Dock({
           onClick={() => setMenuOpen((v) => !v)}
         >
           <PlusIcon />
+        </button>
+
+        <span className="dock-sep" />
+
+        <button className="dock-btn" title="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo}>
+          <UndoIcon />
+        </button>
+        <button className="dock-btn" title="Redo (⌘⇧Z)" disabled={!canRedo} onClick={onRedo}>
+          <RedoIcon />
         </button>
 
         <span className="dock-sep" />
@@ -89,6 +113,20 @@ function PlusIcon() {
   return (
     <svg {...S} width={20} height={20}>
       <path d="M12 5v14M5 12h14" />
+    </svg>
+  )
+}
+function UndoIcon() {
+  return (
+    <svg {...S}>
+      <path d="M9 7L4 12l5 5M4 12h11a5 5 0 0 1 0 10h-2" />
+    </svg>
+  )
+}
+function RedoIcon() {
+  return (
+    <svg {...S}>
+      <path d="M15 7l5 5-5 5M20 12H9a5 5 0 0 0 0 10h2" />
     </svg>
   )
 }
@@ -136,4 +174,7 @@ function NoteIcon() {
       <path d="M20 15h-5v5" />
     </svg>
   )
+}
+function ClaudeIcon() {
+  return <img src={claudeIcon} width={18} height={18} alt="Claude Code" style={{ display: 'block' }} />
 }

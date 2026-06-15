@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 export interface Command {
@@ -6,6 +6,7 @@ export interface Command {
   label: string
   hint?: string
   section?: string
+  icon?: ReactNode
   run: () => void
 }
 
@@ -80,6 +81,7 @@ export function CommandPalette({ commands, onClose }: CommandPaletteProps) {
               onMouseEnter={() => setActive(i)}
               onClick={() => run(c)}
             >
+              <span className="palette__icon">{c.icon}</span>
               <span className="palette__label">{c.label}</span>
               {c.hint && <span className="palette__hint">{c.hint}</span>}
             </button>

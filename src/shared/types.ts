@@ -12,9 +12,9 @@ export interface PtyCreateOptions {
   persistKey?: string
 }
 
-export type NodeKind = 'terminal' | 'sticky' | 'group'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor'
 
-/** Persisted state of a single canvas node (terminal, sticky note, or group frame). */
+/** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
   id: string
   kind: NodeKind
@@ -34,6 +34,8 @@ export interface CanvasNodeState {
   cwd?: string
   // sticky-only
   text?: string
+  // editor-only
+  filePath?: string
 }
 
 /** Canvas pan/zoom state. */
@@ -97,6 +99,10 @@ export interface PtyApi {
   kill(sessionId: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session). */
   destroy(persistKey: string): void
+  /** Suggest a terminal title from its recent output via the configured AI agent. */
+  generateName(persistKey: string, cwd: string): Promise<GitResult>
+  /** Capture a terminal session's recent visible output as text. */
+  capture(persistKey: string): Promise<string>
   /** Listens for PTY output. Returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
@@ -111,6 +117,31 @@ export interface WorkspaceApi {
 export interface DialogApi {
   /** Opens a native folder picker; returns the chosen path or null if cancelled. */
   selectFolder(): Promise<string | null>
+}
+
+export interface ClipboardApi {
+  writeText(text: string): void
+}
+
+export interface ShellApi {
+  /** Reveal a path in the OS file manager (Finder). */
+  reveal(path: string): void
+  /** Open a path with the OS default application. */
+  openPath(path: string): void
+}
+
+export interface DirEntry {
+  name: string
+  dir: boolean
+}
+
+export interface FsApi {
+  /** List a directory (folders first, then files; alphabetical). */
+  list(dirPath: string): Promise<DirEntry[]>
+  /** Read a file's text contents (empty string on error). */
+  read(filePath: string): Promise<string>
+  /** Write text to a file; resolves true on success. */
+  write(filePath: string, content: string): Promise<boolean>
 }
 
 /** User-configurable application settings (settings.json). */
@@ -134,6 +165,8 @@ export interface Settings {
   commitAgentCommand: string
   /** Extra instructions appended to the commit prompt (e.g. Conventional Commits). */
   commitExtraPrompt: string
+  /** Whether the shortcuts overlay has been shown on first launch. */
+  seenShortcuts: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -143,14 +176,15 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
-  panHoverDelay: 300,
+  panHoverDelay: 600,
   doubleClickFocus: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
   tmuxScrollback: 50000,
   commitAgent: 'claude',
   commitAgentCommand: '',
-  commitExtraPrompt: ''
+  commitExtraPrompt: '',
+  seenShortcuts: false
 }
 
 export interface SettingsApi {
@@ -183,6 +217,7 @@ export interface GitStatus {
   behind: number
   hasRemote: boolean
   ghAvailable: boolean
+  ghAuthed: boolean
   staged: GitFileChange[]
   changes: GitFileChange[]
   recent: GitCommit[]
@@ -196,6 +231,8 @@ export interface GitResult {
 export interface GitApi {
   status(cwd: string): Promise<GitStatus>
   init(cwd: string): Promise<GitResult>
+  /** Clone a repo into parentDir; returns the cloned folder path in message on success. */
+  clone(parentDir: string, url: string): Promise<GitResult>
   /** Commits the staged changes (no implicit add). */
   commit(cwd: string, message: string): Promise<GitResult>
   push(cwd: string): Promise<GitResult>
@@ -223,4 +260,9 @@ export interface NodeTerminalApi {
   dialog: DialogApi
   settings: SettingsApi
   git: GitApi
+  clipboard: ClipboardApi
+  shell: ShellApi
+  fs: FsApi
+  /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
+  onMarkdownToggle(listener: () => void): () => void
 }

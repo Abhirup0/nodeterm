@@ -221,14 +221,44 @@ export async function generateCommitMessage(cwd: string, settings: Settings): Pr
   const diff = rawDiff ? truncateDiffForPrompt(rawDiff, STAGED_DIFF_BYTE_BUDGET) : ''
   const prompt = buildPrompt(diff, names, settings.commitExtraPrompt)
 
+  return runAgent(prompt, cwd, settings)
+}
+
+/** Plan + spawn the configured agent on a prompt and return its cleaned output. */
+export async function runAgent(prompt: string, cwd: string, settings: Settings): Promise<GitResult> {
   const plan = planAgent(settings, prompt)
   if ('error' in plan) return { ok: false, message: plan.error }
 
-  const res = await spawnAgent(plan.bin, plan.args, cwd, plan.stdin)
+  const res = await spawnAgent(plan.bin, plan.args, cwd || os.homedir(), plan.stdin)
   const message = cleanMessage(res.stdout)
   if (res.code !== 0 && !message) {
     return { ok: false, message: extractError(res.stderr || res.stdout) }
   }
-  if (!message) return { ok: false, message: 'Agent produced no commit message.' }
+  if (!message) return { ok: false, message: 'Agent produced no output.' }
   return { ok: true, message }
+}
+
+/** Suggest a short terminal title from its recent output. */
+export async function generateTerminalName(
+  content: string,
+  cwd: string,
+  settings: Settings
+): Promise<GitResult> {
+  const trimmed = content.trim()
+  if (!trimmed) return { ok: false, message: 'No terminal output to read yet.' }
+  const clip = trimmed.split('\n').slice(-150).join('\n').slice(-8000)
+  const prompt = `Below is the recent output of a terminal session. Suggest a very short title (2-4 words, Title Case, no surrounding quotes, no trailing punctuation) describing what this terminal is used for. Output ONLY the title.
+
+Terminal output:
+\`\`\`
+${clip}
+\`\`\``
+  const r = await runAgent(prompt, cwd, settings)
+  if (!r.ok) return r
+  const name = r.message
+    .split('\n')[0]
+    .replace(/["'`.]+$/g, '')
+    .trim()
+    .slice(0, 40)
+  return name ? { ok: true, message: name } : { ok: false, message: 'No name produced.' }
 }

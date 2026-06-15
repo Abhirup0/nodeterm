@@ -73,7 +73,29 @@ export function TabBar({
       )}
 
       <div className="tabbar">
-        <span className="tabbar__brand">node-terminal</span>
+        <div className="brand">
+          <svg className="brand__mark" viewBox="0 0 48 48" width="26" height="26" aria-hidden="true">
+            <defs>
+              <linearGradient id="ntg" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#a38dff" />
+                <stop offset="1" stopColor="#622994" />
+              </linearGradient>
+            </defs>
+            <path
+              d="M13 12 L31 24 L13 36"
+              fill="none"
+              stroke="url(#ntg)"
+              strokeWidth="5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <circle cx="13" cy="12" r="3.6" fill="#a38dff" />
+            <circle cx="13" cy="36" r="3.6" fill="#a38dff" />
+            <circle cx="31" cy="24" r="3.6" fill="#fff" />
+            <rect x="33.5" y="32.5" width="10.5" height="5" rx="2.5" fill="#a38dff" />
+          </svg>
+          <span className="brand__name">nodeterm</span>
+        </div>
 
         <div className="tabbar__tabs">
           {projects.map((p) => {
@@ -82,11 +104,14 @@ export function TabBar({
               <div
                 key={p.id}
                 className={`tab${active ? ' active' : ''}`}
-                style={active ? { borderBottomColor: p.color } : undefined}
+                style={active ? { color: p.color } : undefined}
                 onClick={() => !editingId && onSwitch(p.id)}
                 title={p.cwd || undefined}
               >
-                <span className="tab__dot" style={{ background: p.color }} />
+                <span
+                  className="tab__dot"
+                  style={{ background: active ? p.color : 'rgba(255,255,255,0.3)' }}
+                />
                 {editingId === p.id ? (
                   <input
                     className="tab__edit"
@@ -185,7 +210,6 @@ export function TabBar({
             </button>
             <button
               className="danger"
-              disabled={projects.length <= 1}
               onClick={() => {
                 onDelete(menuProject.id)
                 closeMenu()
