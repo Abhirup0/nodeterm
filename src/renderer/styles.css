@@ -2270,31 +2270,85 @@ body,
   width: 100%;
   height: 100%;
   border: 1.5px dashed;
-  border-radius: 12px;
-  display: flex;
-  flex-direction: column;
+  border-radius: 14px;
+  box-sizing: border-box;
+  cursor: grab;
 }
 
-.group-node__header {
-  display: flex;
+/* Floating label pill, sitting on the top border (opaque so it "cuts" the dashes). */
+.group-node__label {
+  position: absolute;
+  top: 0;
+  left: 16px;
+  transform: translateY(-50%);
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  cursor: grab;
+  gap: 7px;
+  max-width: 70%;
+  padding: 3px 11px;
+  background: #141416;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   user-select: none;
 }
 
-.group-node__ungroup {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  border-radius: 6px;
-  font-size: 11px;
-  padding: 2px 7px;
+.group-node__dot {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
   cursor: pointer;
 }
 
-.group-node__ungroup:hover {
+.group-node__name {
+  width: 130px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: text;
+}
+
+/* ungroup / × — top-right, revealed on hover or when selected. */
+.group-node__actions {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.group-node:hover .group-node__actions,
+.group-node.selected .group-node__actions {
+  opacity: 1;
+}
+
+.group-node__ungroup,
+.group-node__close {
+  background: #141416;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.group-node__close {
+  padding: 3px 8px;
+  line-height: 1;
+}
+
+.group-node__ungroup:hover,
+.group-node__close:hover {
   background: var(--panel-header);
   color: var(--text);
 }
