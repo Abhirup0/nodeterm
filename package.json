@@ -15,7 +15,8 @@
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {
-    "node-pty": "^1.0.0"
+    "node-pty": "^1.0.0",
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",

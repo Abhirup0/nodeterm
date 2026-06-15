@@ -12,7 +12,10 @@ export interface TerminalTransport {
   create(options: PtyCreateOptions): Promise<string>
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
+  /** Detaches the client; with tmux the underlying session survives. */
   kill(sessionId: string): void
+  /** Permanently ends a node's persistent session. */
+  destroy(persistKey: string): void
   /** Listens for output; returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the session closes; returns an unsubscribe function. */

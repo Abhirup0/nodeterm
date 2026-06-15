@@ -27,6 +27,10 @@ export class LocalTransport implements TerminalTransport {
     this.pty.kill(sessionId)
   }
 
+  destroy(persistKey: string): void {
+    this.pty.destroy(persistKey)
+  }
+
   onData(sessionId: string, listener: (data: string) => void): () => void {
     return this.pty.onData(sessionId, listener)
   }

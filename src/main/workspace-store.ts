@@ -2,11 +2,16 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
-import { EMPTY_WORKSPACE, type Workspace } from '../shared/types'
+import {
+  DEFAULT_PROJECT_ID,
+  EMPTY_WORKSPACE,
+  type Workspace,
+  type WorkspaceV1
+} from '../shared/types'
 
 /**
  * Stores the workspace JSON in the user's userData directory.
- * MVP keeps a single workspace file: workspace.json
+ * A single file (workspace.json) holds all projects.
  */
 export class WorkspaceStore {
   private get filePath(): string {
@@ -21,9 +26,7 @@ export class WorkspaceStore {
   async load(): Promise<Workspace> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf-8')
-      const parsed = JSON.parse(raw) as Workspace
-      if (parsed?.version === 1 && Array.isArray(parsed.nodes)) return parsed
-      return EMPTY_WORKSPACE
+      return migrate(JSON.parse(raw))
     } catch {
       // Missing or corrupt file -> return an empty workspace.
       return EMPTY_WORKSPACE
@@ -33,4 +36,35 @@ export class WorkspaceStore {
   async save(workspace: Workspace): Promise<void> {
     await fs.writeFile(this.filePath, JSON.stringify(workspace, null, 2), 'utf-8')
   }
+}
+
+/** Normalize any on-disk shape (v1 single canvas, v2 projects) into a valid v2 workspace. */
+function migrate(parsed: unknown): Workspace {
+  const ws = parsed as Partial<Workspace> & Partial<WorkspaceV1>
+
+  if (ws?.version === 2 && Array.isArray(ws.projects) && ws.projects.length > 0) {
+    const active = ws.projects.some((p) => p.id === ws.activeProjectId)
+      ? (ws.activeProjectId as string)
+      : ws.projects[0].id
+    return { version: 2, activeProjectId: active, projects: ws.projects }
+  }
+
+  // v1: a single canvas -> wrap it in one default project.
+  if (ws?.version === 1 && Array.isArray(ws.nodes)) {
+    return {
+      version: 2,
+      activeProjectId: DEFAULT_PROJECT_ID,
+      projects: [
+        {
+          id: DEFAULT_PROJECT_ID,
+          name: 'Project 1',
+          color: '#7aa2f7',
+          viewport: ws.viewport ?? { x: 0, y: 0, zoom: 1 },
+          nodes: ws.nodes
+        }
+      ]
+    }
+  }
+
+  return EMPTY_WORKSPACE
 }
