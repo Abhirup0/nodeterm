@@ -42,10 +42,11 @@ export class WorkspaceStore {
 function migrate(parsed: unknown): Workspace {
   const ws = parsed as Partial<Workspace> & Partial<WorkspaceV1>
 
-  if (ws?.version === 2 && Array.isArray(ws.projects) && ws.projects.length > 0) {
+  // v2: keep as-is, including an empty project list (→ welcome screen).
+  if (ws?.version === 2 && Array.isArray(ws.projects)) {
     const active = ws.projects.some((p) => p.id === ws.activeProjectId)
       ? (ws.activeProjectId as string)
-      : ws.projects[0].id
+      : (ws.projects[0]?.id ?? '')
     return { version: 2, activeProjectId: active, projects: ws.projects }
   }
 

@@ -125,6 +125,12 @@ export const IconClaude = () => (
   <img src={claudeIcon} width={16} height={16} alt="Claude Code" style={{ display: 'block' }} />
 )
 
+export const IconEditor = () => (
+  <svg {...S}>
+    <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
+  </svg>
+)
+
 export const IconMarkdown = () => (
   <svg {...S}>
     <rect x="3" y="5" width="18" height="14" rx="2" />

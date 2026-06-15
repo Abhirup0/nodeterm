@@ -53,7 +53,7 @@ function TreeEntry({
   return (
     <>
       <div
-        className="ex-row"
+        className={`ex-row${entry.ignored ? ' ignored' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
         onContextMenu={(e) => {

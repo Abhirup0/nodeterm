@@ -1,5 +1,7 @@
 import { join } from 'path'
 import { promises as fs } from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import { PtyManager } from './pty-manager'
@@ -7,13 +9,14 @@ import { WorkspaceStore } from './workspace-store'
 import { SettingsStore } from './settings-store'
 import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
+import { initUpdater } from './updater'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -36,9 +39,16 @@ function createWindow(): void {
   // Intercept Cmd/Ctrl+M (default = minimize) and route it to the renderer for the
   // markdown-view toggle instead.
   win.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && (input.meta || input.control) && input.key.toLowerCase() === 'm') {
+    if (input.type !== 'keyDown' || !(input.meta || input.control)) return
+    const key = input.key.toLowerCase()
+    if (key === 'm') {
       event.preventDefault()
       win.webContents.send(IPC.appToggleMarkdown)
+    } else if (key === 'w' && !input.shift) {
+      // Repurpose Cmd/Ctrl+W: the renderer closes the selected node(s); if none are
+      // selected it asks us to close the window (the standard behavior).
+      event.preventDefault()
+      win.webContents.send(IPC.appCloseNode)
     }
   })
 
@@ -54,6 +64,8 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  return win
 }
 
 app.whenReady().then(() => {
@@ -74,6 +86,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string) => ptyManager.captureSession(persistKey))
 
+  ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
+
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
   })
@@ -84,10 +98,37 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.fsList, async (_e, dirPath: string) => {
     try {
-      const entries = await fs.readdir(dirPath, { withFileTypes: true })
-      return entries
-        .map((e) => ({ name: e.name, dir: e.isDirectory() }))
+      const dirents = await fs.readdir(dirPath, { withFileTypes: true })
+      const entries = dirents
+        .filter((e) => e.name !== '.git')
+        .map((e) => ({ name: e.name, dir: e.isDirectory(), ignored: false }))
         .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1))
+
+      // Mark git-ignored entries (so the explorer can dim them).
+      if (entries.length) {
+        const run = promisify(execFile)
+        const flag = (out: string) => {
+          const set = new Set(
+            out
+              .split('\n')
+              .map((s) => s.trim().replace(/\/$/, ''))
+              .filter(Boolean)
+          )
+          for (const en of entries) if (set.has(en.name)) en.ignored = true
+        }
+        try {
+          const { stdout } = await run(
+            'git',
+            ['-C', dirPath, 'check-ignore', '--', ...entries.map((e) => e.name)],
+            { maxBuffer: 4 * 1024 * 1024 }
+          )
+          flag(stdout)
+        } catch (err) {
+          const out = (err as { stdout?: string }).stdout
+          if (out) flag(out)
+        }
+      }
+      return entries
     } catch {
       return []
     }
@@ -115,7 +156,13 @@ app.whenReady().then(() => {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  createWindow()
+  ipcMain.handle(IPC.dialogSelectFile, async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openFile'] })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
+  const win = createWindow()
+  initUpdater(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

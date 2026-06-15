@@ -12,7 +12,7 @@ export interface PtyCreateOptions {
   persistKey?: string
 }
 
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -34,8 +34,10 @@ export interface CanvasNodeState {
   cwd?: string
   // sticky-only
   text?: string
-  // editor-only
+  // editor / diff
   filePath?: string
+  /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
+  diffStaged?: boolean
 }
 
 /** Canvas pan/zoom state. */
@@ -72,18 +74,11 @@ export interface WorkspaceV1 {
 
 export const DEFAULT_PROJECT_ID = 'project-1'
 
+// No projects on a fresh start → the renderer shows the welcome / start screen.
 export const EMPTY_WORKSPACE: Workspace = {
   version: 2,
-  activeProjectId: DEFAULT_PROJECT_ID,
-  projects: [
-    {
-      id: DEFAULT_PROJECT_ID,
-      name: 'Project 1',
-      color: '#7aa2f7',
-      viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: []
-    }
-  ]
+  activeProjectId: '',
+  projects: []
 }
 
 // ---- Contract for the API exposed to the renderer via preload ----
@@ -117,6 +112,8 @@ export interface WorkspaceApi {
 export interface DialogApi {
   /** Opens a native folder picker; returns the chosen path or null if cancelled. */
   selectFolder(): Promise<string | null>
+  /** Opens a native file picker; returns the chosen path or null if cancelled. */
+  selectFile(): Promise<string | null>
 }
 
 export interface ClipboardApi {
@@ -133,6 +130,8 @@ export interface ShellApi {
 export interface DirEntry {
   name: string
   dir: boolean
+  /** True when the entry is matched by .gitignore (shown dimmed). */
+  ignored?: boolean
 }
 
 export interface FsApi {
@@ -250,8 +249,24 @@ export interface GitApi {
   discard(cwd: string, path: string, untracked: boolean): Promise<GitResult>
   switchBranch(cwd: string, name: string): Promise<GitResult>
   createBranch(cwd: string, name: string): Promise<GitResult>
+  /** File contents at a git ref ('HEAD', or '' for the index/staged blob). */
+  showFile(cwd: string, ref: string, path: string): Promise<string>
   /** Generate a commit message from the staged diff via a local AI agent CLI. */
   generateMessage(cwd: string): Promise<GitResult>
+}
+
+export interface UpdateInfo {
+  version: string
+  notes?: string
+}
+
+export interface UpdateApi {
+  /** A newer version was found and is downloading. Returns unsubscribe. */
+  onAvailable(listener: (info: UpdateInfo) => void): () => void
+  /** The update finished downloading and is ready to install. Returns unsubscribe. */
+  onDownloaded(listener: (info: UpdateInfo) => void): () => void
+  /** Quit and install the staged update. */
+  restart(): void
 }
 
 export interface NodeTerminalApi {
@@ -263,6 +278,11 @@ export interface NodeTerminalApi {
   clipboard: ClipboardApi
   shell: ShellApi
   fs: FsApi
+  updates: UpdateApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
+  /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
+  onCloseNode(listener: () => void): () => void
+  /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
+  closeWindow(): void
 }

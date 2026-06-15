@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipc'
 import type {
   NodeTerminalApi,
   PtyCreateOptions,
+  UpdateInfo,
   Workspace
 } from '../shared/types'
 
@@ -33,7 +34,8 @@ const api: NodeTerminalApi = {
     save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace)
   },
   dialog: {
-    selectFolder: () => ipcRenderer.invoke(IPC.dialogSelectFolder)
+    selectFolder: () => ipcRenderer.invoke(IPC.dialogSelectFolder),
+    selectFile: () => ipcRenderer.invoke(IPC.dialogSelectFile)
   },
   settings: {
     load: () => ipcRenderer.invoke(IPC.settingsLoad),
@@ -57,6 +59,7 @@ const api: NodeTerminalApi = {
     discard: (cwd, path, untracked) => ipcRenderer.invoke(IPC.gitDiscard, cwd, path, untracked),
     switchBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitSwitchBranch, cwd, name),
     createBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitCreateBranch, cwd, name),
+    showFile: (cwd, ref, path) => ipcRenderer.invoke(IPC.gitShowFile, cwd, ref, path),
     generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd)
   },
   clipboard: {
@@ -71,11 +74,30 @@ const api: NodeTerminalApi = {
     read: (filePath: string) => ipcRenderer.invoke(IPC.fsRead, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
   },
+  updates: {
+    onAvailable: (listener) => {
+      const handler = (_e: unknown, info: UpdateInfo) => listener(info)
+      ipcRenderer.on(IPC.appUpdateAvailable, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateAvailable, handler)
+    },
+    onDownloaded: (listener) => {
+      const handler = (_e: unknown, info: UpdateInfo) => listener(info)
+      ipcRenderer.on(IPC.appUpdateDownloaded, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateDownloaded, handler)
+    },
+    restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
+  },
   onMarkdownToggle: (listener) => {
     const handler = () => listener()
     ipcRenderer.on(IPC.appToggleMarkdown, handler)
     return () => ipcRenderer.removeListener(IPC.appToggleMarkdown, handler)
-  }
+  },
+  onCloseNode: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on(IPC.appCloseNode, handler)
+    return () => ipcRenderer.removeListener(IPC.appCloseNode, handler)
+  },
+  closeWindow: () => ipcRenderer.send(IPC.appCloseWindow)
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)

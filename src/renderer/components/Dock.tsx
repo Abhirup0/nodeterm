@@ -9,6 +9,7 @@ interface DockProps {
   onAddTerminal: () => void
   onAddSticky: () => void
   onAddClaude: () => void
+  onOpenFile: () => void
   onUndo: () => void
   onRedo: () => void
   onSave: () => void
@@ -29,6 +30,7 @@ export function Dock({
   onAddTerminal,
   onAddSticky,
   onAddClaude,
+  onOpenFile,
   onUndo,
   onRedo,
   onSave,
@@ -61,6 +63,10 @@ export function Dock({
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
+            </button>
+            <button onClick={pick(onOpenFile)}>
+              <EditorIcon />
+              <span>Open file…</span>
             </button>
           </div>
         )}
@@ -172,6 +178,13 @@ function NoteIcon() {
     <svg {...S}>
       <path d="M4 4h16v11l-5 5H4z" />
       <path d="M20 15h-5v5" />
+    </svg>
+  )
+}
+function EditorIcon() {
+  return (
+    <svg {...S}>
+      <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
     </svg>
   )
 }

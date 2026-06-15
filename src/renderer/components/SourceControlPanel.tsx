@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
 import { useProjects } from '../state/projects'
@@ -6,6 +6,7 @@ import { useProjects } from '../state/projects'
 interface SourceControlPanelProps {
   onClose: () => void
   onRunInTerminal: (cmd: string) => void
+  onOpenDiff: (relPath: string, staged: boolean) => void
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -26,38 +27,18 @@ function DiffStat({ added, deleted }: { added: number; deleted: number }) {
   )
 }
 
-/** Renders a unified diff with colored add/remove/hunk lines. */
-function DiffBlock({ text }: { text: string }) {
-  const lines = text.split('\n')
-  return (
-    <pre className="scm-diff">
-      {lines.map((ln, i) => {
-        let cls = 'd-ctx'
-        if (ln.startsWith('@@')) cls = 'd-hunk'
-        else if (ln.startsWith('+') && !ln.startsWith('+++')) cls = 'd-add'
-        else if (ln.startsWith('-') && !ln.startsWith('---')) cls = 'd-del'
-        else if (ln.startsWith('diff ') || ln.startsWith('index ') || ln.startsWith('+++') || ln.startsWith('---'))
-          cls = 'd-meta'
-        return (
-          <div key={i} className={cls}>
-            {ln || ' '}
-          </div>
-        )
-      })}
-    </pre>
-  )
-}
-
 /** Visual Studio-style Source Control: file-level stage/diff/discard + branch switcher. */
-export function SourceControlPanel({ onClose, onRunInTerminal }: SourceControlPanelProps) {
+export function SourceControlPanel({
+  onClose,
+  onRunInTerminal,
+  onOpenDiff
+}: SourceControlPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   const cwd = project?.cwd
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [openKey, setOpenKey] = useState<string | null>(null)
-  const [diffText, setDiffText] = useState('')
   const [branchMenu, setBranchMenu] = useState<{ top: number; left: number } | null>(null)
   const [newBranch, setNewBranch] = useState('')
   const [generating, setGenerating] = useState(false)
@@ -78,20 +59,7 @@ export function SourceControlPanel({ onClose, onRunInTerminal }: SourceControlPa
     const r = await fn()
     setError(r.ok ? '' : r.message)
     setBusy(false)
-    setOpenKey(null)
     await refresh()
-  }
-
-  const toggleDiff = async (f: GitFileChange, staged: boolean) => {
-    const key = `${staged ? 's' : 'c'}:${f.path}`
-    if (openKey === key) {
-      setOpenKey(null)
-      return
-    }
-    setOpenKey(key)
-    setDiffText('Loading…')
-    const d = await git.diff(cwd!, f.path, staged, f.status === 'U')
-    setDiffText(d || '(no textual diff)')
   }
 
   const discard = (f: GitFileChange) => {
@@ -120,40 +88,42 @@ export function SourceControlPanel({ onClose, onRunInTerminal }: SourceControlPa
     list.map((f) => {
       const key = `${staged ? 's' : 'c'}:${f.path}`
       return (
-        <Fragment key={key}>
-          <div
-            className={`scm-file${openKey === key ? ' open' : ''}`}
-            onContextMenu={(e) => {
-              e.preventDefault()
-              setFileMenu({ x: e.clientX, y: e.clientY, path: f.path })
-            }}
+        <div
+          key={key}
+          className="scm-file"
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setFileMenu({ x: e.clientX, y: e.clientY, path: f.path })
+          }}
+        >
+          <span className="scm-letter" style={{ color: STATUS_COLOR[f.status] ?? 'rgba(255,255,255,0.85)' }}>
+            {f.status}
+          </span>
+          <button
+            className="scm-path"
+            title="Open diff"
+            onClick={() => onOpenDiff(f.path, staged)}
           >
-            <span className="scm-letter" style={{ color: STATUS_COLOR[f.status] ?? 'rgba(255,255,255,0.85)' }}>
-              {f.status}
-            </span>
-            <button className="scm-path" title={f.path} onClick={() => toggleDiff(f, staged)}>
-              {f.path}
-            </button>
-            <DiffStat added={f.added} deleted={f.deleted} />
-            <span className="scm-row-actions">
-              {!staged && (
-                <button className="scm-iconbtn" title="Discard changes" onClick={() => discard(f)}>
-                  ↩
-                </button>
-              )}
-              <button
-                className="scm-iconbtn"
-                title={staged ? 'Unstage' : 'Stage'}
-                onClick={() =>
-                  act(() => (staged ? git.unstage(cwd!, [f.path]) : git.stage(cwd!, [f.path])))
-                }
-              >
-                {staged ? '−' : '+'}
+            {f.path}
+          </button>
+          <DiffStat added={f.added} deleted={f.deleted} />
+          <span className="scm-row-actions">
+            {!staged && (
+              <button className="scm-iconbtn" title="Discard changes" onClick={() => discard(f)}>
+                ↩
               </button>
-            </span>
-          </div>
-          {openKey === key && <DiffBlock text={diffText} />}
-        </Fragment>
+            )}
+            <button
+              className="scm-iconbtn"
+              title={staged ? 'Unstage' : 'Stage'}
+              onClick={() =>
+                act(() => (staged ? git.unstage(cwd!, [f.path]) : git.stage(cwd!, [f.path])))
+              }
+            >
+              {staged ? '−' : '+'}
+            </button>
+          </span>
+        </div>
       )
     })
 

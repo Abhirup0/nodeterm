@@ -26,6 +26,7 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
     rows: [
       { keys: ['⌘', 'T'], label: 'New terminal' },
       { keys: ['⌘', '⇧', 'C'], label: 'New Claude Code' },
+      { keys: ['⌘', 'W'], label: 'Close selected node' },
       { keys: ['Right-click'], label: 'Actions menu (empty space or node)' },
       { keys: ['Left-drag'], label: 'Box-select (touch to select)' },
       { keys: ['Middle / Right-drag'], label: 'Pan the canvas' },

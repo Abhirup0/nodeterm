@@ -2,20 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+import { renderMarkdown } from '../lib/markdown'
 import { transport } from '../terminal/local-transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useSettings } from '../state/settings'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-
-/** Render terminal output as markdown, sanitized to prevent XSS. */
-function renderMarkdown(src: string): string {
-  const html = marked.parse(src || '', { async: false }) as string
-  return DOMPurify.sanitize(html)
-}
 
 /**
  * A single terminal node: header (collapse + color + title + close), optional tag chips,

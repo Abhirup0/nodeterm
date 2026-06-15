@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
+import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
 import type { CanvasNode } from '../state/workspace'
 
@@ -13,9 +14,22 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
   const savedRef = useRef<string>('')
+  const hoveredRef = useRef(false)
   const [dirty, setDirty] = useState(false)
+  const [preview, setPreview] = useState(false)
+  const [previewHtml, setPreviewHtml] = useState('')
   const filePath = (data.filePath as string) ?? ''
   const fileName = filePath.split('/').pop() || 'untitled'
+
+  const togglePreview = () => {
+    setPreview((p) => {
+      const next = !p
+      if (next && editorRef.current) setPreviewHtml(renderMarkdown(editorRef.current.getValue()))
+      return next
+    })
+  }
+  const toggleRef = useRef(togglePreview)
+  toggleRef.current = togglePreview
 
   const save = () => {
     const editor = editorRef.current
@@ -70,10 +84,17 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Cmd/Ctrl+M toggles a rendered markdown preview when this node is hovered.
+  useEffect(() => window.nodeTerminal.onMarkdownToggle(() => {
+    if (hoveredRef.current) toggleRef.current()
+  }), [])
+
   return (
     <div
       className={`term-node editor-node${selected ? ' selected' : ''}`}
       style={{ borderTopColor: data.color }}
+      onMouseEnter={() => (hoveredRef.current = true)}
+      onMouseLeave={() => (hoveredRef.current = false)}
     >
       <NodeResizer minWidth={320} minHeight={200} isVisible={selected} color={data.color} />
 
@@ -83,6 +104,13 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           {dirty ? ' ●' : ''}
         </span>
         <span className="term-node__spacer" />
+        <button
+          className="editor-node__toggle"
+          title="Toggle markdown preview (⌘M)"
+          onClick={togglePreview}
+        >
+          {preview ? 'Edit' : 'Preview'}
+        </button>
         <button className="editor-node__save" disabled={!dirty} title="Save (⌘S)" onClick={save}>
           Save
         </button>
@@ -95,7 +123,18 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
       </div>
 
-      <div className="editor-node__body nodrag nowheel" ref={bodyRef} />
+      <div className="editor-node__body">
+        <div className="editor-node__monaco nodrag nowheel" ref={bodyRef} />
+        {preview && (
+          <div className="term-md nodrag nowheel">
+            <div className="term-md__bar">
+              <span>Preview</span>
+              <span className="term-md__hint">⌘M to edit</span>
+            </div>
+            <div className="term-md__content" dangerouslySetInnerHTML={{ __html: previewHtml }} />
+          </div>
+        )}
+      </div>
     </div>
   )
 }

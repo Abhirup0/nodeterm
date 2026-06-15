@@ -16,6 +16,7 @@ const TERMINAL_SIZE = { width: 600, height: 400 }
 const STICKY_SIZE = { width: 240, height: 200 }
 const GROUP_SIZE = { width: 520, height: 360 }
 const EDITOR_SIZE = { width: 660, height: 460 }
+const DIFF_SIZE = { width: 860, height: 500 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -35,6 +36,7 @@ export interface NodeData {
   cwd?: string
   text?: string
   filePath?: string
+  diffStaged?: boolean
   [key: string]: unknown
 }
 
@@ -123,6 +125,32 @@ export function createEditorNode(
       color: '#6ac4dc',
       group: null,
       filePath
+    }
+  }
+}
+
+/** Creates a diff editor node for a changed file (relative path + repo cwd). */
+export function createDiffNode(
+  index: number,
+  cwd: string,
+  relPath: string,
+  staged: boolean,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('diff'),
+    type: 'diff',
+    position: placeAt(center, index, DIFF_SIZE.width, DIFF_SIZE.height),
+    width: DIFF_SIZE.width,
+    height: DIFF_SIZE.height,
+    style: { width: DIFF_SIZE.width, height: DIFF_SIZE.height },
+    data: {
+      title: `${relPath.split('/').pop() || relPath} (diff)`,
+      color: '#e0af68',
+      group: null,
+      cwd,
+      filePath: relPath,
+      diffStaged: staged
     }
   }
 }
@@ -287,7 +315,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         shell: n.shell,
         cwd: n.cwd,
         text: n.text,
-        filePath: n.filePath
+        filePath: n.filePath,
+        diffStaged: n.diffStaged
       }
     }
   })
@@ -302,7 +331,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         ? GROUP_SIZE
         : kind === 'editor'
           ? EDITOR_SIZE
-          : TERMINAL_SIZE
+          : kind === 'diff'
+            ? DIFF_SIZE
+            : TERMINAL_SIZE
   return nodes.map((n) => {
     const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
     const collapsed = !!n.data.collapsed
@@ -326,7 +357,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
       shell: n.data.shell,
       cwd: n.data.cwd,
       text: n.data.text,
-      filePath: n.data.filePath
+      filePath: n.data.filePath,
+      diffStaged: n.data.diffStaged
     }
   })
 }

@@ -12,10 +12,35 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "rebuild": "electron-rebuild -f -w node-pty",
+    "make-icon": "node scripts/make-icon.mjs",
+    "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64",
+    "release": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --x64 --publish always",
     "postinstall": "electron-rebuild -f -w node-pty"
+  },
+  "build": {
+    "appId": "com.nodeterm.app",
+    "productName": "nodeterm",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["out/**/*", "package.json"],
+    "asarUnpack": ["**/node_modules/node-pty/**"],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false,
+      "identity": null,
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "publish": { "provider": "github", "owner": "REPLACE_ME", "repo": "nodeterm" }
   },
   "dependencies": {
     "dompurify": "^3.4.10",
+    "electron-updater": "^6.8.9",
     "marked": "^12.0.2",
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
@@ -30,9 +55,11 @@
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.3.0",
     "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "sharp": "^0.33.5",
     "typescript": "^5.5.4",
     "vite": "^5.4.0"
   }

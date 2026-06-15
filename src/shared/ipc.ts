@@ -9,12 +9,18 @@ export const IPC = {
   ptyGenerateName: 'pty:generate-name',
   ptyCapture: 'pty:capture',
   appToggleMarkdown: 'app:toggle-markdown',
+  appCloseNode: 'app:close-node',
+  appCloseWindow: 'app:close-window',
+  appUpdateAvailable: 'app:update-available',
+  appUpdateDownloaded: 'app:update-downloaded',
+  appRestartToUpdate: 'app:restart-to-update',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   dialogSelectFolder: 'dialog:select-folder',
+  dialogSelectFile: 'dialog:select-file',
   shellReveal: 'shell:reveal',
   shellOpenPath: 'shell:open-path',
   fsList: 'fs:list',
@@ -38,5 +44,6 @@ export const IPC = {
   gitDiscard: 'git:discard',
   gitSwitchBranch: 'git:switch-branch',
   gitCreateBranch: 'git:create-branch',
+  gitShowFile: 'git:show-file',
   commitGenerate: 'commit:generate'
 } as const

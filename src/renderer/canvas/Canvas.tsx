@@ -15,6 +15,7 @@ import { TerminalNode } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
+import { DiffNode } from '../nodes/DiffNode'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
@@ -23,6 +24,7 @@ import {
   IconClaude,
   IconCollapse,
   IconDuplicate,
+  IconEditor,
   IconFit,
   IconGrid,
   IconGroup,
@@ -41,6 +43,7 @@ import { SettingsPanel } from '../components/SettingsPanel'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
+import { UpdateBanner } from '../components/UpdateBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
@@ -49,6 +52,7 @@ import { useSettings } from '../state/settings'
 import {
   COLLAPSED_HEIGHT,
   createClaudeNode,
+  createDiffNode,
   createEditorNode,
   createStickyNode,
   createTerminalNode,
@@ -92,7 +96,13 @@ export function Canvas() {
   nodesRef.current = nodes
 
   const nodeTypes = useMemo(
-    () => ({ terminal: TerminalNode, sticky: StickyNode, group: GroupNode, editor: EditorNode }),
+    () => ({
+      terminal: TerminalNode,
+      sticky: StickyNode,
+      group: GroupNode,
+      editor: EditorNode,
+      diff: DiffNode
+    }),
     []
   )
 
@@ -259,11 +269,31 @@ export function Canvas() {
 
   /** Open a file as a code editor node on the canvas. */
   const openFile = useCallback(
-    (filePath: string) => {
-      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, viewCenter())])
+    (filePath: string, center?: { x: number; y: number }) => {
+      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
+  )
+
+  /** Open a git diff editor node for a changed file (from Source Control). */
+  const openDiff = useCallback(
+    (relPath: string, staged: boolean) => {
+      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      if (!cwd) return
+      setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, staged, viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+
+  /** Pick a file via the native dialog and open it as an editor node. */
+  const openFileDialog = useCallback(
+    async (center?: { x: number; y: number }) => {
+      const f = await window.nodeTerminal.dialog.selectFile()
+      if (f) openFile(f, center)
+    },
+    [openFile]
   )
 
   const cloneRepo = useCallback(async () => {
@@ -371,6 +401,16 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [deleteNodes])
+
+  // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
+  // node's × button. With nothing selected it falls back to closing the window.
+  useEffect(() => {
+    return window.nodeTerminal.onCloseNode(() => {
+      const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
+      if (ids.length) deleteNodes(ids)
+      else window.nodeTerminal.closeWindow()
+    })
   }, [deleteNodes])
 
   const groupSelection = useCallback(
@@ -587,13 +627,14 @@ export function Canvas() {
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
           { label: 'New Claude Code', icon: <IconClaude />, onClick: () => addClaude(at) },
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
+          { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addClaude, addSticky, selectAll, fitView]
+    [screenToFlowPosition, addTerminal, addClaude, addSticky, openFileDialog, selectAll, fitView]
   )
 
   const onNodeContextMenu = useCallback(
@@ -658,10 +699,16 @@ export function Canvas() {
   const addProjectFromFolder = useCallback(async () => {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return
-    const name = folder.split('/').filter(Boolean).pop() || 'Project'
     commitActiveToStore()
-    const project = useProjects.getState().addProject(name, folder)
-    useProjects.getState().setActive(project.id)
+    // A folder maps to one project: reuse the existing one (with its nodes) if present.
+    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+    if (existing) {
+      useProjects.getState().setActive(existing.id)
+    } else {
+      const name = folder.split('/').filter(Boolean).pop() || 'Project'
+      const project = useProjects.getState().addProject(name, folder)
+      useProjects.getState().setActive(project.id)
+    }
     void writeDisk()
   }, [commitActiveToStore, writeDisk])
 
@@ -702,6 +749,7 @@ export function Canvas() {
       { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
       { id: 'new-claude', label: 'New Claude Code', icon: <IconClaude />, run: () => addClaude() },
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
+      { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: () => fitView({ padding: 0.2, duration: 300 }) },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() }
@@ -730,7 +778,17 @@ export function Canvas() {
         })
       )
     return cmds
-  }, [addTerminal, addClaude, addSticky, addProject, fitView, persist, switchProject, goToNode])
+  }, [
+    addTerminal,
+    addClaude,
+    addSticky,
+    openFileDialog,
+    addProject,
+    fitView,
+    persist,
+    switchProject,
+    goToNode
+  ])
 
   return (
     <div className="canvas-root">
@@ -742,6 +800,8 @@ export function Canvas() {
         onSetFolder={setProjectFolder}
         onDelete={deleteProject}
       />
+
+      <UpdateBanner />
 
       <div className="controls-cluster">
         <button
@@ -837,7 +897,11 @@ export function Canvas() {
       {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
 
       {scOpen && (
-        <SourceControlPanel onClose={() => setScOpen(false)} onRunInTerminal={runInTerminal} />
+        <SourceControlPanel
+          onClose={() => setScOpen(false)}
+          onRunInTerminal={runInTerminal}
+          onOpenDiff={openDiff}
+        />
       )}
 
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
@@ -864,6 +928,7 @@ export function Canvas() {
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
         onAddClaude={addClaude}
+        onOpenFile={() => void openFileDialog()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}
         onZoomIn={() => zoomIn({ duration: 150 })}
