@@ -34,6 +34,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [previewHtml, setPreviewHtml] = useState('')
   const [imageSrc, setImageSrc] = useState('')
   const [imageDims, setImageDims] = useState('')
+  const [imageError, setImageError] = useState('')
   const filePath = (data.filePath as string) ?? ''
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
@@ -72,11 +73,19 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       let disposed = false
       // Guard: readBinary may be missing if the preload is stale (dev not restarted).
       const readBinary = window.nodeTerminal.fs.readBinary
-      Promise.resolve(typeof readBinary === 'function' ? readBinary(filePath) : '')
+      if (typeof readBinary !== 'function') {
+        setImageError('Image preview needs an app restart.')
+        return
+      }
+      readBinary(filePath)
         .then((b64) => {
-          if (!disposed && b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
+          if (disposed) return
+          if (b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
+          else setImageError('Couldn’t read this image.')
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!disposed) setImageError('Couldn’t read this image.')
+        })
       return () => {
         disposed = true
       }
@@ -183,7 +192,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 }}
               />
             ) : (
-              <span className="editor-node__loading">Loading…</span>
+              <span className="editor-node__loading">{imageError || 'Loading…'}</span>
             )}
           </div>
         ) : (
