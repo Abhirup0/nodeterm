@@ -1,8 +1,11 @@
-# node-terminal
+# nodeterm
 
-Open-source **node-based terminal manager**. Place multiple real terminals freely on a
+A **node-based terminal manager**. Place multiple real terminals freely on a
 single canvas, drag them around, pan and zoom in/out. Built for people with ADHD and
 disorganized workflows — it turns a scattered workflow into a visual, spatial layout.
+
+> Source-available, not open source. The code is published for reference; see
+> [License](#license). Official `.dmg` builds are free for personal use.
 
 > MVP scaffold. Today: multiple running terminals · drag-and-drop · pan/zoom · save/load
 > layout · grouping by title + color.
@@ -37,4 +40,7 @@ See `CLAUDE.md` for details.
 
 ## License
 
-MIT
+**Source-available, proprietary — all rights reserved.** You may view and study the
+code, but not use, modify, redistribute, or sell it without permission. See
+[`LICENSE`](./LICENSE) for the full terms and [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md)
+for bundled open-source components.

@@ -1,9 +1,10 @@
 {
   "name": "node-terminal",
   "version": "0.1.0",
-  "description": "Open-source node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
-  "author": "",
-  "license": "MIT",
+  "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
+  "author": "enes",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -36,7 +37,7 @@
         { "target": "zip", "arch": ["arm64", "x64"] }
       ]
     },
-    "publish": { "provider": "github", "owner": "REPLACE_ME", "repo": "nodeterm" }
+    "publish": { "provider": "github", "owner": "eneskirca", "repo": "nodeterm" }
   },
   "dependencies": {
     "dompurify": "^3.4.10",
