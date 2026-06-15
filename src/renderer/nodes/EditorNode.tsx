@@ -5,9 +5,23 @@ import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
 import type { CanvasNode } from '../state/workspace'
 
+// Image extensions get a visual preview instead of the Monaco text editor.
+const IMAGE_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  svg: 'image/svg+xml',
+  avif: 'image/avif'
+}
+
 /**
  * A code editor node backed by Monaco. Reads the file on mount, auto-detects the language
- * from the path, and saves back with ⌘S (or the Save button).
+ * from the path, and saves back with ⌘S (or the Save button). Image files are shown as a
+ * preview instead of being opened as (binary) text.
  */
 export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements } = useReactFlow()
@@ -18,10 +32,15 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [dirty, setDirty] = useState(false)
   const [preview, setPreview] = useState(false)
   const [previewHtml, setPreviewHtml] = useState('')
+  const [imageSrc, setImageSrc] = useState('')
+  const [imageDims, setImageDims] = useState('')
   const filePath = (data.filePath as string) ?? ''
   const fileName = filePath.split('/').pop() || 'untitled'
+  const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
+  const isImage = ext in IMAGE_MIME
 
   const togglePreview = () => {
+    if (isImage) return
     setPreview((p) => {
       const next = !p
       if (next && editorRef.current) setPreviewHtml(renderMarkdown(editorRef.current.getValue()))
@@ -46,8 +65,21 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   saveRef.current = save
 
   useEffect(() => {
+    if (!filePath) return
+
+    // Images: load as a data URL and render an <img> preview (no Monaco).
+    if (isImage) {
+      let disposed = false
+      window.nodeTerminal.fs.readBinary(filePath).then((b64) => {
+        if (!disposed && b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
+      })
+      return () => {
+        disposed = true
+      }
+    }
+
     const el = bodyRef.current
-    if (!el || !filePath) return
+    if (!el) return
     let disposed = false
     let editor: monaco.editor.IStandaloneCodeEditor | null = null
     let model: monaco.editor.ITextModel | null = null
@@ -101,19 +133,30 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <div className="term-node__header">
         <span className="term-node__title-text" title={filePath}>
           {fileName}
-          {dirty ? ' ●' : ''}
+          {!isImage && dirty ? ' ●' : ''}
         </span>
         <span className="term-node__spacer" />
-        <button
-          className="editor-node__toggle"
-          title="Toggle markdown preview (⌘M)"
-          onClick={togglePreview}
-        >
-          {preview ? 'Edit' : 'Preview'}
-        </button>
-        <button className="editor-node__save" disabled={!dirty} title="Save (⌘S)" onClick={save}>
-          Save
-        </button>
+        {isImage ? (
+          imageDims && <span className="editor-node__dims">{imageDims}</span>
+        ) : (
+          <>
+            <button
+              className="editor-node__toggle"
+              title="Toggle markdown preview (⌘M)"
+              onClick={togglePreview}
+            >
+              {preview ? 'Edit' : 'Preview'}
+            </button>
+            <button
+              className="editor-node__save"
+              disabled={!dirty}
+              title="Save (⌘S)"
+              onClick={save}
+            >
+              Save
+            </button>
+          </>
+        )}
         <button
           className="term-node__close"
           title="Close"
@@ -124,15 +167,37 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       </div>
 
       <div className="editor-node__body">
-        <div className="editor-node__monaco nodrag nowheel" ref={bodyRef} />
-        {preview && (
-          <div className="term-md nodrag nowheel">
-            <div className="term-md__bar">
-              <span>Preview</span>
-              <span className="term-md__hint">⌘M to edit</span>
-            </div>
-            <div className="term-md__content" dangerouslySetInnerHTML={{ __html: previewHtml }} />
+        {isImage ? (
+          <div className="editor-node__image nodrag nowheel">
+            {imageSrc ? (
+              <img
+                src={imageSrc}
+                alt={fileName}
+                onLoad={(e) => {
+                  const img = e.currentTarget
+                  if (img.naturalWidth) setImageDims(`${img.naturalWidth} × ${img.naturalHeight}`)
+                }}
+              />
+            ) : (
+              <span className="editor-node__loading">Loading…</span>
+            )}
           </div>
+        ) : (
+          <>
+            <div className="editor-node__monaco nodrag nowheel" ref={bodyRef} />
+            {preview && (
+              <div className="term-md nodrag nowheel">
+                <div className="term-md__bar">
+                  <span>Preview</span>
+                  <span className="term-md__hint">⌘M to edit</span>
+                </div>
+                <div
+                  className="term-md__content"
+                  dangerouslySetInnerHTML={{ __html: previewHtml }}
+                />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

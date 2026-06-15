@@ -145,6 +145,15 @@ app.whenReady().then(() => {
     }
   })
 
+  ipcMain.handle(IPC.fsReadBinary, async (_e, filePath: string) => {
+    try {
+      const buf = await fs.readFile(filePath)
+      return buf.toString('base64')
+    } catch {
+      return ''
+    }
+  })
+
   ipcMain.handle(IPC.fsWrite, async (_e, filePath: string, content: string) => {
     try {
       await fs.writeFile(filePath, content, 'utf-8')

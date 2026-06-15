@@ -72,6 +72,7 @@ const api: NodeTerminalApi = {
   fs: {
     list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),
     read: (filePath: string) => ipcRenderer.invoke(IPC.fsRead, filePath),
+    readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
   },
   updates: {

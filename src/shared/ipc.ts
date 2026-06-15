@@ -26,6 +26,7 @@ export const IPC = {
   shellOpenPath: 'shell:open-path',
   fsList: 'fs:list',
   fsRead: 'fs:read',
+  fsReadBinary: 'fs:read-binary',
   fsWrite: 'fs:write',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',

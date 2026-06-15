@@ -139,6 +139,8 @@ export interface FsApi {
   list(dirPath: string): Promise<DirEntry[]>
   /** Read a file's text contents (empty string on error). */
   read(filePath: string): Promise<string>
+  /** Read a file as base64 (for images and other binary previews; '' on error). */
+  readBinary(filePath: string): Promise<string>
   /** Write text to a file; resolves true on success. */
   write(filePath: string, content: string): Promise<boolean>
 }
