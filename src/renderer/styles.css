@@ -1026,6 +1026,31 @@ body,
   flex-shrink: 0;
 }
 
+/* Per-node error boundary fallback (keeps one bad node from blanking the app). */
+.node-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 280px;
+  padding: 16px;
+  background: var(--panel, #282828);
+  border: 1px solid #ff6b6b;
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.node-error__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ff8585;
+}
+
+.node-error__msg {
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
 /* ---- Sticky note node ---- */
 .sticky-node {
   width: 100%;
@@ -1971,6 +1996,14 @@ body,
 
 .ex-row:hover {
   background: var(--panel-header);
+}
+
+.ex-row.selected {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.ex-row.selected:hover {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
 /* Git-ignored entries: dimmed + italic. */

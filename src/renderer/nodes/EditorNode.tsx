@@ -70,9 +70,13 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // Images: load as a data URL and render an <img> preview (no Monaco).
     if (isImage) {
       let disposed = false
-      window.nodeTerminal.fs.readBinary(filePath).then((b64) => {
-        if (!disposed && b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
-      })
+      // Guard: readBinary may be missing if the preload is stale (dev not restarted).
+      const readBinary = window.nodeTerminal.fs.readBinary
+      Promise.resolve(typeof readBinary === 'function' ? readBinary(filePath) : '')
+        .then((b64) => {
+          if (!disposed && b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
+        })
+        .catch(() => {})
       return () => {
         disposed = true
       }

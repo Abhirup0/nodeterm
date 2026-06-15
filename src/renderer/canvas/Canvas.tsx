@@ -16,6 +16,7 @@ import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
+import { withNodeBoundary } from '../components/NodeBoundary'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
@@ -98,11 +99,11 @@ export function Canvas() {
 
   const nodeTypes = useMemo(
     () => ({
-      terminal: TerminalNode,
-      sticky: StickyNode,
-      group: GroupNode,
-      editor: EditorNode,
-      diff: DiffNode
+      terminal: withNodeBoundary(TerminalNode),
+      sticky: withNodeBoundary(StickyNode),
+      group: withNodeBoundary(GroupNode),
+      editor: withNodeBoundary(EditorNode),
+      diff: withNodeBoundary(DiffNode)
     }),
     []
   )

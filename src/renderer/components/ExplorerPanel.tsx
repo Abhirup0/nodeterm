@@ -10,6 +10,7 @@ interface ExplorerPanelProps {
 
 type ContextFn = (x: number, y: number, path: string, isDir: boolean) => void
 type OpenFn = (path: string) => void
+type SelectFn = (path: string) => void
 
 function EntryIcon({ dir }: { dir: boolean }) {
   return dir ? (
@@ -28,36 +29,51 @@ function TreeEntry({
   entry,
   path,
   depth,
+  selected,
   onContext,
-  onOpenFile
+  onOpenFile,
+  onSelect
 }: {
   entry: DirEntry
   path: string
   depth: number
+  selected: string | null
   onContext: ContextFn
   onOpenFile: OpenFn
+  onSelect: SelectFn
 }) {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState<DirEntry[] | null>(null)
 
-  const onClick = useCallback(async () => {
-    if (!entry.dir) {
-      onOpenFile(path)
-      return
-    }
+  const expandDir = useCallback(async () => {
     const next = !open
     setOpen(next)
     if (next && children === null) setChildren(await window.nodeTerminal.fs.list(path))
-  }, [entry.dir, open, children, path, onOpenFile])
+  }, [open, children, path])
+
+  // Files: first click selects, a second click (or double-click) opens the node.
+  // Directories: a click toggles expansion (and selects for highlight).
+  const onClick = useCallback(() => {
+    if (entry.dir) {
+      onSelect(path)
+      void expandDir()
+    } else if (selected === path) {
+      onOpenFile(path)
+    } else {
+      onSelect(path)
+    }
+  }, [entry.dir, selected, path, onOpenFile, onSelect, expandDir])
 
   return (
     <>
       <div
-        className={`ex-row${entry.ignored ? ' ignored' : ''}`}
+        className={`ex-row${entry.ignored ? ' ignored' : ''}${selected === path ? ' selected' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
+        onDoubleClick={() => !entry.dir && onOpenFile(path)}
         onContextMenu={(e) => {
           e.preventDefault()
+          onSelect(path)
           onContext(e.clientX, e.clientY, path, entry.dir)
         }}
         title={entry.name}
@@ -74,8 +90,10 @@ function TreeEntry({
             entry={c}
             path={`${path}/${c.name}`}
             depth={depth + 1}
+            selected={selected}
             onContext={onContext}
             onOpenFile={onOpenFile}
+            onSelect={onSelect}
           />
         ))}
     </>
@@ -88,6 +106,7 @@ export function ExplorerPanel({ onClose, onOpenFile }: ExplorerPanelProps) {
   const cwd = project?.cwd
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
+  const [selected, setSelected] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
 
   useEffect(() => {
@@ -127,8 +146,10 @@ export function ExplorerPanel({ onClose, onOpenFile }: ExplorerPanelProps) {
                 entry={e}
                 path={`${cwd}/${e.name}`}
                 depth={0}
+                selected={selected}
                 onContext={onContext}
                 onOpenFile={onOpenFile}
+                onSelect={setSelected}
               />
             ))}
           </div>
