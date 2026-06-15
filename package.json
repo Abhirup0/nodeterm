@@ -1,0 +1,35 @@
+{
+  "name": "node-terminal",
+  "version": "0.1.0",
+  "description": "Open-source node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
+  "author": "",
+  "license": "MIT",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-rebuild -f -w node-pty"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.3.1",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "@xyflow/react": "^12.3.0",
+    "electron": "^31.3.0",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}
