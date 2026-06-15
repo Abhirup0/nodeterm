@@ -1,13 +1,12 @@
 :root {
-  --bg: #0e0e0e;
-  --panel: #161616;
+  --bg: #0a0a0a;
+  --panel: #141416;
   --border: rgba(255, 255, 255, 0.1);
-  --text: rgba(255, 255, 255, 0.92);
-  --dim: rgba(255, 255, 255, 0.55);
+  --text: rgba(255, 255, 255, 0.94);
+  --dim: rgba(255, 255, 255, 0.52);
   --accent: #0a84ff;
-  --accent-hover: #3a9bff;
   --grad-a: #a38dff;
-  --grad-b: #622994;
+  --grad-b: #7a4bd0;
 }
 
 * {
@@ -25,6 +24,7 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 a {
@@ -32,18 +32,33 @@ a {
   text-decoration: none;
 }
 
+/* Subtle grid backdrop behind the hero */
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 55% at 50% 0%, #000 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 55% at 50% 0%, #000 30%, transparent 75%);
+  pointer-events: none;
+}
+
+main,
+.nav {
+  position: relative;
+  z-index: 1;
+}
+
 /* Nav */
 .nav {
-  position: sticky;
-  top: 0;
-  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
-  background: rgba(14, 14, 14, 0.72);
-  backdrop-filter: saturate(180%) blur(20px);
-  border-bottom: 1px solid var(--border);
+  padding: 18px 28px;
+  max-width: 1180px;
+  margin: 0 auto;
 }
 
 .brand {
@@ -57,82 +72,106 @@ a {
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 22px;
+  gap: 18px;
   font-size: 14px;
   color: var(--dim);
 }
 
-.nav-links a:hover {
+.nav-links > a:not(.btn):not(.star):hover {
   color: var(--text);
+}
+
+.star {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.star:hover {
+  background: #18181b;
+}
+
+.star svg {
+  color: #e3b341;
 }
 
 /* Buttons */
 .btn {
   display: inline-flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 12px 22px;
-  border-radius: 12px;
+  gap: 9px;
+  border-radius: 11px;
   font-weight: 600;
-  font-size: 15px;
   border: 1px solid transparent;
-  transition: background 0.15s, transform 0.05s;
+  transition: background 0.15s, transform 0.05s, border-color 0.15s;
+  white-space: nowrap;
 }
 
 .btn:active {
   transform: translateY(1px);
 }
 
-.btn small {
-  font-weight: 400;
-  font-size: 11.5px;
-  opacity: 0.75;
+.btn-sm {
+  padding: 8px 14px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+.btn-lg {
+  padding: 14px 24px;
+  font-size: 15.5px;
 }
 
 .btn-primary {
-  background: var(--accent);
-  color: #fff;
+  background: #fff;
+  color: #0a0a0a;
 }
 
 .btn-primary:hover {
-  background: var(--accent-hover);
+  background: #e9e9ea;
 }
 
 .btn-secondary {
-  background: #242426;
+  background: #18181b;
   color: var(--text);
   border-color: var(--border);
 }
 
 .btn-secondary:hover {
-  background: #2c2c2e;
-}
-
-.btn-ghost {
-  flex-direction: row;
-  padding: 8px 16px;
-  font-size: 14px;
-  border-color: var(--border);
-}
-
-.btn-ghost:hover {
-  background: #1c1c1e;
+  background: #202024;
 }
 
 /* Hero */
 .hero {
-  max-width: 980px;
+  max-width: 920px;
   margin: 0 auto;
-  padding: 96px 24px 40px;
+  padding: 70px 24px 40px;
   text-align: center;
 }
 
+.badge {
+  display: inline-block;
+  padding: 6px 14px;
+  margin-bottom: 26px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .hero h1 {
-  font-size: clamp(38px, 7vw, 68px);
-  line-height: 1.05;
-  letter-spacing: -0.02em;
-  margin: 0 0 20px;
+  font-size: clamp(42px, 8vw, 80px);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  margin: 0 0 22px;
   font-weight: 800;
 }
 
@@ -144,7 +183,7 @@ a {
 }
 
 .lede {
-  max-width: 620px;
+  max-width: 600px;
   margin: 0 auto 36px;
   font-size: 18px;
   color: var(--dim);
@@ -152,26 +191,38 @@ a {
 
 .cta {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   justify-content: center;
   flex-wrap: wrap;
 }
 
 .cta-meta {
-  margin: 16px 0 0;
+  margin: 18px 0 0;
   font-size: 13px;
   color: var(--dim);
 }
 
-.shot {
-  margin-top: 56px;
+.cta-meta a {
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1px;
+}
+
+.cta-meta a:hover {
+  border-color: var(--text);
+}
+
+/* Hero window frame */
+.window {
+  margin-top: 60px;
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid var(--border);
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+  background: #141416;
+  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.7);
 }
 
-.shot img {
+.window img {
   display: block;
   width: 100%;
   height: auto;
@@ -181,20 +232,21 @@ a {
 .features {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 80px 24px;
+  padding: 90px 24px;
 }
 
 .features h2,
 .closer h2 {
   text-align: center;
-  font-size: clamp(26px, 4vw, 36px);
-  letter-spacing: -0.01em;
-  margin: 0 0 44px;
+  font-size: clamp(28px, 4vw, 38px);
+  letter-spacing: -0.02em;
+  margin: 0 0 48px;
+  font-weight: 800;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
   gap: 16px;
 }
 
@@ -203,6 +255,12 @@ a {
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-2px);
 }
 
 .card h3 {
@@ -219,7 +277,7 @@ a {
 /* Closer */
 .closer {
   text-align: center;
-  padding: 80px 24px 96px;
+  padding: 80px 24px 100px;
 }
 
 .closer h2 {
@@ -229,19 +287,21 @@ a {
 .closer p {
   color: var(--dim);
   font-size: 18px;
-  margin: 0 0 28px;
+  margin: 0 0 30px;
 }
 
 /* Footer */
 .foot {
+  position: relative;
+  z-index: 1;
   border-top: 1px solid var(--border);
-  padding: 36px 24px;
+  padding: 40px 24px;
   text-align: center;
   color: var(--dim);
   font-size: 13px;
 }
 
-.foot > div:first-child {
+.foot-brand {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -251,7 +311,7 @@ a {
 
 .foot-links {
   display: flex;
-  gap: 20px;
+  gap: 22px;
   justify-content: center;
   margin: 16px 0;
 }
