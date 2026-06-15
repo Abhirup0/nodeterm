@@ -1,0 +1,267 @@
+:root {
+  --bg: #0e0e0e;
+  --panel: #161616;
+  --border: rgba(255, 255, 255, 0.1);
+  --text: rgba(255, 255, 255, 0.92);
+  --dim: rgba(255, 255, 255, 0.55);
+  --accent: #0a84ff;
+  --accent-hover: #3a9bff;
+  --grad-a: #a38dff;
+  --grad-b: #622994;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Nav */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: rgba(14, 14, 14, 0.72);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 17px;
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  font-size: 14px;
+  color: var(--dim);
+}
+
+.nav-links a:hover {
+  color: var(--text);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 22px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  border: 1px solid transparent;
+  transition: background 0.15s, transform 0.05s;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn small {
+  font-weight: 400;
+  font-size: 11.5px;
+  opacity: 0.75;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: #242426;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.btn-secondary:hover {
+  background: #2c2c2e;
+}
+
+.btn-ghost {
+  flex-direction: row;
+  padding: 8px 16px;
+  font-size: 14px;
+  border-color: var(--border);
+}
+
+.btn-ghost:hover {
+  background: #1c1c1e;
+}
+
+/* Hero */
+.hero {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 96px 24px 40px;
+  text-align: center;
+}
+
+.hero h1 {
+  font-size: clamp(38px, 7vw, 68px);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin: 0 0 20px;
+  font-weight: 800;
+}
+
+.grad {
+  background: linear-gradient(120deg, var(--grad-a), var(--grad-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.lede {
+  max-width: 620px;
+  margin: 0 auto 36px;
+  font-size: 18px;
+  color: var(--dim);
+}
+
+.cta {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.cta-meta {
+  margin: 16px 0 0;
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.shot {
+  margin-top: 56px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Features */
+.features {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 80px 24px;
+}
+
+.features h2,
+.closer h2 {
+  text-align: center;
+  font-size: clamp(26px, 4vw, 36px);
+  letter-spacing: -0.01em;
+  margin: 0 0 44px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+}
+
+.card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.card p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+/* Closer */
+.closer {
+  text-align: center;
+  padding: 80px 24px 96px;
+}
+
+.closer h2 {
+  margin-bottom: 6px;
+}
+
+.closer p {
+  color: var(--dim);
+  font-size: 18px;
+  margin: 0 0 28px;
+}
+
+/* Footer */
+.foot {
+  border-top: 1px solid var(--border);
+  padding: 36px 24px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.foot > div:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.foot-links {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  margin: 16px 0;
+}
+
+.foot-links a:hover {
+  color: var(--text);
+}
+
+.legal {
+  max-width: 640px;
+  margin: 0 auto;
+  line-height: 1.6;
+}

@@ -22,9 +22,11 @@ a stack of hidden tabs.
 
 ---
 
-<!-- Add a screenshot/GIF of the canvas here once available:
-<div align="center"><img src="docs/assets/screenshot.png" alt="nodeterm canvas" width="900" /></div>
--->
+<div align="center">
+  <img src="docs/assets/hero.png" alt="nodeterm canvas — terminals, a Claude Code node, a sticky note, and an editor on one pan/zoom canvas" width="900" />
+  <br/>
+  <sub><i>Illustration of the canvas — swap in a real screenshot/GIF when ready.</i></sub>
+</div>
 
 ## Why nodeterm
 
