@@ -102,11 +102,11 @@ export function TabBar({
         <div className="tabbar__tabs">
           {projects.map((p) => {
             const active = p.id === activeId
-            const hasUnread = !active && p.nodes.some((n) => statusById[n.id]?.unread)
+            const unreadCount = p.nodes.filter((n) => statusById[n.id]?.unread).length
             return (
               <div
                 key={p.id}
-                className={`tab${active ? ' active' : ''}${hasUnread ? ' has-unread' : ''}`}
+                className={`tab${active ? ' active' : ''}`}
                 style={active ? { color: p.color } : undefined}
                 onClick={() => !editingId && onSwitch(p.id)}
                 title={p.cwd || undefined}
@@ -131,6 +131,12 @@ export function TabBar({
                   />
                 ) : (
                   <span className="tab__name">{p.name}</span>
+                )}
+
+                {unreadCount > 0 && (
+                  <span className="tab__badge" title={`${unreadCount} unread`}>
+                    {unreadCount}
+                  </span>
                 )}
 
                 {active && editingId !== p.id && (
