@@ -521,12 +521,7 @@ body,
 }
 
 .term-node__status--unread {
-  margin-left: 8px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.3);
+  color: var(--accent);
 }
 
 @keyframes nt-pulse {

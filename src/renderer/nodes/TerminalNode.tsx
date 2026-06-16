@@ -291,7 +291,10 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             <span
               className="term-node__status term-node__status--unread"
               title="Finished — click to mark read"
-            />
+            >
+              <span className="term-node__status-dot" />
+              unread
+            </span>
           )}
         {!editingTitle && <span className="term-node__spacer" />}
         <Tooltip label="Name with AI (from terminal output)">
