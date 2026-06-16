@@ -2,7 +2,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
@@ -16,6 +16,10 @@ const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
+
+// The single app window — kept at module scope so IPC handlers (e.g. notifications)
+// can check focus and route clicks back to the renderer.
+let mainWin: BrowserWindow | null = null
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -88,6 +92,22 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string) => ptyManager.captureSession(persistKey))
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
+
+  // Show an OS notification — but only when the window is in the background. Clicking it
+  // brings the app forward and asks the renderer to focus the originating node.
+  ipcMain.handle(IPC.appNotify, (_e, payload: { title: string; body: string; nodeId: string }) => {
+    if (!mainWin || mainWin.isFocused() || !Notification.isSupported()) return false
+    const n = new Notification({ title: payload.title, body: payload.body })
+    n.on('click', () => {
+      if (!mainWin) return
+      if (mainWin.isMinimized()) mainWin.restore()
+      mainWin.show()
+      mainWin.focus()
+      mainWin.webContents.send(IPC.appFocusNode, payload.nodeId)
+    })
+    n.show()
+    return true
+  })
 
   ipcMain.handle(IPC.announcementsFetch, () => fetchAnnouncements())
 
@@ -174,6 +194,7 @@ app.whenReady().then(() => {
   })
 
   const win = createWindow()
+  mainWin = win
   initUpdater(win)
 
   app.on('activate', () => {

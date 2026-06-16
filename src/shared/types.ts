@@ -98,6 +98,8 @@ export interface PtyApi {
   generateName(persistKey: string, cwd: string): Promise<GitResult>
   /** Capture a terminal session's recent visible output as text. */
   capture(persistKey: string): Promise<string>
+  /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
+  sendText(persistKey: string, text: string): Promise<boolean>
   /** Listens for PTY output. Returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
@@ -168,6 +170,10 @@ export interface Settings {
   commitExtraPrompt: string
   /** Whether the shortcuts overlay has been shown on first launch. */
   seenShortcuts: boolean
+  /** Notify (OS notification) when a Claude Code turn finishes while the app is in the background. */
+  notifyOnClaudeDone: boolean
+  /** Whether the one-time notification consent prompt has been shown. */
+  notifyConsentAsked: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -185,7 +191,9 @@ export const DEFAULT_SETTINGS: Settings = {
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
-  seenShortcuts: false
+  seenShortcuts: false,
+  notifyOnClaudeDone: true,
+  notifyConsentAsked: false
 }
 
 export interface SettingsApi {
@@ -288,6 +296,13 @@ export interface AnnouncementsApi {
   fetch(): Promise<Announcement[]>
 }
 
+export interface NotifyPayload {
+  title: string
+  body: string
+  /** Node to focus/center when the notification is clicked. */
+  nodeId: string
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -305,4 +320,8 @@ export interface NodeTerminalApi {
   onCloseNode(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
+  /** Show an OS notification (main suppresses it if the window is focused). Returns whether shown. */
+  notify(payload: NotifyPayload): Promise<boolean>
+  /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
+  onFocusNode(listener: (nodeId: string) => void): () => void
 }

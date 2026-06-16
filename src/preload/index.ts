@@ -16,6 +16,7 @@ const api: NodeTerminalApi = {
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
     capture: (persistKey) => ipcRenderer.invoke(IPC.ptyCapture, persistKey),
+    sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
     onData: (sessionId, listener) => {
       const channel = IPC.ptyData(sessionId)
       const handler = (_e: unknown, data: string) => listener(data)
@@ -101,7 +102,13 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appCloseNode, handler)
     return () => ipcRenderer.removeListener(IPC.appCloseNode, handler)
   },
-  closeWindow: () => ipcRenderer.send(IPC.appCloseWindow)
+  closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
+  notify: (payload) => ipcRenderer.invoke(IPC.appNotify, payload),
+  onFocusNode: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.appFocusNode, handler)
+    return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)

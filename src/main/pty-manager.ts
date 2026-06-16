@@ -97,6 +97,9 @@ export class PtyManager {
     )
     ipcMain.on(IPC.ptyKill, (_event, sessionId: string) => this.kill(sessionId))
     ipcMain.on(IPC.ptyDestroy, (_event, persistKey: string) => this.destroySession(persistKey))
+    ipcMain.handle(IPC.ptySendText, (_event, persistKey: string, text: string) =>
+      this.sendText(persistKey, text)
+    )
   }
 
   private create(webContentsId: number, options: PtyCreateOptions): string {
@@ -195,6 +198,27 @@ export class PtyManager {
       )
     } catch {
       return ''
+    }
+  }
+
+  /**
+   * Send literal text followed by Enter into a node's tmux session (e.g. a slash command).
+   * Works whether or not a client is attached. Returns false if tmux is unavailable or the
+   * session doesn't exist yet.
+   */
+  sendText(persistKey: string, text: string): boolean {
+    if (!this.tmuxPath) return false
+    const target = sessionName(persistKey)
+    try {
+      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text], {
+        stdio: 'ignore'
+      })
+      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'], {
+        stdio: 'ignore'
+      })
+      return true
+    } catch {
+      return false
     }
   }
 
