@@ -75,6 +75,9 @@ export function Canvas() {
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // Cached visible-buffer text per terminal, for command-palette content search.
+  const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
+  const captureTsRef = useRef<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
@@ -730,6 +733,35 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
+  // When the palette opens, capture each terminal's visible buffer (cached ~3s) so the
+  // search can match text shown in terminals/Claude sessions.
+  useEffect(() => {
+    if (!paletteOpen) return
+    const now = Date.now()
+    const stale = nodesRef.current.filter(
+      (n) => n.type === 'terminal' && now - (captureTsRef.current[n.id] ?? 0) > 3000
+    )
+    if (!stale.length) return
+    let cancelled = false
+    void Promise.all(
+      stale.map(async (n) => [n.id, await window.nodeTerminal.pty.capture(n.id)] as const)
+    ).then((pairs) => {
+      if (cancelled) return
+      const ts = Date.now()
+      setBufferCache((prev) => {
+        const next = { ...prev }
+        for (const [id, text] of pairs) {
+          next[id] = text
+          captureTsRef.current[id] = ts
+        }
+        return next
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [paletteOpen])
+
   // One-time consent: the first time a Claude turn finishes in the background, ask whether
   // to enable completion notifications (default off until accepted).
   const anyUnread = useClaudeStatus((s) => Object.values(s.byId).some((v) => v.unread))
@@ -823,17 +855,24 @@ export function Canvas() {
           run: () => switchProject(p.id)
         })
       )
+    const cs = useClaudeStatus.getState()
     nodesRef.current
       .filter((n) => n.type !== 'group')
-      .forEach((n) =>
+      .forEach((n) => {
+        const tags = (n.data.tags as string[]) ?? []
+        const isClaude = tags.includes('claude')
+        const session = isClaude ? cs.byId[n.id]?.session : undefined
         cmds.push({
           id: `node-${n.id}`,
           label: `Go to ${n.data.title}`,
-          hint: ((n.data.tags as string[]) ?? []).join(' '),
+          hint: [tags.join(' '), session, isClaude ? `nt-${n.id}` : '']
+            .filter(Boolean)
+            .join(' '),
           icon: <IconJump />,
+          content: bufferCache[n.id],
           run: () => goToNode(n)
         })
-      )
+      })
     return cmds
   }, [
     addTerminal,
@@ -844,7 +883,8 @@ export function Canvas() {
     fitView,
     persist,
     switchProject,
-    goToNode
+    goToNode,
+    bufferCache
   ])
 
   return (

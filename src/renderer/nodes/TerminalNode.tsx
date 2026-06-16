@@ -88,6 +88,16 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       ? createClaudeBusyDetector((busy) => onBusyChange(busy))
       : null
     if (detector) cleanups.push(term.onBell(() => detector.bell()).dispose)
+    if (isClaude) {
+      // Claude sets the terminal title to the conversation topic; surface it as a chip.
+      // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
+      cleanups.push(
+        term.onTitleChange((t) => {
+          const title = t.trim()
+          if (title && !/[/:~]/.test(title)) useClaudeStatus.getState().setSession(id, title)
+        }).dispose
+      )
+    }
 
     transport
       .create({ cols: term.cols, rows: term.rows, shell: data.shell, cwd: data.cwd, persistKey: id })
@@ -271,6 +281,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             onClick={() => setEditingTitle(true)}
           >
             {data.title || 'Untitled'}
+          </span>
+        )}
+        {isClaude && status?.session && status.session !== data.title && (
+          <span className="term-node__session" title={status.session}>
+            {status.session}
           </span>
         )}
         {isClaude && status?.busy && (

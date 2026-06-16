@@ -7,6 +7,8 @@ export interface Command {
   hint?: string
   section?: string
   icon?: ReactNode
+  /** Searchable body text (e.g. a terminal's visible output) — matched by substring. */
+  content?: string
   run: () => void
 }
 
@@ -33,8 +35,13 @@ export function CommandPalette({ commands, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
 
+  // Fuzzy-match label+hint; also substring-match the body text (e.g. terminal output).
+  const contentHit = (c: Command) =>
+    query.length >= 2 && !!c.content && c.content.toLowerCase().includes(query.toLowerCase())
+  const labelHit = (c: Command) => matches(`${c.label} ${c.hint ?? ''}`, query)
+
   const filtered = useMemo(
-    () => commands.filter((c) => matches(`${c.label} ${c.hint ?? ''}`, query)).slice(0, 50),
+    () => commands.filter((c) => labelHit(c) || contentHit(c)).slice(0, 50),
     [commands, query]
   )
 
@@ -83,7 +90,11 @@ export function CommandPalette({ commands, onClose }: CommandPaletteProps) {
             >
               <span className="palette__icon">{c.icon}</span>
               <span className="palette__label">{c.label}</span>
-              {c.hint && <span className="palette__hint">{c.hint}</span>}
+              {!labelHit(c) && contentHit(c) ? (
+                <span className="palette__hint">found in output</span>
+              ) : (
+                c.hint && <span className="palette__hint">{c.hint}</span>
+              )}
             </button>
           ))}
         </div>
