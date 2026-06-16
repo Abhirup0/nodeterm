@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 interface ConfirmDialogProps {
   message: string
   confirmLabel?: string
+  cancelLabel?: string
   danger?: boolean
   onConfirm: () => void
   onCancel: () => void
@@ -13,6 +14,7 @@ interface ConfirmDialogProps {
 export function ConfirmDialog({
   message,
   confirmLabel = 'Delete',
+  cancelLabel = 'Cancel',
   danger = true,
   onConfirm,
   onCancel
@@ -37,7 +39,7 @@ export function ConfirmDialog({
         <p className="confirm__msg">{message}</p>
         <div className="confirm__actions">
           <button className="confirm__btn" onClick={onCancel}>
-            Cancel
+            {cancelLabel}
           </button>
           <button
             className={`confirm__btn${danger ? ' danger' : ' primary'}`}

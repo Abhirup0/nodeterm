@@ -85,7 +85,13 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
-  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  const [confirm, setConfirm] = useState<{
+    message: string
+    onConfirm: () => void
+    confirmLabel?: string
+    cancelLabel?: string
+    danger?: boolean
+  } | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const settings = useSettings((s) => s.settings)
@@ -863,6 +869,9 @@ export function Canvas() {
     setConfirm({
       message:
         'Notify you when Claude Code finishes while nodeterm is in the background? You can change this any time in Settings.',
+      confirmLabel: 'Enable notifications',
+      cancelLabel: 'Not now',
+      danger: false,
       onConfirm: () => {
         useSettings.getState().update({ notifyOnClaudeDone: true })
         void window.nodeTerminal.notify({
@@ -1116,6 +1125,9 @@ export function Canvas() {
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
+          confirmLabel={confirm.confirmLabel}
+          cancelLabel={confirm.cancelLabel}
+          danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
         />
