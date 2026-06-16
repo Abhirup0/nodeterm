@@ -126,4 +126,7 @@ export function initClaudeHooks(win: BrowserWindow): void {
   } catch (e) {
     console.error('[claude-hooks] watch failed', e)
   }
+  // Poll as well: fs.watch on a directory can miss in-file appends on macOS, which would
+  // make us see SessionStart but miss the later Stop. Polling a few tiny files is cheap.
+  setInterval(scan, 800)
 }
