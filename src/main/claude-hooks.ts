@@ -125,13 +125,15 @@ export function initClaudeHooks(win: BrowserWindow): void {
             hook_event_name?: string
             session_id?: string
             notification_type?: string
+            last_assistant_message?: string
           }
           if (p.hook_event_name && !win.isDestroyed()) {
             win.webContents.send(IPC.claudeStatus, {
               nodeId,
               event: p.hook_event_name,
               sessionId: p.session_id,
-              notificationType: p.notification_type
+              notificationType: p.notification_type,
+              lastMessage: p.last_assistant_message
             })
           }
         } catch {

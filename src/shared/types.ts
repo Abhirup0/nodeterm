@@ -313,6 +313,8 @@ export interface ClaudeStatusEvent {
   sessionId?: string
   /** For Notification events: e.g. 'permission_prompt' | 'idle_prompt'. */
   notificationType?: string
+  /** Claude's last assistant message (on Stop) — used as the notification body. */
+  lastMessage?: string
 }
 
 export interface NodeTerminalApi {

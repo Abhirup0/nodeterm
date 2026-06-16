@@ -800,10 +800,23 @@ export function Canvas() {
   // (with consent, throttled) notify.
   const notifyCooldownRef = useRef<Record<string, number>>({})
   useEffect(() => {
+    // Notification context = the node's folder name (or its title), like REF's worktree label.
+    const contextFor = (nodeId: string): string => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      const cwd = (node?.data.cwd as string) || ''
+      const folder = cwd.replace(/\/+$/, '').split('/').filter(Boolean).pop()
+      const title = node?.data.title as string | undefined
+      return folder || (title && title !== 'Claude Code' ? title : '') || 'workspace'
+    }
+    const clip = (s: string | undefined, max = 180): string => {
+      const t = (s ?? '').replace(/\s+/g, ' ').trim()
+      return t.length <= max ? t : `${t.slice(0, max - 1)}…`
+    }
     return window.nodeTerminal.onClaudeStatus((e) => {
       const cs = useClaudeStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
-      const alert = (title: string) => {
+      // REF-style: "<folder> — Claude finished" + last assistant message as the body.
+      const alert = (statusText: string, fallbackBody: string) => {
         if (document.hasFocus()) return
         cs.markUnread(e.nodeId)
         const s = useSettings.getState().settings
@@ -811,10 +824,9 @@ export function Canvas() {
         const now = Date.now()
         if (now - (notifyCooldownRef.current[e.nodeId] ?? 0) < 5000) return // dedup/cooldown
         notifyCooldownRef.current[e.nodeId] = now
-        const node = nodesRef.current.find((n) => n.id === e.nodeId)
         void window.nodeTerminal.notify({
-          title,
-          body: (node?.data.title as string) || 'Claude Code',
+          title: `${contextFor(e.nodeId)} — Claude ${statusText}`,
+          body: clip(e.lastMessage) || fallbackBody,
           nodeId: e.nodeId
         })
       }
@@ -824,15 +836,15 @@ export function Canvas() {
           break
         case 'Stop':
           cs.setState(e.nodeId, 'done')
-          alert('Claude Code finished')
+          alert('finished', 'Claude finished its turn.')
           break
         case 'Notification':
           if (e.notificationType === 'permission_prompt') {
             cs.setState(e.nodeId, 'blocked')
-            alert('Claude Code needs permission')
+            alert('needs input', 'Claude needs permission to continue.')
           } else {
             cs.setState(e.nodeId, 'waiting')
-            alert('Claude Code needs you')
+            alert('needs input', 'Claude is waiting for your response.')
           }
           break
         case 'SessionStart':
