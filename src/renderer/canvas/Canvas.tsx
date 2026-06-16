@@ -884,13 +884,16 @@ export function Canvas() {
     }
   }, [paletteOpen])
 
-  // First-launch consent: ask once whether to enable Claude completion notifications
-  // (shown via the dedicated NotifyConsentDialog). Default off until accepted.
+  // First-launch consent: ask once whether to enable Claude completion notifications.
+  // Gated on settings hydration — otherwise it runs before settings load from disk and
+  // sees the default (notifyConsentAsked=false) on every launch, re-asking each time.
+  const settingsHydrated = useSettings((s) => s.hydrated)
   useEffect(() => {
+    if (!settingsHydrated) return
     if (useSettings.getState().settings.notifyConsentAsked) return
     useSettings.getState().update({ notifyConsentAsked: true, notifyOnClaudeDone: false })
     setConsentOpen(true)
-  }, [])
+  }, [settingsHydrated])
 
   const addProject = useCallback(() => {
     commitActiveToStore()
