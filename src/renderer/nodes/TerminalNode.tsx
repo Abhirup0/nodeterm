@@ -124,7 +124,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       observer.disconnect()
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
-      if (isClaude) useClaudeStatus.getState().remove(id)
+      useClaudeStatus.getState().remove(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
       termRef.current = null
@@ -170,7 +170,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     dwellRef.current = setTimeout(() => {
       setArmed(false)
       termRef.current?.focus()
-      if (isClaude) useClaudeStatus.getState().clearUnread(id)
+      useClaudeStatus.getState().clearUnread(id)
     }, settings.panHoverDelay)
   }
   const onBodyLeave = () => {
@@ -191,10 +191,10 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (r.ok) updateNodeData(id, { title: r.message })
   }
 
-  // Selecting a Claude node clears its unread badge.
+  // Selecting a node clears its unread badge.
   useEffect(() => {
-    if (isClaude && selected) useClaudeStatus.getState().clearUnread(id)
-  }, [isClaude, selected, id])
+    if (selected) useClaudeStatus.getState().clearUnread(id)
+  }, [selected, id])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {
@@ -264,23 +264,35 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             {data.title || 'Untitled'}
           </span>
         )}
-        {isClaude && status?.session && status.session !== data.title && (
+        {status?.session && status.session !== data.title && (
           <span className="term-node__session" title={status.session}>
             {status.session}
           </span>
         )}
-        {isClaude && status?.busy && (
+        {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title="Claude is working">
             <span className="term-node__status-dot" />
             RUNNING
           </span>
         )}
-        {isClaude && !status?.busy && status?.unread && (
+        {(status?.state === 'waiting' || status?.state === 'blocked') && (
           <span
-            className="term-node__status term-node__status--unread"
-            title="Finished — click to mark read"
-          />
+            className="term-node__status term-node__status--attention"
+            title="Claude needs your input"
+          >
+            <span className="term-node__status-dot" />
+            NEEDS YOU
+          </span>
         )}
+        {status?.unread &&
+          status?.state !== 'working' &&
+          status?.state !== 'waiting' &&
+          status?.state !== 'blocked' && (
+            <span
+              className="term-node__status term-node__status--unread"
+              title="Finished — click to mark read"
+            />
+          )}
         {!editingTitle && <span className="term-node__spacer" />}
         <Tooltip label="Name with AI (from terminal output)">
           <button className="term-node__ai nodrag" disabled={naming} onClick={nameWithAi}>

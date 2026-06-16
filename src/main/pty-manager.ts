@@ -6,7 +6,7 @@ import { app, ipcMain, webContents } from 'electron'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type PtyCreateOptions, type Settings } from '../shared/types'
-import { claudeHookPaths } from './claude-hooks'
+import { claudeHookDir } from './claude-hooks'
 
 // A dedicated tmux socket isolates our sessions from the user's own tmux server.
 const TMUX_SOCKET = 'node-terminal'
@@ -113,11 +113,11 @@ export class PtyManager {
     delete env.TMUX
     delete env.TMUX_PANE
 
-    // Claude Code hooks: each session carries its node id + the signal dir + our hooks
-    // file, so `claude --settings "$NODETERM_CLAUDE_SETTINGS"` reports state back to us.
-    const { hookDir, settingsPath } = claudeHookPaths()
+    // Claude Code hooks: each session carries its node id + the signal dir. Our managed
+    // hook (installed globally in ~/.claude/settings.json, but a no-op without these vars)
+    // then reports state back to us for any `claude` run in this session.
+    const hookDir = claudeHookDir()
     env.NODETERM_HOOK_DIR = hookDir
-    env.NODETERM_CLAUDE_SETTINGS = settingsPath
     if (options.persistKey) env.NODETERM_NODE_ID = options.persistKey
 
     const settings = this.getSettings()
@@ -141,8 +141,6 @@ export class PtyManager {
         `NODETERM_NODE_ID=${options.persistKey}`,
         '-e',
         `NODETERM_HOOK_DIR=${hookDir}`,
-        '-e',
-        `NODETERM_CLAUDE_SETTINGS=${settingsPath}`,
         '-c',
         cwd,
         '-s',

@@ -311,6 +311,8 @@ export interface ClaudeStatusEvent {
   /** SessionStart | UserPromptSubmit | Stop | Notification | SessionEnd */
   event: string
   sessionId?: string
+  /** For Notification events: e.g. 'permission_prompt' | 'idle_prompt'. */
+  notificationType?: string
 }
 
 export interface NodeTerminalApi {

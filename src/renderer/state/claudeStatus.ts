@@ -1,26 +1,26 @@
 import { create } from 'zustand'
 
 /**
- * Transient per-node status for Claude Code terminals — busy/working, unread, and the
- * Claude session name. Deliberately NOT persisted (kept out of workspace.json); it resets
- * on reload / project switch, which is the desired "clean layout file" behavior.
+ * Transient per-node status for Claude Code sessions, driven by Claude's hooks.
+ * `unread`, `session` and `sessionId` are persisted to localStorage so they survive a
+ * reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
  */
+export type ClaudeState = 'working' | 'waiting' | 'blocked' | 'done'
+
 export interface ClaudeNodeStatus {
-  /** Claude is actively processing a turn. */
-  busy: boolean
-  /** A turn finished while the user wasn't looking; cleared on focus/select. */
+  /** Live activity; undefined = idle/unknown. */
+  state?: ClaudeState
+  /** A turn finished / needs attention while the user wasn't looking. */
   unread: boolean
   /** Claude's own session name/title (from the terminal title), shown beside the title. */
   session?: string
-  /** Claude session id (UUID from hooks) — used to resume/branch the conversation. */
+  /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
-  /** Timestamp of the last busy→idle transition. */
-  finishedAt?: number
 }
 
 interface ClaudeStatusState {
   byId: Record<string, ClaudeNodeStatus>
-  setBusy(id: string, busy: boolean): void
+  setState(id: string, state: ClaudeState | undefined): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
@@ -28,56 +28,91 @@ interface ClaudeStatusState {
   remove(id: string): void
 }
 
-const EMPTY: ClaudeNodeStatus = { busy: false, unread: false }
+const EMPTY: ClaudeNodeStatus = { unread: false }
+const KEY = 'nodeterm.claudeStatus'
+
+function load(): Record<string, ClaudeNodeStatus> {
+  try {
+    const raw = localStorage.getItem(KEY)
+    if (!raw) return {}
+    const data = JSON.parse(raw) as Record<string, Partial<ClaudeNodeStatus>>
+    const out: Record<string, ClaudeNodeStatus> = {}
+    for (const [id, v] of Object.entries(data)) {
+      out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+// Persist only the durable fields (not the live `state`).
+function save(byId: Record<string, ClaudeNodeStatus>): void {
+  try {
+    const out: Record<string, Partial<ClaudeNodeStatus>> = {}
+    for (const [id, v] of Object.entries(byId)) {
+      if (v.unread || v.session || v.sessionId) {
+        out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId }
+      }
+    }
+    localStorage.setItem(KEY, JSON.stringify(out))
+  } catch {
+    // ignore quota / serialization errors
+  }
+}
 
 export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
-  byId: {},
+  byId: load(),
 
-  setBusy: (id, busy) =>
+  setState: (id, state) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (prev.busy === busy) return s
-      return {
-        byId: {
-          ...s.byId,
-          [id]: { ...prev, busy, finishedAt: busy ? prev.finishedAt : Date.now() }
-        }
-      }
+      if (prev.state === state) return s
+      return { byId: { ...s.byId, [id]: { ...prev, state } } }
     }),
 
   setSession: (id, session) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
       if (prev.session === session) return s
-      return { byId: { ...s.byId, [id]: { ...prev, session } } }
+      const byId = { ...s.byId, [id]: { ...prev, session } }
+      save(byId)
+      return { byId }
     }),
 
   setSessionId: (id, sessionId) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
       if (prev.sessionId === sessionId) return s
-      return { byId: { ...s.byId, [id]: { ...prev, sessionId } } }
+      const byId = { ...s.byId, [id]: { ...prev, sessionId } }
+      save(byId)
+      return { byId }
     }),
 
   markUnread: (id) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
       if (prev.unread) return s
-      return { byId: { ...s.byId, [id]: { ...prev, unread: true } } }
+      const byId = { ...s.byId, [id]: { ...prev, unread: true } }
+      save(byId)
+      return { byId }
     }),
 
   clearUnread: (id) =>
     set((s) => {
       const prev = s.byId[id]
       if (!prev?.unread) return s
-      return { byId: { ...s.byId, [id]: { ...prev, unread: false } } }
+      const byId = { ...s.byId, [id]: { ...prev, unread: false } }
+      save(byId)
+      return { byId }
     }),
 
   remove: (id) =>
     set((s) => {
       if (!(id in s.byId)) return s
-      const next = { ...s.byId }
-      delete next[id]
-      return { byId: next }
+      const byId = { ...s.byId }
+      delete byId[id]
+      save(byId)
+      return { byId }
     })
 }))

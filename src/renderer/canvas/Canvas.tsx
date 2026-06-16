@@ -795,39 +795,49 @@ export function Canvas() {
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
   // Claude Code lifecycle, reported by Claude's own hooks (see main/claude-hooks.ts):
-  // UserPromptSubmit → working, Stop → finished, Notification → needs input. On a finish
-  // while the window is in the background: mark unread + (with consent) notify.
+  // UserPromptSubmit → working, Stop → done, Notification → waiting/blocked. On a turn
+  // finishing / needing attention while the window is in the background: mark unread +
+  // (with consent, throttled) notify.
+  const notifyCooldownRef = useRef<Record<string, number>>({})
   useEffect(() => {
     return window.nodeTerminal.onClaudeStatus((e) => {
       const cs = useClaudeStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
-      const finish = (attention: boolean) => {
-        cs.setBusy(e.nodeId, false)
-        if (!document.hasFocus()) {
-          cs.markUnread(e.nodeId)
-          const s = useSettings.getState().settings
-          if (s.notifyOnClaudeDone && s.notifyConsentAsked) {
-            const node = nodesRef.current.find((n) => n.id === e.nodeId)
-            void window.nodeTerminal.notify({
-              title: attention ? 'Claude Code needs you' : 'Claude Code finished',
-              body: (node?.data.title as string) || 'Claude Code',
-              nodeId: e.nodeId
-            })
-          }
-        }
+      const alert = (title: string) => {
+        if (document.hasFocus()) return
+        cs.markUnread(e.nodeId)
+        const s = useSettings.getState().settings
+        if (!(s.notifyOnClaudeDone && s.notifyConsentAsked)) return
+        const now = Date.now()
+        if (now - (notifyCooldownRef.current[e.nodeId] ?? 0) < 5000) return // dedup/cooldown
+        notifyCooldownRef.current[e.nodeId] = now
+        const node = nodesRef.current.find((n) => n.id === e.nodeId)
+        void window.nodeTerminal.notify({
+          title,
+          body: (node?.data.title as string) || 'Claude Code',
+          nodeId: e.nodeId
+        })
       }
       switch (e.event) {
         case 'UserPromptSubmit':
-          cs.setBusy(e.nodeId, true)
+          cs.setState(e.nodeId, 'working')
           break
         case 'Stop':
-          finish(false)
+          cs.setState(e.nodeId, 'done')
+          alert('Claude Code finished')
           break
         case 'Notification':
-          finish(true)
+          if (e.notificationType === 'permission_prompt') {
+            cs.setState(e.nodeId, 'blocked')
+            alert('Claude Code needs permission')
+          } else {
+            cs.setState(e.nodeId, 'waiting')
+            alert('Claude Code needs you')
+          }
           break
+        case 'SessionStart':
         case 'SessionEnd':
-          cs.setBusy(e.nodeId, false)
+          cs.setState(e.nodeId, undefined)
           break
       }
     })
@@ -1067,7 +1077,8 @@ export function Canvas() {
             nodeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
             nodeStrokeColor={(n) => {
               const st = useClaudeStatus.getState().byId[n.id]
-              if (st?.busy) return '#30d158'
+              if (st?.state === 'working') return '#30d158'
+              if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
               if (st?.unread) return '#0a84ff'
               return (n.data as { color?: string })?.color ?? '#0a84ff'
             }}

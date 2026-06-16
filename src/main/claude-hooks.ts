@@ -1,81 +1,99 @@
-// Robust Claude Code state detection via Claude's own hooks (not terminal-output parsing).
+// Robust Claude Code state detection via Claude's own hooks (the same approach REF uses).
 //
-// We write a settings file containing only hooks and launch Claude with `--settings <file>`
-// (non-invasive — it merges over the user's settings for that session only). Each hook
-// command inherits the env we set on the session (NODETERM_NODE_ID / NODETERM_HOOK_DIR) and
-// appends the hook's JSON payload, tagged with the event, to a per-node log file. The main
-// process watches that directory and forwards each event to the renderer over `claude:status`.
+// We install ONE managed hook command into the user's ~/.claude/settings.json (merged,
+// preserving their existing config; idempotent). The command is env-gated: it does nothing
+// unless NODETERM_NODE_ID is set, so it's a no-op in the user's normal terminals and only
+// activates in sessions nodeterm spawns (which set NODETERM_NODE_ID/NODETERM_HOOK_DIR via
+// tmux `-e`). When active it appends the hook's JSON payload to a per-node log file; the
+// main process watches that dir and forwards each event to the renderer over `claude:status`.
+// Because the hook lives in the global settings, ANY `claude` run inside nodeterm (including
+// one the user types by hand) is detected — not just the managed Claude Code node.
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { app, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 
+const CLAUDE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'Notification', 'SessionEnd']
+
+// The single managed hook command, registered under each event above. Must stay byte-stable
+// so install is idempotent and uninstall can find it. Reads the hook payload from stdin and
+// appends it (Claude's payload already carries hook_event_name + session_id).
+const MANAGED_CMD =
+  '[ -z "$NODETERM_NODE_ID" ] && exit 0; mkdir -p "$NODETERM_HOOK_DIR" 2>/dev/null; { cat; printf "\\n"; } >> "$NODETERM_HOOK_DIR/$NODETERM_NODE_ID.log" 2>/dev/null || true'
+
 let hookDir = ''
-let settingsPath = ''
 
-export function claudeHookPaths(): { hookDir: string; settingsPath: string } {
-  if (!hookDir) {
-    const base = app.getPath('userData')
-    hookDir = path.join(base, 'claude-signals')
-    settingsPath = path.join(base, 'claude-hooks.json')
-  }
-  return { hookDir, settingsPath }
+export function claudeHookDir(): string {
+  if (!hookDir) hookDir = path.join(app.getPath('userData'), 'claude-signals')
+  return hookDir
 }
 
-// A POSIX-shell hook command: wrap the stdin payload with the event label and append a line.
-function hookCommand(event: string): string {
-  return (
-    `mkdir -p "$NODETERM_HOOK_DIR" 2>/dev/null; ` +
-    `{ printf '{"event":"${event}","p":'; cat; printf '}\\n'; } ` +
-    `>> "$NODETERM_HOOK_DIR/$NODETERM_NODE_ID.log" 2>/dev/null || true`
-  )
+interface HookDef {
+  hooks?: { type?: string; command?: string }[]
 }
 
-function hookEntry(event: string) {
-  return [{ hooks: [{ type: 'command', command: hookCommand(event), async: true }] }]
-}
-
-function writeSettings(): void {
-  const config = {
-    hooks: {
-      SessionStart: hookEntry('SessionStart'),
-      UserPromptSubmit: hookEntry('UserPromptSubmit'),
-      Stop: hookEntry('Stop'),
-      Notification: hookEntry('Notification'),
-      SessionEnd: hookEntry('SessionEnd')
+/** Merge our managed hook into ~/.claude/settings.json, preserving everything else. */
+function installHooks(): void {
+  const cfgPath = path.join(os.homedir(), '.claude', 'settings.json')
+  let config: { hooks?: Record<string, HookDef[]>; [k: string]: unknown } = {}
+  if (fs.existsSync(cfgPath)) {
+    try {
+      config = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
+    } catch {
+      // Don't risk corrupting an unparseable settings file.
+      console.error('[claude-hooks] ~/.claude/settings.json is not valid JSON; skipping install')
+      return
     }
   }
-  fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2))
+  if (!config.hooks || typeof config.hooks !== 'object') config.hooks = {}
+  let changed = false
+  for (const ev of CLAUDE_EVENTS) {
+    const existing = config.hooks[ev]
+    if (existing && !Array.isArray(existing)) continue // leave unexpected shapes alone
+    const list = Array.isArray(existing) ? existing : (config.hooks[ev] = [])
+    const present = list.some((d) => (d.hooks ?? []).some((h) => h.command === MANAGED_CMD))
+    if (!present) {
+      list.push({ hooks: [{ type: 'command', command: MANAGED_CMD }] })
+      changed = true
+    }
+  }
+  if (changed) {
+    try {
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true })
+      fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2))
+    } catch (e) {
+      console.error('[claude-hooks] failed writing ~/.claude/settings.json', e)
+    }
+  }
 }
 
-/** Write the hooks settings file, clear stale signals, and watch for new hook events. */
+/** Install hooks, clear stale signals, and watch for new hook events. */
 export function initClaudeHooks(win: BrowserWindow): void {
-  claudeHookPaths()
+  installHooks()
+  const dir = claudeHookDir()
   try {
-    fs.mkdirSync(hookDir, { recursive: true })
-    // Start fresh each launch so we don't replay a previous run's events.
-    for (const f of fs.readdirSync(hookDir)) {
-      if (f.endsWith('.log')) fs.rmSync(path.join(hookDir, f), { force: true })
+    fs.mkdirSync(dir, { recursive: true })
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.log')) fs.rmSync(path.join(dir, f), { force: true })
     }
-    writeSettings()
   } catch (e) {
-    console.error('[claude-hooks] setup failed', e)
+    console.error('[claude-hooks] signal dir setup failed', e)
     return
   }
 
   const offsets = new Map<string, number>()
-  let timer: ReturnType<typeof setTimeout> | null = null
 
   const scan = () => {
     let files: string[]
     try {
-      files = fs.readdirSync(hookDir)
+      files = fs.readdirSync(dir)
     } catch {
       return
     }
     for (const f of files) {
       if (!f.endsWith('.log')) continue
-      const full = path.join(hookDir, f)
+      const full = path.join(dir, f)
       let size: number
       try {
         size = fs.statSync(full).size
@@ -103,12 +121,17 @@ export function initClaudeHooks(win: BrowserWindow): void {
         const t = line.trim()
         if (!t) continue
         try {
-          const obj = JSON.parse(t) as { event?: string; p?: { session_id?: string } }
-          if (obj.event && !win.isDestroyed()) {
+          const p = JSON.parse(t) as {
+            hook_event_name?: string
+            session_id?: string
+            notification_type?: string
+          }
+          if (p.hook_event_name && !win.isDestroyed()) {
             win.webContents.send(IPC.claudeStatus, {
               nodeId,
-              event: obj.event,
-              sessionId: obj.p?.session_id
+              event: p.hook_event_name,
+              sessionId: p.session_id,
+              notificationType: p.notification_type
             })
           }
         } catch {
@@ -118,15 +141,15 @@ export function initClaudeHooks(win: BrowserWindow): void {
     }
   }
 
+  let timer: ReturnType<typeof setTimeout> | null = null
   try {
-    fs.watch(hookDir, () => {
+    fs.watch(dir, () => {
       if (timer) clearTimeout(timer)
       timer = setTimeout(scan, 40)
     })
   } catch (e) {
     console.error('[claude-hooks] watch failed', e)
   }
-  // Poll as well: fs.watch on a directory can miss in-file appends on macOS, which would
-  // make us see SessionStart but miss the later Stop. Polling a few tiny files is cheap.
+  // Poll too: fs.watch can miss in-file appends on macOS.
   setInterval(scan, 800)
 }

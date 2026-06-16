@@ -84,11 +84,11 @@ export function createTerminalNode(
 }
 
 /**
- * Command that launches Claude Code with our hooks settings (for busy/idle/attention
- * detection). `$NODETERM_CLAUDE_SETTINGS` is exported into every terminal session by the
- * PTY manager. Append `-r <id>` to resume a specific session (used by Branch).
+ * Command that launches Claude Code. Detection works via hooks installed globally in
+ * ~/.claude/settings.json (gated by NODETERM_* env that the PTY manager sets), so a plain
+ * `claude` is enough. Append `-r <id>` to resume a specific session (used by Branch).
  */
-export const CLAUDE_LAUNCH = 'claude --settings "$NODETERM_CLAUDE_SETTINGS"'
+export const CLAUDE_LAUNCH = 'claude'
 
 /** Creates a terminal that launches Claude Code (`claude`) on open. */
 export function createClaudeNode(

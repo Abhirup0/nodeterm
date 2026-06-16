@@ -500,6 +500,14 @@ body,
   animation: nt-pulse 1.1s ease-in-out infinite;
 }
 
+.term-node__status--attention {
+  color: #ff9f0a;
+}
+
+.term-node__status--attention .term-node__status-dot {
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+
 .term-node__status--unread {
   margin-left: 8px;
   width: 8px;
