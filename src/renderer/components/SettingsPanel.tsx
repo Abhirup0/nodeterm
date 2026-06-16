@@ -113,9 +113,18 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               <input
                 type="checkbox"
                 checked={settings.notifyOnClaudeDone}
-                onChange={(e) =>
-                  update({ notifyOnClaudeDone: e.target.checked, notifyConsentAsked: true })
-                }
+                onChange={(e) => {
+                  const on = e.target.checked
+                  update({ notifyOnClaudeDone: on, notifyConsentAsked: true })
+                  // Enabling triggers the macOS notification permission prompt.
+                  if (on)
+                    void window.nodeTerminal.notify({
+                      title: 'Notifications enabled',
+                      body: "You'll be told when Claude Code finishes in the background.",
+                      nodeId: '',
+                      force: true
+                    })
+                }}
               />
             </label>
           </section>

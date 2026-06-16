@@ -854,21 +854,27 @@ export function Canvas() {
     }
   }, [paletteOpen])
 
-  // One-time consent: the first time a Claude turn finishes in the background, ask whether
-  // to enable completion notifications (default off until accepted).
-  const anyUnread = useClaudeStatus((s) => Object.values(s.byId).some((v) => v.unread))
-  const notifyConsentAsked = useSettings((s) => s.settings.notifyConsentAsked)
+  // First-launch consent: ask once whether to enable Claude completion notifications. On
+  // accept we fire a forced notification to trigger the macOS permission prompt. Declining
+  // leaves them off — re-enable any time from Settings.
   useEffect(() => {
-    if (!anyUnread || notifyConsentAsked) return
+    if (useSettings.getState().settings.notifyConsentAsked) return
     useSettings.getState().update({ notifyConsentAsked: true, notifyOnClaudeDone: false })
     setConfirm({
-      message: 'Notify you when Claude Code finishes while nodeterm is in the background?',
+      message:
+        'Notify you when Claude Code finishes while nodeterm is in the background? You can change this any time in Settings.',
       onConfirm: () => {
         useSettings.getState().update({ notifyOnClaudeDone: true })
+        void window.nodeTerminal.notify({
+          title: 'Notifications enabled',
+          body: "You'll be told when Claude Code finishes in the background.",
+          nodeId: '',
+          force: true
+        })
         setConfirm(null)
       }
     })
-  }, [anyUnread, notifyConsentAsked])
+  }, [])
 
   const addProject = useCallback(() => {
     commitActiveToStore()

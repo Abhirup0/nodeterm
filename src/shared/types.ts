@@ -301,6 +301,8 @@ export interface NotifyPayload {
   body: string
   /** Node to focus/center when the notification is clicked. */
   nodeId: string
+  /** Show even when the window is focused (used to trigger the macOS permission prompt). */
+  force?: boolean
 }
 
 /** A Claude Code lifecycle hook event, forwarded from the main process. */

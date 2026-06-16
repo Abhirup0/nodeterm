@@ -96,19 +96,25 @@ app.whenReady().then(() => {
 
   // Show an OS notification — but only when the window is in the background. Clicking it
   // brings the app forward and asks the renderer to focus the originating node.
-  ipcMain.handle(IPC.appNotify, (_e, payload: { title: string; body: string; nodeId: string }) => {
-    if (!mainWin || mainWin.isFocused() || !Notification.isSupported()) return false
-    const n = new Notification({ title: payload.title, body: payload.body })
-    n.on('click', () => {
-      if (!mainWin) return
-      if (mainWin.isMinimized()) mainWin.restore()
-      mainWin.show()
-      mainWin.focus()
-      mainWin.webContents.send(IPC.appFocusNode, payload.nodeId)
-    })
-    n.show()
-    return true
-  })
+  ipcMain.handle(
+    IPC.appNotify,
+    (_e, payload: { title: string; body: string; nodeId: string; force?: boolean }) => {
+      if (!mainWin || !Notification.isSupported()) return false
+      // `force` (permission request / confirmation) shows even when focused; normal
+      // completion notifications only show when the window is in the background.
+      if (!payload.force && mainWin.isFocused()) return false
+      const n = new Notification({ title: payload.title, body: payload.body })
+      n.on('click', () => {
+        if (!mainWin) return
+        if (mainWin.isMinimized()) mainWin.restore()
+        mainWin.show()
+        mainWin.focus()
+        if (payload.nodeId) mainWin.webContents.send(IPC.appFocusNode, payload.nodeId)
+      })
+      n.show()
+      return true
+    }
+  )
 
   ipcMain.handle(IPC.announcementsFetch, () => fetchAnnouncements())
 
