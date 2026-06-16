@@ -20,6 +20,9 @@ export interface ClaudeNodeStatus {
 
 interface ClaudeStatusState {
   byId: Record<string, ClaudeNodeStatus>
+  /** The terminal node the user is currently focused in (for unread decisions). */
+  activeId: string | null
+  setActive(id: string, active: boolean): void
   setState(id: string, state: ClaudeState | undefined): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
@@ -63,6 +66,13 @@ function save(byId: Record<string, ClaudeNodeStatus>): void {
 
 export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
   byId: load(),
+  activeId: null,
+
+  setActive: (id, active) =>
+    set((s) => {
+      if (active) return s.activeId === id ? s : { activeId: id }
+      return s.activeId === id ? { activeId: null } : s
+    }),
 
   setState: (id, state) =>
     set((s) => {

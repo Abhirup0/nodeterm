@@ -817,8 +817,13 @@ export function Canvas() {
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       // REF-style: "<folder> — Claude finished" + last assistant message as the body.
       const alert = (statusText: string, fallbackBody: string) => {
+        // Unread unless the user is actively in this node's terminal (focused window +
+        // this node is the active terminal). So a finish while you're in another terminal,
+        // or with nothing focused, still flags unread.
+        const watching = document.hasFocus() && cs.activeId === e.nodeId
+        if (!watching) cs.markUnread(e.nodeId)
+        // OS notification only when the whole window is in the background.
         if (document.hasFocus()) return
-        cs.markUnread(e.nodeId)
         const s = useSettings.getState().settings
         if (!(s.notifyOnClaudeDone && s.notifyConsentAsked)) return
         const now = Date.now()

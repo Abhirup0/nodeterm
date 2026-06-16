@@ -124,6 +124,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       observer.disconnect()
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
+      useClaudeStatus.getState().setActive(id, false)
       useClaudeStatus.getState().remove(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
@@ -170,6 +171,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     dwellRef.current = setTimeout(() => {
       setArmed(false)
       termRef.current?.focus()
+      useClaudeStatus.getState().setActive(id, true)
       useClaudeStatus.getState().clearUnread(id)
     }, settings.panHoverDelay)
   }
@@ -177,6 +179,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (dwellRef.current) clearTimeout(dwellRef.current)
     setArmed(true)
     termRef.current?.blur()
+    useClaudeStatus.getState().setActive(id, false)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
   // terminal doesn't grab focus mid-drag; restart it on release.
