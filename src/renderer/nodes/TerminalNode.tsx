@@ -8,6 +8,8 @@ import { patchTerminalScale } from '../terminal/scale-fix'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useSettings } from '../state/settings'
+import { useClaudeStatus } from '../state/claudeStatus'
+import { createClaudeBusyDetector } from '../terminal/claudeBusy'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
 /**
@@ -32,6 +34,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
+  const isClaude = tags.includes('claude')
+  const status = useClaudeStatus((s) => s.byId[id])
+  // Latest data for use inside the once-only lifecycle effect (avoids stale closures).
+  const dataRef = useRef(data)
+  dataRef.current = data
 
   // Terminal lifecycle — set up exactly once.
   useEffect(() => {
@@ -58,6 +65,30 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let disposed = false
     const cleanups: Array<() => void> = []
 
+    // Claude Code nodes: watch the output for working/idle transitions.
+    const onBusyChange = (busy: boolean) => {
+      const cs = useClaudeStatus.getState()
+      cs.setBusy(id, busy)
+      // On a turn finishing while the user isn't looking: mark unread + (maybe) notify.
+      // Notifications only fire once consent has been given (Canvas shows a one-time prompt
+      // the first time a background completion happens).
+      if (!busy && !document.hasFocus()) {
+        cs.markUnread(id)
+        const s = useSettings.getState().settings
+        if (s.notifyOnClaudeDone && s.notifyConsentAsked) {
+          void window.nodeTerminal.notify({
+            title: 'Claude Code finished',
+            body: dataRef.current.title || 'Claude Code',
+            nodeId: id
+          })
+        }
+      }
+    }
+    const detector = isClaude
+      ? createClaudeBusyDetector((busy) => onBusyChange(busy))
+      : null
+    if (detector) cleanups.push(term.onBell(() => detector.bell()).dispose)
+
     transport
       .create({ cols: term.cols, rows: term.rows, shell: data.shell, cwd: data.cwd, persistKey: id })
       .then((sid) => {
@@ -66,7 +97,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           return
         }
         sessionId = sid
-        cleanups.push(transport.onData(sid, (chunk) => term.write(chunk)))
+        cleanups.push(
+          transport.onData(sid, (chunk) => {
+            term.write(chunk)
+            detector?.feed(chunk)
+          })
+        )
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
@@ -96,6 +132,8 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       observer.disconnect()
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
+      detector?.dispose()
+      if (isClaude) useClaudeStatus.getState().remove(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
       termRef.current = null
@@ -141,6 +179,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     dwellRef.current = setTimeout(() => {
       setArmed(false)
       termRef.current?.focus()
+      if (isClaude) useClaudeStatus.getState().clearUnread(id)
     }, settings.panHoverDelay)
   }
   const onBodyLeave = () => {
@@ -160,6 +199,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     setNaming(false)
     if (r.ok) updateNodeData(id, { title: r.message })
   }
+
+  // Selecting a Claude node clears its unread badge.
+  useEffect(() => {
+    if (isClaude && selected) useClaudeStatus.getState().clearUnread(id)
+  }, [isClaude, selected, id])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {
@@ -228,6 +272,18 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           >
             {data.title || 'Untitled'}
           </span>
+        )}
+        {isClaude && status?.busy && (
+          <span className="term-node__status term-node__status--busy" title="Claude is working">
+            <span className="term-node__status-dot" />
+            RUNNING
+          </span>
+        )}
+        {isClaude && !status?.busy && status?.unread && (
+          <span
+            className="term-node__status term-node__status--unread"
+            title="Finished — click to mark read"
+          />
         )}
         {!editingTitle && <span className="term-node__spacer" />}
         <Tooltip label="Name with AI (from terminal output)">

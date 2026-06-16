@@ -107,6 +107,20 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </section>
 
           <section>
+            <h3>Claude Code</h3>
+            <label className="set-row">
+              <span>Notify when a turn finishes in the background</span>
+              <input
+                type="checkbox"
+                checked={settings.notifyOnClaudeDone}
+                onChange={(e) =>
+                  update({ notifyOnClaudeDone: e.target.checked, notifyConsentAsked: true })
+                }
+              />
+            </label>
+          </section>
+
+          <section>
             <h3>Appearance</h3>
             <div className="set-row">
               <span>Accent</span>

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
+import { useClaudeStatus } from '../state/claudeStatus'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -27,6 +28,7 @@ export function TabBar({
 }: TabBarProps) {
   const projects = useProjects((s) => s.projects)
   const activeId = useProjects((s) => s.activeProjectId)
+  const statusById = useClaudeStatus((s) => s.byId)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [addPos, setAddPos] = useState<{ top: number; left: number } | null>(null)
@@ -100,17 +102,18 @@ export function TabBar({
         <div className="tabbar__tabs">
           {projects.map((p) => {
             const active = p.id === activeId
+            const hasUnread = !active && p.nodes.some((n) => statusById[n.id]?.unread)
             return (
               <div
                 key={p.id}
-                className={`tab${active ? ' active' : ''}`}
+                className={`tab${active ? ' active' : ''}${hasUnread ? ' has-unread' : ''}`}
                 style={active ? { color: p.color } : undefined}
                 onClick={() => !editingId && onSwitch(p.id)}
                 title={p.cwd || undefined}
               >
                 <span
                   className="tab__dot"
-                  style={{ background: active ? p.color : 'rgba(255,255,255,0.3)' }}
+                  style={active ? { background: p.color } : undefined}
                 />
                 {editingId === p.id ? (
                   <input

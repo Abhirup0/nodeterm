@@ -50,6 +50,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
+import { useClaudeStatus } from '../state/claudeStatus'
 import { useSettings } from '../state/settings'
 import {
   COLLAPSED_HEIGHT,
@@ -79,6 +80,8 @@ export function Canvas() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
   const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  // Node to center once its project finishes loading (cross-project notification click).
+  const pendingFocusRef = useRef<string | null>(null)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -150,8 +153,20 @@ export function Canvas() {
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
       loadingRef.current = false
+      // Consume a cross-project focus request (notification click on a background node).
+      const pending = pendingFocusRef.current
+      if (pending) {
+        pendingFocusRef.current = null
+        const node = nodesRef.current.find((n) => n.id === pending)
+        if (node) {
+          setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
+          goToNode(node)
+          useClaudeStatus.getState().clearUnread(pending)
+        }
+      }
     }, 0)
     return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId, setNodes, setViewport])
 
   const markDirty = useCallback(() => {
@@ -691,6 +706,46 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  // Focus a node by id (notification click): select + center it; if it lives in another
+  // project, switch there first and let the project-load effect finish the focus.
+  const focusNodeById = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      if (node) {
+        setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
+        goToNode(node)
+        useClaudeStatus.getState().clearUnread(nodeId)
+        return
+      }
+      const owner = useProjects
+        .getState()
+        .projects.find((p) => p.nodes.some((n) => n.id === nodeId))
+      if (owner && owner.id !== useProjects.getState().activeProjectId) {
+        pendingFocusRef.current = nodeId
+        switchProject(owner.id)
+      }
+    },
+    [setNodes, goToNode, switchProject]
+  )
+
+  useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // One-time consent: the first time a Claude turn finishes in the background, ask whether
+  // to enable completion notifications (default off until accepted).
+  const anyUnread = useClaudeStatus((s) => Object.values(s.byId).some((v) => v.unread))
+  const notifyConsentAsked = useSettings((s) => s.settings.notifyConsentAsked)
+  useEffect(() => {
+    if (!anyUnread || notifyConsentAsked) return
+    useSettings.getState().update({ notifyConsentAsked: true, notifyOnClaudeDone: false })
+    setConfirm({
+      message: 'Notify you when Claude Code finishes while nodeterm is in the background?',
+      onConfirm: () => {
+        useSettings.getState().update({ notifyOnClaudeDone: true })
+        setConfirm(null)
+      }
+    })
+  }, [anyUnread, notifyConsentAsked])
+
   const addProject = useCallback(() => {
     commitActiveToStore()
     const project = useProjects.getState().addProject()
@@ -878,7 +933,12 @@ export function Canvas() {
             zoomable
             maskColor="rgba(10,12,18,0.6)"
             nodeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
-            nodeStrokeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
+            nodeStrokeColor={(n) => {
+              const st = useClaudeStatus.getState().byId[n.id]
+              if (st?.busy) return '#30d158'
+              if (st?.unread) return '#0a84ff'
+              return (n.data as { color?: string })?.color ?? '#0a84ff'
+            }}
           />
         </ReactFlow>
 
