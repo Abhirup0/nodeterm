@@ -303,6 +303,14 @@ export interface NotifyPayload {
   nodeId: string
 }
 
+/** A Claude Code lifecycle hook event, forwarded from the main process. */
+export interface ClaudeStatusEvent {
+  nodeId: string
+  /** SessionStart | UserPromptSubmit | Stop | Notification | SessionEnd */
+  event: string
+  sessionId?: string
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -324,4 +332,6 @@ export interface NodeTerminalApi {
   notify(payload: NotifyPayload): Promise<boolean>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
+  /** Fires on each Claude Code hook event (start/working/idle/attention). Returns unsubscribe. */
+  onClaudeStatus(listener: (e: ClaudeStatusEvent) => void): () => void
 }

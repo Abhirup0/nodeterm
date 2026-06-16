@@ -10,8 +10,10 @@ export interface ClaudeNodeStatus {
   busy: boolean
   /** A turn finished while the user wasn't looking; cleared on focus/select. */
   unread: boolean
-  /** Claude's own session name/title, shown alongside the terminal title. */
+  /** Claude's own session name/title (from the terminal title), shown beside the title. */
   session?: string
+  /** Claude session id (UUID from hooks) — used to resume/branch the conversation. */
+  sessionId?: string
   /** Timestamp of the last busy→idle transition. */
   finishedAt?: number
 }
@@ -20,6 +22,7 @@ interface ClaudeStatusState {
   byId: Record<string, ClaudeNodeStatus>
   setBusy(id: string, busy: boolean): void
   setSession(id: string, session: string): void
+  setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
   clearUnread(id: string): void
   remove(id: string): void
@@ -47,6 +50,13 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       const prev = s.byId[id] ?? EMPTY
       if (prev.session === session) return s
       return { byId: { ...s.byId, [id]: { ...prev, session } } }
+    }),
+
+  setSessionId: (id, sessionId) =>
+    set((s) => {
+      const prev = s.byId[id] ?? EMPTY
+      if (prev.sessionId === sessionId) return s
+      return { byId: { ...s.byId, [id]: { ...prev, sessionId } } }
     }),
 
   markUnread: (id) =>

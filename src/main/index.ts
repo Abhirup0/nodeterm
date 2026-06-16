@@ -11,6 +11,7 @@ import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
 import { fetchAnnouncements } from './announcements'
+import { initClaudeHooks } from './claude-hooks'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -196,6 +197,7 @@ app.whenReady().then(() => {
   const win = createWindow()
   mainWin = win
   initUpdater(win)
+  initClaudeHooks(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

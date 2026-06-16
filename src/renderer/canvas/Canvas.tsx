@@ -55,6 +55,7 @@ import { useClaudeStatus } from '../state/claudeStatus'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import {
+  CLAUDE_LAUNCH,
   COLLAPSED_HEIGHT,
   createClaudeNode,
   createDiffNode,
@@ -480,19 +481,28 @@ export function Canvas() {
 
   // Run Claude's /branch in this node, then open a new node that resumes the original
   // conversation (claude -r <ORIGINAL_ID>). The source node stays on the new branch.
+  // We already know the current session id from the hooks; only fall back to parsing the
+  // terminal output if it's unknown.
   const branchClaude = useCallback(
     async (nodeId: string) => {
       const source = nodesRef.current.find((n) => n.id === nodeId) as CanvasNode | undefined
       if (!source) return
-      const res = await branchClaudeSession(nodeId)
-      if (!res.ok || !res.originalId) {
-        setConfirm({ message: res.error ?? 'Branch failed.', onConfirm: () => setConfirm(null) })
-        return
+      const known = useClaudeStatus.getState().byId[nodeId]?.sessionId
+      let originalId = known
+      if (known) {
+        await window.nodeTerminal.pty.sendText(nodeId, '/branch')
+      } else {
+        const res = await branchClaudeSession(nodeId)
+        if (!res.ok || !res.originalId) {
+          setConfirm({ message: res.error ?? 'Branch failed.', onConfirm: () => setConfirm(null) })
+          return
+        }
+        originalId = res.originalId
       }
       const copy = duplicateNode(source)
       copy.data = {
         ...copy.data,
-        initialCommand: `claude -r ${res.originalId}`,
+        initialCommand: `${CLAUDE_LAUNCH} -r ${originalId}`,
         title: `${source.data.title} (original)`
       }
       copy.position = {
@@ -775,6 +785,45 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // Claude Code lifecycle, reported by Claude's own hooks (see main/claude-hooks.ts):
+  // UserPromptSubmit → working, Stop → finished, Notification → needs input. On a finish
+  // while the window is in the background: mark unread + (with consent) notify.
+  useEffect(() => {
+    return window.nodeTerminal.onClaudeStatus((e) => {
+      const cs = useClaudeStatus.getState()
+      if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
+      const finish = (attention: boolean) => {
+        cs.setBusy(e.nodeId, false)
+        if (!document.hasFocus()) {
+          cs.markUnread(e.nodeId)
+          const s = useSettings.getState().settings
+          if (s.notifyOnClaudeDone && s.notifyConsentAsked) {
+            const node = nodesRef.current.find((n) => n.id === e.nodeId)
+            void window.nodeTerminal.notify({
+              title: attention ? 'Claude Code needs you' : 'Claude Code finished',
+              body: (node?.data.title as string) || 'Claude Code',
+              nodeId: e.nodeId
+            })
+          }
+        }
+      }
+      switch (e.event) {
+        case 'UserPromptSubmit':
+          cs.setBusy(e.nodeId, true)
+          break
+        case 'Stop':
+          finish(false)
+          break
+        case 'Notification':
+          finish(true)
+          break
+        case 'SessionEnd':
+          cs.setBusy(e.nodeId, false)
+          break
+      }
+    })
+  }, [])
 
   // When the palette opens, capture each terminal's visible buffer (cached ~3s) so the
   // search can match text shown in terminals/Claude sessions.

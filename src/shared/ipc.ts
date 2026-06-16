@@ -14,6 +14,7 @@ export const IPC = {
   appCloseWindow: 'app:close-window',
   appNotify: 'app:notify',
   appFocusNode: 'app:focus-node',
+  claudeStatus: 'claude:status',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appRestartToUpdate: 'app:restart-to-update',

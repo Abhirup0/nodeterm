@@ -108,6 +108,11 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)
     ipcRenderer.on(IPC.appFocusNode, handler)
     return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
+  },
+  onClaudeStatus: (listener) => {
+    const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+    ipcRenderer.on(IPC.claudeStatus, handler)
+    return () => ipcRenderer.removeListener(IPC.claudeStatus, handler)
   }
 }
 

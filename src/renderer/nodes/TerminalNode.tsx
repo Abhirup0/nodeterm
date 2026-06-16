@@ -9,7 +9,6 @@ import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useSettings } from '../state/settings'
 import { useClaudeStatus } from '../state/claudeStatus'
-import { createClaudeBusyDetector } from '../terminal/claudeBusy'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
 /**
@@ -36,9 +35,6 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const tags = (data.tags as string[]) ?? []
   const isClaude = tags.includes('claude')
   const status = useClaudeStatus((s) => s.byId[id])
-  // Latest data for use inside the once-only lifecycle effect (avoids stale closures).
-  const dataRef = useRef(data)
-  dataRef.current = data
 
   // Terminal lifecycle — set up exactly once.
   useEffect(() => {
@@ -65,35 +61,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let disposed = false
     const cleanups: Array<() => void> = []
 
-    // Claude Code nodes: watch the output for working/idle transitions.
-    const onBusyChange = (busy: boolean) => {
-      const cs = useClaudeStatus.getState()
-      cs.setBusy(id, busy)
-      // On a turn finishing while the user isn't looking: mark unread + (maybe) notify.
-      // Notifications only fire once consent has been given (Canvas shows a one-time prompt
-      // the first time a background completion happens).
-      if (!busy && !document.hasFocus()) {
-        cs.markUnread(id)
-        const s = useSettings.getState().settings
-        if (s.notifyOnClaudeDone && s.notifyConsentAsked) {
-          void window.nodeTerminal.notify({
-            title: 'Claude Code finished',
-            body: dataRef.current.title || 'Claude Code',
-            nodeId: id
-          })
-        }
-      }
-    }
-    const detector = isClaude
-      ? createClaudeBusyDetector((busy) => onBusyChange(busy))
-      : null
-    if (detector) cleanups.push(term.onBell(() => detector.bell()).dispose)
+    // Claude Code state (busy/idle/attention) comes from Claude's own hooks via the
+    // claude:status IPC (handled centrally in Canvas) — not from parsing the output here.
+    // We only surface the conversation topic from the terminal title, when Claude sets one.
     if (isClaude) {
-      // Claude sets the terminal title to the conversation topic; surface it as a chip.
-      // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
       cleanups.push(
         term.onTitleChange((t) => {
           const title = t.trim()
+          // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
           if (title && !/[/:~]/.test(title)) useClaudeStatus.getState().setSession(id, title)
         }).dispose
       )
@@ -107,12 +82,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           return
         }
         sessionId = sid
-        cleanups.push(
-          transport.onData(sid, (chunk) => {
-            term.write(chunk)
-            detector?.feed(chunk)
-          })
-        )
+        cleanups.push(transport.onData(sid, (chunk) => term.write(chunk)))
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
@@ -142,7 +112,6 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       observer.disconnect()
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
-      detector?.dispose()
       if (isClaude) useClaudeStatus.getState().remove(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
