@@ -48,6 +48,7 @@ import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateBanner } from '../components/UpdateBanner'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
@@ -94,6 +95,7 @@ export function Canvas() {
   } | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
+  const [consentOpen, setConsentOpen] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -860,29 +862,12 @@ export function Canvas() {
     }
   }, [paletteOpen])
 
-  // First-launch consent: ask once whether to enable Claude completion notifications. On
-  // accept we fire a forced notification to trigger the macOS permission prompt. Declining
-  // leaves them off — re-enable any time from Settings.
+  // First-launch consent: ask once whether to enable Claude completion notifications
+  // (shown via the dedicated NotifyConsentDialog). Default off until accepted.
   useEffect(() => {
     if (useSettings.getState().settings.notifyConsentAsked) return
     useSettings.getState().update({ notifyConsentAsked: true, notifyOnClaudeDone: false })
-    setConfirm({
-      message:
-        'Notify you when Claude Code finishes while nodeterm is in the background? You can change this any time in Settings.',
-      confirmLabel: 'Enable notifications',
-      cancelLabel: 'Not now',
-      danger: false,
-      onConfirm: () => {
-        useSettings.getState().update({ notifyOnClaudeDone: true })
-        void window.nodeTerminal.notify({
-          title: 'Notifications enabled',
-          body: "You'll be told when Claude Code finishes in the background.",
-          nodeId: '',
-          force: true
-        })
-        setConfirm(null)
-      }
-    })
+    setConsentOpen(true)
   }, [])
 
   const addProject = useCallback(() => {
@@ -1130,6 +1115,22 @@ export function Canvas() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {consentOpen && (
+        <NotifyConsentDialog
+          onEnable={() => {
+            useSettings.getState().update({ notifyOnClaudeDone: true })
+            void window.nodeTerminal.notify({
+              title: 'Notifications enabled',
+              body: "You'll be told when Claude Code finishes in the background.",
+              nodeId: '',
+              force: true
+            })
+            setConsentOpen(false)
+          }}
+          onDismiss={() => setConsentOpen(false)}
         />
       )}
 

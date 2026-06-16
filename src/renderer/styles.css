@@ -2129,6 +2129,93 @@ body,
   padding: 18px;
 }
 
+/* ---- Notification consent dialog (polished, icon + title + actions) ---- */
+.consent-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 72;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 10, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-app-region: no-drag;
+}
+
+.consent-card {
+  width: 400px;
+  max-width: 90vw;
+  padding: 28px 26px 22px;
+  text-align: center;
+  background: #1c1c1e;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.65);
+}
+
+.consent-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #a38dff, #7a4bd0);
+  box-shadow: 0 8px 24px rgba(122, 75, 208, 0.45);
+}
+
+.consent-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.consent-desc {
+  margin: 0 0 22px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.consent-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.consent-btn {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.consent-btn.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.consent-btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.consent-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.consent-btn.primary:hover {
+  background: var(--accent-hover);
+}
+
 .confirm__msg {
   margin: 0 0 16px;
   font-size: 13px;
