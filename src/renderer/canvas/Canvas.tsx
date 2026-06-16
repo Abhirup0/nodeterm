@@ -24,6 +24,7 @@ import { CommandPalette, type Command } from '../components/CommandPalette'
 import {
   IconClaude,
   IconCollapse,
+  IconBranch,
   IconDuplicate,
   IconEditor,
   IconFit,
@@ -51,6 +52,7 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useClaudeStatus } from '../state/claudeStatus'
+import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import {
   COLLAPSED_HEIGHT,
@@ -476,6 +478,34 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  // Run Claude's /branch in this node, then open a new node that resumes the original
+  // conversation (claude -r <ORIGINAL_ID>). The source node stays on the new branch.
+  const branchClaude = useCallback(
+    async (nodeId: string) => {
+      const source = nodesRef.current.find((n) => n.id === nodeId) as CanvasNode | undefined
+      if (!source) return
+      const res = await branchClaudeSession(nodeId)
+      if (!res.ok || !res.originalId) {
+        setConfirm({ message: res.error ?? 'Branch failed.', onConfirm: () => setConfirm(null) })
+        return
+      }
+      const copy = duplicateNode(source)
+      copy.data = {
+        ...copy.data,
+        initialCommand: `claude -r ${res.originalId}`,
+        title: `${source.data.title} (original)`
+      }
+      copy.position = {
+        x: source.position.x + ((source.width as number) ?? 600) + 32,
+        y: source.position.y
+      }
+      copy.selected = true
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), copy])
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
   const setNodesColor = useCallback(
     (ids: string[], color: string) => {
       const set = new Set(ids)
@@ -604,6 +634,18 @@ export function Canvas() {
       { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
       { type: 'separator' },
       { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
+      ...(ids.length === 1 &&
+      ((nodesRef.current.find((n) => n.id === ids[0])?.data.tags as string[]) ?? []).includes(
+        'claude'
+      )
+        ? ([
+            {
+              label: 'Branch conversation',
+              icon: <IconBranch />,
+              onClick: () => void branchClaude(ids[0])
+            }
+          ] as MenuItem[])
+        : []),
       { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) },
       { label: 'Collapse / Expand', icon: <IconCollapse />, onClick: () => toggleCollapseNodes(ids) },
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
@@ -618,6 +660,7 @@ export function Canvas() {
       groupSelection,
       setNodesColor,
       duplicateNodes,
+      branchClaude,
       alignToGrid,
       toggleCollapseNodes,
       toggleMarkdown,
