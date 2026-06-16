@@ -57,6 +57,18 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     fit.fit()
     patchTerminalScale(term, getZoom)
 
+    // Cmd+C copies the terminal selection (xterm renders to canvas, so the DOM-selection
+    // copy used elsewhere can't see it). Ctrl+C is left alone so it still sends SIGINT.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'c') {
+        if (term.hasSelection()) {
+          window.nodeTerminal.clipboard.writeText(term.getSelection())
+          return false
+        }
+      }
+      return true
+    })
+
     let sessionId: string | null = null
     let disposed = false
     const cleanups: Array<() => void> = []
