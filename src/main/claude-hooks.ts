@@ -143,6 +143,8 @@ export function initClaudeHooks(win: BrowserWindow): void {
     }
   }
 
+  // Event-driven only (no polling): fs.watch on the dir fires on every append here, and
+  // scan() reads offset-based, so each line is delivered exactly once.
   let timer: ReturnType<typeof setTimeout> | null = null
   try {
     fs.watch(dir, () => {
@@ -152,6 +154,4 @@ export function initClaudeHooks(win: BrowserWindow): void {
   } catch (e) {
     console.error('[claude-hooks] watch failed', e)
   }
-  // Poll too: fs.watch can miss in-file appends on macOS.
-  setInterval(scan, 800)
 }
