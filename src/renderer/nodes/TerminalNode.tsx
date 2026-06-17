@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { renderMarkdown } from '../lib/markdown'
@@ -223,6 +223,13 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       onMouseLeave={() => (hoveredRef.current = false)}
     >
       <NodeResizer minWidth={260} minHeight={160} isVisible={selected && !collapsed} color="#0a84ff" />
+      {/* Invisible source handle so edges to subagent nodes can attach. */}
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        isConnectable={false}
+        style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
+      />
 
       <div className="term-node__header">
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>
