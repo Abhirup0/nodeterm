@@ -13,6 +13,7 @@ import os from 'os'
 import path from 'path'
 import { app, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
+import { createSubagentTail } from './subagent-tail'
 
 const CLAUDE_EVENTS = [
   'SessionStart',
@@ -94,6 +95,7 @@ export function initClaudeHooks(win: BrowserWindow): void {
   }
 
   const offsets = new Map<string, number>()
+  const subagentTail = createSubagentTail(win)
 
   const scan = () => {
     let files: string[]
@@ -135,6 +137,7 @@ export function initClaudeHooks(win: BrowserWindow): void {
           const p = JSON.parse(t) as {
             hook_event_name?: string
             session_id?: string
+            transcript_path?: string
             notification_type?: string
             last_assistant_message?: string
             prompt?: string
@@ -153,6 +156,11 @@ export function initClaudeHooks(win: BrowserWindow): void {
           // Tool events flood (every Bash/Edit) — only forward subagent spawns.
           const isTool = p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse'
           if (isTool && !SUBAGENT_TOOLS.has(p.tool_name ?? '')) continue
+          // Tail the subagent's live transcript while it runs.
+          if (p.tool_use_id) {
+            if (p.hook_event_name === 'PreToolUse') subagentTail.track(p.tool_use_id, p.transcript_path)
+            else if (p.hook_event_name === 'PostToolUse') subagentTail.finish(p.tool_use_id)
+          }
           const tr = p.tool_response
           const result = tr?.content
             ?.filter((c) => c.type === 'text' && c.text)

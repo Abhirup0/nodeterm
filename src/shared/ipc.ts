@@ -15,6 +15,7 @@ export const IPC = {
   appNotify: 'app:notify',
   appFocusNode: 'app:focus-node',
   claudeStatus: 'claude:status',
+  claudeSubagentActivity: 'claude:subagent-activity',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appRestartToUpdate: 'app:restart-to-update',

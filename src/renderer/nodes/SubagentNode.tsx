@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 
@@ -24,7 +24,15 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
   const tokens = data.subagentTokens as number | undefined
   const toolUses = data.subagentToolUses as number | undefined
   const result = (data.subagentResult as string) || ''
+  const activity = (data.subagentActivity as string) || ''
+  const body = activity || result
   const [expanded, setExpanded] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll the live transcript to the bottom as it grows (while expanded).
+  useEffect(() => {
+    if (expanded && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [body, expanded])
 
   // Live elapsed timer while working.
   const [now, setNow] = useState(() => Date.now())
@@ -61,13 +69,9 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
       )}
       {meta && <div className="subagent-node__meta">{meta}</div>}
       {expanded && (
-        <div className="subagent-node__result nodrag nowheel">
+        <div className="subagent-node__result nodrag nowheel" ref={bodyRef}>
           {data.title ? <div className="subagent-node__result-task">{data.title as string}</div> : null}
-          {result
-            ? result
-            : working
-              ? 'Working… the subagent runs inside Claude; its output appears here when it finishes.'
-              : 'No output.'}
+          {body || (working ? 'Working…' : 'No output.')}
         </div>
       )}
     </div>

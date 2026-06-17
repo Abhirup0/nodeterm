@@ -21,6 +21,8 @@ export interface SubagentViz {
   toolUses?: number
   /** What the subagent produced (shown when the node is expanded). */
   result?: string
+  /** Live transcript text streamed while the subagent runs (shown when expanded). */
+  activity?: string
 }
 
 export interface SubagentResult {
@@ -34,6 +36,8 @@ interface AgentNodesState {
   byId: Record<string, SubagentViz>
   start(toolUseId: string, viz: Omit<SubagentViz, 'state' | 'startedAt'>): void
   finish(toolUseId: string, result: SubagentResult): void
+  /** Append a chunk of the subagent's live transcript. */
+  appendActivity(toolUseId: string, chunk: string): void
   /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
   clearForParent(parentNodeId: string): void
 }
@@ -51,6 +55,14 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       const prev = s.byId[toolUseId]
       if (!prev || prev.state === 'done') return s
       return { byId: { ...s.byId, [toolUseId]: { ...prev, state: 'done', ...result } } }
+    }),
+
+  appendActivity: (toolUseId, chunk) =>
+    set((s) => {
+      const prev = s.byId[toolUseId]
+      if (!prev) return s
+      const activity = ((prev.activity ?? '') + chunk).slice(-12000) // keep the tail bounded
+      return { byId: { ...s.byId, [toolUseId]: { ...prev, activity } } }
     }),
 
   clearForParent: (parentNodeId) =>

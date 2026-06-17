@@ -166,7 +166,8 @@ export function Canvas() {
             subagentDurationMs: v.durationMs,
             subagentTokens: v.tokens,
             subagentToolUses: v.toolUses,
-            subagentResult: v.result
+            subagentResult: v.result,
+            subagentActivity: v.activity
           }
         } as CanvasNode)
         eEdges.push({
@@ -852,6 +853,15 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // Stream live subagent transcript chunks into the agent-nodes store.
+  useEffect(
+    () =>
+      window.nodeTerminal.onSubagentActivity((e) =>
+        useAgentNodes.getState().appendActivity(e.toolUseId, e.chunk)
+      ),
+    []
+  )
 
   // Claude Code lifecycle, reported by Claude's own hooks (see main/claude-hooks.ts):
   // UserPromptSubmit → working, Stop → done, Notification → waiting/blocked. On a turn

@@ -332,6 +332,12 @@ export interface ClaudeStatusEvent {
   result?: string
 }
 
+/** A chunk of a subagent's live transcript, streamed while it works. */
+export interface SubagentActivity {
+  toolUseId: string
+  chunk: string
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -355,4 +361,6 @@ export interface NodeTerminalApi {
   onFocusNode(listener: (nodeId: string) => void): () => void
   /** Fires on each Claude Code hook event (start/working/idle/attention). Returns unsubscribe. */
   onClaudeStatus(listener: (e: ClaudeStatusEvent) => void): () => void
+  /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
+  onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
 }
