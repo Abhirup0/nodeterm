@@ -384,6 +384,38 @@ export interface BridgeApi {
   onMessage(listener: (m: BridgeMessage) => void): () => void
 }
 
+/** One usage window (5h session or 7d weekly) as shown in the indicator. */
+export interface ClaudeUsageWindow {
+  /** 0–100; remaining quota. Drives the bar fill (REF shows "remaining"). */
+  leftPercent: number
+  /** Unix ms when this window resets, or null if unknown. */
+  resetsAt: number | null
+}
+
+/** Claude Code subscription usage snapshot for the bottom-left indicator. */
+export interface ClaudeUsage {
+  session: ClaudeUsageWindow | null
+  weekly: ClaudeUsageWindow | null
+  /** Signed-in account email, read-only and best-effort (null if unknown). */
+  email: string | null
+  /** Unix ms when this snapshot was produced. */
+  updatedAt: number
+  /**
+   * 'unavailable' = no OAuth subscription token (API-key billing / logged out) → hide pill.
+   * 'fetching' = request in flight. 'ok' = windows present. 'error' = fetch failed.
+   */
+  status: 'unavailable' | 'fetching' | 'ok' | 'error'
+}
+
+export interface UsageApi {
+  /** Returns the latest snapshot (cached if fresh, else a fresh fetch). */
+  fetch(): Promise<ClaudeUsage>
+  /** Forces a fresh fetch, bypassing the focus debounce. */
+  refresh(): Promise<ClaudeUsage>
+  /** Fires whenever main pushes a new snapshot (poll/refresh). Returns unsubscribe. */
+  onUpdate(listener: (usage: ClaudeUsage) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -396,6 +428,7 @@ export interface NodeTerminalApi {
   updates: UpdateApi
   announcements: AnnouncementsApi
   bridge: BridgeApi
+  usage: UsageApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
