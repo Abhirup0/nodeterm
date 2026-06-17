@@ -156,7 +156,8 @@ export function Canvas() {
           group: null,
           loopCount: st.loop.count,
           loopItems: st.loop.items,
-          loopActive: st.state === 'working'
+          loopActive: st.state === 'working',
+          loopKind: st.loop.kind
         }
       } as CanvasNode)
       eEdges.push({
@@ -949,7 +950,10 @@ export function Canvas() {
         case 'UserPromptSubmit':
           cs.setState(e.nodeId, 'working')
           an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
-          if (/^\s*\/loop\b/.test(e.prompt ?? '')) cs.setLoop(e.nodeId, true, e.prompt)
+          {
+            const m = (e.prompt ?? '').match(/^\s*\/(loop|schedule)\b/)
+            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule', e.prompt)
+          }
           break
         case 'Stop':
           cs.setState(e.nodeId, 'done')

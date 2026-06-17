@@ -16,8 +16,8 @@ export interface ClaudeNodeStatus {
   session?: string
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
-  /** Set when the node is running a /loop (heuristic); shown as a connected loop node. */
-  loop?: { count: number; prompt?: string; items: string[] }
+  /** Set when the node is running /loop or /schedule (heuristic); shown as a connected node. */
+  loop?: { count: number; prompt?: string; items: string[]; kind: 'loop' | 'schedule' }
 }
 
 interface ClaudeStatusState {
@@ -30,8 +30,8 @@ interface ClaudeStatusState {
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
   clearUnread(id: string): void
-  /** Start (active=true, resets) or stop a /loop indicator. */
-  setLoop(id: string, active: boolean, prompt?: string): void
+  /** Start (active=true, resets) or stop a /loop or /schedule indicator. */
+  setLoop(id: string, active: boolean, kind?: 'loop' | 'schedule', prompt?: string): void
   /** Record a /loop iteration (count++ and append its summary). No-op if not looping. */
   bumpLoop(id: string, message?: string): void
   remove(id: string): void
@@ -123,10 +123,11 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       return { byId }
     }),
 
-  setLoop: (id, active, prompt) =>
+  setLoop: (id, active, kind = 'loop', prompt) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (active) return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0, prompt, items: [] } } } }
+      if (active)
+        return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0, prompt, items: [], kind } } } }
       if (!prev.loop) return s
       const { loop: _drop, ...rest } = prev
       return { byId: { ...s.byId, [id]: rest } }

@@ -288,9 +288,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           </span>
         )}
         {status?.loop && (
-          <span className="term-node__status term-node__status--loop" title="Running /loop">
+          <span
+            className="term-node__status term-node__status--loop"
+            title={`Running /${status.loop.kind}`}
+          >
             <span className="term-node__status-dot" />
-            LOOP ×{status.loop.count}
+            {status.loop.kind === 'schedule' ? 'SCHEDULE' : 'LOOP'} ×{status.loop.count}
           </span>
         )}
         {(status?.state === 'waiting' || status?.state === 'blocked') && (
