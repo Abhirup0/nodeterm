@@ -49,7 +49,7 @@ import { SettingsPanel } from '../components/SettingsPanel'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
-import { UpdateBanner } from '../components/UpdateBanner'
+import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
@@ -1426,9 +1426,9 @@ export function Canvas() {
       />
 
       <div className="top-banners">
-        <UpdateBanner />
         <AnnouncementBanner />
       </div>
+      <UpdateCard />
 
       <div className="controls-cluster">
         <button

@@ -1342,6 +1342,131 @@ body,
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Bottom-right auto-update card (download progress + restart). */
+.update-card {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  background: rgba(28, 28, 30, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  -webkit-app-region: no-drag;
+}
+
+.update-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.update-card__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.update-card__icon {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.update-card__icon:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.update-card__body {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.75));
+}
+
+.update-card__link {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim, rgba(255, 255, 255, 0.7));
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.update-card__link:hover {
+  color: var(--text);
+}
+
+.update-card__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.update-card__bar-fill {
+  height: 100%;
+  background: var(--text, #fff);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.update-card__pct {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+.update-card__btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-card__btn:hover {
+  background: var(--accent-hover);
+}
+
+.update-card--pill {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-card__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
+}
+
 /* In-app announcements strip (news from the website feed). */
 .announce-banner {
   display: flex;
