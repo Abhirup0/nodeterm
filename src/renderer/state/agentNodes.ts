@@ -13,12 +13,27 @@ export interface SubagentViz {
   /** The task description/prompt. */
   label?: string
   state: 'working' | 'done'
+  /** When it started (for the live timer). */
+  startedAt: number
+  // Filled on finish (from the PostToolUse tool_response):
+  durationMs?: number
+  tokens?: number
+  toolUses?: number
+  /** What the subagent produced (shown when the node is expanded). */
+  result?: string
+}
+
+export interface SubagentResult {
+  durationMs?: number
+  tokens?: number
+  toolUses?: number
+  result?: string
 }
 
 interface AgentNodesState {
   byId: Record<string, SubagentViz>
-  start(toolUseId: string, viz: Omit<SubagentViz, 'state'>): void
-  finish(toolUseId: string): void
+  start(toolUseId: string, viz: Omit<SubagentViz, 'state' | 'startedAt'>): void
+  finish(toolUseId: string, result: SubagentResult): void
   /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
   clearForParent(parentNodeId: string): void
 }
@@ -27,13 +42,15 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
 
   start: (toolUseId, viz) =>
-    set((s) => ({ byId: { ...s.byId, [toolUseId]: { ...viz, state: 'working' } } })),
+    set((s) => ({
+      byId: { ...s.byId, [toolUseId]: { ...viz, state: 'working', startedAt: Date.now() } }
+    })),
 
-  finish: (toolUseId) =>
+  finish: (toolUseId, result) =>
     set((s) => {
       const prev = s.byId[toolUseId]
       if (!prev || prev.state === 'done') return s
-      return { byId: { ...s.byId, [toolUseId]: { ...prev, state: 'done' } } }
+      return { byId: { ...s.byId, [toolUseId]: { ...prev, state: 'done', ...result } } }
     }),
 
   clearForParent: (parentNodeId) =>

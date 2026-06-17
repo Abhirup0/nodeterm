@@ -141,11 +141,23 @@ export function initClaudeHooks(win: BrowserWindow): void {
             tool_name?: string
             tool_use_id?: string
             tool_input?: { subagent_type?: string; description?: string; prompt?: string }
+            tool_response?: {
+              status?: string
+              content?: { type?: string; text?: string }[]
+              totalDurationMs?: number
+              totalTokens?: number
+              totalToolUseCount?: number
+            }
           }
           if (!p.hook_event_name || win.isDestroyed()) continue
           // Tool events flood (every Bash/Edit) — only forward subagent spawns.
           const isTool = p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse'
           if (isTool && !SUBAGENT_TOOLS.has(p.tool_name ?? '')) continue
+          const tr = p.tool_response
+          const result = tr?.content
+            ?.filter((c) => c.type === 'text' && c.text)
+            .map((c) => c.text)
+            .join('\n')
           win.webContents.send(IPC.claudeStatus, {
             nodeId,
             event: p.hook_event_name,
@@ -156,7 +168,12 @@ export function initClaudeHooks(win: BrowserWindow): void {
             toolName: p.tool_name,
             toolUseId: p.tool_use_id,
             subagentType: p.tool_input?.subagent_type,
-            taskLabel: p.tool_input?.description || p.tool_input?.prompt
+            taskLabel: p.tool_input?.description || p.tool_input?.prompt,
+            status: tr?.status,
+            durationMs: tr?.totalDurationMs,
+            tokens: tr?.totalTokens,
+            toolUses: tr?.totalToolUseCount,
+            result
           })
         } catch {
           // partial/garbled line; ignore

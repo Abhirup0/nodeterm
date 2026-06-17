@@ -323,6 +323,13 @@ export interface ClaudeStatusEvent {
   toolUseId?: string
   subagentType?: string
   taskLabel?: string
+  /** Subagent result metadata (PostToolUse tool_response). */
+  status?: string
+  durationMs?: number
+  tokens?: number
+  toolUses?: number
+  /** The subagent's result text (what it produced). */
+  result?: string
 }
 
 export interface NodeTerminalApi {

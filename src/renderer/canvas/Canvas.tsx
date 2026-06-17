@@ -155,7 +155,12 @@ export function Canvas() {
             color: '#d97757',
             group: null,
             subagentType: v.type,
-            subagentState: v.state
+            subagentState: v.state,
+            subagentStartedAt: v.startedAt,
+            subagentDurationMs: v.durationMs,
+            subagentTokens: v.tokens,
+            subagentToolUses: v.toolUses,
+            subagentResult: v.result
           }
         } as CanvasNode)
         eEdges.push({
@@ -914,7 +919,13 @@ export function Canvas() {
           }
           break
         case 'PostToolUse':
-          if (e.toolUseId) an.finish(e.toolUseId)
+          if (e.toolUseId)
+            an.finish(e.toolUseId, {
+              durationMs: e.durationMs,
+              tokens: e.tokens,
+              toolUses: e.toolUses,
+              result: e.result
+            })
           break
         case 'SessionStart':
           cs.setState(e.nodeId, undefined)
