@@ -13,6 +13,7 @@ import { initUpdater } from './updater'
 import { fetchAnnouncements } from './announcements'
 import { initClaudeHooks } from './claude-hooks'
 import { initBridge } from './bridge'
+import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 
 const settingsStore = new SettingsStore()
@@ -234,6 +235,7 @@ app.whenReady().then(() => {
   initClaudeHooks(win)
   initBridge(win, ptyManager)
   initClaudeUsage(win)
+  initTelemetry(() => settingsStore.get())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
