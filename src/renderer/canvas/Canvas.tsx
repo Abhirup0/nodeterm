@@ -142,12 +142,18 @@ export function Canvas() {
       const parent = nodes.find((n) => n.id === pid)
       if (!parent) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
+      const COLS = 4
+      const COL_W = 240
+      const ROW_H = 140
       childIds.forEach((cid, i) => {
         const v = agentById[cid]
         eNodes.push({
           id: cid,
           type: 'subagent',
-          position: { x: parent.position.x + i * 240, y: parent.position.y + ph + 60 },
+          position: {
+            x: parent.position.x + (i % COLS) * COL_W,
+            y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
+          },
           draggable: false,
           selectable: false,
           data: {
