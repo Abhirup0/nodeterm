@@ -2916,3 +2916,107 @@ body,
 .react-flow__controls-button:hover {
   background: var(--panel-header);
 }
+
+/* ---- Claude usage indicator (bottom-left, right of React Flow Controls) ---- */
+.usage-indicator {
+  position: absolute;
+  left: 60px; /* clear the React Flow Controls column */
+  bottom: 18px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.usage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 13px;
+  background: rgba(28, 28, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--label, #fff);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.usage-pill:hover { background: rgba(44, 44, 46, 0.95); }
+.usage-pill__icon { color: #d97757; font-size: 13px; }
+.usage-pill__minibar {
+  display: inline-block;
+  width: 42px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.usage-pill__minibar-fill { display: block; height: 100%; border-radius: 3px; }
+.usage-pill__num { color: var(--label, #fff); }
+.usage-pill__sep { color: rgba(255, 255, 255, 0.4); }
+.usage-pill__dim { color: rgba(255, 255, 255, 0.5); }
+.usage-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
+@keyframes usage-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+.usage-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  background: rgba(28, 28, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  cursor: pointer;
+}
+.usage-refresh:hover { color: #fff; }
+.usage-refresh:disabled { opacity: 0.4; cursor: default; }
+.usage-refresh.spin { animation: usage-spin 0.9s linear infinite; }
+@keyframes usage-spin { to { transform: rotate(360deg); } }
+
+.usage-popover {
+  position: absolute;
+  bottom: 34px;
+  left: 0;
+  width: 280px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(20, 20, 22, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color: var(--label, #fff);
+}
+.usage-popover__head { margin-bottom: 12px; }
+.usage-popover__title { display: block; font-size: 15px; font-weight: 600; }
+.usage-popover__ago { font-size: 12px; color: rgba(255, 255, 255, 0.5); }
+.usage-popover__empty { font-size: 13px; color: rgba(255, 255, 255, 0.5); }
+.usage-row { margin-top: 14px; }
+.usage-row__title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.usage-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.usage-bar__fill { height: 100%; border-radius: 4px; }
+.usage-row__meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+}
+.usage-row__hidden-label { display: none; }
+.usage-account {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+.usage-account__label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 4px;
+}
+.usage-account__email { font-size: 13px; }

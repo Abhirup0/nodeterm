@@ -54,6 +54,7 @@ import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
+import { UsageIndicator } from '../components/UsageIndicator'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useClaudeStatus } from '../state/claudeStatus'
@@ -1498,6 +1499,7 @@ export function Canvas() {
             color="#4a4a4a"
           />
           <Controls showInteractive={false} position="bottom-left" />
+          <UsageIndicator />
           <MiniMap
             className="minimap"
             position="bottom-right"
