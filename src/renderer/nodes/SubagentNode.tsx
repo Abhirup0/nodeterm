@@ -48,17 +48,28 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div
         className="subagent-node__head nodrag"
-        onClick={() => result && setExpanded((v) => !v)}
-        title={result ? (expanded ? 'Collapse' : 'Click to see what it did') : undefined}
-        style={{ cursor: result ? 'pointer' : 'default' }}
+        onClick={() => setExpanded((v) => !v)}
+        title={expanded ? 'Collapse' : 'Click to expand'}
+        style={{ cursor: 'pointer' }}
       >
         <span className="subagent-node__dot" />
         <span className="subagent-node__type">{(data.subagentType as string) || 'subagent'}</span>
         <span className="subagent-node__state">{working ? 'working' : 'done'}</span>
       </div>
-      {data.title && <div className="subagent-node__task">{data.title as string}</div>}
+      {data.title && !expanded && (
+        <div className="subagent-node__task">{data.title as string}</div>
+      )}
       {meta && <div className="subagent-node__meta">{meta}</div>}
-      {expanded && result && <div className="subagent-node__result nodrag nowheel">{result}</div>}
+      {expanded && (
+        <div className="subagent-node__result nodrag nowheel">
+          {data.title ? <div className="subagent-node__result-task">{data.title as string}</div> : null}
+          {result
+            ? result
+            : working
+              ? 'Working… the subagent runs inside Claude; its output appears here when it finishes.'
+              : 'No output.'}
+        </div>
+      )}
     </div>
   )
 }

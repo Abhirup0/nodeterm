@@ -2625,6 +2625,13 @@ body,
   word-break: break-word;
 }
 
+.subagent-node__result-task {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+
 /* ---- Minimap ---- */
 .minimap {
   background: rgba(40, 40, 42, 0.85) !important;
