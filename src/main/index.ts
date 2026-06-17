@@ -90,7 +90,9 @@ app.whenReady().then(() => {
     generateTerminalName(ptyManager.captureSession(persistKey), cwd, settingsStore.get())
   )
 
-  ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string) => ptyManager.captureSession(persistKey))
+  ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
+    ptyManager.captureSession(persistKey, full)
+  )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
 

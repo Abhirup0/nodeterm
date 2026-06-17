@@ -97,8 +97,8 @@ export interface PtyApi {
   destroy(persistKey: string): void
   /** Suggest a terminal title from its recent output via the configured AI agent. */
   generateName(persistKey: string, cwd: string): Promise<GitResult>
-  /** Capture a terminal session's recent visible output as text. */
-  capture(persistKey: string): Promise<string>
+  /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
+  capture(persistKey: string, full?: boolean): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
   /** Listens for PTY output. Returns an unsubscribe function. */

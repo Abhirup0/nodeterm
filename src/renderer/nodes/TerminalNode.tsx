@@ -211,7 +211,8 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // When markdown mode turns on, capture the terminal output and render it.
   useEffect(() => {
     if (data.mdMode) {
-      void window.nodeTerminal.pty.capture(id).then((t) => setMdHtml(renderMarkdown(t)))
+      // Full scrollback (not just the visible viewport) so the whole session renders.
+      void window.nodeTerminal.pty.capture(id, true).then((t) => setMdHtml(renderMarkdown(t)))
     }
   }, [data.mdMode, id])
 

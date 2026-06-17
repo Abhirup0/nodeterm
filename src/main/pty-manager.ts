@@ -201,14 +201,17 @@ export class PtyManager {
     this.sessions.delete(sessionId)
   }
 
-  /** Capture a session's recent visible output (for AI naming). Empty if no tmux session. */
-  captureSession(persistKey: string): string {
+  /**
+   * Capture a session's output. `full` grabs the entire scrollback (`-S -`, for the
+   * markdown view); otherwise the recent ~200 lines (AI naming, palette search).
+   */
+  captureSession(persistKey: string, full = false): string {
     if (!this.tmuxPath) return ''
     try {
       return execFileSync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', '-200'],
-        { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
+        { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
     } catch {
       return ''
