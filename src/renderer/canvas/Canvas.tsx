@@ -135,6 +135,8 @@ export function Canvas() {
   const agentById = useAgentNodes((s) => s.byId)
   const ephemeralPos = useAgentNodes((s) => s.positions)
   const claudeById = useClaudeStatus((s) => s.byId)
+  // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
+  const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     const eNodes: CanvasNode[] = []
     const eEdges: Edge[] = []
@@ -150,6 +152,7 @@ export function Canvas() {
         type: 'loop',
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
         draggable: true,
+        selected: !!ephSel[lid],
         data: {
           title: st.loop.task ?? '',
           color: '#bf7af0',
@@ -191,6 +194,7 @@ export function Canvas() {
             y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
           },
           draggable: true,
+          selected: !!ephSel[cid],
           data: {
             title: v.label ?? '',
             color: '#d97757',
@@ -215,7 +219,7 @@ export function Canvas() {
       })
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
-  }, [agentById, claudeById, ephemeralPos, nodes])
+  }, [agentById, claudeById, ephemeralPos, ephSel, nodes])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
@@ -369,6 +373,7 @@ export function Canvas() {
       const managed = changes.filter((c) => {
         if ('id' in c && isEph(c.id)) {
           if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
+          else if (c.type === 'select') setEphSel((prev) => ({ ...prev, [c.id]: c.selected }))
           return false
         }
         return true

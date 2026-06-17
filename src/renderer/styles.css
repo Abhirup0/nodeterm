@@ -2543,6 +2543,13 @@ body,
   color: var(--text);
 }
 
+/* Selected outline for ephemeral subagent/loop nodes. */
+.react-flow__node.selected .subagent-node,
+.react-flow__node.selected .loop-node {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--accent), 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
 /* ---- Subagent (ephemeral, hook-driven) node ---- */
 .subagent-node {
   width: 210px;
