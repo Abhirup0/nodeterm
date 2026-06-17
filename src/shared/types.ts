@@ -12,7 +12,8 @@ export interface PtyCreateOptions {
   persistKey?: string
 }
 
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff'
+// 'subagent' is render-only (ephemeral hook-driven viz) and never persisted.
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -308,13 +309,20 @@ export interface NotifyPayload {
 /** A Claude Code lifecycle hook event, forwarded from the main process. */
 export interface ClaudeStatusEvent {
   nodeId: string
-  /** SessionStart | UserPromptSubmit | Stop | Notification | SessionEnd */
+  /** SessionStart | UserPromptSubmit | Stop | Notification | SessionEnd | PreToolUse | PostToolUse */
   event: string
   sessionId?: string
   /** For Notification events: e.g. 'permission_prompt' | 'idle_prompt'. */
   notificationType?: string
   /** Claude's last assistant message (on Stop) — used as the notification body. */
   lastMessage?: string
+  /** The user's prompt (UserPromptSubmit) — used to detect `/loop`. */
+  prompt?: string
+  /** Subagent tool events (PreToolUse/PostToolUse, tool_name Agent/Task). */
+  toolName?: string
+  toolUseId?: string
+  subagentType?: string
+  taskLabel?: string
 }
 
 export interface NodeTerminalApi {

@@ -16,6 +16,8 @@ export interface ClaudeNodeStatus {
   session?: string
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
+  /** Set when the node is running a /loop (heuristic); count = iterations so far. */
+  loop?: { count: number }
 }
 
 interface ClaudeStatusState {
@@ -28,6 +30,10 @@ interface ClaudeStatusState {
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
   clearUnread(id: string): void
+  /** Start (active=true, resets count) or stop a /loop indicator. */
+  setLoop(id: string, active: boolean): void
+  /** Increment the /loop iteration count (only while a loop is active). */
+  bumpLoop(id: string): void
   remove(id: string): void
 }
 
@@ -115,6 +121,22 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       const byId = { ...s.byId, [id]: { ...prev, unread: false } }
       save(byId)
       return { byId }
+    }),
+
+  setLoop: (id, active) =>
+    set((s) => {
+      const prev = s.byId[id] ?? EMPTY
+      if (active) return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0 } } } }
+      if (!prev.loop) return s
+      const { loop: _drop, ...rest } = prev
+      return { byId: { ...s.byId, [id]: rest } }
+    }),
+
+  bumpLoop: (id) =>
+    set((s) => {
+      const prev = s.byId[id]
+      if (!prev?.loop) return s
+      return { byId: { ...s.byId, [id]: { ...prev, loop: { count: prev.loop.count + 1 } } } }
     }),
 
   remove: (id) =>

@@ -14,7 +14,18 @@ import path from 'path'
 import { app, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 
-const CLAUDE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'Notification', 'SessionEnd']
+const CLAUDE_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'Stop',
+  'Notification',
+  'SessionEnd',
+  'PreToolUse',
+  'PostToolUse'
+]
+
+// Tool names that represent a spawned subagent (the only PreToolUse/PostToolUse we forward).
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
 
 // The single managed hook command, registered under each event above. Must stay byte-stable
 // so install is idempotent and uninstall can find it. Reads the hook payload from stdin and
@@ -126,16 +137,27 @@ export function initClaudeHooks(win: BrowserWindow): void {
             session_id?: string
             notification_type?: string
             last_assistant_message?: string
+            prompt?: string
+            tool_name?: string
+            tool_use_id?: string
+            tool_input?: { subagent_type?: string; description?: string; prompt?: string }
           }
-          if (p.hook_event_name && !win.isDestroyed()) {
-            win.webContents.send(IPC.claudeStatus, {
-              nodeId,
-              event: p.hook_event_name,
-              sessionId: p.session_id,
-              notificationType: p.notification_type,
-              lastMessage: p.last_assistant_message
-            })
-          }
+          if (!p.hook_event_name || win.isDestroyed()) continue
+          // Tool events flood (every Bash/Edit) — only forward subagent spawns.
+          const isTool = p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse'
+          if (isTool && !SUBAGENT_TOOLS.has(p.tool_name ?? '')) continue
+          win.webContents.send(IPC.claudeStatus, {
+            nodeId,
+            event: p.hook_event_name,
+            sessionId: p.session_id,
+            notificationType: p.notification_type,
+            lastMessage: p.last_assistant_message,
+            prompt: p.prompt,
+            toolName: p.tool_name,
+            toolUseId: p.tool_use_id,
+            subagentType: p.tool_input?.subagent_type,
+            taskLabel: p.tool_input?.description || p.tool_input?.prompt
+          })
         } catch {
           // partial/garbled line; ignore
         }

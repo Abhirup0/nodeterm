@@ -10,7 +10,7 @@ import {
   useReactFlow,
   type Viewport
 } from '@xyflow/react'
-import type { Node } from '@xyflow/react'
+import type { Edge, Node } from '@xyflow/react'
 import { TerminalNode } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode } from '../nodes/GroupNode'
@@ -53,6 +53,8 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useClaudeStatus } from '../state/claudeStatus'
+import { useAgentNodes } from '../state/agentNodes'
+import { SubagentNode } from '../nodes/SubagentNode'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import {
@@ -120,10 +122,53 @@ export function Canvas() {
       sticky: withNodeBoundary(StickyNode),
       group: withNodeBoundary(GroupNode),
       editor: withNodeBoundary(EditorNode),
-      diff: withNodeBoundary(DiffNode)
+      diff: withNodeBoundary(DiffNode),
+      subagent: withNodeBoundary(SubagentNode)
     }),
     []
   )
+
+  // Ephemeral subagent nodes + edges (driven by Claude hooks; never persisted / no undo).
+  // Laid out fanning below the parent Claude node.
+  const agentById = useAgentNodes((s) => s.byId)
+  const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
+    const eNodes: CanvasNode[] = []
+    const eEdges: Edge[] = []
+    const byParent: Record<string, string[]> = {}
+    for (const id of Object.keys(agentById)) {
+      ;(byParent[agentById[id].parentNodeId] ??= []).push(id)
+    }
+    for (const [pid, childIds] of Object.entries(byParent)) {
+      const parent = nodes.find((n) => n.id === pid)
+      if (!parent) continue
+      const ph = parent.measured?.height ?? (parent.height as number) ?? 400
+      childIds.forEach((cid, i) => {
+        const v = agentById[cid]
+        eNodes.push({
+          id: cid,
+          type: 'subagent',
+          position: { x: parent.position.x + i * 240, y: parent.position.y + ph + 60 },
+          draggable: false,
+          selectable: false,
+          data: {
+            title: v.label ?? '',
+            color: '#d97757',
+            group: null,
+            subagentType: v.type,
+            subagentState: v.state
+          }
+        } as CanvasNode)
+        eEdges.push({
+          id: `e-${cid}`,
+          source: pid,
+          target: cid,
+          animated: v.state === 'working',
+          style: { stroke: '#d97757', strokeWidth: 1.5 }
+        })
+      })
+    }
+    return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
+  }, [agentById, nodes])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
@@ -270,8 +315,11 @@ export function Canvas() {
   // ---- canvas interactions ----
   const handleNodesChange: typeof onNodesChange = useCallback(
     (changes) => {
-      onNodesChange(changes)
-      if (changes.some((c) => c.type !== 'select')) markDirty()
+      // Drop changes targeting ephemeral subagent nodes (they live outside the managed state).
+      const eph = useAgentNodes.getState().byId
+      const filtered = changes.filter((c) => !('id' in c && c.id in eph))
+      onNodesChange(filtered)
+      if (filtered.some((c) => c.type !== 'select')) markDirty()
     },
     [onNodesChange, markDirty]
   )
@@ -835,12 +883,16 @@ export function Canvas() {
           nodeId: e.nodeId
         })
       }
+      const an = useAgentNodes.getState()
       switch (e.event) {
         case 'UserPromptSubmit':
           cs.setState(e.nodeId, 'working')
+          an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
+          if (/^\s*\/loop\b/.test(e.prompt ?? '')) cs.setLoop(e.nodeId, true)
           break
         case 'Stop':
           cs.setState(e.nodeId, 'done')
+          cs.bumpLoop(e.nodeId) // count loop iterations (no-op if not looping)
           alert('finished', 'Claude finished its turn.')
           break
         case 'Notification':
@@ -852,9 +904,25 @@ export function Canvas() {
             alert('needs input', 'Claude is waiting for your response.')
           }
           break
+        case 'PreToolUse':
+          if (e.toolUseId) {
+            an.start(e.toolUseId, {
+              parentNodeId: e.nodeId,
+              type: e.subagentType,
+              label: e.taskLabel
+            })
+          }
+          break
+        case 'PostToolUse':
+          if (e.toolUseId) an.finish(e.toolUseId)
+          break
         case 'SessionStart':
+          cs.setState(e.nodeId, undefined)
+          break
         case 'SessionEnd':
           cs.setState(e.nodeId, undefined)
+          cs.setLoop(e.nodeId, false)
+          an.clearForParent(e.nodeId)
           break
       }
     })
@@ -1050,7 +1118,8 @@ export function Canvas() {
 
       <div className="flow-wrap" ref={flowWrapRef}>
         <ReactFlow
-          nodes={nodes}
+          nodes={ephemeralNodes.length ? [...nodes, ...ephemeralNodes] : nodes}
+          edges={ephemeralEdges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
           onMove={onMove}

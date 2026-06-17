@@ -9,6 +9,7 @@ import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useSettings } from '../state/settings'
 import { useClaudeStatus } from '../state/claudeStatus'
+import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
 /**
@@ -126,6 +127,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       cleanups.forEach((fn) => fn())
       useClaudeStatus.getState().setActive(id, false)
       useClaudeStatus.getState().remove(id)
+      useAgentNodes.getState().clearForParent(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
       termRef.current = null
@@ -276,6 +278,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           <span className="term-node__status term-node__status--busy" title="Claude is working">
             <span className="term-node__status-dot" />
             RUNNING
+          </span>
+        )}
+        {status?.loop && (
+          <span className="term-node__status term-node__status--loop" title="Running /loop">
+            <span className="term-node__status-dot" />
+            LOOP ×{status.loop.count}
           </span>
         )}
         {(status?.state === 'waiting' || status?.state === 'blocked') && (
