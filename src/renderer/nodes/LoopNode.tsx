@@ -10,7 +10,8 @@ export function LoopNode({ data }: NodeProps<CanvasNode>) {
   const count = (data.loopCount as number) ?? 0
   const items = (data.loopItems as string[]) ?? []
   const active = !!data.loopActive
-  const label = data.loopKind === 'schedule' ? 'Schedule' : 'Loop'
+  const kind = (data.loopKind as string) || 'loop'
+  const label = kind.charAt(0).toUpperCase() + kind.slice(1)
   const [expanded, setExpanded] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
 

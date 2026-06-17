@@ -951,8 +951,8 @@ export function Canvas() {
           cs.setState(e.nodeId, 'working')
           an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
           {
-            const m = (e.prompt ?? '').match(/^\s*\/(loop|schedule)\b/)
-            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule', e.prompt)
+            const m = (e.prompt ?? '').match(/^\s*\/(loop|schedule|cron)\b/)
+            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', e.prompt)
           }
           break
         case 'Stop':
