@@ -5,8 +5,8 @@ import { barColor, formatResetCountdown, formatTimeAgo } from '../lib/usageForma
 const SESSION_LABEL = '5h'
 const WEEKLY_LABEL = 'wk'
 
-/** A single window row in the popover: label, bar, "% left", reset countdown. */
-function WindowRow({ title, label, w }: { title: string; label: string; w: ClaudeUsageWindow }) {
+/** A single window row in the popover: bar, "% left", reset countdown. */
+function WindowRow({ title, w }: { title: string; w: ClaudeUsageWindow }) {
   const left = Math.round(w.leftPercent)
   return (
     <div className="usage-row">
@@ -18,7 +18,6 @@ function WindowRow({ title, label, w }: { title: string; label: string; w: Claud
         <span>{left}% left</span>
         <span>{formatResetCountdown(w.resetsAt)}</span>
       </div>
-      <span className="usage-row__hidden-label">{label}</span>
     </div>
   )
 }
@@ -53,7 +52,7 @@ export function UsageIndicator(): JSX.Element | null {
 
   const { session, weekly, status } = usage
   const hasData = !!session || !!weekly
-  const fetching = status === 'fetching' || refreshing
+  const fetching = refreshing
   const isError = status === 'error'
 
   const refresh = async (e: React.MouseEvent): Promise<void> => {
@@ -107,8 +106,8 @@ export function UsageIndicator(): JSX.Element | null {
             <span className="usage-popover__title">✦ Claude</span>
             <span className="usage-popover__ago">Updated {formatTimeAgo(usage.updatedAt)}</span>
           </div>
-          {session && <WindowRow title="Session" label={SESSION_LABEL} w={session} />}
-          {weekly && <WindowRow title="Weekly" label={WEEKLY_LABEL} w={weekly} />}
+          {session && <WindowRow title="Session" w={session} />}
+          {weekly && <WindowRow title="Weekly" w={weekly} />}
           {!hasData && <div className="usage-popover__empty">No usage data.</div>}
           {usage.email && (
             <div className="usage-account">
