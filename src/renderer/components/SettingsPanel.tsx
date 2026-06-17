@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../state/settings'
 import { NODE_COLORS } from '../state/workspace'
@@ -10,6 +11,11 @@ interface SettingsPanelProps {
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
+
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    void window.nodeTerminal.updates.getVersion().then(setVersion)
+  }, [])
 
   return createPortal(
     <div className="drawer-overlay" onClick={onClose}>
@@ -208,6 +214,24 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 onChange={(e) => update({ tmuxScrollback: Number(e.target.value) || 50000 })}
               />
             </label>
+          </section>
+
+          <section>
+            <h3>Updates</h3>
+            <label className="set-row">
+              <span>Current version</span>
+              <span className="set-value">{version || '…'}</span>
+            </label>
+            <button
+              className="set-btn"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('nodeterm:update-checking'))
+                window.nodeTerminal.updates.check()
+              }}
+            >
+              Check for updates
+            </button>
+            <p className="set-note">Results appear in the update card at the bottom-right.</p>
           </section>
         </div>
       </aside>

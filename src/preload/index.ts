@@ -4,6 +4,7 @@ import type {
   NodeTerminalApi,
   PtyCreateOptions,
   UpdateInfo,
+  UpdateProgress,
   Workspace
 } from '../shared/types'
 
@@ -88,6 +89,23 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.appUpdateDownloaded, handler)
       return () => ipcRenderer.removeListener(IPC.appUpdateDownloaded, handler)
     },
+    onProgress: (listener) => {
+      const handler = (_e: unknown, p: UpdateProgress) => listener(p)
+      ipcRenderer.on(IPC.appUpdateProgress, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateProgress, handler)
+    },
+    onError: (listener) => {
+      const handler = (_e: unknown, message: string) => listener(message)
+      ipcRenderer.on(IPC.appUpdateError, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateError, handler)
+    },
+    onNotAvailable: (listener) => {
+      const handler = () => listener()
+      ipcRenderer.on(IPC.appUpdateNotAvailable, handler)
+      return () => ipcRenderer.removeListener(IPC.appUpdateNotAvailable, handler)
+    },
+    check: () => ipcRenderer.send(IPC.appCheckForUpdates),
+    getVersion: () => ipcRenderer.invoke(IPC.appGetVersion),
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
   },
   announcements: {

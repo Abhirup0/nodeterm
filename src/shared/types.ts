@@ -282,11 +282,29 @@ export interface UpdateInfo {
   notes?: string
 }
 
+export interface UpdateProgress {
+  /** 0–100. */
+  percent: number
+  transferred: number
+  total: number
+  bytesPerSecond: number
+}
+
 export interface UpdateApi {
   /** A newer version was found and is downloading. Returns unsubscribe. */
   onAvailable(listener: (info: UpdateInfo) => void): () => void
   /** The update finished downloading and is ready to install. Returns unsubscribe. */
   onDownloaded(listener: (info: UpdateInfo) => void): () => void
+  /** Download progress ticks while an update downloads. Returns unsubscribe. */
+  onProgress(listener: (p: UpdateProgress) => void): () => void
+  /** An updater error occurred (drives the card's error state). Returns unsubscribe. */
+  onError(listener: (message: string) => void): () => void
+  /** No newer version is available (also the dev no-op reply to check()). Returns unsubscribe. */
+  onNotAvailable(listener: () => void): () => void
+  /** Trigger a manual update check. */
+  check(): void
+  /** The running app version. */
+  getVersion(): Promise<string>
   /** Quit and install the staged update. */
   restart(): void
 }
