@@ -51,6 +51,7 @@ import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { PrivacyBanner } from '../components/PrivacyBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
@@ -1428,6 +1429,7 @@ export function Canvas() {
 
       <div className="top-banners">
         <AnnouncementBanner />
+        <PrivacyBanner />
       </div>
       <UpdateCard />
 

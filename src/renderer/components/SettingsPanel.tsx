@@ -136,6 +136,19 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </section>
 
           <section>
+            <h3>Privacy</h3>
+            <label className="set-row">
+              <span>Send anonymous usage data (version/OS)</span>
+              <input
+                type="checkbox"
+                checked={settings.telemetryEnabled}
+                onChange={(e) => update({ telemetryEnabled: e.target.checked, telemetryNoticeSeen: true })}
+              />
+            </label>
+            <p className="set-note">No personal data. Used only to see which versions are in use.</p>
+          </section>
+
+          <section>
             <h3>Appearance</h3>
             <div className="set-row">
               <span>Accent</span>
