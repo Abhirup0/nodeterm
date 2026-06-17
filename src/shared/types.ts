@@ -434,6 +434,25 @@ export interface UsageApi {
   onUpdate(listener: (usage: ClaudeUsage) => void): () => void
 }
 
+/** A Claude session's context-window fill, pushed per sessionId from the transcript tailer. */
+export interface ContextWindowUsage {
+  sessionId: string
+  /** input + cache_read + cache_creation tokens of the latest assistant message. */
+  usedTokens: number
+  /** Model context window (200k default, 1M for 1m-context models). */
+  windowTokens: number
+  /** 0–100 fullness. */
+  usedPercent: number
+  /** Model id from the transcript, or null if not seen yet. */
+  model: string | null
+  updatedAt: number
+}
+
+export interface ContextApi {
+  /** Fires whenever a session's context fill changes. Returns unsubscribe. */
+  onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -447,6 +466,7 @@ export interface NodeTerminalApi {
   announcements: AnnouncementsApi
   bridge: BridgeApi
   usage: UsageApi
+  context: ContextApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
