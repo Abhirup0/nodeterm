@@ -30,7 +30,7 @@ export function LoopNode({ data }: NodeProps<CanvasNode>) {
       >
         <span className="loop-node__dot" />
         <span className="loop-node__type">{label}</span>
-        <span className="loop-node__count">×{count}</span>
+        {count > 0 && <span className="loop-node__count">×{count}</span>}
       </div>
       {data.title && !expanded && <div className="loop-node__task">{data.title as string}</div>}
       {expanded && (

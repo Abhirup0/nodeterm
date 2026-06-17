@@ -136,7 +136,8 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
   bumpLoop: (id, message) =>
     set((s) => {
       const prev = s.byId[id]
-      if (!prev?.loop) return s
+      // Only count in-session /loop turns; /schedule and /cron run in the background.
+      if (!prev?.loop || prev.loop.kind !== 'loop') return s
       const items = message
         ? [...prev.loop.items, message.replace(/\s+/g, ' ').trim().slice(0, 200)].slice(-50)
         : prev.loop.items

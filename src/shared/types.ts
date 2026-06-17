@@ -323,6 +323,9 @@ export interface ClaudeStatusEvent {
   toolUseId?: string
   subagentType?: string
   taskLabel?: string
+  /** Recurring-task tools: skill name (Skill) and cron expression (CronCreate). */
+  skill?: string
+  schedule?: string
   /** Subagent result metadata (PostToolUse tool_response). */
   status?: string
   durationMs?: number

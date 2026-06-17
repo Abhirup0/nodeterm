@@ -969,15 +969,31 @@ export function Canvas() {
             alert('needs input', 'Claude is waiting for your response.')
           }
           break
-        case 'PreToolUse':
-          if (e.toolUseId) {
-            an.start(e.toolUseId, {
-              parentNodeId: e.nodeId,
-              type: e.subagentType,
-              label: e.taskLabel
-            })
+        case 'PreToolUse': {
+          const tool = e.toolName
+          if (tool === 'Agent' || tool === 'Task') {
+            if (e.toolUseId) {
+              an.start(e.toolUseId, {
+                parentNodeId: e.nodeId,
+                type: e.subagentType,
+                label: e.taskLabel
+              })
+            }
+          } else {
+            // Recurring-task tools → loop/schedule/cron node.
+            let kind: 'loop' | 'schedule' | 'cron' | undefined
+            if (tool === 'Skill') {
+              const sk = (e.skill ?? '').split(':').pop()
+              if (sk === 'loop' || sk === 'schedule' || sk === 'cron') kind = sk
+            } else if (tool === 'CronCreate') kind = 'cron'
+            else if (tool === 'ScheduleWakeup') kind = 'loop'
+            if (kind) {
+              const label = [e.schedule, e.taskLabel].filter(Boolean).join(' · ')
+              cs.setLoop(e.nodeId, true, kind, label || undefined)
+            }
           }
           break
+        }
         case 'PostToolUse':
           if (e.toolUseId)
             an.finish(e.toolUseId, {

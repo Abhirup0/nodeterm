@@ -25,8 +25,10 @@ const CLAUDE_EVENTS = [
   'PostToolUse'
 ]
 
-// Tool names that represent a spawned subagent (the only PreToolUse/PostToolUse we forward).
+// Tool names that represent a spawned subagent.
 const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
+// Tools that set up a recurring task (drive the loop/schedule/cron node).
+const RECURRING_TOOLS = new Set(['Skill', 'CronCreate', 'ScheduleWakeup'])
 
 // The single managed hook command, registered under each event above. Must stay byte-stable
 // so install is idempotent and uninstall can find it. Reads the hook payload from stdin and
@@ -143,7 +145,13 @@ export function initClaudeHooks(win: BrowserWindow): void {
             prompt?: string
             tool_name?: string
             tool_use_id?: string
-            tool_input?: { subagent_type?: string; description?: string; prompt?: string }
+            tool_input?: {
+              subagent_type?: string
+              description?: string
+              prompt?: string
+              skill?: string
+              cron?: string
+            }
             tool_response?: {
               status?: string
               content?: { type?: string; text?: string }[]
@@ -153,11 +161,12 @@ export function initClaudeHooks(win: BrowserWindow): void {
             }
           }
           if (!p.hook_event_name || win.isDestroyed()) continue
-          // Tool events flood (every Bash/Edit) — only forward subagent spawns.
+          // Tool events flood (every Bash/Edit) — only forward subagent + recurring tools.
+          const name = p.tool_name ?? ''
           const isTool = p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse'
-          if (isTool && !SUBAGENT_TOOLS.has(p.tool_name ?? '')) continue
-          // Tail the subagent's live transcript while it runs.
-          if (p.tool_use_id) {
+          if (isTool && !SUBAGENT_TOOLS.has(name) && !RECURRING_TOOLS.has(name)) continue
+          // Tail the subagent's live transcript while it runs (subagent tools only).
+          if (SUBAGENT_TOOLS.has(name) && p.tool_use_id) {
             if (p.hook_event_name === 'PreToolUse') subagentTail.track(p.tool_use_id, p.transcript_path)
             else if (p.hook_event_name === 'PostToolUse') subagentTail.finish(p.tool_use_id)
           }
@@ -177,6 +186,8 @@ export function initClaudeHooks(win: BrowserWindow): void {
             toolUseId: p.tool_use_id,
             subagentType: p.tool_input?.subagent_type,
             taskLabel: p.tool_input?.description || p.tool_input?.prompt,
+            skill: p.tool_input?.skill,
+            schedule: p.tool_input?.cron,
             status: tr?.status,
             durationMs: tr?.totalDurationMs,
             tokens: tr?.totalTokens,
