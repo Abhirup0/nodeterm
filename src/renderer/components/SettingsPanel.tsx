@@ -224,7 +224,10 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             </label>
             <button
               className="set-btn"
-              onClick={() => window.nodeTerminal.updates.check()}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('nodeterm:update-checking'))
+                window.nodeTerminal.updates.check()
+              }}
             >
               Check for updates
             </button>

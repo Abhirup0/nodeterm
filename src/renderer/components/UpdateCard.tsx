@@ -51,6 +51,17 @@ export function UpdateCard(): JSX.Element | null {
     }
   }, [])
 
+  // A manual check was triggered from Settings → show the checking state (unless an update
+  // is already downloading or staged, which must not be overwritten).
+  useEffect(() => {
+    const onChecking = () => {
+      setStatus((s) => (s.kind === 'available' || s.kind === 'downloaded' ? s : { kind: 'checking' }))
+      setMinimized(false)
+    }
+    window.addEventListener('nodeterm:update-checking', onChecking)
+    return () => window.removeEventListener('nodeterm:update-checking', onChecking)
+  }, [])
+
   // Dev-only: drive the card through its states from the console without packaging, e.g.
   //   __simulateUpdate({ kind: 'available', version: '0.3.0', percent: 42 })
   useEffect(() => {

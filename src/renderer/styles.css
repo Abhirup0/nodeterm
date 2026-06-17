@@ -1283,65 +1283,6 @@ body,
   pointer-events: auto;
 }
 
-/* Auto-update notification strip, just below the tab bar. */
-.update-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px 6px 14px;
-  background: rgba(40, 40, 42, 0.96);
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  font-size: 12.5px;
-  color: var(--text);
-}
-
-.update-banner__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
-}
-
-.update-banner__text {
-  white-space: nowrap;
-}
-
-.update-banner__btn {
-  padding: 4px 12px;
-  background: var(--accent);
-  border: none;
-  border-radius: 7px;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.update-banner__btn:hover {
-  background: var(--accent-hover);
-}
-
-.update-banner__close {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 6px;
-  color: var(--text-dim, rgba(255, 255, 255, 0.6));
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.update-banner__close:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
 /* Bottom-right auto-update card (download progress + restart). */
 .update-card {
   position: fixed;
