@@ -186,6 +186,10 @@ export interface Settings {
   notifyOnClaudeDone: boolean
   /** Whether the one-time notification consent prompt has been shown. */
   notifyConsentAsked: boolean
+  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-out (default on). */
+  telemetryEnabled: boolean
+  /** Whether the one-time telemetry privacy notice has been shown/dismissed. */
+  telemetryNoticeSeen: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -205,7 +209,9 @@ export const DEFAULT_SETTINGS: Settings = {
   commitExtraPrompt: '',
   seenShortcuts: false,
   notifyOnClaudeDone: true,
-  notifyConsentAsked: false
+  notifyConsentAsked: false,
+  telemetryEnabled: true,
+  telemetryNoticeSeen: false
 }
 
 export interface SettingsApi {
