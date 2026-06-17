@@ -55,6 +55,7 @@ import { useProjects } from '../state/projects'
 import { useClaudeStatus } from '../state/claudeStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
+import { LoopNode } from '../nodes/LoopNode'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import {
@@ -123,7 +124,8 @@ export function Canvas() {
       group: withNodeBoundary(GroupNode),
       editor: withNodeBoundary(EditorNode),
       diff: withNodeBoundary(DiffNode),
-      subagent: withNodeBoundary(SubagentNode)
+      subagent: withNodeBoundary(SubagentNode),
+      loop: withNodeBoundary(LoopNode)
     }),
     []
   )
@@ -131,9 +133,40 @@ export function Canvas() {
   // Ephemeral subagent nodes + edges (driven by Claude hooks; never persisted / no undo).
   // Laid out fanning below the parent Claude node.
   const agentById = useAgentNodes((s) => s.byId)
+  const claudeById = useClaudeStatus((s) => s.byId)
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     const eNodes: CanvasNode[] = []
     const eEdges: Edge[] = []
+    // Loop nodes: one per terminal node currently running a /loop, placed below-left.
+    for (const [pid, st] of Object.entries(claudeById)) {
+      if (!st.loop) continue
+      const parent = nodes.find((n) => n.id === pid)
+      if (!parent) continue
+      const ph = parent.measured?.height ?? (parent.height as number) ?? 400
+      const lid = `loop-${pid}`
+      eNodes.push({
+        id: lid,
+        type: 'loop',
+        position: { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
+        draggable: false,
+        selectable: false,
+        data: {
+          title: st.loop.prompt ?? '',
+          color: '#bf7af0',
+          group: null,
+          loopCount: st.loop.count,
+          loopItems: st.loop.items,
+          loopActive: st.state === 'working'
+        }
+      } as CanvasNode)
+      eEdges.push({
+        id: `e-${lid}`,
+        source: pid,
+        target: lid,
+        animated: st.state === 'working',
+        style: { stroke: '#bf7af0', strokeWidth: 1.5 }
+      })
+    }
     const byParent: Record<string, string[]> = {}
     for (const id of Object.keys(agentById)) {
       ;(byParent[agentById[id].parentNodeId] ??= []).push(id)
@@ -180,7 +213,7 @@ export function Canvas() {
       })
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
-  }, [agentById, nodes])
+  }, [agentById, claudeById, nodes])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
@@ -329,7 +362,9 @@ export function Canvas() {
     (changes) => {
       // Drop changes targeting ephemeral subagent nodes (they live outside the managed state).
       const eph = useAgentNodes.getState().byId
-      const filtered = changes.filter((c) => !('id' in c && c.id in eph))
+      const filtered = changes.filter(
+        (c) => !('id' in c && (c.id in eph || c.id.startsWith('loop-')))
+      )
       onNodesChange(filtered)
       if (filtered.some((c) => c.type !== 'select')) markDirty()
     },
@@ -909,11 +944,11 @@ export function Canvas() {
         case 'UserPromptSubmit':
           cs.setState(e.nodeId, 'working')
           an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
-          if (/^\s*\/loop\b/.test(e.prompt ?? '')) cs.setLoop(e.nodeId, true)
+          if (/^\s*\/loop\b/.test(e.prompt ?? '')) cs.setLoop(e.nodeId, true, e.prompt)
           break
         case 'Stop':
           cs.setState(e.nodeId, 'done')
-          cs.bumpLoop(e.nodeId) // count loop iterations (no-op if not looping)
+          cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
           alert('finished', 'Claude finished its turn.')
           break
         case 'Notification':

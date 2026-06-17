@@ -16,8 +16,8 @@ export interface ClaudeNodeStatus {
   session?: string
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
-  /** Set when the node is running a /loop (heuristic); count = iterations so far. */
-  loop?: { count: number }
+  /** Set when the node is running a /loop (heuristic); shown as a connected loop node. */
+  loop?: { count: number; prompt?: string; items: string[] }
 }
 
 interface ClaudeStatusState {
@@ -30,10 +30,10 @@ interface ClaudeStatusState {
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
   clearUnread(id: string): void
-  /** Start (active=true, resets count) or stop a /loop indicator. */
-  setLoop(id: string, active: boolean): void
-  /** Increment the /loop iteration count (only while a loop is active). */
-  bumpLoop(id: string): void
+  /** Start (active=true, resets) or stop a /loop indicator. */
+  setLoop(id: string, active: boolean, prompt?: string): void
+  /** Record a /loop iteration (count++ and append its summary). No-op if not looping. */
+  bumpLoop(id: string, message?: string): void
   remove(id: string): void
 }
 
@@ -123,20 +123,25 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       return { byId }
     }),
 
-  setLoop: (id, active) =>
+  setLoop: (id, active, prompt) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (active) return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0 } } } }
+      if (active) return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0, prompt, items: [] } } } }
       if (!prev.loop) return s
       const { loop: _drop, ...rest } = prev
       return { byId: { ...s.byId, [id]: rest } }
     }),
 
-  bumpLoop: (id) =>
+  bumpLoop: (id, message) =>
     set((s) => {
       const prev = s.byId[id]
       if (!prev?.loop) return s
-      return { byId: { ...s.byId, [id]: { ...prev, loop: { count: prev.loop.count + 1 } } } }
+      const items = message
+        ? [...prev.loop.items, message.replace(/\s+/g, ' ').trim().slice(0, 200)].slice(-50)
+        : prev.loop.items
+      return {
+        byId: { ...s.byId, [id]: { ...prev, loop: { ...prev.loop, count: prev.loop.count + 1, items } } }
+      }
     }),
 
   remove: (id) =>

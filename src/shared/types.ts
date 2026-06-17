@@ -12,8 +12,8 @@ export interface PtyCreateOptions {
   persistKey?: string
 }
 
-// 'subagent' is render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent'
+// 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
