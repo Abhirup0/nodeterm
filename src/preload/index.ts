@@ -93,6 +93,15 @@ const api: NodeTerminalApi = {
   announcements: {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },
+  usage: {
+    fetch: () => ipcRenderer.invoke(IPC.usageFetch),
+    refresh: () => ipcRenderer.invoke(IPC.usageRefresh),
+    onUpdate: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.usageUpdate, handler)
+      return () => ipcRenderer.removeListener(IPC.usageUpdate, handler)
+    }
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),
