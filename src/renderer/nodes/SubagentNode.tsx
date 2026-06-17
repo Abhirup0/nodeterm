@@ -52,14 +52,24 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
     .join(' · ')
 
   return (
-    <div className={`subagent-node${working ? ' working' : ' done'}`}>
+    <div className={`subagent-node${working ? ' working' : ' done'}${expanded ? ' expanded' : ''}`}>
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div
         className="subagent-node__head nodrag"
         onClick={() => setExpanded((v) => !v)}
-        title={expanded ? 'Collapse' : 'Click to expand'}
+        title={expanded ? 'Collapse' : 'Open output'}
         style={{ cursor: 'pointer' }}
       >
+        <button
+          className="subagent-node__expand"
+          title={expanded ? 'Collapse' : 'Open output'}
+          onClick={(e) => {
+            e.stopPropagation()
+            setExpanded((v) => !v)
+          }}
+        >
+          {expanded ? '▾' : '▸'}
+        </button>
         <span className="subagent-node__dot" />
         <span className="subagent-node__type">{(data.subagentType as string) || 'subagent'}</span>
         <span className="subagent-node__state">{working ? 'working' : 'done'}</span>
@@ -69,9 +79,9 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
       )}
       {meta && <div className="subagent-node__meta">{meta}</div>}
       {expanded && (
-        <div className="subagent-node__result nodrag nowheel" ref={bodyRef}>
+        <div className="subagent-node__term nodrag nowheel" ref={bodyRef}>
           {data.title ? <div className="subagent-node__result-task">{data.title as string}</div> : null}
-          {body || (working ? 'Working…' : 'No output.')}
+          {body || (working ? 'Working… (live output appears here)' : 'No output.')}
         </div>
       )}
     </div>
