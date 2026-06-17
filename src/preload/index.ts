@@ -1,4 +1,4 @@
-import { clipboard, contextBridge, ipcRenderer } from 'electron'
+import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
   NodeTerminalApi,
@@ -12,6 +12,7 @@ const api: NodeTerminalApi = {
     create: (options: PtyCreateOptions) => ipcRenderer.invoke(IPC.ptyCreate, options),
     write: (sessionId, data) => ipcRenderer.send(IPC.ptyWrite, sessionId, data),
     resize: (sessionId, cols, rows) => ipcRenderer.send(IPC.ptyResize, sessionId, cols, rows),
+    setFlow: (sessionId, resume) => ipcRenderer.send(IPC.ptyFlow, sessionId, resume),
     kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
@@ -92,6 +93,15 @@ const api: NodeTerminalApi = {
   announcements: {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },
+  bridge: {
+    configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
+    setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),
+    onMessage: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.bridgeMessage, handler)
+      return () => ipcRenderer.removeListener(IPC.bridgeMessage, handler)
+    }
+  },
   onMarkdownToggle: (listener) => {
     const handler = () => listener()
     ipcRenderer.on(IPC.appToggleMarkdown, handler)
@@ -103,6 +113,9 @@ const api: NodeTerminalApi = {
     return () => ipcRenderer.removeListener(IPC.appCloseNode, handler)
   },
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
+  setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
+  // Absolute path of a dropped/picked File (File.path was removed in Electron 30+).
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   notify: (payload) => ipcRenderer.invoke(IPC.appNotify, payload),
   onFocusNode: (listener) => {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)

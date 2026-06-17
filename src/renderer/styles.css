@@ -414,6 +414,58 @@ body,
   border-color: var(--accent);
 }
 
+/* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
+   never buried under the terminal body. Subtle until you hover the node, then prominent. */
+.react-flow__handle.bridge-handle {
+  width: 13px;
+  height: 13px;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  opacity: 0.4;
+  z-index: 20;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.react-flow__node:hover .react-flow__handle.bridge-handle,
+.react-flow__node.selected .react-flow__handle.bridge-handle {
+  opacity: 1;
+}
+.react-flow__handle.bridge-handle:hover {
+  transform: scale(1.6);
+  opacity: 1;
+}
+
+/* Hover explanation for the bridge handles (CSS tooltip via the data-tip attribute). */
+.react-flow__handle.bridge-handle[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  white-space: nowrap;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: #0a0a0c;
+  border: 1px solid var(--border);
+  color: var(--label);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 50;
+}
+/* Grow inward over the node so the label never runs off-screen. */
+.react-flow__handle.bridge-handle--out[data-tip]::after {
+  right: 50%;
+}
+.react-flow__handle.bridge-handle--in[data-tip]::after {
+  left: 50%;
+}
+.react-flow__handle.bridge-handle:hover[data-tip]::after {
+  opacity: 1;
+}
+
 .term-node__header {
   display: flex;
   align-items: center;
@@ -603,6 +655,24 @@ body,
   flex: 1;
   min-height: 0;
   background: var(--bg);
+}
+
+/* Drop-target hint while dragging a file from Finder into the terminal. */
+.term-node__body.dropping::after {
+  content: 'Drop to insert path';
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  pointer-events: none;
 }
 
 .term-node__xterm {

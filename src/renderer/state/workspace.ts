@@ -84,11 +84,24 @@ export function createTerminalNode(
 }
 
 /**
+ * Path to the bridge MCP config, fetched once from main at boot (see Canvas). When set, new
+ * Claude nodes launch with `--mcp-config <path>` so the Session Bridge tools are available in
+ * exactly the sessions nodeterm spawns — never the user's own `claude`.
+ */
+let bridgeConfigPath = ''
+export function setBridgeConfigPath(p: string): void {
+  bridgeConfigPath = p
+}
+
+/**
  * Command that launches Claude Code. Detection works via hooks installed globally in
  * ~/.claude/settings.json (gated by NODETERM_* env that the PTY manager sets), so a plain
- * `claude` is enough. Append `-r <id>` to resume a specific session (used by Branch).
+ * `claude` is enough. We add `--mcp-config` to attach the Session Bridge MCP server. Append
+ * `-r <id>` to resume a specific session (used by Branch).
  */
-export const CLAUDE_LAUNCH = 'claude'
+export function claudeLaunchCommand(): string {
+  return bridgeConfigPath ? `claude --mcp-config "${bridgeConfigPath}"` : 'claude'
+}
 
 /** Creates a terminal that launches Claude Code (`claude`) on open. */
 export function createClaudeNode(
@@ -109,7 +122,7 @@ export function createClaudeNode(
       group: null,
       tags: ['claude'],
       cwd,
-      initialCommand: CLAUDE_LAUNCH
+      initialCommand: claudeLaunchCommand()
     }
   }
 }

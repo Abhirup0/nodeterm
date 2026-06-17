@@ -33,7 +33,10 @@ export class SettingsStore {
     ipcMain.handle(IPC.settingsLoad, () => this.cache)
     ipcMain.handle(IPC.settingsSave, async (_e, settings: Settings) => {
       this.cache = { ...DEFAULT_SETTINGS, ...settings }
-      await fs.writeFile(this.filePath, JSON.stringify(this.cache, null, 2), 'utf-8')
+      // Atomic write (temp + rename) so a mid-write crash can't corrupt settings.json.
+      const tmp = `${this.filePath}.tmp`
+      await fs.writeFile(tmp, JSON.stringify(this.cache, null, 2), 'utf-8')
+      await fs.rename(tmp, this.filePath)
     })
   }
 }

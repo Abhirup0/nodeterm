@@ -23,6 +23,10 @@ export class LocalTransport implements TerminalTransport {
     this.pty.resize(sessionId, cols, rows)
   }
 
+  setFlow(sessionId: string, resume: boolean): void {
+    this.pty.setFlow(sessionId, resume)
+  }
+
   kill(sessionId: string): void {
     this.pty.kill(sessionId)
   }

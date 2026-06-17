@@ -48,6 +48,13 @@ export interface Viewport {
   zoom: number
 }
 
+/** A persistent "bridge" link between two Claude nodes (lets their sessions message each other). */
+export interface BridgeLink {
+  id: string
+  source: string
+  target: string
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -57,6 +64,8 @@ export interface Project {
   cwd?: string
   viewport: Viewport
   nodes: CanvasNodeState[]
+  /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
+  bridges?: BridgeLink[]
 }
 
 /** The full workspace written to / read from disk. */
@@ -91,6 +100,8 @@ export interface PtyApi {
   write(sessionId: string, data: string): void
   /** Updates the PTY when the terminal is resized. */
   resize(sessionId: string, cols: number, rows: number): void
+  /** Flow control: pause (false) or resume (true) reading the PTY when xterm is backed up. */
+  setFlow(sessionId: string, resume: boolean): void
   /** Detaches/terminates the PTY client (the underlying tmux session survives). */
   kill(sessionId: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session). */
@@ -341,6 +352,38 @@ export interface SubagentActivity {
   chunk: string
 }
 
+/** One linked node, as the bridge MCP server sees it (id + display title). */
+export interface BridgeNodeInfo {
+  id: string
+  title: string
+}
+
+/** Map of node id → the nodes it is bridge-linked to. Sent to main so the MCP server can route. */
+export type BridgeTopology = Record<string, BridgeNodeInfo[]>
+
+/** A bridge message delivered (or paused) between two linked Claude nodes. */
+export interface BridgeMessage {
+  from: string
+  to: string
+  /** Display title of the sender (for the receiving wrapper + UI). */
+  fromTitle: string
+  message: string
+  /** Exchanges in the current conversation on this pair, and the cap. */
+  count: number
+  max: number
+  /** True when the loop guard paused delivery (cap reached). */
+  stopped?: boolean
+}
+
+export interface BridgeApi {
+  /** Path to the MCP config that attaches the bridge server (pass to `claude --mcp-config`). */
+  configPath(): Promise<string>
+  /** Push the current link topology to main so the MCP server can route messages. */
+  setTopology(topology: BridgeTopology): Promise<void>
+  /** Fires when a bridge message is delivered/paused. Returns unsubscribe. */
+  onMessage(listener: (m: BridgeMessage) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -352,12 +395,17 @@ export interface NodeTerminalApi {
   fs: FsApi
   updates: UpdateApi
   announcements: AnnouncementsApi
+  bridge: BridgeApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
   onCloseNode(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
+  /** Set the macOS Dock badge to the unread-message count (0 clears it). */
+  setBadgeCount(count: number): void
+  /** Absolute filesystem path for a dropped/picked File (for drag-into-terminal). */
+  getPathForFile(file: File): string
   /** Show an OS notification (main suppresses it if the window is focused). Returns whether shown. */
   notify(payload: NotifyPayload): Promise<boolean>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */

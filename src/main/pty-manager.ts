@@ -1,7 +1,8 @@
 import os from 'os'
 import fs from 'fs'
 import path from 'path'
-import { execFileSync } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
+import { promisify } from 'util'
 import { app, ipcMain, webContents } from 'electron'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
@@ -10,6 +11,11 @@ import { claudeHookDir } from './claude-hooks'
 
 // A dedicated tmux socket isolates our sessions from the user's own tmux server.
 const TMUX_SOCKET = 'node-terminal'
+
+// Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
+// the main event loop — a synchronous capture-pane of a large scrollback would stall every
+// other session's PTY streaming and all IPC for its duration.
+const runAsync = promisify(execFile)
 
 // Minimal tmux config so the user's ~/.tmux.conf never interferes. The tmux server
 // (under our socket) keeps sessions alive while no client is attached, which is what
@@ -54,7 +60,17 @@ function sessionName(persistKey: string): string {
 interface Session {
   proc: pty.IPty
   webContentsId: number
+  /** Pending output chunks, coalesced into one IPC message per flush. */
+  buf: string[]
+  bufBytes: number
+  flushTimer: ReturnType<typeof setTimeout> | null
 }
+
+// Output coalescing: a fast producer (e.g. `yes`, a verbose build, tmux full-screen
+// redraws) emits many small chunks. Buffering them for one short window collapses N
+// IPC messages + N xterm writes into one, which is the single hottest path in the app.
+const FLUSH_MS = 8
+const MAX_BUF_BYTES = 256 * 1024
 
 /**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
@@ -95,6 +111,9 @@ export class PtyManager {
     )
     ipcMain.on(IPC.ptyResize, (_event, sessionId: string, cols: number, rows: number) =>
       this.resize(sessionId, cols, rows)
+    )
+    ipcMain.on(IPC.ptyFlow, (_event, sessionId: string, resume: boolean) =>
+      this.setFlow(sessionId, resume)
     )
     ipcMain.on(IPC.ptyKill, (_event, sessionId: string) => this.kill(sessionId))
     ipcMain.on(IPC.ptyDestroy, (_event, persistKey: string) => this.destroySession(persistKey))
@@ -166,17 +185,59 @@ export class PtyManager {
       env
     })
 
-    proc.onData((data) => {
-      this.send(webContentsId, IPC.ptyData(sessionId), data)
-    })
+    const session: Session = { proc, webContentsId, buf: [], bufBytes: 0, flushTimer: null }
+    this.sessions.set(sessionId, session)
+
+    proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
+      this.flush(sessionId, session) // deliver any buffered output before the exit signal
       this.send(webContentsId, IPC.ptyExit(sessionId), exitCode)
       this.sessions.delete(sessionId)
     })
 
-    this.sessions.set(sessionId, { proc, webContentsId })
     return sessionId
+  }
+
+  /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
+  private queueData(sessionId: string, session: Session, data: string): void {
+    session.buf.push(data)
+    session.bufBytes += data.length
+    if (session.bufBytes >= MAX_BUF_BYTES) {
+      this.flush(sessionId, session)
+    } else if (!session.flushTimer) {
+      session.flushTimer = setTimeout(() => this.flush(sessionId, session), FLUSH_MS)
+    }
+  }
+
+  /** Send all buffered output for a session as a single IPC message. */
+  private flush(sessionId: string, session: Session): void {
+    if (session.flushTimer) {
+      clearTimeout(session.flushTimer)
+      session.flushTimer = null
+    }
+    if (session.buf.length === 0) return
+    const data = session.buf.join('')
+    session.buf = []
+    session.bufBytes = 0
+    this.send(session.webContentsId, IPC.ptyData(sessionId), data)
+  }
+
+  /**
+   * Flow control: the renderer pauses us when xterm's write backlog grows past a high
+   * watermark and resumes once it drains, so a flood can't grow the renderer buffer
+   * without bound. node-pty pause()/resume() stops/starts reading the pty fd; the OS
+   * pipe applies backpressure to the producing process.
+   */
+  private setFlow(sessionId: string, resume: boolean): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    try {
+      if (resume) session.proc.resume()
+      else session.proc.pause()
+    } catch {
+      // pause/resume can throw if the proc already exited; ignore.
+    }
   }
 
   private write(sessionId: string, data: string): void {
@@ -197,6 +258,7 @@ export class PtyManager {
   kill(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    if (session.flushTimer) clearTimeout(session.flushTimer)
     session.proc.kill()
     this.sessions.delete(sessionId)
   }
@@ -205,14 +267,15 @@ export class PtyManager {
    * Capture a session's output. `full` grabs the entire scrollback (`-S -`, for the
    * markdown view); otherwise the recent ~200 lines (AI naming, palette search).
    */
-  captureSession(persistKey: string, full = false): string {
+  async captureSession(persistKey: string, full = false): Promise<string> {
     if (!this.tmuxPath) return ''
     try {
-      return execFileSync(
+      const { stdout } = await runAsync(
         this.tmuxPath,
         ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
+      return stdout
     } catch {
       return ''
     }
@@ -223,16 +286,13 @@ export class PtyManager {
    * Works whether or not a client is attached. Returns false if tmux is unavailable or the
    * session doesn't exist yet.
    */
-  sendText(persistKey: string, text: string): boolean {
+  async sendText(persistKey: string, text: string): Promise<boolean> {
     if (!this.tmuxPath) return false
     const target = sessionName(persistKey)
     try {
-      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text], {
-        stdio: 'ignore'
-      })
-      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'], {
-        stdio: 'ignore'
-      })
+      // The literal text and the Enter must be sent in order, so await sequentially.
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text])
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
       return true
     } catch {
       return false
@@ -240,12 +300,10 @@ export class PtyManager {
   }
 
   /** Permanently end a node's persistent tmux session (called when the user closes it). */
-  destroySession(persistKey: string): void {
+  async destroySession(persistKey: string): Promise<void> {
     if (!this.tmuxPath) return
     try {
-      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'kill-session', '-t', sessionName(persistKey)], {
-        stdio: 'ignore'
-      })
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'kill-session', '-t', sessionName(persistKey)])
     } catch {
       // session may not exist; ignore
     }
@@ -256,7 +314,10 @@ export class PtyManager {
    * of persistence). The tmux server keeps the sessions alive for next launch.
    */
   killAll(): void {
-    for (const { proc } of this.sessions.values()) proc.kill()
+    for (const session of this.sessions.values()) {
+      if (session.flushTimer) clearTimeout(session.flushTimer)
+      session.proc.kill()
+    }
     this.sessions.clear()
   }
 

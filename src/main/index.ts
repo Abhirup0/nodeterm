@@ -12,6 +12,7 @@ import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
 import { fetchAnnouncements } from './announcements'
 import { initClaudeHooks } from './claude-hooks'
+import { initBridge } from './bridge'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -21,6 +22,23 @@ const gitService = new GitService()
 // The single app window — kept at module scope so IPC handlers (e.g. notifications)
 // can check focus and route clicks back to the renderer.
 let mainWin: BrowserWindow | null = null
+
+// Enforce a single instance. A second instance would re-attach every node's tmux session
+// (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
+// "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
+// instead. (The bridge MCP server runs via ELECTRON_RUN_AS_NODE on its own .mjs entry, so it
+// never reaches this code; this guards against a stray real GUI launch.)
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWin) return
+    if (mainWin.isMinimized()) mainWin.restore()
+    mainWin.show()
+    mainWin.focus()
+  })
+}
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -75,6 +93,7 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return // losing second instance — quitting; don't touch tmux
   settingsStore.init()
   settingsStore.registerIpc()
   ptyManager.init(() => settingsStore.get())
@@ -86,8 +105,8 @@ app.whenReady().then(() => {
     generateCommitMessage(cwd, settingsStore.get())
   )
 
-  ipcMain.handle(IPC.ptyGenerateName, (_e, persistKey: string, cwd: string) =>
-    generateTerminalName(ptyManager.captureSession(persistKey), cwd, settingsStore.get())
+  ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
+    generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
   )
 
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
@@ -95,6 +114,12 @@ app.whenReady().then(() => {
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
+
+  // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
+  ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
+    if (process.platform !== 'darwin' || !app.dock) return
+    app.dock.setBadge(count > 0 ? String(count) : '')
+  })
 
   // Show an OS notification — but only when the window is in the background. Clicking it
   // brings the app forward and asks the renderer to focus the originating node.
@@ -206,6 +231,7 @@ app.whenReady().then(() => {
   mainWin = win
   initUpdater(win)
   initClaudeHooks(win)
+  initBridge(win, ptyManager)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

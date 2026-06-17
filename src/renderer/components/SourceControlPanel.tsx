@@ -195,9 +195,12 @@ export function SourceControlPanel({
             </div>
 
             <div className="drawer__body scm-body">
-              {status.ghAvailable && !status.ghAuthed && (
+              {/* Only nag when gh is actually needed (publishing a repo with no remote yet).
+                  With a remote, push/pull/sync use git's credential helper (macOS keychain /
+                  the same creds your IDE uses), so a gh login isn't required. */}
+              {status.ghAvailable && !status.ghAuthed && !status.hasRemote && (
                 <div className="scm-signin">
-                  <span>Not signed in to GitHub.</span>
+                  <span>Sign in to GitHub to publish this repo.</span>
                   <button
                     onClick={() => {
                       onRunInTerminal('gh auth login')

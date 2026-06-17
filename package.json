@@ -1,6 +1,6 @@
 {
   "name": "node-terminal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": "enes",
   "license": "SEE LICENSE IN LICENSE",
@@ -22,9 +22,17 @@
   "build": {
     "appId": "com.nodeterm.app",
     "productName": "nodeterm",
-    "directories": { "output": "dist", "buildResources": "build" },
-    "files": ["out/**/*", "package.json"],
-    "asarUnpack": ["**/node_modules/node-pty/**"],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.png",
@@ -34,11 +42,26 @@
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": true,
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ]
     },
-    "publish": { "provider": "generic", "url": "https://nodeterm.dev/updates" }
+    "publish": {
+      "provider": "generic",
+      "url": "https://nodeterm.dev/updates"
+    }
   },
   "dependencies": {
     "dompurify": "^3.4.10",

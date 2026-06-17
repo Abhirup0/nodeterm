@@ -34,7 +34,12 @@ export class WorkspaceStore {
   }
 
   async save(workspace: Workspace): Promise<void> {
-    await fs.writeFile(this.filePath, JSON.stringify(workspace, null, 2), 'utf-8')
+    // Atomic write: a crash/kill mid-write to the real file would truncate it, and a
+    // corrupt workspace.json silently loads as empty (total layout loss). Write to a
+    // temp file then rename (atomic on the same filesystem).
+    const tmp = `${this.filePath}.tmp`
+    await fs.writeFile(tmp, JSON.stringify(workspace, null, 2), 'utf-8')
+    await fs.rename(tmp, this.filePath)
   }
 }
 

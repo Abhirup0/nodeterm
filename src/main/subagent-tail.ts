@@ -27,8 +27,37 @@ function textOf(content: unknown): string {
   return ''
 }
 
-// Render one transcript line into readable text. Includes everything substantive
-// (assistant text + tool calls, user/tool results); skips pure-metadata lines.
+// A short, human-readable argument for a tool call (no raw JSON), e.g.
+//   Read → workspace.ts   Bash → npm test   Grep → "NODE_COLORS"
+function toolArg(name: string | undefined, input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const i = input as Record<string, unknown>
+  const base = (p: unknown) => (typeof p === 'string' ? p.split('/').pop() || p : '')
+  const p = i.file_path ?? i.path ?? i.notebook_path
+  if (p) return base(p)
+  if (typeof i.command === 'string') return i.command.replace(/\s+/g, ' ').slice(0, 80)
+  if (typeof i.pattern === 'string') return `"${i.pattern.slice(0, 60)}"`
+  if (typeof i.url === 'string') return i.url
+  if (typeof i.query === 'string') return i.query.slice(0, 60)
+  const txt = i.description ?? i.prompt
+  if (typeof txt === 'string') return txt.replace(/\s+/g, ' ').slice(0, 80)
+  void name
+  return ''
+}
+
+// Collapse a tool result to a one-line summary instead of dumping the full
+// (often line-numbered) content — keeps the panel readable like an activity log.
+function summarizeResult(content: unknown): string {
+  const r = textOf(content).trim()
+  if (!r) return ''
+  const lines = r.split('\n')
+  const first = (lines.find((l) => l.trim()) ?? '').trim().slice(0, 100)
+  const extra = lines.length > 1 ? ` … (+${lines.length - 1} lines)` : ''
+  return `  ↳ ${first}${extra}`
+}
+
+// Render one transcript line as a clean activity log: assistant prose verbatim,
+// tool calls as `$ Tool arg`, tool results as a one-line summary. Skips metadata.
 function formatLine(line: string): string {
   let o: { type?: string; message?: { content?: unknown } }
   try {
@@ -42,8 +71,8 @@ function formatLine(line: string): string {
       .map((c: { type?: string; text?: string; name?: string; input?: unknown }) => {
         if (c.type === 'text') return c.text ?? ''
         if (c.type === 'tool_use') {
-          const input = c.input ? JSON.stringify(c.input) : ''
-          return `→ ${c.name}${input ? ` ${input.slice(0, 120)}` : ''}`
+          const arg = toolArg(c.name, c.input)
+          return `$ ${c.name}${arg ? ` ${arg}` : ''}`
         }
         return ''
       })
@@ -54,10 +83,7 @@ function formatLine(line: string): string {
     return content
       .map((c: { type?: string; text?: string; content?: unknown }) => {
         if (c.type === 'text') return c.text ?? ''
-        if (c.type === 'tool_result') {
-          const r = textOf(c.content)
-          return r ? `⮑ ${r.slice(0, 400)}` : ''
-        }
+        if (c.type === 'tool_result') return summarizeResult(c.content)
         return ''
       })
       .filter(Boolean)

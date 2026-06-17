@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { CanvasNodeState, Project, Viewport, Workspace } from '@shared/types'
+import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '@shared/types'
 import { createProject } from './workspace'
 
 interface ProjectsState {
@@ -14,8 +14,8 @@ interface ProjectsState {
   addProject(name?: string, cwd?: string): Project
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
-  /** Writes the serialized canvas (nodes + viewport) back into a project. */
-  commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport): void
+  /** Writes the serialized canvas (nodes + viewport + bridge links) back into a project. */
+  commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport, bridges?: BridgeLink[]): void
   /** Removes a project; returns the id that should become active (never deletes the last one). */
   deleteProject(id: string): string
 
@@ -56,9 +56,11 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }))
   },
 
-  commitCanvas(id, nodes, viewport) {
+  commitCanvas(id, nodes, viewport, bridges) {
     set((s) => ({
-      projects: s.projects.map((p) => (p.id === id ? { ...p, nodes, viewport } : p))
+      projects: s.projects.map((p) =>
+        p.id === id ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}) } : p
+      )
     }))
   },
 

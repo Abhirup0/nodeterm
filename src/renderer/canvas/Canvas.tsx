@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  addEdge,
   Background,
   BackgroundVariant,
   Controls,
+  MarkerType,
   MiniMap,
   ReactFlow,
   SelectionMode,
+  useEdgesState,
   useNodesState,
   useReactFlow,
+  type Connection,
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
@@ -59,7 +63,7 @@ import { LoopNode } from '../nodes/LoopNode'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import {
-  CLAUDE_LAUNCH,
+  claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   createClaudeNode,
   createDiffNode,
@@ -70,14 +74,30 @@ import {
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
+  setBridgeConfigPath,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
 
 const GRID = 24
 
+// Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
+// memo doesn't allocate fresh arrays on every node change (e.g. each drag frame).
+const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
+  ephemeralNodes: [],
+  ephemeralEdges: []
+}
+
 export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
+  // Persistent bridge links between Claude nodes (separate from ephemeral subagent/loop edges).
+  const [bridgeEdges, setBridgeEdges, onBridgeEdgesChange] = useEdgesState<Edge>([])
+  const bridgeEdgesRef = useRef<Edge[]>([])
+  bridgeEdgesRef.current = bridgeEdges
+  // Transient per-edge activity (count + paused flag) shown while messages flow.
+  const [bridgeActivity, setBridgeActivity] = useState<
+    Record<string, { count: number; stopped: boolean }>
+  >({})
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
@@ -110,7 +130,7 @@ export function Canvas() {
   const committedRef = useRef<CanvasNode[]>([])
   const draggingRef = useRef(false)
   const [, bumpHist] = useState(0)
-  const { setViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
+  const { setViewport, getViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
     useReactFlow()
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
@@ -140,6 +160,12 @@ export function Canvas() {
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
   const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
+    // Common case: no /loop running and no subagents → return a stable empty result so
+    // this memo (which depends on `nodes`, i.e. recomputes every drag frame) stays cheap
+    // and doesn't churn array identity downstream.
+    const hasLoops = Object.values(claudeById).some((s) => s.loop)
+    const hasAgents = Object.keys(agentById).length > 0
+    if (!hasLoops && !hasAgents) return NO_EPHEMERAL
     // Explicit width/height for an ephemeral node (so it resizes like any other node).
     // Defaults switch with expand; a user resize override wins.
     const dims = (id: string, baseW: number, expW: number, baseH: number, expH: number) => {
@@ -181,6 +207,7 @@ export function Canvas() {
       eEdges.push({
         id: `e-${lid}`,
         source: pid,
+        sourceHandle: 'flow-out',
         target: lid,
         animated: st.state === 'working',
         style: { stroke: '#bf7af0', strokeWidth: 1.5 }
@@ -227,6 +254,7 @@ export function Canvas() {
         eEdges.push({
           id: `e-${cid}`,
           source: pid,
+          sourceHandle: 'flow-out',
           target: cid,
           animated: v.state === 'working',
           style: { stroke: '#d97757', strokeWidth: 1.5 }
@@ -236,9 +264,52 @@ export function Canvas() {
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
   }, [agentById, claudeById, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
 
+  // Merge the persisted nodes with the ephemeral ones once per change (not per render),
+  // so React Flow's array-identity short-circuit holds while panning/zooming.
+  const allNodes = useMemo(
+    () => (ephemeralNodes.length ? [...nodes, ...ephemeralNodes] : nodes),
+    [nodes, ephemeralNodes]
+  )
+
+  // Bridge edges decorated with live activity (count badge + animation while messaging).
+  const accent = settings.accent
+  const displayEdges = useMemo(() => {
+    const decorated = bridgeEdges.map((e) => {
+      const act = bridgeActivity[e.id]
+      const sel = !!e.selected
+      const stroke = sel ? '#ffffff' : act?.stopped ? '#ff9f0a' : accent
+      return {
+        ...e,
+        type: 'default',
+        sourceHandle: 'bridge-out',
+        targetHandle: 'bridge-in',
+        animated: !!act && !act.stopped,
+        label: act
+          ? act.stopped
+            ? `⇄ paused (${act.count})`
+            : `⇄ ${act.count}`
+          : sel
+            ? '⇄ bridge — ⌫ to remove'
+            : '⇄ bridge',
+        labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
+        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+        labelBgPadding: [6, 3] as [number, number],
+        labelBgBorderRadius: 5,
+        style: { stroke, strokeWidth: sel ? 3.5 : 2 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 },
+        markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 }
+      }
+    })
+    return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
+  }, [bridgeEdges, bridgeActivity, ephemeralEdges, accent])
+
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
+    // Bridge MCP config path → new Claude nodes launch with `--mcp-config` (Session Bridge).
+    void window.nodeTerminal.bridge.configPath().then((p) => {
+      if (!cancelled && p) setBridgeConfigPath(p)
+    })
     useSettings
       .getState()
       .hydrate()
@@ -267,6 +338,8 @@ export function Canvas() {
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
+    setBridgeEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
+    setBridgeActivity({})
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -301,7 +374,15 @@ export function Canvas() {
   // ---- persistence helpers ----
   const commitActiveToStore = useCallback(() => {
     const id = useProjects.getState().activeProjectId
-    if (id) useProjects.getState().commitCanvas(id, flowToNodeStates(nodesRef.current), viewportRef.current)
+    if (id)
+      useProjects
+        .getState()
+        .commitCanvas(
+          id,
+          flowToNodeStates(nodesRef.current),
+          viewportRef.current,
+          bridgeEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+        )
   }, [])
 
   const writeDisk = useCallback(async () => {
@@ -400,6 +481,132 @@ export function Canvas() {
     },
     [onNodesChange, markDirty]
   )
+
+  const isClaudeNode = useCallback((id: string) => {
+    const n = nodesRef.current.find((x) => x.id === id)
+    return n?.type === 'terminal' && ((n.data.tags as string[]) ?? []).includes('claude')
+  }, [])
+
+  // Draw a bridge link between two Claude nodes (the connection that lets them message).
+  const onConnect = useCallback(
+    (c: Connection) => {
+      if (!c.source || !c.target || c.source === c.target) return
+      if (!isClaudeNode(c.source) || !isClaudeNode(c.target)) return
+      // No duplicate link (in either direction).
+      const exists = bridgeEdgesRef.current.some(
+        (e) =>
+          (e.source === c.source && e.target === c.target) ||
+          (e.source === c.target && e.target === c.source)
+      )
+      if (exists) return
+      setBridgeEdges((es) =>
+        addEdge(
+          { id: `bridge-${c.source}-${c.target}`, source: c.source!, target: c.target!, type: 'default' },
+          es
+        )
+      )
+      markDirty()
+    },
+    [isClaudeNode, setBridgeEdges, markDirty]
+  )
+
+  // Double-click a bridge link to remove it (ephemeral subagent/loop edges are left alone).
+  const onEdgeDoubleClick = useCallback(
+    (_e: React.MouseEvent, edge: Edge) => {
+      if (!bridgeEdgesRef.current.some((b) => b.id === edge.id)) return
+      setBridgeEdges((es) => es.filter((b) => b.id !== edge.id))
+      markDirty()
+    },
+    [setBridgeEdges, markDirty]
+  )
+
+  // Prune links whose endpoints were deleted, then push the topology to main (debounced) so
+  // the bridge MCP server can resolve `list_bridge_nodes` / route `send_to_bridge`.
+  useEffect(() => {
+    const ids = new Set(nodes.map((n) => n.id))
+    const valid = bridgeEdges.filter((e) => ids.has(e.source) && ids.has(e.target))
+    if (valid.length !== bridgeEdges.length) {
+      setBridgeEdges(valid)
+      return // re-runs with the pruned set
+    }
+    const titleOf = (id: string) =>
+      (nodes.find((n) => n.id === id)?.data.title as string) || id
+    const topo: Record<string, { id: string; title: string }[]> = {}
+    for (const e of valid) {
+      ;(topo[e.source] ??= []).push({ id: e.target, title: titleOf(e.target) })
+      ;(topo[e.target] ??= []).push({ id: e.source, title: titleOf(e.source) })
+    }
+    const t = setTimeout(() => void window.nodeTerminal.bridge.setTopology(topo), 150)
+    return () => clearTimeout(t)
+  }, [bridgeEdges, nodes, setBridgeEdges])
+
+  // A bridge message was delivered (or paused): pulse the matching edge with a live count.
+  useEffect(() => {
+    return window.nodeTerminal.bridge.onMessage((m) => {
+      const edge = bridgeEdgesRef.current.find(
+        (e) =>
+          (e.source === m.from && e.target === m.to) || (e.source === m.to && e.target === m.from)
+      )
+      if (!edge) return
+      const id = edge.id
+      setBridgeActivity((prev) => ({ ...prev, [id]: { count: m.count, stopped: !!m.stopped } }))
+      // Clear the pulse after a beat (keep the paused flag visible a little longer).
+      const ttl = m.stopped ? 8000 : 2500
+      window.setTimeout(() => {
+        setBridgeActivity((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+      }, ttl)
+    })
+  }, [])
+
+  // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
+  useEffect(() => {
+    const count = Object.values(claudeById).filter((s) => s?.unread).length
+    window.nodeTerminal.setBadgeCount(count)
+  }, [claudeById])
+
+  // Prevent a stray file drop (outside a terminal body) from navigating the whole window to
+  // the dropped file. Terminal nodes handle their own drop and stopPropagation, so this only
+  // catches drops on empty canvas / other UI.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => {
+      if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault()
+    }
+    window.addEventListener('dragover', prevent)
+    window.addEventListener('drop', prevent)
+    return () => {
+      window.removeEventListener('dragover', prevent)
+      window.removeEventListener('drop', prevent)
+    }
+  }, [])
+
+  // Pinch-zoom (trackpad / ctrl+wheel) must keep working even over a focused terminal, which
+  // carries `nowheel` so plain scroll stays inside xterm. React Flow ignores wheel over a
+  // nowheel element, so we zoom-to-cursor manually there; on open canvas React Flow handles it.
+  useEffect(() => {
+    const wrap = flowWrapRef.current
+    if (!wrap) return
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return // only the pinch gesture (browsers deliver it as ctrl+wheel)
+      const target = e.target as Element | null
+      if (!target?.closest('.nowheel')) return // open canvas → leave it to React Flow
+      e.preventDefault()
+      e.stopPropagation()
+      const { x, y, zoom } = getViewport()
+      const rect = wrap.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const py = e.clientY - rect.top
+      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-e.deltaY * 0.01)))
+      if (next === zoom) return
+      const k = next / zoom
+      setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
+    }
+    wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
+  }, [getViewport, setViewport])
 
   /** Flow-space point at the center of the visible canvas (for dock-added nodes). */
   const viewCenter = useCallback(() => {
@@ -545,7 +752,17 @@ export function Canvas() {
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
-      if (!ids.length) return
+      if (!ids.length) {
+        // No node selected → remove any selected bridge link(s).
+        const edgeIds = bridgeEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
+        if (edgeIds.length) {
+          e.preventDefault()
+          const drop = new Set(edgeIds)
+          setBridgeEdges((es) => es.filter((b) => !drop.has(b.id)))
+          markDirty()
+        }
+        return
+      }
       e.preventDefault()
       setConfirm({
         message: `Delete ${ids.length} ${ids.length > 1 ? 'nodes' : 'node'}? Open terminal sessions will end.`,
@@ -557,7 +774,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [deleteNodes])
+  }, [deleteNodes, setBridgeEdges, markDirty])
 
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
@@ -635,7 +852,7 @@ export function Canvas() {
       const copy = duplicateNode(source)
       copy.data = {
         ...copy.data,
-        initialCommand: `${CLAUDE_LAUNCH} -r ${originalId}`,
+        initialCommand: `${claudeLaunchCommand()} -r ${originalId}`,
         title: `${source.data.title} (original)`
       }
       copy.position = {
@@ -861,25 +1078,37 @@ export function Canvas() {
   )
 
   // Title/color/text edits go through updateNodeData; watch them so they persist too.
+  // Computed only when the `nodes` array changes (not on every Canvas render — e.g. zoom
+  // readout, hover, menu — which would otherwise rebuild this whole string each frame).
+  const dataSignature = useMemo(
+    () =>
+      nodes
+        .map(
+          (n) =>
+            `${n.id}:${n.data.title}:${n.data.color}:${n.data.text ?? ''}:${
+              n.data.collapsed ? 1 : 0
+            }:${((n.data.tags as string[]) ?? []).join(',')}`
+        )
+        .join('|'),
+    [nodes]
+  )
   useEffect(() => {
     markDirty()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    nodes
-      .map(
-        (n) =>
-          `${n.id}:${n.data.title}:${n.data.color}:${n.data.text ?? ''}:${
-            n.data.collapsed ? 1 : 0
-          }:${((n.data.tags as string[]) ?? []).join(',')}`
-      )
-      .join('|')
-  ])
+  }, [dataSignature, markDirty])
 
+  const zoomRafRef = useRef<number | null>(null)
   const onMove = useCallback(
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
-      setZoomPct(Math.round(vp.zoom * 100))
       markDirty()
+      // Coalesce the zoom-% readout to one update per frame so a zoom gesture doesn't
+      // re-render the whole Canvas on every intermediate viewport event.
+      if (zoomRafRef.current == null) {
+        zoomRafRef.current = requestAnimationFrame(() => {
+          zoomRafRef.current = null
+          setZoomPct(Math.round(viewportRef.current.zoom * 100))
+        })
+      }
     },
     [markDirty]
   )
@@ -1226,10 +1455,13 @@ export function Canvas() {
 
       <div className="flow-wrap" ref={flowWrapRef}>
         <ReactFlow
-          nodes={ephemeralNodes.length ? [...nodes, ...ephemeralNodes] : nodes}
-          edges={ephemeralEdges}
+          nodes={allNodes}
+          edges={displayEdges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
+          onEdgesChange={onBridgeEdgesChange}
+          onConnect={onConnect}
+          onEdgeDoubleClick={onEdgeDoubleClick}
           onMove={onMove}
           onNodeDragStart={() => (draggingRef.current = true)}
           onNodeDragStop={() => {

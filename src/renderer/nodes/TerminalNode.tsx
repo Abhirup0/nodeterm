@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
+import {
+  Handle,
+  NodeResizer,
+  Position,
+  useReactFlow,
+  useUpdateNodeInternals,
+  type NodeProps
+} from '@xyflow/react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { renderMarkdown } from '../lib/markdown'
@@ -12,21 +19,33 @@ import { useClaudeStatus } from '../state/claudeStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
+/** Backslash-escape shell-special characters, like a native terminal does on file drop. */
+function escapeDroppedPath(p: string): string {
+  return p.replace(/([ \t"'`\\()&;|<>$!*?[\]{}#~])/g, '\\$1')
+}
+
 /**
  * A single terminal node: header (collapse + color + title + close), optional tag chips,
  * and a real xterm.js terminal. A hover guard delays entering the terminal so the canvas
  * can be panned across terminals without grabbing focus. Cmd/Ctrl+M (while hovered)
- * toggles a markdown view of the terminal's output.
+ * toggles a markdown view of the terminal's output. Files dropped from Finder are pasted
+ * as their (escaped) paths, like a native terminal — so Claude can read dropped images.
  */
 export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes } = useReactFlow()
-  const settings = useSettings((s) => s.settings)
+  // Scoped selectors (not the whole settings object) so this node only re-renders when a
+  // field it actually uses changes — not on every unrelated settings edit.
+  const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)
+  const fontSize = useSettings((s) => s.settings.fontSize)
+  const fontFamily = useSettings((s) => s.settings.fontFamily)
+  const cursorBlink = useSettings((s) => s.settings.cursorBlink)
   const bodyRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
+  const [dropping, setDropping] = useState(false)
   const [naming, setNaming] = useState(false)
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
@@ -36,6 +55,13 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const tags = (data.tags as string[]) ?? []
   const isClaude = tags.includes('claude')
   const status = useClaudeStatus((s) => s.byId[id])
+  const updateNodeInternals = useUpdateNodeInternals()
+
+  // The bridge handles are added/positioned dynamically for Claude nodes; make React Flow
+  // re-measure them so edges anchor to the (centered) handle, not a stale position.
+  useEffect(() => {
+    if (isClaude) updateNodeInternals(id)
+  }, [isClaude, id, updateNodeInternals])
 
   // Terminal lifecycle — set up exactly once.
   useEffect(() => {
@@ -95,7 +121,29 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           return
         }
         sessionId = sid
-        cleanups.push(transport.onData(sid, (chunk) => term.write(chunk)))
+        // Flow control: track xterm's unprocessed write backlog (bytes handed to
+        // term.write but not yet parsed). Past a high watermark we pause the source so
+        // a flood can't grow this buffer without bound; we resume once it drains.
+        let pending = 0
+        let paused = false
+        const HIGH_WATER = 1 << 20 // 1 MB
+        const LOW_WATER = 1 << 18 //  256 KB
+        cleanups.push(
+          transport.onData(sid, (chunk) => {
+            pending += chunk.length
+            if (!paused && pending > HIGH_WATER) {
+              paused = true
+              transport.setFlow(sid, false)
+            }
+            term.write(chunk, () => {
+              pending -= chunk.length
+              if (paused && pending < LOW_WATER) {
+                paused = false
+                transport.setFlow(sid, true)
+              }
+            })
+          })
+        )
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
@@ -140,15 +188,15 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.fontSize = settings.fontSize
-    term.options.fontFamily = settings.fontFamily
-    term.options.cursorBlink = settings.cursorBlink
+    term.options.fontSize = fontSize
+    term.options.fontFamily = fontFamily
+    term.options.cursorBlink = cursorBlink
     try {
       fitRef.current?.fit()
     } catch {
       // ignore
     }
-  }, [settings.fontSize, settings.fontFamily, settings.cursorBlink])
+  }, [fontSize, fontFamily, cursorBlink])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
@@ -175,7 +223,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       termRef.current?.focus()
       useClaudeStatus.getState().setActive(id, true)
       useClaudeStatus.getState().clearUnread(id)
-    }, settings.panHoverDelay)
+    }, panHoverDelay)
   }
   const onBodyLeave = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
@@ -187,6 +235,38 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // terminal doesn't grab focus mid-drag; restart it on release.
   const onGuardDown = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
+  }
+
+  // ---- file drop: paste dropped file paths into the terminal (native-terminal behavior) ----
+  const onBodyDragOver = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dropping) setDropping(true)
+  }
+  const onBodyDragLeave = (e: React.DragEvent) => {
+    const rt = e.relatedTarget as Node | null
+    if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
+  }
+  const onBodyDrop = (e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer.files)
+    setDropping(false)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    const paths = files
+      .map((f) => window.nodeTerminal.getPathForFile(f))
+      .filter(Boolean)
+      .map(escapeDroppedPath)
+    if (!paths.length) return
+    const term = termRef.current
+    if (!term) return
+    // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
+    if (dwellRef.current) clearTimeout(dwellRef.current)
+    setArmed(false)
+    term.focus()
+    term.paste(paths.join(' ') + ' ')
+    useClaudeStatus.getState().setActive(id, true)
   }
 
   const nameWithAi = async () => {
@@ -224,13 +304,34 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       onMouseLeave={() => (hoveredRef.current = false)}
     >
       <NodeResizer minWidth={260} minHeight={160} isVisible={selected && !collapsed} color="#0a84ff" />
-      {/* Invisible source handle so edges to subagent nodes can attach. */}
+      {/* Invisible source handle so edges to subagent/loop nodes can attach. */}
       <Handle
+        id="flow-out"
         type="source"
         position={Position.Bottom}
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
       />
+      {/* Bridge link handles (Claude nodes only): drag right→left to connect two sessions.
+          Vertically centered on the side edges; raised above the body so they're never buried. */}
+      {isClaude && (
+        <>
+          <Handle
+            id="bridge-out"
+            type="source"
+            position={Position.Right}
+            className="bridge-handle bridge-handle--out"
+            data-tip="Bridge out — drag to another Claude node to link their sessions"
+          />
+          <Handle
+            id="bridge-in"
+            type="target"
+            position={Position.Left}
+            className="bridge-handle bridge-handle--in"
+            data-tip="Bridge in — drop a link here to connect this Claude session"
+          />
+        </>
+      )}
 
       <div className="term-node__header">
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>
@@ -342,7 +443,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       )}
 
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
-      <div className="term-node__body" onMouseEnter={onBodyEnter} onMouseLeave={onBodyLeave}>
+      <div
+        className={`term-node__body${dropping ? ' dropping' : ''}`}
+        onMouseEnter={onBodyEnter}
+        onMouseLeave={onBodyLeave}
+        onDragOver={onBodyDragOver}
+        onDragLeave={onBodyDragLeave}
+        onDrop={onBodyDrop}
+      >
         <div className="term-node__xterm nodrag nowheel" ref={bodyRef} />
         {armed && !mdMode && (
           <div
