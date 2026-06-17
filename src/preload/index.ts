@@ -120,6 +120,13 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.usageUpdate, handler)
     }
   },
+  context: {
+    onUpdate: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.contextUpdate, handler)
+      return () => ipcRenderer.removeListener(IPC.contextUpdate, handler)
+    }
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),
