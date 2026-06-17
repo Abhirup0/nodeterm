@@ -17,7 +17,16 @@ export interface ClaudeNodeStatus {
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
   /** Set when running /loop, /schedule or /cron (heuristic); shown as a connected node. */
-  loop?: { count: number; prompt?: string; items: string[]; kind: 'loop' | 'schedule' | 'cron' }
+  loop?: {
+    count: number
+    kind: 'loop' | 'schedule' | 'cron'
+    /** Schedule expression (cron) shown as a sub-label. */
+    schedule?: string
+    /** The task/prompt — shown in full and re-issued by the node's Play button. */
+    task?: string
+    /** Per-iteration summaries (in-session /loop). */
+    items: string[]
+  }
 }
 
 interface ClaudeStatusState {
@@ -31,7 +40,12 @@ interface ClaudeStatusState {
   markUnread(id: string): void
   clearUnread(id: string): void
   /** Start (active=true, resets) or stop a /loop, /schedule or /cron indicator. */
-  setLoop(id: string, active: boolean, kind?: 'loop' | 'schedule' | 'cron', prompt?: string): void
+  setLoop(
+    id: string,
+    active: boolean,
+    kind?: 'loop' | 'schedule' | 'cron',
+    opts?: { schedule?: string; task?: string }
+  ): void
   /** Record a /loop iteration (count++ and append its summary). No-op if not looping. */
   bumpLoop(id: string, message?: string): void
   remove(id: string): void
@@ -123,11 +137,16 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       return { byId }
     }),
 
-  setLoop: (id, active, kind = 'loop', prompt) =>
+  setLoop: (id, active, kind = 'loop', opts) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
       if (active)
-        return { byId: { ...s.byId, [id]: { ...prev, loop: { count: 0, prompt, items: [], kind } } } }
+        return {
+          byId: {
+            ...s.byId,
+            [id]: { ...prev, loop: { count: 0, kind, schedule: opts?.schedule, task: opts?.task, items: [] } }
+          }
+        }
       if (!prev.loop) return s
       const { loop: _drop, ...rest } = prev
       return { byId: { ...s.byId, [id]: rest } }
@@ -139,7 +158,7 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       // Only count in-session /loop turns; /schedule and /cron run in the background.
       if (!prev?.loop || prev.loop.kind !== 'loop') return s
       const items = message
-        ? [...prev.loop.items, message.replace(/\s+/g, ' ').trim().slice(0, 200)].slice(-50)
+        ? [...prev.loop.items, message.trim().slice(0, 4000)].slice(-100)
         : prev.loop.items
       return {
         byId: { ...s.byId, [id]: { ...prev, loop: { ...prev.loop, count: prev.loop.count + 1, items } } }

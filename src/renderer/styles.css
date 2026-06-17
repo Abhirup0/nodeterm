@@ -2668,11 +2668,37 @@ body,
 }
 
 .loop-node__count {
-  margin-left: auto;
   font-size: 10.5px;
   font-weight: 700;
   color: #bf7af0;
   font-variant-numeric: tabular-nums;
+}
+
+.loop-node__sched {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.loop-node__play {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(191, 122, 240, 0.18);
+  border: 1px solid #bf7af0;
+  border-radius: 6px;
+  color: #bf7af0;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.loop-node__play:hover {
+  background: rgba(191, 122, 240, 0.32);
 }
 
 .loop-node__task {

@@ -151,13 +151,15 @@ export function Canvas() {
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
         draggable: true,
         data: {
-          title: st.loop.prompt ?? '',
+          title: st.loop.task ?? '',
           color: '#bf7af0',
           group: null,
           loopCount: st.loop.count,
           loopItems: st.loop.items,
           loopActive: st.state === 'working',
-          loopKind: st.loop.kind
+          loopKind: st.loop.kind,
+          loopSchedule: st.loop.schedule,
+          loopTask: st.loop.task
         }
       } as CanvasNode)
       eEdges.push({
@@ -952,7 +954,7 @@ export function Canvas() {
           an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
           {
             const m = (e.prompt ?? '').match(/^\s*\/(loop|schedule|cron)\b/)
-            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', e.prompt)
+            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.prompt })
           }
           break
         case 'Stop':
@@ -987,10 +989,7 @@ export function Canvas() {
               if (sk === 'loop' || sk === 'schedule' || sk === 'cron') kind = sk
             } else if (tool === 'CronCreate') kind = 'cron'
             else if (tool === 'ScheduleWakeup') kind = 'loop'
-            if (kind) {
-              const label = [e.schedule, e.taskLabel].filter(Boolean).join(' · ')
-              cs.setLoop(e.nodeId, true, kind, label || undefined)
-            }
+            if (kind) cs.setLoop(e.nodeId, true, kind, { schedule: e.schedule, task: e.taskLabel })
           }
           break
         }
