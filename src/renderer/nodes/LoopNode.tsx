@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { useEffect, useRef } from 'react'
+import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
+import { useAgentNodes } from '../state/agentNodes'
 
 /**
- * Ephemeral node visualizing a /loop, /schedule or /cron set up on a Claude terminal.
- * Shows the kind, schedule, full task, and (for in-session loops) per-iteration summaries.
- * The Play button re-issues the task to the parent terminal (manual trigger).
+ * Loop/schedule/cron node — first-class (select/drag/resize). Shows the kind, schedule, full
+ * task, and (for in-session loops) per-iteration summaries. Play re-issues the task to the
+ * parent terminal (manual trigger).
  */
-export function LoopNode({ id, data }: NodeProps<CanvasNode>) {
+export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const count = (data.loopCount as number) ?? 0
   const items = (data.loopItems as string[]) ?? []
   const active = !!data.loopActive
@@ -15,8 +16,9 @@ export function LoopNode({ id, data }: NodeProps<CanvasNode>) {
   const task = (data.loopTask as string) || ''
   const kind = (data.loopKind as string) || 'loop'
   const label = kind.charAt(0).toUpperCase() + kind.slice(1)
-  const [expanded, setExpanded] = useState(false)
+  const expanded = !!data.ephExpanded
   const bodyRef = useRef<HTMLDivElement>(null)
+  const toggle = () => useAgentNodes.getState().toggleExpanded(id)
 
   useEffect(() => {
     if (expanded && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
@@ -29,13 +31,19 @@ export function LoopNode({ id, data }: NodeProps<CanvasNode>) {
 
   return (
     <div className={`loop-node${active ? ' working' : ''}`}>
+      <NodeResizer isVisible={selected} minWidth={180} minHeight={84} color="#bf7af0" />
       <Handle type="target" position={Position.Top} isConnectable={false} />
-      <div
-        className="loop-node__head nodrag"
-        onClick={() => setExpanded((v) => !v)}
-        title={expanded ? 'Collapse' : 'Click to expand'}
-        style={{ cursor: 'pointer' }}
-      >
+      <div className="loop-node__head nodrag" onClick={toggle} style={{ cursor: 'pointer' }}>
+        <button
+          className="loop-node__expand"
+          title={expanded ? 'Collapse' : 'Open'}
+          onClick={(e) => {
+            e.stopPropagation()
+            toggle()
+          }}
+        >
+          {expanded ? '▾' : '▸'}
+        </button>
         <span className="loop-node__dot" />
         <span className="loop-node__type">{label}</span>
         {count > 0 && <span className="loop-node__count">×{count}</span>}
@@ -46,9 +54,7 @@ export function LoopNode({ id, data }: NodeProps<CanvasNode>) {
           </button>
         )}
       </div>
-      {(task || schedule) && !expanded && (
-        <div className="loop-node__task">{task || schedule}</div>
-      )}
+      {(task || schedule) && !expanded && <div className="loop-node__task">{task || schedule}</div>}
       {expanded && (
         <div className="loop-node__items nodrag nowheel" ref={bodyRef}>
           {task ? <div className="loop-node__task-full">{task}</div> : null}

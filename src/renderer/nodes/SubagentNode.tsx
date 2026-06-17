@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
+import { useAgentNodes } from '../state/agentNodes'
 
 function fmtDur(ms: number): string {
   const s = Math.round(ms / 1000)
@@ -13,11 +14,11 @@ function fmtTokens(n: number): string {
 }
 
 /**
- * Display-only node visualizing a subagent a Claude session spawned. Shows type + task +
- * a live timer while working and duration/tokens/tool-uses when done. Click to expand and
- * read what it produced (subagents have no terminal — this is their result content).
+ * Subagent node — a first-class canvas node (select/drag/resize) visualizing a subagent the
+ * Claude session spawned. Shows type + task + live timer / duration-tokens; expand to read
+ * its live transcript in a terminal-styled panel (subagents have no PTY).
  */
-export function SubagentNode({ data }: NodeProps<CanvasNode>) {
+export function SubagentNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const working = data.subagentState !== 'done'
   const startedAt = (data.subagentStartedAt as number) || 0
   const durationMs = data.subagentDurationMs as number | undefined
@@ -26,15 +27,14 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
   const result = (data.subagentResult as string) || ''
   const activity = (data.subagentActivity as string) || ''
   const body = activity || result
-  const [expanded, setExpanded] = useState(false)
+  const expanded = !!data.ephExpanded
   const bodyRef = useRef<HTMLDivElement>(null)
+  const toggle = () => useAgentNodes.getState().toggleExpanded(id)
 
-  // Auto-scroll the live transcript to the bottom as it grows (while expanded).
   useEffect(() => {
     if (expanded && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
   }, [body, expanded])
 
-  // Live elapsed timer while working.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!working) return
@@ -52,20 +52,16 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
     .join(' · ')
 
   return (
-    <div className={`subagent-node${working ? ' working' : ' done'}${expanded ? ' expanded' : ''}`}>
+    <div className={`subagent-node${working ? ' working' : ' done'}`}>
+      <NodeResizer isVisible={selected} minWidth={180} minHeight={84} color="#d97757" />
       <Handle type="target" position={Position.Top} isConnectable={false} />
-      <div
-        className="subagent-node__head nodrag"
-        onClick={() => setExpanded((v) => !v)}
-        title={expanded ? 'Collapse' : 'Open output'}
-        style={{ cursor: 'pointer' }}
-      >
+      <div className="subagent-node__head nodrag" onClick={toggle} style={{ cursor: 'pointer' }}>
         <button
           className="subagent-node__expand"
           title={expanded ? 'Collapse' : 'Open output'}
           onClick={(e) => {
             e.stopPropagation()
-            setExpanded((v) => !v)
+            toggle()
           }}
         >
           {expanded ? '▾' : '▸'}
@@ -74,9 +70,7 @@ export function SubagentNode({ data }: NodeProps<CanvasNode>) {
         <span className="subagent-node__type">{(data.subagentType as string) || 'subagent'}</span>
         <span className="subagent-node__state">{working ? 'working' : 'done'}</span>
       </div>
-      {data.title && !expanded && (
-        <div className="subagent-node__task">{data.title as string}</div>
-      )}
+      {data.title && !expanded && <div className="subagent-node__task">{data.title as string}</div>}
       {meta && <div className="subagent-node__meta">{meta}</div>}
       {expanded && (
         <div className="subagent-node__term nodrag nowheel" ref={bodyRef}>

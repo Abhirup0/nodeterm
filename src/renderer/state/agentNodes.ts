@@ -34,9 +34,13 @@ export interface SubagentResult {
 
 interface AgentNodesState {
   byId: Record<string, SubagentViz>
-  /** User-dragged position overrides for ephemeral nodes (subagent ids + `loop-<parentId>`). */
+  /** Per-ephemeral-node UI overrides (keyed by node id: subagent ids + `loop-<parentId>`). */
   positions: Record<string, { x: number; y: number }>
+  sizes: Record<string, { width: number; height: number }>
+  expanded: Record<string, boolean>
   setPosition(id: string, pos: { x: number; y: number }): void
+  setSize(id: string, size: { width: number; height: number }): void
+  toggleExpanded(id: string): void
   start(toolUseId: string, viz: Omit<SubagentViz, 'state' | 'startedAt'>): void
   finish(toolUseId: string, result: SubagentResult): void
   /** Append a chunk of the subagent's live transcript. */
@@ -48,8 +52,12 @@ interface AgentNodesState {
 export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
   positions: {},
+  sizes: {},
+  expanded: {},
 
   setPosition: (id, pos) => set((s) => ({ positions: { ...s.positions, [id]: pos } })),
+  setSize: (id, size) => set((s) => ({ sizes: { ...s.sizes, [id]: size } })),
+  toggleExpanded: (id) => set((s) => ({ expanded: { ...s.expanded, [id]: !s.expanded[id] } })),
 
   start: (toolUseId, viz) =>
     set((s) => ({
@@ -75,11 +83,16 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
     set((s) => {
       const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
       const byId = { ...s.byId }
-      for (const id of ids) delete byId[id]
-      // Also drop position overrides for those subagents and the parent's loop node.
       const positions = { ...s.positions }
-      for (const id of ids) delete positions[id]
-      delete positions[`loop-${parentNodeId}`]
-      return { byId, positions }
+      const sizes = { ...s.sizes }
+      const expanded = { ...s.expanded }
+      const drop = [...ids, `loop-${parentNodeId}`]
+      for (const id of ids) delete byId[id]
+      for (const id of drop) {
+        delete positions[id]
+        delete sizes[id]
+        delete expanded[id]
+      }
+      return { byId, positions, sizes, expanded }
     })
 }))

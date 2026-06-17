@@ -134,10 +134,21 @@ export function Canvas() {
   // Laid out fanning below the parent Claude node.
   const agentById = useAgentNodes((s) => s.byId)
   const ephemeralPos = useAgentNodes((s) => s.positions)
+  const ephSizes = useAgentNodes((s) => s.sizes)
+  const ephExpanded = useAgentNodes((s) => s.expanded)
   const claudeById = useClaudeStatus((s) => s.byId)
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
   const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
+    // Explicit width/height for an ephemeral node (so it resizes like any other node).
+    // Defaults switch with expand; a user resize override wins.
+    const dims = (id: string, baseW: number, expW: number, baseH: number, expH: number) => {
+      const sz = ephSizes[id]
+      const exp = !!ephExpanded[id]
+      const width = sz?.width ?? (exp ? expW : baseW)
+      const height = sz?.height ?? (exp ? expH : baseH)
+      return { width, height, style: { width, height } }
+    }
     const eNodes: CanvasNode[] = []
     const eEdges: Edge[] = []
     // Loop nodes: one per terminal node currently running a /loop, placed below-left.
@@ -153,6 +164,7 @@ export function Canvas() {
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
         draggable: true,
         selected: !!ephSel[lid],
+        ...dims(lid, 230, 460, 92, 320),
         data: {
           title: st.loop.task ?? '',
           color: '#bf7af0',
@@ -162,7 +174,8 @@ export function Canvas() {
           loopActive: st.state === 'working',
           loopKind: st.loop.kind,
           loopSchedule: st.loop.schedule,
-          loopTask: st.loop.task
+          loopTask: st.loop.task,
+          ephExpanded: !!ephExpanded[lid]
         }
       } as CanvasNode)
       eEdges.push({
@@ -195,6 +208,7 @@ export function Canvas() {
           },
           draggable: true,
           selected: !!ephSel[cid],
+          ...dims(cid, 230, 480, 96, 340),
           data: {
             title: v.label ?? '',
             color: '#d97757',
@@ -206,7 +220,8 @@ export function Canvas() {
             subagentTokens: v.tokens,
             subagentToolUses: v.toolUses,
             subagentResult: v.result,
-            subagentActivity: v.activity
+            subagentActivity: v.activity,
+            ephExpanded: !!ephExpanded[cid]
           }
         } as CanvasNode)
         eEdges.push({
@@ -219,7 +234,7 @@ export function Canvas() {
       })
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
-  }, [agentById, claudeById, ephemeralPos, ephSel, nodes])
+  }, [agentById, claudeById, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
@@ -374,6 +389,8 @@ export function Canvas() {
         if ('id' in c && isEph(c.id)) {
           if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
           else if (c.type === 'select') setEphSel((prev) => ({ ...prev, [c.id]: c.selected }))
+          else if (c.type === 'dimensions' && c.dimensions && c.resizing)
+            useAgentNodes.getState().setSize(c.id, c.dimensions)
           return false
         }
         return true
@@ -1224,6 +1241,7 @@ export function Canvas() {
             draggingRef.current = false
             markDirty()
           }}
+          onPaneClick={() => setEphSel({})}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
