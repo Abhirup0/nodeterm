@@ -23,6 +23,11 @@ export const IPC = {
   bridgeMessage: 'bridge:message',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
+  appUpdateProgress: 'app:update-progress',
+  appUpdateError: 'app:update-error',
+  appUpdateNotAvailable: 'app:update-not-available',
+  appCheckForUpdates: 'app:check-for-updates',
+  appGetVersion: 'app:get-version',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
