@@ -63,6 +63,7 @@ import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
+import { useContextWindow } from '../state/contextWindow'
 import {
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
@@ -568,6 +569,11 @@ export function Canvas() {
     const count = Object.values(claudeById).filter((s) => s?.unread).length
     window.nodeTerminal.setBadgeCount(count)
   }, [claudeById])
+
+  // Feed per-session context-window fill from main into the transient store.
+  useEffect(() => {
+    return window.nodeTerminal.context.onUpdate((u) => useContextWindow.getState().set(u))
+  }, [])
 
   // Prevent a stray file drop (outside a terminal body) from navigating the whole window to
   // the dropped file. Terminal nodes handle their own drop and stopPropagation, so this only
