@@ -34,6 +34,9 @@ export interface SubagentResult {
 
 interface AgentNodesState {
   byId: Record<string, SubagentViz>
+  /** User-dragged position overrides for ephemeral nodes (subagent ids + `loop-<parentId>`). */
+  positions: Record<string, { x: number; y: number }>
+  setPosition(id: string, pos: { x: number; y: number }): void
   start(toolUseId: string, viz: Omit<SubagentViz, 'state' | 'startedAt'>): void
   finish(toolUseId: string, result: SubagentResult): void
   /** Append a chunk of the subagent's live transcript. */
@@ -44,6 +47,9 @@ interface AgentNodesState {
 
 export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
+  positions: {},
+
+  setPosition: (id, pos) => set((s) => ({ positions: { ...s.positions, [id]: pos } })),
 
   start: (toolUseId, viz) =>
     set((s) => ({
@@ -68,9 +74,12 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
   clearForParent: (parentNodeId) =>
     set((s) => {
       const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
-      if (!ids.length) return s
       const byId = { ...s.byId }
       for (const id of ids) delete byId[id]
-      return { byId }
+      // Also drop position overrides for those subagents and the parent's loop node.
+      const positions = { ...s.positions }
+      for (const id of ids) delete positions[id]
+      delete positions[`loop-${parentNodeId}`]
+      return { byId, positions }
     })
 }))

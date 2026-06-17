@@ -133,6 +133,7 @@ export function Canvas() {
   // Ephemeral subagent nodes + edges (driven by Claude hooks; never persisted / no undo).
   // Laid out fanning below the parent Claude node.
   const agentById = useAgentNodes((s) => s.byId)
+  const ephemeralPos = useAgentNodes((s) => s.positions)
   const claudeById = useClaudeStatus((s) => s.byId)
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     const eNodes: CanvasNode[] = []
@@ -147,9 +148,8 @@ export function Canvas() {
       eNodes.push({
         id: lid,
         type: 'loop',
-        position: { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
-        draggable: false,
-        selectable: false,
+        position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
+        draggable: true,
         data: {
           title: st.loop.prompt ?? '',
           color: '#bf7af0',
@@ -183,12 +183,11 @@ export function Canvas() {
         eNodes.push({
           id: cid,
           type: 'subagent',
-          position: {
+          position: ephemeralPos[cid] ?? {
             x: parent.position.x + (i % COLS) * COL_W,
             y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
           },
-          draggable: false,
-          selectable: false,
+          draggable: true,
           data: {
             title: v.label ?? '',
             color: '#d97757',
@@ -213,7 +212,7 @@ export function Canvas() {
       })
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
-  }, [agentById, claudeById, nodes])
+  }, [agentById, claudeById, ephemeralPos, nodes])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
@@ -360,13 +359,19 @@ export function Canvas() {
   // ---- canvas interactions ----
   const handleNodesChange: typeof onNodesChange = useCallback(
     (changes) => {
-      // Drop changes targeting ephemeral subagent nodes (they live outside the managed state).
+      // Ephemeral nodes (subagent / loop) live outside the managed state. Persist their drag
+      // positions to the agent-nodes store; drop their other changes from the managed updater.
       const eph = useAgentNodes.getState().byId
-      const filtered = changes.filter(
-        (c) => !('id' in c && (c.id in eph || c.id.startsWith('loop-')))
-      )
-      onNodesChange(filtered)
-      if (filtered.some((c) => c.type !== 'select')) markDirty()
+      const isEph = (id: string) => id in eph || id.startsWith('loop-')
+      const managed = changes.filter((c) => {
+        if ('id' in c && isEph(c.id)) {
+          if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
+          return false
+        }
+        return true
+      })
+      onNodesChange(managed)
+      if (managed.some((c) => c.type !== 'select')) markDirty()
     },
     [onNodesChange, markDirty]
   )
