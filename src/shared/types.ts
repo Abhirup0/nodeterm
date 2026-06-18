@@ -18,7 +18,7 @@ export interface PtyCreateOptions {
    * injected at spawn. Defaults to 'claude' for backward compat; the renderer passes a
    * real value in a later phase.
    */
-  agentId?: string
+  agentId?: AgentId
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -357,35 +357,6 @@ export interface NotifyPayload {
   nodeId: string
   /** Show even when the window is focused (used to trigger the macOS permission prompt). */
   force?: boolean
-}
-
-/** A Claude Code lifecycle hook event, forwarded from the main process. */
-export interface ClaudeStatusEvent {
-  nodeId: string
-  /** SessionStart | UserPromptSubmit | Stop | Notification | SessionEnd | PreToolUse | PostToolUse */
-  event: string
-  sessionId?: string
-  /** For Notification events: e.g. 'permission_prompt' | 'idle_prompt'. */
-  notificationType?: string
-  /** Claude's last assistant message (on Stop) — used as the notification body. */
-  lastMessage?: string
-  /** The user's prompt (UserPromptSubmit) — used to detect `/loop`. */
-  prompt?: string
-  /** Subagent tool events (PreToolUse/PostToolUse, tool_name Agent/Task). */
-  toolName?: string
-  toolUseId?: string
-  subagentType?: string
-  taskLabel?: string
-  /** Recurring-task tools: skill name (Skill) and cron expression (CronCreate). */
-  skill?: string
-  schedule?: string
-  /** Subagent result metadata (PostToolUse tool_response). */
-  status?: string
-  durationMs?: number
-  tokens?: number
-  toolUses?: number
-  /** The subagent's result text (what it produced). */
-  result?: string
 }
 
 /** A chunk of a subagent's live transcript, streamed while it works. */

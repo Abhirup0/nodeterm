@@ -19,7 +19,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canBridge, hasUsage, type AgentId } from '@shared/agents/config'
+import { hasHooks, canRecur, canBridge, hasUsage, agentConfig, type AgentId } from '@shared/agents/config'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -63,6 +63,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
   const showBridge = !!agentId && canBridge(agentId) // bridge link handles
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
+  const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
   const status = useAgentStatus((s) => s.byId[id])
   const updateNodeInternals = useUpdateNodeInternals()
 
@@ -401,7 +402,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
         )}
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {status?.state === 'working' && (
-          <span className="term-node__status term-node__status--busy" title="Claude is working">
+          <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
             <span className="term-node__status-dot" />
             RUNNING
           </span>
@@ -419,7 +420,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
         {(status?.state === 'waiting' || status?.state === 'blocked') && (
           <span
             className="term-node__status term-node__status--attention"
-            title="Claude needs your input"
+            title={`${agentLabel} needs your input`}
           >
             <span className="term-node__status-dot" />
             NEEDS YOU

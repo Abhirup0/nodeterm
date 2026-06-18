@@ -31,7 +31,6 @@ export function installClaudeHooks(): void {
 
 export function removeClaudeHooks(): void {
   removeHooksFrom({
-    scriptFileName: SCRIPT_FILE_NAME,
     configPath: configPath(),
     events: CLAUDE_EVENTS
   })

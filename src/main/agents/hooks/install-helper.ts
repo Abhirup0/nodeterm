@@ -74,7 +74,6 @@ export function installHooksInto(opts: InstallHooksOptions): void {
 }
 
 export interface RemoveHooksOptions {
-  scriptFileName?: string
   configPath: string
   events: readonly string[]
 }

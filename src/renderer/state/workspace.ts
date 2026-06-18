@@ -108,6 +108,9 @@ export function claudeLaunchCommand(): string {
   return bridgeConfigPath ? `claude --mcp-config "${bridgeConfigPath}"` : 'claude'
 }
 
+/** Fallback color for custom / unknown agents that have no config-provided color. */
+const FALLBACK_AGENT_COLOR = '#888888'
+
 /**
  * Resolves an agent's label/color/launch command. Builtins come from the static config;
  * custom agents are looked up by id in the settings store. Falls back to the id itself for
@@ -117,8 +120,8 @@ function resolveAgent(agentId: AgentId): { label: string; color: string; launchC
   const builtin = agentConfig(agentId)
   if (builtin) return { label: builtin.label, color: builtin.color, launchCmd: builtin.launchCmd }
   const custom = useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
-  if (custom) return { label: custom.label, color: '#888888', launchCmd: custom.launchCmd }
-  return { label: agentId, color: '#888888', launchCmd: agentId }
+  if (custom) return { label: custom.label, color: FALLBACK_AGENT_COLOR, launchCmd: custom.launchCmd }
+  return { label: agentId, color: FALLBACK_AGENT_COLOR, launchCmd: agentId }
 }
 
 /**

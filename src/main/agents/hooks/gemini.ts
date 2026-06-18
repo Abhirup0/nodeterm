@@ -23,7 +23,6 @@ export function installGeminiHooks(): void {
 
 export function removeGeminiHooks(): void {
   removeHooksFrom({
-    scriptFileName: SCRIPT_FILE_NAME,
     configPath: configPath(),
     events: GEMINI_EVENTS
   })

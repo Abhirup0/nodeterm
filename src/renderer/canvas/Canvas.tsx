@@ -1246,7 +1246,7 @@ export function Canvas() {
         if (now - (notifyCooldownRef.current[e.nodeId] ?? 0) < 5000) return // dedup/cooldown
         notifyCooldownRef.current[e.nodeId] = now
         void window.nodeTerminal.notify({
-          title: `${contextFor(e.nodeId)} — Claude ${statusText}`,
+          title: `${contextFor(e.nodeId)} — ${agentConfig(e.agentId)?.label ?? 'Agent'} ${statusText}`,
           body: clip(e.lastMessage) || fallbackBody,
           nodeId: e.nodeId
         })
