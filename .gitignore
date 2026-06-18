@@ -9,3 +9,6 @@ dist/
 build/icon.png
 
 .playwright-mcp/
+
+# concurrent-session worktrees / local agent state
+.claude/
