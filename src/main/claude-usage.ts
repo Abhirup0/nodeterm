@@ -39,6 +39,11 @@ function parseCreds(raw: string): OAuthCreds {
   }
 }
 
+/** The OAuth access token alone (keychain → ~/.claude/.credentials.json), or null. */
+export async function resolveClaudeAccessToken(): Promise<string | null> {
+  return (await resolveCreds()).accessToken
+}
+
 /** macOS Keychain → ~/.claude/.credentials.json → email backfill from ~/.claude.json. */
 async function resolveCreds(): Promise<OAuthCreds> {
   let creds: OAuthCreds = { accessToken: null, email: null }
