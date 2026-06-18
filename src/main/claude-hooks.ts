@@ -14,6 +14,7 @@ import path from 'path'
 import { app, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import { createSubagentTail } from './subagent-tail'
+import { createContextTail } from './context-tail'
 
 const CLAUDE_EVENTS = [
   'SessionStart',
@@ -98,6 +99,7 @@ export function initClaudeHooks(win: BrowserWindow): void {
 
   const offsets = new Map<string, number>()
   const subagentTail = createSubagentTail(win)
+  const contextTail = createContextTail(win)
 
   const scan = () => {
     let files: string[]
@@ -161,6 +163,9 @@ export function initClaudeHooks(win: BrowserWindow): void {
             }
           }
           if (!p.hook_event_name || win.isDestroyed()) continue
+          // Context-window meter: tail the session transcript (any event carries both fields).
+          if (p.session_id && p.transcript_path) contextTail.track(p.session_id, p.transcript_path)
+          if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
           // Tool events flood (every Bash/Edit) — only forward subagent + recurring tools.
           const name = p.tool_name ?? ''
           const isTool = p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse'

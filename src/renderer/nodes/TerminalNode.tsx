@@ -14,6 +14,7 @@ import { transport } from '../terminal/local-transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
+import { ContextMeter } from '../components/ContextMeter'
 import { useSettings } from '../state/settings'
 import { useClaudeStatus } from '../state/claudeStatus'
 import { useAgentNodes } from '../state/agentNodes'
@@ -383,6 +384,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             {status.session}
           </span>
         )}
+        {isClaude && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title="Claude is working">
             <span className="term-node__status-dot" />
