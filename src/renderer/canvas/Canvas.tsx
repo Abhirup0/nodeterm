@@ -1231,6 +1231,7 @@ export function Canvas() {
     return window.nodeTerminal.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
+      const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
       // REF-style: "<folder> — Claude finished" + last assistant message as the body.
       const alert = (statusText: string, fallbackBody: string) => {
         // Unread unless the user is actively in this node's terminal (focused window +
@@ -1246,7 +1247,7 @@ export function Canvas() {
         if (now - (notifyCooldownRef.current[e.nodeId] ?? 0) < 5000) return // dedup/cooldown
         notifyCooldownRef.current[e.nodeId] = now
         void window.nodeTerminal.notify({
-          title: `${contextFor(e.nodeId)} — ${agentConfig(e.agentId)?.label ?? 'Agent'} ${statusText}`,
+          title: `${contextFor(e.nodeId)} — ${agentLabel} ${statusText}`,
           body: clip(e.lastMessage) || fallbackBody,
           nodeId: e.nodeId
         })
@@ -1264,10 +1265,10 @@ export function Canvas() {
           }
           if (e.state === 'done') {
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
-            alert('finished', 'Claude finished its turn.')
+            alert('finished', `${agentLabel} finished its turn.`)
           }
-          if (e.state === 'blocked') alert('needs input', 'Claude needs permission to continue.')
-          else if (e.state === 'waiting') alert('needs input', 'Claude is waiting for your response.')
+          if (e.state === 'blocked') alert('needs input', `${agentLabel} needs permission to continue.`)
+          else if (e.state === 'waiting') alert('needs input', `${agentLabel} is waiting for your response.`)
           break
         case 'subagent-start':
           if (e.toolUseId) {
