@@ -13,6 +13,8 @@ export interface NormalizedAgentEvent {
   lastMessage?: string
   // session
   sessionTitle?: string
+  // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
+  sessionPhase?: 'start' | 'end'
   // subagent
   toolUseId?: string
   subagentType?: string
@@ -120,6 +122,8 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     const state: AgentState = p.notification_type === 'permission_prompt' ? 'blocked' : 'waiting'
     return { ...base, kind: 'state', state, lastMessage: p.last_assistant_message }
   }
+  if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start' }
+  if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
   return null
 }
 

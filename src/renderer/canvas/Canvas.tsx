@@ -1245,6 +1245,12 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
+          if (e.sessionPhase === 'start') cs.setState(e.nodeId, undefined, e.agentId)
+          if (e.sessionPhase === 'end') {
+            cs.setState(e.nodeId, undefined, e.agentId)
+            cs.setLoop(e.nodeId, false)
+            an.clearForParent(e.nodeId)
+          }
           break
       }
     })
