@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../state/settings'
 import { NODE_COLORS } from '../state/workspace'
+import type { CustomAgent } from '@shared/types'
+import type { PromptInjectionMode } from '@shared/agents/config'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -16,6 +18,24 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   useEffect(() => {
     void window.nodeTerminal.updates.getVersion().then(setVersion)
   }, [])
+
+  const customAgents = settings.customAgents
+  const patchAgent = (id: string, patch: Partial<CustomAgent>) =>
+    update({ customAgents: customAgents.map((a) => (a.id === id ? { ...a, ...patch } : a)) })
+  const removeAgent = (id: string) =>
+    update({ customAgents: customAgents.filter((a) => a.id !== id) })
+  const addAgent = () =>
+    update({
+      customAgents: [
+        ...customAgents,
+        {
+          id: 'custom:' + crypto.randomUUID(),
+          label: 'Custom agent',
+          launchCmd: '',
+          promptInjectionMode: 'argv'
+        }
+      ]
+    })
 
   return createPortal(
     <div className="drawer-overlay" onClick={onClose}>
@@ -133,6 +153,57 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 }}
               />
             </label>
+          </section>
+
+          <section>
+            <h3>Custom agents</h3>
+            <p className="set-note">
+              Bring your own agent CLI. Custom agents launch in a terminal and show process /
+              title status only (no hooks, branch, or loop).
+            </p>
+            {customAgents.map((agent) => (
+              <div key={agent.id} className="set-agent">
+                <label className="set-row">
+                  <span>Label</span>
+                  <input
+                    type="text"
+                    placeholder="e.g. Aider"
+                    value={agent.label}
+                    onChange={(e) => patchAgent(agent.id, { label: e.target.value })}
+                  />
+                </label>
+                <label className="set-row">
+                  <span>Launch command</span>
+                  <input
+                    type="text"
+                    placeholder="e.g. aider"
+                    value={agent.launchCmd}
+                    onChange={(e) => patchAgent(agent.id, { launchCmd: e.target.value })}
+                  />
+                </label>
+                <label className="set-row">
+                  <span>Prompt injection</span>
+                  <select
+                    value={agent.promptInjectionMode}
+                    onChange={(e) =>
+                      patchAgent(agent.id, {
+                        promptInjectionMode: e.target.value as PromptInjectionMode
+                      })
+                    }
+                  >
+                    <option value="argv">argv</option>
+                    <option value="flag-prompt">flag-prompt</option>
+                    <option value="stdin-after-start">stdin-after-start</option>
+                  </select>
+                </label>
+                <button className="set-btn" onClick={() => removeAgent(agent.id)}>
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button className="set-btn" onClick={addAgent}>
+              Add agent
+            </button>
           </section>
 
           <section>

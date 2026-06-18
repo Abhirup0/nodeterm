@@ -1,7 +1,7 @@
 // Types shared across the main, preload, and renderer processes.
 
 import type { NormalizedAgentEvent } from './agents/normalize'
-import type { AgentId } from './agents/config'
+import type { AgentId, PromptInjectionMode } from './agents/config'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -170,6 +170,16 @@ export interface FsApi {
   write(filePath: string, content: string): Promise<boolean>
 }
 
+/** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
+ * terminal-title + process status (no hooks/branch/loop/bridge). */
+export interface CustomAgent {
+  /** Stable id of the form 'custom:<uuid>'. Used as the node's agentId. */
+  id: string
+  label: string
+  launchCmd: string
+  promptInjectionMode: PromptInjectionMode
+}
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -197,6 +207,8 @@ export interface Settings {
   notifyOnClaudeDone: boolean
   /** Whether the one-time notification consent prompt has been shown. */
   notifyConsentAsked: boolean
+  /** User-defined agents (BYO CLI) appended to the Add menus. */
+  customAgents: CustomAgent[]
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -216,7 +228,8 @@ export const DEFAULT_SETTINGS: Settings = {
   commitExtraPrompt: '',
   seenShortcuts: false,
   notifyOnClaudeDone: true,
-  notifyConsentAsked: false
+  notifyConsentAsked: false,
+  customAgents: []
 }
 
 export interface SettingsApi {

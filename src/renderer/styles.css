@@ -1694,6 +1694,13 @@ body,
   font-size: 13px;
 }
 
+.set-agent {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px 8px;
+  margin: 8px 0;
+}
+
 .set-textarea {
   width: 100%;
   min-height: 54px;

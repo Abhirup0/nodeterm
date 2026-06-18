@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import claudeIcon from '../assets/claude.svg'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { useSettings } from '../state/settings'
 
 interface DockProps {
   dirty: boolean
@@ -40,6 +41,7 @@ export function Dock({
   onZoomOut
 }: DockProps) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const customAgents = useSettings((s) => s.settings.customAgents)
 
   const pick = (fn: () => void) => () => {
     fn()
@@ -61,6 +63,12 @@ export function Dock({
               <button key={aid} onClick={pick(() => onAddAgent(aid))}>
                 {aid === 'claude' ? <ClaudeIcon /> : <TerminalIcon />}
                 <span>{AGENT_CONFIG[aid].label}</span>
+              </button>
+            ))}
+            {customAgents.map((c) => (
+              <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
+                <TerminalIcon />
+                <span>New {c.label}</span>
               </button>
             ))}
             <button onClick={pick(onAddSticky)}>

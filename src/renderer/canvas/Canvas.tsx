@@ -1094,6 +1094,13 @@ export function Canvas() {
               onClick: () => addAgentNode(aid, at)
             })
           ),
+          ...useSettings.getState().settings.customAgents.map(
+            (c): MenuItem => ({
+              label: `New ${c.label}`,
+              icon: <IconTerminal />,
+              onClick: () => addAgentNode(c.id, at)
+            })
+          ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
@@ -1400,6 +1407,14 @@ export function Canvas() {
           label: `New ${AGENT_CONFIG[aid].label}`,
           icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
           run: () => addAgentNode(aid)
+        })
+      ),
+      ...useSettings.getState().settings.customAgents.map(
+        (c): Command => ({
+          id: `new-${c.id}`,
+          label: `New ${c.label}`,
+          icon: <IconTerminal />,
+          run: () => addAgentNode(c.id)
         })
       ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },

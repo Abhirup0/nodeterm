@@ -2,6 +2,7 @@ import type { Node } from '@xyflow/react'
 import type { CanvasNodeState, NodeKind, Project } from '@shared/types'
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
+import { useSettings } from './settings'
 
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
@@ -108,10 +109,23 @@ export function claudeLaunchCommand(): string {
 }
 
 /**
+ * Resolves an agent's label/color/launch command. Builtins come from the static config;
+ * custom agents are looked up by id in the settings store. Falls back to the id itself for
+ * unknown agents so a node still spawns something sensible.
+ */
+function resolveAgent(agentId: AgentId): { label: string; color: string; launchCmd: string } {
+  const builtin = agentConfig(agentId)
+  if (builtin) return { label: builtin.label, color: builtin.color, launchCmd: builtin.launchCmd }
+  const custom = useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+  if (custom) return { label: custom.label, color: '#888888', launchCmd: custom.launchCmd }
+  return { label: agentId, color: '#888888', launchCmd: agentId }
+}
+
+/**
  * Creates a terminal node that launches the given agent on open. Title, color, and the
- * launch command come from the agent config; the node carries `agentId` so the rest of the
- * app (hooks, capabilities, UI) can branch on it. For `claude` we use `claudeLaunchCommand()`
- * which appends the Session Bridge `--mcp-config` (Claude-only).
+ * launch command come from the resolved agent config (builtin or custom); the node carries
+ * `agentId` so the rest of the app (hooks, capabilities, UI) can branch on it. For `claude`
+ * we use `claudeLaunchCommand()` which appends the Session Bridge `--mcp-config` (Claude-only).
  */
 export function createAgentNode(
   agentId: AgentId,
@@ -119,10 +133,8 @@ export function createAgentNode(
   cwd?: string,
   center?: { x: number; y: number }
 ): CanvasNode {
-  const cfg = agentConfig(agentId)
-  const label = cfg?.label ?? agentId
-  const color = cfg?.color ?? '#888888'
-  const initialCommand = agentId === 'claude' ? claudeLaunchCommand() : cfg?.launchCmd ?? agentId
+  const { label, color, launchCmd } = resolveAgent(agentId)
+  const initialCommand = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
   return {
     id: nextId('term'),
     type: 'terminal',
