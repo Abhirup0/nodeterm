@@ -10,6 +10,7 @@ type Status =
   | { kind: 'available'; version: string; percent: number }
   | { kind: 'downloaded'; version: string }
   | { kind: 'upToDate' }
+  | { kind: 'required'; minSupported: string | null }
   | { kind: 'error'; message: string }
 
 const RELEASES_URL = 'https://nodeterm.dev/releases'
@@ -32,10 +33,13 @@ export function UpdateCard(): JSX.Element | null {
       setMinimized(false)
     })
     const offNotAvailable = window.nodeTerminal.updates.onNotAvailable(() => {
-      setStatus({ kind: 'upToDate' })
+      setStatus((s) => (s.kind === 'required' ? s : { kind: 'upToDate' }))
       setMinimized(false)
       if (upToDateTimer.current) window.clearTimeout(upToDateTimer.current)
-      upToDateTimer.current = window.setTimeout(() => setStatus({ kind: 'idle' }), 4000)
+      upToDateTimer.current = window.setTimeout(
+        () => setStatus((s) => (s.kind === 'required' ? s : { kind: 'idle' })),
+        4000
+      )
     })
     const offError = window.nodeTerminal.updates.onError((message) => {
       setStatus({ kind: 'error', message })
@@ -55,11 +59,29 @@ export function UpdateCard(): JSX.Element | null {
   // is already downloading or staged, which must not be overwritten).
   useEffect(() => {
     const onChecking = () => {
-      setStatus((s) => (s.kind === 'available' || s.kind === 'downloaded' ? s : { kind: 'checking' }))
+      setStatus((s) =>
+        s.kind === 'available' || s.kind === 'downloaded' || s.kind === 'required'
+          ? s
+          : { kind: 'checking' }
+      )
       setMinimized(false)
     }
     window.addEventListener('nodeterm:update-checking', onChecking)
     return () => window.removeEventListener('nodeterm:update-checking', onChecking)
+  }, [])
+
+  // Mandatory-update policy (from /v1/check via main). If the running version is below the
+  // channel minimum, show a non-dismissible "required" card. Don't override an in-progress
+  // download/ready state.
+  useEffect(() => {
+    void window.nodeTerminal.updates.getPolicy().then((p) => {
+      if (!p.mandatory) return
+      setStatus((s) =>
+        s.kind === 'available' || s.kind === 'downloaded'
+          ? s
+          : { kind: 'required', minSupported: p.minSupported }
+      )
+    })
   }, [])
 
   // Dev-only: drive the card through its states from the console without packaging, e.g.
@@ -107,7 +129,9 @@ export function UpdateCard(): JSX.Element | null {
           ? 'Update ready'
           : status.kind === 'upToDate'
             ? "You're up to date"
-            : 'Update failed'
+            : status.kind === 'required'
+              ? 'Update required'
+              : 'Update failed'
 
   const canMinimize = status.kind === 'available' || status.kind === 'downloaded'
   const canDismiss =
@@ -163,6 +187,19 @@ export function UpdateCard(): JSX.Element | null {
 
       {status.kind === 'upToDate' && (
         <p className="update-card__body">nodeterm is on the latest version.</p>
+      )}
+
+      {status.kind === 'required' && (
+        <>
+          <p className="update-card__body">
+            This version is no longer supported
+            {status.minSupported ? ` (minimum ${status.minSupported})` : ''}. Please update to
+            continue.
+          </p>
+          <button className="update-card__btn" onClick={() => window.nodeTerminal.updates.check()}>
+            Update now
+          </button>
+        </>
       )}
 
       {status.kind === 'error' && (
