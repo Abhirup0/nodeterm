@@ -1,7 +1,8 @@
 import { create } from 'zustand'
+import type { AgentId } from '@shared/agents/config'
 
 /**
- * Transient per-node status for Claude Code sessions, driven by Claude's hooks.
+ * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
  * `unread`, `session` and `sessionId` are persisted to localStorage so they survive a
  * reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
  */
@@ -10,6 +11,8 @@ export type ClaudeState = 'working' | 'waiting' | 'blocked' | 'done'
 export interface ClaudeNodeStatus {
   /** Live activity; undefined = idle/unknown. */
   state?: ClaudeState
+  /** Which agent this node is running (claude/codex/gemini/…), when known. */
+  agentId?: AgentId
   /** A turn finished / needs attention while the user wasn't looking. */
   unread: boolean
   /** Claude's own session name/title (from the terminal title), shown beside the title. */
@@ -34,7 +37,7 @@ interface ClaudeStatusState {
   /** The terminal node the user is currently focused in (for unread decisions). */
   activeId: string | null
   setActive(id: string, active: boolean): void
-  setState(id: string, state: ClaudeState | undefined): void
+  setState(id: string, state: ClaudeState | undefined, agentId?: AgentId): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
@@ -52,7 +55,18 @@ interface ClaudeStatusState {
 }
 
 const EMPTY: ClaudeNodeStatus = { unread: false }
-const KEY = 'nodeterm.claudeStatus'
+const KEY = 'nodeterm.agentStatus'
+
+// One-time localStorage migration from the old key. Runs before the store hydrates.
+const LEGACY_KEY = 'nodeterm.claudeStatus'
+try {
+  if (!localStorage.getItem(KEY)) {
+    const legacy = localStorage.getItem(LEGACY_KEY)
+    if (legacy) localStorage.setItem(KEY, legacy)
+  }
+} catch {
+  /* ignore */
+}
 
 function load(): Record<string, ClaudeNodeStatus> {
   try {
@@ -84,7 +98,7 @@ function save(byId: Record<string, ClaudeNodeStatus>): void {
   }
 }
 
-export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
+export const useAgentStatus = create<ClaudeStatusState>((set) => ({
   byId: load(),
   activeId: null,
 
@@ -94,11 +108,13 @@ export const useClaudeStatus = create<ClaudeStatusState>((set) => ({
       return s.activeId === id ? { activeId: null } : s
     }),
 
-  setState: (id, state) =>
+  setState: (id, state, agentId) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (prev.state === state) return s
-      return { byId: { ...s.byId, [id]: { ...prev, state } } }
+      if (prev.state === state && (agentId === undefined || prev.agentId === agentId)) return s
+      const next = { ...prev, state }
+      if (agentId !== undefined) next.agentId = agentId
+      return { byId: { ...s.byId, [id]: next } }
     }),
 
   setSession: (id, session) =>

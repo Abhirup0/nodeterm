@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
-import { useClaudeStatus } from '../state/claudeStatus'
+import { useAgentStatus } from '../state/agentStatus'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -28,7 +28,7 @@ export function TabBar({
 }: TabBarProps) {
   const projects = useProjects((s) => s.projects)
   const activeId = useProjects((s) => s.activeProjectId)
-  const statusById = useClaudeStatus((s) => s.byId)
+  const statusById = useAgentStatus((s) => s.byId)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [addPos, setAddPos] = useState<{ top: number; left: number } | null>(null)

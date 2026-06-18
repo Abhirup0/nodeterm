@@ -16,7 +16,7 @@ import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { ContextMeter } from '../components/ContextMeter'
 import { useSettings } from '../state/settings'
-import { useClaudeStatus } from '../state/claudeStatus'
+import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
@@ -55,7 +55,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
   const isClaude = tags.includes('claude')
-  const status = useClaudeStatus((s) => s.byId[id])
+  const status = useAgentStatus((s) => s.byId[id])
   const updateNodeInternals = useUpdateNodeInternals()
 
   // The bridge handles are added/positioned dynamically for Claude nodes; make React Flow
@@ -109,7 +109,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
         term.onTitleChange((t) => {
           const title = t.trim()
           // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
-          if (title && !/[/:~]/.test(title)) useClaudeStatus.getState().setSession(id, title)
+          if (title && !/[/:~]/.test(title)) useAgentStatus.getState().setSession(id, title)
         }).dispose
       )
     }
@@ -174,8 +174,8 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       observer.disconnect()
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
-      useClaudeStatus.getState().setActive(id, false)
-      useClaudeStatus.getState().remove(id)
+      useAgentStatus.getState().setActive(id, false)
+      useAgentStatus.getState().remove(id)
       useAgentNodes.getState().clearForParent(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
@@ -222,15 +222,15 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     dwellRef.current = setTimeout(() => {
       setArmed(false)
       termRef.current?.focus()
-      useClaudeStatus.getState().setActive(id, true)
-      useClaudeStatus.getState().clearUnread(id)
+      useAgentStatus.getState().setActive(id, true)
+      useAgentStatus.getState().clearUnread(id)
     }, panHoverDelay)
   }
   const onBodyLeave = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
     setArmed(true)
     termRef.current?.blur()
-    useClaudeStatus.getState().setActive(id, false)
+    useAgentStatus.getState().setActive(id, false)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
   // terminal doesn't grab focus mid-drag; restart it on release.
@@ -267,7 +267,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     setArmed(false)
     term.focus()
     term.paste(paths.join(' ') + ' ')
-    useClaudeStatus.getState().setActive(id, true)
+    useAgentStatus.getState().setActive(id, true)
   }
 
   const nameWithAi = async () => {
@@ -279,7 +279,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   // Selecting a node clears its unread badge.
   useEffect(() => {
-    if (selected) useClaudeStatus.getState().clearUnread(id)
+    if (selected) useAgentStatus.getState().clearUnread(id)
   }, [selected, id])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).

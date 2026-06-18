@@ -57,7 +57,7 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
-import { useClaudeStatus } from '../state/claudeStatus'
+import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
@@ -158,7 +158,7 @@ export function Canvas() {
   const ephemeralPos = useAgentNodes((s) => s.positions)
   const ephSizes = useAgentNodes((s) => s.sizes)
   const ephExpanded = useAgentNodes((s) => s.expanded)
-  const claudeById = useClaudeStatus((s) => s.byId)
+  const claudeById = useAgentStatus((s) => s.byId)
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
   const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
@@ -361,7 +361,7 @@ export function Canvas() {
         if (node) {
           setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
           goToNode(node)
-          useClaudeStatus.getState().clearUnread(pending)
+          useAgentStatus.getState().clearUnread(pending)
         }
       }
     }, 0)
@@ -844,7 +844,7 @@ export function Canvas() {
     async (nodeId: string) => {
       const source = nodesRef.current.find((n) => n.id === nodeId) as CanvasNode | undefined
       if (!source) return
-      const known = useClaudeStatus.getState().byId[nodeId]?.sessionId
+      const known = useAgentStatus.getState().byId[nodeId]?.sessionId
       let originalId = known
       if (known) {
         await window.nodeTerminal.pty.sendText(nodeId, '/branch')
@@ -1139,7 +1139,7 @@ export function Canvas() {
       if (node) {
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
         goToNode(node)
-        useClaudeStatus.getState().clearUnread(nodeId)
+        useAgentStatus.getState().clearUnread(nodeId)
         return
       }
       const owner = useProjects
@@ -1183,7 +1183,7 @@ export function Canvas() {
       return t.length <= max ? t : `${t.slice(0, max - 1)}…`
     }
     return window.nodeTerminal.onClaudeStatus((e) => {
-      const cs = useClaudeStatus.getState()
+      const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       // REF-style: "<folder> — Claude finished" + last assistant message as the body.
       const alert = (statusText: string, fallbackBody: string) => {
@@ -1389,7 +1389,7 @@ export function Canvas() {
           run: () => switchProject(p.id)
         })
       )
-    const cs = useClaudeStatus.getState()
+    const cs = useAgentStatus.getState()
     nodesRef.current
       .filter((n) => n.type !== 'group')
       .forEach((n) => {
@@ -1514,7 +1514,7 @@ export function Canvas() {
             maskColor="rgba(10,12,18,0.6)"
             nodeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
             nodeStrokeColor={(n) => {
-              const st = useClaudeStatus.getState().byId[n.id]
+              const st = useAgentStatus.getState().byId[n.id]
               if (st?.state === 'working') return '#30d158'
               if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
               if (st?.unread) return '#0a84ff'
