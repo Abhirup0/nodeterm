@@ -10,12 +10,13 @@ import { SettingsStore } from './settings-store'
 import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
-import { fetchAnnouncements } from './announcements'
+import { fetchCheck } from './check'
 import { hookServer } from './agents/hook-server'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
 import { initBridge } from './bridge'
+import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 
 const settingsStore = new SettingsStore()
@@ -147,7 +148,8 @@ app.whenReady().then(async () => {
     }
   )
 
-  ipcMain.handle(IPC.announcementsFetch, () => fetchAnnouncements())
+  ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
+  ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
@@ -268,6 +270,7 @@ app.whenReady().then(async () => {
 
   initBridge(win, ptyManager)
   initClaudeUsage(win)
+  initTelemetry(() => settingsStore.get())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

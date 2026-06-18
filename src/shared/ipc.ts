@@ -28,6 +28,7 @@ export const IPC = {
   appUpdateNotAvailable: 'app:update-not-available',
   appCheckForUpdates: 'app:check-for-updates',
   appGetVersion: 'app:get-version',
+  appUpdatePolicy: 'app:update-policy',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   usageFetch: 'usage:fetch',
