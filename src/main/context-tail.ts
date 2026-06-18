@@ -6,9 +6,8 @@ import fs from 'fs'
 import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
+import { cachedWindowFor, resolveModelWindow } from './model-window'
 
-const DEFAULT_WINDOW = 200_000
-const LARGE_WINDOW = 1_000_000
 const POLL_MS = 1000
 
 interface Tracked {
@@ -17,10 +16,10 @@ interface Tracked {
   used: number
   window: number
   model: string | null
-}
-
-function windowForModel(model: string | null): number {
-  return model && /1m/i.test(model) ? LARGE_WINDOW : DEFAULT_WINDOW
+  // Last pushed snapshot — a push fires only when one of these changes.
+  lastUsed: number
+  lastModel: string | null
+  lastWindow: number
 }
 
 export interface ContextTail {
@@ -46,49 +45,66 @@ export function createContextTail(win: BrowserWindow): ContextTail {
     win.webContents.send(IPC.contextUpdate, payload)
   }
 
-  // Read appended bytes from t.offset; update used/window/model from the latest assistant
-  // usage seen in the new lines; push once if anything changed.
+  // Read newly-appended transcript bytes (if any), reconcile the window from the model
+  // resolver, and push when the used tokens / model / window changed since the last push.
   const read = (sessionId: string, t: Tracked): void => {
-    let size: number
+    let size = -1
     try {
       size = fs.statSync(t.path).size
     } catch {
-      return // file not created yet / unreadable — try again next tick
+      // file not created yet / unreadable — skip the byte read, still reconcile below
     }
-    if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
-    if (size === t.offset) return
-    let chunk = ''
-    try {
-      const fd = fs.openSync(t.path, 'r')
-      const buf = Buffer.alloc(size - t.offset)
-      fs.readSync(fd, buf, 0, buf.length, t.offset)
-      fs.closeSync(fd)
-      chunk = buf.toString('utf-8')
-    } catch {
-      return
-    }
-    t.offset = size
-    let changed = false
-    for (const line of chunk.split('\n')) {
-      const s = line.trim()
-      if (!s) continue
-      let o: { type?: string; message?: { model?: string; usage?: Record<string, number> } }
-      try {
-        o = JSON.parse(s)
-      } catch {
-        continue // partial/garbled line
+    if (size >= 0) {
+      if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
+      if (size > t.offset) {
+        let chunk = ''
+        try {
+          const fd = fs.openSync(t.path, 'r')
+          const buf = Buffer.alloc(size - t.offset)
+          fs.readSync(fd, buf, 0, buf.length, t.offset)
+          fs.closeSync(fd)
+          chunk = buf.toString('utf-8')
+          t.offset = size
+        } catch {
+          return
+        }
+        for (const line of chunk.split('\n')) {
+          const s = line.trim()
+          if (!s) continue
+          let o: { type?: string; message?: { model?: string; usage?: Record<string, number> } }
+          try {
+            o = JSON.parse(s)
+          } catch {
+            continue // partial/garbled line
+          }
+          if (o.type !== 'assistant' || !o.message?.usage) continue
+          const u = o.message.usage
+          const used =
+            (u.input_tokens ?? 0) +
+            (u.cache_read_input_tokens ?? 0) +
+            (u.cache_creation_input_tokens ?? 0)
+          if (used <= 0) continue
+          t.used = used
+          t.model = o.message.model ?? t.model
+        }
       }
-      if (o.type !== 'assistant' || !o.message?.usage) continue
-      const u = o.message.usage
-      const used =
-        (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-      if (used <= 0) continue
-      t.used = used
-      t.model = o.message.model ?? t.model
-      t.window = windowForModel(t.model)
-      changed = true
     }
-    if (changed) push(sessionId, t)
+
+    // Reconcile the window every tick: kick off async API resolution once per model
+    // (self-gating), and use the best cached/static value now.
+    if (t.model) void resolveModelWindow(t.model)
+    const win = cachedWindowFor(t.model)
+
+    if (
+      t.used > 0 &&
+      (t.used !== t.lastUsed || t.model !== t.lastModel || win !== t.lastWindow)
+    ) {
+      t.window = win
+      push(sessionId, t)
+      t.lastUsed = t.used
+      t.lastModel = t.model
+      t.lastWindow = win
+    }
   }
 
   const tick = (): void => {
@@ -114,8 +130,11 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         path: transcriptPath,
         offset: 0,
         used: 0,
-        window: DEFAULT_WINDOW,
-        model: null
+        window: 0,
+        model: null,
+        lastUsed: 0,
+        lastModel: null,
+        lastWindow: 0
       }
       sessions.set(sessionId, t)
       read(sessionId, t) // immediate first value (resumed sessions already have content)
