@@ -109,9 +109,9 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let disposed = false
     const cleanups: Array<() => void> = []
 
-    // Claude Code state (busy/idle/attention) comes from Claude's own hooks via the
-    // claude:status IPC (handled centrally in Canvas) — not from parsing the output here.
-    // We only surface the conversation topic from the terminal title, when Claude sets one.
+    // Agent state (busy/idle/attention) comes from the agent's own hooks via the
+    // agent:status IPC (handled centrally in Canvas) — not from parsing the output here.
+    // We only surface the conversation topic from the terminal title, when the agent sets one.
     if (showStatus) {
       cleanups.push(
         term.onTitleChange((t) => {
@@ -337,7 +337,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             type="source"
             position={Position.Right}
             className="bridge-handle bridge-handle--out"
-            data-tip="Bridge out — drag to another Claude node to link their sessions"
+            data-tip="Bridge out — drag to another bridge-capable node to link their sessions"
           />
           <Handle
             id="bridge-in"

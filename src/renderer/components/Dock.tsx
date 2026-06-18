@@ -68,7 +68,7 @@ export function Dock({
             {customAgents.map((c) => (
               <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
                 <TerminalIcon />
-                <span>New {c.label}</span>
+                <span>{c.label}</span>
               </button>
             ))}
             <button onClick={pick(onAddSticky)}>

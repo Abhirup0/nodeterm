@@ -1209,8 +1209,9 @@ export function Canvas() {
     []
   )
 
-  // Claude Code lifecycle, reported by Claude's own hooks (see main/claude-hooks.ts):
-  // UserPromptSubmit → working, Stop → done, Notification → waiting/blocked. On a turn
+  // Agent lifecycle, reported by each agent's own hooks via the main-process hook server
+  // (`main/agents/hook-server.ts`) and mapped to the shared 4-state model by the per-agent
+  // normalizers (`shared/agents/normalize.ts`): working / waiting / blocked / done. On a turn
   // finishing / needing attention while the window is in the background: mark unread +
   // (with consent, throttled) notify.
   const notifyCooldownRef = useRef<Record<string, number>>({})

@@ -1,16 +1,15 @@
 import { create } from 'zustand'
 import type { AgentId } from '@shared/agents/config'
+import type { AgentState } from '@shared/agents/normalize'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
  * `unread`, `session` and `sessionId` are persisted to localStorage so they survive a
  * reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
  */
-export type ClaudeState = 'working' | 'waiting' | 'blocked' | 'done'
-
-export interface ClaudeNodeStatus {
+export interface AgentNodeStatus {
   /** Live activity; undefined = idle/unknown. */
-  state?: ClaudeState
+  state?: AgentState
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
   /** A turn finished / needs attention while the user wasn't looking. */
@@ -32,12 +31,12 @@ export interface ClaudeNodeStatus {
   }
 }
 
-interface ClaudeStatusState {
-  byId: Record<string, ClaudeNodeStatus>
+interface AgentStatusStore {
+  byId: Record<string, AgentNodeStatus>
   /** The terminal node the user is currently focused in (for unread decisions). */
   activeId: string | null
   setActive(id: string, active: boolean): void
-  setState(id: string, state: ClaudeState | undefined, agentId?: AgentId): void
+  setState(id: string, state: AgentState | undefined, agentId?: AgentId): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
@@ -54,7 +53,7 @@ interface ClaudeStatusState {
   remove(id: string): void
 }
 
-const EMPTY: ClaudeNodeStatus = { unread: false }
+const EMPTY: AgentNodeStatus = { unread: false }
 const KEY = 'nodeterm.agentStatus'
 
 // One-time localStorage migration from the old key. Runs before the store hydrates.
@@ -68,12 +67,12 @@ try {
   /* ignore */
 }
 
-function load(): Record<string, ClaudeNodeStatus> {
+function load(): Record<string, AgentNodeStatus> {
   try {
     const raw = localStorage.getItem(KEY)
     if (!raw) return {}
-    const data = JSON.parse(raw) as Record<string, Partial<ClaudeNodeStatus>>
-    const out: Record<string, ClaudeNodeStatus> = {}
+    const data = JSON.parse(raw) as Record<string, Partial<AgentNodeStatus>>
+    const out: Record<string, AgentNodeStatus> = {}
     for (const [id, v] of Object.entries(data)) {
       out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId }
     }
@@ -84,9 +83,9 @@ function load(): Record<string, ClaudeNodeStatus> {
 }
 
 // Persist only the durable fields (not the live `state`).
-function save(byId: Record<string, ClaudeNodeStatus>): void {
+function save(byId: Record<string, AgentNodeStatus>): void {
   try {
-    const out: Record<string, Partial<ClaudeNodeStatus>> = {}
+    const out: Record<string, Partial<AgentNodeStatus>> = {}
     for (const [id, v] of Object.entries(byId)) {
       if (v.unread || v.session || v.sessionId) {
         out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId }
@@ -98,7 +97,7 @@ function save(byId: Record<string, ClaudeNodeStatus>): void {
   }
 }
 
-export const useAgentStatus = create<ClaudeStatusState>((set) => ({
+export const useAgentStatus = create<AgentStatusStore>((set) => ({
   byId: load(),
   activeId: null,
 

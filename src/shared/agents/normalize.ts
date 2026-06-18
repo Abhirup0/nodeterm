@@ -91,7 +91,10 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
         durationMs: p.tool_response?.totalDurationMs,
         tokens: p.tool_response?.totalTokens,
         toolUses: p.tool_response?.totalToolUseCount,
-        result: p.tool_response?.content?.map((c) => c.text ?? '').join('')
+        result: p.tool_response?.content
+          ?.filter((c) => c.type === 'text' && c.text)
+          .map((c) => c.text)
+          .join('\n')
       }
     }
     if (ev === 'PreToolUse' && RECURRING_TOOLS.has(tool)) {
