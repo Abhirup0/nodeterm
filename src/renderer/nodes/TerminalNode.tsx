@@ -19,6 +19,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { hasHooks, canRecur, canBridge, hasUsage, type AgentId } from '@shared/agents/config'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -54,15 +55,22 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
-  const isClaude = tags.includes('claude')
+  // Derive the node's agent once. The `tags` fallback keeps not-yet-migrated legacy
+  // claude nodes working until they're re-serialized with `agentId`.
+  const agentId = (data.agentId as AgentId | undefined) ?? (tags.includes('claude') ? 'claude' : undefined)
+  // Gate each former `isClaude` site by the capability it actually represents.
+  const showStatus = !!agentId && hasHooks(agentId) // status badge + session-title capture
+  const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
+  const showBridge = !!agentId && canBridge(agentId) // bridge link handles
+  const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const status = useAgentStatus((s) => s.byId[id])
   const updateNodeInternals = useUpdateNodeInternals()
 
-  // The bridge handles are added/positioned dynamically for Claude nodes; make React Flow
-  // re-measure them so edges anchor to the (centered) handle, not a stale position.
+  // The bridge handles are added/positioned dynamically for bridge-capable nodes; make
+  // React Flow re-measure them so edges anchor to the (centered) handle, not a stale position.
   useEffect(() => {
-    if (isClaude) updateNodeInternals(id)
-  }, [isClaude, id, updateNodeInternals])
+    if (showBridge) updateNodeInternals(id)
+  }, [showBridge, id, updateNodeInternals])
 
   // Terminal lifecycle — set up exactly once.
   useEffect(() => {
@@ -104,7 +112,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // Claude Code state (busy/idle/attention) comes from Claude's own hooks via the
     // claude:status IPC (handled centrally in Canvas) — not from parsing the output here.
     // We only surface the conversation topic from the terminal title, when Claude sets one.
-    if (isClaude) {
+    if (showStatus) {
       cleanups.push(
         term.onTitleChange((t) => {
           const title = t.trim()
@@ -320,9 +328,9 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
       />
-      {/* Bridge link handles (Claude nodes only): drag right→left to connect two sessions.
-          Vertically centered on the side edges; raised above the body so they're never buried. */}
-      {isClaude && (
+      {/* Bridge link handles (bridge-capable nodes only): drag right→left to connect two
+          sessions. Vertically centered on the side edges; raised above the body so they're never buried. */}
+      {showBridge && (
         <>
           <Handle
             id="bridge-out"
@@ -391,14 +399,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             {status.session}
           </span>
         )}
-        {isClaude && <ContextMeter sessionId={status?.sessionId ?? null} />}
+        {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title="Claude is working">
             <span className="term-node__status-dot" />
             RUNNING
           </span>
         )}
-        {status?.loop && (
+        {showLoop && status?.loop && (
           <span
             className="term-node__status term-node__status--loop"
             title={`Running /${status.loop.kind}`}

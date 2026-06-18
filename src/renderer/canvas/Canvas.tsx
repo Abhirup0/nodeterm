@@ -62,14 +62,22 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import { agentConfig } from '@shared/agents/config'
+import {
+  agentConfig,
+  hasHooks,
+  canBranch,
+  canBridge,
+  AGENT_CONFIG,
+  BUILTIN_AGENT_IDS,
+  type AgentId
+} from '@shared/agents/config'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
 import {
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
-  createClaudeNode,
+  createAgentNode,
   createDiffNode,
   createEditorNode,
   createStickyNode,
@@ -488,16 +496,30 @@ export function Canvas() {
     [onNodesChange, markDirty]
   )
 
-  const isClaudeNode = useCallback((id: string) => {
+  // Resolve a node's agent id, with a tags fallback for not-yet-migrated legacy nodes.
+  const agentIdOf = useCallback((id: string): AgentId | undefined => {
     const n = nodesRef.current.find((x) => x.id === id)
-    return n?.type === 'terminal' && ((n.data.tags as string[]) ?? []).includes('claude')
+    if (!n || n.type !== 'terminal') return undefined
+    return (
+      (n.data.agentId as AgentId | undefined) ??
+      (((n.data.tags as string[]) ?? []).includes('claude') ? 'claude' : undefined)
+    )
   }, [])
 
-  // Draw a bridge link between two Claude nodes (the connection that lets them message).
+  // Bridge links connect two bridge-capable agent sessions (currently Claude only).
+  const canBridgeNode = useCallback(
+    (id: string) => {
+      const a = agentIdOf(id)
+      return !!a && canBridge(a)
+    },
+    [agentIdOf]
+  )
+
+  // Draw a bridge link between two bridge-capable nodes (the connection that lets them message).
   const onConnect = useCallback(
     (c: Connection) => {
       if (!c.source || !c.target || c.source === c.target) return
-      if (!isClaudeNode(c.source) || !isClaudeNode(c.target)) return
+      if (!canBridgeNode(c.source) || !canBridgeNode(c.target)) return
       // No duplicate link (in either direction).
       const exists = bridgeEdgesRef.current.some(
         (e) =>
@@ -513,7 +535,7 @@ export function Canvas() {
       )
       markDirty()
     },
-    [isClaudeNode, setBridgeEdges, markDirty]
+    [canBridgeNode, setBridgeEdges, markDirty]
   )
 
   // Double-click a bridge link to remove it (ephemeral subagent/loop edges are left alone).
@@ -695,13 +717,18 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter]
   )
 
-  const addClaude = useCallback(
-    (center?: { x: number; y: number }) => {
+  const addAgentNode = useCallback(
+    (agentId: AgentId, center?: { x: number; y: number }) => {
       const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createClaudeNode(ns.length, cwd, center ?? viewCenter())])
+      setNodes((ns) => [...ns, createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+  // Kept as a thin wrapper so existing callers + the ⌘⇧C shortcut keep working.
+  const addClaude = useCallback(
+    (center?: { x: number; y: number }) => addAgentNode('claude', center),
+    [addAgentNode]
   )
 
   // ⌘T = new terminal, ⌘⇧C = new Claude Code (ignored while typing in a field/terminal).
@@ -1005,10 +1032,10 @@ export function Canvas() {
       { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
       { type: 'separator' },
       { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
-      ...(ids.length === 1 &&
-      ((nodesRef.current.find((n) => n.id === ids[0])?.data.tags as string[]) ?? []).includes(
-        'claude'
-      )
+      ...(ids.length === 1 && (() => {
+        const a = agentIdOf(ids[0])
+        return !!a && canBranch(a)
+      })()
         ? ([
             {
               label: 'Branch conversation',
@@ -1032,6 +1059,7 @@ export function Canvas() {
       setNodesColor,
       duplicateNodes,
       branchClaude,
+      agentIdOf,
       alignToGrid,
       toggleCollapseNodes,
       toggleMarkdown,
@@ -1059,7 +1087,13 @@ export function Canvas() {
         y: e.clientY,
         items: [
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
-          { label: 'New Claude Code', icon: <IconClaude />, onClick: () => addClaude(at) },
+          ...BUILTIN_AGENT_IDS.map(
+            (aid): MenuItem => ({
+              label: `New ${AGENT_CONFIG[aid].label}`,
+              icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+              onClick: () => addAgentNode(aid, at)
+            })
+          ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
@@ -1068,7 +1102,7 @@ export function Canvas() {
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addClaude, addSticky, openFileDialog, selectAll, fitView]
+    [screenToFlowPosition, addTerminal, addAgentNode, addSticky, openFileDialog, selectAll, fitView]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1360,7 +1394,14 @@ export function Canvas() {
   const buildCommands = useCallback((): Command[] => {
     const cmds: Command[] = [
       { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
-      { id: 'new-claude', label: 'New Claude Code', icon: <IconClaude />, run: () => addClaude() },
+      ...BUILTIN_AGENT_IDS.map(
+        (aid): Command => ({
+          id: `new-${aid}`,
+          label: `New ${AGENT_CONFIG[aid].label}`,
+          icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+          run: () => addAgentNode(aid)
+        })
+      ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
@@ -1384,12 +1425,14 @@ export function Canvas() {
       .filter((n) => n.type !== 'group')
       .forEach((n) => {
         const tags = (n.data.tags as string[]) ?? []
-        const isClaude = tags.includes('claude')
-        const session = isClaude ? cs.byId[n.id]?.session : undefined
+        const a =
+          (n.data.agentId as AgentId | undefined) ?? (tags.includes('claude') ? 'claude' : undefined)
+        const isAgent = !!a && hasHooks(a)
+        const session = isAgent ? cs.byId[n.id]?.session : undefined
         cmds.push({
           id: `node-${n.id}`,
           label: `Go to ${n.data.title}`,
-          hint: [tags.join(' '), session, isClaude ? `nt-${n.id}` : '']
+          hint: [tags.join(' '), session, isAgent ? `nt-${n.id}` : '']
             .filter(Boolean)
             .join(' '),
           icon: <IconJump />,
@@ -1400,7 +1443,7 @@ export function Canvas() {
     return cmds
   }, [
     addTerminal,
-    addClaude,
+    addAgentNode,
     addSticky,
     openFileDialog,
     addProject,
@@ -1582,7 +1625,7 @@ export function Canvas() {
         onRedo={redo}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
-        onAddClaude={addClaude}
+        onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import claudeIcon from '../assets/claude.svg'
+import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 
 interface DockProps {
   dirty: boolean
@@ -8,7 +9,7 @@ interface DockProps {
   canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
-  onAddClaude: () => void
+  onAddAgent: (agentId: AgentId) => void
   onOpenFile: () => void
   onUndo: () => void
   onRedo: () => void
@@ -29,7 +30,7 @@ export function Dock({
   canRedo,
   onAddTerminal,
   onAddSticky,
-  onAddClaude,
+  onAddAgent,
   onOpenFile,
   onUndo,
   onRedo,
@@ -56,10 +57,12 @@ export function Dock({
               <TerminalIcon />
               <span>Terminal</span>
             </button>
-            <button onClick={pick(onAddClaude)}>
-              <ClaudeIcon />
-              <span>Claude Code</span>
-            </button>
+            {BUILTIN_AGENT_IDS.map((aid) => (
+              <button key={aid} onClick={pick(() => onAddAgent(aid))}>
+                {aid === 'claude' ? <ClaudeIcon /> : <TerminalIcon />}
+                <span>{AGENT_CONFIG[aid].label}</span>
+              </button>
+            ))}
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
