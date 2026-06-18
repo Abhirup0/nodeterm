@@ -102,7 +102,7 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
   let timer: ReturnType<typeof setInterval> | null = null
 
   const send = (toolUseId: string, chunk: string) => {
-    if (chunk && !win.isDestroyed()) win.webContents.send(IPC.claudeSubagentActivity, { toolUseId, chunk })
+    if (chunk && !win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
   }
 
   const readOne = (toolUseId: string, e: Tracked) => {

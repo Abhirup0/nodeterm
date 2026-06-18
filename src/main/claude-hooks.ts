@@ -180,7 +180,7 @@ export function initClaudeHooks(win: BrowserWindow): void {
             ?.filter((c) => c.type === 'text' && c.text)
             .map((c) => c.text)
             .join('\n')
-          win.webContents.send(IPC.claudeStatus, {
+          win.webContents.send(IPC.agentStatus, {
             nodeId,
             event: p.hook_event_name,
             sessionId: p.session_id,

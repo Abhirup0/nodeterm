@@ -7,7 +7,7 @@ import { app, ipcMain, webContents } from 'electron'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type PtyCreateOptions, type Settings } from '../shared/types'
-import { claudeHookDir } from './claude-hooks'
+import { hookServer } from './agents/hook-server'
 
 // A dedicated tmux socket isolates our sessions from the user's own tmux server.
 const TMUX_SOCKET = 'node-terminal'
@@ -132,12 +132,13 @@ export class PtyManager {
     delete env.TMUX
     delete env.TMUX_PANE
 
-    // Claude Code hooks: each session carries its node id + the signal dir. Our managed
-    // hook (installed globally in ~/.claude/settings.json, but a no-op without these vars)
-    // then reports state back to us for any `claude` run in this session.
-    const hookDir = claudeHookDir()
-    env.NODETERM_HOOK_DIR = hookDir
-    if (options.persistKey) env.NODETERM_NODE_ID = options.persistKey
+    // Agent hooks: each session carries the hook-server coordinates + its node/agent id.
+    // Our managed hook (installed globally in each agent's config, but a no-op without these
+    // vars) then posts state back to us for any agent run in this session.
+    const hookEnv = options.persistKey
+      ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude')
+      : {}
+    for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
     const settings = this.getSettings()
     let file: string
@@ -148,6 +149,9 @@ export class PtyManager {
       // `-e` sets the session environment explicitly (the tmux server is shared, so relying
       // on the client's inherited env would leak the first session's values into later ones).
       file = this.tmuxPath
+      // The hook-server env (port/token/node id/agent id) is passed explicitly via `-e`
+      // (one `-e KEY=VALUE` per key) since the shared tmux server can't rely on inherited env.
+      const hookEnvArgs = Object.entries(hookEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`])
       args = [
         '-L',
         TMUX_SOCKET,
@@ -156,10 +160,7 @@ export class PtyManager {
         'new-session',
         '-A',
         '-D',
-        '-e',
-        `NODETERM_NODE_ID=${options.persistKey}`,
-        '-e',
-        `NODETERM_HOOK_DIR=${hookDir}`,
+        ...hookEnvArgs,
         '-c',
         cwd,
         '-s',

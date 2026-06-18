@@ -156,15 +156,15 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appFocusNode, handler)
     return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
   },
-  onClaudeStatus: (listener) => {
+  onAgentStatus: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
-    ipcRenderer.on(IPC.claudeStatus, handler)
-    return () => ipcRenderer.removeListener(IPC.claudeStatus, handler)
+    ipcRenderer.on(IPC.agentStatus, handler)
+    return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
   },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
-    ipcRenderer.on(IPC.claudeSubagentActivity, handler)
-    return () => ipcRenderer.removeListener(IPC.claudeSubagentActivity, handler)
+    ipcRenderer.on(IPC.agentSubagentActivity, handler)
+    return () => ipcRenderer.removeListener(IPC.agentSubagentActivity, handler)
   }
 }
 

@@ -1,5 +1,7 @@
 // Types shared across the main, preload, and renderer processes.
 
+import type { NormalizedAgentEvent } from './agents/normalize'
+
 export interface PtyCreateOptions {
   shell?: string
   cwd?: string
@@ -10,6 +12,12 @@ export interface PtyCreateOptions {
    * terminal reattaches to the same session across remounts and app restarts.
    */
   persistKey?: string
+  /**
+   * Which agent runs in this session (claude/codex/gemini/custom). Drives the hook env
+   * injected at spawn. Defaults to 'claude' for backward compat; the renderer passes a
+   * real value in a later phase.
+   */
+  agentId?: string
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -481,8 +489,8 @@ export interface NodeTerminalApi {
   notify(payload: NotifyPayload): Promise<boolean>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
-  /** Fires on each Claude Code hook event (start/working/idle/attention). Returns unsubscribe. */
-  onClaudeStatus(listener: (e: ClaudeStatusEvent) => void): () => void
+  /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
+  onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
 }

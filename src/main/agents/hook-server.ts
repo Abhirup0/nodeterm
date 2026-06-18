@@ -37,6 +37,7 @@ class HookServer {
   private port = 0
   private token = ''
   private listener: ((e: NormalizedAgentEvent) => void) | null = null
+  private rawListener: ((agentId: string, nodeId: string, payload: Record<string, unknown>) => void) | null = null
   private endpointPath = ''
 
   endpointFilePath(): string {
@@ -46,6 +47,12 @@ class HookServer {
 
   setListener(cb: (e: NormalizedAgentEvent) => void): void {
     this.listener = cb
+  }
+
+  // Raw payload listener: receives the parsed (un-normalized) hook JSON. Drives the
+  // contextTail/subagentTail features, which need transcript_path (not in NormalizedAgentEvent).
+  setRawListener(cb: (agentId: string, nodeId: string, payload: Record<string, unknown>) => void): void {
+    this.rawListener = cb
   }
 
   async start(): Promise<void> {
@@ -75,6 +82,9 @@ class HookServer {
           } catch {
             payload = {}
           }
+          // Raw listener first: it drives the transcript-tailing features (which need
+          // transcript_path). Inside the try so a throwing raw listener still ends 204.
+          this.rawListener?.(agentId, nodeId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
           if (normalized && this.listener) this.listener(normalized)
         }

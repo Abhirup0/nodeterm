@@ -11,7 +11,10 @@ import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
 import { fetchAnnouncements } from './announcements'
-import { initClaudeHooks } from './claude-hooks'
+import { hookServer } from './agents/hook-server'
+import { installManagedAgentHooks } from './agents/hooks'
+import { createSubagentTail } from './subagent-tail'
+import { createContextTail } from './context-tail'
 import { initBridge } from './bridge'
 import { initClaudeUsage } from './claude-usage'
 
@@ -93,7 +96,7 @@ function createWindow(): BrowserWindow {
   return win
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return // losing second instance — quitting; don't touch tmux
   settingsStore.init()
   settingsStore.registerIpc()
@@ -231,7 +234,38 @@ app.whenReady().then(() => {
   const win = createWindow()
   mainWin = win
   initUpdater(win)
-  initClaudeHooks(win)
+
+  // Agent hooks: install the managed hook script into each agent's config, then start the
+  // local HTTP server that receives hook posts and forwards normalized events to the renderer.
+  // A raw listener drives the transcript-tailing features (context meter + subagent transcript),
+  // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
+  const subagentTail = createSubagentTail(win)
+  const contextTail = createContextTail(win)
+  installManagedAgentHooks()
+  hookServer.setListener((e) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)
+  })
+  hookServer.setRawListener((agentId, _nodeId, payload) => {
+    if (agentId !== 'claude') return
+    const p = payload as {
+      hook_event_name?: string
+      session_id?: string
+      transcript_path?: string
+      tool_name?: string
+      tool_use_id?: string
+    }
+    // Context-window meter: tail the session transcript (any event carrying both fields).
+    if (p.session_id && p.transcript_path) contextTail.track(p.session_id, p.transcript_path)
+    if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
+    // Subagent live transcript: track on PreToolUse / finish on PostToolUse for subagent tools.
+    const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
+    if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name)) {
+      if (p.hook_event_name === 'PreToolUse') subagentTail.track(p.tool_use_id, p.transcript_path)
+      else if (p.hook_event_name === 'PostToolUse') subagentTail.finish(p.tool_use_id)
+    }
+  })
+  await hookServer.start()
+
   initBridge(win, ptyManager)
   initClaudeUsage(win)
 
