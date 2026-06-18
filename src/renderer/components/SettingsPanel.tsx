@@ -142,7 +142,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               <input
                 type="checkbox"
                 checked={settings.telemetryEnabled}
-                onChange={(e) => update({ telemetryEnabled: e.target.checked, telemetryNoticeSeen: true })}
+                onChange={(e) => update({ telemetryEnabled: e.target.checked })}
               />
             </label>
             <p className="set-note">No personal data. Used only to see which versions are in use.</p>

@@ -188,8 +188,6 @@ export interface Settings {
   notifyConsentAsked: boolean
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-out (default on). */
   telemetryEnabled: boolean
-  /** Whether the one-time telemetry privacy notice has been shown/dismissed. */
-  telemetryNoticeSeen: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -210,8 +208,7 @@ export const DEFAULT_SETTINGS: Settings = {
   seenShortcuts: false,
   notifyOnClaudeDone: true,
   notifyConsentAsked: false,
-  telemetryEnabled: true,
-  telemetryNoticeSeen: false
+  telemetryEnabled: true
 }
 
 export interface SettingsApi {
