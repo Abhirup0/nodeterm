@@ -10,7 +10,7 @@ import { SettingsStore } from './settings-store'
 import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
-import { fetchAnnouncements } from './announcements'
+import { fetchCheck } from './check'
 import { initClaudeHooks } from './claude-hooks'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
@@ -145,7 +145,8 @@ app.whenReady().then(() => {
     }
   )
 
-  ipcMain.handle(IPC.announcementsFetch, () => fetchAnnouncements())
+  ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
+  ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)

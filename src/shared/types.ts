@@ -285,6 +285,13 @@ export interface UpdateInfo {
   notes?: string
 }
 
+export interface UpdatePolicy {
+  /** Minimum supported version for the device's channel (or null when no policy). */
+  minSupported: string | null
+  /** True when the running version is below the minimum supported version. */
+  mandatory: boolean
+}
+
 export interface UpdateProgress {
   /** 0–100. */
   percent: number
@@ -308,6 +315,8 @@ export interface UpdateApi {
   check(): void
   /** The running app version. */
   getVersion(): Promise<string>
+  /** The channel's mandatory-update policy for the running version (from /v1/check). */
+  getPolicy(): Promise<UpdatePolicy>
   /** Quit and install the staged update. */
   restart(): void
 }
