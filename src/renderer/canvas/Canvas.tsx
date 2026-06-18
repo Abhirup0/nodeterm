@@ -61,6 +61,8 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
+import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { agentConfig } from '@shared/agents/config'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
@@ -185,6 +187,7 @@ export function Canvas() {
       const parent = nodes.find((n) => n.id === pid)
       if (!parent) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
+      const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const lid = `loop-${pid}`
       eNodes.push({
         id: lid,
@@ -195,7 +198,7 @@ export function Canvas() {
         ...dims(lid, 230, 460, 92, 320),
         data: {
           title: st.loop.task ?? '',
-          color: '#bf7af0',
+          color: accent,
           group: null,
           loopCount: st.loop.count,
           loopItems: st.loop.items,
@@ -212,7 +215,7 @@ export function Canvas() {
         sourceHandle: 'flow-out',
         target: lid,
         animated: st.state === 'working',
-        style: { stroke: '#bf7af0', strokeWidth: 1.5 }
+        style: { stroke: accent, strokeWidth: 1.5 }
       })
     }
     const byParent: Record<string, string[]> = {}
@@ -223,6 +226,7 @@ export function Canvas() {
       const parent = nodes.find((n) => n.id === pid)
       if (!parent) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
+      const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const COLS = 4
       const COL_W = 240
       const ROW_H = 140
@@ -240,7 +244,7 @@ export function Canvas() {
           ...dims(cid, 230, 480, 96, 340),
           data: {
             title: v.label ?? '',
-            color: '#d97757',
+            color: accent,
             group: null,
             subagentType: v.type,
             subagentState: v.state,
@@ -259,7 +263,7 @@ export function Canvas() {
           sourceHandle: 'flow-out',
           target: cid,
           animated: v.state === 'working',
-          style: { stroke: '#d97757', strokeWidth: 1.5 }
+          style: { stroke: accent, strokeWidth: 1.5 }
         })
       })
     }
@@ -1182,7 +1186,7 @@ export function Canvas() {
       const t = (s ?? '').replace(/\s+/g, ' ').trim()
       return t.length <= max ? t : `${t.slice(0, max - 1)}…`
     }
-    return window.nodeTerminal.onClaudeStatus((e) => {
+    return window.nodeTerminal.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       // REF-style: "<folder> — Claude finished" + last assistant message as the body.
@@ -1206,52 +1210,27 @@ export function Canvas() {
         })
       }
       const an = useAgentNodes.getState()
-      switch (e.event) {
-        case 'UserPromptSubmit':
-          cs.setState(e.nodeId, 'working')
-          an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
-          {
-            const m = (e.prompt ?? '').match(/^\s*\/(loop|schedule|cron)\b/)
-            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.prompt })
+      switch (e.kind) {
+        case 'state':
+          if (e.state) cs.setState(e.nodeId, e.state, e.agentId)
+          if (e.state === 'working') an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
+          if (e.state === 'done') {
+            cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
+            alert('finished', 'Claude finished its turn.')
+          }
+          if (e.state === 'blocked') alert('needs input', 'Claude needs permission to continue.')
+          else if (e.state === 'waiting') alert('needs input', 'Claude is waiting for your response.')
+          break
+        case 'subagent-start':
+          if (e.toolUseId) {
+            an.start(e.toolUseId, {
+              parentNodeId: e.nodeId,
+              type: e.subagentType,
+              label: e.taskLabel
+            })
           }
           break
-        case 'Stop':
-          cs.setState(e.nodeId, 'done')
-          cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
-          alert('finished', 'Claude finished its turn.')
-          break
-        case 'Notification':
-          if (e.notificationType === 'permission_prompt') {
-            cs.setState(e.nodeId, 'blocked')
-            alert('needs input', 'Claude needs permission to continue.')
-          } else {
-            cs.setState(e.nodeId, 'waiting')
-            alert('needs input', 'Claude is waiting for your response.')
-          }
-          break
-        case 'PreToolUse': {
-          const tool = e.toolName
-          if (tool === 'Agent' || tool === 'Task') {
-            if (e.toolUseId) {
-              an.start(e.toolUseId, {
-                parentNodeId: e.nodeId,
-                type: e.subagentType,
-                label: e.taskLabel
-              })
-            }
-          } else {
-            // Recurring-task tools → loop/schedule/cron node.
-            let kind: 'loop' | 'schedule' | 'cron' | undefined
-            if (tool === 'Skill') {
-              const sk = (e.skill ?? '').split(':').pop()
-              if (sk === 'loop' || sk === 'schedule' || sk === 'cron') kind = sk
-            } else if (tool === 'CronCreate') kind = 'cron'
-            else if (tool === 'ScheduleWakeup') kind = 'loop'
-            if (kind) cs.setLoop(e.nodeId, true, kind, { schedule: e.schedule, task: e.taskLabel })
-          }
-          break
-        }
-        case 'PostToolUse':
+        case 'subagent-end':
           if (e.toolUseId)
             an.finish(e.toolUseId, {
               durationMs: e.durationMs,
@@ -1260,13 +1239,12 @@ export function Canvas() {
               result: e.result
             })
           break
-        case 'SessionStart':
-          cs.setState(e.nodeId, undefined)
+        case 'recurring':
+          if (e.recurringKind)
+            cs.setLoop(e.nodeId, true, e.recurringKind, { schedule: e.schedule, task: e.task })
           break
-        case 'SessionEnd':
-          cs.setState(e.nodeId, undefined)
-          cs.setLoop(e.nodeId, false)
-          an.clearForParent(e.nodeId)
+        case 'session':
+          if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
           break
       }
     })
