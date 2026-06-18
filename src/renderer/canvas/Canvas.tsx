@@ -1213,7 +1213,13 @@ export function Canvas() {
       switch (e.kind) {
         case 'state':
           if (e.state) cs.setState(e.nodeId, e.state, e.agentId)
-          if (e.state === 'working') an.clearForParent(e.nodeId) // new turn → drop the previous fan-out
+          if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
+          if (e.newTurn && e.task) {
+            // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
+            // phrasing doesn't trigger the tool-based (recurring) detection.
+            const m = e.task.match(/^\s*\/(loop|schedule|cron)\b/)
+            if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.task })
+          }
           if (e.state === 'done') {
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
             alert('finished', 'Claude finished its turn.')

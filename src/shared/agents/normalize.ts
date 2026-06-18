@@ -9,6 +9,9 @@ export interface NormalizedAgentEvent {
   agentId: AgentId
   kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session'
   state?: AgentState
+  // true only for a genuine new turn (Claude UserPromptSubmit), so the renderer can
+  // clear per-turn fan-out without clearing on every mid-turn tool event.
+  newTurn?: boolean
   sessionId?: string
   lastMessage?: string
   // session
@@ -113,7 +116,7 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
   }
 
   if (ev === 'UserPromptSubmit') {
-    return { ...base, kind: 'state', state: 'working', task: p.prompt }
+    return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
   }
   if (ev === 'Stop') {
     return { ...base, kind: 'state', state: 'done', lastMessage: p.last_assistant_message }
