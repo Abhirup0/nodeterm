@@ -1,6 +1,7 @@
 // Types shared across the main, preload, and renderer processes.
 
 import type { NormalizedAgentEvent } from './agents/normalize'
+import type { AgentId } from './agents/config'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -41,6 +42,8 @@ export interface CanvasNodeState {
   // terminal-only
   shell?: string
   cwd?: string
+  /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
+  agentId?: AgentId
   // sticky-only
   text?: string
   // editor / diff

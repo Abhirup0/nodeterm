@@ -115,7 +115,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     }
 
     transport
-      .create({ cols: term.cols, rows: term.rows, shell: data.shell, cwd: data.cwd, persistKey: id })
+      .create({
+        cols: term.cols,
+        rows: term.rows,
+        shell: data.shell,
+        cwd: data.cwd,
+        persistKey: id,
+        agentId: data.agentId
+      })
       .then((sid) => {
         if (disposed) {
           transport.kill(sid)

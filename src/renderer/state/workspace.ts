@@ -1,5 +1,7 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasNodeState, NodeKind, Project } from '@shared/types'
+import type { AgentId } from '@shared/agents/config'
+import { agentConfig } from '@shared/agents/config'
 
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
@@ -37,6 +39,8 @@ export interface NodeData {
   text?: string
   filePath?: string
   diffStaged?: boolean
+  /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
+  agentId?: AgentId
   [key: string]: unknown
 }
 
@@ -103,12 +107,22 @@ export function claudeLaunchCommand(): string {
   return bridgeConfigPath ? `claude --mcp-config "${bridgeConfigPath}"` : 'claude'
 }
 
-/** Creates a terminal that launches Claude Code (`claude`) on open. */
-export function createClaudeNode(
+/**
+ * Creates a terminal node that launches the given agent on open. Title, color, and the
+ * launch command come from the agent config; the node carries `agentId` so the rest of the
+ * app (hooks, capabilities, UI) can branch on it. For `claude` we use `claudeLaunchCommand()`
+ * which appends the Session Bridge `--mcp-config` (Claude-only).
+ */
+export function createAgentNode(
+  agentId: AgentId,
   index: number,
   cwd?: string,
   center?: { x: number; y: number }
 ): CanvasNode {
+  const cfg = agentConfig(agentId)
+  const label = cfg?.label ?? agentId
+  const color = cfg?.color ?? '#888888'
+  const initialCommand = agentId === 'claude' ? claudeLaunchCommand() : cfg?.launchCmd ?? agentId
   return {
     id: nextId('term'),
     type: 'terminal',
@@ -117,14 +131,24 @@ export function createClaudeNode(
     height: TERMINAL_SIZE.height,
     style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
     data: {
-      title: 'Claude Code',
-      color: '#d97757',
+      title: label,
+      color,
       group: null,
-      tags: ['claude'],
+      tags: [],
+      agentId,
       cwd,
-      initialCommand: claudeLaunchCommand()
+      initialCommand
     }
   }
+}
+
+/** Creates a terminal that launches Claude Code (`claude`) on open. Thin wrapper. */
+export function createClaudeNode(
+  index: number,
+  cwd?: string,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return createAgentNode('claude', index, cwd, center)
 }
 
 /** Creates a code editor node for a file. */
@@ -316,6 +340,10 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
   return ordered.map((n) => {
     const collapsed = !!n.collapsed
     const height = collapsed ? COLLAPSED_HEIGHT : n.size.height
+    // Legacy migration: nodes saved before `agentId` existed marked Claude via the 'claude'
+    // tag. Backfill agentId so saved workspaces keep working.
+    let agentId = n.agentId
+    if (!agentId && Array.isArray(n.tags) && n.tags.includes('claude')) agentId = 'claude'
     return {
       id: n.id,
       // Default to 'terminal' for nodes saved before the kind field existed.
@@ -336,7 +364,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         cwd: n.cwd,
         text: n.text,
         filePath: n.filePath,
-        diffStaged: n.diffStaged
+        diffStaged: n.diffStaged,
+        agentId
       }
     }
   })
@@ -378,7 +407,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
       cwd: n.data.cwd,
       text: n.data.text,
       filePath: n.data.filePath,
-      diffStaged: n.data.diffStaged
+      diffStaged: n.data.diffStaged,
+      agentId: n.data.agentId
     }
   })
 }
