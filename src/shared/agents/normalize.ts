@@ -130,11 +130,58 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
   return null
 }
 
-// Stubs — filled with real event mappings in Phase 4.
-export function normalizeCodex(_env: RawHookEnvelope): NormalizedAgentEvent | null {
+// Codex hook payload. Event name is read defensively; codex emits a session id under
+// `session_id`. Mapping confirmed against REF's agent-hook-listener.
+interface CodexPayload {
+  hook_event_name?: string
+  hookEventName?: string
+  session_id?: string
+  prompt?: string
+}
+
+export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as CodexPayload
+  const ev = p.hook_event_name ?? p.hookEventName
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+
+  // UserPromptSubmit is codex's turn start — flag newTurn so the renderer clears
+  // per-turn fan-out once per turn, not on every tool event.
+  if (ev === 'UserPromptSubmit') {
+    return { ...base, kind: 'state', state: 'working', newTurn: true }
+  }
+  // SessionStart + tool events keep the node "working".
+  if (ev === 'SessionStart' || ev === 'PreToolUse' || ev === 'PostToolUse') {
+    return { ...base, kind: 'state', state: 'working' }
+  }
+  if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting' }
+  if (ev === 'Stop') return { ...base, kind: 'state', state: 'done' }
   return null
 }
-export function normalizeGemini(_env: RawHookEnvelope): NormalizedAgentEvent | null {
+
+// Gemini hook payload. Event name is read defensively (REF reads
+// `hook_event_name`/`hookEventName`); a session id may be present under `session_id`.
+interface GeminiPayload {
+  hook_event_name?: string
+  hookEventName?: string
+  event?: string
+  session_id?: string
+}
+
+export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as GeminiPayload
+  const ev = p.hook_event_name ?? p.hookEventName ?? p.event
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+
+  // BeforeAgent is gemini's turn start — flag newTurn (mirrors Claude's UserPromptSubmit)
+  // so per-turn fan-out clears once per turn rather than on every tool event.
+  if (ev === 'BeforeAgent') {
+    return { ...base, kind: 'state', state: 'working', newTurn: true }
+  }
+  if (ev === 'BeforeTool' || ev === 'AfterTool') {
+    return { ...base, kind: 'state', state: 'working' }
+  }
+  if (ev === 'AfterAgent') return { ...base, kind: 'state', state: 'done' }
+  // Gemini has no waiting/blocked states.
   return null
 }
 

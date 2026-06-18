@@ -9,7 +9,17 @@ import { homedir } from 'os'
 import path from 'path'
 import { installHooksInto, removeHooksFrom } from './install-helper'
 
-const CODEX_EVENTS = ['UserPromptSubmit', 'Stop'] as const
+// Confirmed codex event set (verified against REF's agent-hook-listener).
+// NOTE: the config path + install mechanism below are still placeholders — they are
+// revised in the codex-trust follow-up task. Only this events constant is final here.
+const CODEX_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PermissionRequest',
+  'PostToolUse',
+  'Stop'
+] as const
 
 const SCRIPT_FILE_NAME = 'codex.sh'
 
