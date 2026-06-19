@@ -209,6 +209,10 @@ export interface Settings {
   notifyConsentAsked: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** Agent ids hidden from the Add menus. */
+  disabledAgents: AgentId[]
+  /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
+  defaultAgent: AgentId
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-out (default on). */
   telemetryEnabled: boolean
 }
@@ -232,6 +236,8 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyOnClaudeDone: true,
   notifyConsentAsked: false,
   customAgents: [],
+  disabledAgents: [],
+  defaultAgent: 'claude',
   telemetryEnabled: true
 }
 
