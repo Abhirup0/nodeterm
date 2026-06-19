@@ -10,6 +10,7 @@ export const IPC = {
   ptyGenerateName: 'pty:generate-name',
   ptyCapture: 'pty:capture',
   ptySendText: 'pty:send-text',
+  claudeReadTranscript: 'claude:read-transcript',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
   appCloseWindow: 'app:close-window',

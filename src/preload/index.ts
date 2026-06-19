@@ -128,6 +128,9 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.contextUpdate, handler)
     }
   },
+  claude: {
+    readTranscript: (sessionId) => ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId)
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),

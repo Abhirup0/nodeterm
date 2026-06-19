@@ -15,6 +15,7 @@ import { hookServer } from './agents/hook-server'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
+import { readTranscriptLines, resolveTranscriptPath } from './transcript-reader'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -243,6 +244,10 @@ app.whenReady().then(async () => {
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(win)
   const contextTail = createContextTail(win)
+  ipcMain.handle(IPC.claudeReadTranscript, async (_e, sessionId: string) => {
+    const p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+    return p ? readTranscriptLines(p) : []
+  })
   installManagedAgentHooks()
   hookServer.setListener((e) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)

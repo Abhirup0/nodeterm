@@ -460,6 +460,17 @@ export interface ContextApi {
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
 }
 
+/** One searchable line extracted from a Claude session transcript. */
+export interface TranscriptLine {
+  role: 'user' | 'assistant' | 'tool'
+  text: string
+}
+
+export interface ClaudeApi {
+  /** Reads a Claude session's full transcript as flat searchable lines ([] if unavailable). */
+  readTranscript(sessionId: string): Promise<TranscriptLine[]>
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -474,6 +485,7 @@ export interface NodeTerminalApi {
   bridge: BridgeApi
   usage: UsageApi
   context: ContextApi
+  claude: ClaudeApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

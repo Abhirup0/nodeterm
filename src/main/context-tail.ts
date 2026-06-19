@@ -25,6 +25,8 @@ interface Tracked {
 export interface ContextTail {
   track(sessionId: string | undefined, transcriptPath: string | undefined): void
   untrack(sessionId: string | undefined): void
+  /** The transcript path currently tracked for a session, if any. */
+  pathFor(sessionId: string | undefined): string | undefined
 }
 
 export function createContextTail(win: BrowserWindow): ContextTail {
@@ -147,6 +149,10 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         clearInterval(timer)
         timer = null
       }
+    },
+    pathFor(sessionId) {
+      if (!sessionId) return undefined
+      return sessions.get(sessionId)?.path
     }
   }
 }
