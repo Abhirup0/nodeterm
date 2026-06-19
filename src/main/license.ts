@@ -13,6 +13,14 @@ import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
+// Same gate as telemetry/check: never hit the prod API from a dev/unsigned build unless a
+// local server is targeted explicitly, and honor DO_NOT_TRACK / the kill switch.
+function allowed(): boolean {
+  if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
+  if (!app.isPackaged && !process.env.NODETERM_API_BASE) return false
+  return true
+}
+
 interface Stored {
   key?: string
   token?: string
@@ -65,6 +73,7 @@ function statusFrom(token: string | undefined, error: string | null = null): Lic
 }
 
 async function call(path: string, body: unknown): Promise<{ token?: string; error?: string }> {
+  if (!allowed()) return { error: 'disabled' }
   try {
     const ctrl = new AbortController()
     const t = setTimeout(() => ctrl.abort(), 8000)
