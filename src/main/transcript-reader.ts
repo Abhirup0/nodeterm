@@ -96,9 +96,14 @@ export async function readTranscriptLines(filePath: string): Promise<TranscriptL
   return lines
 }
 
+// Claude session ids are UUID-like (hex + dashes). Reject anything else before it
+// touches the filesystem — this alone prevents path traversal (no '/' or '.' possible).
+export const SESSION_ID_RE = /^[0-9a-fA-F-]{8,64}$/
+
 // Fallback when context-tail isn't tracking the session (e.g. resumed after restart):
 // find <sessionId>.jsonl anywhere under ~/.claude/projects/*.
 export async function resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
+  if (!SESSION_ID_RE.test(sessionId)) return undefined
   const root = path.join(os.homedir(), '.claude', 'projects')
   let dirs: string[]
   try {

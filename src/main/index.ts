@@ -15,7 +15,7 @@ import { hookServer } from './agents/hook-server'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
-import { readTranscriptLines, resolveTranscriptPath } from './transcript-reader'
+import { readTranscriptLines, resolveTranscriptPath, SESSION_ID_RE } from './transcript-reader'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -245,6 +245,7 @@ app.whenReady().then(async () => {
   const subagentTail = createSubagentTail(win)
   const contextTail = createContextTail(win)
   ipcMain.handle(IPC.claudeReadTranscript, async (_e, sessionId: string) => {
+    if (!SESSION_ID_RE.test(sessionId)) return []
     const p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
     return p ? readTranscriptLines(p) : []
   })
