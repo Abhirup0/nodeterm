@@ -3169,3 +3169,31 @@ body,
 .ctx-popover__meta { margin-top: 8px; font-size: 12px; }
 .ctx-popover__sub { margin-top: 4px; font-size: 11px; color: rgba(255, 255, 255, 0.5); }
 .usage-account__email { font-size: 13px; }
+
+.seg-pill {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.seg-pill-opt {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.seg-pill-opt:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+.seg-pill-opt.active {
+  background: var(--accent);
+  color: #fff;
+}
