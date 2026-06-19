@@ -460,6 +460,27 @@ export interface ContextApi {
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
 }
 
+export interface LicenseStatus {
+  /** 'pro' when entitled, else null. */
+  tier: string | null
+  active: boolean
+  /** Unix seconds when the entitlement expires, or null. */
+  expiresAt: number | null
+  /** Last activation/refresh error reason code, or null. */
+  error: string | null
+}
+
+export interface LicenseApi {
+  /** Activate a license key on this device. Returns the resulting status. */
+  activate(key: string): Promise<LicenseStatus>
+  /** Release this device's seat and clear the local license. */
+  deactivate(): Promise<LicenseStatus>
+  /** Current cached status (verifies the stored token offline). */
+  getStatus(): Promise<LicenseStatus>
+  /** Fires when the license status changes. Returns unsubscribe. */
+  onChange(listener: (s: LicenseStatus) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -471,6 +492,7 @@ export interface NodeTerminalApi {
   fs: FsApi
   updates: UpdateApi
   announcements: AnnouncementsApi
+  license: LicenseApi
   bridge: BridgeApi
   usage: UsageApi
   context: ContextApi

@@ -109,6 +109,16 @@ const api: NodeTerminalApi = {
     getPolicy: () => ipcRenderer.invoke(IPC.appUpdatePolicy),
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
   },
+  license: {
+    activate: (key: string) => ipcRenderer.invoke(IPC.licenseActivate, key),
+    deactivate: () => ipcRenderer.invoke(IPC.licenseDeactivate),
+    getStatus: () => ipcRenderer.invoke(IPC.licenseStatus),
+    onChange: (listener) => {
+      const handler = (_e: unknown, s: Parameters<typeof listener>[0]) => listener(s)
+      ipcRenderer.on(IPC.licenseChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.licenseChanged, handler)
+    }
+  },
   announcements: {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },
