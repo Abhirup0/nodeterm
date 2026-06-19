@@ -42,6 +42,7 @@ export function Dock({
 }: DockProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const customAgents = useSettings((s) => s.settings.customAgents)
+  const disabledAgents = useSettings((s) => s.settings.disabledAgents)
 
   const pick = (fn: () => void) => () => {
     fn()
@@ -59,18 +60,20 @@ export function Dock({
               <TerminalIcon />
               <span>Terminal</span>
             </button>
-            {BUILTIN_AGENT_IDS.map((aid) => (
+            {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).map((aid) => (
               <button key={aid} onClick={pick(() => onAddAgent(aid))}>
                 <AgentIcon agentId={aid} size={18} />
                 <span>{AGENT_CONFIG[aid].label}</span>
               </button>
             ))}
-            {customAgents.map((c) => (
-              <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
-                <AgentIcon agentId={c.id} size={18} />
-                <span>{c.label}</span>
-              </button>
-            ))}
+            {customAgents
+              .filter((c) => !disabledAgents.includes(c.id))
+              .map((c) => (
+                <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
+                  <AgentIcon agentId={c.id} size={18} />
+                  <span>{c.label}</span>
+                </button>
+              ))}
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
