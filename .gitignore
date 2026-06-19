@@ -12,3 +12,6 @@ build/icon.png
 
 # concurrent-session worktrees / local agent state
 .claude/
+
+# private backend lives in its own repo (a-private-repo)
+/nodebaseserver/
