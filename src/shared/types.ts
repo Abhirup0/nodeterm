@@ -150,6 +150,8 @@ export interface ShellApi {
   reveal(path: string): void
   /** Open a path with the OS default application. */
   openPath(path: string): void
+  /** Open an http(s) URL in the OS default browser. */
+  openExternal(url: string): void
 }
 
 export interface DirEntry {
@@ -302,6 +304,15 @@ export interface GitApi {
   showFile(cwd: string, ref: string, path: string): Promise<string>
   /** Generate a commit message from the staged diff via a local AI agent CLI. */
   generateMessage(cwd: string): Promise<GitResult>
+  /** Commit history graph for the repo. */
+  history(
+    cwd: string,
+    options?: { limit?: number; baseRef?: string | null }
+  ): Promise<import('./git-history').GitHistoryResult>
+  /** File-level changes introduced by a commit (oid). */
+  commitFiles(cwd: string, oid: string): Promise<GitFileChange[]>
+  /** Remote web URL for a commit sha, or null if it can't be derived. */
+  remoteCommitUrl(cwd: string, sha: string): Promise<string | null>
 }
 
 export interface UpdateInfo {
