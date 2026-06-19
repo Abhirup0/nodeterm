@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import claudeIcon from '../assets/claude.svg'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 
 interface DockProps {
@@ -61,13 +61,13 @@ export function Dock({
             </button>
             {BUILTIN_AGENT_IDS.map((aid) => (
               <button key={aid} onClick={pick(() => onAddAgent(aid))}>
-                {aid === 'claude' ? <ClaudeIcon /> : <TerminalIcon />}
+                <AgentIcon agentId={aid} size={18} />
                 <span>{AGENT_CONFIG[aid].label}</span>
               </button>
             ))}
             {customAgents.map((c) => (
               <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
-                <TerminalIcon />
+                <AgentIcon agentId={c.id} size={18} />
                 <span>{c.label}</span>
               </button>
             ))}
@@ -198,7 +198,4 @@ function EditorIcon() {
       <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
     </svg>
   )
-}
-function ClaudeIcon() {
-  return <img src={claudeIcon} width={18} height={18} alt="Claude Code" style={{ display: 'block' }} />
 }

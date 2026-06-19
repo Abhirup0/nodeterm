@@ -26,7 +26,6 @@ import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { CommandPalette, type Command } from '../components/CommandPalette'
 import {
-  IconClaude,
   IconCollapse,
   IconBranch,
   IconDuplicate,
@@ -71,6 +70,7 @@ import {
   BUILTIN_AGENT_IDS,
   type AgentId
 } from '@shared/agents/config'
+import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
@@ -1090,14 +1090,14 @@ export function Canvas() {
           ...BUILTIN_AGENT_IDS.map(
             (aid): MenuItem => ({
               label: `New ${AGENT_CONFIG[aid].label}`,
-              icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+              icon: <AgentIcon agentId={aid} />,
               onClick: () => addAgentNode(aid, at)
             })
           ),
           ...useSettings.getState().settings.customAgents.map(
             (c): MenuItem => ({
               label: `New ${c.label}`,
-              icon: <IconTerminal />,
+              icon: <AgentIcon agentId={c.id} />,
               onClick: () => addAgentNode(c.id, at)
             })
           ),
@@ -1407,7 +1407,7 @@ export function Canvas() {
         (aid): Command => ({
           id: `new-${aid}`,
           label: `New ${AGENT_CONFIG[aid].label}`,
-          icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+          icon: <AgentIcon agentId={aid} />,
           run: () => addAgentNode(aid)
         })
       ),
@@ -1415,7 +1415,7 @@ export function Canvas() {
         (c): Command => ({
           id: `new-${c.id}`,
           label: `New ${c.label}`,
-          icon: <IconTerminal />,
+          icon: <AgentIcon agentId={c.id} />,
           run: () => addAgentNode(c.id)
         })
       ),
