@@ -230,6 +230,22 @@ export function SourceControlPanel({
             </div>
 
             <div className="drawer__body scm-body">
+              {/* Surface git action errors (e.g. a branch switch blocked by local changes)
+                  at the top, right under the repo/branch bar, so the user sees why the
+                  action they just triggered failed instead of missing it at the bottom. */}
+              {error && (
+                <div className="scm-error" role="alert">
+                  <pre className="scm-error__msg">{error}</pre>
+                  <button
+                    className="scm-error__dismiss"
+                    title="Dismiss"
+                    aria-label="Dismiss error"
+                    onClick={() => setError('')}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               {/* Only nag when gh is actually needed (publishing a repo with no remote yet).
                   With a remote, push/pull/sync use git's credential helper (macOS keychain /
                   the same creds your IDE uses), so a gh login isn't required. */}
@@ -321,7 +337,6 @@ export function SourceControlPanel({
                 }}
               />
 
-              {error && <pre className="sc-log">{error}</pre>}
             </div>
           </>
         )}

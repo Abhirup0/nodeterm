@@ -3372,3 +3372,37 @@ body,
 .scm-history__meta { padding: 3px 10px 3px 32px; font-size: 11px; opacity: 0.55; }
 .scm-history__msg { padding: 6px 10px; font-size: 11px; opacity: 0.6; }
 .scm-history__resize { height: 6px; cursor: row-resize; }
+
+/* Source Control action error banner (e.g. branch switch blocked by local changes) */
+.scm-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 69, 58, 0.4);
+  border-radius: 6px;
+  background: rgba(255, 69, 58, 0.12);
+}
+.scm-error__msg {
+  flex: 1;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ff8a80;
+}
+.scm-error__dismiss {
+  flex: none;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.scm-error__dismiss:hover {
+  color: #fff;
+}
