@@ -18,6 +18,7 @@ import { createContextTail } from './context-tail'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
+import { initLicense } from './license'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -271,6 +272,7 @@ app.whenReady().then(async () => {
   initBridge(win, ptyManager)
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
+  initLicense(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
