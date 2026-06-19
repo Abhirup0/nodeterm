@@ -252,12 +252,6 @@ export interface GitFileChange {
   deleted: number
 }
 
-export interface GitCommit {
-  hash: string
-  subject: string
-  relative: string
-}
-
 export interface GitStatus {
   hasRepo: boolean
   /** "owner/repo" from the origin remote, else the folder name. */
@@ -272,7 +266,6 @@ export interface GitStatus {
   ghAuthed: boolean
   staged: GitFileChange[]
   changes: GitFileChange[]
-  recent: GitCommit[]
 }
 
 export interface GitResult {

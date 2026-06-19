@@ -4,7 +4,7 @@ import path from 'path'
 import { promisify } from 'util'
 import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
-import type { GitCommit, GitFileChange, GitResult, GitStatus } from '../shared/types'
+import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 
@@ -161,8 +161,7 @@ export class GitService {
       ghAvailable: !!GH_PATH,
       ghAuthed: false,
       staged: [],
-      changes: [],
-      recent: []
+      changes: []
     }
     if (!cwd) return empty
 
@@ -174,7 +173,7 @@ export class GitService {
     // These reads are independent of each other; run them concurrently instead of
     // serially spawning ~10 git processes one after the next. (`remote get-url origin`
     // simply fails to empty when there's no origin, so it needn't wait on `remote`.)
-    const [branchR, branchesR, remotesR, originR, countsR, cachedR, workR, porcelainR, logR, gh] =
+    const [branchR, branchesR, remotesR, originR, countsR, cachedR, workR, porcelainR, gh] =
       await Promise.all([
         git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']),
         git(cwd, ['branch', '--format=%(refname:short)']),
@@ -184,7 +183,6 @@ export class GitService {
         git(cwd, ['diff', '--cached', '--numstat']),
         git(cwd, ['diff', '--numstat']),
         git(cwd, ['status', '--porcelain']),
-        git(cwd, ['log', '-n', '12', '--pretty=format:%h%x00%s%x00%cr']),
         ghAuthed()
       ])
 
@@ -229,12 +227,6 @@ export class GitService {
       }
     }
 
-    const recent: GitCommit[] = []
-    for (const line of logR.out.split('\n').filter(Boolean)) {
-      const [hash, subject, relative] = line.split(' ')
-      if (hash) recent.push({ hash, subject: subject ?? '', relative: relative ?? '' })
-    }
-
     return {
       hasRepo: true,
       repoName,
@@ -246,8 +238,7 @@ export class GitService {
       ghAvailable: !!GH_PATH,
       ghAuthed: gh,
       staged,
-      changes,
-      recent
+      changes
     }
   }
 

@@ -25,14 +25,12 @@ export function GitHistoryRow({
   viewModel,
   expanded = false,
   preserveRefIds,
-  onOpenCommit,
   onToggleExpand,
   onContextMenu
 }: {
   viewModel: GitHistoryItemViewModel
   expanded?: boolean
   preserveRefIds?: readonly string[]
-  onOpenCommit?: (item: GitHistoryItem) => void
   onToggleExpand?: (item: GitHistoryItem) => void
   onContextMenu?: (item: GitHistoryItem, e: React.MouseEvent) => void
 }) {
@@ -72,7 +70,7 @@ export function GitHistoryRow({
       className="scm-history__row"
       title={tooltip}
       aria-expanded={canExpand ? expanded : undefined}
-      onClick={() => (canExpand ? onToggleExpand?.(item) : onOpenCommit?.(item))}
+      onClick={() => canExpand && onToggleExpand?.(item)}
       onContextMenu={(e) => onContextMenu?.(item, e)}
     >
       {content}
