@@ -13,6 +13,14 @@
   --muted-2: rgba(255, 255, 255, 0.25); /* tertiaryLabel */
   --accent: #0a84ff; /* systemBlue */
   --accent-hover: #3a9bff;
+  --git-graph-ref: var(--accent);
+  --git-graph-remote-ref: #bf5af2;
+  --git-graph-base-ref: #ff9f0a;
+  --git-graph-lane-1: #32d74b;
+  --git-graph-lane-2: #ffd60a;
+  --git-graph-lane-3: #6ac4dc;
+  --git-graph-lane-4: #ff453a;
+  --git-graph-lane-5: #ac8e68;
   --radius: 8px;
   --radius-sm: 6px;
   --radius-lg: 12px;
@@ -3169,3 +3177,69 @@ body,
 .ctx-popover__meta { margin-top: 8px; font-size: 12px; }
 .ctx-popover__sub { margin-top: 4px; font-size: 11px; color: rgba(255, 255, 255, 0.5); }
 .usage-account__email { font-size: 13px; }
+
+/* Git history graph (Source Control "Commits") */
+.scm-history__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+}
+.scm-history__head button { background: none; border: none; color: inherit; cursor: pointer; }
+.scm-history__count { font-size: 10px; opacity: 0.7; }
+.scm-history__body { overflow-y: auto; max-height: 33vh; }
+.scm-history__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 1px 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.scm-history__row:hover { background: rgba(255, 255, 255, 0.06); }
+.scm-history__subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scm-history__chevron { width: 10px; transition: transform 0.12s; opacity: 0.6; }
+.scm-history__chevron.collapsed { transform: rotate(-90deg); }
+.scm-history__refs { display: flex; gap: 4px; overflow: hidden; }
+.scm-history__ref {
+  max-width: 8rem;
+  padding: 1px 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.15));
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scm-history__files { background: rgba(255, 255, 255, 0.03); border-left: 1px solid rgba(255, 255, 255, 0.1); }
+.scm-history__file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px 3px 32px;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.scm-history__file:hover { background: rgba(255, 255, 255, 0.06); }
+.scm-history__file-dir { margin-left: 6px; font-size: 11px; opacity: 0.55; }
+.scm-history__meta { padding: 3px 10px 3px 32px; font-size: 11px; opacity: 0.55; }
+.scm-history__msg { padding: 6px 10px; font-size: 11px; opacity: 0.6; }
+.scm-history__resize { height: 6px; cursor: row-resize; }
