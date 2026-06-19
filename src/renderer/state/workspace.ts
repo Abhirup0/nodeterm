@@ -40,6 +40,7 @@ export interface NodeData {
   text?: string
   filePath?: string
   diffStaged?: boolean
+  commitOid?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
   [key: string]: unknown
@@ -47,6 +48,11 @@ export interface NodeData {
 
 /** React Flow node type string mirrors the persisted NodeKind. */
 export type CanvasNode = Node<NodeData, NodeKind>
+
+/** Single-quote a string for safe use as one shell argument (POSIX). */
+export function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
 
 let idCounter = 0
 function nextId(prefix: string): string {
@@ -134,10 +140,14 @@ export function createAgentNode(
   agentId: AgentId,
   index: number,
   cwd?: string,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  initialPrompt?: string
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
-  const initialCommand = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
+  const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
+  const initialCommand = initialPrompt
+    ? `${baseCmd} ${shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())}`
+    : baseCmd
   return {
     id: nextId('term'),
     type: 'terminal',
@@ -194,7 +204,8 @@ export function createDiffNode(
   cwd: string,
   relPath: string,
   staged: boolean,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  commitOid?: string
 ): CanvasNode {
   return {
     id: nextId('diff'),
@@ -204,12 +215,13 @@ export function createDiffNode(
     height: DIFF_SIZE.height,
     style: { width: DIFF_SIZE.width, height: DIFF_SIZE.height },
     data: {
-      title: `${relPath.split('/').pop() || relPath} (diff)`,
+      title: `${relPath.split('/').pop() || relPath} (${commitOid ? commitOid.slice(0, 7) : 'diff'})`,
       color: '#e0af68',
       group: null,
       cwd,
       filePath: relPath,
-      diffStaged: staged
+      diffStaged: staged,
+      commitOid
     }
   }
 }
@@ -380,6 +392,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         text: n.text,
         filePath: n.filePath,
         diffStaged: n.diffStaged,
+        commitOid: n.commitOid,
         agentId
       }
     }
@@ -423,6 +436,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
       text: n.data.text,
       filePath: n.data.filePath,
       diffStaged: n.data.diffStaged,
+      commitOid: n.data.commitOid,
       agentId: n.data.agentId
     }
   })

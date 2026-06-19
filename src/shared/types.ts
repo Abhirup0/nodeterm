@@ -50,6 +50,8 @@ export interface CanvasNodeState {
   filePath?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
+  /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
+  commitOid?: string
 }
 
 /** Canvas pan/zoom state. */
