@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../state/settings'
+import { useEntitlement } from '../state/entitlement'
 import { NODE_COLORS } from '../state/workspace'
 import type { CustomAgent } from '@shared/types'
 import type { PromptInjectionMode } from '@shared/agents/config'
@@ -17,6 +18,12 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [version, setVersion] = useState('')
   useEffect(() => {
     void window.nodeTerminal.updates.getVersion().then(setVersion)
+  }, [])
+
+  const ent = useEntitlement()
+  const [licenseKey, setLicenseKey] = useState('')
+  useEffect(() => {
+    void ent.hydrate()
   }, [])
 
   const customAgents = settings.customAgents
@@ -316,6 +323,51 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               Check for updates
             </button>
             <p className="set-note">Results appear in the update card at the bottom-right.</p>
+          </section>
+
+          <section>
+            <h3>License</h3>
+            {ent.isPremium ? (
+              <>
+                <p className="set-note">
+                  Pro — active
+                  {ent.status.expiresAt
+                    ? ` until ${new Date(ent.status.expiresAt * 1000).toLocaleDateString()}`
+                    : ''}
+                  .
+                </p>
+                <button className="set-btn" onClick={() => void ent.deactivate()}>
+                  Deactivate on this device
+                </button>
+              </>
+            ) : (
+              <>
+                <label className="set-row">
+                  <span>License key</span>
+                  <input
+                    type="text"
+                    placeholder="paste your key"
+                    value={licenseKey}
+                    onChange={(e) => setLicenseKey(e.target.value)}
+                  />
+                </label>
+                <button
+                  className="set-btn"
+                  onClick={() => {
+                    if (licenseKey.trim()) void ent.activate(licenseKey.trim())
+                  }}
+                >
+                  Activate
+                </button>
+                {ent.status.error ? (
+                  <p className="set-note" style={{ color: '#ff9f0a' }}>
+                    Could not activate ({ent.status.error}).
+                  </p>
+                ) : (
+                  <p className="set-note">Enter a key to unlock Pro features.</p>
+                )}
+              </>
+            )}
           </section>
         </div>
       </aside>
