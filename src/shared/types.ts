@@ -494,6 +494,9 @@ export interface LicenseStatus {
 }
 
 export interface LicenseApi {
+  /** Open Stripe checkout bound to this device and poll for the entitlement (no key paste).
+   * Returns the current status immediately; the active status arrives via onChange. */
+  upgrade(): Promise<LicenseStatus>
   /** Activate a license key on this device. Returns the resulting status. */
   activate(key: string): Promise<LicenseStatus>
   /** Release this device's seat and clear the local license. */

@@ -5,13 +5,18 @@
 import { promises as fs, readFileSync } from 'fs'
 import path from 'path'
 import crypto from 'node:crypto'
-import { app, ipcMain, type BrowserWindow } from 'electron'
+import { app, ipcMain, shell, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { LicenseStatus } from '../shared/types'
 import { getDeviceId } from './device-id'
 import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
+
+// Stripe Payment Link for the Pro subscription. The app appends ?client_reference_id=<deviceId>
+// so the webhook binds the purchase to this device → keyless ("device-bound") activation.
+// Replace with your real Payment Link (Stripe → Payment Links).
+const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/REPLACE_ME'
 
 // Same gate as telemetry/check: never hit the prod API from a dev/unsigned build unless a
 // local server is targeted explicitly, and honor DO_NOT_TRACK / the kill switch.
@@ -92,6 +97,21 @@ async function call(path: string, body: unknown): Promise<{ token?: string; erro
   }
 }
 
+// GET helper for the device-bound status poll.
+async function getJson(path: string): Promise<{ active?: boolean; token?: string; error?: string }> {
+  if (!allowed()) return { error: 'disabled' }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 8000)
+    const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal }).finally(() => clearTimeout(t))
+    const json = (await res.json().catch(() => ({}))) as { active?: boolean; token?: string; error?: string }
+    if (!res.ok) return { error: json.error ?? 'network' }
+    return json
+  } catch {
+    return { error: 'offline' }
+  }
+}
+
 export function initLicense(win: BrowserWindow): void {
   const deviceId = getDeviceId()
   const broadcast = (s: LicenseStatus) => {
@@ -99,6 +119,34 @@ export function initLicense(win: BrowserWindow): void {
   }
 
   ipcMain.handle(IPC.licenseStatus, () => statusFrom(load().token))
+
+  // Device-bound upgrade: open Stripe checkout (carrying our deviceId), then poll the status
+  // endpoint until the webhook has bound + minted the entitlement. Status arrives via broadcast.
+  let polling = false
+  ipcMain.handle(IPC.licenseUpgrade, async () => {
+    const url = `${CHECKOUT_URL}${CHECKOUT_URL.includes('?') ? '&' : '?'}client_reference_id=${encodeURIComponent(deviceId)}`
+    await shell.openExternal(url)
+    if (!polling) {
+      polling = true
+      const deadline = Date.now() + 6 * 60 * 1000 // poll up to 6 min after opening checkout
+      const poll = async (): Promise<void> => {
+        if (Date.now() > deadline) {
+          polling = false
+          return
+        }
+        const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
+        if (r.active && r.token) {
+          await save({ key: load().key, token: r.token })
+          broadcast(statusFrom(r.token))
+          polling = false
+          return
+        }
+        setTimeout(() => void poll(), 4000)
+      }
+      setTimeout(() => void poll(), 4000)
+    }
+    return statusFrom(load().token)
+  })
 
   ipcMain.handle(IPC.licenseActivate, async (_e, key: string) => {
     const r = await call('/v1/license/activate', { key: String(key).trim(), deviceId })

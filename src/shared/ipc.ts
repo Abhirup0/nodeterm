@@ -34,6 +34,7 @@ export const IPC = {
   licenseDeactivate: 'license:deactivate',
   licenseStatus: 'license:status',
   licenseChanged: 'license:changed',
+  licenseUpgrade: 'license:upgrade',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   usageFetch: 'usage:fetch',

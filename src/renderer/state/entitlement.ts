@@ -6,6 +6,8 @@ interface EntitlementState {
   /** True when an active Pro entitlement is present — features gate on this. */
   isPremium: boolean
   hydrate(): Promise<void>
+  /** Open Stripe checkout for this device; Pro arrives via onChange when the purchase lands. */
+  upgrade(): Promise<void>
   activate(key: string): Promise<void>
   deactivate(): Promise<void>
 }
@@ -21,6 +23,9 @@ export const useEntitlement = create<EntitlementState>((set) => {
     isPremium: false,
     async hydrate() {
       apply(await window.nodeTerminal.license.getStatus())
+    },
+    async upgrade() {
+      apply(await window.nodeTerminal.license.upgrade())
     },
     async activate(key) {
       apply(await window.nodeTerminal.license.activate(key))

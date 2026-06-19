@@ -26,6 +26,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const ent = useEntitlement()
   const [licenseKey, setLicenseKey] = useState('')
+  const [upgrading, setUpgrading] = useState(false)
   useEffect(() => {
     void ent.hydrate()
   }, [])
@@ -392,30 +393,49 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               </>
             ) : (
               <>
-                <label className="set-row">
-                  <span>License key</span>
-                  <input
-                    type="text"
-                    placeholder="paste your key"
-                    value={licenseKey}
-                    onChange={(e) => setLicenseKey(e.target.value)}
-                  />
-                </label>
                 <button
                   className="set-btn"
                   onClick={() => {
-                    if (licenseKey.trim()) void ent.activate(licenseKey.trim())
+                    setUpgrading(true)
+                    void ent.upgrade()
                   }}
                 >
-                  Activate
+                  Upgrade to Pro — $29/mo
                 </button>
-                {ent.status.error ? (
-                  <p className="set-note" style={{ color: '#ff9f0a' }}>
-                    Could not activate ({ent.status.error}).
+                {upgrading ? (
+                  <p className="set-note">
+                    Complete your purchase in the browser — Pro unlocks here automatically.
                   </p>
                 ) : (
-                  <p className="set-note">Enter a key to unlock Pro features.</p>
+                  <p className="set-note">Unlock remote access and Pro features.</p>
                 )}
+                <details>
+                  <summary className="set-note" style={{ cursor: 'pointer' }}>
+                    Have a license key?
+                  </summary>
+                  <label className="set-row">
+                    <span>License key</span>
+                    <input
+                      type="text"
+                      placeholder="paste your key"
+                      value={licenseKey}
+                      onChange={(e) => setLicenseKey(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="set-btn"
+                    onClick={() => {
+                      if (licenseKey.trim()) void ent.activate(licenseKey.trim())
+                    }}
+                  >
+                    Activate
+                  </button>
+                  {ent.status.error ? (
+                    <p className="set-note" style={{ color: '#ff9f0a' }}>
+                      Could not activate ({ent.status.error}).
+                    </p>
+                  ) : null}
+                </details>
               </>
             )}
           </section>

@@ -114,6 +114,7 @@ const api: NodeTerminalApi = {
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
   },
   license: {
+    upgrade: () => ipcRenderer.invoke(IPC.licenseUpgrade),
     activate: (key: string) => ipcRenderer.invoke(IPC.licenseActivate, key),
     deactivate: () => ipcRenderer.invoke(IPC.licenseDeactivate),
     getStatus: () => ipcRenderer.invoke(IPC.licenseStatus),
