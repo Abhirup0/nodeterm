@@ -725,11 +725,6 @@ export function Canvas() {
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
-  // Kept as a thin wrapper so existing callers + the ⌘⇧C shortcut keep working.
-  const addClaude = useCallback(
-    (center?: { x: number; y: number }) => addAgentNode('claude', center),
-    [addAgentNode]
-  )
 
   // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
   useEffect(() => {

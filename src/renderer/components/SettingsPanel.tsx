@@ -160,9 +160,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </section>
 
           {(() => {
-            const rows: { id: AgentId; label: string }[] = [
-              ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label })),
-              ...customAgents.map((c) => ({ id: c.id, label: c.label || c.id }))
+            const rows: { id: AgentId; label: string; isBuiltin: boolean }[] = [
+              ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
+              ...customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
             ]
             return (
               <section>
@@ -179,14 +179,16 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                         <AgentIcon agentId={row.id} size={18} />
                       </span>
                       <span className="agents-row-label">{row.label}</span>
-                      <button
-                        type="button"
-                        className={`set-btn agents-default${isDefault ? ' active' : ''}`}
-                        aria-pressed={isDefault}
-                        onClick={() => update(setDefaultAgent(settings, row.id))}
-                      >
-                        {isDefault ? 'Default' : 'Set default'}
-                      </button>
+                      {row.isBuiltin && (
+                        <button
+                          type="button"
+                          className={`set-btn agents-default${isDefault ? ' active' : ''}`}
+                          aria-pressed={isDefault}
+                          onClick={() => update(setDefaultAgent(settings, row.id))}
+                        >
+                          {isDefault ? 'Default' : 'Set default'}
+                        </button>
+                      )}
                       <SegmentedPill<'enabled' | 'disabled'>
                         value={enabled ? 'enabled' : 'disabled'}
                         ariaLabel={`${row.label} availability`}

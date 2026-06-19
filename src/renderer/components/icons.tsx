@@ -1,5 +1,3 @@
-import claudeIcon from '../assets/claude.svg'
-
 /** Small line icons (stroke = currentColor), shared across menus and the palette. */
 const S = {
   width: 16,
@@ -119,10 +117,6 @@ export const IconBranch = () => (
     <circle cx="18" cy="8" r="2.5" />
     <path d="M6 8.5v7M6 13a6 6 0 0 0 6-6h3.5" />
   </svg>
-)
-
-export const IconClaude = () => (
-  <img src={claudeIcon} width={16} height={16} alt="Claude Code" style={{ display: 'block' }} />
 )
 
 export const IconEditor = () => (
