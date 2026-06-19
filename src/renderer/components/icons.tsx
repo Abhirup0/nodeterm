@@ -151,3 +151,10 @@ export const IconSave = () => (
     <path d="M17 21v-8H7v8M7 3v5h8" />
   </svg>
 )
+
+export const IconSearch = () => (
+  <svg {...S}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="M21 21l-4.35-4.35" />
+  </svg>
+)
