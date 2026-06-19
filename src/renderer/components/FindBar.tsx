@@ -55,13 +55,33 @@ export function FindBar({
           }}
         />
         <span className="term-node__find-count">{matchCount ? `${matchIndex} / ${matchCount}` : '0 / 0'}</span>
-        <button className="term-node__find-btn" title="Previous (Shift+Enter)" onClick={onPrev} disabled={!matchCount}>
+        <button
+          type="button"
+          className="term-node__find-btn"
+          title="Previous (Shift+Enter)"
+          aria-label="Previous match"
+          onClick={onPrev}
+          disabled={!matchCount}
+        >
           ↑
         </button>
-        <button className="term-node__find-btn" title="Next (Enter)" onClick={onNext} disabled={!matchCount}>
+        <button
+          type="button"
+          className="term-node__find-btn"
+          title="Next (Enter)"
+          aria-label="Next match"
+          onClick={onNext}
+          disabled={!matchCount}
+        >
           ↓
         </button>
-        <button className="term-node__find-btn" title="Close (Esc)" onClick={onClose}>
+        <button
+          type="button"
+          className="term-node__find-btn"
+          title="Close (Esc)"
+          aria-label="Close search"
+          onClick={onClose}
+        >
           ✕
         </button>
       </div>

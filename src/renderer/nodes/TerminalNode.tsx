@@ -92,6 +92,29 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     readBuffer
   })
 
+  // Single source of truth for the on-screen highlight colors (used by both the
+  // initial-highlight effect and the prev/next nav handlers below).
+  const findOpts = {
+    decorations: {
+      matchBackground: '#ffd54f55',
+      activeMatchBackground: '#ffb300',
+      matchOverviewRuler: '#ffd54f',
+      activeMatchColorOverviewRuler: '#ffb300'
+    }
+  }
+
+  // Navigation steps the hook's authoritative cursor AND xterm's on-screen highlight.
+  // The two intentionally desync (the hook also counts transcript-only matches that
+  // xterm can't highlight) — that's expected; this only tracks navigation direction.
+  const handleNext = useCallback(() => {
+    search.next()
+    if (search.query.trim()) searchAddonRef.current?.findNext(search.query, findOpts)
+  }, [search])
+  const handlePrev = useCallback(() => {
+    search.prev()
+    if (search.query.trim()) searchAddonRef.current?.findPrevious(search.query, findOpts)
+  }, [search])
+
   // The bridge handles are added/positioned dynamically for bridge-capable nodes; make
   // React Flow re-measure them so edges anchor to the (centered) handle, not a stale position.
   useEffect(() => {
@@ -342,14 +365,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       sa.clearDecorations()
       return
     }
-    sa.findNext(search.query, {
-      decorations: {
-        matchBackground: '#ffd54f55',
-        activeMatchBackground: '#ffb300',
-        matchOverviewRuler: '#ffd54f',
-        activeMatchColorOverviewRuler: '#ffb300'
-      }
-    })
+    sa.findNext(search.query, findOpts)
   }, [search.query, searchOpen])
 
   // Cmd/Ctrl+F toggles the find-bar while this node is hovered. No main-process interception
@@ -532,8 +548,8 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           matchIndex={search.matchIndex}
           matchCount={search.matchCount}
           current={search.current}
-          onNext={search.next}
-          onPrev={search.prev}
+          onNext={handleNext}
+          onPrev={handlePrev}
           onClose={() => setSearchOpen(false)}
         />
       )}

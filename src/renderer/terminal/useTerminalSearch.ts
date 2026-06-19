@@ -86,6 +86,8 @@ export function useTerminalSearch({
   }, [query, source])
 
   // Reset the cursor to the first match whenever the result set changes.
+  // `matches` is a fresh array on every query/source change (useMemo), so this
+  // intentionally jumps back to the first match on each new search — not a bug.
   useEffect(() => {
     setCursor(0)
   }, [matches])
