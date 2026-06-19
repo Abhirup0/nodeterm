@@ -5,6 +5,8 @@ import { promisify } from 'util'
 import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { GitCommit, GitFileChange, GitResult, GitStatus } from '../shared/types'
+import { loadGitHistoryFromExecutor } from '../shared/git-history'
+import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 
 const run = promisify(execFile)
 
@@ -139,6 +141,11 @@ export class GitService {
     )
     ipcMain.handle(IPC.gitShowFile, (_e, cwd: string, ref: string, p: string) =>
       this.showFile(cwd, ref, p)
+    )
+    ipcMain.handle(IPC.gitHistory, (_e, cwd: string, options) => this.history(cwd, options))
+    ipcMain.handle(IPC.gitCommitFiles, (_e, cwd: string, oid: string) => this.commitFiles(cwd, oid))
+    ipcMain.handle(IPC.gitRemoteCommitUrl, (_e, cwd: string, sha: string) =>
+      this.remoteCommitUrl(cwd, sha)
     )
   }
 
@@ -276,6 +283,70 @@ export class GitService {
     const spec = ref ? `${ref}:${p}` : `:${p}`
     const r = await git(cwd, ['show', spec])
     return r.ok ? r.out : ''
+  }
+
+  async history(cwd: string, options: GitHistoryOptions = {}): Promise<GitHistoryResult> {
+    if (!cwd) {
+      return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: options.limit ?? 50 }
+    }
+    // Adapt the shared executor (throws on failure) onto our env-configured git runner.
+    return loadGitHistoryFromExecutor(
+      async (args, dir) => {
+        const { stdout } = await run('git', args, { cwd: dir, env: GIT_ENV, maxBuffer: 50 * 1024 * 1024 })
+        return { stdout }
+      },
+      cwd,
+      options
+    )
+  }
+
+  /** Files changed by a single commit (parent↔commit; `--root` so the initial commit shows). */
+  async commitFiles(cwd: string, oid: string): Promise<GitFileChange[]> {
+    if (!cwd || !/^[0-9a-fA-F]{7,64}$/.test(oid)) return []
+    const [namesR, statR] = await Promise.all([
+      git(cwd, ['diff-tree', '--no-commit-id', '--root', '-r', '-z', '--name-status', oid]),
+      git(cwd, ['diff-tree', '--no-commit-id', '--root', '-r', '--numstat', oid])
+    ])
+    const stat = parseNumstat(statR.out)
+    const files: GitFileChange[] = []
+    const tokens = namesR.out.split('\0').filter(Boolean)
+    for (let i = 0; i < tokens.length; ) {
+      const status = tokens[i]![0] ?? 'M'
+      if (status === 'R' || status === 'C') {
+        const newPath = tokens[i + 2] ?? ''
+        const s = stat.get(newPath)
+        files.push({ path: newPath, status, added: s?.added ?? 0, deleted: s?.deleted ?? 0 })
+        i += 3
+      } else {
+        const p = tokens[i + 1] ?? ''
+        const s = stat.get(p)
+        files.push({ path: p, status, added: s?.added ?? 0, deleted: s?.deleted ?? 0 })
+        i += 2
+      }
+    }
+    return files
+  }
+
+  /** Build a provider web URL for a commit from the origin remote; null if unsupported. */
+  async remoteCommitUrl(cwd: string, sha: string): Promise<string | null> {
+    if (!cwd || !/^[0-9a-fA-F]{7,64}$/.test(sha)) return null
+    const r = await git(cwd, ['remote', 'get-url', 'origin'])
+    if (!r.ok) return null
+    const url = r.out.trim()
+    const m =
+      url.match(/^git@([^:]+):(.+?)(?:\.git)?$/) ||
+      url.match(/^ssh:\/\/(?:[^@]+@)?([^/]+)\/(.+?)(?:\.git)?$/) ||
+      url.match(/^https?:\/\/(?:[^@]+@)?([^/]+)\/(.+?)(?:\.git)?$/)
+    if (!m) return null
+    const host = m[1]
+    const repoPath = m[2]
+    if (/(^|\.)github\.com$/.test(host) || /(^|\.)gitlab\.com$/.test(host)) {
+      return `https://${host}/${repoPath}/commit/${sha}`
+    }
+    if (/(^|\.)bitbucket\.org$/.test(host)) {
+      return `https://${host}/${repoPath}/commits/${sha}`
+    }
+    return null
   }
 
   async createBranch(cwd: string, name: string): Promise<GitResult> {
