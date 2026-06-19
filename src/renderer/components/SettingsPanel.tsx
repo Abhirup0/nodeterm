@@ -4,6 +4,10 @@ import { useSettings } from '../state/settings'
 import { NODE_COLORS } from '../state/workspace'
 import type { CustomAgent } from '@shared/types'
 import type { PromptInjectionMode } from '@shared/agents/config'
+import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { AgentIcon } from '../lib/agentIcons'
+import { SegmentedPill } from './SegmentedPill'
+import { isAgentEnabled, setAgentEnabled, setDefaultAgent } from '../state/agentAvailability'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -154,6 +158,50 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               />
             </label>
           </section>
+
+          {(() => {
+            const rows: { id: AgentId; label: string }[] = [
+              ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label })),
+              ...customAgents.map((c) => ({ id: c.id, label: c.label || c.id }))
+            ]
+            return (
+              <section>
+                <h3>Agents</h3>
+                <p className="set-note">
+                  Enable or disable agents in the Add menus, and pick the default (⌘⇧C).
+                </p>
+                {rows.map((row) => {
+                  const enabled = isAgentEnabled(settings, row.id)
+                  const isDefault = settings.defaultAgent === row.id
+                  return (
+                    <div key={row.id} className="agents-row">
+                      <span className="agents-row-icon">
+                        <AgentIcon agentId={row.id} size={18} />
+                      </span>
+                      <span className="agents-row-label">{row.label}</span>
+                      <button
+                        type="button"
+                        className={`set-btn agents-default${isDefault ? ' active' : ''}`}
+                        aria-pressed={isDefault}
+                        onClick={() => update(setDefaultAgent(settings, row.id))}
+                      >
+                        {isDefault ? 'Default' : 'Set default'}
+                      </button>
+                      <SegmentedPill<'enabled' | 'disabled'>
+                        value={enabled ? 'enabled' : 'disabled'}
+                        ariaLabel={`${row.label} availability`}
+                        options={[
+                          { value: 'enabled', label: 'Enabled' },
+                          { value: 'disabled', label: 'Disabled' }
+                        ]}
+                        onChange={(v) => update(setAgentEnabled(settings, row.id, v === 'enabled'))}
+                      />
+                    </div>
+                  )
+                })}
+              </section>
+            )
+          })()}
 
           <section>
             <h3>Custom agents</h3>
