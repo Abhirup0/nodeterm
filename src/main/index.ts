@@ -19,6 +19,7 @@ import { readTranscriptLines, resolveTranscriptPath, SESSION_ID_RE } from './tra
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
+import { initLicense } from './license'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -160,6 +161,10 @@ app.whenReady().then(async () => {
     if (p) void shell.openPath(p)
   })
 
+  ipcMain.on(IPC.shellOpenExternal, (_e, url: string) => {
+    if (typeof url === 'string' && /^https?:\/\//.test(url)) void shell.openExternal(url)
+  })
+
   ipcMain.handle(IPC.fsList, async (_e, dirPath: string) => {
     try {
       const dirents = await fs.readdir(dirPath, { withFileTypes: true })
@@ -277,6 +282,7 @@ app.whenReady().then(async () => {
   initBridge(win, ptyManager)
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
+  initLicense(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

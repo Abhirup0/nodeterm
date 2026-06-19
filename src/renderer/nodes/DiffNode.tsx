@@ -14,6 +14,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const cwd = (data.cwd as string) ?? ''
   const rel = (data.filePath as string) ?? ''
   const staged = !!data.diffStaged
+  const commitOid = (data.commitOid as string | undefined) || ''
 
   useEffect(() => {
     const el = bodyRef.current
@@ -25,9 +26,17 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
     const git = window.nodeTerminal.git
     const abs = `${cwd}/${rel}`
-    // staged: HEAD (original) vs index (modified). unstaged: index (original) vs working (modified).
-    const origP = staged ? git.showFile(cwd, 'HEAD', rel) : git.showFile(cwd, '', rel)
-    const modP = staged ? git.showFile(cwd, '', rel) : window.nodeTerminal.fs.read(abs)
+    // commit mode: parent (<oid>^) vs commit (<oid>). staged: HEAD vs index. unstaged: index vs working.
+    const origP = commitOid
+      ? git.showFile(cwd, `${commitOid}^`, rel)
+      : staged
+        ? git.showFile(cwd, 'HEAD', rel)
+        : git.showFile(cwd, '', rel)
+    const modP = commitOid
+      ? git.showFile(cwd, commitOid, rel)
+      : staged
+        ? git.showFile(cwd, '', rel)
+        : window.nodeTerminal.fs.read(abs)
 
     Promise.all([origP, modP]).then(([orig, mod]) => {
       if (disposed) return
@@ -66,9 +75,9 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <NodeResizer minWidth={420} minHeight={220} isVisible={selected} color={data.color} />
 
       <div className="term-node__header">
-        <span className="term-node__title-text" title={`${rel} — ${staged ? 'staged' : 'working'}`}>
+        <span className="term-node__title-text" title={`${rel} — ${commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'working'}`}>
           {rel.split('/').pop()}
-          <span className="diff-node__tag">{staged ? 'staged' : 'changes'}</span>
+          <span className="diff-node__tag">{commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'changes'}</span>
         </span>
         <span className="term-node__spacer" />
         <button

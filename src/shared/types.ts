@@ -50,6 +50,8 @@ export interface CanvasNodeState {
   filePath?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
+  /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
+  commitOid?: string
 }
 
 /** Canvas pan/zoom state. */
@@ -150,6 +152,8 @@ export interface ShellApi {
   reveal(path: string): void
   /** Open a path with the OS default application. */
   openPath(path: string): void
+  /** Open an http(s) URL in the OS default browser. */
+  openExternal(url: string): void
 }
 
 export interface DirEntry {
@@ -209,6 +213,10 @@ export interface Settings {
   notifyConsentAsked: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** Agent ids hidden from the Add menus. */
+  disabledAgents: AgentId[]
+  /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
+  defaultAgent: AgentId
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-out (default on). */
   telemetryEnabled: boolean
 }
@@ -232,6 +240,8 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyOnClaudeDone: true,
   notifyConsentAsked: false,
   customAgents: [],
+  disabledAgents: [],
+  defaultAgent: 'claude',
   telemetryEnabled: true
 }
 
@@ -248,12 +258,6 @@ export interface GitFileChange {
   deleted: number
 }
 
-export interface GitCommit {
-  hash: string
-  subject: string
-  relative: string
-}
-
 export interface GitStatus {
   hasRepo: boolean
   /** "owner/repo" from the origin remote, else the folder name. */
@@ -268,7 +272,6 @@ export interface GitStatus {
   ghAuthed: boolean
   staged: GitFileChange[]
   changes: GitFileChange[]
-  recent: GitCommit[]
 }
 
 export interface GitResult {
@@ -302,6 +305,15 @@ export interface GitApi {
   showFile(cwd: string, ref: string, path: string): Promise<string>
   /** Generate a commit message from the staged diff via a local AI agent CLI. */
   generateMessage(cwd: string): Promise<GitResult>
+  /** Commit history graph for the repo. */
+  history(
+    cwd: string,
+    options?: { limit?: number; baseRef?: string | null }
+  ): Promise<import('./git-history').GitHistoryResult>
+  /** File-level changes introduced by a commit (oid). */
+  commitFiles(cwd: string, oid: string): Promise<GitFileChange[]>
+  /** Remote web URL for a commit sha, or null if it can't be derived. */
+  remoteCommitUrl(cwd: string, sha: string): Promise<string | null>
 }
 
 export interface UpdateInfo {
@@ -471,6 +483,27 @@ export interface ClaudeApi {
   readTranscript(sessionId: string): Promise<TranscriptLine[]>
 }
 
+export interface LicenseStatus {
+  /** 'pro' when entitled, else null. */
+  tier: string | null
+  active: boolean
+  /** Unix seconds when the entitlement expires, or null. */
+  expiresAt: number | null
+  /** Last activation/refresh error reason code, or null. */
+  error: string | null
+}
+
+export interface LicenseApi {
+  /** Activate a license key on this device. Returns the resulting status. */
+  activate(key: string): Promise<LicenseStatus>
+  /** Release this device's seat and clear the local license. */
+  deactivate(): Promise<LicenseStatus>
+  /** Current cached status (verifies the stored token offline). */
+  getStatus(): Promise<LicenseStatus>
+  /** Fires when the license status changes. Returns unsubscribe. */
+  onChange(listener: (s: LicenseStatus) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -482,6 +515,7 @@ export interface NodeTerminalApi {
   fs: FsApi
   updates: UpdateApi
   announcements: AnnouncementsApi
+  license: LicenseApi
   bridge: BridgeApi
   usage: UsageApi
   context: ContextApi

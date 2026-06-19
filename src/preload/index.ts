@@ -63,14 +63,18 @@ const api: NodeTerminalApi = {
     switchBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitSwitchBranch, cwd, name),
     createBranch: (cwd, name) => ipcRenderer.invoke(IPC.gitCreateBranch, cwd, name),
     showFile: (cwd, ref, path) => ipcRenderer.invoke(IPC.gitShowFile, cwd, ref, path),
-    generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd)
+    generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd),
+    history: (cwd, options) => ipcRenderer.invoke(IPC.gitHistory, cwd, options),
+    commitFiles: (cwd, oid) => ipcRenderer.invoke(IPC.gitCommitFiles, cwd, oid),
+    remoteCommitUrl: (cwd, sha) => ipcRenderer.invoke(IPC.gitRemoteCommitUrl, cwd, sha)
   },
   clipboard: {
     writeText: (text: string) => clipboard.writeText(text)
   },
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
-    openPath: (path: string) => ipcRenderer.send(IPC.shellOpenPath, path)
+    openPath: (path: string) => ipcRenderer.send(IPC.shellOpenPath, path),
+    openExternal: (url: string) => ipcRenderer.send(IPC.shellOpenExternal, url)
   },
   fs: {
     list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),
@@ -108,6 +112,16 @@ const api: NodeTerminalApi = {
     getVersion: () => ipcRenderer.invoke(IPC.appGetVersion),
     getPolicy: () => ipcRenderer.invoke(IPC.appUpdatePolicy),
     restart: () => ipcRenderer.send(IPC.appRestartToUpdate)
+  },
+  license: {
+    activate: (key: string) => ipcRenderer.invoke(IPC.licenseActivate, key),
+    deactivate: () => ipcRenderer.invoke(IPC.licenseDeactivate),
+    getStatus: () => ipcRenderer.invoke(IPC.licenseStatus),
+    onChange: (listener) => {
+      const handler = (_e: unknown, s: Parameters<typeof listener>[0]) => listener(s)
+      ipcRenderer.on(IPC.licenseChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.licenseChanged, handler)
+    }
   },
   announcements: {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
