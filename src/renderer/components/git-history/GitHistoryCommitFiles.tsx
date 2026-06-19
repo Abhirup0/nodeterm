@@ -1,0 +1,51 @@
+import type { GitFileChange } from '@shared/types'
+import { formatGitHistoryTimestamp } from './git-history-format'
+
+const STATUS_COLOR: Record<string, string> = {
+  M: '#ffd60a', A: '#32d74b', D: '#ff453a', R: '#bf5af2', U: '#6ac4dc'
+}
+
+export type GitHistoryCommitFilesState =
+  | { status: 'loading' }
+  | { status: 'error'; error: string }
+  | { status: 'ready'; entries: GitFileChange[] }
+
+export function GitHistoryCommitFiles({
+  state,
+  author,
+  timestamp,
+  onOpenFile
+}: {
+  state: GitHistoryCommitFilesState
+  author?: string
+  timestamp?: number
+  onOpenFile: (entry: GitFileChange) => void
+}) {
+  const meta = [author, formatGitHistoryTimestamp(timestamp)].filter(Boolean).join(' · ')
+  return (
+    <div className="scm-history__files">
+      {meta && <div className="scm-history__meta">{meta}</div>}
+      {state.status === 'loading' && <div className="scm-history__meta">Loading files…</div>}
+      {state.status === 'error' && <div className="scm-history__meta" style={{ color: '#ff453a' }} title={state.error}>{state.error}</div>}
+      {state.status === 'ready' && state.entries.length === 0 && (
+        <div className="scm-history__meta">No file changes in this commit</div>
+      )}
+      {state.status === 'ready' &&
+        state.entries.map((entry) => {
+          const name = entry.path.split('/').pop() || entry.path
+          const dir = entry.path.includes('/') ? entry.path.slice(0, entry.path.lastIndexOf('/')) : ''
+          return (
+            <button key={entry.path} type="button" className="scm-history__file" title={entry.path} onClick={() => onOpenFile(entry)}>
+              <span style={{ width: 12, textAlign: 'center', fontWeight: 700, fontSize: 10, color: STATUS_COLOR[entry.status] ?? 'rgba(255,255,255,0.85)' }}>
+                {entry.status}
+              </span>
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {name}
+                {dir && <span className="scm-history__file-dir">{dir}</span>}
+              </span>
+            </button>
+          )
+        })}
+    </div>
+  )
+}
