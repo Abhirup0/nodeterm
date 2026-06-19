@@ -26,7 +26,6 @@ import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { CommandPalette, type Command } from '../components/CommandPalette'
 import {
-  IconClaude,
   IconCollapse,
   IconBranch,
   IconDuplicate,
@@ -71,6 +70,7 @@ import {
   BUILTIN_AGENT_IDS,
   type AgentId
 } from '@shared/agents/config'
+import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
@@ -725,13 +725,8 @@ export function Canvas() {
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
-  // Kept as a thin wrapper so existing callers + the ⌘⇧C shortcut keep working.
-  const addClaude = useCallback(
-    (center?: { x: number; y: number }) => addAgentNode('claude', center),
-    [addAgentNode]
-  )
 
-  // ⌘T = new terminal, ⌘⇧C = new Claude Code (ignored while typing in a field/terminal).
+  // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return
@@ -743,12 +738,12 @@ export function Canvas() {
         addTerminal()
       } else if (k === 'c' && e.shiftKey) {
         e.preventDefault()
-        addClaude()
+        addAgentNode(useSettings.getState().settings.defaultAgent)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [addTerminal, addClaude])
+  }, [addTerminal, addAgentNode])
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
@@ -1082,25 +1077,29 @@ export function Canvas() {
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      const disabled = useSettings.getState().settings.disabledAgents
       setMenu({
         x: e.clientX,
         y: e.clientY,
         items: [
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
-          ...BUILTIN_AGENT_IDS.map(
+          ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
             (aid): MenuItem => ({
               label: `New ${AGENT_CONFIG[aid].label}`,
-              icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+              icon: <AgentIcon agentId={aid} />,
               onClick: () => addAgentNode(aid, at)
             })
           ),
-          ...useSettings.getState().settings.customAgents.map(
-            (c): MenuItem => ({
-              label: `New ${c.label}`,
-              icon: <IconTerminal />,
-              onClick: () => addAgentNode(c.id, at)
-            })
-          ),
+          ...useSettings
+            .getState()
+            .settings.customAgents.filter((c) => !disabled.includes(c.id))
+            .map(
+              (c): MenuItem => ({
+                label: `New ${c.label}`,
+                icon: <AgentIcon agentId={c.id} />,
+                onClick: () => addAgentNode(c.id, at)
+              })
+            ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
@@ -1401,24 +1400,28 @@ export function Canvas() {
   )
 
   const buildCommands = useCallback((): Command[] => {
+    const disabled = useSettings.getState().settings.disabledAgents
     const cmds: Command[] = [
       { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
-      ...BUILTIN_AGENT_IDS.map(
+      ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
         (aid): Command => ({
           id: `new-${aid}`,
           label: `New ${AGENT_CONFIG[aid].label}`,
-          icon: aid === 'claude' ? <IconClaude /> : <IconTerminal />,
+          icon: <AgentIcon agentId={aid} />,
           run: () => addAgentNode(aid)
         })
       ),
-      ...useSettings.getState().settings.customAgents.map(
-        (c): Command => ({
-          id: `new-${c.id}`,
-          label: `New ${c.label}`,
-          icon: <IconTerminal />,
-          run: () => addAgentNode(c.id)
-        })
-      ),
+      ...useSettings
+        .getState()
+        .settings.customAgents.filter((c) => !disabled.includes(c.id))
+        .map(
+          (c): Command => ({
+            id: `new-${c.id}`,
+            label: `New ${c.label}`,
+            icon: <AgentIcon agentId={c.id} />,
+            run: () => addAgentNode(c.id)
+          })
+        ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
