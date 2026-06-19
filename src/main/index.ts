@@ -160,6 +160,10 @@ app.whenReady().then(async () => {
     if (p) void shell.openPath(p)
   })
 
+  ipcMain.on(IPC.shellOpenExternal, (_e, url: string) => {
+    if (typeof url === 'string' && /^https?:\/\//.test(url)) void shell.openExternal(url)
+  })
+
   ipcMain.handle(IPC.fsList, async (_e, dirPath: string) => {
     try {
       const dirents = await fs.readdir(dirPath, { withFileTypes: true })

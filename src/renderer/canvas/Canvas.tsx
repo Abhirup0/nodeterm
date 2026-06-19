@@ -683,6 +683,27 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
 
+  /** Open a parent↔commit diff node for a file from the history graph. */
+  const openCommitDiff = useCallback(
+    (relPath: string, commitOid: string) => {
+      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      if (!cwd) return
+      setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, false, viewCenter(), commitOid)])
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+
+  /** Open a Claude node seeded with a commit-explanation prompt. */
+  const explainCommit = useCallback(
+    (prompt: string) => {
+      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => [...ns, createAgentNode('claude', ns.length, cwd, viewCenter(), prompt)])
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+
   /** Pick a file via the native dialog and open it as an editor node. */
   const openFileDialog = useCallback(
     async (center?: { x: number; y: number }) => {
@@ -1600,6 +1621,8 @@ export function Canvas() {
           onClose={() => setScOpen(false)}
           onRunInTerminal={runInTerminal}
           onOpenDiff={openDiff}
+          onOpenCommitDiff={openCommitDiff}
+          onExplainCommit={explainCommit}
         />
       )}
 

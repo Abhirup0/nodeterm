@@ -71,5 +71,9 @@ export const IPC = {
   gitSwitchBranch: 'git:switch-branch',
   gitCreateBranch: 'git:create-branch',
   gitShowFile: 'git:show-file',
+  gitHistory: 'git:history',
+  gitCommitFiles: 'git:commit-files',
+  gitRemoteCommitUrl: 'git:remote-commit-url',
+  shellOpenExternal: 'shell:open-external',
   commitGenerate: 'commit:generate'
 } as const
