@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Handle,
   NodeResizer,
@@ -9,11 +9,15 @@ import {
 } from '@xyflow/react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import { renderMarkdown } from '../lib/markdown'
 import { transport } from '../terminal/local-transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
+import { FindBar } from '../components/FindBar'
+import { IconSearch } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
+import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
@@ -44,6 +48,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const searchAddonRef = useRef<SearchAddon | null>(null)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
@@ -66,6 +71,26 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
   const status = useAgentStatus((s) => s.byId[id])
   const updateNodeInternals = useUpdateNodeInternals()
+
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
+  const readBuffer = useCallback(() => {
+    const t = termRef.current
+    if (!t) return ''
+    const b = t.buffer.active
+    let s = ''
+    for (let i = 0; i < b.length; i++) s += (b.getLine(i)?.translateToString() ?? '') + '\n'
+    return s
+  }, [])
+
+  const search = useTerminalSearch({
+    nodeId: id,
+    sessionId: status?.sessionId,
+    searchTranscript: showUsage,
+    open: searchOpen,
+    readBuffer
+  })
 
   // The bridge handles are added/positioned dynamically for bridge-capable nodes; make
   // React Flow re-measure them so edges anchor to the (centered) handle, not a stale position.
@@ -90,6 +115,9 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     const fit = new FitAddon()
     fitRef.current = fit
     term.loadAddon(fit)
+    const searchAddon = new SearchAddon()
+    searchAddonRef.current = searchAddon
+    term.loadAddon(searchAddon)
     term.open(container)
     fit.fit()
     patchTerminalScale(term, getZoom)
@@ -197,6 +225,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       term.dispose()
       termRef.current = null
       fitRef.current = null
+      searchAddonRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -304,6 +333,37 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       if (hoveredRef.current) updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))
     })
   }, [id, updateNodeData])
+
+  // Best-effort: highlight matches that are in the live xterm buffer (on-screen scrollback).
+  useEffect(() => {
+    const sa = searchAddonRef.current
+    if (!sa) return
+    if (!searchOpen || !search.query.trim()) {
+      sa.clearDecorations()
+      return
+    }
+    sa.findNext(search.query, {
+      decorations: {
+        matchBackground: '#ffd54f55',
+        activeMatchBackground: '#ffb300',
+        matchOverviewRuler: '#ffd54f',
+        activeMatchColorOverviewRuler: '#ffb300'
+      }
+    })
+  }, [search.query, searchOpen])
+
+  // Cmd/Ctrl+F toggles the find-bar while this node is hovered. No main-process interception
+  // needed (the Electron renderer has no native find UI), unlike Cmd+M.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'f' && hoveredRef.current) {
+        e.preventDefault()
+        setSearchOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
 
   // When markdown mode turns on, capture the terminal output and render it.
   useEffect(() => {
@@ -439,6 +499,15 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </span>
           )}
         {!editingTitle && <span className="term-node__spacer" />}
+        <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
+          <button
+            className="term-node__search nodrag"
+            onClick={() => setSearchOpen((v) => !v)}
+            aria-pressed={searchOpen}
+          >
+            <IconSearch />
+          </button>
+        </Tooltip>
         <Tooltip label="Name with AI (from terminal output)">
           <button className="term-node__ai nodrag" disabled={naming} onClick={nameWithAi}>
             {naming ? '…' : '✦'}
@@ -455,6 +524,19 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           ×
         </button>
       </div>
+
+      {searchOpen && !collapsed && (
+        <FindBar
+          query={search.query}
+          onQueryChange={search.setQuery}
+          matchIndex={search.matchIndex}
+          matchCount={search.matchCount}
+          current={search.current}
+          onNext={search.next}
+          onPrev={search.prev}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
 
       {!collapsed && (
         <NodeTags tags={tags} onChange={(t) => updateNodeData(id, { tags: t })} />
