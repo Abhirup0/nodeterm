@@ -1919,19 +1919,6 @@ body,
   cursor: not-allowed;
 }
 
-.sc-log {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  max-height: 160px;
-  overflow-y: auto;
-}
-
 .sc-graph {
   margin: 0;
   font-family: Menlo, Monaco, 'Courier New', monospace;
