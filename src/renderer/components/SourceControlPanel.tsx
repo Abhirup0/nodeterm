@@ -324,29 +324,29 @@ export function SourceControlPanel({
               )}
 
               <section className="scm-commit">
-                <div className="scm-commit-head">
-                  <span>Commit message</span>
+                <div className="scm-compose">
+                  <textarea
+                    className="scm-message"
+                    placeholder="Message (⌘↵ to commit)"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commitAndPush()
+                    }}
+                  />
                   <button
-                    className="scm-gen"
+                    className={`scm-gen${generating ? ' is-generating' : ''}`}
                     disabled={generating || stagedCount === 0}
-                    title="Generate from staged diff with your AI agent"
+                    title={
+                      stagedCount === 0
+                        ? 'Stage files to generate a commit message'
+                        : 'Generate commit message from the staged diff with your AI agent'
+                    }
+                    aria-label="Generate commit message"
                     onClick={generate}
                   >
-                    {generating ? '✦ Generating…' : '✦ Generate'}
+                    ✦
                   </button>
-                </div>
-                <textarea
-                  className="scm-message"
-                  placeholder="Message (⌘↵ to commit)"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commitAndPush()
-                  }}
-                />
-                <div className="scm-commit-foot">
-                  <span>{stagedCount} files staged</span>
-                  <span>⌘↵ to commit</span>
                 </div>
                 <button
                   className="scm-commit-btn"
