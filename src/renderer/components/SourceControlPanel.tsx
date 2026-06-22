@@ -116,7 +116,9 @@ export function SourceControlPanel({
       const c = await git.commit(cwd!, message)
       if (!c.ok) return c
       setMessage('')
-      return status?.hasRemote ? git.push(cwd!) : c
+      // Only auto-push when the branch already has an upstream. An unpublished
+      // branch is published explicitly via the bar's "Publish Branch" action.
+      return status?.hasUpstream ? git.push(cwd!) : c
     })
 
   const renderFiles = (list: GitFileChange[], staged: boolean) =>
@@ -164,6 +166,87 @@ export function SourceControlPanel({
 
   const stagedCount = status?.staged.length ?? 0
 
+  /**
+   * The bar's primary remote action, adapting to the actual git state so the user
+   * never sees a button that can't work:
+   *   - no remote at all        → "Publish to GitHub" (create repo via gh)
+   *   - remote, branch unpushed → "Publish Branch" (push -u origin <branch>)
+   *   - upstream + ahead/behind → "Sync" / "Push" / "Pull"
+   *   - upstream, in sync       → "Synced" (disabled)
+   */
+  const renderRemoteAction = () => {
+    if (!status) return null
+    if (!status.hasRemote) {
+      return (
+        <button
+          className="scm-sync"
+          disabled={busy || !status.ghAuthed}
+          title={
+            !status.ghAvailable
+              ? 'GitHub CLI (gh) not found'
+              : !status.ghAuthed
+                ? 'Sign in to GitHub first'
+                : 'Create a GitHub repo and push'
+          }
+          onClick={() => act(() => git.publish(cwd!, project?.name || 'repo', true))}
+        >
+          Publish to GitHub
+        </button>
+      )
+    }
+    if (!status.hasUpstream) {
+      return (
+        <button
+          className="scm-sync"
+          disabled={busy}
+          title={`Publish ${status.branch} to origin`}
+          onClick={() => act(() => git.push(cwd!))}
+        >
+          Publish Branch
+        </button>
+      )
+    }
+    const { ahead, behind } = status
+    return (
+      <>
+        <span className="scm-ahead">↑{ahead}</span>
+        <span className="scm-behind">↓{behind}</span>
+        {ahead > 0 && behind > 0 ? (
+          <button
+            className="scm-sync"
+            disabled={busy}
+            title={`Pull ${behind}, push ${ahead}`}
+            onClick={() => act(() => git.sync(cwd!))}
+          >
+            Sync
+          </button>
+        ) : behind > 0 ? (
+          <button
+            className="scm-sync"
+            disabled={busy}
+            title={`Pull ${behind} commit${behind === 1 ? '' : 's'}`}
+            onClick={() => act(() => git.pull(cwd!))}
+          >
+            Pull
+          </button>
+        ) : ahead > 0 ? (
+          <button
+            className="scm-sync"
+            disabled={busy}
+            title={`Push ${ahead} commit${ahead === 1 ? '' : 's'}`}
+            onClick={() => act(() => git.push(cwd!))}
+          >
+            Push
+          </button>
+        ) : (
+          <button className="scm-sync" disabled title="Up to date with origin">
+            Synced
+          </button>
+        )}
+      </>
+    )
+  }
+
   return createPortal(
     <div className="drawer-overlay" onClick={onClose}>
       <aside className="drawer scm" onClick={(e) => e.stopPropagation()}>
@@ -203,30 +286,7 @@ export function SourceControlPanel({
                 ⎇ {status.branch} ⌄
               </button>
               <span className="scm-spacer" />
-              {status.hasRemote ? (
-                <>
-                  <span className="scm-ahead">↑{status.ahead}</span>
-                  <span className="scm-behind">↓{status.behind}</span>
-                  <button className="scm-sync" disabled={busy} onClick={() => act(() => git.sync(cwd))}>
-                    Sync
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="scm-sync"
-                  disabled={busy || !status.ghAuthed}
-                  title={
-                    !status.ghAvailable
-                      ? 'GitHub CLI (gh) not found'
-                      : !status.ghAuthed
-                        ? 'Sign in to GitHub first'
-                        : ''
-                  }
-                  onClick={() => act(() => git.publish(cwd, project?.name || 'repo', true))}
-                >
-                  Publish
-                </button>
-              )}
+              {renderRemoteAction()}
             </div>
 
             <div className="drawer__body scm-body">
@@ -293,7 +353,7 @@ export function SourceControlPanel({
                   disabled={busy || !message.trim() || stagedCount === 0}
                   onClick={commitAndPush}
                 >
-                  {status.hasRemote ? 'Commit & Push' : 'Commit'} → {status.branch}
+                  {status.hasUpstream ? 'Commit & Push' : 'Commit'} → {status.branch}
                 </button>
               </section>
 
