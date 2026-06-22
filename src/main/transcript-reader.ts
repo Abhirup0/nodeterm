@@ -122,3 +122,34 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
   }
   return undefined
 }
+
+// Durable resolver by working directory: Claude stores a project's transcripts under
+// ~/.claude/projects/<cwd with every '/' and '.' replaced by '-'>/. We pick the most
+// recently modified .jsonl there — the node's active session. Unlike the sessionId path
+// this needs no live hook event, so the find-bar works even after a reload/restart or when
+// reattaching to a session this app instance didn't spawn. (Encoding leaves no '/', so it
+// can't traverse.) Limitation: multiple Claude nodes in the SAME cwd resolve to the same
+// newest transcript — the sessionId path above is preferred when known for that reason.
+export async function transcriptPathForCwd(cwd: string): Promise<string | undefined> {
+  if (!cwd) return undefined
+  const encoded = cwd.replace(/[/.]/g, '-')
+  const dir = path.join(os.homedir(), '.claude', 'projects', encoded)
+  let entries: string[]
+  try {
+    entries = await fs.promises.readdir(dir)
+  } catch {
+    return undefined
+  }
+  let newest: { path: string; mtime: number } | undefined
+  for (const e of entries) {
+    if (!e.endsWith('.jsonl')) continue
+    const p = path.join(dir, e)
+    try {
+      const st = await fs.promises.stat(p)
+      if (!newest || st.mtimeMs > newest.mtime) newest = { path: p, mtime: st.mtimeMs }
+    } catch {
+      /* skip */
+    }
+  }
+  return newest?.path
+}

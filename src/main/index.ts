@@ -15,7 +15,12 @@ import { hookServer } from './agents/hook-server'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
-import { readTranscriptLines, resolveTranscriptPath, SESSION_ID_RE } from './transcript-reader'
+import {
+  readTranscriptLines,
+  resolveTranscriptPath,
+  transcriptPathForCwd,
+  SESSION_ID_RE
+} from './transcript-reader'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -249,11 +254,19 @@ app.whenReady().then(async () => {
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(win)
   const contextTail = createContextTail(win)
-  ipcMain.handle(IPC.claudeReadTranscript, async (_e, sessionId: string) => {
-    if (!SESSION_ID_RE.test(sessionId)) return []
-    const p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
-    return p ? readTranscriptLines(p) : []
-  })
+  ipcMain.handle(
+    IPC.claudeReadTranscript,
+    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+      // Prefer the exact session path when a (valid) sessionId is known; otherwise fall
+      // back to the node's cwd, which is durable and doesn't need a live hook event.
+      let p: string | undefined
+      if (sessionId && SESSION_ID_RE.test(sessionId)) {
+        p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+      }
+      if (!p && cwd) p = await transcriptPathForCwd(cwd)
+      return p ? readTranscriptLines(p) : []
+    }
+  )
   installManagedAgentHooks()
   hookServer.setListener((e) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)

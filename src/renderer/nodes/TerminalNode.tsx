@@ -19,6 +19,7 @@ import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
+import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
@@ -87,6 +88,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const search = useTerminalSearch({
     nodeId: id,
     sessionId: status?.sessionId,
+    cwd: data.cwd as string | undefined,
     searchTranscript: showUsage,
     open: searchOpen,
     readBuffer
@@ -287,12 +289,19 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // ---- hover guard: dwell before entering the terminal ----
   const onBodyEnter = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
-    dwellRef.current = setTimeout(() => {
+    const enter = () => {
+      // While Cmd/Ctrl is held the user is zooming the canvas — don't grab focus / enter the
+      // terminal; just keep checking until the modifier is released.
+      if (isZoomModifierHeld()) {
+        dwellRef.current = setTimeout(enter, 200)
+        return
+      }
       setArmed(false)
       termRef.current?.focus()
       useAgentStatus.getState().setActive(id, true)
       useAgentStatus.getState().clearUnread(id)
-    }, panHoverDelay)
+    }
+    dwellRef.current = setTimeout(enter, panHoverDelay)
   }
   const onBodyLeave = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)

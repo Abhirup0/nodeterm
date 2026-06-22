@@ -482,8 +482,15 @@ export interface TranscriptLine {
 }
 
 export interface ClaudeApi {
-  /** Reads a Claude session's full transcript as flat searchable lines ([] if unavailable). */
-  readTranscript(sessionId: string): Promise<TranscriptLine[]>
+  /**
+   * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
+   * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
+   * the newest transcript under that project dir, no live hook event required).
+   */
+  readTranscript(
+    sessionId: string | undefined,
+    cwd: string | undefined
+  ): Promise<TranscriptLine[]>
 }
 
 export interface LicenseStatus {

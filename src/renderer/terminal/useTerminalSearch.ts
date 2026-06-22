@@ -10,6 +10,8 @@ export interface SearchSnippet {
 interface Args {
   nodeId: string
   sessionId: string | undefined
+  /** The node's working directory — durable fallback for resolving the transcript. */
+  cwd: string | undefined
   /** Whether this node has a readable Claude transcript (gated on hasUsage capability). */
   searchTranscript: boolean
   open: boolean
@@ -30,6 +32,7 @@ export interface TerminalSearch {
 export function useTerminalSearch({
   nodeId,
   sessionId,
+  cwd,
   searchTranscript,
   open,
   readBuffer
@@ -57,9 +60,14 @@ export function useTerminalSearch({
       }
       if (!captured) captured = readBuffer()
       for (const t of captured.split('\n')) lines.push({ source: 'terminal', text: t })
-      if (searchTranscript && sessionId) {
+      // Search the full Claude transcript for agent nodes. Resolved by sessionId when known,
+      // else by cwd (durable) — so it works even when no live hook event set the sessionId.
+      if (searchTranscript) {
         try {
-          const tr: TranscriptLine[] = await window.nodeTerminal.claude.readTranscript(sessionId)
+          const tr: TranscriptLine[] = await window.nodeTerminal.claude.readTranscript(
+            sessionId,
+            cwd
+          )
           for (const l of tr) {
             for (const t of l.text.split('\n')) lines.push({ source: 'claude', role: l.role, text: t })
           }
@@ -73,7 +81,7 @@ export function useTerminalSearch({
       cancelled = true
     }
     // readBuffer must be stable (useCallback in the caller) to avoid rebuilds.
-  }, [open, nodeId, sessionId, searchTranscript, readBuffer])
+  }, [open, nodeId, sessionId, cwd, searchTranscript, readBuffer])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()

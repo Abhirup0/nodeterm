@@ -8,6 +8,28 @@ import type {
   Workspace
 } from '../shared/types'
 
+// Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
+// this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
+// its own ipcRenderer listener, tripping Node's MaxListeners (>10) warning. Returns unsubscribe.
+function subscribe<A extends unknown[] = []>(channel: string) {
+  const listeners = new Set<(...args: A) => void>()
+  let handler: ((e: unknown, ...args: A) => void) | null = null
+  return (listener: (...args: A) => void): (() => void) => {
+    if (!handler) {
+      handler = (_e, ...args) => listeners.forEach((l) => l(...args))
+      ipcRenderer.on(channel, handler)
+    }
+    listeners.add(listener)
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0 && handler) {
+        ipcRenderer.removeListener(channel, handler)
+        handler = null
+      }
+    }
+  }
+}
+
 const api: NodeTerminalApi = {
   pty: {
     create: (options: PtyCreateOptions) => ipcRenderer.invoke(IPC.ptyCreate, options),
@@ -144,7 +166,8 @@ const api: NodeTerminalApi = {
     }
   },
   claude: {
-    readTranscript: (sessionId) => ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId)
+    readTranscript: (sessionId, cwd) =>
+      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
   },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
@@ -155,16 +178,10 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.bridgeMessage, handler)
     }
   },
-  onMarkdownToggle: (listener) => {
-    const handler = () => listener()
-    ipcRenderer.on(IPC.appToggleMarkdown, handler)
-    return () => ipcRenderer.removeListener(IPC.appToggleMarkdown, handler)
-  },
-  onCloseNode: (listener) => {
-    const handler = () => listener()
-    ipcRenderer.on(IPC.appCloseNode, handler)
-    return () => ipcRenderer.removeListener(IPC.appCloseNode, handler)
-  },
+  // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
+  // ipcRenderer listeners and trip the MaxListeners warning.
+  onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
+  onCloseNode: subscribe(IPC.appCloseNode),
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
   setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
   // Absolute path of a dropped/picked File (File.path was removed in Electron 30+).
