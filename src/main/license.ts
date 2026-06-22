@@ -184,8 +184,14 @@ export function initLicense(win: BrowserWindow): void {
       if (r.active && r.token) {
         await save({ key: stored.key, token: r.token })
         broadcast(statusFrom(r.token))
-      } else if (stored.token) {
-        broadcast(statusFrom(stored.token)) // offline grace
+      } else if (r.error === 'offline' || r.error === 'network' || r.error === 'disabled') {
+        // Couldn't reach the server → offline grace: keep the last valid token.
+        if (stored.token) broadcast(statusFrom(stored.token))
+      } else {
+        // Server responded: this device is no longer entitled (canceled / suspended / expired)
+        // → drop Pro and clear the cached token, even though it hasn't expired yet.
+        if (stored.token) await save({ key: stored.key })
+        broadcast(statusFrom(undefined))
       }
     }
   })()
