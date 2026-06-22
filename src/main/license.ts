@@ -13,10 +13,10 @@ import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
-// Stripe Payment Link for the Pro subscription. The app appends ?client_reference_id=<deviceId>
+// Stripe Payment Link (live) for the Pro subscription. The app appends ?client_reference_id=<deviceId>
 // so the webhook binds the purchase to this device → keyless ("device-bound") activation.
-// Replace with your real Payment Link (Stripe → Payment Links).
-const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/REPLACE_ME'
+// NODETERM_CHECKOUT_URL overrides it for testing (e.g. the test-mode link).
+const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/9B65kFeraflH9ora4A7EQ00'
 
 // Same gate as telemetry/check: never hit the prod API from a dev/unsigned build unless a
 // local server is targeted explicitly, and honor DO_NOT_TRACK / the kill switch.
