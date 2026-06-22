@@ -158,6 +158,7 @@ export class GitService {
       ahead: 0,
       behind: 0,
       hasRemote: false,
+      hasUpstream: false,
       ghAvailable: !!GH_PATH,
       ghAuthed: false,
       staged: [],
@@ -173,13 +174,16 @@ export class GitService {
     // These reads are independent of each other; run them concurrently instead of
     // serially spawning ~10 git processes one after the next. (`remote get-url origin`
     // simply fails to empty when there's no origin, so it needn't wait on `remote`.)
-    const [branchR, branchesR, remotesR, originR, countsR, cachedR, workR, porcelainR, gh] =
+    const [branchR, branchesR, remotesR, originR, countsR, upstreamR, cachedR, workR, porcelainR, gh] =
       await Promise.all([
         git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']),
         git(cwd, ['branch', '--format=%(refname:short)']),
         git(cwd, ['remote']),
         git(cwd, ['remote', 'get-url', 'origin']),
         git(cwd, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']),
+        // Resolves only when the current branch has an upstream tracking ref —
+        // distinguishes "never pushed (Publish Branch)" from "has upstream (Push/Pull/Sync)".
+        git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
         git(cwd, ['diff', '--cached', '--numstat']),
         git(cwd, ['diff', '--numstat']),
         git(cwd, ['status', '--porcelain']),
@@ -189,6 +193,7 @@ export class GitService {
     const branch = branchR.out.trim() || 'HEAD'
     const branches = branchesR.out.split('\n').map((b) => b.trim()).filter(Boolean)
     const hasRemote = !!remotesR.out.trim()
+    const hasUpstream = upstreamR.ok && !!upstreamR.out.trim()
     const originUrl = originR.out.trim()
     const repoName = originUrl ? parseRepoName(originUrl, path.basename(cwd)) : path.basename(cwd)
 
@@ -235,6 +240,7 @@ export class GitService {
       ahead,
       behind,
       hasRemote,
+      hasUpstream,
       ghAvailable: !!GH_PATH,
       ghAuthed: gh,
       staged,
