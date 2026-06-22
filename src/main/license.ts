@@ -165,16 +165,28 @@ export function initLicense(win: BrowserWindow): void {
     return status
   })
 
-  // On launch: refresh the token if we have a key, but keep the last valid token on failure.
+  // On launch: re-establish entitlement, keeping the last valid token on failure (offline grace).
   void (async () => {
     const stored = load()
-    if (!stored.key) return
-    const r = await call('/v1/license/refresh', { key: stored.key, deviceId })
-    if (r.token) {
-      await save({ key: stored.key, token: r.token })
-      broadcast(statusFrom(r.token))
+    if (stored.key) {
+      // Key-paste flow: refresh against the stored key.
+      const r = await call('/v1/license/refresh', { key: stored.key, deviceId })
+      if (r.token) {
+        await save({ key: stored.key, token: r.token })
+        broadcast(statusFrom(r.token))
+      } else {
+        broadcast(statusFrom(stored.token, r.error ?? null)) // offline grace
+      }
     } else {
-      broadcast(statusFrom(stored.token, r.error ?? null)) // offline grace
+      // Device-bound flow (no key): re-poll status by deviceId. Covers a purchase that completed
+      // after the in-app Upgrade poll window, and every later relaunch.
+      const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
+      if (r.active && r.token) {
+        await save({ key: stored.key, token: r.token })
+        broadcast(statusFrom(r.token))
+      } else if (stored.token) {
+        broadcast(statusFrom(stored.token)) // offline grace
+      }
     }
   })()
 }
