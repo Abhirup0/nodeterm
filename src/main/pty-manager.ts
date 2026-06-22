@@ -29,6 +29,17 @@ set -g default-terminal "xterm-256color"
 set -sg escape-time 10
 set -g destroy-unattached off
 setw -g aggressive-resize on
+set -g set-clipboard on
+# With mouse on, a drag in a normal-screen shell makes a tmux copy-mode selection (not an
+# xterm one), so the renderer's Cmd+C can't see it. Pipe the selection straight to the macOS
+# clipboard when the drag ends — so mouse-select copies like a native terminal (iTerm-style).
+bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
+bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
+# Double-click word / triple-click line also copy to the clipboard.
+bind -T copy-mode    DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
+bind -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
+bind -T copy-mode    TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
+bind -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe-and-cancel "/usr/bin/pbcopy"
 `
 }
 
@@ -99,6 +110,17 @@ export class PtyManager {
     } catch {
       // If we can't write the config, disable tmux and fall back to a plain shell.
       this.tmuxPath = null
+      return
+    }
+    // The tmux server outlives the app, so it won't re-read `-f` on relaunch. Push the
+    // (possibly updated) config into a running server now so new bindings apply immediately;
+    // a no-op error when no server exists yet (the next session loads it fresh via `-f`).
+    try {
+      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'source-file', this.confPath], {
+        stdio: 'ignore'
+      })
+    } catch {
+      // no server running yet — ignore
     }
   }
 
