@@ -93,5 +93,6 @@ export const IPC = {
   remoteClientExit: (connectionId: string, streamId: number) =>
     `remote:client:exit:${connectionId}:${streamId}`,
   // Fired when a connection's relay socket drops (host/relay gone).
-  remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`
+  remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
+  handoffBuild: 'handoff:build'
 } as const

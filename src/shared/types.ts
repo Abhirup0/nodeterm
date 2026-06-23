@@ -496,6 +496,22 @@ export interface ClaudeApi {
   ): Promise<TranscriptLine[]>
 }
 
+export type HandoffResult = { filePath: string } | { error: string }
+
+export interface HandoffApi {
+  /**
+   * Render the source agent's full conversation transcript (located by `sessionId`)
+   * to a portable Markdown file under `<cwd>/.nodeterm/` and return its absolute path.
+   * No summarization — the entire transcript including tool calls and outputs.
+   */
+  build(
+    sessionId: string,
+    agentId: string,
+    sourceNodeId: string,
+    cwd: string | undefined
+  ): Promise<HandoffResult>
+}
+
 export interface LicenseStatus {
   /** 'pro' when entitled, else null. */
   tier: string | null
@@ -578,6 +594,7 @@ export interface NodeTerminalApi {
   claude: ClaudeApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi
+  handoff: HandoffApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

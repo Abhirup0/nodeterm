@@ -203,6 +203,10 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(channel, handler)
     }
   },
+  handoff: {
+    build: (sessionId, agentId, sourceNodeId, cwd) =>
+      ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd)
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),
