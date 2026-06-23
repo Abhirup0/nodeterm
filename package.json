@@ -13,6 +13,7 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "test:unit": "vitest run test/remote",
     "rebuild": "electron-rebuild -f -w node-pty",
     "make-icon": "node scripts/make-icon.mjs",
     "make-social": "node scripts/make-social.mjs",
@@ -70,10 +71,12 @@
     "marked": "^12.0.2",
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
+    "tweetnacl": "^1.0.3",
     "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
+    "@types/node": "^26.0.0",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.1",
