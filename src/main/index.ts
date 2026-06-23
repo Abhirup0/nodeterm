@@ -21,6 +21,7 @@ import {
   transcriptPathForCwd,
   SESSION_ID_RE
 } from './transcript-reader'
+import { buildHandoff } from './handoff'
 import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -268,6 +269,11 @@ app.whenReady().then(async () => {
       if (!p && cwd) p = await transcriptPathForCwd(cwd)
       return p ? readTranscriptLines(p) : []
     }
+  )
+  ipcMain.handle(
+    IPC.handoffBuild,
+    (_e, sessionId: string, agentId: string, sourceNodeId: string, cwd: string | undefined) =>
+      buildHandoff({ sessionId, agentId, sourceNodeId, cwd })
   )
   installManagedAgentHooks()
   hookServer.setListener((e) => {
