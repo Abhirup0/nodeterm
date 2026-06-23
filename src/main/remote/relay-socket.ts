@@ -499,9 +499,17 @@ export function wrapWebSocket(ws: import('ws').WebSocket): RelayTransport {
     get bufferedAmount() {
       return ws.bufferedAmount
     },
-    send: (data) => ws.send(data),
+    // Strings (handshake control) go out as ws *text* frames; Uint8Array (E2EE boxes) as ws
+    // *binary*. The relay preserves that text/binary-ness end to end.
+    send: (data) => ws.send(data, { binary: typeof data !== 'string' }),
     close: () => ws.close(),
-    onMessage: (cb) => ws.on('message', (data: unknown) => cb(data)),
+    // Deliver ws *text* frames as JS strings and *binary* frames as bytes, so relay-socket's
+    // type-based control-vs-box discrimination works. (`ws` hands us a Buffer for both unless we
+    // consult `isBinary`.)
+    onMessage: (cb) =>
+      ws.on('message', (data: Buffer, isBinary: boolean) =>
+        cb(isBinary ? data : data.toString('utf-8'))
+      ),
     onClose: (cb) => ws.on('close', () => cb())
   }
 }
