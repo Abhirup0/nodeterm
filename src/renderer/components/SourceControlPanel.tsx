@@ -6,6 +6,7 @@ import { useProjects } from '../state/projects'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu } from './ContextMenu'
+import { PublishDialog } from './PublishDialog'
 
 interface SourceControlPanelProps {
   onClose: () => void
@@ -57,6 +58,7 @@ export function SourceControlPanel({
   const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; item: GitHistoryItem } | null>(
     null
   )
+  const [publishOpen, setPublishOpen] = useState(false)
 
   const git = window.nodeTerminal.git
 
@@ -188,21 +190,7 @@ export function SourceControlPanel({
                 ? 'Create a GitHub repo and push'
                 : 'Sign in to GitHub, then create the repo'
           }
-          onClick={() => {
-            if (status.ghAuthed) {
-              act(() => git.publish(cwd!, project?.name || 'repo', true))
-            } else {
-              // Not signed in: do the whole publish inside one flow. gh auth login is
-              // interactive (browser / device code), so it runs in a terminal — but it's
-              // chained straight into creating + pushing the repo, so a successful login
-              // publishes without a second step. Single-quote the name as one shell arg.
-              const name = (project?.name || 'repo').replace(/'/g, `'\\''`)
-              onRunInTerminal(
-                `gh auth login && gh repo create '${name}' --private --source=. --push`
-              )
-              onClose()
-            }
-          }}
+          onClick={() => setPublishOpen(true)}
         >
           Publish to GitHub
         </button>
@@ -510,6 +498,27 @@ export function SourceControlPanel({
               )
             }
           })}
+        />
+      )}
+
+      {publishOpen && (
+        <PublishDialog
+          defaultName={project?.name || 'repo'}
+          onCancel={() => setPublishOpen(false)}
+          onPublish={(name, isPrivate) => {
+            setPublishOpen(false)
+            if (status?.ghAuthed) {
+              void act(() => git.publish(cwd!, name, isPrivate))
+            } else {
+              // Not signed in: run the interactive gh login, chained straight into
+              // creating + pushing the chosen repo, so login flows into publish.
+              const safe = name.replace(/'/g, `'\\''`)
+              onRunInTerminal(
+                `gh auth login && gh repo create '${safe}' ${isPrivate ? '--private' : '--public'} --source=. --push`
+              )
+              onClose()
+            }
+          }}
         />
       )}
     </div>,
