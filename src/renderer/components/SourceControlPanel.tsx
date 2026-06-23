@@ -180,15 +180,29 @@ export function SourceControlPanel({
       return (
         <button
           className="scm-sync"
-          disabled={busy || !status.ghAuthed}
+          disabled={busy || !status.ghAvailable}
           title={
             !status.ghAvailable
               ? 'GitHub CLI (gh) not found'
-              : !status.ghAuthed
-                ? 'Sign in to GitHub first'
-                : 'Create a GitHub repo and push'
+              : status.ghAuthed
+                ? 'Create a GitHub repo and push'
+                : 'Sign in to GitHub, then create the repo'
           }
-          onClick={() => act(() => git.publish(cwd!, project?.name || 'repo', true))}
+          onClick={() => {
+            if (status.ghAuthed) {
+              act(() => git.publish(cwd!, project?.name || 'repo', true))
+            } else {
+              // Not signed in: do the whole publish inside one flow. gh auth login is
+              // interactive (browser / device code), so it runs in a terminal — but it's
+              // chained straight into creating + pushing the repo, so a successful login
+              // publishes without a second step. Single-quote the name as one shell arg.
+              const name = (project?.name || 'repo').replace(/'/g, `'\\''`)
+              onRunInTerminal(
+                `gh auth login && gh repo create '${name}' --private --source=. --push`
+              )
+              onClose()
+            }
+          }}
         >
           Publish to GitHub
         </button>
@@ -306,47 +320,35 @@ export function SourceControlPanel({
                   </button>
                 </div>
               )}
-              {/* Only nag when gh is actually needed (publishing a repo with no remote yet).
-                  With a remote, push/pull/sync use git's credential helper (macOS keychain /
-                  the same creds your IDE uses), so a gh login isn't required. */}
-              {status.ghAvailable && !status.ghAuthed && !status.hasRemote && (
-                <div className="scm-signin">
-                  <span>Sign in to GitHub to publish this repo.</span>
-                  <button
-                    onClick={() => {
-                      onRunInTerminal('gh auth login')
-                      onClose()
-                    }}
-                  >
-                    Sign in to GitHub
-                  </button>
-                </div>
-              )}
+              {/* No proactive GitHub sign-in nag. Push/pull on an existing remote use git's
+                  own credential helper (the account you're already signed into), and a brand-new
+                  `git init` repo shouldn't demand a gh login before you've even committed. gh
+                  auth is requested on demand only when you click "Publish to GitHub" below. */}
 
               <section className="scm-commit">
-                <div className="scm-commit-head">
-                  <span>Commit message</span>
+                <div className="scm-compose">
+                  <textarea
+                    className="scm-message"
+                    placeholder="Message (⌘↵ to commit)"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commitAndPush()
+                    }}
+                  />
                   <button
-                    className="scm-gen"
+                    className={`scm-gen${generating ? ' is-generating' : ''}`}
                     disabled={generating || stagedCount === 0}
-                    title="Generate from staged diff with your AI agent"
+                    title={
+                      stagedCount === 0
+                        ? 'Stage files to generate a commit message'
+                        : 'Generate commit message from the staged diff with your AI agent'
+                    }
+                    aria-label="Generate commit message"
                     onClick={generate}
                   >
-                    {generating ? '✦ Generating…' : '✦ Generate'}
+                    ✦
                   </button>
-                </div>
-                <textarea
-                  className="scm-message"
-                  placeholder="Message (⌘↵ to commit)"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commitAndPush()
-                  }}
-                />
-                <div className="scm-commit-foot">
-                  <span>{stagedCount} files staged</span>
-                  <span>⌘↵ to commit</span>
                 </div>
                 <button
                   className="scm-commit-btn"
