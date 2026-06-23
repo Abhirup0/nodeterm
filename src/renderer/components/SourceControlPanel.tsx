@@ -192,9 +192,14 @@ export function SourceControlPanel({
             if (status.ghAuthed) {
               act(() => git.publish(cwd!, project?.name || 'repo', true))
             } else {
-              // Sign in on demand — only when the user actually chooses to publish,
-              // never proactively after `git init`.
-              onRunInTerminal('gh auth login')
+              // Not signed in: do the whole publish inside one flow. gh auth login is
+              // interactive (browser / device code), so it runs in a terminal — but it's
+              // chained straight into creating + pushing the repo, so a successful login
+              // publishes without a second step. Single-quote the name as one shell arg.
+              const name = (project?.name || 'repo').replace(/'/g, `'\\''`)
+              onRunInTerminal(
+                `gh auth login && gh repo create '${name}' --private --source=. --push`
+              )
               onClose()
             }
           }}
