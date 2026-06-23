@@ -27,6 +27,49 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const ent = useEntitlement()
   const [licenseKey, setLicenseKey] = useState('')
   const [upgrading, setUpgrading] = useState(false)
+
+  // Remote access (Pro). Host side: a single pairing offer to hand to a client. Client side:
+  // paste a host's offer to connect, which opens a remote terminal node on the canvas.
+  const [hostOffer, setHostOffer] = useState('')
+  const [hostBusy, setHostBusy] = useState(false)
+  const [remoteError, setRemoteError] = useState('')
+  const [clientCode, setClientCode] = useState('')
+  const [connecting, setConnecting] = useState(false)
+  const startHosting = async () => {
+    setRemoteError('')
+    setHostBusy(true)
+    try {
+      const { offer } = await window.nodeTerminal.remoteHost.start()
+      setHostOffer(offer)
+    } catch (err) {
+      setRemoteError((err as Error).message)
+      setHostBusy(false)
+    }
+  }
+  const stopHosting = async () => {
+    await window.nodeTerminal.remoteHost.stop()
+    setHostOffer('')
+    setHostBusy(false)
+  }
+  const connectToHost = async () => {
+    const code = clientCode.trim()
+    if (!code) return
+    setRemoteError('')
+    setConnecting(true)
+    try {
+      const connectionId = await window.nodeTerminal.remoteClient.connect(code)
+      setClientCode('')
+      // Open a remote terminal node on the canvas bound to this connection.
+      window.dispatchEvent(
+        new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
+      )
+      onClose()
+    } catch (err) {
+      setRemoteError((err as Error).message)
+    } finally {
+      setConnecting(false)
+    }
+  }
   useEffect(() => {
     void ent.hydrate()
   }, [])
@@ -439,6 +482,66 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               </>
             )}
           </section>
+
+          {ent.isPremium ? (
+            <section>
+              <h3>Remote access</h3>
+              <p className="set-note">
+                Share this device's terminals with another nodeterm, or connect to one that's
+                sharing — end-to-end encrypted over the relay.
+              </p>
+
+              <h4 className="set-subhead">Allow remote access</h4>
+              {hostOffer ? (
+                <>
+                  <p className="set-note">
+                    Share this pairing code with the other device (single use):
+                  </p>
+                  <label className="set-row">
+                    <span>Pairing code</span>
+                    <input type="text" readOnly value={hostOffer} onFocus={(e) => e.target.select()} />
+                  </label>
+                  <button
+                    className="set-btn"
+                    onClick={() => window.nodeTerminal.clipboard.writeText(hostOffer)}
+                  >
+                    Copy code
+                  </button>
+                  <button className="set-btn" onClick={() => void stopHosting()}>
+                    Stop sharing
+                  </button>
+                </>
+              ) : (
+                <button className="set-btn" disabled={hostBusy} onClick={() => void startHosting()}>
+                  {hostBusy ? 'Starting…' : 'Allow remote access'}
+                </button>
+              )}
+
+              <h4 className="set-subhead">Connect to a host</h4>
+              <label className="set-row">
+                <span>Pairing code</span>
+                <input
+                  type="text"
+                  placeholder="paste the host's code"
+                  value={clientCode}
+                  onChange={(e) => setClientCode(e.target.value)}
+                />
+              </label>
+              <button
+                className="set-btn"
+                disabled={connecting || !clientCode.trim()}
+                onClick={() => void connectToHost()}
+              >
+                {connecting ? 'Connecting…' : 'Connect'}
+              </button>
+
+              {remoteError ? (
+                <p className="set-note" style={{ color: '#ff9f0a' }}>
+                  {remoteError}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
         </div>
       </aside>
     </div>,

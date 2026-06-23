@@ -26,6 +26,7 @@ import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
+import { initRemoteClient } from './remote/client-service'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -298,6 +299,7 @@ app.whenReady().then(async () => {
   initTelemetry(() => settingsStore.get())
   initLicense(win)
   initRemoteHost(win, ptyManager)
+  initRemoteClient(win, { isPackaged: app.isPackaged })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

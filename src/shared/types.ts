@@ -528,6 +528,35 @@ export interface RemoteHostApi {
   stop(): Promise<void>
 }
 
+export interface RemoteClientApi {
+  /**
+   * Connect to a host by its pairing offer string (`nodeterm://pair?code=…` or a bare code).
+   * Gates on a valid Pro entitlement (rejects otherwise, and in dev builds without
+   * NODETERM_RELAY_URL). Resolves with a `connectionId` to address with the methods below.
+   */
+  connect(offer: string): Promise<string>
+  /** Close a connection: ends the relay socket and drops access to the host's PTYs. */
+  disconnect(connectionId: string): Promise<void>
+  /** Open a remote PTY on the connected host; resolves with its session id. */
+  create(connectionId: string, options: PtyCreateOptions): Promise<string>
+  /** Send input to a remote PTY. */
+  write(connectionId: string, sessionId: string, data: string): void
+  /** Resize a remote PTY. */
+  resize(connectionId: string, sessionId: string, cols: number, rows: number): void
+  /** Kill a remote PTY (the host detaches; its tmux session survives host-side). */
+  kill(connectionId: string, sessionId: string): void
+  /** Listen for a remote PTY's output. Returns an unsubscribe function. */
+  onData(connectionId: string, sessionId: string, listener: (data: string) => void): () => void
+  /** Fires when a remote PTY exits. Returns an unsubscribe function. */
+  onExit(
+    connectionId: string,
+    sessionId: string,
+    listener: (exitCode: number) => void
+  ): () => void
+  /** Fires when the connection's relay socket drops (host/relay gone). Returns unsubscribe. */
+  onClosed(connectionId: string, listener: () => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -545,6 +574,7 @@ export interface NodeTerminalApi {
   context: ContextApi
   claude: ClaudeApi
   remoteHost: RemoteHostApi
+  remoteClient: RemoteClientApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

@@ -79,5 +79,19 @@ export const IPC = {
   shellOpenExternal: 'shell:open-external',
   commitGenerate: 'commit:generate',
   remoteHostStart: 'remote:host:start',
-  remoteHostStop: 'remote:host:stop'
+  remoteHostStop: 'remote:host:stop',
+  // Remote-access CLIENT (drives a host's PTYs over the relay).
+  remoteClientConnect: 'remote:client:connect',
+  remoteClientDisconnect: 'remote:client:disconnect',
+  remoteClientCreate: 'remote:client:create',
+  remoteClientWrite: 'remote:client:write',
+  remoteClientResize: 'remote:client:resize',
+  remoteClientKill: 'remote:client:kill',
+  // Per-session events broadcast main->renderer (connectionId + streamId appended).
+  remoteClientData: (connectionId: string, streamId: number) =>
+    `remote:client:data:${connectionId}:${streamId}`,
+  remoteClientExit: (connectionId: string, streamId: number) =>
+    `remote:client:exit:${connectionId}:${streamId}`,
+  // Fired when a connection's relay socket drops (host/relay gone).
+  remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`
 } as const

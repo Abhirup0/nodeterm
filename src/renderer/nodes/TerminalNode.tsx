@@ -11,7 +11,9 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { renderMarkdown } from '../lib/markdown'
-import { transport } from '../terminal/local-transport'
+import { transport as localTransport } from '../terminal/local-transport'
+import { RemoteTransport } from '../terminal/remote-transport'
+import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { FindBar } from '../components/FindBar'
 import { IconSearch } from '../components/icons'
@@ -40,6 +42,15 @@ function escapeDroppedPath(p: string): string {
  */
 export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes } = useReactFlow()
+  // Pick the session layer: a remote-bound node (data.remote) talks to a host over the relay
+  // via RemoteTransport; otherwise the local PTY (LocalTransport). The connectionId is stable
+  // for a node's lifetime, so the instance is created once and held in a ref.
+  const transportRef = useRef<TerminalTransport | null>(null)
+  if (!transportRef.current) {
+    const conn = (data.remote as { connectionId: string } | undefined)?.connectionId
+    transportRef.current = conn ? new RemoteTransport(conn) : localTransport
+  }
+  const transport = transportRef.current
   // Scoped selectors (not the whole settings object) so this node only re-renders when a
   // field it actually uses changes — not on every unrelated settings edit.
   const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)

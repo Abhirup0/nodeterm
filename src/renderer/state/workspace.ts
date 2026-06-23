@@ -43,6 +43,12 @@ export interface NodeData {
   commitOid?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * When set, this terminal runs on a REMOTE host over the relay (RemoteTransport) rather than
+   * the local PTY (LocalTransport). Not persisted — remote nodes are transient to a live
+   * connection (see flowToNodeStates).
+   */
+  remote?: { connectionId: string }
   [key: string]: unknown
 }
 
@@ -90,6 +96,33 @@ export function createTerminalNode(
       tags: [],
       cwd,
       initialCommand
+    }
+  }
+}
+
+/**
+ * Creates a terminal node bound to a REMOTE host over the relay. Identical to a local terminal
+ * except `data.remote.connectionId` is set, which makes TerminalNode pick RemoteTransport instead
+ * of LocalTransport. Not persisted (see flowToNodeStates).
+ */
+export function createRemoteTerminalNode(
+  connectionId: string,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('remote'),
+    type: 'terminal',
+    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
+    width: TERMINAL_SIZE.width,
+    height: TERMINAL_SIZE.height,
+    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    data: {
+      title: 'Remote terminal',
+      color: NODE_COLORS[index % NODE_COLORS.length],
+      group: null,
+      tags: [],
+      remote: { connectionId }
     }
   }
 }
@@ -411,33 +444,37 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
           : kind === 'diff'
             ? DIFF_SIZE
             : TERMINAL_SIZE
-  return nodes.map((n) => {
-    const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
-    const collapsed = !!n.data.collapsed
-    return {
-      id: n.id,
-      kind,
-      position: n.position,
-      size: {
-        width: n.measured?.width ?? n.width ?? sizeFor(kind).width,
-        // While collapsed, persist the expanded height, not the shrunk one.
-        height: collapsed
-          ? n.data.expandedHeight ?? sizeFor(kind).height
-          : n.measured?.height ?? n.height ?? sizeFor(kind).height
-      },
-      title: n.data.title,
-      color: n.data.color,
-      group: n.data.group,
-      tags: n.data.tags,
-      collapsed: n.data.collapsed,
-      parentId: n.parentId,
-      shell: n.data.shell,
-      cwd: n.data.cwd,
-      text: n.data.text,
-      filePath: n.data.filePath,
-      diffStaged: n.data.diffStaged,
-      commitOid: n.data.commitOid,
-      agentId: n.data.agentId
-    }
-  })
+  return nodes
+    // Remote terminals are transient to a live relay connection — never persist them (their
+    // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).
+    .filter((n) => !n.data.remote)
+    .map((n) => {
+      const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
+      const collapsed = !!n.data.collapsed
+      return {
+        id: n.id,
+        kind,
+        position: n.position,
+        size: {
+          width: n.measured?.width ?? n.width ?? sizeFor(kind).width,
+          // While collapsed, persist the expanded height, not the shrunk one.
+          height: collapsed
+            ? n.data.expandedHeight ?? sizeFor(kind).height
+            : n.measured?.height ?? n.height ?? sizeFor(kind).height
+        },
+        title: n.data.title,
+        color: n.data.color,
+        group: n.data.group,
+        tags: n.data.tags,
+        collapsed: n.data.collapsed,
+        parentId: n.parentId,
+        shell: n.data.shell,
+        cwd: n.data.cwd,
+        text: n.data.text,
+        filePath: n.data.filePath,
+        diffStaged: n.data.diffStaged,
+        commitOid: n.data.commitOid,
+        agentId: n.data.agentId
+      }
+    })
 }

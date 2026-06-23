@@ -80,6 +80,7 @@ import {
   createAgentNode,
   createDiffNode,
   createEditorNode,
+  createRemoteTerminalNode,
   createStickyNode,
   createTerminalNode,
   duplicateNode,
@@ -663,6 +664,15 @@ export function Canvas() {
   /** Open a new terminal that runs a command on start (e.g. gh auth login). */
   const runInTerminal = useCallback((cmd: string) => addTerminal(undefined, cmd), [addTerminal])
 
+  /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
+  const addRemoteTerminal = useCallback(
+    (connectionId: string) => {
+      setNodes((ns) => [...ns, createRemoteTerminalNode(connectionId, ns.length, viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
   /** Open a file as a code editor node on the canvas. */
   const openFile = useCallback(
     (filePath: string, center?: { x: number; y: number }) => {
@@ -766,12 +776,24 @@ export function Canvas() {
     return () => window.removeEventListener('keydown', onKey)
   }, [addTerminal, addAgentNode])
 
+  // When a remote connection is established (from Settings), open a remote terminal node bound
+  // to it. Dispatched as a window event so Settings doesn't need a Canvas reference.
+  useEffect(() => {
+    const onOpenRemote = (e: Event) => {
+      const connectionId = (e as CustomEvent<{ connectionId: string }>).detail?.connectionId
+      if (connectionId) addRemoteTerminal(connectionId)
+    }
+    window.addEventListener('nodeterm:open-remote-terminal', onOpenRemote)
+    return () => window.removeEventListener('nodeterm:open-remote-terminal', onOpenRemote)
+  }, [addRemoteTerminal])
+
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
     (ids: string[]) => {
       const set = new Set(ids)
       nodesRef.current.forEach((n) => {
-        if (set.has(n.id) && n.type === 'terminal') transport.destroy(n.id)
+        // Remote terminals have no local persistent session — only destroy local ones.
+        if (set.has(n.id) && n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.

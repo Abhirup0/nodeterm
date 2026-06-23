@@ -173,6 +173,36 @@ const api: NodeTerminalApi = {
     start: () => ipcRenderer.invoke(IPC.remoteHostStart),
     stop: () => ipcRenderer.invoke(IPC.remoteHostStop)
   },
+  remoteClient: {
+    connect: (offer) => ipcRenderer.invoke(IPC.remoteClientConnect, offer),
+    disconnect: (connectionId) => ipcRenderer.invoke(IPC.remoteClientDisconnect, connectionId),
+    create: (connectionId, options) =>
+      ipcRenderer.invoke(IPC.remoteClientCreate, connectionId, options),
+    write: (connectionId, sessionId, data) =>
+      ipcRenderer.send(IPC.remoteClientWrite, connectionId, sessionId, data),
+    resize: (connectionId, sessionId, cols, rows) =>
+      ipcRenderer.send(IPC.remoteClientResize, connectionId, sessionId, cols, rows),
+    kill: (connectionId, sessionId) =>
+      ipcRenderer.send(IPC.remoteClientKill, connectionId, sessionId),
+    onData: (connectionId, sessionId, listener) => {
+      const channel = IPC.remoteClientData(connectionId, Number(sessionId))
+      const handler = (_e: unknown, data: string) => listener(data)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onExit: (connectionId, sessionId, listener) => {
+      const channel = IPC.remoteClientExit(connectionId, Number(sessionId))
+      const handler = (_e: unknown, code: number) => listener(code)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onClosed: (connectionId, listener) => {
+      const channel = IPC.remoteClientClosed(connectionId)
+      const handler = () => listener()
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    }
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),

@@ -1857,6 +1857,13 @@ body,
   color: var(--muted);
 }
 
+.set-subhead {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label);
+}
+
 /* ---- Source control ---- */
 .sc-meta {
   display: flex;
