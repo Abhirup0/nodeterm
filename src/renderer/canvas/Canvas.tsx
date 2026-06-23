@@ -618,23 +618,26 @@ export function Canvas() {
     }
   }, [])
 
-  // Pinch-zoom (trackpad / ctrl+wheel) must keep working even over a focused terminal, which
-  // carries `nowheel` so plain scroll stays inside xterm. React Flow ignores wheel over a
-  // nowheel element, so we zoom-to-cursor manually there; on open canvas React Flow handles it.
+  // Zoom on Cmd/Ctrl+wheel and trackpad pinch (ctrl+wheel), handled in one capture-phase
+  // listener for the whole canvas — so it works on the open canvas, over a selected node, and
+  // even over a *focused* terminal (whose `nowheel` would otherwise route the wheel into xterm
+  // scrollback). We intercept (preventDefault + stopPropagation) before xterm sees it, then
+  // zoom to the cursor. React Flow's own zoomOnPinch / zoomActivationKeyCode are disabled so
+  // this is the single source of zoom (no double-zoom on the open canvas).
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return // only the pinch gesture (browsers deliver it as ctrl+wheel)
-      const target = e.target as Element | null
-      if (!target?.closest('.nowheel')) return // open canvas → leave it to React Flow
+      if (!e.ctrlKey && !e.metaKey) return // pinch (ctrl+wheel) or Cmd/Ctrl+scroll = zoom
       e.preventDefault()
       e.stopPropagation()
       const { x, y, zoom } = getViewport()
       const rect = wrap.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
-      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-e.deltaY * 0.01)))
+      // Cap a single event's influence so a chunky mouse-wheel tick doesn't jump zoom levels.
+      const d = Math.max(-50, Math.min(50, e.deltaY))
+      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-d * 0.01)))
       if (next === zoom) return
       const k = next / zoom
       setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
@@ -1683,7 +1686,8 @@ export function Canvas() {
           panOnDrag={[1]}
           panOnScroll
           zoomOnScroll={false}
-          zoomOnPinch
+          zoomOnPinch={false}
+          zoomActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
         >

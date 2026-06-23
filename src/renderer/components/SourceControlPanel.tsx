@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
 import type { GitHistoryItem, GitHistoryResult } from '@shared/git-history'
 import { useProjects } from '../state/projects'
+import { useScmDraft } from '../state/scmDraft'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu } from './ContextMenu'
@@ -45,12 +46,20 @@ export function SourceControlPanel({
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   const cwd = project?.cwd
   const [status, setStatus] = useState<GitStatus | null>(null)
-  const [message, setMessage] = useState('')
+  // Commit message + AI-generate state live in a per-repo store (keyed by cwd), so closing the
+  // panel mid-generation neither discards the message nor abandons the run — reopening shows it.
+  const draftKey = cwd ?? ''
+  const message = useScmDraft((s) => s.messages[draftKey] ?? '')
+  const generating = useScmDraft((s) => !!s.generating[draftKey])
+  const genError = useScmDraft((s) => s.errors[draftKey] ?? '')
+  const setMessage = useCallback(
+    (m: string) => useScmDraft.getState().setMessage(draftKey, m),
+    [draftKey]
+  )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [branchMenu, setBranchMenu] = useState<{ top: number; left: number } | null>(null)
   const [newBranch, setNewBranch] = useState('')
-  const [generating, setGenerating] = useState(false)
   const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null)
   const [history, setHistory] = useState<GitHistoryResult | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -104,14 +113,9 @@ export function SourceControlPanel({
     void act(() => git.discard(cwd!, f.path, f.status === 'U'))
   }
 
-  const generate = async () => {
-    setGenerating(true)
-    setError('')
-    const r = await git.generateMessage(cwd!)
-    setGenerating(false)
-    if (r.ok) setMessage(r.message)
-    else setError(r.message)
-  }
+  // Runs in the store so it completes even if the panel is closed mid-generation; the result
+  // (or error) is stashed per-cwd and shown when the panel reopens.
+  const generate = () => useScmDraft.getState().generate(draftKey)
 
   const commitAndPush = () =>
     act(async () => {
@@ -295,14 +299,17 @@ export function SourceControlPanel({
               {/* Surface git action errors (e.g. a branch switch blocked by local changes)
                   at the top, right under the repo/branch bar, so the user sees why the
                   action they just triggered failed instead of missing it at the bottom. */}
-              {error && (
+              {(error || genError) && (
                 <div className="scm-error" role="alert">
-                  <pre className="scm-error__msg">{error}</pre>
+                  <pre className="scm-error__msg">{error || genError}</pre>
                   <button
                     className="scm-error__dismiss"
                     title="Dismiss"
                     aria-label="Dismiss error"
-                    onClick={() => setError('')}
+                    onClick={() => {
+                      setError('')
+                      useScmDraft.getState().clearError(draftKey)
+                    }}
                   >
                     ×
                   </button>
