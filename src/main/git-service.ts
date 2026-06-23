@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { promisify } from 'util'
@@ -105,6 +105,36 @@ function parseNumstat(out: string): Map<string, { added: number; deleted: number
     map.set(p, { added: Number(a) || 0, deleted: Number(d) || 0 })
   }
   return map
+}
+
+/**
+ * Read the user's stored github.com HTTPS token from git's credential helper
+ * (macOS keychain etc.) so we can hand it to `gh` as GH_TOKEN — letting someone
+ * who can already push over HTTPS publish a new repo without a separate
+ * `gh auth login`. Returns null if no HTTPS credential is stored (e.g. SSH-only).
+ * Never logs the token. `git credential fill` reads the query from stdin.
+ */
+function githubTokenFromGitCredentials(cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let out = ''
+    const child = spawn('git', ['credential', 'fill'], { cwd: cwd || undefined, env: GIT_ENV })
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
+    child.stdout.on('data', (d) => {
+      out += d.toString()
+    })
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(null)
+    })
+    child.on('close', () => {
+      clearTimeout(timer)
+      const line = out.split('\n').find((l) => l.startsWith('password='))
+      const token = line ? line.slice('password='.length).trim() : ''
+      resolve(token || null)
+    })
+    child.stdin.write('protocol=https\nhost=github.com\n\n')
+    child.stdin.end()
+  })
 }
 
 /**
@@ -427,16 +457,33 @@ export class GitService {
     if (!repo || repo.startsWith('-') || !/^[A-Za-z0-9._/-]+$/.test(repo)) {
       return { ok: false, message: 'Invalid repository name.' }
     }
+    // Prefer gh's own login; otherwise reuse the user's existing git HTTPS token
+    // (the one that already lets them push) so publishing doesn't demand a separate
+    // `gh auth login`. If neither is available, signal the UI to start a login.
+    const env: NodeJS.ProcessEnv = { ...GIT_ENV }
+    if (!(await ghAuthed())) {
+      const token = await githubTokenFromGitCredentials(cwd)
+      if (!token) {
+        return { ok: false, message: 'Sign in to GitHub to publish.', needsAuth: true }
+      }
+      env.GH_TOKEN = token
+    }
     try {
       await run(
         GH_PATH,
         ['repo', 'create', repo, isPrivate ? '--private' : '--public', '--source=.', '--push'],
-        { cwd, env: GIT_ENV, maxBuffer: 10 * 1024 * 1024 }
+        { cwd, env, maxBuffer: 10 * 1024 * 1024 }
       )
       return { ok: true, message: 'Published to GitHub.' }
     } catch (e) {
       const err = e as { stderr?: string; message?: string }
-      return { ok: false, message: (err.stderr || err.message || 'gh failed').trim() }
+      const msg = (err.stderr || err.message || 'gh failed').trim()
+      // A reused token without repo-create scope (or an expired one) reads as an auth
+      // failure — let the UI offer a full login rather than a dead-end error.
+      if (/\b(401|403)\b|unauthor|forbidden|auth|token|scope|HTTP 4/i.test(msg)) {
+        return { ok: false, message: msg, needsAuth: true }
+      }
+      return { ok: false, message: msg }
     }
   }
 }

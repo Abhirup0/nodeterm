@@ -280,6 +280,9 @@ export interface GitStatus {
 export interface GitResult {
   ok: boolean
   message: string
+  /** Set by publish() when no usable GitHub credential was found, so the UI can
+   *  fall back to an interactive `gh auth login` instead of just showing an error. */
+  needsAuth?: boolean
 }
 
 export interface GitApi {

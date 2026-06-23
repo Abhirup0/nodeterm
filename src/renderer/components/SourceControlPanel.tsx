@@ -505,19 +505,30 @@ export function SourceControlPanel({
         <PublishDialog
           defaultName={project?.name || 'repo'}
           onCancel={() => setPublishOpen(false)}
-          onPublish={(name, isPrivate) => {
+          onPublish={async (name, isPrivate) => {
             setPublishOpen(false)
-            if (status?.ghAuthed) {
-              void act(() => git.publish(cwd!, name, isPrivate))
-            } else {
-              // Not signed in: run the interactive gh login, chained straight into
-              // creating + pushing the chosen repo, so login flows into publish.
+            // Always try in-app: publish() reuses gh's login OR the user's existing git
+            // HTTPS token, so an already-authenticated user never sees a terminal.
+            setBusy(true)
+            const r = await git.publish(cwd!, name, isPrivate)
+            setBusy(false)
+            if (r.ok) {
+              setError('')
+              await refresh()
+              await refreshHistory()
+              return
+            }
+            if (r.needsAuth) {
+              // No usable credential (e.g. SSH-only): fall back to an interactive gh
+              // login chained straight into creating + pushing the chosen repo.
               const safe = name.replace(/'/g, `'\\''`)
               onRunInTerminal(
                 `gh auth login && gh repo create '${safe}' ${isPrivate ? '--private' : '--public'} --source=. --push`
               )
               onClose()
+              return
             }
+            setError(r.message)
           }}
         />
       )}
