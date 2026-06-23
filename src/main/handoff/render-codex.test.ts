@@ -22,4 +22,11 @@ describe('renderCodexTranscript', () => {
     expect(md).toContain('file2')
     expect(md).not.toContain('task_started')
   })
+
+  it('falls back to content when reasoning summary is empty', () => {
+    const raw =
+      '{"type":"response_item","payload":{"type":"reasoning","summary":[],"content":[{"type":"text","text":"thinking hard about it"}]}}'
+    const md = renderCodexTranscript(raw)
+    expect(md).toContain('thinking hard about it')
+  })
 })

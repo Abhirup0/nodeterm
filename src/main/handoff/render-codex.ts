@@ -28,7 +28,8 @@ export function renderCodexTranscript(raw: string): string {
         role === 'user' ? 'User' : role === 'assistant' ? 'Assistant' : `Message (${role})`
       out.push(`## ${heading}\n\n${blockText(p.content)}`)
     } else if (pt === 'reasoning') {
-      out.push(`## Assistant (reasoning)\n\n${blockText(p.summary ?? p.content)}`)
+      const body = blockText(p.summary) || blockText(p.content)
+      out.push(`## Assistant (reasoning)\n\n${body}`)
     } else if (pt === 'function_call') {
       const args =
         typeof p.arguments === 'string' ? '```\n' + p.arguments + '\n```' : fenceJson(p.arguments)
