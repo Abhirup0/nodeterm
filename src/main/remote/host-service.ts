@@ -92,16 +92,13 @@ function str(value: unknown): string | undefined {
  * `nextStreamId` lets tests assert deterministic ids; production uses a monotonic counter.
  */
 export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket): HostHandlers {
-  // streamId -> Stream, plus the reverse (sessionId -> streamId) so PTY callbacks resolve fast.
+  // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
+  // reverse (sessionId -> streamId) index is needed.
   const streams = new Map<number, Stream>()
-  const bySession = new Map<string, number>()
   let streamCounter = 0
 
   function dropStream(streamId: number): void {
-    const stream = streams.get(streamId)
-    if (!stream) return
     streams.delete(streamId)
-    bySession.delete(stream.sessionId)
   }
 
   function handleCreate(req: RpcRequest): void {
@@ -152,7 +149,6 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
     }
     stream.sessionId = sessionId
     streams.set(streamId, stream)
-    bySession.set(sessionId, streamId)
     socket.respond(req.id, true, { streamId })
   }
 
@@ -203,7 +199,6 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
         pty.kill(stream.sessionId)
       }
       streams.clear()
-      bySession.clear()
     }
   }
 }

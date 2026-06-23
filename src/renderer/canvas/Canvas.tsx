@@ -795,6 +795,20 @@ export function Canvas() {
         // Remote terminals have no local persistent session — only destroy local ones.
         if (set.has(n.id) && n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
       })
+      // Tear down relay connections owned solely by the deleted remote node(s). The model is
+      // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
+      // connectionId if no *surviving* remote node still uses it, so we never drop a live one.
+      const deletedConns = new Set<string>()
+      const survivingConns = new Set<string>()
+      nodesRef.current.forEach((n) => {
+        const conn = (n.data.remote as { connectionId: string } | undefined)?.connectionId
+        if (!conn) return
+        if (set.has(n.id)) deletedConns.add(conn)
+        else survivingConns.add(conn)
+      })
+      deletedConns.forEach((conn) => {
+        if (!survivingConns.has(conn)) void window.nodeTerminal.remoteClient.disconnect(conn)
+      })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
         const groupPos = new Map(

@@ -174,6 +174,18 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let disposed = false
     const cleanups: Array<() => void> = []
 
+    // Remote nodes: surface a dropped relay connection (host gone / socket closed) so the
+    // terminal isn't silently frozen. The actual relay teardown on node *deletion* happens
+    // in Canvas.deleteNodes (which can dedupe a connectionId shared by sibling nodes).
+    const remoteConn = (data.remote as { connectionId: string } | undefined)?.connectionId
+    if (remoteConn) {
+      cleanups.push(
+        window.nodeTerminal.remoteClient.onClosed(remoteConn, () => {
+          term.write('\r\n\x1b[31m[remote disconnected]\x1b[0m\r\n')
+        })
+      )
+    }
+
     // Agent state (busy/idle/attention) comes from the agent's own hooks via the
     // agent:status IPC (handled centrally in Canvas) — not from parsing the output here.
     // We only surface the conversation topic from the terminal title, when the agent sets one.
@@ -553,7 +565,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
           className="term-node__close"
           title="Close (ends the session)"
           onClick={() => {
-            transport.destroy(id)
+            const remoteConn = (data.remote as { connectionId: string } | undefined)?.connectionId
+            if (remoteConn) {
+              // Remote node: no local tmux to destroy; tear down the relay connection
+              // (socket + keepalive + main-process map entry). N:1, so this owns it.
+              void window.nodeTerminal.remoteClient.disconnect(remoteConn)
+            } else {
+              transport.destroy(id)
+            }
             deleteElements({ nodes: [{ id }] })
           }}
         >

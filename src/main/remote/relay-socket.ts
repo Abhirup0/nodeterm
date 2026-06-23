@@ -367,6 +367,12 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     }
   }
 
+  // KNOWN MVP LIMITATION: this reconnect path re-dials with the *same* pairing token, which
+  // the real relay permanently rejects (the token is single-use and consumed on first pair,
+  // with a ~600s TTL). So a post-drop reconnect can never re-authenticate against the live
+  // relay — a working reconnect would need a freshly minted token, which is out of MVP scope.
+  // The machinery is kept (it's harmless and useful once token re-minting exists); don't be
+  // misled into thinking dropped connections currently recover on their own.
   function scheduleReconnect(): void {
     if (reconnectTimer || intentionallyClosed) {
       return
