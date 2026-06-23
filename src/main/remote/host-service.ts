@@ -271,7 +271,8 @@ async function loadOrCreateKeyPair(): Promise<KeyPair> {
         publicKey: Buffer.from(keys.publicKey).toString('base64'),
         secretKey: Buffer.from(keys.secretKey).toString('base64')
       }),
-      'utf-8'
+      // 0o600: the host's NaCl secret key is its E2EE identity — owner read/write only.
+      { encoding: 'utf-8', mode: 0o600 }
     )
     .catch(() => {})
   return keys
