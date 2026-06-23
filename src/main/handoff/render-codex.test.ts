@@ -29,4 +29,13 @@ describe('renderCodexTranscript', () => {
     const md = renderCodexTranscript(raw)
     expect(md).toContain('thinking hard about it')
   })
+
+  it('JSON-emits an unknown response_item payload type (no silent drop)', () => {
+    const raw =
+      '{"type":"response_item","payload":{"type":"custom_thing","distinctiveField":"KEEP_ME_99"}}'
+    const md = renderCodexTranscript(raw)
+    expect(md).toContain('### Item (custom_thing)')
+    expect(md).toContain('distinctiveField')
+    expect(md).toContain('KEEP_ME_99')
+  })
 })

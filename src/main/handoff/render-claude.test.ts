@@ -25,4 +25,18 @@ describe('renderClaudeTranscript', () => {
     const md = renderClaudeTranscript('{"type":"mode","mode":"normal"}\nnot json\n')
     expect(md).toBe('')
   })
+
+  it('renders a string tool_result in full and JSON-emits unknown content blocks (no silent drop)', () => {
+    const raw = [
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"PLAIN_STRING_RESULT"}]}}',
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"image","source":"data:UNKNOWN_SRC_42"}]}}'
+    ].join('\n')
+    const md = renderClaudeTranscript(raw)
+    // (a) string tool_result content is rendered in full
+    expect(md).toContain('PLAIN_STRING_RESULT')
+    // (b) unknown assistant block falls back to JSON, not dropped
+    expect(md).toContain('Assistant block (image)')
+    expect(md).toContain('UNKNOWN_SRC_42')
+    expect(md).toContain('"image"')
+  })
 })

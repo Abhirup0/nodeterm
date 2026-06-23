@@ -27,9 +27,12 @@ const LOCATORS: Record<string, Locator> = {
   gemini: locateGemini
 }
 
-/** Filesystem-safe handoff filename for a node + ISO-ish timestamp. */
+/** Filesystem-safe handoff filename for a node + ISO-ish timestamp. Node ids are
+ *  machine-generated and safe today, but sanitize defensively so a future caller can't
+ *  cause a path escape via the interpolated id. */
 export function handoffFilename(nodeId: string, ts: string): string {
-  return `handoff-${nodeId}-${ts}.md`
+  const safe = nodeId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return `handoff-${safe}-${ts}.md`
 }
 
 export async function buildHandoff(opts: {

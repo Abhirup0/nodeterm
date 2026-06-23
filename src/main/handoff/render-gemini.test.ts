@@ -17,4 +17,15 @@ describe('renderGeminiTranscript', () => {
     expect(md.indexOf('how are you ?')).toBeLessThan(md.indexOf('I am well.'))
     expect(md).not.toContain('projectHash')
   })
+
+  it('appends a $push message after the $set baseline, in order (no silent drop)', () => {
+    const raw = [
+      '{"$set":{"messages":[{"id":"a","type":"user","content":[{"text":"BASELINE_MSG"}]}]}}',
+      '{"$push":{"messages":[{"id":"b","type":"gemini","content":[{"text":"PUSHED_MSG"}]}]}}'
+    ].join('\n')
+    const md = renderGeminiTranscript(raw)
+    expect(md).toContain('BASELINE_MSG')
+    expect(md).toContain('PUSHED_MSG')
+    expect(md.indexOf('BASELINE_MSG')).toBeLessThan(md.indexOf('PUSHED_MSG'))
+  })
 })
