@@ -70,11 +70,22 @@ function sessionName(persistKey: string): string {
 
 interface Session {
   proc: pty.IPty
-  webContentsId: number
+  /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
+  webContentsId: number | null
+  /** Detached sinks: when set, output/exit go to these callbacks instead of IPC (relay host). */
+  onData?: (data: string) => void
+  onExit?: (exitCode: number) => void
   /** Pending output chunks, coalesced into one IPC message per flush. */
   buf: string[]
   bufBytes: number
   flushTimer: ReturnType<typeof setTimeout> | null
+}
+
+/** Sinks for a detached session whose output is served somewhere other than the renderer
+ * (the relay host). The PTY is otherwise identical to a normal session. */
+export interface DetachedSinks {
+  onData(data: string): void
+  onExit(exitCode: number): void
 }
 
 // Output coalescing: a fast producer (e.g. `yes`, a verbose build, tmux full-screen
@@ -145,6 +156,24 @@ export class PtyManager {
   }
 
   private create(webContentsId: number, options: PtyCreateOptions): string {
+    return this.spawnSession(options, webContentsId, undefined)
+  }
+
+  /**
+   * Spawn a PTY whose output/exit are delivered to `sinks` instead of the renderer. Used by
+   * the relay host (Task 6) to serve PTYs over the E2EE transport: the host pipes `onData`
+   * into `OP.Output` frames and maps client RPC/frames back to `write`/`resize`/`kill`. The
+   * spawn (tmux session, hook env, shell selection) is identical to a normal renderer session.
+   */
+  createDetached(options: PtyCreateOptions, sinks: DetachedSinks): string {
+    return this.spawnSession(options, null, sinks)
+  }
+
+  private spawnSession(
+    options: PtyCreateOptions,
+    webContentsId: number | null,
+    sinks: DetachedSinks | undefined
+  ): string {
     const sessionId = `pty-${++this.counter}`
     const cwd = options.cwd || os.homedir()
 
@@ -208,14 +237,26 @@ export class PtyManager {
       env
     })
 
-    const session: Session = { proc, webContentsId, buf: [], bufBytes: 0, flushTimer: null }
+    const session: Session = {
+      proc,
+      webContentsId,
+      onData: sinks?.onData,
+      onExit: sinks?.onExit,
+      buf: [],
+      bufBytes: 0,
+      flushTimer: null
+    }
     this.sessions.set(sessionId, session)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
-      this.send(webContentsId, IPC.ptyExit(sessionId), exitCode)
+      if (session.onExit) {
+        session.onExit(exitCode)
+      } else if (webContentsId !== null) {
+        this.send(webContentsId, IPC.ptyExit(sessionId), exitCode)
+      }
       this.sessions.delete(sessionId)
     })
 
@@ -243,7 +284,11 @@ export class PtyManager {
     const data = session.buf.join('')
     session.buf = []
     session.bufBytes = 0
-    this.send(session.webContentsId, IPC.ptyData(sessionId), data)
+    if (session.onData) {
+      session.onData(data)
+    } else if (session.webContentsId !== null) {
+      this.send(session.webContentsId, IPC.ptyData(sessionId), data)
+    }
   }
 
   /**
@@ -252,7 +297,7 @@ export class PtyManager {
    * without bound. node-pty pause()/resume() stops/starts reading the pty fd; the OS
    * pipe applies backpressure to the producing process.
    */
-  private setFlow(sessionId: string, resume: boolean): void {
+  setFlow(sessionId: string, resume: boolean): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
     try {
@@ -263,11 +308,11 @@ export class PtyManager {
     }
   }
 
-  private write(sessionId: string, data: string): void {
+  write(sessionId: string, data: string): void {
     this.sessions.get(sessionId)?.proc.write(data)
   }
 
-  private resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number, rows: number): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
     // cols/rows must be at least 1, otherwise node-pty throws.

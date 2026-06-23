@@ -169,6 +169,10 @@ const api: NodeTerminalApi = {
     readTranscript: (sessionId, cwd) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
   },
+  remoteHost: {
+    start: () => ipcRenderer.invoke(IPC.remoteHostStart),
+    stop: () => ipcRenderer.invoke(IPC.remoteHostStop)
+  },
   bridge: {
     configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
     setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),

@@ -112,6 +112,20 @@ async function getJson(path: string): Promise<{ active?: boolean; token?: string
   }
 }
 
+/**
+ * The stored entitlement token (the compact Ed25519 token minted by our API), or null when
+ * none is stored. Other main-process features (e.g. the relay pairing call) read this to prove
+ * entitlement to the server. Returns the raw stored value — verify with `isPremium()` for gating.
+ */
+export function getStoredEntitlement(): string | null {
+  return load().token ?? null
+}
+
+/** True when a valid, unexpired Pro entitlement is stored (offline-verified). Gates premium features. */
+export function isPremium(): boolean {
+  return verify(load().token) !== null
+}
+
 export function initLicense(win: BrowserWindow): void {
   const deviceId = getDeviceId()
   const broadcast = (s: LicenseStatus) => {

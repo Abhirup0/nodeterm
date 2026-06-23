@@ -25,6 +25,7 @@ import { initBridge } from './bridge'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
+import { initRemoteHost } from './remote/host-service'
 
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
@@ -296,6 +297,7 @@ app.whenReady().then(async () => {
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
+  initRemoteHost(win, ptyManager)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

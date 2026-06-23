@@ -517,6 +517,17 @@ export interface LicenseApi {
   onChange(listener: (s: LicenseStatus) => void): () => void
 }
 
+export interface RemoteHostApi {
+  /**
+   * Enter host mode: mint a pairing token, connect to the relay as the host, and return the
+   * pairing offer string (`nodeterm://pair?code=…`) to hand to a client. Rejects if the device
+   * is not entitled to Pro (or in a dev build without NODETERM_RELAY_URL).
+   */
+  start(): Promise<{ offer: string }>
+  /** Leave host mode: close the relay connection (ends served PTYs, drops client access). */
+  stop(): Promise<void>
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -533,6 +544,7 @@ export interface NodeTerminalApi {
   usage: UsageApi
   context: ContextApi
   claude: ClaudeApi
+  remoteHost: RemoteHostApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

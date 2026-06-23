@@ -77,5 +77,7 @@ export const IPC = {
   gitCommitFiles: 'git:commit-files',
   gitRemoteCommitUrl: 'git:remote-commit-url',
   shellOpenExternal: 'shell:open-external',
-  commitGenerate: 'commit:generate'
+  commitGenerate: 'commit:generate',
+  remoteHostStart: 'remote:host:start',
+  remoteHostStop: 'remote:host:stop'
 } as const
