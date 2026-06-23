@@ -29,6 +29,12 @@ import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 
+// Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
+// isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
+// in packaged builds. Must run before the stores below resolve userData paths.
+const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
+if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
+
 const settingsStore = new SettingsStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
@@ -43,7 +49,7 @@ let mainWin: BrowserWindow | null = null
 // "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
 // instead. (The bridge MCP server runs via ELECTRON_RUN_AS_NODE on its own .mjs entry, so it
 // never reaches this code; this guards against a stray real GUI launch.)
-const gotSingleInstanceLock = app.requestSingleInstanceLock()
+const gotSingleInstanceLock = NT_MULTI || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
