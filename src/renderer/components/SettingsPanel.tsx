@@ -483,16 +483,16 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             )}
           </section>
 
-          {ent.isPremium ? (
-            <section>
-              <h3>Remote access</h3>
-              <p className="set-note">
-                Share this device's terminals with another nodeterm, or connect to one that's
-                sharing — end-to-end encrypted over the relay.
-              </p>
+          <section>
+            <h3>Remote access</h3>
+            <p className="set-note">
+              Open terminals that run on another machine you own — end-to-end encrypted over the
+              relay. Hosting (sharing this machine) is Pro; connecting to a host is free.
+            </p>
 
-              <h4 className="set-subhead">Allow remote access</h4>
-              {hostOffer ? (
+            <h4 className="set-subhead">Allow remote access</h4>
+            {ent.isPremium ? (
+              hostOffer ? (
                 <>
                   <p className="set-note">
                     Share this pairing code with the other device (single use):
@@ -515,33 +515,38 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 <button className="set-btn" disabled={hostBusy} onClick={() => void startHosting()}>
                   {hostBusy ? 'Starting…' : 'Allow remote access'}
                 </button>
-              )}
+              )
+            ) : (
+              <p className="set-note">
+                Hosting this machine requires nodeterm Pro — upgrade above. Connecting to a host
+                you were given a code for is free.
+              </p>
+            )}
 
-              <h4 className="set-subhead">Connect to a host</h4>
-              <label className="set-row">
-                <span>Pairing code</span>
-                <input
-                  type="text"
-                  placeholder="paste the host's code"
-                  value={clientCode}
-                  onChange={(e) => setClientCode(e.target.value)}
-                />
-              </label>
-              <button
-                className="set-btn"
-                disabled={connecting || !clientCode.trim()}
-                onClick={() => void connectToHost()}
-              >
-                {connecting ? 'Connecting…' : 'Connect'}
-              </button>
+            <h4 className="set-subhead">Connect to a host</h4>
+            <label className="set-row">
+              <span>Pairing code</span>
+              <input
+                type="text"
+                placeholder="paste the host's code"
+                value={clientCode}
+                onChange={(e) => setClientCode(e.target.value)}
+              />
+            </label>
+            <button
+              className="set-btn"
+              disabled={connecting || !clientCode.trim()}
+              onClick={() => void connectToHost()}
+            >
+              {connecting ? 'Connecting…' : 'Connect'}
+            </button>
 
-              {remoteError ? (
-                <p className="set-note" style={{ color: '#ff9f0a' }}>
-                  {remoteError}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
+            {remoteError ? (
+              <p className="set-note" style={{ color: '#ff9f0a' }}>
+                {remoteError}
+              </p>
+            ) : null}
+          </section>
         </div>
       </aside>
     </div>,

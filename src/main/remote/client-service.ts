@@ -22,7 +22,6 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { PtyCreateOptions } from '../../shared/types'
-import { isPremium } from '../license'
 import { genKeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
 import { decodeOffer } from './pairing'
@@ -159,7 +158,8 @@ interface ClientConnection {
 }
 
 /**
- * Wire the client-mode IPC. `remote:client:connect` gates on Pro + the dev gate, decodes the
+ * Wire the client-mode IPC. `remote:client:connect` gates on the dev gate only (the host's Pro
+ * mints the pairing token, so the client needs no entitlement), decodes the
  * offer, connects to the relay as the client (triggering the host bridge), and returns a
  * `connectionId`. The renderer's RemoteTransport(connectionId) then drives remote PTYs over
  * the per-session create/write/resize/kill IPC, with output/exit arriving on per-session
@@ -178,9 +178,9 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
   }
 
   ipcMain.handle(IPC.remoteClientConnect, async (_e, offerCode: string): Promise<string> => {
-    if (!isPremium()) {
-      throw new Error('Remote access requires nodeterm Pro.')
-    }
+    // No Pro gate on the client: the paywall is the HOST minting the pairing token
+    // (/v1/pair/token requires the host's entitlement). A valid offer is the credential, so a
+    // user's free device can connect to their own Pro host. The dev/relay gate still applies.
     if (!relayAllowed()) {
       throw new Error('Remote access is unavailable in development builds (set NODETERM_RELAY_URL).')
     }
