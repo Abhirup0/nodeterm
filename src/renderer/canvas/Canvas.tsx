@@ -65,6 +65,7 @@ import {
   agentConfig,
   hasHooks,
   canBranch,
+  canTransferFrom,
   canBridge,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
@@ -956,6 +957,54 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  // Transfer this agent's full conversation to a different agent. We render the source
+  // agent's native transcript to a handoff file (main) and open a target node that reads it
+  // and continues. The source node stays. Mirrors branchClaude's placement.
+  const transferConversation = useCallback(
+    async (sourceNodeId: string, targetAgentId: AgentId) => {
+      const source = nodesRef.current.find((n) => n.id === sourceNodeId) as CanvasNode | undefined
+      if (!source) return
+      const sourceAgentId = source.data.agentId
+      const sessionId = useAgentStatus.getState().byId[sourceNodeId]?.sessionId
+      if (!sourceAgentId || !sessionId) {
+        setConfirm({
+          message: 'Conversation not ready to transfer yet.',
+          onConfirm: () => setConfirm(null)
+        })
+        return
+      }
+      const res = await window.nodeTerminal.handoff.build(
+        sessionId,
+        sourceAgentId,
+        sourceNodeId,
+        source.data.cwd
+      )
+      if ('error' in res) {
+        setConfirm({ message: res.error, onConfirm: () => setConfirm(null) })
+        return
+      }
+      const prompt =
+        `The file ${res.filePath} contains the COMPLETE prior conversation from a ` +
+        `${sourceAgentId} session, including every message and all tool calls and outputs. ` +
+        `Read the entire file first, then continue the task from where it left off.`
+      const node = createAgentNode(
+        targetAgentId,
+        nodesRef.current.length,
+        source.data.cwd,
+        undefined,
+        prompt
+      )
+      node.position = {
+        x: source.position.x + ((source.width as number) ?? 600) + 32,
+        y: source.position.y
+      }
+      node.selected = true
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
   const setNodesColor = useCallback(
     (ids: string[], color: string) => {
       const set = new Set(ids)
@@ -1096,6 +1145,35 @@ export function Canvas() {
             }
           ] as MenuItem[])
         : []),
+      ...(ids.length === 1 &&
+      (() => {
+        const a = agentIdOf(ids[0])
+        return !!a && canTransferFrom(a) && !!useAgentStatus.getState().byId[ids[0]]?.sessionId
+      })()
+        ? (() => {
+            const src = agentIdOf(ids[0]) as AgentId
+            const disabled = useSettings.getState().settings.disabledAgents
+            const settings = useSettings.getState().settings
+            const targets: { id: AgentId; label: string }[] = [
+              ...BUILTIN_AGENT_IDS.filter((aid) => aid !== src && !disabled.includes(aid)).map(
+                (aid) => ({ id: aid as AgentId, label: AGENT_CONFIG[aid].label })
+              ),
+              ...settings.customAgents
+                .filter((c) => c.id !== src && !disabled.includes(c.id))
+                .map((c) => ({ id: c.id, label: c.label }))
+            ]
+            return [
+              { type: 'label', label: 'Transfer conversation to' },
+              ...targets.map(
+                (tg): MenuItem => ({
+                  label: tg.label,
+                  icon: <AgentIcon agentId={tg.id} />,
+                  onClick: () => void transferConversation(ids[0], tg.id)
+                })
+              )
+            ] as MenuItem[]
+          })()
+        : []),
       { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) },
       { label: 'Collapse / Expand', icon: <IconCollapse />, onClick: () => toggleCollapseNodes(ids) },
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
@@ -1111,6 +1189,7 @@ export function Canvas() {
       setNodesColor,
       duplicateNodes,
       branchClaude,
+      transferConversation,
       agentIdOf,
       alignToGrid,
       toggleCollapseNodes,
