@@ -180,15 +180,24 @@ export function SourceControlPanel({
       return (
         <button
           className="scm-sync"
-          disabled={busy || !status.ghAuthed}
+          disabled={busy || !status.ghAvailable}
           title={
             !status.ghAvailable
               ? 'GitHub CLI (gh) not found'
-              : !status.ghAuthed
-                ? 'Sign in to GitHub first'
-                : 'Create a GitHub repo and push'
+              : status.ghAuthed
+                ? 'Create a GitHub repo and push'
+                : 'Sign in to GitHub, then create the repo'
           }
-          onClick={() => act(() => git.publish(cwd!, project?.name || 'repo', true))}
+          onClick={() => {
+            if (status.ghAuthed) {
+              act(() => git.publish(cwd!, project?.name || 'repo', true))
+            } else {
+              // Sign in on demand — only when the user actually chooses to publish,
+              // never proactively after `git init`.
+              onRunInTerminal('gh auth login')
+              onClose()
+            }
+          }}
         >
           Publish to GitHub
         </button>
@@ -306,22 +315,10 @@ export function SourceControlPanel({
                   </button>
                 </div>
               )}
-              {/* Only nag when gh is actually needed (publishing a repo with no remote yet).
-                  With a remote, push/pull/sync use git's credential helper (macOS keychain /
-                  the same creds your IDE uses), so a gh login isn't required. */}
-              {status.ghAvailable && !status.ghAuthed && !status.hasRemote && (
-                <div className="scm-signin">
-                  <span>Sign in to GitHub to publish this repo.</span>
-                  <button
-                    onClick={() => {
-                      onRunInTerminal('gh auth login')
-                      onClose()
-                    }}
-                  >
-                    Sign in to GitHub
-                  </button>
-                </div>
-              )}
+              {/* No proactive GitHub sign-in nag. Push/pull on an existing remote use git's
+                  own credential helper (the account you're already signed into), and a brand-new
+                  `git init` repo shouldn't demand a gh login before you've even committed. gh
+                  auth is requested on demand only when you click "Publish to GitHub" below. */}
 
               <section className="scm-commit">
                 <div className="scm-compose">

@@ -1935,37 +1935,6 @@ body,
 }
 
 /* ---- Source control (VS Code style) ---- */
-.scm-signin {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 12px 0 4px;
-  padding: 10px 12px;
-  background: rgba(10, 132, 255, 0.1);
-  border: 1px solid rgba(10, 132, 255, 0.3);
-  border-radius: 10px;
-  font-size: 12px;
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-}
-
-.scm-signin button {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 7px;
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.scm-signin button:hover {
-  background: var(--accent-hover);
-}
-
 
 .scm-bar {
   display: flex;
