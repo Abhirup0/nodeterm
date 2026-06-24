@@ -6,6 +6,7 @@ import {
   ReactFlowProvider,
   SelectionMode,
   useNodesState,
+  useReactFlow,
   type NodeChange
 } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState } from '@shared/types'
@@ -75,6 +76,11 @@ function RemoteSessionCanvas({
   onClose: () => void
 }): React.JSX.Element {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
+  const { fitView } = useReactFlow()
+  // Fit the view once, when the host's nodes first arrive: their positions are the host's canvas
+  // coordinates, which may sit far outside the mirror's default (0,0) viewport — without this the
+  // mirror looks empty even though the nodes are present.
+  const fittedRef = useRef(false)
   // Guard so applying an inbound host snapshot doesn't echo back as a client mutation.
   const applyingHostStateRef = useRef(false)
   // True between drag-start and drag-stop. While the user is actively dragging a node, we ignore
@@ -105,6 +111,14 @@ function RemoteSessionCanvas({
       })
     })
   }, [connectionId, setNodes])
+
+  // Bring the host's nodes into view the first time they arrive (host coords ≠ mirror viewport).
+  useEffect(() => {
+    if (fittedRef.current || nodes.length === 0) return
+    fittedRef.current = true
+    const id = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 0 }))
+    return () => cancelAnimationFrame(id)
+  }, [nodes, fitView])
 
   // Send the client's optimistic edit upstream (the host applies it; the next snapshot reconciles).
   const sendMutation = useCallback(

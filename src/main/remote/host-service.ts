@@ -336,6 +336,9 @@ export function createHostHandlers(
 // full state, client->host one-way mutation command). Kept as constants so both sides agree.
 export const CANVAS_STATE_METHOD = 'canvas:state'
 export const CANVAS_MUTATE_METHOD = 'canvas:mutate'
+// Client → host: "re-send me the current canvas now." Covers the case where the client mirror
+// mounts/subscribes after the host's initial connect-time push (no replay otherwise).
+export const CANVAS_REQUEST_METHOD = 'canvas:request'
 
 // The slice of RelaySocket the canvas sync needs: a one-way host->client push.
 export interface CanvasNotifySocket {
@@ -544,6 +547,11 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
         if (latestCanvas) canvasSync?.setState(latestCanvas)
       },
       onRpc: (req) => {
+        // A client asking for a fresh canvas snapshot → re-push the current one.
+        if (req.method === CANVAS_REQUEST_METHOD) {
+          canvasSync?.broadcastCurrent()
+          return
+        }
         // Canvas mutations route to the canvas sync (which forwards them to the host renderer,
         // the single writer); everything else is a pty RPC.
         if (canvasSync?.handleRpc(req)) return

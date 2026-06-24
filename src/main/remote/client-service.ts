@@ -24,7 +24,7 @@ import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import { genKeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
-import { CANVAS_MUTATE_METHOD, CANVAS_STATE_METHOD } from './host-service'
+import { CANVAS_MUTATE_METHOD, CANVAS_REQUEST_METHOD, CANVAS_STATE_METHOD } from './host-service'
 import { decodeOffer } from './pairing'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
 import { createSnapshotReassembler, type SnapshotReassembler } from './snapshot'
@@ -296,7 +296,9 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
       ourKeys,
       theirPubB64: offer.hostPublicKeyB64,
       onReady: () => {
-        // Bridge established with the host. Handlers are already live; nothing extra to do.
+        // Bridge established. Ask the host to (re-)push its current canvas, in case our mirror
+        // subscribed after the host's connect-time push (there is no replay otherwise).
+        socket.notify(CANVAS_REQUEST_METHOD)
       },
       onRpc: (req) => {
         // The host pushes its canvas snapshot as a one-way `canvas:state` notify (id:''). Route it
