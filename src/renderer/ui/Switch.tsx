@@ -23,7 +23,7 @@ export function Switch({
     >
       <span
         className={cn(
-          'absolute top-[3px] size-[18px] rounded-full bg-white shadow-sm transition-transform duration-200',
+          'absolute left-0 top-[3px] size-[18px] rounded-full bg-white shadow-sm transition-transform duration-200',
           checked ? 'translate-x-[21px]' : 'translate-x-[3px]'
         )}
       />

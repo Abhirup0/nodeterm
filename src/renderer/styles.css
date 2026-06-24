@@ -3480,6 +3480,25 @@ body,
   height: 18px;
   flex: none;
 }
+
+/* Settings surface (.nt-settings): Tailwind preflight is intentionally not
+   loaded, so unstyled <button>/<input>/<select> render with the grey native
+   chrome (the light pills in the settings sidebar). Reset ONLY `appearance`
+   here, in plain CSS so it is served in dev and prod alike — no
+   background/border/color, so Tailwind utilities keep full control. */
+.nt-settings button,
+.nt-settings input,
+.nt-settings select,
+.nt-settings textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.nt-settings select::-ms-expand {
+  display: none;
+}
+.nt-settings textarea {
+  resize: vertical;
+}
 .agents-row-label {
   flex: 1;
   font-size: 13px;
