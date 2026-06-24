@@ -45,7 +45,7 @@ import {
   IconTrash,
   IconUngroup
 } from '../components/icons'
-import { SettingsPanel } from '../components/SettingsPanel'
+import { SettingsPage } from '../components/settings/SettingsPage'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
@@ -1791,7 +1791,7 @@ export function Canvas() {
         <CommandPalette commands={buildCommands()} onClose={() => setPaletteOpen(false)} />
       )}
 
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
 
       {scOpen && (
         <SourceControlPanel

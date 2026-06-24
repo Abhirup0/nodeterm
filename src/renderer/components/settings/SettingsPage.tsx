@@ -1,0 +1,69 @@
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useEntitlement } from '../../state/entitlement'
+import { SettingsSearchContext } from './context'
+import { SettingsSidebar } from './SettingsSidebar'
+import { FIRST_SECTION_ID, type SettingsSectionId } from './nav'
+import { TerminalSection } from './sections/TerminalSection'
+import { ShellSection } from './sections/ShellSection'
+import { BehaviorSection } from './sections/BehaviorSection'
+import { AppearanceSection } from './sections/AppearanceSection'
+import { AgentsSection } from './sections/AgentsSection'
+import { CustomAgentsSection } from './sections/CustomAgentsSection'
+import { NotificationsSection } from './sections/NotificationsSection'
+import { CommitSection } from './sections/CommitSection'
+import { TmuxSection } from './sections/TmuxSection'
+import { LicenseSection } from './sections/LicenseSection'
+import { RemoteSection } from './sections/RemoteSection'
+import { UpdatesSection } from './sections/UpdatesSection'
+import { PrivacySection } from './sections/PrivacySection'
+
+export function SettingsPage({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const hydrate = useEntitlement((s) => s.hydrate)
+  const [active, setActive] = useState<SettingsSectionId>(FIRST_SECTION_ID)
+  const [query, setQuery] = useState('')
+
+  useEffect(() => {
+    void hydrate()
+  }, [hydrate])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex bg-bg text-text">
+      <SettingsSidebar
+        activeSectionId={active}
+        query={query}
+        onSelect={setActive}
+        onQueryChange={setQuery}
+        onClose={onClose}
+      />
+      <SettingsSearchContext.Provider value={query}>
+        <main className="min-w-0 flex-1 overflow-y-auto px-10 py-8">
+          <div className="mx-auto max-w-3xl space-y-10">
+            <TerminalSection isActive={active === 'terminal'} />
+            <ShellSection isActive={active === 'shell'} />
+            <BehaviorSection isActive={active === 'behavior'} />
+            <AppearanceSection isActive={active === 'appearance'} />
+            <AgentsSection isActive={active === 'agents'} />
+            <CustomAgentsSection isActive={active === 'custom-agents'} />
+            <NotificationsSection isActive={active === 'notifications'} />
+            <CommitSection isActive={active === 'commit'} />
+            <TmuxSection isActive={active === 'tmux'} />
+            <LicenseSection isActive={active === 'license'} />
+            <RemoteSection isActive={active === 'remote'} onClose={onClose} />
+            <UpdatesSection isActive={active === 'updates'} />
+            <PrivacySection isActive={active === 'privacy'} />
+          </div>
+        </main>
+      </SettingsSearchContext.Provider>
+    </div>,
+    document.body
+  )
+}
