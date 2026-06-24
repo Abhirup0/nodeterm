@@ -82,6 +82,13 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
   const status = useAgentStatus((s) => s.byId[id])
+  // Feed the context meter without waiting for a live hook event: after an app restart the
+  // continuing tmux session is idle and emits no event, so the main-process tailer is never
+  // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
+  useEffect(() => {
+    const sid = status?.sessionId
+    if (showUsage && sid) window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined)
+  }, [showUsage, status?.sessionId, data.cwd])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
