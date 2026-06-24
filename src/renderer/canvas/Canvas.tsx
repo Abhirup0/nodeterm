@@ -371,6 +371,11 @@ export function Canvas() {
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
       loadingRef.current = false
+      // The broadcast effect early-returns while `loadingRef` is set and isn't re-triggered by the
+      // reset, so push the freshly-loaded project's canvas once now — otherwise a connected client
+      // keeps mirroring the previous project until the host's next edit. Benign with no client
+      // attached (main only forwards to a live client).
+      window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
       // Consume a cross-project focus request (notification click on a background node).
       const pending = pendingFocusRef.current
       if (pending) {
@@ -437,22 +442,20 @@ export function Canvas() {
   }, [nodes])
 
   // Apply a client's mutation to React Flow — the host's single writer. Serialize the live nodes,
-  // apply the mutation, and convert back, guarded by `loadingRef` so the resulting `setNodes` does
-  // not mark the project dirty (it's a remote edit; the normal change path persists it). The
-  // change re-triggers the broadcast effect above, echoing the authoritative state to the client.
+  // apply the mutation, and convert back. A direct `setNodes(...)` bypasses `handleNodesChange`,
+  // so we must mark the project dirty EXPLICITLY — otherwise a client-driven move/delete is lost
+  // on host restart/project switch. The `[nodes]` change re-triggers the broadcast effect above,
+  // echoing the authoritative state back to the client (intended). The remote edit is also picked
+  // up by the undo-snapshot effect, which is acceptable.
   useEffect(() => {
     return window.nodeTerminal.remoteHost.onApplyMutation((mutation) => {
-      loadingRef.current = true
       setNodes((ns) => {
         const next = applyCanvasMutation(flowToNodeStates(ns), mutation)
         return nodeStatesToFlow(next)
       })
-      // Release the guard after the state flush so dirty-marking resumes for local edits.
-      queueMicrotask(() => {
-        loadingRef.current = false
-      })
+      markDirty()
     })
-  }, [setNodes])
+  }, [setNodes, markDirty])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {

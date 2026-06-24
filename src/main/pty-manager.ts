@@ -175,7 +175,9 @@ export class PtyManager {
    * the node id as the `persistKey` reattaches the existing `nt-<nodeId>` session if it exists,
    * or creates it otherwise (graceful fallback). Used by the relay host so a mirrored terminal
    * resumes the host's live session instead of opening a blank shell. Pair with `captureSnapshot`
-   * to paint the current screen before live output starts streaming.
+   * to paint the current screen before live output starts streaming. Note: reusing
+   * `new-session -A -D` detaches the host's own local tmux client (a takeover) — acceptable
+   * because the B5 host is unattended while a client is mirroring it.
    */
   attachDetached(
     persistKey: string,
@@ -201,17 +203,6 @@ export class PtyManager {
       return stdout
     } catch {
       return ''
-    }
-  }
-
-  /** Whether a tmux session for this node id currently exists (host attach-vs-create decision). */
-  async hasSession(persistKey: string): Promise<boolean> {
-    if (!this.tmuxPath) return false
-    try {
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)])
-      return true
-    } catch {
-      return false
     }
   }
 

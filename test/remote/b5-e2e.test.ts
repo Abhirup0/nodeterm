@@ -381,7 +381,7 @@ describe('B5 remote project mirror end-to-end (real relay + real handlers + fake
 
     // === (5) E2EE: no host->relay frame leaks plaintext (node id / file payload) ===
     expect(hostSentFrames.length).toBeGreaterThan(0)
-    for (const needleStr of ['hello', contents]) {
+    for (const needleStr of ['hello', contents, 'n-1']) {
       const needle = Buffer.from(needleStr)
       const leaked = hostSentFrames.find((frame) => Buffer.from(frame).includes(needle))
       expect(leaked, `a host->relay frame leaked the plaintext "${needleStr}"`).toBeUndefined()

@@ -101,33 +101,6 @@ export function createTerminalNode(
 }
 
 /**
- * Creates a terminal node bound to a REMOTE host over the relay. Identical to a local terminal
- * except `data.remote.connectionId` is set, which makes TerminalNode pick RemoteTransport instead
- * of LocalTransport. Not persisted (see flowToNodeStates).
- */
-export function createRemoteTerminalNode(
-  connectionId: string,
-  index: number,
-  center?: { x: number; y: number }
-): CanvasNode {
-  return {
-    id: nextId('remote'),
-    type: 'terminal',
-    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
-    width: TERMINAL_SIZE.width,
-    height: TERMINAL_SIZE.height,
-    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
-    data: {
-      title: 'Remote terminal',
-      color: NODE_COLORS[index % NODE_COLORS.length],
-      group: null,
-      tags: [],
-      remote: { connectionId }
-    }
-  }
-}
-
-/**
  * Path to the bridge MCP config, fetched once from main at boot (see Canvas). When set, new
  * Claude nodes launch with `--mcp-config <path>` so the Session Bridge tools are available in
  * exactly the sessions nodeterm spawns — never the user's own `claude`.
