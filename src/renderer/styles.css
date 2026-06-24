@@ -1180,7 +1180,9 @@ body,
 .remote-session-overlay {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  /* Above all canvas chrome (dock z40, minimap, side buttons, panels up to z90) so the underlying
+     main canvas — and especially its dock zoom controls — can't bleed through or be clicked. */
+  z-index: 100;
   background: var(--bg, #000);
 }
 
