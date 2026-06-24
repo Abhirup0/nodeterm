@@ -37,6 +37,7 @@ import {
   IconMarkdown,
   IconNote,
   IconProject,
+  IconRemote,
   IconSave,
   IconSelectAll,
   IconSwitch,
@@ -54,6 +55,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
+import { RemoteSessionView } from './RemoteSessionView'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
@@ -82,7 +84,6 @@ import {
   createAgentNode,
   createDiffNode,
   createEditorNode,
-  createRemoteTerminalNode,
   createStickyNode,
   createTerminalNode,
   duplicateNode,
@@ -124,6 +125,8 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
+  // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
+  const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -702,13 +705,34 @@ export function Canvas() {
   const runInTerminal = useCallback((cmd: string) => addTerminal(undefined, cmd), [addTerminal])
 
   /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
-  const addRemoteTerminal = useCallback(
-    (connectionId: string) => {
-      setNodes((ns) => [...ns, createRemoteTerminalNode(connectionId, ns.length, viewCenter())])
-      markDirty()
-    },
-    [setNodes, markDirty, viewCenter]
-  )
+  // Tear down the active remote mirror: hide the view and disconnect the relay connection (ends
+  // the host<->client bridge; the host-side tmux sessions survive). Safe to call when none active.
+  const disconnectRemote = useCallback(() => {
+    setRemoteConnId((id) => {
+      if (id) void window.nodeTerminal.remoteClient.disconnect(id)
+      return null
+    })
+  }, [])
+
+  // Mount the host mirror for an already-established connection. Wires `onClosed` so a dropped
+  // host/relay tears the view down without leaking the listener.
+  const mountRemoteMirror = useCallback((connectionId: string) => {
+    setRemoteConnId(connectionId)
+  }, [])
+
+  // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
+  // and open the live mirror over the local canvas. This is the primary remote entry (it replaces
+  // B4's lone remote-terminal-on-connect flow).
+  const connectRemote = useCallback(async () => {
+    const offer = window.prompt("Paste the host's pairing code:")?.trim()
+    if (!offer) return
+    try {
+      const connectionId = await window.nodeTerminal.remoteClient.connect(offer)
+      mountRemoteMirror(connectionId)
+    } catch (err) {
+      window.alert(`Could not connect: ${(err as Error).message}`)
+    }
+  }, [mountRemoteMirror])
 
   /** Open a file as a code editor node on the canvas. */
   const openFile = useCallback(
@@ -813,16 +837,25 @@ export function Canvas() {
     return () => window.removeEventListener('keydown', onKey)
   }, [addTerminal, addAgentNode])
 
-  // When a remote connection is established (from Settings), open a remote terminal node bound
-  // to it. Dispatched as a window event so Settings doesn't need a Canvas reference.
+  // When a remote connection is established (from Settings' "Connect to a host"), open the live
+  // mirror of the host's canvas. Dispatched as a window event so Settings doesn't need a Canvas
+  // reference. This replaces B4's lone-remote-terminal behavior as the primary remote entry.
   useEffect(() => {
     const onOpenRemote = (e: Event) => {
       const connectionId = (e as CustomEvent<{ connectionId: string }>).detail?.connectionId
-      if (connectionId) addRemoteTerminal(connectionId)
+      if (connectionId) mountRemoteMirror(connectionId)
     }
     window.addEventListener('nodeterm:open-remote-terminal', onOpenRemote)
     return () => window.removeEventListener('nodeterm:open-remote-terminal', onOpenRemote)
-  }, [addRemoteTerminal])
+  }, [mountRemoteMirror])
+
+  // Tear the mirror down if the host/relay drops the active connection.
+  useEffect(() => {
+    if (!remoteConnId) return
+    return window.nodeTerminal.remoteClient.onClosed(remoteConnId, () => {
+      setRemoteConnId((id) => (id === remoteConnId ? null : id))
+    })
+  }, [remoteConnId])
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
@@ -1597,6 +1630,12 @@ export function Canvas() {
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
+      {
+        id: 'new-remote',
+        label: 'New Remote Connection',
+        icon: <IconRemote />,
+        run: () => void connectRemote()
+      },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: () => fitView({ padding: 0.2, duration: 300 }) },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() }
     ]
@@ -1643,7 +1682,8 @@ export function Canvas() {
     persist,
     switchProject,
     goToNode,
-    bufferCache
+    bufferCache,
+    connectRemote
   ])
 
   return (
@@ -1756,6 +1796,12 @@ export function Canvas() {
             onCloneRepo={cloneRepo}
           />
         )}
+
+        {remoteConnId && (
+          <div className="remote-session-overlay">
+            <RemoteSessionView connectionId={remoteConnId} onClose={disconnectRemote} />
+          </div>
+        )}
       </div>
 
       {menu && (
@@ -1822,6 +1868,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
+        onConnectRemote={() => void connectRemote()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}
         onZoomIn={() => zoomIn({ duration: 150 })}

@@ -90,6 +90,13 @@ export const IconProject = () => (
   </svg>
 )
 
+export const IconRemote = () => (
+  <svg {...S}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18" />
+  </svg>
+)
+
 export const IconSwitch = () => (
   <svg {...S}>
     <path d="M7 7h11l-3-3M17 17H6l3 3" />

@@ -12,6 +12,7 @@ interface DockProps {
   onAddSticky: () => void
   onAddAgent: (agentId: AgentId) => void
   onOpenFile: () => void
+  onConnectRemote: () => void
   onUndo: () => void
   onRedo: () => void
   onSave: () => void
@@ -33,6 +34,7 @@ export function Dock({
   onAddSticky,
   onAddAgent,
   onOpenFile,
+  onConnectRemote,
   onUndo,
   onRedo,
   onSave,
@@ -81,6 +83,10 @@ export function Dock({
             <button onClick={pick(onOpenFile)}>
               <EditorIcon />
               <span>Open file…</span>
+            </button>
+            <button onClick={pick(onConnectRemote)}>
+              <RemoteIcon />
+              <span>New Remote Connection</span>
             </button>
           </div>
         )}
@@ -199,6 +205,14 @@ function EditorIcon() {
   return (
     <svg {...S}>
       <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
+    </svg>
+  )
+}
+function RemoteIcon() {
+  return (
+    <svg {...S}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18" />
     </svg>
   )
 }

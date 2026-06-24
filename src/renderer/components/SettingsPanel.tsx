@@ -29,7 +29,8 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [upgrading, setUpgrading] = useState(false)
 
   // Remote access (Pro). Host side: a single pairing offer to hand to a client. Client side:
-  // paste a host's offer to connect, which opens a remote terminal node on the canvas.
+  // paste a host's offer to connect, which opens the live remote-session mirror of the host's
+  // canvas (via the `nodeterm:open-remote-terminal` event the Canvas listens for).
   const [hostOffer, setHostOffer] = useState('')
   const [hostBusy, setHostBusy] = useState(false)
   const [remoteError, setRemoteError] = useState('')
@@ -59,7 +60,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     try {
       const connectionId = await window.nodeTerminal.remoteClient.connect(code)
       setClientCode('')
-      // Open a remote terminal node on the canvas bound to this connection.
+      // Open the live remote-session mirror for this connection (Canvas mounts RemoteSessionView).
       window.dispatchEvent(
         new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
       )

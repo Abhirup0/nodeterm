@@ -35,20 +35,30 @@ import { flowToNodeStates, nodeStatesToFlow, type CanvasNode } from '../state/wo
  * routing that swaps the main Canvas for this view (when a `connectionId` is active) is Task 6;
  * mounting is simply `<RemoteSessionView connectionId={id} onClose={...} />`.
  */
-export function RemoteSessionView({ connectionId }: { connectionId: string }): React.JSX.Element {
+export function RemoteSessionView({
+  connectionId,
+  onClose
+}: {
+  connectionId: string
+  /** Called when the user leaves the mirror; the caller disconnects the relay connection. */
+  onClose: () => void
+}): React.JSX.Element {
   return (
     <ReactFlowProvider>
-      <RemoteSessionCanvas connectionId={connectionId} />
+      <RemoteSessionCanvas connectionId={connectionId} onClose={onClose} />
     </ReactFlowProvider>
   )
 }
 
 // Node kinds whose `data.remote.connectionId` routes their I/O to the host over the relay:
-// terminals pick RemoteTransport(connectionId); editor/diff use remoteFs(connectionId) so they
+// terminals pick RemoteTransport(connectionId); editors use remoteFs(connectionId) so they
 // read/write the HOST's filesystem instead of the local one.
-const REMOTE_BOUND_KINDS = new Set(['terminal', 'editor', 'diff'])
+// NOTE: `diff` is deliberately EXCLUDED — remote git isn't proxied over the relay, so a diff node
+// tagged remote would silently read the CLIENT's git/fs while appearing to mirror the host. It
+// renders as an unbound (local) diff node instead, which is at least not misleading.
+const REMOTE_BOUND_KINDS = new Set(['terminal', 'editor'])
 
-/** Tag remote-capable nodes (terminal/editor/diff) so they address the host over the relay. */
+/** Tag remote-capable nodes (terminal/editor) so they address the host over the relay. */
 function bindRemote(states: CanvasNodeState[], connectionId: string): CanvasNode[] {
   return nodeStatesToFlow(states).map((n) =>
     n.type && REMOTE_BOUND_KINDS.has(n.type)
@@ -57,10 +67,20 @@ function bindRemote(states: CanvasNodeState[], connectionId: string): CanvasNode
   )
 }
 
-function RemoteSessionCanvas({ connectionId }: { connectionId: string }): React.JSX.Element {
+function RemoteSessionCanvas({
+  connectionId,
+  onClose
+}: {
+  connectionId: string
+  onClose: () => void
+}): React.JSX.Element {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Guard so applying an inbound host snapshot doesn't echo back as a client mutation.
   const applyingHostStateRef = useRef(false)
+  // True between drag-start and drag-stop. While the user is actively dragging a node, we ignore
+  // inbound host `canvas:state` snapshots so the dragged node doesn't jump back to the host's
+  // last-known position mid-gesture (the drag-stop upsert + the next snapshot then reconcile).
+  const draggingRef = useRef(false)
 
   const nodeTypes = useMemo(
     () => ({
@@ -76,6 +96,8 @@ function RemoteSessionCanvas({ connectionId }: { connectionId: string }): React.
   // Render the host's authoritative snapshot. Reconciles any local optimistic divergence.
   useEffect(() => {
     return window.nodeTerminal.remoteClient.onCanvasState(connectionId, (state) => {
+      // Don't yank a node out from under an active drag — let drag-stop settle first.
+      if (draggingRef.current) return
       applyingHostStateRef.current = true
       setNodes(bindRemote(state.nodes, connectionId))
       queueMicrotask(() => {
@@ -111,6 +133,7 @@ function RemoteSessionCanvas({ connectionId }: { connectionId: string }): React.
   // already happened via onNodesChange position updates).
   const handleNodeDragStop = useCallback(
     (_e: unknown, node: CanvasNode) => {
+      draggingRef.current = false
       if (applyingHostStateRef.current) return
       // Serialize just this node back to a CanvasNodeState (reuse the shared serializer, then
       // pick the one we moved — keeps size/position/kind logic in one place).
@@ -121,20 +144,31 @@ function RemoteSessionCanvas({ connectionId }: { connectionId: string }): React.
   )
 
   return (
-    <div className="remote-session-view" style={{ width: '100%', height: '100%' }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={[]}
-        nodeTypes={nodeTypes}
-        onNodesChange={handleNodesChange}
-        onNodeDragStop={handleNodeDragStop}
-        selectionMode={SelectionMode.Partial}
-        panOnScroll
-        zoomOnScroll={false}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
-      </ReactFlow>
+    <div className="remote-session-view">
+      <div className="remote-session-bar">
+        <span className="remote-session-bar__dot" />
+        <span className="remote-session-bar__label">Remote session</span>
+        <span className="remote-session-bar__hint">mirroring the host&apos;s canvas</span>
+        <button className="remote-session-bar__leave" onClick={onClose} title="Disconnect">
+          Leave
+        </button>
+      </div>
+      <div className="remote-session-flow">
+        <ReactFlow
+          nodes={nodes}
+          edges={[]}
+          nodeTypes={nodeTypes}
+          onNodesChange={handleNodesChange}
+          onNodeDragStart={() => (draggingRef.current = true)}
+          onNodeDragStop={handleNodeDragStop}
+          selectionMode={SelectionMode.Partial}
+          panOnScroll
+          zoomOnScroll={false}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
+        </ReactFlow>
+      </div>
     </div>
   )
 }
