@@ -23,7 +23,7 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import type { PtyCreateOptions } from '../../shared/types'
+import type { CanvasMutation, CanvasState, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../pty-manager'
 import { getStoredEntitlement, isPremium } from '../license'
@@ -203,6 +203,62 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
   }
 }
 
+// --- pure canvas mirror sync (host renderer <-> relay) -----------------------
+
+// The wire methods for the host-authoritative canvas mirror (host->client push of the
+// full state, client->host one-way mutation command). Kept as constants so both sides agree.
+export const CANVAS_STATE_METHOD = 'canvas:state'
+export const CANVAS_MUTATE_METHOD = 'canvas:mutate'
+
+// The slice of RelaySocket the canvas sync needs: a one-way host->client push.
+export interface CanvasNotifySocket {
+  notify(method: string, params?: unknown): boolean
+}
+
+export interface HostCanvasSync {
+  /** Record the latest active-project canvas snapshot and broadcast it to the client. */
+  setState(state: CanvasState): void
+  /** Push the current known state now (e.g. on a fresh client connect). No-op if none yet. */
+  broadcastCurrent(): void
+  /** Route an inbound client RPC/notify; returns the mutation when it is a canvas:mutate. */
+  handleRpc(req: RpcRequest): CanvasMutation | null
+}
+
+/**
+ * Build the host-side canvas mirror router. Pure over its two injected dependencies (the relay
+ * socket for host->client push + a sink the IPC layer forwards to the host renderer), so it is
+ * unit-testable with fakes — no Electron, no real socket. The host's React Flow stays the single
+ * writer: client mutations are surfaced via `onMutation` and applied there, which re-triggers the
+ * renderer's debounced `setState` broadcast.
+ */
+export function createHostCanvasSync(
+  socket: CanvasNotifySocket,
+  onMutation: (mutation: CanvasMutation) => void
+): HostCanvasSync {
+  let current: CanvasState | null = null
+
+  function broadcastCurrent(): void {
+    if (current) socket.notify(CANVAS_STATE_METHOD, current)
+  }
+
+  return {
+    setState(state) {
+      current = state
+      broadcastCurrent()
+    },
+    broadcastCurrent,
+    handleRpc(req) {
+      if (req.method !== CANVAS_MUTATE_METHOD) return null
+      const mutation = req.params as CanvasMutation
+      if (!mutation || typeof mutation !== 'object' || typeof (mutation as { op?: unknown }).op !== 'string') {
+        return null
+      }
+      onMutation(mutation)
+      return mutation
+    }
+  }
+}
+
 // --- pairing-token mint ------------------------------------------------------
 
 interface PairTokenResponse {
@@ -288,16 +344,48 @@ function relayAllowed(): boolean {
  * the relay as host, and returns the offer string. `remote:host:stop` closes the relay socket
  * (which kills the served PTYs and drops the client's access).
  */
-export function initRemoteHost(_win: BrowserWindow, ptyManager: PtyManager): void {
+export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void {
   let socket: RelaySocket | null = null
   let handlers: HostHandlers | null = null
+  let canvasSync: HostCanvasSync | null = null
+  // Latest snapshot pushed from the renderer, kept across (re)connects so a freshly joined
+  // client always gets the current state even if it connected after the last edit.
+  let latestCanvas: CanvasState | null = null
+
+  function send(channel: string, ...args: unknown[]): void {
+    if (!win.isDestroyed()) win.webContents.send(channel, ...args)
+  }
 
   function teardown(): void {
+    if (broadcastTimer) {
+      clearTimeout(broadcastTimer)
+      broadcastTimer = null
+    }
     handlers?.closeAll()
     handlers = null
+    canvasSync = null
     socket?.close()
     socket = null
   }
+
+  // Re-broadcasting the *full* canvas on every renderer keystroke would be wasteful; the
+  // renderer already debounces, but a small main-side debounce coalesces bursts further.
+  let broadcastTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleBroadcast(): void {
+    if (broadcastTimer) return
+    broadcastTimer = setTimeout(() => {
+      broadcastTimer = null
+      if (latestCanvas) canvasSync?.setState(latestCanvas)
+    }, 120)
+    broadcastTimer.unref?.()
+  }
+
+  // Renderer pushes its serialized active-project canvas; remember it and (debounced) broadcast.
+  // Safe to receive when not hosting — it just updates the snapshot a future client will get.
+  ipcMain.on(IPC.remoteHostCanvasState, (_e, state: CanvasState) => {
+    latestCanvas = state
+    scheduleBroadcast()
+  })
 
   ipcMain.handle(IPC.remoteHostStart, async (): Promise<{ offer: string }> => {
     if (!isPremium()) {
@@ -325,9 +413,15 @@ export function initRemoteHost(_win: BrowserWindow, ptyManager: PtyManager): voi
       role: 'host',
       ourKeys: keys,
       onReady: () => {
-        // Bridge established with a client. Nothing extra to do — handlers are already live.
+        // Bridge established with a client — push the current canvas so it mirrors immediately.
+        if (latestCanvas) canvasSync?.setState(latestCanvas)
       },
-      onRpc: (req) => handlers?.onRpc(req),
+      onRpc: (req) => {
+        // Canvas mutations route to the canvas sync (which forwards them to the host renderer,
+        // the single writer); everything else is a pty RPC.
+        if (canvasSync?.handleRpc(req)) return
+        handlers?.onRpc(req)
+      },
       onFrame: (frame) => handlers?.onFrame(frame),
       onClose: () => {
         // The client (or relay) dropped — kill served PTYs. relay-socket may reconnect; the
@@ -336,6 +430,10 @@ export function initRemoteHost(_win: BrowserWindow, ptyManager: PtyManager): voi
       }
     })
     handlers = createHostHandlers(ptyManager, socket)
+    // The host renderer applies inbound client mutations to its React Flow (single writer).
+    canvasSync = createHostCanvasSync(socket, (mutation) =>
+      send(IPC.remoteHostApplyMutation, mutation)
+    )
 
     return {
       offer: encodeOffer({

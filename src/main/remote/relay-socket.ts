@@ -55,6 +55,10 @@ export type RelaySocket = {
   // Send an RPC request to the peer; resolves with the peer's response body (or
   // rejects on a non-ok response / timeout / closed connection).
   rpc(method: string, params?: unknown): Promise<unknown>
+  // Fire a one-way notification to the peer (no response expected, never rejects).
+  // The peer receives it in `onRpc` with an empty `id` — answering it is a no-op
+  // (notifications carry no correlation id). Returns false if not connected.
+  notify(method: string, params?: unknown): boolean
   // Answer a received RPC request (from onRpc) by its id.
   respond(id: string, ok: boolean, body: unknown): void
   // Send a terminal frame to the peer. Returns false when the transport is over
@@ -95,6 +99,7 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 15_000]
 
 type RpcEnvelope =
   | { kind: 'req'; id: string; method: string; params: unknown }
+  | { kind: 'notify'; method: string; params: unknown }
   | { kind: 'res'; id: string; ok: boolean; body: unknown }
   | { kind: 'keepalive' }
 
@@ -317,6 +322,12 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       opts.onRpc({ id: env.id, method: env.method, params: env.params })
       return
     }
+    if (env.kind === 'notify') {
+      // One-way notification: surface it like an RPC but with an empty id, so a
+      // `respond` (if any) is a no-op (no matching pending request on our side).
+      opts.onRpc({ id: '', method: env.method, params: env.params })
+      return
+    }
     if (env.kind === 'res') {
       const waiter = pending.get(env.id)
       if (!waiter) {
@@ -421,6 +432,11 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
           reject(new Error('Relay socket is not connected.'))
         }
       })
+    },
+    notify(method, params) {
+      return sendEncrypted(
+        tagged(TAG_RPC, textEncoder.encode(JSON.stringify({ kind: 'notify', method, params })))
+      )
     },
     respond(id, ok, body) {
       sendEncrypted(tagged(TAG_RPC, textEncoder.encode(JSON.stringify({ kind: 'res', id, ok, body }))))

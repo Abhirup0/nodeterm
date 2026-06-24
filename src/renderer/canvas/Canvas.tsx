@@ -61,6 +61,7 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import type { CanvasMutation, CanvasNodeState } from '@shared/types'
 import {
   agentConfig,
   hasHooks,
@@ -94,6 +95,19 @@ import {
 } from '../state/workspace'
 
 const GRID = 24
+
+// Apply a single client mutation to a serialized node list (renderer-local copy of the pure
+// `applyMutation` from main/remote/canvas-sync — duplicated to keep the renderer off the main
+// process boundary). `upsert` replaces-or-appends by id; `remove` filters by id. Returns a NEW
+// array (the input is never mutated).
+function applyCanvasMutation(nodes: CanvasNodeState[], m: CanvasMutation): CanvasNodeState[] {
+  if (m.op === 'remove') return nodes.filter((n) => n.id !== m.id)
+  const idx = nodes.findIndex((n) => n.id === m.node.id)
+  if (idx === -1) return [...nodes, m.node]
+  const next = nodes.slice()
+  next[idx] = m.node
+  return next
+}
 
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
 // memo doesn't allocate fresh arrays on every node change (e.g. each drag frame).
@@ -417,6 +431,38 @@ export function Canvas() {
     const t = setTimeout(() => void persist(), 800)
     return () => clearTimeout(t)
   }, [dirty, persist])
+
+  // ---- remote canvas mirror (host side) ----
+  // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
+  // change, so a connected client mirrors the layout. Main holds the latest snapshot regardless
+  // of whether a client is connected and only broadcasts when one is — so this is safe to send
+  // unconditionally (no host-mode flag in the renderer). Skips programmatic loads to avoid a
+  // redundant push on project switch (the post-load value is captured by the next real change).
+  useEffect(() => {
+    if (loadingRef.current) return
+    const t = setTimeout(() => {
+      window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
+    }, 120)
+    return () => clearTimeout(t)
+  }, [nodes])
+
+  // Apply a client's mutation to React Flow — the host's single writer. Serialize the live nodes,
+  // apply the mutation, and convert back, guarded by `loadingRef` so the resulting `setNodes` does
+  // not mark the project dirty (it's a remote edit; the normal change path persists it). The
+  // change re-triggers the broadcast effect above, echoing the authoritative state to the client.
+  useEffect(() => {
+    return window.nodeTerminal.remoteHost.onApplyMutation((mutation) => {
+      loadingRef.current = true
+      setNodes((ns) => {
+        const next = applyCanvasMutation(flowToNodeStates(ns), mutation)
+        return nodeStatesToFlow(next)
+      })
+      // Release the guard after the state flush so dirty-marking resumes for local edits.
+      queueMicrotask(() => {
+        loadingRef.current = false
+      })
+    })
+  }, [setNodes])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {

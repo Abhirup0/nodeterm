@@ -561,6 +561,16 @@ export interface RemoteHostApi {
   start(): Promise<{ offer: string }>
   /** Leave host mode: close the relay connection (ends served PTYs, drops client access). */
   stop(): Promise<void>
+  /**
+   * Push the host's current active-project canvas snapshot to main. Main keeps the latest
+   * and (re)broadcasts it to a connected client (debounced). Safe to call when not hosting.
+   */
+  sendCanvasState(state: CanvasState): void
+  /**
+   * Listen for a client's mutation command that the host renderer must apply to its React
+   * Flow (the single writer). Returns an unsubscribe function.
+   */
+  onApplyMutation(listener: (mutation: CanvasMutation) => void): () => void
 }
 
 export interface RemoteClientApi {

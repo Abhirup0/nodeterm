@@ -1,6 +1,7 @@
 import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
+  CanvasMutation,
   NodeTerminalApi,
   PtyCreateOptions,
   UpdateInfo,
@@ -29,6 +30,10 @@ function subscribe<A extends unknown[] = []>(channel: string) {
     }
   }
 }
+
+// Fan-out subscriber for the host's inbound apply-mutation events (a single ipcRenderer
+// listener shared by all renderer subscribers, like the other event channels).
+const subscribeMutation = subscribe<[CanvasMutation]>(IPC.remoteHostApplyMutation)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -171,7 +176,9 @@ const api: NodeTerminalApi = {
   },
   remoteHost: {
     start: () => ipcRenderer.invoke(IPC.remoteHostStart),
-    stop: () => ipcRenderer.invoke(IPC.remoteHostStop)
+    stop: () => ipcRenderer.invoke(IPC.remoteHostStop),
+    sendCanvasState: (state) => ipcRenderer.send(IPC.remoteHostCanvasState, state),
+    onApplyMutation: subscribeMutation
   },
   remoteClient: {
     connect: (offer) => ipcRenderer.invoke(IPC.remoteClientConnect, offer),

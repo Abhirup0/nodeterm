@@ -80,6 +80,10 @@ export const IPC = {
   commitGenerate: 'commit:generate',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
+  // Host canvas mirror: renderer pushes its serialized active-project canvas to main;
+  // main pushes a client's mutation back to the host renderer to apply.
+  remoteHostCanvasState: 'remote:host:canvas-state',
+  remoteHostApplyMutation: 'remote:host:apply-mutation',
   // Remote-access CLIENT (drives a host's PTYs over the relay).
   remoteClientConnect: 'remote:client:connect',
   remoteClientDisconnect: 'remote:client:disconnect',

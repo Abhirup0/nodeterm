@@ -125,4 +125,52 @@ describe('relay-socket', () => {
     host.close()
     client.close()
   })
+
+  it('delivers a host->client notify to the client onRpc with an empty id', async () => {
+    const hostKeys = genKeyPair()
+    const clientKeys = genKeyPair()
+    const { a: hostTransport, b: clientTransport } = makeTransportPair()
+
+    const hostReady = deferred()
+    const clientReady = deferred()
+    const received: { id: string; method: string; params: unknown }[] = []
+
+    const host = connectRelay({
+      url: 'wss://relay.example/ws',
+      token: 'pairing-token',
+      role: 'host',
+      ourKeys: hostKeys,
+      transport: hostTransport,
+      onReady: () => hostReady.resolve(),
+      onRpc: () => {},
+      onFrame: () => {},
+      onClose: () => {}
+    })
+
+    const client = connectRelay({
+      url: 'wss://relay.example/ws',
+      token: 'pairing-token',
+      role: 'client',
+      ourKeys: clientKeys,
+      theirPubB64: publicKeyToB64(hostKeys.publicKey),
+      transport: clientTransport,
+      onReady: () => clientReady.resolve(),
+      onRpc: (msg) => received.push(msg),
+      onFrame: () => {},
+      onClose: () => {}
+    })
+
+    await Promise.all([hostReady.promise, clientReady.promise])
+
+    const ok = host.notify('canvas:state', { nodes: [{ id: 'a' }] })
+    expect(ok).toBe(true)
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(received).toEqual([
+      { id: '', method: 'canvas:state', params: { nodes: [{ id: 'a' }] } }
+    ])
+
+    host.close()
+    client.close()
+  })
 })
