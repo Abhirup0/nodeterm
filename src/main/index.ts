@@ -1,9 +1,7 @@
 import { join } from 'path'
-import { promises as fs } from 'fs'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
+import * as fsOps from './fs-ops'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
 import { SettingsStore } from './settings-store'
@@ -179,69 +177,14 @@ app.whenReady().then(async () => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) void shell.openExternal(url)
   })
 
-  ipcMain.handle(IPC.fsList, async (_e, dirPath: string) => {
-    try {
-      const dirents = await fs.readdir(dirPath, { withFileTypes: true })
-      const entries = dirents
-        .filter((e) => e.name !== '.git')
-        .map((e) => ({ name: e.name, dir: e.isDirectory(), ignored: false }))
-        .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1))
-
-      // Mark git-ignored entries (so the explorer can dim them).
-      if (entries.length) {
-        const run = promisify(execFile)
-        const flag = (out: string) => {
-          const set = new Set(
-            out
-              .split('\n')
-              .map((s) => s.trim().replace(/\/$/, ''))
-              .filter(Boolean)
-          )
-          for (const en of entries) if (set.has(en.name)) en.ignored = true
-        }
-        try {
-          const { stdout } = await run(
-            'git',
-            ['-C', dirPath, 'check-ignore', '--', ...entries.map((e) => e.name)],
-            { maxBuffer: 4 * 1024 * 1024 }
-          )
-          flag(stdout)
-        } catch (err) {
-          const out = (err as { stdout?: string }).stdout
-          if (out) flag(out)
-        }
-      }
-      return entries
-    } catch {
-      return []
-    }
-  })
-
-  ipcMain.handle(IPC.fsRead, async (_e, filePath: string) => {
-    try {
-      return await fs.readFile(filePath, 'utf-8')
-    } catch {
-      return ''
-    }
-  })
-
-  ipcMain.handle(IPC.fsReadBinary, async (_e, filePath: string) => {
-    try {
-      const buf = await fs.readFile(filePath)
-      return buf.toString('base64')
-    } catch {
-      return ''
-    }
-  })
-
-  ipcMain.handle(IPC.fsWrite, async (_e, filePath: string, content: string) => {
-    try {
-      await fs.writeFile(filePath, content, 'utf-8')
-      return true
-    } catch {
-      return false
-    }
-  })
+  // The local Explorer/Editor fs IPC: thin wrappers over the shared fs-ops (the SAME logic the
+  // remote `fs.*` RPC handlers reuse, so local and remote filesystem behaviour stay identical).
+  ipcMain.handle(IPC.fsList, (_e, dirPath: string) => fsOps.listDir(dirPath))
+  ipcMain.handle(IPC.fsRead, (_e, filePath: string) => fsOps.readText(filePath))
+  ipcMain.handle(IPC.fsReadBinary, (_e, filePath: string) => fsOps.readBinary(filePath))
+  ipcMain.handle(IPC.fsWrite, (_e, filePath: string, content: string) =>
+    fsOps.writeText(filePath, content)
+  )
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

@@ -3,6 +3,7 @@ import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
 import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
+import { remoteFs } from '../terminal/remote-fs'
 import type { CanvasNode } from '../state/workspace'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
@@ -36,6 +37,10 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [imageDims, setImageDims] = useState('')
   const [imageError, setImageError] = useState('')
   const filePath = (data.filePath as string) ?? ''
+  // In a remote session the node operates on the HOST's filesystem via the relay; otherwise the
+  // local fs. The `FsApi` shape is identical, so the rest of the component is unchanged.
+  const connectionId = data.remote?.connectionId
+  const fs = connectionId ? remoteFs(connectionId) : window.nodeTerminal.fs
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
   const isImage = ext in IMAGE_MIME
@@ -55,7 +60,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     const editor = editorRef.current
     if (!editor) return
     const value = editor.getValue()
-    window.nodeTerminal.fs.write(filePath, value).then((ok) => {
+    fs.write(filePath, value).then((ok) => {
       if (ok) {
         savedRef.current = value
         setDirty(false)
@@ -72,7 +77,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (isImage) {
       let disposed = false
       // Guard: readBinary may be missing if the preload is stale (dev not restarted).
-      const readBinary = window.nodeTerminal.fs.readBinary
+      const readBinary = fs.readBinary
       if (typeof readBinary !== 'function') {
         setImageError('Image preview needs an app restart.')
         return
@@ -97,7 +102,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let editor: monaco.editor.IStandaloneCodeEditor | null = null
     let model: monaco.editor.ITextModel | null = null
 
-    window.nodeTerminal.fs.read(filePath).then((content) => {
+    fs.read(filePath).then((content) => {
       if (disposed) return
       const s = useSettings.getState().settings
       // Unique model per node (fragment), language still inferred from the path extension.

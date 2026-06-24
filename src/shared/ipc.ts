@@ -94,6 +94,11 @@ export const IPC = {
   // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
   // the client renderer sends its local mutations back for main to RPC to the host.
   remoteClientMutate: 'remote:client:mutate',
+  // Remote filesystem: the client proxies the local `fs:*` shape onto the host over the relay.
+  remoteClientFsList: 'remote:client:fs-list',
+  remoteClientFsRead: 'remote:client:fs-read',
+  remoteClientFsReadBinary: 'remote:client:fs-read-binary',
+  remoteClientFsWrite: 'remote:client:fs-write',
   // Host canvas snapshot pushed main->renderer for a connection (connectionId appended).
   remoteClientCanvasState: (connectionId: string) => `remote:client:canvas-state:${connectionId}`,
   // Per-session events broadcast main->renderer (connectionId + streamId appended).

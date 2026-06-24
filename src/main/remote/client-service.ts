@@ -21,7 +21,7 @@
 
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import type { CanvasMutation, CanvasState, PtyCreateOptions } from '../../shared/types'
+import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import { genKeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
 import { CANVAS_MUTATE_METHOD, CANVAS_STATE_METHOD } from './host-service'
@@ -64,6 +64,14 @@ export interface ClientHandlers {
   onFrame(frame: Frame): void
   /** Drop all tracked streams (called on disconnect/close); does not RPC the host. */
   closeAll(): void
+  /** List a directory on the host's filesystem (over `fs.list` RPC). */
+  fsList(path: string): Promise<DirEntry[]>
+  /** Read a host file's UTF-8 text (over `fs.read` RPC). */
+  fsRead(path: string): Promise<string>
+  /** Read a host file as base64 (over `fs.readBinary` RPC). */
+  fsReadBinary(path: string): Promise<string>
+  /** Write UTF-8 text to a host file (over `fs.write` RPC). */
+  fsWrite(path: string, content: string): Promise<boolean>
 }
 
 interface Stream {
@@ -165,6 +173,22 @@ export function createClientHandlers(
     },
     closeAll() {
       streams.clear()
+    },
+    async fsList(path) {
+      const body = asRecord(await socket.rpc('fs.list', { path }))
+      return Array.isArray(body.entries) ? (body.entries as DirEntry[]) : []
+    },
+    async fsRead(path) {
+      const body = asRecord(await socket.rpc('fs.read', { path }))
+      return typeof body.content === 'string' ? body.content : ''
+    },
+    async fsReadBinary(path) {
+      const body = asRecord(await socket.rpc('fs.readBinary', { path }))
+      return typeof body.base64 === 'string' ? body.base64 : ''
+    },
+    async fsWrite(path, content) {
+      const body = asRecord(await socket.rpc('fs.write', { path, content }))
+      return body.ok === true
     }
   }
 }
@@ -334,4 +358,23 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
   ipcMain.on(IPC.remoteClientMutate, (_e, connectionId: string, mutation: CanvasMutation) => {
     connections.get(String(connectionId))?.canvas.sendMutation(mutation)
   })
+
+  // Remote filesystem: the client renderer's `remoteFs(connectionId)` proxies the local `fs:*`
+  // shape onto the host's filesystem over the relay's `fs.*` RPCs. A missing connection degrades
+  // to the same empty/false values the host's fs-ops would return on error.
+  ipcMain.handle(IPC.remoteClientFsList, (_e, connectionId: string, path: string) =>
+    connections.get(String(connectionId))?.handlers.fsList(path) ?? Promise.resolve([])
+  )
+  ipcMain.handle(IPC.remoteClientFsRead, (_e, connectionId: string, path: string) =>
+    connections.get(String(connectionId))?.handlers.fsRead(path) ?? Promise.resolve('')
+  )
+  ipcMain.handle(IPC.remoteClientFsReadBinary, (_e, connectionId: string, path: string) =>
+    connections.get(String(connectionId))?.handlers.fsReadBinary(path) ?? Promise.resolve('')
+  )
+  ipcMain.handle(
+    IPC.remoteClientFsWrite,
+    (_e, connectionId: string, path: string, content: string) =>
+      connections.get(String(connectionId))?.handlers.fsWrite(path, content) ??
+      Promise.resolve(false)
+  )
 }

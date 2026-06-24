@@ -100,7 +100,13 @@ function TreeEntry({
   )
 }
 
-/** Project file explorer — a lazy-loaded tree of the active project's folder. */
+/** Project file explorer — a lazy-loaded tree of the active project's folder.
+ *
+ * NOTE (Task 6): this Explorer is LOCAL-only. In a remote session the host's root cwd isn't known
+ * client-side (the local project's `cwd` is the client's), so it can't be pointed at the host
+ * filesystem yet. Once `canvas:state` carries the host cwd (Task 6), this can switch to
+ * `remoteFs(connectionId)` (the per-connection `FsApi`) rooted at that path — the Editor already
+ * proxies over the relay via `data.remote.connectionId`. */
 export function ExplorerPanel({ onClose, onOpenFile }: ExplorerPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   const cwd = project?.cwd

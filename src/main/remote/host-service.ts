@@ -23,9 +23,10 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import type { CanvasMutation, CanvasState, PtyCreateOptions } from '../../shared/types'
+import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../pty-manager'
+import * as fsOps from '../fs-ops'
 import { getStoredEntitlement, isPremium } from '../license'
 import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
@@ -73,6 +74,16 @@ export interface HostHandlers {
   closeAll(): void
 }
 
+// The slice of fs-ops the host serves over `fs.*` RPC. Defaults to the real fs-ops; tests inject
+// a fake (or just point it at a temp dir). Mirrors the renderer's `FsApi` contract exactly so a
+// remote Explorer/Editor behaves the same as a local one.
+export interface HostFsOps {
+  listDir(dirPath: string): Promise<DirEntry[]>
+  readText(filePath: string): Promise<string>
+  readBinary(filePath: string): Promise<string>
+  writeText(filePath: string, content: string): Promise<boolean>
+}
+
 interface Stream {
   sessionId: string
   /** Outbound OP.Output sequence counter. */
@@ -99,7 +110,11 @@ function str(value: unknown): string | undefined {
  *
  * `nextStreamId` lets tests assert deterministic ids; production uses a monotonic counter.
  */
-export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket): HostHandlers {
+export function createHostHandlers(
+  pty: HostPtyManager,
+  socket: HostRelaySocket,
+  fs: HostFsOps = fsOps
+): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
   const streams = new Map<number, Stream>()
@@ -232,6 +247,29 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
       })
   }
 
+  // Serve a `fs.*` RPC by calling the shared fs-ops on the host's real filesystem and responding
+  // with the same shape the renderer's `FsApi` expects. fs-ops never throws (errors degrade to
+  // empty/false), so this always responds ok with a result body.
+  function handleFs(req: RpcRequest): void {
+    const p = asRecord(req.params)
+    const filePath = str(p.path) ?? ''
+    const respond = (body: unknown): void => socket.respond(req.id, true, body)
+    switch (req.method) {
+      case 'fs.list':
+        void fs.listDir(filePath).then((entries) => respond({ entries }))
+        break
+      case 'fs.read':
+        void fs.readText(filePath).then((content) => respond({ content }))
+        break
+      case 'fs.readBinary':
+        void fs.readBinary(filePath).then((base64) => respond({ base64 }))
+        break
+      case 'fs.write':
+        void fs.writeText(filePath, str(p.content) ?? '').then((ok) => respond({ ok }))
+        break
+    }
+  }
+
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
@@ -253,6 +291,12 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
           break
         case 'pty.kill':
           handleKill(req)
+          break
+        case 'fs.list':
+        case 'fs.read':
+        case 'fs.readBinary':
+        case 'fs.write':
+          handleFs(req)
           break
         default:
           socket.respond(req.id, false, { message: `Unknown method: ${req.method}` })

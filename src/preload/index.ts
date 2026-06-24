@@ -217,7 +217,13 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(channel, handler)
     },
     sendMutation: (connectionId, mutation) =>
-      ipcRenderer.send(IPC.remoteClientMutate, connectionId, mutation)
+      ipcRenderer.send(IPC.remoteClientMutate, connectionId, mutation),
+    fsList: (connectionId, path) => ipcRenderer.invoke(IPC.remoteClientFsList, connectionId, path),
+    fsRead: (connectionId, path) => ipcRenderer.invoke(IPC.remoteClientFsRead, connectionId, path),
+    fsReadBinary: (connectionId, path) =>
+      ipcRenderer.invoke(IPC.remoteClientFsReadBinary, connectionId, path),
+    fsWrite: (connectionId, path, content) =>
+      ipcRenderer.invoke(IPC.remoteClientFsWrite, connectionId, path, content)
   },
   handoff: {
     build: (sessionId, agentId, sourceNodeId, cwd) =>

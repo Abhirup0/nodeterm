@@ -43,10 +43,17 @@ export function RemoteSessionView({ connectionId }: { connectionId: string }): R
   )
 }
 
-/** Tag every terminal node as remote-bound so TerminalNode picks RemoteTransport(connectionId). */
+// Node kinds whose `data.remote.connectionId` routes their I/O to the host over the relay:
+// terminals pick RemoteTransport(connectionId); editor/diff use remoteFs(connectionId) so they
+// read/write the HOST's filesystem instead of the local one.
+const REMOTE_BOUND_KINDS = new Set(['terminal', 'editor', 'diff'])
+
+/** Tag remote-capable nodes (terminal/editor/diff) so they address the host over the relay. */
 function bindRemote(states: CanvasNodeState[], connectionId: string): CanvasNode[] {
   return nodeStatesToFlow(states).map((n) =>
-    n.type === 'terminal' ? { ...n, data: { ...n.data, remote: { connectionId } } } : n
+    n.type && REMOTE_BOUND_KINDS.has(n.type)
+      ? { ...n, data: { ...n.data, remote: { connectionId } } }
+      : n
   )
 }
 

@@ -610,6 +610,14 @@ export interface RemoteClientApi {
    * `canvas:mutate` RPC; the host applies it and the next `canvas:state` reconciles.
    */
   sendMutation(connectionId: string, mutation: CanvasMutation): void
+  /** List a directory on the host's filesystem (the `FsApi.list` shape over the relay). */
+  fsList(connectionId: string, path: string): Promise<DirEntry[]>
+  /** Read a host file's UTF-8 text (the `FsApi.read` shape over the relay). */
+  fsRead(connectionId: string, path: string): Promise<string>
+  /** Read a host file as base64 (the `FsApi.readBinary` shape over the relay). */
+  fsReadBinary(connectionId: string, path: string): Promise<string>
+  /** Write UTF-8 text to a host file (the `FsApi.write` shape over the relay). */
+  fsWrite(connectionId: string, path: string, content: string): Promise<boolean>
 }
 
 export interface NodeTerminalApi {
