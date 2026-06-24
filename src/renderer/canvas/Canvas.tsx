@@ -68,7 +68,7 @@ import {
   hasHooks,
   canBranch,
   canTransferFrom,
-  canBridge,
+  canContextLink,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
   type AgentId
@@ -90,7 +90,6 @@ import {
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
-  setBridgeConfigPath,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -106,14 +105,10 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
 
 export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
-  // Persistent bridge links between Claude nodes (separate from ephemeral subagent/loop edges).
-  const [bridgeEdges, setBridgeEdges, onBridgeEdgesChange] = useEdgesState<Edge>([])
-  const bridgeEdgesRef = useRef<Edge[]>([])
-  bridgeEdgesRef.current = bridgeEdges
-  // Transient per-edge activity (count + paused flag) shown while messages flow.
-  const [bridgeActivity, setBridgeActivity] = useState<
-    Record<string, { count: number; stopped: boolean }>
-  >({})
+  // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
+  const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
+  const linkEdgesRef = useRef<Edge[]>([])
+  linkEdgesRef.current = linkEdges
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
@@ -291,26 +286,18 @@ export function Canvas() {
     [nodes, ephemeralNodes]
   )
 
-  // Bridge edges decorated with live activity (count badge + animation while messaging).
+  // Context-link edges, statically styled (no per-message activity in the pull model).
   const accent = settings.accent
   const displayEdges = useMemo(() => {
-    const decorated = bridgeEdges.map((e) => {
-      const act = bridgeActivity[e.id]
+    const decorated = linkEdges.map((e) => {
       const sel = !!e.selected
-      const stroke = sel ? '#ffffff' : act?.stopped ? '#ff9f0a' : accent
+      const stroke = sel ? '#ffffff' : accent
       return {
         ...e,
         type: 'default',
-        sourceHandle: 'bridge-out',
-        targetHandle: 'bridge-in',
-        animated: !!act && !act.stopped,
-        label: act
-          ? act.stopped
-            ? `⇄ paused (${act.count})`
-            : `⇄ ${act.count}`
-          : sel
-            ? '⇄ bridge — ⌫ to remove'
-            : '⇄ bridge',
+        sourceHandle: 'link-out',
+        targetHandle: 'link-in',
+        label: sel ? '⇄ context — ⌫ to remove' : '⇄ context',
         labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
         labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
         labelBgPadding: [6, 3] as [number, number],
@@ -321,15 +308,11 @@ export function Canvas() {
       }
     })
     return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
-  }, [bridgeEdges, bridgeActivity, ephemeralEdges, accent])
+  }, [linkEdges, ephemeralEdges, accent])
 
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
-    // Bridge MCP config path → new Claude nodes launch with `--mcp-config` (Session Bridge).
-    void window.nodeTerminal.bridge.configPath().then((p) => {
-      if (!cancelled && p) setBridgeConfigPath(p)
-    })
     useSettings
       .getState()
       .hydrate()
@@ -358,8 +341,7 @@ export function Canvas() {
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
-    setBridgeEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
-    setBridgeActivity({})
+    setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -406,7 +388,7 @@ export function Canvas() {
           id,
           flowToNodeStates(nodesRef.current),
           viewportRef.current,
-          bridgeEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+          linkEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
         )
   }, [])
 
@@ -547,28 +529,28 @@ export function Canvas() {
     )
   }, [])
 
-  // Bridge links connect two bridge-capable agent sessions (currently Claude only).
-  const canBridgeNode = useCallback(
+  // Context links connect two context-link-capable agent sessions (currently Claude only).
+  const canLinkNode = useCallback(
     (id: string) => {
       const a = agentIdOf(id)
-      return !!a && canBridge(a)
+      return !!a && canContextLink(a)
     },
     [agentIdOf]
   )
 
-  // Draw a bridge link between two bridge-capable nodes (the connection that lets them message).
+  // Draw a context link between two context-link-capable nodes.
   const onConnect = useCallback(
     (c: Connection) => {
       if (!c.source || !c.target || c.source === c.target) return
-      if (!canBridgeNode(c.source) || !canBridgeNode(c.target)) return
+      if (!canLinkNode(c.source) || !canLinkNode(c.target)) return
       // No duplicate link (in either direction).
-      const exists = bridgeEdgesRef.current.some(
+      const exists = linkEdgesRef.current.some(
         (e) =>
           (e.source === c.source && e.target === c.target) ||
           (e.source === c.target && e.target === c.source)
       )
       if (exists) return
-      setBridgeEdges((es) =>
+      setLinkEdges((es) =>
         addEdge(
           { id: `bridge-${c.source}-${c.target}`, source: c.source!, target: c.target!, type: 'default' },
           es
@@ -576,60 +558,40 @@ export function Canvas() {
       )
       markDirty()
     },
-    [canBridgeNode, setBridgeEdges, markDirty]
+    [canLinkNode, setLinkEdges, markDirty]
   )
 
-  // Double-click a bridge link to remove it (ephemeral subagent/loop edges are left alone).
+  // Double-click a context link to remove it (ephemeral subagent/loop edges are left alone).
   const onEdgeDoubleClick = useCallback(
     (_e: React.MouseEvent, edge: Edge) => {
-      if (!bridgeEdgesRef.current.some((b) => b.id === edge.id)) return
-      setBridgeEdges((es) => es.filter((b) => b.id !== edge.id))
+      if (!linkEdgesRef.current.some((b) => b.id === edge.id)) return
+      setLinkEdges((es) => es.filter((b) => b.id !== edge.id))
       markDirty()
     },
-    [setBridgeEdges, markDirty]
+    [setLinkEdges, markDirty]
   )
 
-  // Prune links whose endpoints were deleted, then push the topology to main (debounced) so
-  // the bridge MCP server can resolve `list_bridge_nodes` / route `send_to_bridge`.
+  // Prune links whose endpoints were deleted, then push the link map to main (debounced) so
+  // it can rewrite the per-node link files the context CLI reads.
   useEffect(() => {
     const ids = new Set(nodes.map((n) => n.id))
-    const valid = bridgeEdges.filter((e) => ids.has(e.source) && ids.has(e.target))
-    if (valid.length !== bridgeEdges.length) {
-      setBridgeEdges(valid)
+    const valid = linkEdges.filter((e) => ids.has(e.source) && ids.has(e.target))
+    if (valid.length !== linkEdges.length) {
+      setLinkEdges(valid)
       return // re-runs with the pruned set
     }
-    const titleOf = (id: string) =>
-      (nodes.find((n) => n.id === id)?.data.title as string) || id
-    const topo: Record<string, { id: string; title: string }[]> = {}
-    for (const e of valid) {
-      ;(topo[e.source] ??= []).push({ id: e.target, title: titleOf(e.target) })
-      ;(topo[e.target] ??= []).push({ id: e.source, title: titleOf(e.source) })
+    const infoOf = (id: string) => {
+      const n = nodes.find((nn) => nn.id === id)
+      return { id, title: (n?.data.title as string) || id, cwd: (n?.data.cwd as string) || '' }
     }
-    const t = setTimeout(() => void window.nodeTerminal.bridge.setTopology(topo), 150)
+    const map: Record<string, { id: string; title: string; cwd: string }[]> = {}
+    for (const e of valid) {
+      ;(map[e.source] ??= []).push(infoOf(e.target))
+      ;(map[e.target] ??= []).push(infoOf(e.source))
+    }
+    const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
-  }, [bridgeEdges, nodes, setBridgeEdges])
-
-  // A bridge message was delivered (or paused): pulse the matching edge with a live count.
-  useEffect(() => {
-    return window.nodeTerminal.bridge.onMessage((m) => {
-      const edge = bridgeEdgesRef.current.find(
-        (e) =>
-          (e.source === m.from && e.target === m.to) || (e.source === m.to && e.target === m.from)
-      )
-      if (!edge) return
-      const id = edge.id
-      setBridgeActivity((prev) => ({ ...prev, [id]: { count: m.count, stopped: !!m.stopped } }))
-      // Clear the pulse after a beat (keep the paused flag visible a little longer).
-      const ttl = m.stopped ? 8000 : 2500
-      window.setTimeout(() => {
-        setBridgeActivity((prev) => {
-          const next = { ...prev }
-          delete next[id]
-          return next
-        })
-      }, ttl)
-    })
-  }, [])
+  }, [linkEdges, nodes, setLinkEdges])
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
   useEffect(() => {
@@ -916,12 +878,12 @@ export function Canvas() {
       if (tag === 'input' || tag === 'textarea') return
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
       if (!ids.length) {
-        // No node selected → remove any selected bridge link(s).
-        const edgeIds = bridgeEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
+        // No node selected → remove any selected context link(s).
+        const edgeIds = linkEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
         if (edgeIds.length) {
           e.preventDefault()
           const drop = new Set(edgeIds)
-          setBridgeEdges((es) => es.filter((b) => !drop.has(b.id)))
+          setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
           markDirty()
         }
         return
@@ -937,7 +899,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [deleteNodes, setBridgeEdges, markDirty])
+  }, [deleteNodes, setLinkEdges, markDirty])
 
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
@@ -1734,7 +1696,7 @@ export function Canvas() {
           edges={displayEdges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
-          onEdgesChange={onBridgeEdgesChange}
+          onEdgesChange={onLinkEdgesChange}
           onConnect={onConnect}
           onEdgeDoubleClick={onEdgeDoubleClick}
           onMove={onMove}

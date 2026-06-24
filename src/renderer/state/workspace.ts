@@ -101,23 +101,39 @@ export function createTerminalNode(
 }
 
 /**
- * Path to the bridge MCP config, fetched once from main at boot (see Canvas). When set, new
- * Claude nodes launch with `--mcp-config <path>` so the Session Bridge tools are available in
- * exactly the sessions nodeterm spawns — never the user's own `claude`.
+ * Creates a terminal node bound to a REMOTE host over the relay. Identical to a local terminal
+ * except `data.remote.connectionId` is set, which makes TerminalNode pick RemoteTransport instead
+ * of LocalTransport. Not persisted (see flowToNodeStates).
  */
-let bridgeConfigPath = ''
-export function setBridgeConfigPath(p: string): void {
-  bridgeConfigPath = p
+export function createRemoteTerminalNode(
+  connectionId: string,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('remote'),
+    type: 'terminal',
+    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
+    width: TERMINAL_SIZE.width,
+    height: TERMINAL_SIZE.height,
+    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    data: {
+      title: 'Remote terminal',
+      color: NODE_COLORS[index % NODE_COLORS.length],
+      group: null,
+      tags: [],
+      remote: { connectionId }
+    }
+  }
 }
 
 /**
  * Command that launches Claude Code. Detection works via hooks installed globally in
  * ~/.claude/settings.json (gated by NODETERM_* env that the PTY manager sets), so a plain
- * `claude` is enough. We add `--mcp-config` to attach the Session Bridge MCP server. Append
- * `-r <id>` to resume a specific session (used by Branch).
+ * `claude` is enough. Append `-r <id>` to resume a specific session (used by Branch).
  */
 export function claudeLaunchCommand(): string {
-  return bridgeConfigPath ? `claude --mcp-config "${bridgeConfigPath}"` : 'claude'
+  return 'claude'
 }
 
 /** Fallback color for custom / unknown agents that have no config-provided color. */
@@ -140,7 +156,7 @@ function resolveAgent(agentId: AgentId): { label: string; color: string; launchC
  * Creates a terminal node that launches the given agent on open. Title, color, and the
  * launch command come from the resolved agent config (builtin or custom); the node carries
  * `agentId` so the rest of the app (hooks, capabilities, UI) can branch on it. For `claude`
- * we use `claudeLaunchCommand()` which appends the Session Bridge `--mcp-config` (Claude-only).
+ * we use `claudeLaunchCommand()`.
  */
 export function createAgentNode(
   agentId: AgentId,

@@ -411,38 +411,6 @@ export interface SubagentActivity {
   chunk: string
 }
 
-/** One linked node, as the bridge MCP server sees it (id + display title). */
-export interface BridgeNodeInfo {
-  id: string
-  title: string
-}
-
-/** Map of node id → the nodes it is bridge-linked to. Sent to main so the MCP server can route. */
-export type BridgeTopology = Record<string, BridgeNodeInfo[]>
-
-/** A bridge message delivered (or paused) between two linked Claude nodes. */
-export interface BridgeMessage {
-  from: string
-  to: string
-  /** Display title of the sender (for the receiving wrapper + UI). */
-  fromTitle: string
-  message: string
-  /** Exchanges in the current conversation on this pair, and the cap. */
-  count: number
-  max: number
-  /** True when the loop guard paused delivery (cap reached). */
-  stopped?: boolean
-}
-
-export interface BridgeApi {
-  /** Path to the MCP config that attaches the bridge server (pass to `claude --mcp-config`). */
-  configPath(): Promise<string>
-  /** Push the current link topology to main so the MCP server can route messages. */
-  setTopology(topology: BridgeTopology): Promise<void>
-  /** Fires when a bridge message is delivered/paused. Returns unsubscribe. */
-  onMessage(listener: (m: BridgeMessage) => void): () => void
-}
-
 /** One linked node, as the context-link CLI sees it. */
 export interface ContextLinkInfo {
   id: string
@@ -654,7 +622,7 @@ export interface NodeTerminalApi {
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi
-  bridge: BridgeApi
+  contextLink: ContextLinkApi
   usage: UsageApi
   context: ContextApi
   claude: ClaudeApi

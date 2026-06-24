@@ -230,14 +230,8 @@ const api: NodeTerminalApi = {
     build: (sessionId, agentId, sourceNodeId, cwd) =>
       ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd)
   },
-  bridge: {
-    configPath: () => ipcRenderer.invoke(IPC.bridgeConfigPath),
-    setTopology: (topology) => ipcRenderer.invoke(IPC.bridgeSetTopology, topology),
-    onMessage: (listener) => {
-      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
-      ipcRenderer.on(IPC.bridgeMessage, handler)
-      return () => ipcRenderer.removeListener(IPC.bridgeMessage, handler)
-    }
+  contextLink: {
+    setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)
   },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.

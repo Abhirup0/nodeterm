@@ -26,7 +26,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canBridge, hasUsage, agentConfig, type AgentId } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, agentConfig, type AgentId } from '@shared/agents/config'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -78,7 +78,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // Gate each former `isClaude` site by the capability it actually represents.
   const showStatus = !!agentId && hasHooks(agentId) // status badge + session-title capture
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
-  const showBridge = !!agentId && canBridge(agentId) // bridge link handles
+  const showLink = !!agentId && canContextLink(agentId) // context-link handles
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
   const status = useAgentStatus((s) => s.byId[id])
@@ -135,11 +135,11 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (search.query.trim()) searchAddonRef.current?.findPrevious(search.query, findOpts)
   }, [search])
 
-  // The bridge handles are added/positioned dynamically for bridge-capable nodes; make
+  // The link handles are added/positioned dynamically for context-link-capable nodes; make
   // React Flow re-measure them so edges anchor to the (centered) handle, not a stale position.
   useEffect(() => {
-    if (showBridge) updateNodeInternals(id)
-  }, [showBridge, id, updateNodeInternals])
+    if (showLink) updateNodeInternals(id)
+  }, [showLink, id, updateNodeInternals])
 
   // Terminal lifecycle — set up exactly once.
   useEffect(() => {
@@ -444,23 +444,23 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
       />
-      {/* Bridge link handles (bridge-capable nodes only): drag right→left to connect two
+      {/* Context-link handles (context-link-capable nodes only): drag right→left to link two
           sessions. Vertically centered on the side edges; raised above the body so they're never buried. */}
-      {showBridge && (
+      {showLink && (
         <>
           <Handle
-            id="bridge-out"
+            id="link-out"
             type="source"
             position={Position.Right}
             className="bridge-handle bridge-handle--out"
-            data-tip="Bridge out — drag to another bridge-capable node to link their sessions"
+            data-tip="Link out — drag to another Claude node so they can read each other's context"
           />
           <Handle
-            id="bridge-in"
+            id="link-in"
             type="target"
             position={Position.Left}
             className="bridge-handle bridge-handle--in"
-            data-tip="Bridge in — drop a link here to connect this Claude session"
+            data-tip="Link in — drop a link here to share context with this Claude session"
           />
         </>
       )}

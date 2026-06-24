@@ -49,7 +49,7 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const BRIDGE_CAPABLE = ['claude'] as const
+export const CONTEXT_LINK_CAPABLE = ['claude'] as const
 export const USAGE_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
@@ -61,7 +61,7 @@ export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
-export const canBridge = (id: AgentId): boolean => includes(BRIDGE_CAPABLE, id)
+export const canContextLink = (id: AgentId): boolean => includes(CONTEXT_LINK_CAPABLE, id)
 export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 

@@ -20,7 +20,7 @@ import {
   SESSION_ID_RE
 } from './transcript-reader'
 import { buildHandoff } from './handoff'
-import { initBridge } from './bridge'
+import { initContextLink, setNodeTranscript } from './context-link'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
@@ -45,8 +45,7 @@ let mainWin: BrowserWindow | null = null
 // Enforce a single instance. A second instance would re-attach every node's tmux session
 // (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
 // "[detached (from session ...)]" dead terminals. Bail out and focus the existing window
-// instead. (The bridge MCP server runs via ELECTRON_RUN_AS_NODE on its own .mjs entry, so it
-// never reaches this code; this guards against a stray real GUI launch.)
+// instead. (This guards against a stray real GUI launch.)
 const gotSingleInstanceLock = NT_MULTI || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -238,7 +237,7 @@ app.whenReady().then(async () => {
   hookServer.setListener((e) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)
   })
-  hookServer.setRawListener((agentId, _nodeId, payload) => {
+  hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId !== 'claude') return
     const p = payload as {
       hook_event_name?: string
@@ -249,6 +248,7 @@ app.whenReady().then(async () => {
     }
     // Context-window meter: tail the session transcript (any event carrying both fields).
     if (p.session_id && p.transcript_path) contextTail.track(p.session_id, p.transcript_path)
+    if (nodeId && p.session_id && p.transcript_path) setNodeTranscript(nodeId, p.session_id, p.transcript_path)
     if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
     // Subagent live transcript: track on PreToolUse / finish on PostToolUse for subagent tools.
     const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
@@ -259,7 +259,7 @@ app.whenReady().then(async () => {
   })
   await hookServer.start()
 
-  initBridge(win, ptyManager)
+  initContextLink(win, ptyManager)
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
