@@ -20,3 +20,22 @@
   --radius-md: var(--radius);
   --radius-lg: var(--radius-lg);
 }
+
+/* Settings surface: Tailwind preflight is intentionally not loaded, so native
+   form-control chrome (the grey button background, the select arrow) would leak
+   through. Neutralize ONLY `appearance` here — no background/border/color/font —
+   so Tailwind utilities still fully control the look without a cascade-layer
+   conflict. Scoped to the settings page via the `.nt-settings` root class. */
+.nt-settings button,
+.nt-settings input,
+.nt-settings select,
+.nt-settings textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.nt-settings select::-ms-expand {
+  display: none;
+}
+.nt-settings textarea {
+  resize: vertical;
+}
