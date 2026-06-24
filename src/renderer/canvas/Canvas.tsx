@@ -61,7 +61,6 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import type { CanvasMutation, CanvasNodeState } from '@shared/types'
 import {
   agentConfig,
   hasHooks,
@@ -77,6 +76,7 @@ import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
 import {
+  applyCanvasMutation,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   createAgentNode,
@@ -95,19 +95,6 @@ import {
 } from '../state/workspace'
 
 const GRID = 24
-
-// Apply a single client mutation to a serialized node list (renderer-local copy of the pure
-// `applyMutation` from main/remote/canvas-sync — duplicated to keep the renderer off the main
-// process boundary). `upsert` replaces-or-appends by id; `remove` filters by id. Returns a NEW
-// array (the input is never mutated).
-function applyCanvasMutation(nodes: CanvasNodeState[], m: CanvasMutation): CanvasNodeState[] {
-  if (m.op === 'remove') return nodes.filter((n) => n.id !== m.id)
-  const idx = nodes.findIndex((n) => n.id === m.node.id)
-  if (idx === -1) return [...nodes, m.node]
-  const next = nodes.slice()
-  next[idx] = m.node
-  return next
-}
 
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
 // memo doesn't allocate fresh arrays on every node change (e.g. each drag frame).

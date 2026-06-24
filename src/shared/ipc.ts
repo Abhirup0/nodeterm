@@ -91,6 +91,11 @@ export const IPC = {
   remoteClientWrite: 'remote:client:write',
   remoteClientResize: 'remote:client:resize',
   remoteClientKill: 'remote:client:kill',
+  // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
+  // the client renderer sends its local mutations back for main to RPC to the host.
+  remoteClientMutate: 'remote:client:mutate',
+  // Host canvas snapshot pushed main->renderer for a connection (connectionId appended).
+  remoteClientCanvasState: (connectionId: string) => `remote:client:canvas-state:${connectionId}`,
   // Per-session events broadcast main->renderer (connectionId + streamId appended).
   remoteClientData: (connectionId: string, streamId: number) =>
     `remote:client:data:${connectionId}:${streamId}`,

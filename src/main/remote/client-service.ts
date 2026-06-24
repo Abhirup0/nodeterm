@@ -21,11 +21,12 @@
 
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import type { PtyCreateOptions } from '../../shared/types'
+import type { CanvasMutation, CanvasState, PtyCreateOptions } from '../../shared/types'
 import { genKeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
+import { CANVAS_MUTATE_METHOD, CANVAS_STATE_METHOD } from './host-service'
 import { decodeOffer } from './pairing'
-import { connectRelay, type RelaySocket } from './relay-socket'
+import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
 
 // Default relay endpoint override gate — mirrors host-service.ts. Used only for the dev gate;
 // the actual endpoint a client connects to comes from the decoded offer.
@@ -143,6 +144,46 @@ export function createClientHandlers(
   }
 }
 
+// --- pure client canvas mirror router (relay <-> client renderer) ------------
+
+// The slice of RelaySocket the client canvas router needs: a one-way client->host RPC for
+// mutations. (Inbound host->client `canvas:state` arrives via `connectRelay.onRpc`, not here.)
+export interface CanvasMutateSocket {
+  rpc(method: string, params?: unknown): Promise<unknown>
+}
+
+export interface ClientCanvasRouter {
+  /** Route an inbound host RPC/notify; returns the CanvasState when it is a `canvas:state` push. */
+  handleRpc(req: RpcRequest): CanvasState | null
+  /** Send the client's optimistic mutation to the host (best-effort; never throws). */
+  sendMutation(mutation: CanvasMutation): void
+}
+
+/**
+ * Build the client-side canvas mirror router. Pure over its single injected dependency (the relay
+ * socket for client->host mutation RPC) so it is unit-testable with a fake — no Electron, no real
+ * socket. The host's React Flow stays the single writer: the client renders the host's pushed
+ * `canvas:state` (surfaced here from `handleRpc`) and sends back mutations the host applies, then
+ * the next `canvas:state` reconciles.
+ */
+export function createClientCanvasRouter(socket: CanvasMutateSocket): ClientCanvasRouter {
+  return {
+    handleRpc(req) {
+      if (req.method !== CANVAS_STATE_METHOD) return null
+      const state = req.params as CanvasState
+      if (!state || typeof state !== 'object' || !Array.isArray((state as { nodes?: unknown }).nodes)) {
+        return null
+      }
+      return state
+    },
+    sendMutation(mutation) {
+      // Best-effort: the host forgets the client's edit regardless of our knowing the outcome
+      // (the next `canvas:state` is authoritative and reconciles any divergence).
+      void socket.rpc(CANVAS_MUTATE_METHOD, mutation).catch(() => {})
+    }
+  }
+}
+
 // --- dev gate ----------------------------------------------------------------
 
 // Never hit a real relay from an unpackaged build unless a relay is explicitly targeted
@@ -155,6 +196,7 @@ interface ClientConnection {
   id: string
   socket: RelaySocket
   handlers: ClientHandlers
+  canvas: ClientCanvasRouter
 }
 
 /**
@@ -194,8 +236,9 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
     // key in the offer; the client just needs a fresh keypair to derive the shared secret).
     const ourKeys = genKeyPair()
 
-    // Bind handlers lazily so they can reference the socket created just below.
+    // Bind handlers + canvas router lazily so their `onRpc` can reference the socket below.
     let handlers: ClientHandlers | null = null
+    let canvas: ClientCanvasRouter | null = null
 
     const socket = connectRelay({
       url: offer.relayEndpoint,
@@ -206,8 +249,11 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
       onReady: () => {
         // Bridge established with the host. Handlers are already live; nothing extra to do.
       },
-      onRpc: () => {
-        // The host never initiates RPC toward the client in this MVP.
+      onRpc: (req) => {
+        // The host pushes its canvas snapshot as a one-way `canvas:state` notify (id:''). Route it
+        // to the client renderer's mirror; the host initiates no other RPC toward the client.
+        const state = canvas?.handleRpc(req)
+        if (state) send(IPC.remoteClientCanvasState(connectionId), state)
       },
       onFrame: (frame) => handlers?.onFrame(frame),
       onClose: () => {
@@ -220,8 +266,9 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
       onData: (streamId, data) => send(IPC.remoteClientData(connectionId, streamId), data),
       onExit: (streamId, exitCode) => send(IPC.remoteClientExit(connectionId, streamId), exitCode)
     })
+    canvas = createClientCanvasRouter(socket)
 
-    connections.set(connectionId, { id: connectionId, socket, handlers })
+    connections.set(connectionId, { id: connectionId, socket, handlers, canvas })
     return connectionId
   })
 
@@ -256,5 +303,10 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
 
   ipcMain.on(IPC.remoteClientKill, (_e, connectionId: string, sessionId: string) => {
     connections.get(String(connectionId))?.handlers.kill(Number(sessionId))
+  })
+
+  // The client renderer's optimistic canvas edit → forward to the host as a `canvas:mutate` RPC.
+  ipcMain.on(IPC.remoteClientMutate, (_e, connectionId: string, mutation: CanvasMutation) => {
+    connections.get(String(connectionId))?.canvas.sendMutation(mutation)
   })
 }

@@ -2,6 +2,7 @@ import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
   CanvasMutation,
+  CanvasState,
   NodeTerminalApi,
   PtyCreateOptions,
   UpdateInfo,
@@ -208,7 +209,15 @@ const api: NodeTerminalApi = {
       const handler = () => listener()
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
-    }
+    },
+    onCanvasState: (connectionId, listener) => {
+      const channel = IPC.remoteClientCanvasState(connectionId)
+      const handler = (_e: unknown, state: Parameters<typeof listener>[0]) => listener(state)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    sendMutation: (connectionId, mutation) =>
+      ipcRenderer.send(IPC.remoteClientMutate, connectionId, mutation)
   },
   handoff: {
     build: (sessionId, agentId, sourceNodeId, cwd) =>

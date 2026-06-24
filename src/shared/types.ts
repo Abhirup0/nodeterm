@@ -600,6 +600,16 @@ export interface RemoteClientApi {
   ): () => void
   /** Fires when the connection's relay socket drops (host/relay gone). Returns unsubscribe. */
   onClosed(connectionId: string, listener: () => void): () => void
+  /**
+   * Listen for the host's full canvas snapshot for a connection (the mirror source of truth).
+   * Returns an unsubscribe function.
+   */
+  onCanvasState(connectionId: string, listener: (state: CanvasState) => void): () => void
+  /**
+   * Send a canvas mutation to the host (the client's optimistic edit). Main forwards it as a
+   * `canvas:mutate` RPC; the host applies it and the next `canvas:state` reconciles.
+   */
+  sendMutation(connectionId: string, mutation: CanvasMutation): void
 }
 
 export interface NodeTerminalApi {
