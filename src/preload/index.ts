@@ -169,7 +169,8 @@ const api: NodeTerminalApi = {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
       ipcRenderer.on(IPC.contextUpdate, handler)
       return () => ipcRenderer.removeListener(IPC.contextUpdate, handler)
-    }
+    },
+    ensure: (sessionId, cwd) => ipcRenderer.send(IPC.contextEnsure, sessionId, cwd)
   },
   claude: {
     readTranscript: (sessionId, cwd) =>

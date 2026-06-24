@@ -219,6 +219,16 @@ app.whenReady().then(async () => {
       return p ? readTranscriptLines(p) : []
     }
   )
+  // Populate the context meter without a live hook event: the renderer calls this on mount
+  // (the continuing session may be idle after a restart). Track under the sessionId (the key
+  // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
+  // the 1s interval keeps it fresh while tracked.
+  ipcMain.on(IPC.contextEnsure, async (_e, sessionId?: string, cwd?: string) => {
+    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
+    let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+    if (!p && cwd) p = await transcriptPathForCwd(cwd)
+    if (p) contextTail.track(sessionId, p)
+  })
   ipcMain.handle(
     IPC.handoffBuild,
     (_e, sessionId: string, agentId: string, sourceNodeId: string, cwd: string | undefined) =>

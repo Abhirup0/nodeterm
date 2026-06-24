@@ -492,6 +492,12 @@ export interface ContextWindowUsage {
 export interface ContextApi {
   /** Fires whenever a session's context fill changes. Returns unsubscribe. */
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
+  /**
+   * Ask main to start (or refresh) tracking a session's transcript so the meter populates
+   * without waiting for a live hook event — e.g. on node mount after an app restart, when
+   * the continuing session is idle. `cwd` is a transcript-path fallback only.
+   */
+  ensure(sessionId: string, cwd?: string): void
 }
 
 /** One searchable line extracted from a Claude session transcript. */
