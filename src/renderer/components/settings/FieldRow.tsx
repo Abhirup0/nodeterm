@@ -13,7 +13,7 @@ export function FieldRow({
   htmlFor?: string
 }): React.JSX.Element {
   return (
-    <div className="flex items-center justify-between gap-6 py-4">
+    <div className="flex items-center justify-between gap-6">
       <div className="min-w-0">
         <label htmlFor={htmlFor} className="block text-sm font-medium text-text">
           {label}

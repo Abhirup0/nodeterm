@@ -20,13 +20,17 @@ export function SettingsSidebar({
   const hasQuery = query.trim() !== ''
   return (
     <aside className="flex w-[256px] shrink-0 flex-col border-r border-border bg-panel">
-      <div className="flex items-center justify-between px-4 pb-2 pt-4">
+      <div
+        className="flex items-center justify-between px-4 pb-2 pt-10"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
         <h1 className="text-sm font-semibold tracking-tight text-text">Settings</h1>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close settings"
-          className="flex size-6 items-center justify-center rounded-md bg-panel text-muted transition-colors hover:bg-white/10 hover:text-text"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="flex size-6 items-center justify-center rounded-md border-0 bg-panel text-muted outline-none transition-colors hover:bg-white/10 hover:text-text"
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
             <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
@@ -76,7 +80,7 @@ export function SettingsSidebar({
                   onClick={() => onSelect(s.id)}
                   aria-current={isActive ? 'page' : undefined}
                   className={cn(
-                    'group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] transition-colors',
+                    'group flex w-full items-center gap-2.5 rounded-lg border-0 px-3 py-2 text-left text-[13px] outline-none transition-colors',
                     isActive
                       ? 'bg-white/[0.09] font-medium text-text ring-1 ring-inset ring-white/10'
                       : 'bg-panel text-muted hover:bg-white/[0.05] hover:text-text',

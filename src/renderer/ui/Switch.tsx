@@ -17,14 +17,14 @@ export function Switch({
       aria-label={ariaLabel}
       onClick={() => onChange(!checked)}
       className={cn(
-        'relative h-[24px] w-[42px] shrink-0 rounded-full transition-colors duration-200',
+        'relative box-border block h-[24px] w-[42px] shrink-0 cursor-pointer rounded-full border-0 p-0 outline-none transition-colors duration-200',
         checked ? 'bg-accent' : 'bg-white/15'
       )}
     >
       <span
         className={cn(
-          'absolute left-0 top-[3px] size-[18px] rounded-full bg-white shadow-sm transition-transform duration-200',
-          checked ? 'translate-x-[21px]' : 'translate-x-[3px]'
+          'absolute left-[3px] top-[3px] size-[18px] rounded-full bg-white shadow-sm transition-transform duration-200',
+          checked ? 'translate-x-[18px]' : 'translate-x-0'
         )}
       />
     </button>

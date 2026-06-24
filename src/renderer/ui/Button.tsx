@@ -12,9 +12,9 @@ export function Button({
     <button
       type="button"
       className={cn(
-        'inline-flex items-center justify-center rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex cursor-pointer items-center justify-center rounded-md px-3 py-1.5 text-[13px] font-medium outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50',
         variant === 'primary' && 'bg-accent text-white hover:bg-accent-hover',
-        variant === 'ghost' && 'text-muted hover:text-text',
+        variant === 'ghost' && 'bg-transparent text-muted hover:text-text',
         variant === 'default' && 'border border-border bg-panel-header text-text hover:bg-[rgba(255,255,255,0.06)]',
         className
       )}
