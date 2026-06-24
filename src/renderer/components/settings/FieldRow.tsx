@@ -13,12 +13,14 @@ export function FieldRow({
   htmlFor?: string
 }): React.JSX.Element {
   return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
+    <div className="flex items-center justify-between gap-6 py-4">
       <div className="min-w-0">
-        <label htmlFor={htmlFor} className="block text-[13px] text-text">
+        <label htmlFor={htmlFor} className="block text-sm font-medium text-text">
           {label}
         </label>
-        {description ? <p className="mt-0.5 text-xs text-muted">{description}</p> : null}
+        {description ? (
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">{description}</p>
+        ) : null}
       </div>
       <div className="shrink-0">{control}</div>
     </div>

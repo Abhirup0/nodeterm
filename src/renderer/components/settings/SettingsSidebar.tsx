@@ -76,9 +76,9 @@ export function SettingsSidebar({
                   onClick={() => onSelect(s.id)}
                   aria-current={isActive ? 'page' : undefined}
                   className={cn(
-                    'group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] transition-colors',
+                    'group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] transition-colors',
                     isActive
-                      ? 'bg-accent/15 font-medium text-text ring-1 ring-inset ring-accent/30'
+                      ? 'bg-white/[0.07] font-medium text-text ring-1 ring-inset ring-white/10'
                       : 'text-muted hover:bg-white/[0.04] hover:text-text',
                     dimmed && 'opacity-35'
                   )}
@@ -86,7 +86,7 @@ export function SettingsSidebar({
                   <span
                     className={cn(
                       'flex size-4 shrink-0 items-center justify-center transition-colors',
-                      isActive ? 'text-accent' : 'text-muted-2 group-hover:text-muted'
+                      isActive ? 'text-text' : 'text-muted-2 group-hover:text-muted'
                     )}
                   >
                     <SectionIcon id={s.id} />

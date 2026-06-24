@@ -45,8 +45,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }): React.JSX.El
         onClose={onClose}
       />
       <SettingsSearchContext.Provider value={query}>
-        <main className="min-w-0 flex-1 overflow-y-auto px-10 py-8">
-          <div className="mx-auto max-w-3xl space-y-10">
+        <main className="min-w-0 flex-1 overflow-y-auto px-12 py-10">
+          <div className="mx-auto max-w-[860px] space-y-10">
             <TerminalSection isActive={active === 'terminal'} />
             <ShellSection isActive={active === 'shell'} />
             <BehaviorSection isActive={active === 'behavior'} />
