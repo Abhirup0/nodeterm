@@ -60,7 +60,7 @@ export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
   }, [input, working, nodeId])
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
       e.preventDefault()
       void send()
     }
@@ -107,7 +107,7 @@ export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
               ? "Can't write to this session"
               : working
                 ? 'Claude is working…'
-                : 'Message Claude…  (Enter to send, Shift+Enter for newline)'
+                : 'Message Claude…  (Enter to send)'
           }
           disabled={readonly || working}
           rows={2}

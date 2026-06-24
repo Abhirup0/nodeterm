@@ -149,7 +149,10 @@ export function parseChatMessages(rawLines: string[]): ChatMessage[] {
         if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
         else if (c.type === 'tool_result') {
           const tool = c.tool_use_id ? toolById.get(c.tool_use_id) : undefined
-          if (tool) tool.result = summarizeResult(c.content)
+          if (tool) {
+            const s = summarizeResult(c.content)
+            if (s) tool.result = s
+          }
         }
       }
       if (parts.length) messages.push({ role: 'user', parts })
