@@ -36,7 +36,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }): React.JSX.El
   }, [onClose])
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex bg-bg text-text">
+    <div className="fixed inset-0 z-[55] flex bg-bg text-text">
       <SettingsSidebar
         activeSectionId={active}
         query={query}

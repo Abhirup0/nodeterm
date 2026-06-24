@@ -36,6 +36,7 @@ export function SettingsSidebar({
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           placeholder="Search settings"
+          aria-label="Search settings"
         />
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto p-3">
