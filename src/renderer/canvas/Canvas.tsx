@@ -557,8 +557,22 @@ export function Canvas() {
         )
       )
       markDirty()
+      // Discovery: tell each idle endpoint it is now linked (skip a node mid-turn so we don't
+      // interrupt it — the skill stays discoverable on its next relevant need).
+      const status = useAgentStatus.getState().byId
+      const titleOf = (id: string) =>
+        (nodes.find((n) => n.id === id)?.data.title as string) || 'a linked node'
+      const note = (selfId: string, otherId: string) => {
+        if (status[selfId]?.state === 'working') return
+        void window.nodeTerminal.pty.sendText(
+          selfId,
+          `[nodeterm] You are now linked to "${titleOf(otherId)}". Use the get-linked-context skill to read its context when you need it.`
+        )
+      }
+      note(c.source, c.target)
+      note(c.target, c.source)
     },
-    [canLinkNode, setLinkEdges, markDirty]
+    [canLinkNode, setLinkEdges, markDirty, nodes]
   )
 
   // Double-click a context link to remove it (ephemeral subagent/loop edges are left alone).
