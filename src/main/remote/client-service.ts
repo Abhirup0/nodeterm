@@ -27,6 +27,7 @@ import { OP, type Frame } from './framing'
 import { CANVAS_MUTATE_METHOD, CANVAS_STATE_METHOD } from './host-service'
 import { decodeOffer } from './pairing'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
+import { createSnapshotReassembler, type SnapshotReassembler } from './snapshot'
 
 // Default relay endpoint override gate — mirrors host-service.ts. Used only for the dev gate;
 // the actual endpoint a client connects to comes from the decoded offer.
@@ -68,6 +69,8 @@ export interface ClientHandlers {
 interface Stream {
   /** Outbound OP.Input/OP.Resize sequence counter. */
   seq: number
+  /** Reassembles the host's SnapshotStart→Chunk*→End into the initial screen text. */
+  snapshot: SnapshotReassembler
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -95,12 +98,22 @@ export function createClientHandlers(
 
   return {
     async create(options) {
-      const body = asRecord(await socket.rpc('pty.create', options))
+      // RemoteTransport is only ever used for mirrored (remote) nodes, so `create` maps to
+      // `pty.attach` — the client attaches to the host's EXISTING tmux session for this node id
+      // (the persistKey is the host node id from the mirror) and gets a snapshot of the current
+      // screen before live output, instead of spawning a fresh blank PTY (B4's blank-terminal bug).
+      const body = asRecord(
+        await socket.rpc('pty.attach', {
+          nodeId: options.persistKey,
+          cols: options.cols,
+          rows: options.rows
+        })
+      )
       const streamId = body.streamId
       if (typeof streamId !== 'number' || !Number.isFinite(streamId)) {
         throw new Error('Host did not return a streamId.')
       }
-      streams.set(streamId, { seq: 0 })
+      streams.set(streamId, { seq: 0, snapshot: createSnapshotReassembler() })
       return streamId
     },
     write(streamId, data) {
@@ -120,7 +133,19 @@ export function createClientHandlers(
       void socket.rpc('pty.kill', { streamId }).catch(() => {})
     },
     onFrame(frame) {
-      if (!streams.has(frame.streamId)) return
+      const stream = streams.get(frame.streamId)
+      if (!stream) return
+      if (
+        frame.op === OP.SnapshotStart ||
+        frame.op === OP.SnapshotChunk ||
+        frame.op === OP.SnapshotEnd
+      ) {
+        // Buffer the snapshot; on End deliver the reassembled current screen as the FIRST onData
+        // so the mirrored xterm paints it before any live output arrives.
+        const res = stream.snapshot.accept(frame)
+        if (res.done && res.text) sinks.onData(frame.streamId, res.text)
+        return
+      }
       if (frame.op === OP.Output) {
         sinks.onData(frame.streamId, textDecoder.decode(frame.payload))
         return

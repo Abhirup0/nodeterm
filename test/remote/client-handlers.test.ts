@@ -13,7 +13,8 @@ function fakeSocket(createBody: unknown = { streamId: 7 }) {
   const socket: ClientRelaySocket = {
     rpc: vi.fn(async (method, params) => {
       rpcs.push({ method, params })
-      if (method === 'pty.create') return createBody
+      // RemoteTransport is remote-only, so `create` maps to `pty.attach` (attach-to-existing).
+      if (method === 'pty.attach') return createBody
       return {}
     }),
     sendFrame: vi.fn((op, streamId, seq, payload) => {
@@ -35,15 +36,38 @@ function fakeSinks() {
 }
 
 describe('createClientHandlers', () => {
-  it('maps create to RPC pty.create and resolves with the host streamId', async () => {
+  it('maps create to RPC pty.attach (nodeId from persistKey) and resolves with the host streamId', async () => {
     const sock = fakeSocket({ streamId: 7 })
     const sinks = fakeSinks()
     const h = createClientHandlers(sock.socket, sinks.sinks)
 
-    const streamId = await h.create({ cols: 100, rows: 30, cwd: '/tmp' })
+    const streamId = await h.create({ cols: 100, rows: 30, cwd: '/tmp', persistKey: 'node-9' })
 
     expect(streamId).toBe(7)
-    expect(sock.rpcs).toEqual([{ method: 'pty.create', params: { cols: 100, rows: 30, cwd: '/tmp' } }])
+    expect(sock.rpcs).toEqual([
+      { method: 'pty.attach', params: { nodeId: 'node-9', cols: 100, rows: 30 } }
+    ])
+  })
+
+  it('delivers a buffered snapshot (Start→Chunk*→End) as the first onData before live output', async () => {
+    const sock = fakeSocket({ streamId: 4 })
+    const sinks = fakeSinks()
+    const h = createClientHandlers(sock.socket, sinks.sinks)
+    await h.create({ cols: 80, rows: 24, persistKey: 'node-x' })
+
+    h.onFrame({ op: OP.SnapshotStart, streamId: 4, seq: 0, payload: new Uint8Array(0) })
+    h.onFrame({ op: OP.SnapshotChunk, streamId: 4, seq: 1, payload: new TextEncoder().encode('cur') })
+    h.onFrame({ op: OP.SnapshotChunk, streamId: 4, seq: 2, payload: new TextEncoder().encode('rent') })
+    // Nothing delivered until End.
+    expect(sinks.data).toEqual([])
+    h.onFrame({ op: OP.SnapshotEnd, streamId: 4, seq: 3, payload: new Uint8Array(0) })
+    // Snapshot first, then live output.
+    h.onFrame({ op: OP.Output, streamId: 4, seq: 4, payload: new TextEncoder().encode('live') })
+
+    expect(sinks.data).toEqual([
+      { streamId: 4, data: 'current' },
+      { streamId: 4, data: 'live' }
+    ])
   })
 
   it('throws when the host does not return a numeric streamId', async () => {

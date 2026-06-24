@@ -184,6 +184,16 @@ function makeEchoPty(): HostPtyManager {
       sinks.set(sessionId, s)
       return sessionId
     },
+    attachDetached(_persistKey: string, s: DetachedSinks): string {
+      // Same echo semantics as create — the client now opens streams via pty.attach.
+      const sessionId = `echo-${++counter}`
+      sinks.set(sessionId, s)
+      return sessionId
+    },
+    async captureSnapshot(): Promise<string> {
+      // No prior screen in the fake; an empty snapshot still exercises the Start→End path.
+      return ''
+    },
     write(sessionId: string, data: string): void {
       sinks.get(sessionId)?.onData(data)
     },
@@ -288,11 +298,11 @@ describe('B4 relay end-to-end (real relay + real protocol + fake pty)', () => {
     // Both ends complete the E2EE handshake.
     await withTimeout(Promise.all([hostReady.promise, clientReady.promise]), HANDSHAKE_TIMEOUT_MS, 'handshake')
 
-    // --- client opens a stream via RPC pty.create ---
+    // --- client opens a stream via RPC pty.attach (persistKey = host node id) ---
     const streamId = await withTimeout(
-      clientHandlers.create({ cols: 80, rows: 24 }),
+      clientHandlers.create({ cols: 80, rows: 24, persistKey: 'node-e2e' }),
       HANDSHAKE_TIMEOUT_MS,
-      'pty.create'
+      'pty.attach'
     )
     expect(typeof streamId).toBe('number')
 

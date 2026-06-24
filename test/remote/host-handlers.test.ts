@@ -14,6 +14,7 @@ function fakePty() {
   let lastSinks: DetachedSinks | null = null
   let lastOptions: PtyCreateOptions | null = null
   let counter = 0
+  let snapshot = ''
   const mgr: HostPtyManager = {
     createDetached(options, sinks) {
       lastOptions = options
@@ -21,6 +22,16 @@ function fakePty() {
       const id = `pty-${++counter}`
       calls.push({ method: 'createDetached', args: [options, id] })
       return id
+    },
+    attachDetached(persistKey, sinks, options) {
+      lastSinks = sinks
+      const id = `pty-${++counter}`
+      calls.push({ method: 'attachDetached', args: [persistKey, id, options] })
+      return id
+    },
+    captureSnapshot: async (persistKey) => {
+      calls.push({ method: 'captureSnapshot', args: [persistKey] })
+      return snapshot
     },
     write: (sessionId, data) => calls.push({ method: 'write', args: [sessionId, data] }),
     resize: (sessionId, cols, rows) =>
@@ -32,7 +43,10 @@ function fakePty() {
     mgr,
     calls,
     sinks: () => lastSinks!,
-    options: () => lastOptions!
+    options: () => lastOptions!,
+    setSnapshot: (s: string) => {
+      snapshot = s
+    }
   }
 }
 
@@ -67,6 +81,63 @@ describe('createHostHandlers', () => {
 
     expect(pty.options()).toMatchObject({ cols: 100, rows: 30, cwd: '/tmp' })
     expect(sock.responses).toEqual([{ id: 'r1', ok: true, body: { streamId: 1 } }])
+  })
+
+  it('maps pty.attach to a snapshot sequence then attachDetached on the existing session', async () => {
+    const pty = fakePty()
+    pty.setSnapshot('CURRENT SCREEN')
+    const sock = fakeSocket()
+    const h = createHostHandlers(pty.mgr, sock.socket)
+
+    h.onRpc({ id: 'r1', method: 'pty.attach', params: { nodeId: 'node-9', cols: 100, rows: 30 } })
+    // Responds with the streamId synchronously so the client can route frames.
+    expect(sock.responses).toEqual([{ id: 'r1', ok: true, body: { streamId: 1 } }])
+    // Capture + attach are async (a tmux side-call).
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(pty.calls).toContainEqual({ method: 'captureSnapshot', args: ['node-9'] })
+    expect(pty.calls).toContainEqual({
+      method: 'attachDetached',
+      args: ['node-9', 'pty-1', { cols: 100, rows: 30 }]
+    })
+
+    // Snapshot frames precede any live output: Start, one Chunk (the screen text), End.
+    expect(sock.frames[0]).toMatchObject({ op: OP.SnapshotStart, streamId: 1 })
+    expect(sock.frames[1]).toMatchObject({ op: OP.SnapshotChunk, streamId: 1 })
+    expect(Buffer.from(sock.frames[1].payload).toString('utf8')).toBe('CURRENT SCREEN')
+    expect(sock.frames[2]).toMatchObject({ op: OP.SnapshotEnd, streamId: 1 })
+
+    // Live output then drives the same stream.
+    pty.sinks().onData('live')
+    const out = sock.frames.find((f) => f.op === OP.Output)
+    expect(out).toBeDefined()
+    expect(Buffer.from(out!.payload).toString('utf8')).toBe('live')
+  })
+
+  it('attach sends an empty snapshot when the session has no current screen', async () => {
+    const pty = fakePty() // snapshot defaults to ''
+    const sock = fakeSocket()
+    const h = createHostHandlers(pty.mgr, sock.socket)
+
+    h.onRpc({ id: 'r1', method: 'pty.attach', params: { nodeId: 'node-1', cols: 80, rows: 24 } })
+    await new Promise((r) => setTimeout(r, 0))
+
+    // Empty snapshot: Start, End, no Chunk.
+    expect(sock.frames.map((f) => f.op)).toContain(OP.SnapshotStart)
+    expect(sock.frames.map((f) => f.op)).toContain(OP.SnapshotEnd)
+    expect(sock.frames.some((f) => f.op === OP.SnapshotChunk)).toBe(false)
+    expect(pty.calls).toContainEqual({
+      method: 'attachDetached',
+      args: ['node-1', 'pty-1', { cols: 80, rows: 24 }]
+    })
+  })
+
+  it('rejects pty.attach without a nodeId', () => {
+    const pty = fakePty()
+    const sock = fakeSocket()
+    const h = createHostHandlers(pty.mgr, sock.socket)
+    h.onRpc({ id: 'r1', method: 'pty.attach', params: { cols: 80, rows: 24 } })
+    expect(sock.responses[0]).toMatchObject({ id: 'r1', ok: false })
   })
 
   it('pipes PTY output into OP.Output frames with an incrementing seq', () => {

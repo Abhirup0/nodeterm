@@ -169,6 +169,52 @@ export class PtyManager {
     return this.spawnSession(options, null, sinks)
   }
 
+  /**
+   * Attach a detached (relay-served) PTY to the EXISTING tmux session for a node id, rather
+   * than always creating a fresh one. Because `spawnSession` uses `tmux new-session -A`, passing
+   * the node id as the `persistKey` reattaches the existing `nt-<nodeId>` session if it exists,
+   * or creates it otherwise (graceful fallback). Used by the relay host so a mirrored terminal
+   * resumes the host's live session instead of opening a blank shell. Pair with `captureSnapshot`
+   * to paint the current screen before live output starts streaming.
+   */
+  attachDetached(
+    persistKey: string,
+    sinks: DetachedSinks,
+    options: Omit<PtyCreateOptions, 'persistKey'> = { cols: 80, rows: 24 }
+  ): string {
+    return this.spawnSession({ ...options, persistKey }, null, sinks)
+  }
+
+  /**
+   * Capture the CURRENT visible pane of a node's tmux session (with colors, via `-e`). Returns
+   * the screen text so the relay host can send it as a snapshot the mirrored client paints before
+   * live output. Empty string if tmux is unavailable or the session doesn't exist yet.
+   */
+  async captureSnapshot(persistKey: string): Promise<string> {
+    if (!this.tmuxPath) return ''
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey)],
+        { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+      )
+      return stdout
+    } catch {
+      return ''
+    }
+  }
+
+  /** Whether a tmux session for this node id currently exists (host attach-vs-create decision). */
+  async hasSession(persistKey: string): Promise<boolean> {
+    if (!this.tmuxPath) return false
+    try {
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)])
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private spawnSession(
     options: PtyCreateOptions,
     webContentsId: number | null,

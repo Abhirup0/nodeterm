@@ -46,6 +46,14 @@ const textDecoder = new TextDecoder()
 // The slice of pty-manager the host needs. PtyManager satisfies this; tests pass a fake.
 export interface HostPtyManager {
   createDetached(options: PtyCreateOptions, sinks: DetachedSinks): string
+  /** Attach a relay-served PTY to the EXISTING tmux session for a node id (create if absent). */
+  attachDetached(
+    persistKey: string,
+    sinks: DetachedSinks,
+    options?: Omit<PtyCreateOptions, 'persistKey'>
+  ): string
+  /** Current visible screen of a node's tmux session, for the attach snapshot. */
+  captureSnapshot(persistKey: string): Promise<string>
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
   setFlow(sessionId: string, resume: boolean): void
@@ -101,21 +109,10 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
     streams.delete(streamId)
   }
 
-  function handleCreate(req: RpcRequest): void {
-    const p = asRecord(req.params)
-    const options: PtyCreateOptions = {
-      cols: Math.max(1, num(p.cols, 80)),
-      rows: Math.max(1, num(p.rows, 24)),
-      cwd: str(p.cwd),
-      shell: str(p.shell),
-      persistKey: str(p.persistKey),
-      agentId: str(p.agentId) as AgentId | undefined
-    }
-
-    const streamId = ++streamCounter
-    const stream: Stream = { sessionId: '', seq: 0, paused: false }
-
-    const sinks: DetachedSinks = {
+  // Build the output/exit sinks for a new stream: pipe PTY output into OP.Output frames (with
+  // relay backpressure -> setFlow pause/resume) and PTY exit into an OP.Error frame.
+  function makeSinks(streamId: number, stream: Stream): DetachedSinks {
+    return {
       onData: (data) => {
         const bytes = textEncoder.encode(data)
         const ok = socket.sendFrame(OP.Output, streamId, stream.seq++, bytes)
@@ -139,6 +136,22 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
         dropStream(streamId)
       }
     }
+  }
+
+  function handleCreate(req: RpcRequest): void {
+    const p = asRecord(req.params)
+    const options: PtyCreateOptions = {
+      cols: Math.max(1, num(p.cols, 80)),
+      rows: Math.max(1, num(p.rows, 24)),
+      cwd: str(p.cwd),
+      shell: str(p.shell),
+      persistKey: str(p.persistKey),
+      agentId: str(p.agentId) as AgentId | undefined
+    }
+
+    const streamId = ++streamCounter
+    const stream: Stream = { sessionId: '', seq: 0, paused: false }
+    const sinks = makeSinks(streamId, stream)
 
     let sessionId: string
     try {
@@ -150,6 +163,73 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
     stream.sessionId = sessionId
     streams.set(streamId, stream)
     socket.respond(req.id, true, { streamId })
+  }
+
+  // Reassembled snapshot is sent as one or more OP.SnapshotChunk frames between Start and End.
+  // 256 KB keeps each chunk well under the relay's per-frame limits while a full-screen capture
+  // (with colors) stays small in practice.
+  const SNAPSHOT_CHUNK_BYTES = 256 * 1024
+
+  function sendSnapshot(streamId: number, stream: Stream, text: string): void {
+    socket.sendFrame(OP.SnapshotStart, streamId, stream.seq++, new Uint8Array(0))
+    const bytes = textEncoder.encode(text)
+    for (let i = 0; i < bytes.length; i += SNAPSHOT_CHUNK_BYTES) {
+      socket.sendFrame(
+        OP.SnapshotChunk,
+        streamId,
+        stream.seq++,
+        bytes.subarray(i, i + SNAPSHOT_CHUNK_BYTES)
+      )
+    }
+    socket.sendFrame(OP.SnapshotEnd, streamId, stream.seq++, new Uint8Array(0))
+  }
+
+  /**
+   * Attach a mirrored terminal to the host's EXISTING tmux session for `nodeId`: respond with the
+   * streamId, send a SNAPSHOT of the current screen (so the client paints it before any live
+   * output), then start streaming live output via `attachDetached`. Falls back to plain create
+   * semantics when no session exists yet (attachDetached creates one; the snapshot is empty).
+   */
+  function handleAttach(req: RpcRequest): void {
+    const p = asRecord(req.params)
+    const nodeId = str(p.nodeId) ?? str(p.persistKey)
+    if (!nodeId) {
+      socket.respond(req.id, false, { message: 'pty.attach requires a nodeId.' })
+      return
+    }
+    const cols = Math.max(1, num(p.cols, 80))
+    const rows = Math.max(1, num(p.rows, 24))
+
+    const streamId = ++streamCounter
+    const stream: Stream = { sessionId: '', seq: 0, paused: false }
+    const sinks = makeSinks(streamId, stream)
+
+    // Reserve the stream and respond up front so the client can route Input/Resize frames; the
+    // snapshot + live attach then proceed. Capturing the screen is async (a tmux side-call).
+    streams.set(streamId, stream)
+    socket.respond(req.id, true, { streamId })
+
+    void pty
+      .captureSnapshot(nodeId)
+      .catch(() => '')
+      .then((snapshot) => {
+        // The stream may have been killed/closed while the capture was in flight.
+        if (!streams.has(streamId)) return
+        // Snapshot first (current screen) — then live output begins on attach.
+        sendSnapshot(streamId, stream, snapshot)
+        try {
+          stream.sessionId = pty.attachDetached(nodeId, sinks, { cols, rows })
+        } catch {
+          // Attach failed (e.g. tmux unavailable) — surface as an exit so the client tears down.
+          socket.sendFrame(
+            OP.Error,
+            streamId,
+            stream.seq++,
+            textEncoder.encode(JSON.stringify({ exitCode: 1 }))
+          )
+          dropStream(streamId)
+        }
+      })
   }
 
   function handleKill(req: RpcRequest): void {
@@ -167,6 +247,9 @@ export function createHostHandlers(pty: HostPtyManager, socket: HostRelaySocket)
       switch (req.method) {
         case 'pty.create':
           handleCreate(req)
+          break
+        case 'pty.attach':
+          handleAttach(req)
           break
         case 'pty.kill':
           handleKill(req)
