@@ -941,6 +941,10 @@ body,
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Allow text selection / Cmd+C (React Flow nodes are non-selectable by default). */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
 }
 .term-chat__empty {
   margin: auto;
@@ -3479,6 +3483,25 @@ body,
   width: 18px;
   height: 18px;
   flex: none;
+}
+
+/* Settings surface (.nt-settings): Tailwind preflight is intentionally not
+   loaded, so unstyled <button>/<input>/<select> render with the grey native
+   chrome (the light pills in the settings sidebar). Reset ONLY `appearance`
+   here, in plain CSS so it is served in dev and prod alike — no
+   background/border/color, so Tailwind utilities keep full control. */
+.nt-settings button,
+.nt-settings input,
+.nt-settings select,
+.nt-settings textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.nt-settings select::-ms-expand {
+  display: none;
+}
+.nt-settings textarea {
+  resize: vertical;
 }
 .agents-row-label {
   flex: 1;

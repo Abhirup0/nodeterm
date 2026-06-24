@@ -30,14 +30,14 @@ export function SettingsSection({
     return null
   }
   return (
-    <section id={id} data-settings-section={id} className="space-y-5">
-      <div>
-        <h2 className="text-[22px] font-semibold tracking-tight text-text">{title}</h2>
+    <section id={id} data-settings-section={id} className="space-y-6">
+      <div className="border-b border-border pb-5">
+        <h2 className="text-[28px] font-bold leading-tight tracking-tight text-text">{title}</h2>
         {description ? (
-          <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-muted">{description}</p>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">{description}</p>
         ) : null}
       </div>
-      <div className="rounded-xl border border-border bg-white/[0.02] px-5 py-2 shadow-sm">
+      <div className="divide-y divide-border/60 rounded-2xl border border-border bg-white/[0.02] px-6 shadow-sm [&>*]:py-5">
         {children}
       </div>
     </section>
