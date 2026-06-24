@@ -11,6 +11,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { renderMarkdown } from '../lib/markdown'
+import { ChatPanel } from './ChatPanel'
 import { transport as localTransport } from '../terminal/local-transport'
 import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
@@ -26,7 +27,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, agentConfig, type AgentId } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, agentConfig, type AgentId } from '@shared/agents/config'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -80,8 +81,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
   const showLink = !!agentId && canContextLink(agentId) // context-link handles
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
+  const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
   const status = useAgentStatus((s) => s.byId[id])
+  // Use the chat panel only for a chat-capable agent with a known session; otherwise the
+  // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
+  const useChat = mdMode && showChat && !!status?.sessionId
   // Feed the context meter without waiting for a live hook event: after an app restart the
   // continuing tmux session is idle and emits no event, so the main-process tailer is never
   // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
@@ -420,13 +425,15 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
 
-  // When markdown mode turns on, capture the terminal output and render it.
+  // When markdown mode turns on, capture the terminal output and render it. Skipped when the
+  // chat panel is active (it loads its own structured transcript), but still runs as the
+  // fallback when a chat-capable node has no sessionId yet.
   useEffect(() => {
-    if (data.mdMode) {
+    if (data.mdMode && !useChat) {
       // Full scrollback (not just the visible viewport) so the whole session renders.
       void window.nodeTerminal.pty.capture(id, true).then((t) => setMdHtml(renderMarkdown(t)))
     }
-  }, [data.mdMode, id])
+  }, [data.mdMode, id, useChat])
 
   return (
     <div
@@ -622,15 +629,18 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             title="Drag to move · scroll to pan · hover to focus"
           />
         )}
-        {mdMode && (
-          <div className="term-md nodrag nowheel">
-            <div className="term-md__bar">
-              <span>Markdown</span>
-              <span className="term-md__hint">⌘M to exit</span>
+        {mdMode &&
+          (useChat ? (
+            <ChatPanel nodeId={id} sessionId={status?.sessionId} cwd={data.cwd as string | undefined} />
+          ) : (
+            <div className="term-md nodrag nowheel">
+              <div className="term-md__bar">
+                <span>Markdown</span>
+                <span className="term-md__hint">⌘M to exit</span>
+              </div>
+              <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
             </div>
-            <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
-          </div>
-        )}
+          ))}
       </div>
     </div>
   )
