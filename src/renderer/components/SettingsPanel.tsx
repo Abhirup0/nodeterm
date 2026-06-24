@@ -7,7 +7,7 @@ import type { CustomAgent } from '@shared/types'
 import type { PromptInjectionMode } from '@shared/agents/config'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { AgentIcon } from '../lib/agentIcons'
-import { SegmentedPill } from './SegmentedPill'
+import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { isAgentEnabled, setAgentEnabled, setDefaultAgent } from '../state/agentAvailability'
 
 interface SettingsPanelProps {
