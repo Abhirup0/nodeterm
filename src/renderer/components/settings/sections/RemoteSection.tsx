@@ -1,0 +1,139 @@
+import { useState } from 'react'
+import { useEntitlement } from '../../../state/entitlement'
+import { SettingsSection } from '../SettingsSection'
+import { SearchableRow } from '../SearchableRow'
+import { FieldRow } from '../FieldRow'
+import { Button } from '@renderer/ui/Button'
+import { Input } from '@renderer/ui/Input'
+
+const ROWS = {
+  allow: { title: 'Allow remote access', keywords: ['remote', 'host', 'share', 'pairing', 'ssh'] },
+  connect: {
+    title: 'Connect to a host',
+    keywords: ['remote', 'connect', 'client', 'pairing', 'code']
+  }
+}
+const ENTRIES = Object.values(ROWS)
+
+export function RemoteSection({
+  isActive,
+  onClose
+}: {
+  isActive: boolean
+  onClose: () => void
+}): React.JSX.Element {
+  const isPremium = useEntitlement((s) => s.isPremium)
+  const [hostOffer, setHostOffer] = useState('')
+  const [hostBusy, setHostBusy] = useState(false)
+  const [remoteError, setRemoteError] = useState('')
+  const [clientCode, setClientCode] = useState('')
+  const [connecting, setConnecting] = useState(false)
+  const startHosting = async () => {
+    setRemoteError('')
+    setHostBusy(true)
+    try {
+      const { offer } = await window.nodeTerminal.remoteHost.start()
+      setHostOffer(offer)
+    } catch (err) {
+      setRemoteError((err as Error).message)
+      setHostBusy(false)
+    }
+  }
+  const stopHosting = async () => {
+    await window.nodeTerminal.remoteHost.stop()
+    setHostOffer('')
+    setHostBusy(false)
+  }
+  const connectToHost = async () => {
+    const code = clientCode.trim()
+    if (!code) return
+    setRemoteError('')
+    setConnecting(true)
+    try {
+      const connectionId = await window.nodeTerminal.remoteClient.connect(code)
+      setClientCode('')
+      window.dispatchEvent(
+        new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
+      )
+      onClose()
+    } catch (err) {
+      setRemoteError((err as Error).message)
+    } finally {
+      setConnecting(false)
+    }
+  }
+  return (
+    <SettingsSection
+      id="remote"
+      title="Remote access"
+      description="Open terminals that run on another machine you own — end-to-end encrypted over the relay. Hosting (sharing this machine) is Pro; connecting to a host is free."
+      isActive={isActive}
+      searchEntries={ENTRIES}
+    >
+      <SearchableRow {...ROWS.allow}>
+        <div className="space-y-3">
+          <h4 className="text-[13px] font-medium text-text">Allow remote access</h4>
+          {isPremium ? (
+            hostOffer ? (
+              <div className="space-y-2">
+                <p className="text-sm text-muted">
+                  Share this pairing code with the other device (single use):
+                </p>
+                <FieldRow
+                  label="Pairing code"
+                  control={
+                    <Input
+                      className="w-72"
+                      readOnly
+                      value={hostOffer}
+                      onFocus={(e) => e.target.select()}
+                    />
+                  }
+                />
+                <div className="flex gap-2">
+                  <Button onClick={() => window.nodeTerminal.clipboard.writeText(hostOffer)}>
+                    Copy code
+                  </Button>
+                  <Button onClick={() => void stopHosting()}>Stop sharing</Button>
+                </div>
+              </div>
+            ) : (
+              <Button disabled={hostBusy} onClick={() => void startHosting()}>
+                {hostBusy ? 'Starting…' : 'Allow remote access'}
+              </Button>
+            )
+          ) : (
+            <p className="text-sm text-muted">
+              Hosting this machine requires nodeterm Pro — upgrade above. Connecting to a host you
+              were given a code for is free.
+            </p>
+          )}
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.connect}>
+        <div className="mt-4 space-y-3">
+          <h4 className="text-[13px] font-medium text-text">Connect to a host</h4>
+          <FieldRow
+            label="Pairing code"
+            control={
+              <Input
+                className="w-72"
+                placeholder="paste the host's code"
+                value={clientCode}
+                onChange={(e) => setClientCode(e.target.value)}
+              />
+            }
+          />
+          <Button disabled={connecting || !clientCode.trim()} onClick={() => void connectToHost()}>
+            {connecting ? 'Connecting…' : 'Connect'}
+          </Button>
+          {remoteError ? (
+            <p className="text-sm" style={{ color: '#ff9f0a' }}>
+              {remoteError}
+            </p>
+          ) : null}
+        </div>
+      </SearchableRow>
+    </SettingsSection>
+  )
+}
