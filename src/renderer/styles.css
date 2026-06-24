@@ -941,6 +941,10 @@ body,
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Allow text selection / Cmd+C (React Flow nodes are non-selectable by default). */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
 }
 .term-chat__empty {
   margin: auto;
