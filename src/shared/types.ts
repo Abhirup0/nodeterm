@@ -443,6 +443,22 @@ export interface BridgeApi {
   onMessage(listener: (m: BridgeMessage) => void): () => void
 }
 
+/** One linked node, as the context-link CLI sees it. */
+export interface ContextLinkInfo {
+  id: string
+  title: string
+  /** The linked node's working dir — lets the CLI resolve a transcript when the path isn't known yet. */
+  cwd?: string
+}
+
+/** Map of node id → the nodes it is context-linked to. Sent to main so it can write link files. */
+export type ContextLinkMap = Record<string, ContextLinkInfo[]>
+
+export interface ContextLinkApi {
+  /** Push the current link map to main; main rewrites the per-node link files. */
+  setLinks(map: ContextLinkMap): Promise<void>
+}
+
 /** One usage window (5h session or 7d weekly) as shown in the indicator. */
 export interface ClaudeUsageWindow {
   /** 0–100; remaining quota. Drives the bar fill (REF shows "remaining"). */

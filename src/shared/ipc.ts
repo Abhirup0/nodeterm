@@ -22,6 +22,7 @@ export const IPC = {
   bridgeConfigPath: 'bridge:config-path',
   bridgeSetTopology: 'bridge:set-topology',
   bridgeMessage: 'bridge:message',
+  contextLinkSetLinks: 'context-link:set-links',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appUpdateProgress: 'app:update-progress',

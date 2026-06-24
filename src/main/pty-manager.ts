@@ -8,9 +8,7 @@ import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type PtyCreateOptions, type Settings } from '../shared/types'
 import { hookServer } from './agents/hook-server'
-
-// A dedicated tmux socket isolates our sessions from the user's own tmux server.
-const TMUX_SOCKET = 'node-terminal'
+import { TMUX_SOCKET, sessionName } from './tmux-naming'
 
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
@@ -61,11 +59,6 @@ function findTmux(): string | null {
     // ignore
   }
   return null
-}
-
-/** tmux session names may not contain '.', ':' or whitespace. */
-function sessionName(persistKey: string): string {
-  return `nt-${persistKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`
 }
 
 interface Session {
@@ -133,6 +126,11 @@ export class PtyManager {
     } catch {
       // no server running yet — ignore
     }
+  }
+
+  /** Absolute tmux path (or null if tmux is unavailable). Used by the context-link backend. */
+  getTmuxBin(): string | null {
+    return this.tmuxPath
   }
 
   registerIpc(): void {
