@@ -51,6 +51,8 @@ export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
 export const CONTEXT_LINK_CAPABLE = ['claude'] as const
 export const USAGE_CAPABLE = ['claude'] as const
+// Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
+export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 
@@ -63,6 +65,7 @@ export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
 export const canContextLink = (id: AgentId): boolean => includes(CONTEXT_LINK_CAPABLE, id)
 export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
+export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 
 // Returns the builtin config for an id, or undefined for custom/unknown agents.

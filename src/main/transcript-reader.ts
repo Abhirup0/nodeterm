@@ -4,7 +4,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { TranscriptLine } from '../shared/types'
+import type { TranscriptLine, ChatMessage, ChatPart } from '../shared/types'
 
 // Only read the last ~5 MB of a transcript so a very large session can't block the main
 // process. The older head is dropped silently (search is most useful on recent context).
@@ -64,8 +64,9 @@ function linesFrom(raw: string): TranscriptLine[] {
   return out
 }
 
-export async function readTranscriptLines(filePath: string): Promise<TranscriptLine[]> {
-  let buf: string
+// Read the last ~READ_CAP_BYTES of the file as UTF-8 (dropping the partial leading line on a
+// capped read), or the whole file when it's small. Returns undefined if it can't be read.
+async function readCappedTail(filePath: string): Promise<string | undefined> {
   try {
     const stat = await fs.promises.stat(filePath)
     if (stat.size > READ_CAP_BYTES) {
@@ -77,23 +78,92 @@ export async function readTranscriptLines(filePath: string): Promise<TranscriptL
           length: READ_CAP_BYTES,
           buffer: Buffer.alloc(READ_CAP_BYTES)
         })
-        buf = buffer.toString('utf8')
+        const s = buffer.toString('utf8')
+        const nl = s.indexOf('\n') // drop the first (partial) line
+        return nl >= 0 ? s.slice(nl + 1) : s
       } finally {
         await fd.close()
       }
-      const nl = buf.indexOf('\n') // drop the first (partial) line
-      if (nl >= 0) buf = buf.slice(nl + 1)
-    } else {
-      buf = await fs.promises.readFile(filePath, 'utf8')
     }
+    return await fs.promises.readFile(filePath, 'utf8')
   } catch {
-    return []
+    return undefined
   }
+}
+
+export async function readTranscriptLines(filePath: string): Promise<TranscriptLine[]> {
+  const buf = await readCappedTail(filePath)
+  if (buf === undefined) return []
   const lines: TranscriptLine[] = []
   for (const raw of buf.split('\n')) {
     if (raw.trim()) lines.push(...linesFrom(raw))
   }
   return lines
+}
+
+// Reconstruct structured chat messages from raw transcript JSONL lines. An assistant line's
+// text + tool_use blocks become one message's ordered parts; a later user-line tool_result is
+// correlated back onto its tool part by tool_use_id. User lines that carry only tool_results
+// (no prose) are NOT rendered as bubbles — they're tool output, attached to the tool instead.
+export function parseChatMessages(rawLines: string[]): ChatMessage[] {
+  const messages: ChatMessage[] = []
+  const toolById = new Map<string, Extract<ChatPart, { kind: 'tool' }>>()
+  for (const raw of rawLines) {
+    if (!raw.trim()) continue
+    let o: { type?: string; message?: { content?: unknown } }
+    try {
+      o = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    const content = o.message?.content
+    if (o.type === 'assistant' && Array.isArray(content)) {
+      const parts: ChatPart[] = []
+      for (const c of content as Array<{
+        type?: string
+        text?: string
+        name?: string
+        id?: string
+        input?: unknown
+      }>) {
+        if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
+        else if (c.type === 'tool_use') {
+          const part: Extract<ChatPart, { kind: 'tool' }> = {
+            kind: 'tool',
+            name: c.name ?? 'tool',
+            arg: toolArg(c.input)
+          }
+          parts.push(part)
+          if (c.id) toolById.set(c.id, part)
+        }
+      }
+      if (parts.length) messages.push({ role: 'assistant', parts })
+    } else if (o.type === 'user' && Array.isArray(content)) {
+      const parts: ChatPart[] = []
+      for (const c of content as Array<{
+        type?: string
+        text?: string
+        tool_use_id?: string
+        content?: unknown
+      }>) {
+        if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
+        else if (c.type === 'tool_result') {
+          const tool = c.tool_use_id ? toolById.get(c.tool_use_id) : undefined
+          if (tool) tool.result = summarizeResult(c.content)
+        }
+      }
+      if (parts.length) messages.push({ role: 'user', parts })
+    } else if (o.type === 'user' && typeof content === 'string' && content.trim()) {
+      messages.push({ role: 'user', parts: [{ kind: 'text', text: content }] })
+    }
+  }
+  return messages
+}
+
+export async function readChatMessages(filePath: string): Promise<ChatMessage[]> {
+  const buf = await readCappedTail(filePath)
+  if (buf === undefined) return []
+  return parseChatMessages(buf.split('\n'))
 }
 
 // Claude session ids are UUID-like (hex + dashes). Reject anything else before it

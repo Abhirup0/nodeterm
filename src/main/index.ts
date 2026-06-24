@@ -15,6 +15,7 @@ import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
 import {
   readTranscriptLines,
+  readChatMessages,
   resolveTranscriptPath,
   transcriptPathForCwd,
   SESSION_ID_RE
@@ -205,17 +206,34 @@ app.whenReady().then(async () => {
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(win)
   const contextTail = createContextTail(win)
+  // Resolve a session's transcript path: prefer the exact session path when a (valid)
+  // sessionId is known; otherwise fall back to the node's cwd, which is durable and doesn't
+  // need a live hook event.
+  const resolveTranscript = async (
+    sessionId: string | undefined,
+    cwd: string | undefined
+  ): Promise<string | undefined> => {
+    let p: string | undefined
+    if (sessionId && SESSION_ID_RE.test(sessionId)) {
+      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+    }
+    if (!p && cwd) p = await transcriptPathForCwd(cwd)
+    return p
+  }
+
   ipcMain.handle(
     IPC.claudeReadTranscript,
     async (_e, sessionId: string | undefined, cwd: string | undefined) => {
-      // Prefer the exact session path when a (valid) sessionId is known; otherwise fall
-      // back to the node's cwd, which is durable and doesn't need a live hook event.
-      let p: string | undefined
-      if (sessionId && SESSION_ID_RE.test(sessionId)) {
-        p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
-      }
-      if (!p && cwd) p = await transcriptPathForCwd(cwd)
+      const p = await resolveTranscript(sessionId, cwd)
       return p ? readTranscriptLines(p) : []
+    }
+  )
+
+  ipcMain.handle(
+    IPC.chatReadTranscript,
+    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+      const p = await resolveTranscript(sessionId, cwd)
+      return p ? readChatMessages(p) : []
     }
   )
   // Populate the context meter without a live hook event: the renderer calls this on mount

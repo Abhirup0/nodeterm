@@ -490,6 +490,29 @@ export interface TranscriptLine {
   text: string
 }
 
+/** One ordered piece of a chat message: prose, or a tool call with an optional result. */
+export type ChatPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; name: string; arg: string; result?: string }
+
+/** A structured chat message reconstructed from a Claude session transcript. */
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  parts: ChatPart[]
+}
+
+export interface ChatApi {
+  /**
+   * Reads a Claude session transcript as structured chat messages ([] if unavailable).
+   * Resolves the transcript like `ClaudeApi.readTranscript` (sessionId → cwd), then
+   * reconstructs ordered bubbles + tool calls.
+   */
+  readTranscript(
+    sessionId: string | undefined,
+    cwd: string | undefined
+  ): Promise<ChatMessage[]>
+}
+
 export interface ClaudeApi {
   /**
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
@@ -626,6 +649,7 @@ export interface NodeTerminalApi {
   usage: UsageApi
   context: ContextApi
   claude: ClaudeApi
+  chat: ChatApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi
   handoff: HandoffApi

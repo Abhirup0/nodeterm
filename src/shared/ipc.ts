@@ -11,6 +11,7 @@ export const IPC = {
   ptyCapture: 'pty:capture',
   ptySendText: 'pty:send-text',
   claudeReadTranscript: 'claude:read-transcript',
+  chatReadTranscript: 'chat:read-transcript',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
   appCloseWindow: 'app:close-window',

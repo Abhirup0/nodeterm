@@ -176,6 +176,10 @@ const api: NodeTerminalApi = {
     readTranscript: (sessionId, cwd) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
   },
+  chat: {
+    readTranscript: (sessionId, cwd) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd)
+  },
   remoteHost: {
     start: () => ipcRenderer.invoke(IPC.remoteHostStart),
     stop: () => ipcRenderer.invoke(IPC.remoteHostStop),
