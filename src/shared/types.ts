@@ -54,6 +54,22 @@ export interface CanvasNodeState {
   commitOid?: string
 }
 
+/**
+ * A snapshot of one canvas's nodes in the form sent over the remote mirror wire.
+ * Reuses the persisted node shape (`CanvasNodeState`) so host and client agree on layout.
+ */
+export interface CanvasState {
+  nodes: CanvasNodeState[]
+}
+
+/**
+ * A minimal change to a canvas node list: replace-or-append a node by id, or drop one by id.
+ * Used for the client's optimistic edits and host-side diffing (see `applyMutation`/`diffToMutations`).
+ */
+export type CanvasMutation =
+  | { op: 'upsert'; node: CanvasNodeState }
+  | { op: 'remove'; id: string }
+
 /** Canvas pan/zoom state. */
 export interface Viewport {
   x: number
