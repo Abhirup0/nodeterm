@@ -26,7 +26,7 @@ export function SettingsSidebar({
           type="button"
           onClick={onClose}
           aria-label="Close settings"
-          className="flex size-6 items-center justify-center rounded-md text-muted transition-colors hover:bg-white/5 hover:text-text"
+          className="flex size-6 items-center justify-center rounded-md bg-panel text-muted transition-colors hover:bg-white/10 hover:text-text"
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
             <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
@@ -78,8 +78,8 @@ export function SettingsSidebar({
                   className={cn(
                     'group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] transition-colors',
                     isActive
-                      ? 'bg-white/[0.07] font-medium text-text ring-1 ring-inset ring-white/10'
-                      : 'text-muted hover:bg-white/[0.04] hover:text-text',
+                      ? 'bg-white/[0.09] font-medium text-text ring-1 ring-inset ring-white/10'
+                      : 'bg-panel text-muted hover:bg-white/[0.05] hover:text-text',
                     dimmed && 'opacity-35'
                   )}
                 >
