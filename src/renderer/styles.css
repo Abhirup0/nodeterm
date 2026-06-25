@@ -422,6 +422,30 @@ body,
   border-color: var(--accent);
 }
 
+/* Unread (agent finished while unfocused): a blue glow around the whole node so it's
+   obvious at a glance, not just the small header badge. Pulses gently to draw the eye.
+   Selecting the node clears unread, so this never fights the selection ring. */
+.term-node.unread {
+  border-color: var(--accent);
+  animation: nt-unread-glow 2s ease-in-out infinite;
+}
+
+@keyframes nt-unread-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(10, 132, 255, 0.5),
+      0 0 16px 1px rgba(10, 132, 255, 0.35),
+      0 8px 28px rgba(0, 0, 0, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(10, 132, 255, 0.8),
+      0 0 26px 4px rgba(10, 132, 255, 0.6),
+      0 8px 28px rgba(0, 0, 0, 0.4);
+  }
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent. */
 .react-flow__handle.bridge-handle {
