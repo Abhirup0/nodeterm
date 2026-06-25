@@ -464,9 +464,19 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
   }, [data.mdMode, id, useChat])
 
+  // Unread = the agent finished (not still working/waiting/blocked) while you weren't looking.
+  // Drives both the header badge and a node-wide glow so it's obvious at a glance.
+  const isUnread =
+    !!status?.unread &&
+    status?.state !== 'working' &&
+    status?.state !== 'waiting' &&
+    status?.state !== 'blocked'
+
   return (
     <div
-      className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}
+      className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
+        isUnread ? ' unread' : ''
+      }`}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
@@ -585,10 +595,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             NEEDS YOU
           </span>
         )}
-        {status?.unread &&
-          status?.state !== 'working' &&
-          status?.state !== 'waiting' &&
-          status?.state !== 'blocked' && (
+        {isUnread && (
             <span
               className="term-node__status term-node__status--unread"
               title="Finished — click to mark read"
