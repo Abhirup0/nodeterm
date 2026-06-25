@@ -841,8 +841,12 @@ export function Canvas() {
     (ids: string[]) => {
       const set = new Set(ids)
       nodesRef.current.forEach((n) => {
+        if (!set.has(n.id)) return
         // Remote terminals have no local persistent session — only destroy local ones.
-        if (set.has(n.id) && n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        // Permanent deletion → drop the node's persisted agent status (sessionId/session/
+        // unread). Node unmount no longer does this, so deletion must.
+        useAgentStatus.getState().remove(n.id)
       })
       // Tear down relay connections owned solely by the deleted remote node(s). The model is
       // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
@@ -1573,9 +1577,11 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
-      // End the tmux sessions of every terminal in the deleted project.
+      // End the tmux sessions of every terminal in the deleted project, and drop their
+      // persisted agent status (node unmount no longer removes it).
       store.getProject(id)?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
+        useAgentStatus.getState().remove(n.id)
       })
       store.deleteProject(id)
       void writeDisk()
