@@ -60,6 +60,7 @@ export const IPC = {
   sshList: 'ssh:list',
   sshSave: 'ssh:save',
   sshDelete: 'ssh:delete',
+  sshImport: 'ssh:import-candidates',
   gitStatus: 'git:status',
   gitInit: 'git:init',
   gitClone: 'git:clone',

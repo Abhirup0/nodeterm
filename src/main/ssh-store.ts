@@ -1,8 +1,9 @@
 import { promises as fs, readFileSync } from 'fs'
+import os from 'os'
 import path from 'path'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
-import type { SshServer } from '../shared/ssh'
+import { parseSshConfig, type ParsedSshHost, type SshServer } from '../shared/ssh'
 
 /**
  * Stores saved SSH servers in ssh-servers.json. Keeps a synchronous cache so reads are
@@ -57,9 +58,20 @@ export class SshStore {
     return this.writeChain
   }
 
+  /** Parse the user's `~/.ssh/config` into importable hosts (empty if it doesn't exist). */
+  async importCandidates(): Promise<ParsedSshHost[]> {
+    try {
+      const text = await fs.readFile(path.join(os.homedir(), '.ssh', 'config'), 'utf-8')
+      return parseSshConfig(text)
+    } catch {
+      return []
+    }
+  }
+
   registerIpc(): void {
     ipcMain.handle(IPC.sshList, () => this.list())
     ipcMain.handle(IPC.sshSave, (_e, server: SshServer) => this.save(server))
     ipcMain.handle(IPC.sshDelete, (_e, id: string) => this.remove(id))
+    ipcMain.handle(IPC.sshImport, () => this.importCandidates())
   }
 }

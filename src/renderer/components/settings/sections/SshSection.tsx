@@ -18,10 +18,40 @@ const ENTRIES = Object.values(ROWS)
 export function SshSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const sshServers = useSshServers((s) => s.servers)
   const [sshDraft, setSshDraft] = useState<SshServer | null>(null)
+  const [importMsg, setImportMsg] = useState<string | null>(null)
 
   useEffect(() => {
     void useSshServers.getState().hydrate()
   }, [])
+
+  // Import named hosts from ~/.ssh/config. Dedupe against saved servers by user@host:port and
+  // skip hosts without a User (can't form a usable connection); the user can add those by hand.
+  const importFromConfig = async () => {
+    const key = (s: { user?: string; host: string; port?: number }) =>
+      `${s.user ?? ''}@${s.host}:${s.port ?? 22}`
+    const candidates = await window.nodeTerminal.ssh.importCandidates()
+    const withUser = candidates.filter((c) => c.user)
+    const skipped = candidates.length - withUser.length
+    const seen = new Set(useSshServers.getState().servers.map(key))
+    const fresh = withUser.filter((c) => !seen.has(key(c)))
+    for (const c of fresh) {
+      await useSshServers.getState().save({
+        id: crypto.randomUUID(),
+        label: c.label,
+        host: c.host,
+        user: c.user as string,
+        port: c.port,
+        identityFile: c.identityFile
+      })
+    }
+    setImportMsg(
+      candidates.length === 0
+        ? 'No hosts found in ~/.ssh/config'
+        : `${fresh.length ? `Imported ${fresh.length} server${fresh.length === 1 ? '' : 's'}` : 'No new servers to import'}${
+            skipped ? ` · skipped ${skipped} without a user` : ''
+          }`
+    )
+  }
 
   const saveDisabled =
     !sshDraft ||
@@ -161,19 +191,25 @@ export function SshSection({ isActive }: { isActive: boolean }): React.JSX.Eleme
               </div>
             </div>
           ) : (
-            <Button
-              onClick={() =>
-                setSshDraft({
-                  id: crypto.randomUUID(),
-                  label: '',
-                  host: '',
-                  user: '',
-                  port: 22
-                })
-              }
-            >
-              Add server
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() =>
+                  setSshDraft({
+                    id: crypto.randomUUID(),
+                    label: '',
+                    host: '',
+                    user: '',
+                    port: 22
+                  })
+                }
+              >
+                Add server
+              </Button>
+              <Button variant="ghost" onClick={() => void importFromConfig()}>
+                Import from ~/.ssh/config
+              </Button>
+              {importMsg && <span className="text-xs text-muted">{importMsg}</span>}
+            </div>
           )}
         </div>
       </SearchableRow>
