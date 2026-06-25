@@ -190,6 +190,11 @@ export interface FsApi {
   write(filePath: string, content: string): Promise<boolean>
 }
 
+export interface FilesApi {
+  /** Fuzzy-open file index for a project root: root-relative `/`-paths ([] on failure). */
+  quickOpen(cwd: string): Promise<string[]>
+}
+
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
  * terminal-title + process status (no hooks/branch/loop/bridge). */
 export interface CustomAgent {
@@ -664,6 +669,7 @@ export interface NodeTerminalApi {
   clipboard: ClipboardApi
   shell: ShellApi
   fs: FsApi
+  files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi

@@ -185,6 +185,7 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.fsWrite, (_e, filePath: string, content: string) =>
     fsOps.writeText(filePath, content)
   )
+  ipcMain.handle(IPC.filesQuickOpen, (_e, cwd: string) => fsOps.listQuickOpenFiles(cwd))
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

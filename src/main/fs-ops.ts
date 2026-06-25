@@ -9,9 +9,17 @@
 // empty/false rather than throwing, so a missing file or unreadable dir degrades gracefully.
 
 import { promises as fs } from 'fs'
-import { execFile } from 'child_process'
+import { sep } from 'path'
+import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import type { DirEntry } from '../shared/types'
+import {
+  buildRgArgsForQuickOpen,
+  buildGitLsFilesArgs,
+  normalizeQuickOpenRgLine,
+  shouldIncludeQuickOpenPath,
+  HIDDEN_DIR_BLOCKLIST
+} from '../shared/quick-open-filter'
 
 const run = promisify(execFile)
 
@@ -83,4 +91,113 @@ export async function writeText(filePath: string, content: string): Promise<bool
   } catch {
     return false
   }
+}
+
+const QUICK_OPEN_FILE_CAP = 50_000
+const QUICK_OPEN_TIMEOUT_MS = 10_000
+
+// Spawn a lister command, stream stdout split on `splitChar`, normalize+filter each path into
+// `out`. Resolves with `true` on a clean run, `false` on spawn error / nonzero-ish exit, so the
+// caller can fall through to the next strategy. Never rejects.
+function runLister(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  splitChar: string,
+  out: Set<string>
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let buf = ''
+    let settled = false
+    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+    const timer = setTimeout(() => child.kill(), QUICK_OPEN_TIMEOUT_MS)
+    const take = (line: string): void => {
+      if (out.size >= QUICK_OPEN_FILE_CAP) return
+      const rel = normalizeQuickOpenRgLine(line)
+      if (rel && shouldIncludeQuickOpenPath(rel)) out.add(rel)
+    }
+    const finish = (ok: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(ok)
+    }
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      buf += chunk
+      let idx = buf.indexOf(splitChar)
+      while (idx !== -1) {
+        take(buf.slice(0, idx))
+        buf = buf.slice(idx + 1)
+        idx = buf.indexOf(splitChar)
+      }
+    })
+    child.on('error', () => finish(false))
+    child.on('close', (code) => {
+      if (buf) take(buf)
+      // rg: 0=matches, 1=no matches, 2=partial (unreadable subdir) — all usable. git: 0.
+      finish(code === 0 || code === 1 || (code === 2 && out.size > 0))
+    })
+  })
+}
+
+// Last-resort BFS walk for non-git roots with no rg. Prunes the blocklist + node_modules,
+// caps total. Returns root-relative `/`-paths.
+async function walkDirCapped(rootPath: string): Promise<string[]> {
+  const out: string[] = []
+  const queue: string[] = ['']
+  while (queue.length && out.length < QUICK_OPEN_FILE_CAP) {
+    const rel = queue.shift() as string
+    let dirents: import('fs').Dirent[]
+    try {
+      dirents = await fs.readdir(rel ? `${rootPath}/${rel}` : rootPath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const d of dirents) {
+      if (d.name === 'node_modules' || HIDDEN_DIR_BLOCKLIST.has(d.name)) continue
+      const childRel = rel ? `${rel}/${d.name}` : d.name
+      if (d.isDirectory()) queue.push(childRel)
+      else if (d.isFile() && out.length < QUICK_OPEN_FILE_CAP) out.push(childRel)
+    }
+  }
+  return out
+}
+
+let rgChecked: boolean | null = null
+async function rgAvailable(): Promise<boolean> {
+  if (rgChecked !== null) return rgChecked
+  rgChecked = await new Promise<boolean>((resolve) => {
+    const child = spawn('rg', ['--version'], { stdio: 'ignore' })
+    child.on('error', () => resolve(false))
+    child.on('close', (code) => resolve(code === 0))
+  })
+  return rgChecked
+}
+
+/**
+ * Fuzzy-open file index for `rootPath`: root-relative `/`-paths. Two passes (tracked + ignored
+ * so git-ignored build output like dist/*.dmg appears) minus a noise blocklist. rg →
+ * git ls-files → capped readdir walk. Always resolves ([] if everything fails).
+ */
+export async function listQuickOpenFiles(rootPath: string): Promise<string[]> {
+  try {
+    const st = await fs.stat(rootPath)
+    if (!st.isDirectory()) return []
+  } catch {
+    return []
+  }
+  const out = new Set<string>()
+  if (await rgAvailable()) {
+    const { primary, ignoredPass } = buildRgArgsForQuickOpen({ forceSlashSeparator: sep === '\\' })
+    await runLister('rg', primary, rootPath, '\n', out)
+    await runLister('rg', ignoredPass, rootPath, '\n', out)
+  }
+  if (out.size === 0) {
+    const { primary, ignoredPass } = buildGitLsFilesArgs()
+    const okPrimary = await runLister('git', primary, rootPath, '\0', out)
+    if (okPrimary) await runLister('git', ignoredPass, rootPath, '\0', out)
+    if (!okPrimary) for (const p of await walkDirCapped(rootPath)) out.add(p)
+  }
+  return [...out].sort().slice(0, QUICK_OPEN_FILE_CAP)
 }

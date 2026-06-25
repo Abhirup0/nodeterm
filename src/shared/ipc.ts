@@ -54,6 +54,7 @@ export const IPC = {
   fsRead: 'fs:read',
   fsReadBinary: 'fs:read-binary',
   fsWrite: 'fs:write',
+  filesQuickOpen: 'files:quick-open',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   gitStatus: 'git:status',

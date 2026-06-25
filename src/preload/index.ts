@@ -121,6 +121,9 @@ const api: NodeTerminalApi = {
     readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
   },
+  files: {
+    quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
+  },
   updates: {
     onAvailable: (listener) => {
       const handler = (_e: unknown, info: UpdateInfo) => listener(info)
