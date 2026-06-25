@@ -61,6 +61,33 @@ function findTmux(): string | null {
   return null
 }
 
+/** Resolve an absolute ssh path (GUI apps don't inherit the shell PATH). */
+let cachedSsh: string | null | undefined
+function findSsh(): string | null {
+  if (cachedSsh !== undefined) return cachedSsh
+  try {
+    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v ssh'], {
+      encoding: 'utf-8'
+    }).trim()
+    cachedSsh = out || null
+  } catch {
+    cachedSsh = null
+  }
+  // Common fallback locations if the login shell lookup failed.
+  if (!cachedSsh) {
+    for (const p of ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh']) {
+      try {
+        execFileSync(p, ['-V'], { stdio: 'ignore' })
+        cachedSsh = p
+        break
+      } catch {
+        // keep trying
+      }
+    }
+  }
+  return cachedSsh ?? null
+}
+
 interface Session {
   proc: pty.IPty
   /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
@@ -230,6 +257,12 @@ export class PtyManager {
     let file: string
     let args: string[]
 
+    // Resolve the session program. A bare 'ssh' is resolved to an absolute path because GUI
+    // apps don't inherit the shell PATH; its args come from options.shellArgs.
+    const reqShell = options.shell
+    const program = reqShell === 'ssh' ? findSsh() ?? 'ssh' : reqShell
+    const programArgs = options.shellArgs ?? []
+
     if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
       // attach-or-create the persistent session for this node; -D detaches any stale client.
       // `-e` sets the session environment explicitly (the tmux server is shared, so relying
@@ -252,16 +285,19 @@ export class PtyManager {
         '-s',
         sessionName(options.persistKey)
       ]
-      // Honor a custom default shell at session creation (ignored on reattach).
-      const shell = options.shell || settings.defaultShell
-      if (shell) args.push(shell)
+      // Honor a custom session program at creation (ignored on reattach).
+      const shell = program || settings.defaultShell
+      if (shell) {
+        args.push(shell)
+        args.push(...programArgs)
+      }
     } else {
       file =
-        options.shell ||
+        program ||
         settings.defaultShell ||
         process.env.SHELL ||
         (os.platform() === 'win32' ? 'powershell.exe' : 'bash')
-      args = []
+      args = program ? programArgs : []
     }
 
     const proc = pty.spawn(file, args, {

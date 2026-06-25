@@ -5,6 +5,8 @@ import type { AgentId, PromptInjectionMode } from './agents/config'
 
 export interface PtyCreateOptions {
   shell?: string
+  /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
+  shellArgs?: string[]
   cwd?: string
   cols: number
   rows: number
@@ -44,6 +46,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
+  ssh?: import('./ssh').SshConnection
   // sticky-only
   text?: string
   // editor / diff
@@ -269,6 +273,12 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface SettingsApi {
   load(): Promise<Settings>
   save(settings: Settings): Promise<void>
+}
+
+export interface SshApi {
+  list(): Promise<import('./ssh').SshServer[]>
+  save(server: import('./ssh').SshServer): Promise<import('./ssh').SshServer[]>
+  remove(id: string): Promise<import('./ssh').SshServer[]>
 }
 
 export interface GitFileChange {
@@ -665,6 +675,7 @@ export interface NodeTerminalApi {
   workspace: WorkspaceApi
   dialog: DialogApi
   settings: SettingsApi
+  ssh: SshApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi

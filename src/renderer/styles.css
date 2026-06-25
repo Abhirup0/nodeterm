@@ -548,6 +548,21 @@ body,
   border-radius: 6px;
 }
 
+/* SSH-bound terminal: user@host chip beside the title. Mirrors the session chip. */
+.term-ssh-chip {
+  margin-left: 8px;
+  max-width: 180px;
+  padding: 1px 8px;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;
@@ -3729,3 +3744,89 @@ body,
   background: var(--panel-2);
   color: var(--text);
 }
+/* Sessions sidebar — row + status dot */
+@keyframes nt-spin { to { transform: rotate(360deg); } }
+
+.ss-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.ss-row:hover { background: var(--panel-header); }
+.ss-row.is-active { background: rgba(255, 255, 255, 0.06); border-color: var(--border); }
+
+.ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
+.ss-dot--idle { background: rgba(160, 160, 160, 0.4); }
+.ss-dot--done { background: #30d158; }
+.ss-dot--attention { background: #ffd60a; }
+.ss-dot--working {
+  background: transparent;
+  border: 2px solid #ffd60a;
+  border-top-color: transparent;
+  animation: nt-spin 1s steps(12, end) infinite;
+}
+
+.ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.ss-row__titleline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-title.is-unread { font-weight: 600; }
+.ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
+.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.ss-loop { font-size: 9.5px; color: #ffd60a; border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
+.ss-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: rgba(180, 180, 185, 0.85); min-width: 0; }
+.ss-meta__cwd { font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-meta__ssh { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.ss-ctx { font-size: 9.5px; padding: 0 5px; border-radius: 4px; color: #000; font-weight: 600; flex: 0 0 auto; }
+.ss-row__close { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-row:hover .ss-row__close { opacity: 0.6; }
+.ss-row__close:hover { opacity: 1 !important; color: #ff453a; }
+
+/* Sessions sidebar — shell */
+.sessions-sidebar {
+  position: absolute;
+  top: 54px;
+  left: 14px;
+  z-index: 12;
+  width: 300px;
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 28, 30, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.sessions-sidebar__head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.sessions-sidebar__title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.sessions-sidebar__count { font-size: 10.5px; color: rgba(180, 180, 185, 0.85); }
+.sessions-sidebar__head-actions { margin-left: auto; display: flex; gap: 4px; }
+.sessions-sidebar__head-actions button { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; color: var(--text); cursor: pointer; border-radius: 6px; }
+.sessions-sidebar__head-actions button:hover { background: var(--panel-header); }
+.sessions-sidebar__head-actions button.is-on { color: var(--accent); }
+.sessions-sidebar__search { margin: 8px 10px 4px; }
+.sessions-sidebar__search input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 8px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
+.sessions-sidebar__body { overflow-y: auto; padding: 4px 6px 8px; }
+.sessions-sidebar__empty { padding: 18px 12px; text-align: center; font-size: 12px; color: rgba(180, 180, 185, 0.8); }
+
+.ss-group__head { display: flex; align-items: center; gap: 6px; padding: 6px 6px; cursor: pointer; border-radius: 6px; }
+.ss-group__head:hover { background: var(--panel-header); }
+.ss-group__chev { font-size: 9px; color: rgba(180, 180, 185, 0.85); width: 10px; }
+.ss-group__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.ss-group__name { font-size: 12px; font-weight: 600; color: var(--text); }
+.ss-group.is-active .ss-group__name { color: var(--accent); }
+.ss-group__branch { font-size: 10px; color: rgba(180, 180, 185, 0.8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-group__count { font-size: 10px; color: rgba(180, 180, 185, 0.8); }
+.ss-group__add { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
+.ss-group__head:hover .ss-group__add { opacity: 0.7; }
+.ss-group__add:hover { opacity: 1 !important; color: var(--accent); }
+.ss-group__empty { padding: 4px 8px 6px 22px; font-size: 11px; color: rgba(180, 180, 185, 0.6); }
+
+.sessions-icon-cluster { position: absolute; top: 54px; left: 14px; z-index: 11; }
+.sessions-icon-cluster button { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; background: rgba(40, 40, 42, 0.92); border: 1px solid var(--border); border-radius: 9px; color: var(--text); cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3); }
+.sessions-icon-cluster button:hover { background: var(--panel-header); }

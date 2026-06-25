@@ -159,3 +159,19 @@ export const IconSearch = () => (
     <path d="M21 21l-4.35-4.35" />
   </svg>
 )
+
+export const IconSessions = () => (
+  <svg {...S}>
+    <rect x="3" y="4" width="18" height="5" rx="1.5" />
+    <rect x="3" y="11" width="18" height="5" rx="1.5" />
+    <line x1="6" y1="6.5" x2="6" y2="6.5" />
+    <line x1="6" y1="13.5" x2="6" y2="13.5" />
+  </svg>
+)
+
+export const IconPin = () => (
+  <svg {...S}>
+    <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z" />
+    <line x1="12" y1="14" x2="12" y2="21" />
+  </svg>
+)

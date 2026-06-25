@@ -40,6 +40,7 @@ import {
   IconRemote,
   IconSave,
   IconSelectAll,
+  IconSessions,
   IconSwitch,
   IconTerminal,
   IconTrash,
@@ -52,8 +53,12 @@ import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { UpgradeDialog } from '../components/UpgradeDialog'
+import { RemotePicker } from '../components/RemotePicker'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
+import { SessionsSidebar } from '../components/SessionsSidebar'
+import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
 import { transport } from '../terminal/local-transport'
@@ -79,6 +84,9 @@ import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
+import { useSshServers } from '../state/sshServers'
+import { requireProOr } from '../state/upgradeGate'
+import type { SshServer } from '@shared/ssh'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -86,6 +94,7 @@ import {
   createAgentNode,
   createDiffNode,
   createEditorNode,
+  createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
   duplicateNode,
@@ -114,6 +123,7 @@ export function Canvas() {
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
+  const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
   // Cached visible-buffer text per terminal, for command-palette content search.
@@ -126,6 +136,19 @@ export function Canvas() {
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
   const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
+  // Sessions sidebar (left): hover-to-peek + click-to-pin (persisted).
+  const [sessionsPinned, setSessionsPinned] = useState(() => {
+    try {
+      return localStorage.getItem('nodeterm.sessionsPinned') === '1'
+    } catch {
+      return false
+    }
+  })
+  const [sessionsHover, setSessionsHover] = useState(false)
+  const sessionsOpen = sessionsPinned || sessionsHover
+  // When set, add a terminal to this project once its nodes have loaded into React Flow
+  // (cross-project "add" from the sidebar, which must switch projects first).
+  const pendingAddRef = useRef<string | null>(null)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{
@@ -316,6 +339,63 @@ export function Canvas() {
     return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
   }, [linkEdges, ephemeralEdges, accent])
 
+  const toggleSessionsPin = useCallback(() => {
+    setSessionsPinned((v) => {
+      const next = !v
+      try {
+        localStorage.setItem('nodeterm.sessionsPinned', next ? '1' : '0')
+      } catch {
+        // ignore
+      }
+      if (!next) setSessionsHover(false)
+      return next
+    })
+  }, [])
+
+  // Hover-peek: the sidebar overlaps its trigger icon, so leaving the icon (mouseleave)
+  // must not close the peek while the cursor moves onto the sidebar body. A single shared
+  // timer lets entering either surface cancel a pending close from the other.
+  const sessionsCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const openSessionsPeek = useCallback(() => {
+    if (sessionsCloseTimer.current) {
+      clearTimeout(sessionsCloseTimer.current)
+      sessionsCloseTimer.current = null
+    }
+    setSessionsHover(true)
+  }, [])
+  const closeSessionsPeekSoon = useCallback(() => {
+    if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    sessionsCloseTimer.current = setTimeout(() => {
+      sessionsCloseTimer.current = null
+      setSessionsHover(false)
+    }, 140)
+  }, [])
+  useEffect(
+    () => () => {
+      if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    },
+    []
+  )
+
+  // Serialized inputs for the active project's terminal/agent nodes (the sidebar reads the
+  // serialized nodes of *inactive* projects directly from the store, but the active project's
+  // live state lives in React Flow — pass it through here).
+  const liveActiveNodes = useMemo<SessionNodeInput[]>(
+    () =>
+      nodes
+        .filter((n) => (n.type ?? 'terminal') === 'terminal')
+        .map((n) => ({
+          id: n.id,
+          kind: 'terminal' as const,
+          title: n.data.title ?? n.id,
+          color: n.data.color ?? '#888',
+          agentId: n.data.agentId,
+          cwd: n.data.cwd,
+          ssh: n.data.ssh
+        })),
+    [nodes]
+  )
+
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
@@ -374,6 +454,12 @@ export function Canvas() {
           goToNode(node)
           useAgentStatus.getState().clearUnread(pending)
         }
+      }
+      // Consume a cross-project "add terminal" request from the sessions sidebar (which had
+      // to switch projects first). Only act if we landed on the requested project.
+      if (pendingAddRef.current === useProjects.getState().activeProjectId) {
+        pendingAddRef.current = null
+        addTerminal()
       }
     }, 0)
     return () => clearTimeout(t)
@@ -842,6 +928,26 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
 
+  // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
+  // converted to a flow position; otherwise the node lands at the view center. The new node is
+  // selected (and others deselected) so it's the active focus right away.
+  const addSshTerminal = useCallback(
+    (server: SshServer, screenPos?: { x: number; y: number }) => {
+      const at = screenPos ? screenToFlowPosition(screenPos) : viewCenter()
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createSshTerminalNode(server, ns.length, at), selected: true }
+      ])
+      markDirty()
+    },
+    [setNodes, markDirty, screenToFlowPosition, viewCenter]
+  )
+
+  // Pro-gated entry to the SSH server picker: free users get the upgrade dialog instead.
+  const openRemotePicker = useCallback((screenPos: { x: number; y: number }) => {
+    requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
+  }, [])
+
   // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1191,6 +1297,9 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
         setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault()
+        toggleSessionsPin()
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
@@ -1204,7 +1313,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [toggleSessionsPin])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -1335,13 +1444,27 @@ export function Canvas() {
             ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
+          {
+            label: 'New remote…',
+            icon: <IconTerminal />,
+            onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
+          },
           { type: 'separator' },
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addAgentNode, addSticky, openFileDialog, selectAll, fitView]
+    [
+      screenToFlowPosition,
+      addTerminal,
+      addAgentNode,
+      addSticky,
+      openFileDialog,
+      openRemotePicker,
+      selectAll,
+      fitView
+    ]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1431,6 +1554,97 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // ---- sessions sidebar actions ----
+  // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
+  // inactive project's node even though it isn't mounted; then drop it from the store.
+  const closeSession = useCallback(
+    (projectId: string, id: string) => {
+      setConfirm({
+        message: 'End this session? This stops its tmux session.',
+        confirmLabel: 'End session',
+        danger: true,
+        onConfirm: () => {
+          if (projectId === activeProjectId) {
+            deleteNodes([id])
+          } else {
+            transport.destroy(id)
+            useAgentStatus.getState().remove(id)
+            useProjects.getState().removeNode(projectId, id)
+            void writeDisk()
+          }
+          setConfirm(null)
+        }
+      })
+    },
+    [activeProjectId, deleteNodes, writeDisk]
+  )
+
+  const renameSession = useCallback(
+    (projectId: string, id: string, title: string) => {
+      if (projectId === activeProjectId) {
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, title } } : n)))
+        markDirty()
+      } else {
+        useProjects.getState().renameNode(projectId, id, title)
+        void writeDisk()
+      }
+    },
+    [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
+  const addToProject = useCallback(
+    (projectId: string) => {
+      if (projectId === activeProjectId) {
+        addTerminal()
+      } else {
+        // Add once the project's nodes have loaded into React Flow (load effect consumes this).
+        pendingAddRef.current = projectId
+        switchProject(projectId)
+      }
+    },
+    [activeProjectId, addTerminal, switchProject]
+  )
+
+  const onRowContextMenu = useCallback(
+    (e: React.MouseEvent, projectId: string, id: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+          {
+            label: 'Rename',
+            icon: <IconEditor />,
+            onClick: () => {
+              const t = window.prompt('Rename session', '')
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            }
+          },
+          {
+            label: 'Duplicate',
+            icon: <IconDuplicate />,
+            onClick: () => {
+              if (projectId === activeProjectId) duplicateNodes([id])
+              else {
+                useProjects.getState().duplicateNode(projectId, id)
+                void writeDisk()
+              }
+            }
+          },
+          {
+            label: 'Close',
+            icon: <IconTrash />,
+            danger: true,
+            onClick: () => closeSession(projectId, id)
+          }
+        ]
+      })
+    },
+    [activeProjectId, focusNodeById, renameSession, duplicateNodes, closeSession, writeDisk]
+  )
 
   // Stream live subagent transcript chunks into the agent-nodes store.
   useEffect(
@@ -1577,6 +1791,11 @@ export function Canvas() {
     setConsentOpen(true)
   }, [settingsHydrated])
 
+  // Load saved SSH servers once so the RemotePicker / palette have them available.
+  useEffect(() => {
+    void useSshServers.getState().hydrate()
+  }, [])
+
   const addProject = useCallback(() => {
     commitActiveToStore()
     const project = useProjects.getState().addProject()
@@ -1659,6 +1878,17 @@ export function Canvas() {
         ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
+      ...useSshServers.getState().servers.map(
+        (srv): Command => ({
+          id: `new-remote-${srv.id}`,
+          label: `New remote: ${srv.label}`,
+          icon: <IconTerminal />,
+          run: () =>
+            requireProOr('Remote SSH terminals', () =>
+              addSshTerminal(srv, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
+            )
+        })
+      ),
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       {
         id: 'new-remote',
@@ -1713,7 +1943,8 @@ export function Canvas() {
     switchProject,
     goToNode,
     bufferCache,
-    connectRemote
+    connectRemote,
+    addSshTerminal
   ])
 
   return (
@@ -1731,6 +1962,16 @@ export function Canvas() {
         <AnnouncementBanner />
       </div>
       <UpdateCard />
+
+      <div
+        className="sessions-icon-cluster"
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
+      >
+        <button title="Sessions (⌘⇧L)" onClick={toggleSessionsPin}>
+          <IconSessions />
+        </button>
+      </div>
 
       <div className="controls-cluster">
         <button
@@ -1866,6 +2107,29 @@ export function Canvas() {
         <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} reveal={reveal} />
       )}
 
+      <SessionsSidebar
+        open={sessionsOpen}
+        pinned={sessionsPinned}
+        liveActiveNodes={liveActiveNodes}
+        onTogglePin={toggleSessionsPin}
+        onClose={() => {
+          setSessionsHover(false)
+          setSessionsPinned(false)
+          try {
+            localStorage.setItem('nodeterm.sessionsPinned', '0')
+          } catch {
+            // ignore
+          }
+        }}
+        onFocusNode={focusNodeById}
+        onCloseSession={closeSession}
+        onRenameSession={renameSession}
+        onRowContextMenu={onRowContextMenu}
+        onAddToProject={addToProject}
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
+      />
+
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
@@ -1874,6 +2138,18 @@ export function Canvas() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      <UpgradeDialog />
+
+      {remotePicker && (
+        <RemotePicker
+          x={remotePicker.x}
+          y={remotePicker.y}
+          onPick={(srv) => addSshTerminal(srv, { x: remotePicker.x, y: remotePicker.y })}
+          onManage={() => setSettingsOpen(true)}
+          onClose={() => setRemotePicker(null)}
         />
       )}
 
@@ -1904,6 +2180,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
+        onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}

@@ -28,6 +28,7 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, agentConfig, type AgentId } from '@shared/agents/config'
+import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -211,11 +212,13 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       )
     }
 
+    const ssh = data.ssh as SshConnection | undefined
     transport
       .create({
         cols: term.cols,
         rows: term.rows,
-        shell: data.shell,
+        shell: ssh ? 'ssh' : data.shell,
+        shellArgs: ssh ? buildSshArgs(ssh) : undefined,
         cwd: data.cwd,
         persistKey: id,
         agentId: data.agentId
@@ -527,6 +530,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             {status.session}
           </span>
         )}
+        {data.ssh ? (
+          <span
+            className="term-ssh-chip"
+            title={`ssh ${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}`}
+          >
+            SSH {(data.ssh as SshConnection).user}@{(data.ssh as SshConnection).host}
+          </span>
+        ) : null}
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
