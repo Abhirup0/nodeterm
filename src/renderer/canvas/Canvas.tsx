@@ -141,16 +141,20 @@ export function Canvas() {
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
   const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
-  // Sessions sidebar (left): hover-to-peek + click-to-pin (persisted).
+  // Sessions sidebar (left): pinned (docked) by default; unpin is a persisted preference.
+  // hover-to-peek when unpinned. `dismissed` is a transient "hide for now" (the × button)
+  // that does NOT change the pin preference — so a pinned sidebar reopens pinned next launch.
   const [sessionsPinned, setSessionsPinned] = useState(() => {
     try {
-      return localStorage.getItem('nodeterm.sessionsPinned') === '1'
+      const v = localStorage.getItem('nodeterm.sessionsPinned')
+      return v === null ? true : v === '1'
     } catch {
-      return false
+      return true
     }
   })
   const [sessionsHover, setSessionsHover] = useState(false)
-  const sessionsOpen = sessionsPinned || sessionsHover
+  const [sessionsDismissed, setSessionsDismissed] = useState(false)
+  const sessionsOpen = (sessionsPinned && !sessionsDismissed) || sessionsHover
   // When set, add a terminal to this project once its nodes have loaded into React Flow
   // (cross-project "add" from the sidebar, which must switch projects first).
   const pendingAddRef = useRef<string | null>(null)
@@ -352,6 +356,8 @@ export function Canvas() {
     return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
   }, [linkEdges, ephemeralEdges, accent])
 
+  // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
+  // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
   const toggleSessionsPin = useCallback(() => {
     setSessionsPinned((v) => {
       const next = !v
@@ -363,7 +369,24 @@ export function Canvas() {
       if (!next) setSessionsHover(false)
       return next
     })
+    setSessionsDismissed(false)
   }, [])
+
+  // Top-left icon click: when pinned, toggle the transient hide/show (keeps the pin); when
+  // unpinned, promote the hover-peek to a docked pinned panel.
+  const onSessionsIconClick = useCallback(() => {
+    if (sessionsPinned) {
+      setSessionsDismissed((d) => !d)
+    } else {
+      setSessionsPinned(true)
+      try {
+        localStorage.setItem('nodeterm.sessionsPinned', '1')
+      } catch {
+        // ignore
+      }
+      setSessionsDismissed(false)
+    }
+  }, [sessionsPinned])
 
   // Hover-peek: the sidebar overlaps its trigger icon, so leaving the icon (mouseleave)
   // must not close the peek while the cursor moves onto the sidebar body. A single shared
@@ -1811,6 +1834,16 @@ export function Canvas() {
     [activeProjectId, setNodes, markDirty, writeDisk]
   )
 
+  // Sidebar "Name with AI": generate a title from the session's captured terminal output
+  // (same BYO-agent path as the terminal node's ✦), then apply it via renameSession.
+  const aiNameSession = useCallback(
+    async (projectId: string, id: string, cwd?: string) => {
+      const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
+      if (r.ok) renameSession(projectId, id, r.message)
+    },
+    [renameSession]
+  )
+
   const addToProject = useCallback(
     (projectId: string) => {
       if (projectId === activeProjectId) {
@@ -2186,7 +2219,7 @@ export function Canvas() {
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       >
-        <button title="Sessions (⌘⇧L)" onClick={toggleSessionsPin}>
+        <button title="Sessions (⌘⇧L)" onClick={onSessionsIconClick}>
           <IconSessions />
         </button>
       </div>
@@ -2339,17 +2372,14 @@ export function Canvas() {
         liveActiveNodes={liveActiveNodes}
         onTogglePin={toggleSessionsPin}
         onClose={() => {
+          // Transient "hide for now" — does NOT touch the pin preference.
           setSessionsHover(false)
-          setSessionsPinned(false)
-          try {
-            localStorage.setItem('nodeterm.sessionsPinned', '0')
-          } catch {
-            // ignore
-          }
+          setSessionsDismissed(true)
         }}
         onFocusNode={focusNodeById}
         onCloseSession={closeSession}
         onRenameSession={renameSession}
+        onAiNameSession={aiNameSession}
         onRowContextMenu={onRowContextMenu}
         onAddToProject={addToProject}
         onMouseEnter={openSessionsPeek}

@@ -35,6 +35,7 @@ export interface SessionsSidebarProps {
   onFocusNode(id: string): void
   onCloseSession(projectId: string, id: string): void
   onRenameSession(projectId: string, id: string, title: string): void
+  onAiNameSession(projectId: string, id: string, cwd?: string): void | Promise<void>
   onRowContextMenu(e: React.MouseEvent, projectId: string, id: string): void
   onAddToProject(projectId: string): void
   onMouseEnter?(): void
@@ -158,6 +159,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                       onClick={() => props.onFocusNode(row.id)}
                       onClose={() => props.onCloseSession(g.projectId, row.id)}
                       onRename={(title) => props.onRenameSession(g.projectId, row.id, title)}
+                      onAiName={() => props.onAiNameSession(g.projectId, row.id, row.cwd)}
                       onContextMenu={(e) => props.onRowContextMenu(e, g.projectId, row.id)}
                     />
                   ))

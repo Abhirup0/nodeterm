@@ -3904,7 +3904,11 @@ body,
 .ss-meta__cwd { font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-meta__ssh { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .ss-ctx { font-size: 9.5px; padding: 0 5px; border-radius: 4px; color: #000; font-weight: 600; flex: 0 0 auto; }
-.ss-row__close { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-row__ai { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-row:hover .ss-row__ai { opacity: 0.6; }
+.ss-row__ai:hover { opacity: 1 !important; color: var(--accent); }
+.ss-row__ai:disabled { opacity: 0.6; cursor: default; color: var(--accent); }
+.ss-row__close { opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
 .ss-row:hover .ss-row__close { opacity: 0.6; }
 .ss-row__close:hover { opacity: 1 !important; color: #ff453a; }
 

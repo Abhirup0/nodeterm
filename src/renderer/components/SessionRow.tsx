@@ -7,6 +7,7 @@ export interface SessionRowProps {
   onClick(): void
   onClose(): void
   onRename(title: string): void
+  onAiName(): void | Promise<void>
   onContextMenu(e: React.MouseEvent): void
 }
 
@@ -22,15 +23,34 @@ function dirName(p?: string): string {
   return parts[parts.length - 1] || p
 }
 
-export function SessionRow({ row, onClick, onClose, onRename, onContextMenu }: SessionRowProps): JSX.Element {
+export function SessionRow({
+  row,
+  onClick,
+  onClose,
+  onRename,
+  onAiName,
+  onContextMenu
+}: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
+  const [naming, setNaming] = useState(false)
   const usage = useContextWindow((s) => (row.sessionId ? s.bySessionId[row.sessionId] : undefined))
 
   const commit = (): void => {
     const t = draft.trim()
     if (t && t !== row.title) onRename(t)
     setEditing(false)
+  }
+
+  const aiName = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    if (naming) return
+    setNaming(true)
+    try {
+      await onAiName()
+    } finally {
+      setNaming(false)
+    }
   }
 
   return (
@@ -75,6 +95,14 @@ export function SessionRow({ row, onClick, onClose, onRename, onContextMenu }: S
               {Math.round(usage.usedPercent)}%
             </span>
           )}
+          <button
+            className="ss-row__ai"
+            title="Name with AI (from terminal output)"
+            disabled={naming}
+            onClick={aiName}
+          >
+            {naming ? '…' : '✦'}
+          </button>
           <button
             className="ss-row__close"
             title="Close session"
