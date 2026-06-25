@@ -93,6 +93,13 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
             >
               Unbind
             </button>
+            <button
+              className="group-node__wt-btn"
+              title="Remove worktree"
+              onClick={() => worktreeActionHandler?.(id, 'remove')}
+            >
+              ✕
+            </button>
           </div>
         )}
       </div>

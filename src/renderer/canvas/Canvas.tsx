@@ -138,6 +138,10 @@ export function Canvas() {
   const [bindTarget, setBindTarget] = useState<string | null>(null)
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTarget] = useState<string | null>(null)
+  // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
+  const [removeTarget, setRemoveTarget] = useState<{ groupId: string; warning: string } | null>(
+    null
+  )
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -1012,9 +1016,52 @@ export function Canvas() {
     [bindTarget, setNodes, markDirty]
   )
 
+  // Ask-first worktree removal (Task 9). Gather any uncommitted-work info, then open a safety
+  // dialog before doing anything destructive. GitStatus has no `files` field — the dirty count
+  // is staged + unstaged changes.
+  const requestRemoveWorktree = useCallback(async (groupId: string) => {
+    const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+    if (!wt) return
+    const status = await window.nodeTerminal.git.status(wt.path)
+    const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
+    const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
+    setRemoveTarget({ groupId, warning })
+  }, [])
+
+  // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
+  // never touches a directory with live processes inside it, then remove the worktree + branch
+  // (git's `-d` refuses to delete an unmerged branch, so unmerged work survives).
+  const confirmRemoveWorktree = useCallback(async () => {
+    const t = removeTarget
+    if (!t) return
+    const wt = nodesRef.current.find((n) => n.id === t.groupId)?.data.worktree
+    if (!wt) {
+      setRemoveTarget(null)
+      return
+    }
+    // 1) Kill the group's terminals' sessions BEFORE git touches the directory.
+    const childIds = nodesRef.current
+      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
+      .map((n) => n.id)
+    for (const id of childIds) transport.destroy(id)
+    // 2) Remove the worktree (and branch; -d protects unmerged branches).
+    const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, true)
+    if (!res.ok) {
+      window.alert(res.message)
+      setRemoveTarget(null)
+      return
+    }
+    // 3) Clear the binding from the group node.
+    setNodes((ns) =>
+      ns.map((n) => (n.id === t.groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
+    )
+    setRemoveTarget(null)
+    markDirty()
+  }, [removeTarget, setNodes, markDirty])
+
   // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
-  // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. For now only
-  // `unbind` is handled: forget the worktree binding without touching the on-disk worktree.
+  // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
+  // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
     async (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
       switch (action) {
@@ -1033,12 +1080,14 @@ export function Canvas() {
           window.alert(res.message) // success or the blocked/conflict reason
           break
         }
-        // 'remove' (Task 9) is wired separately.
+        case 'remove':
+          void requestRemoveWorktree(groupId)
+          break
         default:
           break
       }
     },
-    [setNodes, markDirty]
+    [setNodes, markDirty, requestRemoveWorktree]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -2001,6 +2050,18 @@ export function Canvas() {
           danger={false}
           onConfirm={confirmMoveIntoWorktree}
           onCancel={() => setMoveTarget(null)}
+        />
+      )}
+
+      {removeTarget && (
+        <ConfirmDialog
+          message={`Remove this worktree and delete its branch?${
+            removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : ''
+          }`}
+          confirmLabel="Remove"
+          danger
+          onConfirm={confirmRemoveWorktree}
+          onCancel={() => setRemoveTarget(null)}
         />
       )}
 
