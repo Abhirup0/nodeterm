@@ -177,6 +177,25 @@ export class GitService {
     ipcMain.handle(IPC.gitRemoteCommitUrl, (_e, cwd: string, sha: string) =>
       this.remoteCommitUrl(cwd, sha)
     )
+    ipcMain.handle(IPC.gitMerge, (_e, cwd: string, ref: string) => this.merge(cwd, ref))
+    ipcMain.handle(IPC.gitRebase, (_e, cwd: string, onto: string) => this.rebase(cwd, onto))
+    ipcMain.handle(IPC.gitDeleteBranch, (_e, cwd: string, name: string, force: boolean) =>
+      this.deleteBranch(cwd, name, force)
+    )
+    ipcMain.handle(IPC.gitRenameBranch, (_e, cwd: string, newName: string) =>
+      this.renameBranch(cwd, newName)
+    )
+    ipcMain.handle(IPC.gitFetch, (_e, cwd: string) => this.fetch(cwd))
+    ipcMain.handle(IPC.gitForcePush, (_e, cwd: string) => this.forcePush(cwd))
+    ipcMain.handle(IPC.gitStashPush, (_e, cwd: string) => this.stashPush(cwd))
+    ipcMain.handle(IPC.gitStashPop, (_e, cwd: string) => this.stashPop(cwd))
+    ipcMain.handle(IPC.gitRevert, (_e, cwd: string, oid: string) => this.revert(cwd, oid))
+    ipcMain.handle(IPC.gitBranchAt, (_e, cwd: string, name: string, oid: string) =>
+      this.branchAt(cwd, name, oid)
+    )
+    ipcMain.handle(IPC.gitCheckoutCommit, (_e, cwd: string, oid: string) =>
+      this.checkoutCommit(cwd, oid)
+    )
   }
 
   async status(cwd: string): Promise<GitStatus> {
@@ -381,6 +400,69 @@ export class GitService {
     if (!isValidRef(name)) return { ok: false, message: 'Invalid branch name.' }
     const r = await git(cwd, ['switch', '-c', name.trim()])
     return r.ok ? { ok: true, message: `Created ${name.trim()}.` } : fail(r)
+  }
+
+  async merge(cwd: string, ref: string): Promise<GitResult> {
+    if (!isValidRef(ref)) return { ok: false, message: 'Invalid branch name.' }
+    const r = await git(cwd, ['merge', ref.trim()])
+    return r.ok ? { ok: true, message: r.out || `Merged ${ref.trim()}.` } : fail(r)
+  }
+
+  async rebase(cwd: string, onto: string): Promise<GitResult> {
+    if (!isValidRef(onto)) return { ok: false, message: 'Invalid branch name.' }
+    const r = await git(cwd, ['rebase', onto.trim()])
+    return r.ok ? { ok: true, message: r.out || `Rebased onto ${onto.trim()}.` } : fail(r)
+  }
+
+  async deleteBranch(cwd: string, name: string, force: boolean): Promise<GitResult> {
+    if (!isValidRef(name)) return { ok: false, message: 'Invalid branch name.' }
+    const r = await git(cwd, ['branch', force ? '-D' : '-d', name.trim()])
+    return r.ok ? { ok: true, message: `Deleted ${name.trim()}.` } : fail(r)
+  }
+
+  async renameBranch(cwd: string, newName: string): Promise<GitResult> {
+    if (!isValidRef(newName)) return { ok: false, message: 'Invalid branch name.' }
+    const r = await git(cwd, ['branch', '-m', newName.trim()])
+    return r.ok ? { ok: true, message: `Renamed to ${newName.trim()}.` } : fail(r)
+  }
+
+  async fetch(cwd: string): Promise<GitResult> {
+    const r = await git(cwd, ['fetch', '--all', '--prune'])
+    return r.ok ? { ok: true, message: r.out || 'Fetched.' } : fail(r)
+  }
+
+  async forcePush(cwd: string): Promise<GitResult> {
+    const r = await git(cwd, ['push', '--force-with-lease'])
+    return r.ok ? { ok: true, message: 'Force-pushed.' } : fail(r)
+  }
+
+  async stashPush(cwd: string): Promise<GitResult> {
+    const r = await git(cwd, ['stash', 'push', '-u'])
+    return r.ok ? { ok: true, message: r.out || 'Stashed.' } : fail(r)
+  }
+
+  async stashPop(cwd: string): Promise<GitResult> {
+    const r = await git(cwd, ['stash', 'pop'])
+    return r.ok ? { ok: true, message: r.out || 'Popped stash.' } : fail(r)
+  }
+
+  async revert(cwd: string, oid: string): Promise<GitResult> {
+    if (!/^[0-9a-fA-F]{7,64}$/.test(oid)) return { ok: false, message: 'Invalid commit.' }
+    const r = await git(cwd, ['revert', '--no-edit', oid])
+    return r.ok ? { ok: true, message: r.out || 'Reverted.' } : fail(r)
+  }
+
+  async branchAt(cwd: string, name: string, oid: string): Promise<GitResult> {
+    if (!isValidRef(name)) return { ok: false, message: 'Invalid branch name.' }
+    if (!/^[0-9a-fA-F]{7,64}$/.test(oid)) return { ok: false, message: 'Invalid commit.' }
+    const r = await git(cwd, ['switch', '-c', name.trim(), oid])
+    return r.ok ? { ok: true, message: `Created ${name.trim()}.` } : fail(r)
+  }
+
+  async checkoutCommit(cwd: string, oid: string): Promise<GitResult> {
+    if (!/^[0-9a-fA-F]{7,64}$/.test(oid)) return { ok: false, message: 'Invalid commit.' }
+    const r = await git(cwd, ['checkout', '--detach', oid])
+    return r.ok ? { ok: true, message: `Checked out ${oid.slice(0, 7)} (detached).` } : fail(r)
   }
 
   /** Clone a repo into parentDir; returns the cloned folder path in `message` on success. */

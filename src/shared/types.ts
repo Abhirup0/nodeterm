@@ -336,6 +336,28 @@ export interface GitApi {
   commitFiles(cwd: string, oid: string): Promise<GitFileChange[]>
   /** Remote web URL for a commit sha, or null if it can't be derived. */
   remoteCommitUrl(cwd: string, sha: string): Promise<string | null>
+  /** Merge a branch into the current branch. */
+  merge(cwd: string, ref: string): Promise<GitResult>
+  /** Rebase the current branch onto another. */
+  rebase(cwd: string, onto: string): Promise<GitResult>
+  /** Delete a branch (force = -D, for unmerged). */
+  deleteBranch(cwd: string, name: string, force: boolean): Promise<GitResult>
+  /** Rename the current branch. */
+  renameBranch(cwd: string, newName: string): Promise<GitResult>
+  /** Fetch all remotes and prune. */
+  fetch(cwd: string): Promise<GitResult>
+  /** Push with --force-with-lease. */
+  forcePush(cwd: string): Promise<GitResult>
+  /** Stash uncommitted changes (incl. untracked). */
+  stashPush(cwd: string): Promise<GitResult>
+  /** Pop the latest stash. */
+  stashPop(cwd: string): Promise<GitResult>
+  /** Revert a commit (--no-edit). */
+  revert(cwd: string, oid: string): Promise<GitResult>
+  /** Create + switch to a new branch at a commit. */
+  branchAt(cwd: string, name: string, oid: string): Promise<GitResult>
+  /** Checkout a commit (detached HEAD). */
+  checkoutCommit(cwd: string, oid: string): Promise<GitResult>
 }
 
 export interface UpdateInfo {
