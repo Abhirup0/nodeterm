@@ -53,6 +53,7 @@ import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
+import { RemotePicker } from '../components/RemotePicker'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
@@ -78,6 +79,9 @@ import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
+import { useSshServers } from '../state/sshServers'
+import { requireProOr } from '../state/upgradeGate'
+import type { SshServer } from '@shared/ssh'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -85,6 +89,7 @@ import {
   createAgentNode,
   createDiffNode,
   createEditorNode,
+  createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
   duplicateNode,
@@ -113,6 +118,7 @@ export function Canvas() {
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
+  const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
@@ -798,6 +804,26 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
 
+  // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
+  // converted to a flow position; otherwise the node lands at the view center. The new node is
+  // selected (and others deselected) so it's the active focus right away.
+  const addSshTerminal = useCallback(
+    (server: SshServer, screenPos?: { x: number; y: number }) => {
+      const at = screenPos ? screenToFlowPosition(screenPos) : viewCenter()
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createSshTerminalNode(server, ns.length, at), selected: true }
+      ])
+      markDirty()
+    },
+    [setNodes, markDirty, screenToFlowPosition, viewCenter]
+  )
+
+  // Pro-gated entry to the SSH server picker: free users get the upgrade dialog instead.
+  const openRemotePicker = useCallback((screenPos: { x: number; y: number }) => {
+    requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
+  }, [])
+
   // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1291,13 +1317,27 @@ export function Canvas() {
             ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
+          {
+            label: 'New remote…',
+            icon: <IconTerminal />,
+            onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
+          },
           { type: 'separator' },
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addAgentNode, addSticky, openFileDialog, selectAll, fitView]
+    [
+      screenToFlowPosition,
+      addTerminal,
+      addAgentNode,
+      addSticky,
+      openFileDialog,
+      openRemotePicker,
+      selectAll,
+      fitView
+    ]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1533,6 +1573,11 @@ export function Canvas() {
     setConsentOpen(true)
   }, [settingsHydrated])
 
+  // Load saved SSH servers once so the RemotePicker / palette have them available.
+  useEffect(() => {
+    void useSshServers.getState().hydrate()
+  }, [])
+
   const addProject = useCallback(() => {
     commitActiveToStore()
     const project = useProjects.getState().addProject()
@@ -1615,6 +1660,17 @@ export function Canvas() {
         ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
+      ...useSshServers.getState().servers.map(
+        (srv): Command => ({
+          id: `new-remote-${srv.id}`,
+          label: `New remote: ${srv.label}`,
+          icon: <IconTerminal />,
+          run: () =>
+            requireProOr('Remote SSH terminals', () =>
+              addSshTerminal(srv, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
+            )
+        })
+      ),
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       {
         id: 'new-remote',
@@ -1669,7 +1725,8 @@ export function Canvas() {
     switchProject,
     goToNode,
     bufferCache,
-    connectRemote
+    connectRemote,
+    addSshTerminal
   ])
 
   return (
@@ -1829,6 +1886,16 @@ export function Canvas() {
 
       <UpgradeDialog />
 
+      {remotePicker && (
+        <RemotePicker
+          x={remotePicker.x}
+          y={remotePicker.y}
+          onPick={(srv) => addSshTerminal(srv, { x: remotePicker.x, y: remotePicker.y })}
+          onManage={() => setSettingsOpen(true)}
+          onClose={() => setRemotePicker(null)}
+        />
+      )}
+
       {consentOpen && (
         <NotifyConsentDialog
           onEnable={() => {
@@ -1856,6 +1923,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
+        onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}

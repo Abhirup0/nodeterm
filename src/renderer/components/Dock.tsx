@@ -12,6 +12,7 @@ interface DockProps {
   onAddSticky: () => void
   onAddAgent: (agentId: AgentId) => void
   onOpenFile: () => void
+  onAddRemote: () => void
   onConnectRemote: () => void
   onUndo: () => void
   onRedo: () => void
@@ -34,6 +35,7 @@ export function Dock({
   onAddSticky,
   onAddAgent,
   onOpenFile,
+  onAddRemote,
   onConnectRemote,
   onUndo,
   onRedo,
@@ -61,6 +63,10 @@ export function Dock({
             <button onClick={pick(onAddTerminal)}>
               <TerminalIcon />
               <span>Terminal</span>
+            </button>
+            <button onClick={pick(onAddRemote)}>
+              <TerminalIcon />
+              <span>Remote…</span>
             </button>
             {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).map((aid) => (
               <button key={aid} onClick={pick(() => onAddAgent(aid))}>
