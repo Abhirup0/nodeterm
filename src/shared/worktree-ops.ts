@@ -29,12 +29,15 @@ export async function worktreeAdd(
   git: GitExecutor, repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean
 ): Promise<WorktreeOpResult> {
   if (!repoPath || !wtPath) return { ok: false, message: 'Missing repo or worktree path.' }
+  // Reject a path that could be parsed as an option flag (argv injection).
+  if (wtPath.startsWith('-')) return { ok: false, message: 'Invalid worktree path.' }
   if (!isValidGitRef(branch)) return { ok: false, message: 'Invalid branch name.' }
   if (isNew && !isValidGitRef(baseRef)) return { ok: false, message: 'Invalid base ref.' }
   // `--no-track` so a new branch does not inherit upstream and report "behind".
+  // `--` ends option parsing so wtPath can never be read as a flag (verified git ≥2.39).
   const args = isNew
-    ? ['worktree', 'add', '--no-track', '-b', branch, wtPath, baseRef]
-    : ['worktree', 'add', wtPath, branch]
+    ? ['worktree', 'add', '--no-track', '-b', branch, '--', wtPath, baseRef]
+    : ['worktree', 'add', '--', wtPath, branch]
   const r = await git(repoPath, args)
   return r.ok ? { ok: true, message: `Worktree ready at ${wtPath}.` } : { ok: false, message: r.err }
 }
@@ -74,6 +77,8 @@ export async function worktreeMerge(
 export async function worktreeRemove(
   git: GitExecutor, repoPath: string, wtPath: string, homeDir: string, deleteBranch: boolean
 ): Promise<WorktreeOpResult> {
+  // Reject a path that could be parsed as an option flag (argv injection).
+  if (!wtPath || wtPath.startsWith('-')) return { ok: false, message: 'Invalid worktree path.' }
   if (isDangerousWorktreeRemovalPath(wtPath, repoPath, homeDir)) {
     return { ok: false, message: 'Refusing to remove that path.' }
   }
@@ -81,7 +86,8 @@ export async function worktreeRemove(
   const entry = list.find((e) => e.path.replace(/\/+$/, '') === wtPath.replace(/\/+$/, ''))
   if (!entry) return { ok: false, message: 'Worktree is not registered.' }
   const branch = entry.branch
-  const rm = await git(repoPath, ['worktree', 'remove', '--force', wtPath])
+  // `--` ends option parsing so wtPath can never be read as a flag (verified git ≥2.39).
+  const rm = await git(repoPath, ['worktree', 'remove', '--force', '--', wtPath])
   if (!rm.ok) return { ok: false, message: rm.err }
   await git(repoPath, ['worktree', 'prune'])
   if (deleteBranch && branch && isValidGitRef(branch)) {

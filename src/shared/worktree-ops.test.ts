@@ -15,15 +15,27 @@ function fakeGit(handlers: Record<string, GitExec>) {
 }
 
 describe('worktreeAdd', () => {
-  it('uses --no-track -b for a new branch', async () => {
+  it('uses --no-track -b and a -- separator for a new branch', async () => {
     const { git, calls } = fakeGit({})
     const r = await worktreeAdd(git, '/repo', '/wt/x', 'feature/x', 'main', true)
     expect(r.ok).toBe(true)
-    expect(calls[0]).toEqual(['worktree', 'add', '--no-track', '-b', 'feature/x', '/wt/x', 'main'])
+    expect(calls[0]).toEqual(['worktree', 'add', '--no-track', '-b', 'feature/x', '--', '/wt/x', 'main'])
+  })
+  it('uses a -- separator for an existing branch', async () => {
+    const { git, calls } = fakeGit({})
+    const r = await worktreeAdd(git, '/repo', '/wt/x', 'feature/x', 'main', false)
+    expect(r.ok).toBe(true)
+    expect(calls[0]).toEqual(['worktree', 'add', '--', '/wt/x', 'feature/x'])
   })
   it('rejects a flag-injecting branch name without calling git', async () => {
     const { git, calls } = fakeGit({})
     const r = await worktreeAdd(git, '/repo', '/wt/x', '--evil', 'main', true)
+    expect(r.ok).toBe(false)
+    expect(calls.length).toBe(0)
+  })
+  it('rejects a flag-injecting worktree path without calling git', async () => {
+    const { git, calls } = fakeGit({})
+    const r = await worktreeAdd(git, '/repo', '--evil', 'feature/x', 'main', true)
     expect(r.ok).toBe(false)
     expect(calls.length).toBe(0)
   })
@@ -67,6 +79,12 @@ describe('worktreeRemove', () => {
     expect(r.ok).toBe(false)
     expect(calls.length).toBe(0)
   })
+  it('rejects a flag-injecting worktree path without calling git', async () => {
+    const { git, calls } = fakeGit({})
+    const r = await worktreeRemove(git, '/repo', '--evil', '/home', false)
+    expect(r.ok).toBe(false)
+    expect(calls.length).toBe(0)
+  })
   it('refuses an unregistered worktree path', async () => {
     const { git } = fakeGit({ 'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n') })
     const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false)
@@ -77,7 +95,7 @@ describe('worktreeRemove', () => {
     const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
     const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true)
     expect(r.ok).toBe(true)
-    expect(calls.some((c) => c.join(' ') === 'worktree remove --force /wt/x')).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'worktree remove --force -- /wt/x')).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'branch -d feature/x')).toBe(true)
   })
