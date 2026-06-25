@@ -77,7 +77,9 @@ function RemoteSessionCanvas({
   onClose: () => void
 }): React.JSX.Element {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
-  const { fitView } = useReactFlow()
+  const { fitView, getViewport, setViewport } = useReactFlow()
+  // The flow wrapper — target for the custom zoom-to-cursor wheel listener (mirrors Canvas.tsx).
+  const flowRef = useRef<HTMLDivElement>(null)
   // Fit the view once, when the host's nodes first arrive: their positions are the host's canvas
   // coordinates, which may sit far outside the mirror's default (0,0) viewport — without this the
   // mirror looks empty even though the nodes are present.
@@ -120,6 +122,31 @@ function RemoteSessionCanvas({
     const id = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 0 }))
     return () => cancelAnimationFrame(id)
   }, [nodes, fitView])
+
+  // Zoom on Cmd/Ctrl+wheel and trackpad pinch (ctrl+wheel), zoom-to-cursor — ported verbatim from
+  // Canvas.tsx so the mirror zooms identically to the local canvas (incl. over a focused terminal,
+  // whose `nowheel` would otherwise route the wheel into xterm scrollback). React Flow's own
+  // zoomOnScroll/zoomOnPinch stay off so this is the single zoom source (no double-zoom).
+  useEffect(() => {
+    const wrap = flowRef.current
+    if (!wrap) return
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return // pinch (ctrl+wheel) or Cmd/Ctrl+scroll = zoom
+      e.preventDefault()
+      e.stopPropagation()
+      const { x, y, zoom } = getViewport()
+      const rect = wrap.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const py = e.clientY - rect.top
+      const d = Math.max(-50, Math.min(50, e.deltaY))
+      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-d * 0.01)))
+      if (next === zoom) return
+      const k = next / zoom
+      setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
+    }
+    wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
+  }, [getViewport, setViewport])
 
   // Send the client's optimistic edit upstream (the host applies it; the next snapshot reconciles).
   const sendMutation = useCallback(
@@ -168,7 +195,7 @@ function RemoteSessionCanvas({
           Leave
         </button>
       </div>
-      <div className="remote-session-flow">
+      <div className="remote-session-flow" ref={flowRef}>
         <ReactFlow
           nodes={nodes}
           edges={[]}
@@ -177,8 +204,12 @@ function RemoteSessionCanvas({
           onNodeDragStart={() => (draggingRef.current = true)}
           onNodeDragStop={handleNodeDragStop}
           selectionMode={SelectionMode.Partial}
+          minZoom={0.2}
+          maxZoom={2}
           panOnScroll
           zoomOnScroll={false}
+          zoomOnPinch={false}
+          zoomActivationKeyCode={null}
           proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
