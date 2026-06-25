@@ -10,6 +10,8 @@ interface TabBarProps {
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
   onDelete: (id: string) => void
+  /** Open the Remote access dialog (host/share + connect). Shown for every project. */
+  onRemoteAccess: () => void
 }
 
 /**
@@ -24,7 +26,8 @@ export function TabBar({
   onAddFromFolder,
   onRename,
   onSetFolder,
-  onDelete
+  onDelete,
+  onRemoteAccess
 }: TabBarProps) {
   const projects = useProjects((s) => s.projects)
   const activeId = useProjects((s) => s.activeProjectId)
@@ -216,6 +219,14 @@ export function TabBar({
               }}
             >
               Set folder…
+            </button>
+            <button
+              onClick={() => {
+                onRemoteAccess()
+                closeMenu()
+              }}
+            >
+              Remote access…
             </button>
             <button
               className="danger"

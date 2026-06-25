@@ -56,6 +56,7 @@ import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
+import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { transport } from '../terminal/local-transport'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
@@ -122,6 +123,7 @@ export function Canvas() {
   const [explorerOpen, setExplorerOpen] = useState(false)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
+  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   const [confirm, setConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -1674,6 +1676,7 @@ export function Canvas() {
         onRename={renameProject}
         onSetFolder={setProjectFolder}
         onDelete={deleteProject}
+        onRemoteAccess={() => setRemoteDialogOpen(true)}
       />
 
       <div className="top-banners">
@@ -1782,6 +1785,8 @@ export function Canvas() {
           </div>
         )}
       </div>
+
+      {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />

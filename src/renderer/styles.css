@@ -1240,6 +1240,68 @@ body,
   position: relative;
 }
 
+/* ---- Remote access dialog (from the project caret menu) ---- */
+.remote-dialog {
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg, #16181c);
+  border: 1px solid var(--separator, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  padding: 18px 20px 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  color: var(--label, #fff);
+}
+.remote-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.remote-dialog__head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.remote-dialog__x {
+  background: transparent;
+  border: none;
+  color: var(--label-secondary, rgba(255, 255, 255, 0.55));
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.remote-dialog__x:hover {
+  color: var(--label, #fff);
+}
+.remote-dialog__desc {
+  margin: 6px 0 14px;
+  font-size: 12px;
+  color: var(--label-secondary, rgba(255, 255, 255, 0.55));
+}
+.remote-dialog__head4 {
+  margin: 14px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.remote-dialog__block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.remote-dialog__row {
+  display: flex;
+  gap: 8px;
+}
+.remote-dialog__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--label-secondary, rgba(255, 255, 255, 0.55));
+}
+.remote-dialog__err {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: #ff9f0a;
+}
+
 /* ---- Welcome / empty state ---- */
 .welcome {
   position: absolute;
