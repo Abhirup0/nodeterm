@@ -81,6 +81,13 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </span>
             <button
               className="group-node__wt-btn"
+              title="Merge to main"
+              onClick={() => worktreeActionHandler?.(id, 'merge')}
+            >
+              ⤴
+            </button>
+            <button
+              className="group-node__wt-btn"
               title="Unbind worktree (keeps the worktree on disk)"
               onClick={() => worktreeActionHandler?.(id, 'unbind')}
             >

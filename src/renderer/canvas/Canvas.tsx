@@ -1016,7 +1016,7 @@ export function Canvas() {
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. For now only
   // `unbind` is handled: forget the worktree binding without touching the on-disk worktree.
   const onWorktreeAction = useCallback(
-    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+    async (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
       switch (action) {
         case 'unbind':
           setNodes((ns) =>
@@ -1026,7 +1026,14 @@ export function Canvas() {
           )
           markDirty()
           break
-        // 'merge' (Task 8) and 'remove' (Task 9) are wired separately.
+        case 'merge': {
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          const res = await window.nodeTerminal.git.worktreeMerge(wt.repoPath, wt.branch, wt.baseRef)
+          window.alert(res.message) // success or the blocked/conflict reason
+          break
+        }
+        // 'remove' (Task 9) is wired separately.
         default:
           break
       }
