@@ -7,7 +7,7 @@ import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
-import * as worktreeOps from '@shared/worktree-ops'
+import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 
 const run = promisify(execFile)
