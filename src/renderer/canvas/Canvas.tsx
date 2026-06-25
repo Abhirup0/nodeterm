@@ -123,6 +123,9 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
+  // Reveal-in-Explorer target (relative to the active project cwd). Cleared shortly after so
+  // the same file can be revealed twice in a row.
+  const [revealPath, setRevealPath] = useState<string | null>(null)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{
@@ -754,6 +757,14 @@ export function Canvas() {
     },
     [activeProjectId, openFile]
   )
+
+  /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
+   *  Cleared after a tick so revealing the same file twice still triggers the effect. */
+  const revealProjectFile = useCallback((relPath: string) => {
+    setExplorerOpen(true)
+    setRevealPath(relPath)
+    setTimeout(() => setRevealPath(null), 1000)
+  }, [])
 
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
@@ -1831,6 +1842,7 @@ export function Canvas() {
           commands={buildCommands()}
           fileIndex={fileIndex}
           onOpenFile={openProjectFile}
+          onRevealFile={revealProjectFile}
           onClose={() => setPaletteOpen(false)}
         />
       )}
@@ -1850,7 +1862,7 @@ export function Canvas() {
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
       {explorerOpen && (
-        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} />
+        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} revealPath={revealPath} />
       )}
 
       {confirm && (
