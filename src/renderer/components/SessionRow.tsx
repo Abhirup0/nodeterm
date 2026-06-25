@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
+import { useSessionNaming } from '../state/sessionNaming'
 
 export interface SessionRowProps {
   row: SessionRowVM
@@ -33,7 +34,9 @@ export function SessionRow({
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
-  const [naming, setNaming] = useState(false)
+  // Naming progress lives in a store keyed by node id, so the spinner persists across the row
+  // unmounting (sidebar close / hover-peek collapse) while the name is still generating.
+  const naming = useSessionNaming((s) => !!s.byId[row.id])
   const usage = useContextWindow((s) => (row.sessionId ? s.bySessionId[row.sessionId] : undefined))
 
   const commit = (): void => {
@@ -42,15 +45,10 @@ export function SessionRow({
     setEditing(false)
   }
 
-  const aiName = async (e: React.MouseEvent): Promise<void> => {
+  const aiName = (e: React.MouseEvent): void => {
     e.stopPropagation()
     if (naming) return
-    setNaming(true)
-    try {
-      await onAiName()
-    } finally {
-      setNaming(false)
-    }
+    void onAiName()
   }
 
   return (

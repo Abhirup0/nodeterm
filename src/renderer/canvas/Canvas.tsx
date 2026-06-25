@@ -87,6 +87,7 @@ import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
+import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
 import { requireProOr } from '../state/upgradeGate'
 import type { SshServer } from '@shared/ssh'
@@ -154,7 +155,9 @@ export function Canvas() {
   })
   const [sessionsHover, setSessionsHover] = useState(false)
   const [sessionsDismissed, setSessionsDismissed] = useState(false)
-  const sessionsOpen = (sessionsPinned && !sessionsDismissed) || sessionsHover
+  // When pinned the sidebar is docked and stays open (mouse-leave never closes it); `dismissed`
+  // hides it until the next hover/click. When unpinned it is a pure hover-peek.
+  const sessionsOpen = sessionsPinned ? !sessionsDismissed : sessionsHover
   // When set, add a terminal to this project once its nodes have loaded into React Flow
   // (cross-project "add" from the sidebar, which must switch projects first).
   const pendingAddRef = useRef<string | null>(null)
@@ -366,9 +369,9 @@ export function Canvas() {
       } catch {
         // ignore
       }
-      if (!next) setSessionsHover(false)
       return next
     })
+    // Re-show on (re)pin; on unpin, leave hover as-is so it stays a peek until the cursor leaves.
     setSessionsDismissed(false)
   }, [])
 
@@ -398,6 +401,9 @@ export function Canvas() {
       sessionsCloseTimer.current = null
     }
     setSessionsHover(true)
+    // Hovering re-opens a dismissed sidebar; when pinned this re-docks it so it then stays
+    // open after the cursor leaves (open = !dismissed), instead of collapsing like a peek.
+    setSessionsDismissed(false)
   }, [])
   const closeSessionsPeekSoon = useCallback(() => {
     if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
@@ -1838,8 +1844,15 @@ export function Canvas() {
   // (same BYO-agent path as the terminal node's ✦), then apply it via renameSession.
   const aiNameSession = useCallback(
     async (projectId: string, id: string, cwd?: string) => {
-      const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
-      if (r.ok) renameSession(projectId, id, r.message)
+      // Track progress in a store keyed by node id so the spinner survives the row/sidebar
+      // unmounting mid-request; this Canvas-level call completes and applies the name anyway.
+      useSessionNaming.getState().set(id, true)
+      try {
+        const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
+        if (r.ok) renameSession(projectId, id, r.message)
+      } finally {
+        useSessionNaming.getState().set(id, false)
+      }
     },
     [renameSession]
   )
