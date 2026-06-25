@@ -282,7 +282,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
       useAgentStatus.getState().setActive(id, false)
-      useAgentStatus.getState().remove(id)
+      // Unmount happens on a project switch (a detach — the tmux session keeps running) as
+      // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
+      // persisted status (that would drop the sessionId the context meter looks up on remount,
+      // making the meter vanish when you switch projects); only clear the live state. Real
+      // deletion drops the entry in Canvas.deleteNodes.
+      useAgentStatus.getState().setState(id, undefined)
       useAgentNodes.getState().clearForParent(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
