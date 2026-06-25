@@ -6,7 +6,7 @@ import { useProjects } from '../state/projects'
 import { useScmDraft } from '../state/scmDraft'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
-import { ContextMenu } from './ContextMenu'
+import { ContextMenu, type MenuItem } from './ContextMenu'
 import { PublishDialog } from './PublishDialog'
 
 interface SourceControlPanelProps {
@@ -68,6 +68,12 @@ export function SourceControlPanel({
     null
   )
   const [publishOpen, setPublishOpen] = useState(false)
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null)
+  const [branchPick, setBranchPick] = useState<{
+    x: number
+    y: number
+    action: 'merge' | 'rebase' | 'delete'
+  } | null>(null)
 
   const git = window.nodeTerminal.git
 
@@ -293,6 +299,17 @@ export function SourceControlPanel({
               </button>
               <span className="scm-spacer" />
               {renderRemoteAction()}
+              <button
+                className="scm-more"
+                title="More actions"
+                aria-label="More source control actions"
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setMoreMenu({ x: r.right - 200, y: r.bottom + 4 })
+                }}
+              >
+                ⋯
+              </button>
             </div>
 
             <div className="drawer__body scm-body">
@@ -517,6 +534,67 @@ export function SourceControlPanel({
               void act(() => git.checkoutCommit(cwd!, item.id))
             }
           })}
+        />
+      )}
+
+      {moreMenu && status && (
+        <ContextMenu
+          x={moreMenu.x}
+          y={moreMenu.y}
+          onClose={() => setMoreMenu(null)}
+          items={[
+            { label: 'Fetch', onClick: () => void act(() => git.fetch(cwd!)) },
+            {
+              label: 'Force Push',
+              onClick: () => {
+                if (window.confirm('Force push with lease? This overwrites the remote branch.'))
+                  void act(() => git.forcePush(cwd!))
+              }
+            },
+            { type: 'separator' },
+            {
+              label: 'Merge Branch…',
+              onClick: () => setBranchPick({ x: moreMenu.x, y: moreMenu.y, action: 'merge' })
+            },
+            {
+              label: 'Rebase onto…',
+              onClick: () => setBranchPick({ x: moreMenu.x, y: moreMenu.y, action: 'rebase' })
+            },
+            {
+              label: 'Rename Branch…',
+              onClick: () => {
+                const name = window.prompt('Rename current branch to:', status.branch)
+                if (name && name.trim()) void act(() => git.renameBranch(cwd!, name.trim()))
+              }
+            },
+            {
+              label: 'Delete Branch…',
+              onClick: () => setBranchPick({ x: moreMenu.x, y: moreMenu.y, action: 'delete' })
+            },
+            { type: 'separator' },
+            { label: 'Stash Changes', onClick: () => void act(() => git.stashPush(cwd!)) },
+            { label: 'Pop Stash', onClick: () => void act(() => git.stashPop(cwd!)) }
+          ] as MenuItem[]}
+        />
+      )}
+
+      {branchPick && status && (
+        <ContextMenu
+          x={branchPick.x}
+          y={branchPick.y}
+          onClose={() => setBranchPick(null)}
+          items={
+            status.branches
+              .filter((b) => (branchPick.action === 'delete' ? b !== status.branch : b !== status.branch))
+              .map((b) => ({
+                label: b,
+                onClick: () => {
+                  if (branchPick.action === 'merge') void act(() => git.merge(cwd!, b))
+                  else if (branchPick.action === 'rebase') void act(() => git.rebase(cwd!, b))
+                  else if (window.confirm(`Delete branch ${b}?`)) void act(() => git.deleteBranch(cwd!, b, false))
+                }
+              })) as MenuItem[]
+          }
         />
       )}
 

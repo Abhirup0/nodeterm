@@ -3691,3 +3691,18 @@ body,
 .pubdlg__opt:hover .pubdlg__opt-hint {
   opacity: 0.85;
 }
+
+.scm-more {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.scm-more:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
