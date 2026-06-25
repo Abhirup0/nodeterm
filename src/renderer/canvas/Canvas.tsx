@@ -52,6 +52,7 @@ import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { UpgradeDialog } from '../components/UpgradeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
@@ -1819,6 +1820,8 @@ export function Canvas() {
           onCancel={() => setConfirm(null)}
         />
       )}
+
+      <UpgradeDialog />
 
       {consentOpen && (
         <NotifyConsentDialog
