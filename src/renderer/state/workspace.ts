@@ -35,6 +35,12 @@ export interface NodeData {
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
+  /**
+   * Transient respawn trigger: bumping this number tears down a terminal node's session and
+   * recreates it (used to move an existing terminal into a worktree cwd). Not persisted —
+   * deliberately absent from flowToNodeStates, like initialCommand/expandedHeight.
+   */
+  respawnNonce?: number
   shell?: string
   cwd?: string
   text?: string
@@ -43,6 +49,8 @@ export interface NodeData {
   commitOid?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** group-only: the git worktree this group is bound to (single source of truth). */
+  worktree?: import('@shared/worktree').GroupWorktree
   /**
    * When set, this terminal runs on a REMOTE host over the relay (RemoteTransport) rather than
    * the local PTY (LocalTransport). Not persisted — remote nodes are transient to a live
@@ -472,7 +480,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
         agentId,
-        ssh: n.ssh
+        ssh: n.ssh,
+        worktree: n.worktree
       }
     }
   })
@@ -521,7 +530,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
         agentId: n.data.agentId,
-        ssh: n.data.ssh
+        ssh: n.data.ssh,
+        worktree: n.data.worktree
       }
     })
 }

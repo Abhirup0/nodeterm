@@ -2,6 +2,7 @@
 
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, PromptInjectionMode } from './agents/config'
+import type { GroupWorktree } from './worktree'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -56,6 +57,8 @@ export interface CanvasNodeState {
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
   commitOid?: string
+  /** group-only: when bound, the git worktree this group works in. */
+  worktree?: GroupWorktree
 }
 
 /**
@@ -373,6 +376,11 @@ export interface GitApi {
   branchAt(cwd: string, name: string, oid: string): Promise<GitResult>
   /** Checkout a commit (detached HEAD). */
   checkoutCommit(cwd: string, oid: string): Promise<GitResult>
+  repoRoot(cwd: string): Promise<string | null>
+  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
+  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
+  worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
 }
 
 export interface UpdateInfo {

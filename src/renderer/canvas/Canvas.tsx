@@ -15,9 +15,9 @@ import {
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
-import { TerminalNode } from '../nodes/TerminalNode'
+import { TerminalNode, setMoveIntoWorktreeHandler } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
-import { GroupNode } from '../nodes/GroupNode'
+import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -55,6 +55,7 @@ import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
+import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
@@ -70,6 +71,7 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { computeWorktreePath, sanitizeWorktreeBranch } from '@shared/worktree'
 import {
   agentConfig,
   hasHooks,
@@ -161,6 +163,14 @@ export function Canvas() {
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
+  // Group id awaiting a worktree bind (drives BindWorktreeDialog).
+  const [bindTarget, setBindTarget] = useState<string | null>(null)
+  // Terminal node id awaiting confirmation to move into its group's worktree.
+  const [moveTarget, setMoveTarget] = useState<string | null>(null)
+  // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
+  const [removeTarget, setRemoveTarget] = useState<{ groupId: string; warning: string } | null>(
+    null
+  )
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -760,16 +770,37 @@ export function Canvas() {
     return screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
   }, [screenToFlowPosition])
 
+  // cwd for a node being created INTO a group: prefer the group's bound worktree path,
+  // then its default cwd, else undefined (caller falls back to the project cwd).
+  const cwdForNewNodeIn = useCallback((parentId: string | undefined): string | undefined => {
+    if (!parentId) return undefined
+    const parent = nodesRef.current.find((n) => n.id === parentId)
+    return parent?.data.worktree?.path || parent?.data.cwd || undefined
+  }, [])
+
+  // Reparent a freshly-created node into a group (parentId + extent 'parent', position made
+  // relative to the group frame). Mirrors how `groupSelectedNodes` parents its children.
+  const parentInto = useCallback((node: CanvasNode, groupId: string): CanvasNode => {
+    const group = nodesRef.current.find((n) => n.id === groupId)
+    if (!group) return node
+    return {
+      ...node,
+      parentId: groupId,
+      extent: 'parent' as const,
+      position: { x: node.position.x - group.position.x, y: node.position.y - group.position.y }
+    }
+  }, [])
+
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }, initialCommand?: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [
-        ...ns,
-        createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
-      ])
+    (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   /** Open a new terminal that runs a command on start (e.g. gh auth login). */
@@ -920,12 +951,15 @@ export function Canvas() {
   )
 
   const addAgentNode = useCallback(
-    (agentId: AgentId, center?: { x: number; y: number }) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())])
+    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
@@ -1096,6 +1130,172 @@ export function Canvas() {
     },
     [setNodes, markDirty]
   )
+
+  const groupHasWorktree = useCallback(
+    (groupId: string) => !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree,
+    []
+  )
+
+  const bindGroupToWorktree = useCallback((groupId: string) => setBindTarget(groupId), [])
+
+  const confirmBind = useCallback(
+    async (v: BindWorktreeValue) => {
+      const git = window.nodeTerminal.git
+      const res = await git.worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
+      if (!res.ok) {
+        window.alert(res.message)
+        return
+      }
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === bindTarget
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  worktree: {
+                    repoPath: v.repoPath,
+                    branch: v.branch,
+                    baseRef: v.baseRef,
+                    path: v.path,
+                    createdByApp: true
+                  }
+                }
+              }
+            : n
+        )
+      )
+      setBindTarget(null)
+      markDirty()
+    },
+    [bindTarget, setNodes, markDirty]
+  )
+
+  // Ask-first worktree removal (Task 9). Gather any uncommitted-work info, then open a safety
+  // dialog before doing anything destructive. GitStatus has no `files` field — the dirty count
+  // is staged + unstaged changes.
+  const requestRemoveWorktree = useCallback(async (groupId: string) => {
+    const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+    if (!wt) return
+    const status = await window.nodeTerminal.git.status(wt.path)
+    const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
+    const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
+    setRemoveTarget({ groupId, warning })
+  }, [])
+
+  // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
+  // never touches a directory with live processes inside it, then remove the worktree + branch.
+  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; that failure
+  // is swallowed, so the worktree directory is removed, the branch is kept, and res.ok is still
+  // true — the binding is cleared either way (res.ok is false only if the worktree remove fails).
+  const confirmRemoveWorktree = useCallback(async () => {
+    const t = removeTarget
+    if (!t) return
+    const wt = nodesRef.current.find((n) => n.id === t.groupId)?.data.worktree
+    if (!wt) {
+      setRemoveTarget(null)
+      return
+    }
+    // 1) Kill the group's terminals' sessions BEFORE git touches the directory.
+    const childIds = nodesRef.current
+      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
+      .map((n) => n.id)
+    for (const id of childIds) transport.destroy(id)
+    // 2) Remove the worktree (and try to delete its branch). The branch delete uses `git -d`,
+    //    which refuses unmerged branches; that refusal is swallowed (branch kept), so res.ok is
+    //    false only when the worktree-directory removal itself fails.
+    const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, true)
+    if (!res.ok) {
+      window.alert(res.message)
+      setRemoveTarget(null)
+      return
+    }
+    // 3) Clear the binding from the group node.
+    setNodes((ns) =>
+      ns.map((n) => (n.id === t.groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
+    )
+    setRemoveTarget(null)
+    markDirty()
+  }, [removeTarget, setNodes, markDirty])
+
+  // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
+  // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
+  // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
+  const onWorktreeAction = useCallback(
+    async (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+      switch (action) {
+        case 'unbind':
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n
+            )
+          )
+          markDirty()
+          break
+        case 'merge': {
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          const res = await window.nodeTerminal.git.worktreeMerge(wt.repoPath, wt.branch, wt.baseRef)
+          window.alert(res.message) // success or the blocked/conflict reason
+          break
+        }
+        case 'remove':
+          void requestRemoveWorktree(groupId)
+          break
+        default:
+          break
+      }
+    },
+    [setNodes, markDirty, requestRemoveWorktree]
+  )
+
+  // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
+  useEffect(() => {
+    setWorktreeActionHandler(onWorktreeAction)
+    return () => setWorktreeActionHandler(null)
+  }, [onWorktreeAction])
+
+  // Move an existing terminal into its group's worktree. The "↪" header action requests it;
+  // confirming respawns the node's session in the worktree cwd. We bump `respawnNonce` (a
+  // transient, non-persisted trigger) so TerminalNode's session-creation effect re-runs —
+  // its cleanup kills the old tmux session (same node id = same target) and create() spawns a
+  // fresh one with the new cwd. Changing cwd alone wouldn't re-run that `[respawnNonce]` effect.
+  const requestMoveIntoWorktree = useCallback((nodeId: string) => setMoveTarget(nodeId), [])
+
+  const confirmMoveIntoWorktree = useCallback(() => {
+    const id = moveTarget
+    setMoveTarget(null)
+    if (!id) return
+    const node = nodesRef.current.find((n) => n.id === id)
+    const parent = nodesRef.current.find((p) => p.id === node?.parentId)
+    const wtPath = parent?.data.worktree?.path as string | undefined
+    if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
+    // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
+    // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
+    // (which would keep the old working directory). The node id / persistKey is unchanged.
+    transport.destroy(id)
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                cwd: wtPath,
+                respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+              }
+            }
+          : n
+      )
+    )
+    markDirty()
+  }, [moveTarget, setNodes, markDirty])
+
+  // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
+  useEffect(() => {
+    setMoveIntoWorktreeHandler(requestMoveIntoWorktree)
+    return () => setMoveIntoWorktreeHandler(null)
+  }, [requestMoveIntoWorktree])
 
   const toggleMarkdown = useCallback(
     (ids: string[]) => {
@@ -1407,12 +1607,26 @@ export function Canvas() {
   const groupItems = useCallback(
     (groupId: string): MenuItem[] => [
       { type: 'label', label: 'Group' },
+      {
+        label: 'New terminal in group',
+        icon: <IconTerminal />,
+        onClick: () => addTerminal(undefined, undefined, groupId)
+      },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
+      ...(groupHasWorktree(groupId)
+        ? []
+        : [
+            {
+              label: 'Bind to worktree…',
+              icon: <IconBranch />,
+              onClick: () => bindGroupToWorktree(groupId)
+            } as MenuItem
+          ]),
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
       { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
-    [setNodesColor, ungroup]
+    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree, addTerminal]
   )
 
   const onPaneContextMenu = useCallback(
@@ -2150,6 +2364,41 @@ export function Canvas() {
           onPick={(srv) => addSshTerminal(srv, { x: remotePicker.x, y: remotePicker.y })}
           onManage={() => setSettingsOpen(true)}
           onClose={() => setRemotePicker(null)}
+        />
+      )}
+
+      {bindTarget && (
+        <BindWorktreeDialog
+          initialRepoPath={
+            (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
+          }
+          defaultPath={(repoPath, branch) =>
+            computeWorktreePath('', repoPath.split('/').pop() || 'repo', sanitizeWorktreeBranch(branch))
+          }
+          onConfirm={confirmBind}
+          onCancel={() => setBindTarget(null)}
+        />
+      )}
+
+      {moveTarget && (
+        <ConfirmDialog
+          message="Move this terminal into the worktree? Its session restarts and any running process ends."
+          confirmLabel="Move"
+          danger={false}
+          onConfirm={confirmMoveIntoWorktree}
+          onCancel={() => setMoveTarget(null)}
+        />
+      )}
+
+      {removeTarget && (
+        <ConfirmDialog
+          message={`Remove this worktree and delete its branch?${
+            removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : ''
+          }`}
+          confirmLabel="Remove"
+          danger
+          onConfirm={confirmRemoveWorktree}
+          onCancel={() => setRemoveTarget(null)}
         />
       )}
 

@@ -657,6 +657,23 @@ body,
   cursor: default;
 }
 
+.term-node__move-worktree {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.term-node__move-worktree:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: #6cb0ff;
+}
+
 .term-node__search {
   background: transparent;
   border: none;
@@ -2604,6 +2621,54 @@ body,
   padding: 18px;
 }
 
+/* ---- Bind-to-worktree dialog (reuses .confirm shell) ---- */
+.confirm.bind-dialog {
+  width: 420px;
+}
+
+.bind-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bind-field input {
+  background: var(--panel-header);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.bind-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.bind-mode {
+  display: flex;
+  gap: 18px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.bind-mode label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.confirm__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ---- Notification consent dialog (polished, icon + title + actions) ---- */
 .consent-overlay {
   position: fixed;
@@ -2951,7 +3016,7 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  max-width: 70%;
+  max-width: 90%;
   padding: 3px 11px;
   background: #141416;
   border: 1px solid var(--border);
@@ -2978,6 +3043,39 @@ body,
   font-size: 12px;
   font-weight: 600;
   cursor: text;
+}
+
+/* Worktree binding chip — branch name + Unbind, shown in the label pill when bound. */
+.group-node__wt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.group-node__branch {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.group-node__wt-btn {
+  background: #141416;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.group-node__wt-btn:hover {
+  background: var(--panel-header);
+  color: var(--text);
 }
 
 /* ungroup / × — top-right, revealed on hover or when selected. */
