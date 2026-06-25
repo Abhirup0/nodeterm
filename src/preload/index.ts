@@ -94,7 +94,15 @@ const api: NodeTerminalApi = {
     generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd),
     history: (cwd, options) => ipcRenderer.invoke(IPC.gitHistory, cwd, options),
     commitFiles: (cwd, oid) => ipcRenderer.invoke(IPC.gitCommitFiles, cwd, oid),
-    remoteCommitUrl: (cwd, sha) => ipcRenderer.invoke(IPC.gitRemoteCommitUrl, cwd, sha)
+    remoteCommitUrl: (cwd, sha) => ipcRenderer.invoke(IPC.gitRemoteCommitUrl, cwd, sha),
+    repoRoot: (cwd) => ipcRenderer.invoke(IPC.gitRepoRoot, cwd),
+    worktreeList: (repoPath) => ipcRenderer.invoke(IPC.gitWorktreeList, repoPath),
+    worktreeAdd: (repoPath, wtPath, branch, baseRef, isNew) =>
+      ipcRenderer.invoke(IPC.gitWorktreeAdd, repoPath, wtPath, branch, baseRef, isNew),
+    worktreeMerge: (repoPath, branch, baseRef) =>
+      ipcRenderer.invoke(IPC.gitWorktreeMerge, repoPath, branch, baseRef),
+    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
+      ipcRenderer.invoke(IPC.gitWorktreeRemove, repoPath, wtPath, deleteBranch)
   },
   clipboard: {
     writeText: (text: string) => clipboard.writeText(text)

@@ -339,6 +339,11 @@ export interface GitApi {
   commitFiles(cwd: string, oid: string): Promise<GitFileChange[]>
   /** Remote web URL for a commit sha, or null if it can't be derived. */
   remoteCommitUrl(cwd: string, sha: string): Promise<string | null>
+  repoRoot(cwd: string): Promise<string | null>
+  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
+  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
+  worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
 }
 
 export interface UpdateInfo {

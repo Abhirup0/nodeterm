@@ -1,11 +1,13 @@
 import { execFile, spawn } from 'child_process'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { promisify } from 'util'
 import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
+import * as worktreeOps from '@shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 
 const run = promisify(execFile)
@@ -177,6 +179,33 @@ export class GitService {
     ipcMain.handle(IPC.gitRemoteCommitUrl, (_e, cwd: string, sha: string) =>
       this.remoteCommitUrl(cwd, sha)
     )
+    ipcMain.handle(IPC.gitRepoRoot, (_e, cwd: string) => this.repoRoot(cwd))
+    ipcMain.handle(IPC.gitWorktreeList, (_e, repoPath: string) => this.worktreeList(repoPath))
+    ipcMain.handle(IPC.gitWorktreeAdd, (_e, repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) =>
+      this.worktreeAdd(repoPath, wtPath, branch, baseRef, isNew)
+    )
+    ipcMain.handle(IPC.gitWorktreeMerge, (_e, repoPath: string, branch: string, baseRef: string) =>
+      this.worktreeMerge(repoPath, branch, baseRef)
+    )
+    ipcMain.handle(IPC.gitWorktreeRemove, (_e, repoPath: string, wtPath: string, deleteBranch: boolean) =>
+      this.worktreeRemove(repoPath, wtPath, deleteBranch)
+    )
+  }
+
+  repoRoot(cwd: string) {
+    return worktreeOps.repoRoot(git, cwd)
+  }
+  worktreeList(repoPath: string) {
+    return worktreeOps.worktreeList(git, repoPath)
+  }
+  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) {
+    return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)
+  }
+  worktreeMerge(repoPath: string, branch: string, baseRef: string) {
+    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef)
+  }
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean) {
+    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch)
   }
 
   async status(cwd: string): Promise<GitStatus> {
