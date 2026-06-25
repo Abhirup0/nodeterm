@@ -49,6 +49,11 @@ export interface NodeData {
    * connection (see flowToNodeStates).
    */
   remote?: { connectionId: string }
+  /**
+   * When set, this terminal runs `ssh` to a remote host on the LOCAL PTY (LocalTransport).
+   * Unlike `remote` (relay), this IS persisted — the node auto-reconnects on relaunch.
+   */
+  ssh?: import('@shared/ssh').SshConnection
   [key: string]: unknown
 }
 
@@ -123,6 +128,39 @@ export function createRemoteTerminalNode(
       group: null,
       tags: [],
       remote: { connectionId }
+    }
+  }
+}
+
+/**
+ * Creates a terminal node that runs `ssh` to a saved server on the local PTY. The connection
+ * is snapshotted inline (`data.ssh`) so the node survives the server being edited/deleted.
+ */
+export function createSshTerminalNode(
+  server: import('@shared/ssh').SshServer,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('ssh'),
+    type: 'terminal',
+    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
+    width: TERMINAL_SIZE.width,
+    height: TERMINAL_SIZE.height,
+    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    data: {
+      title: server.label,
+      color: NODE_COLORS[index % NODE_COLORS.length],
+      group: null,
+      tags: [],
+      ssh: {
+        host: server.host,
+        user: server.user,
+        port: server.port,
+        identityFile: server.identityFile,
+        extraArgs: server.extraArgs,
+        label: server.label
+      }
     }
   }
 }
@@ -433,7 +471,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
-        agentId
+        agentId,
+        ssh: n.ssh
       }
     }
   })
@@ -481,7 +520,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
-        agentId: n.data.agentId
+        agentId: n.data.agentId,
+        ssh: n.data.ssh
       }
     })
 }

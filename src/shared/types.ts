@@ -46,6 +46,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
+  ssh?: import('./ssh').SshConnection
   // sticky-only
   text?: string
   // editor / diff
