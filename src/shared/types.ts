@@ -268,6 +268,12 @@ export interface SettingsApi {
   save(settings: Settings): Promise<void>
 }
 
+export interface SshApi {
+  list(): Promise<import('./ssh').SshServer[]>
+  save(server: import('./ssh').SshServer): Promise<import('./ssh').SshServer[]>
+  remove(id: string): Promise<import('./ssh').SshServer[]>
+}
+
 export interface GitFileChange {
   path: string
   /** Single-letter status: M (modified), A (added), D (deleted), R (renamed), U (untracked). */
@@ -640,6 +646,7 @@ export interface NodeTerminalApi {
   workspace: WorkspaceApi
   dialog: DialogApi
   settings: SettingsApi
+  ssh: SshApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi

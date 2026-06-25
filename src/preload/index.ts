@@ -72,6 +72,11 @@ const api: NodeTerminalApi = {
     load: () => ipcRenderer.invoke(IPC.settingsLoad),
     save: (settings) => ipcRenderer.invoke(IPC.settingsSave, settings)
   },
+  ssh: {
+    list: () => ipcRenderer.invoke(IPC.sshList),
+    save: (server) => ipcRenderer.invoke(IPC.sshSave, server),
+    remove: (id) => ipcRenderer.invoke(IPC.sshDelete, id)
+  },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
