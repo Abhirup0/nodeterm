@@ -35,6 +35,12 @@ export interface NodeData {
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
+  /**
+   * Transient respawn trigger: bumping this number tears down a terminal node's session and
+   * recreates it (used to move an existing terminal into a worktree cwd). Not persisted —
+   * deliberately absent from flowToNodeStates, like initialCommand/expandedHeight.
+   */
+  respawnNonce?: number
   shell?: string
   cwd?: string
   text?: string
@@ -43,12 +49,19 @@ export interface NodeData {
   commitOid?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** group-only: the git worktree this group is bound to (single source of truth). */
+  worktree?: import('@shared/worktree').GroupWorktree
   /**
    * When set, this terminal runs on a REMOTE host over the relay (RemoteTransport) rather than
    * the local PTY (LocalTransport). Not persisted — remote nodes are transient to a live
    * connection (see flowToNodeStates).
    */
   remote?: { connectionId: string }
+  /**
+   * When set, this terminal runs `ssh` to a remote host on the LOCAL PTY (LocalTransport).
+   * Unlike `remote` (relay), this IS persisted — the node auto-reconnects on relaunch.
+   */
+  ssh?: import('@shared/ssh').SshConnection
   [key: string]: unknown
 }
 
@@ -123,6 +136,39 @@ export function createRemoteTerminalNode(
       group: null,
       tags: [],
       remote: { connectionId }
+    }
+  }
+}
+
+/**
+ * Creates a terminal node that runs `ssh` to a saved server on the local PTY. The connection
+ * is snapshotted inline (`data.ssh`) so the node survives the server being edited/deleted.
+ */
+export function createSshTerminalNode(
+  server: import('@shared/ssh').SshServer,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('ssh'),
+    type: 'terminal',
+    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
+    width: TERMINAL_SIZE.width,
+    height: TERMINAL_SIZE.height,
+    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    data: {
+      title: server.label,
+      color: NODE_COLORS[index % NODE_COLORS.length],
+      group: null,
+      tags: [],
+      ssh: {
+        host: server.host,
+        user: server.user,
+        port: server.port,
+        identityFile: server.identityFile,
+        extraArgs: server.extraArgs,
+        label: server.label
+      }
     }
   }
 }
@@ -433,7 +479,9 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
-        agentId
+        agentId,
+        ssh: n.ssh,
+        worktree: n.worktree
       }
     }
   })
@@ -481,7 +529,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
-        agentId: n.data.agentId
+        agentId: n.data.agentId,
+        ssh: n.data.ssh,
+        worktree: n.data.worktree
       }
     })
 }

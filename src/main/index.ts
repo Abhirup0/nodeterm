@@ -5,6 +5,7 @@ import * as fsOps from './fs-ops'
 import { PtyManager } from './pty-manager'
 import { WorkspaceStore } from './workspace-store'
 import { SettingsStore } from './settings-store'
+import { SshStore } from './ssh-store'
 import { GitService } from './git-service'
 import { generateCommitMessage, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
@@ -35,6 +36,7 @@ const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
 if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
 
 const settingsStore = new SettingsStore()
+const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
@@ -115,6 +117,7 @@ app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return // losing second instance — quitting; don't touch tmux
   settingsStore.init()
   settingsStore.registerIpc()
+  sshStore.registerIpc()
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
@@ -185,6 +188,7 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.fsWrite, (_e, filePath: string, content: string) =>
     fsOps.writeText(filePath, content)
   )
+  ipcMain.handle(IPC.filesQuickOpen, (_e, cwd: string) => fsOps.listQuickOpenFiles(cwd))
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

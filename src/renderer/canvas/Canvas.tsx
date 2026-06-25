@@ -15,9 +15,9 @@ import {
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
-import { TerminalNode } from '../nodes/TerminalNode'
+import { TerminalNode, setMoveIntoWorktreeHandler } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
-import { GroupNode } from '../nodes/GroupNode'
+import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -40,30 +40,40 @@ import {
   IconRemote,
   IconSave,
   IconSelectAll,
+  IconSessions,
   IconSwitch,
   IconTerminal,
   IconTrash,
   IconUngroup
 } from '../components/icons'
 import { SettingsPage } from '../components/settings/SettingsPage'
+import type { SettingsSectionId } from '../components/settings/nav'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { UpgradeDialog } from '../components/UpgradeDialog'
+import { RemotePicker } from '../components/RemotePicker'
+import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
+import { SessionsSidebar } from '../components/SessionsSidebar'
+import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { transport } from '../terminal/local-transport'
+import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
+import { opensInEditor } from '../lib/openTarget'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { computeWorktreePath, sanitizeWorktreeBranch } from '@shared/worktree'
 import {
   agentConfig,
   hasHooks,
@@ -78,6 +88,10 @@ import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
+import { useSessionNaming } from '../state/sessionNaming'
+import { useSshServers } from '../state/sshServers'
+import { requireProOr } from '../state/upgradeGate'
+import type { SshServer } from '@shared/ssh'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -85,6 +99,7 @@ import {
   createAgentNode,
   createDiffNode,
   createEditorNode,
+  createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
   duplicateNode,
@@ -113,14 +128,40 @@ export function Canvas() {
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
+  const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
+  // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
+  // distinct so revealing the same file twice still re-fires the Explorer effect.
+  const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
+  // Sessions sidebar (left): pinned (docked) by default; unpin is a persisted preference.
+  // hover-to-peek when unpinned. `dismissed` is a transient "hide for now" (the × button)
+  // that does NOT change the pin preference — so a pinned sidebar reopens pinned next launch.
+  const [sessionsPinned, setSessionsPinned] = useState(() => {
+    try {
+      const v = localStorage.getItem('nodeterm.sessionsPinned')
+      return v === null ? true : v === '1'
+    } catch {
+      return true
+    }
+  })
+  const [sessionsHover, setSessionsHover] = useState(false)
+  const [sessionsDismissed, setSessionsDismissed] = useState(false)
+  // When pinned the sidebar is docked and stays open (mouse-leave never closes it); `dismissed`
+  // hides it until the next hover/click. When unpinned it is a pure hover-peek.
+  const sessionsOpen = sessionsPinned ? !sessionsDismissed : sessionsHover
+  // When set, add a terminal to this project once its nodes have loaded into React Flow
+  // (cross-project "add" from the sidebar, which must switch projects first).
+  const pendingAddRef = useRef<string | null>(null)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
@@ -134,6 +175,14 @@ export function Canvas() {
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
+  // Group id awaiting a worktree bind (drives BindWorktreeDialog).
+  const [bindTarget, setBindTarget] = useState<string | null>(null)
+  // Terminal node id awaiting confirmation to move into its group's worktree.
+  const [moveTarget, setMoveTarget] = useState<string | null>(null)
+  // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
+  const [removeTarget, setRemoveTarget] = useState<{ groupId: string; warning: string } | null>(
+    null
+  )
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -312,6 +361,85 @@ export function Canvas() {
     return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
   }, [linkEdges, ephemeralEdges, accent])
 
+  // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
+  // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
+  const toggleSessionsPin = useCallback(() => {
+    setSessionsPinned((v) => {
+      const next = !v
+      try {
+        localStorage.setItem('nodeterm.sessionsPinned', next ? '1' : '0')
+      } catch {
+        // ignore
+      }
+      return next
+    })
+    // Re-show on (re)pin; on unpin, leave hover as-is so it stays a peek until the cursor leaves.
+    setSessionsDismissed(false)
+  }, [])
+
+  // Top-left icon click: when pinned, toggle the transient hide/show (keeps the pin); when
+  // unpinned, promote the hover-peek to a docked pinned panel.
+  const onSessionsIconClick = useCallback(() => {
+    if (sessionsPinned) {
+      setSessionsDismissed((d) => !d)
+    } else {
+      setSessionsPinned(true)
+      try {
+        localStorage.setItem('nodeterm.sessionsPinned', '1')
+      } catch {
+        // ignore
+      }
+      setSessionsDismissed(false)
+    }
+  }, [sessionsPinned])
+
+  // Hover-peek: the sidebar overlaps its trigger icon, so leaving the icon (mouseleave)
+  // must not close the peek while the cursor moves onto the sidebar body. A single shared
+  // timer lets entering either surface cancel a pending close from the other.
+  const sessionsCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const openSessionsPeek = useCallback(() => {
+    if (sessionsCloseTimer.current) {
+      clearTimeout(sessionsCloseTimer.current)
+      sessionsCloseTimer.current = null
+    }
+    setSessionsHover(true)
+    // Hovering re-opens a dismissed sidebar; when pinned this re-docks it so it then stays
+    // open after the cursor leaves (open = !dismissed), instead of collapsing like a peek.
+    setSessionsDismissed(false)
+  }, [])
+  const closeSessionsPeekSoon = useCallback(() => {
+    if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    sessionsCloseTimer.current = setTimeout(() => {
+      sessionsCloseTimer.current = null
+      setSessionsHover(false)
+    }, 140)
+  }, [])
+  useEffect(
+    () => () => {
+      if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    },
+    []
+  )
+
+  // Serialized inputs for the active project's terminal/agent nodes (the sidebar reads the
+  // serialized nodes of *inactive* projects directly from the store, but the active project's
+  // live state lives in React Flow — pass it through here).
+  const liveActiveNodes = useMemo<SessionNodeInput[]>(
+    () =>
+      nodes
+        .filter((n) => (n.type ?? 'terminal') === 'terminal')
+        .map((n) => ({
+          id: n.id,
+          kind: 'terminal' as const,
+          title: n.data.title ?? n.id,
+          color: n.data.color ?? '#888',
+          agentId: n.data.agentId,
+          cwd: n.data.cwd,
+          ssh: n.data.ssh
+        })),
+    [nodes]
+  )
+
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
@@ -370,6 +498,12 @@ export function Canvas() {
           goToNode(node)
           useAgentStatus.getState().clearUnread(pending)
         }
+      }
+      // Consume a cross-project "add terminal" request from the sessions sidebar (which had
+      // to switch projects first). Only act if we landed on the requested project.
+      if (pendingAddRef.current === useProjects.getState().activeProjectId) {
+        pendingAddRef.current = null
+        addTerminal()
       }
     }, 0)
     return () => clearTimeout(t)
@@ -670,16 +804,37 @@ export function Canvas() {
     return screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
   }, [screenToFlowPosition])
 
+  // cwd for a node being created INTO a group: prefer the group's bound worktree path,
+  // then its default cwd, else undefined (caller falls back to the project cwd).
+  const cwdForNewNodeIn = useCallback((parentId: string | undefined): string | undefined => {
+    if (!parentId) return undefined
+    const parent = nodesRef.current.find((n) => n.id === parentId)
+    return parent?.data.worktree?.path || parent?.data.cwd || undefined
+  }, [])
+
+  // Reparent a freshly-created node into a group (parentId + extent 'parent', position made
+  // relative to the group frame). Mirrors how `groupSelectedNodes` parents its children.
+  const parentInto = useCallback((node: CanvasNode, groupId: string): CanvasNode => {
+    const group = nodesRef.current.find((n) => n.id === groupId)
+    if (!group) return node
+    return {
+      ...node,
+      parentId: groupId,
+      extent: 'parent' as const,
+      position: { x: node.position.x - group.position.x, y: node.position.y - group.position.y }
+    }
+  }, [])
+
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }, initialCommand?: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [
-        ...ns,
-        createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
-      ])
+    (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   /** Open a new terminal that runs a command on start (e.g. gh auth login). */
@@ -723,6 +878,45 @@ export function Canvas() {
     },
     [setNodes, markDirty, viewCenter]
   )
+
+  // Load the quick-open file index when the palette opens.
+  useEffect(() => {
+    if (!paletteOpen) return
+    const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+    if (!cwd) {
+      setFileIndex([])
+      return
+    }
+    let cancelled = false
+    void window.nodeTerminal.files.quickOpen(cwd).then((files) => {
+      if (!cancelled) setFileIndex(prepareQuickOpenFiles(files))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [paletteOpen, activeProjectId])
+
+  /** Open a quick-open file result by root-relative path: editor node for text/images,
+   *  OS default app for binaries (e.g. .dmg). */
+  const openProjectFile = useCallback(
+    (relPath: string) => {
+      const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      if (!cwd) return
+      // relPath comes from the trusted local file index (always cwd-relative), so the
+      // `cwd + relPath` join needs no traversal guard in v1; a future remote/untrusted source would.
+      const abs = `${cwd.replace(/\/$/, '')}/${relPath}`
+      if (opensInEditor(relPath)) openFile(abs)
+      else window.nodeTerminal.shell.openPath(abs)
+    },
+    [activeProjectId, openFile]
+  )
+
+  /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
+   *  Each call bumps a nonce so revealing the same file twice still re-fires the effect. */
+  const revealProjectFile = useCallback((relPath: string) => {
+    setExplorerOpen(true)
+    setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
+  }, [])
 
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
@@ -791,13 +985,36 @@ export function Canvas() {
   )
 
   const addAgentNode = useCallback(
-    (agentId: AgentId, center?: { x: number; y: number }) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())])
+    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
+
+  // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
+  // converted to a flow position; otherwise the node lands at the view center. The new node is
+  // selected (and others deselected) so it's the active focus right away.
+  const addSshTerminal = useCallback(
+    (server: SshServer, screenPos?: { x: number; y: number }) => {
+      const at = screenPos ? screenToFlowPosition(screenPos) : viewCenter()
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createSshTerminalNode(server, ns.length, at), selected: true }
+      ])
+      markDirty()
+    },
+    [setNodes, markDirty, screenToFlowPosition, viewCenter]
+  )
+
+  // Pro-gated entry to the SSH server picker: free users get the upgrade dialog instead.
+  const openRemotePicker = useCallback((screenPos: { x: number; y: number }) => {
+    requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
+  }, [])
 
   // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
   useEffect(() => {
@@ -843,8 +1060,12 @@ export function Canvas() {
     (ids: string[]) => {
       const set = new Set(ids)
       nodesRef.current.forEach((n) => {
+        if (!set.has(n.id)) return
         // Remote terminals have no local persistent session — only destroy local ones.
-        if (set.has(n.id) && n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        // Permanent deletion → drop the node's persisted agent status (sessionId/session/
+        // unread). Node unmount no longer does this, so deletion must.
+        useAgentStatus.getState().remove(n.id)
       })
       // Tear down relay connections owned solely by the deleted remote node(s). The model is
       // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
@@ -943,6 +1164,172 @@ export function Canvas() {
     },
     [setNodes, markDirty]
   )
+
+  const groupHasWorktree = useCallback(
+    (groupId: string) => !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree,
+    []
+  )
+
+  const bindGroupToWorktree = useCallback((groupId: string) => setBindTarget(groupId), [])
+
+  const confirmBind = useCallback(
+    async (v: BindWorktreeValue) => {
+      const git = window.nodeTerminal.git
+      const res = await git.worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
+      if (!res.ok) {
+        window.alert(res.message)
+        return
+      }
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === bindTarget
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  worktree: {
+                    repoPath: v.repoPath,
+                    branch: v.branch,
+                    baseRef: v.baseRef,
+                    path: v.path,
+                    createdByApp: true
+                  }
+                }
+              }
+            : n
+        )
+      )
+      setBindTarget(null)
+      markDirty()
+    },
+    [bindTarget, setNodes, markDirty]
+  )
+
+  // Ask-first worktree removal (Task 9). Gather any uncommitted-work info, then open a safety
+  // dialog before doing anything destructive. GitStatus has no `files` field — the dirty count
+  // is staged + unstaged changes.
+  const requestRemoveWorktree = useCallback(async (groupId: string) => {
+    const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+    if (!wt) return
+    const status = await window.nodeTerminal.git.status(wt.path)
+    const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
+    const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
+    setRemoveTarget({ groupId, warning })
+  }, [])
+
+  // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
+  // never touches a directory with live processes inside it, then remove the worktree + branch.
+  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; that failure
+  // is swallowed, so the worktree directory is removed, the branch is kept, and res.ok is still
+  // true — the binding is cleared either way (res.ok is false only if the worktree remove fails).
+  const confirmRemoveWorktree = useCallback(async () => {
+    const t = removeTarget
+    if (!t) return
+    const wt = nodesRef.current.find((n) => n.id === t.groupId)?.data.worktree
+    if (!wt) {
+      setRemoveTarget(null)
+      return
+    }
+    // 1) Kill the group's terminals' sessions BEFORE git touches the directory.
+    const childIds = nodesRef.current
+      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
+      .map((n) => n.id)
+    for (const id of childIds) transport.destroy(id)
+    // 2) Remove the worktree (and try to delete its branch). The branch delete uses `git -d`,
+    //    which refuses unmerged branches; that refusal is swallowed (branch kept), so res.ok is
+    //    false only when the worktree-directory removal itself fails.
+    const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, true)
+    if (!res.ok) {
+      window.alert(res.message)
+      setRemoveTarget(null)
+      return
+    }
+    // 3) Clear the binding from the group node.
+    setNodes((ns) =>
+      ns.map((n) => (n.id === t.groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
+    )
+    setRemoveTarget(null)
+    markDirty()
+  }, [removeTarget, setNodes, markDirty])
+
+  // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
+  // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
+  // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
+  const onWorktreeAction = useCallback(
+    async (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+      switch (action) {
+        case 'unbind':
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n
+            )
+          )
+          markDirty()
+          break
+        case 'merge': {
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          const res = await window.nodeTerminal.git.worktreeMerge(wt.repoPath, wt.branch, wt.baseRef)
+          window.alert(res.message) // success or the blocked/conflict reason
+          break
+        }
+        case 'remove':
+          void requestRemoveWorktree(groupId)
+          break
+        default:
+          break
+      }
+    },
+    [setNodes, markDirty, requestRemoveWorktree]
+  )
+
+  // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
+  useEffect(() => {
+    setWorktreeActionHandler(onWorktreeAction)
+    return () => setWorktreeActionHandler(null)
+  }, [onWorktreeAction])
+
+  // Move an existing terminal into its group's worktree. The "↪" header action requests it;
+  // confirming respawns the node's session in the worktree cwd. We bump `respawnNonce` (a
+  // transient, non-persisted trigger) so TerminalNode's session-creation effect re-runs —
+  // its cleanup kills the old tmux session (same node id = same target) and create() spawns a
+  // fresh one with the new cwd. Changing cwd alone wouldn't re-run that `[respawnNonce]` effect.
+  const requestMoveIntoWorktree = useCallback((nodeId: string) => setMoveTarget(nodeId), [])
+
+  const confirmMoveIntoWorktree = useCallback(() => {
+    const id = moveTarget
+    setMoveTarget(null)
+    if (!id) return
+    const node = nodesRef.current.find((n) => n.id === id)
+    const parent = nodesRef.current.find((p) => p.id === node?.parentId)
+    const wtPath = parent?.data.worktree?.path as string | undefined
+    if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
+    // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
+    // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
+    // (which would keep the old working directory). The node id / persistKey is unchanged.
+    transport.destroy(id)
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                cwd: wtPath,
+                respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+              }
+            }
+          : n
+      )
+    )
+    markDirty()
+  }, [moveTarget, setNodes, markDirty])
+
+  // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
+  useEffect(() => {
+    setMoveIntoWorktreeHandler(requestMoveIntoWorktree)
+    return () => setMoveIntoWorktreeHandler(null)
+  }, [requestMoveIntoWorktree])
 
   const toggleMarkdown = useCallback(
     (ids: string[]) => {
@@ -1140,10 +1527,14 @@ export function Canvas() {
         setPaletteOpen((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.key === ',') {
         e.preventDefault()
+        setSettingsSection(undefined)
         setSettingsOpen(true)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
         setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault()
+        toggleSessionsPin()
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
@@ -1157,7 +1548,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [toggleSessionsPin])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -1251,12 +1642,26 @@ export function Canvas() {
   const groupItems = useCallback(
     (groupId: string): MenuItem[] => [
       { type: 'label', label: 'Group' },
+      {
+        label: 'New terminal in group',
+        icon: <IconTerminal />,
+        onClick: () => addTerminal(undefined, undefined, groupId)
+      },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
+      ...(groupHasWorktree(groupId)
+        ? []
+        : [
+            {
+              label: 'Bind to worktree…',
+              icon: <IconBranch />,
+              onClick: () => bindGroupToWorktree(groupId)
+            } as MenuItem
+          ]),
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
       { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
-    [setNodesColor, ungroup]
+    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree, addTerminal]
   )
 
   const onPaneContextMenu = useCallback(
@@ -1288,13 +1693,27 @@ export function Canvas() {
             ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
+          {
+            label: 'New remote…',
+            icon: <IconTerminal />,
+            onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
+          },
           { type: 'separator' },
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
       })
     },
-    [screenToFlowPosition, addTerminal, addAgentNode, addSticky, openFileDialog, selectAll, fitView]
+    [
+      screenToFlowPosition,
+      addTerminal,
+      addAgentNode,
+      addSticky,
+      openFileDialog,
+      openRemotePicker,
+      selectAll,
+      fitView
+    ]
   )
 
   const onNodeContextMenu = useCallback(
@@ -1384,6 +1803,114 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // ---- sessions sidebar actions ----
+  // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
+  // inactive project's node even though it isn't mounted; then drop it from the store.
+  const closeSession = useCallback(
+    (projectId: string, id: string) => {
+      setConfirm({
+        message: 'End this session? This stops its tmux session.',
+        confirmLabel: 'End session',
+        danger: true,
+        onConfirm: () => {
+          if (projectId === activeProjectId) {
+            deleteNodes([id])
+          } else {
+            transport.destroy(id)
+            useAgentStatus.getState().remove(id)
+            useProjects.getState().removeNode(projectId, id)
+            void writeDisk()
+          }
+          setConfirm(null)
+        }
+      })
+    },
+    [activeProjectId, deleteNodes, writeDisk]
+  )
+
+  const renameSession = useCallback(
+    (projectId: string, id: string, title: string) => {
+      if (projectId === activeProjectId) {
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, title } } : n)))
+        markDirty()
+      } else {
+        useProjects.getState().renameNode(projectId, id, title)
+        void writeDisk()
+      }
+    },
+    [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
+  // Sidebar "Name with AI": generate a title from the session's captured terminal output
+  // (same BYO-agent path as the terminal node's ✦), then apply it via renameSession.
+  const aiNameSession = useCallback(
+    async (projectId: string, id: string, cwd?: string) => {
+      // Track progress in a store keyed by node id so the spinner survives the row/sidebar
+      // unmounting mid-request; this Canvas-level call completes and applies the name anyway.
+      useSessionNaming.getState().set(id, true)
+      try {
+        const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
+        if (r.ok) renameSession(projectId, id, r.message)
+      } finally {
+        useSessionNaming.getState().set(id, false)
+      }
+    },
+    [renameSession]
+  )
+
+  const addToProject = useCallback(
+    (projectId: string) => {
+      if (projectId === activeProjectId) {
+        addTerminal()
+      } else {
+        // Add once the project's nodes have loaded into React Flow (load effect consumes this).
+        pendingAddRef.current = projectId
+        switchProject(projectId)
+      }
+    },
+    [activeProjectId, addTerminal, switchProject]
+  )
+
+  const onRowContextMenu = useCallback(
+    (e: React.MouseEvent, projectId: string, id: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+          {
+            label: 'Rename',
+            icon: <IconEditor />,
+            onClick: () => {
+              const t = window.prompt('Rename session', '')
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            }
+          },
+          {
+            label: 'Duplicate',
+            icon: <IconDuplicate />,
+            onClick: () => {
+              if (projectId === activeProjectId) duplicateNodes([id])
+              else {
+                useProjects.getState().duplicateNode(projectId, id)
+                void writeDisk()
+              }
+            }
+          },
+          {
+            label: 'Close',
+            icon: <IconTrash />,
+            danger: true,
+            onClick: () => closeSession(projectId, id)
+          }
+        ]
+      })
+    },
+    [activeProjectId, focusNodeById, renameSession, duplicateNodes, closeSession, writeDisk]
+  )
 
   // Stream live subagent transcript chunks into the agent-nodes store.
   useEffect(
@@ -1530,6 +2057,11 @@ export function Canvas() {
     setConsentOpen(true)
   }, [settingsHydrated])
 
+  // Load saved SSH servers once so the RemotePicker / palette have them available.
+  useEffect(() => {
+    void useSshServers.getState().hydrate()
+  }, [])
+
   const addProject = useCallback(() => {
     commitActiveToStore()
     const project = useProjects.getState().addProject()
@@ -1575,9 +2107,11 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
-      // End the tmux sessions of every terminal in the deleted project.
+      // End the tmux sessions of every terminal in the deleted project, and drop their
+      // persisted agent status (node unmount no longer removes it).
       store.getProject(id)?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
+        useAgentStatus.getState().remove(n.id)
       })
       store.deleteProject(id)
       void writeDisk()
@@ -1610,6 +2144,17 @@ export function Canvas() {
         ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
+      ...useSshServers.getState().servers.map(
+        (srv): Command => ({
+          id: `new-remote-${srv.id}`,
+          label: `New remote: ${srv.label}`,
+          icon: <IconTerminal />,
+          run: () =>
+            requireProOr('Remote SSH terminals', () =>
+              addSshTerminal(srv, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
+            )
+        })
+      ),
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       {
         id: 'new-remote',
@@ -1664,7 +2209,8 @@ export function Canvas() {
     switchProject,
     goToNode,
     bufferCache,
-    connectRemote
+    connectRemote,
+    addSshTerminal
   ])
 
   return (
@@ -1684,6 +2230,16 @@ export function Canvas() {
       </div>
       <UpdateCard />
 
+      <div
+        className="sessions-icon-cluster"
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
+      >
+        <button title="Sessions (⌘⇧L)" onClick={onSessionsIconClick}>
+          <IconSessions />
+        </button>
+      </div>
+
       <div className="controls-cluster">
         <button
           className="cluster-search"
@@ -1699,7 +2255,13 @@ export function Canvas() {
         <button title="Source Control" onClick={() => setScOpen(true)}>
           ⎇
         </button>
-        <button title="Settings (⌘,)" onClick={() => setSettingsOpen(true)}>
+        <button
+          title="Settings (⌘,)"
+          onClick={() => {
+            setSettingsSection(undefined)
+            setSettingsOpen(true)
+          }}
+        >
           ⚙
         </button>
         <button title="Keyboard shortcuts (⌘/)" onClick={() => setShortcutsOpen(true)}>
@@ -1793,10 +2355,18 @@ export function Canvas() {
       )}
 
       {paletteOpen && (
-        <CommandPalette commands={buildCommands()} onClose={() => setPaletteOpen(false)} />
+        <CommandPalette
+          commands={buildCommands()}
+          fileIndex={fileIndex}
+          onOpenFile={openProjectFile}
+          onRevealFile={revealProjectFile}
+          onClose={() => setPaletteOpen(false)}
+        />
       )}
 
-      {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsPage onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
 
       {scOpen && (
         <SourceControlPanel
@@ -1811,8 +2381,28 @@ export function Canvas() {
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
       {explorerOpen && (
-        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} />
+        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} reveal={reveal} />
       )}
+
+      <SessionsSidebar
+        open={sessionsOpen}
+        pinned={sessionsPinned}
+        liveActiveNodes={liveActiveNodes}
+        onTogglePin={toggleSessionsPin}
+        onClose={() => {
+          // Transient "hide for now" — does NOT touch the pin preference.
+          setSessionsHover(false)
+          setSessionsDismissed(true)
+        }}
+        onFocusNode={focusNodeById}
+        onCloseSession={closeSession}
+        onRenameSession={renameSession}
+        onAiNameSession={aiNameSession}
+        onRowContextMenu={onRowContextMenu}
+        onAddToProject={addToProject}
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
+      />
 
       {confirm && (
         <ConfirmDialog
@@ -1822,6 +2412,56 @@ export function Canvas() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      <UpgradeDialog />
+
+      {remotePicker && (
+        <RemotePicker
+          x={remotePicker.x}
+          y={remotePicker.y}
+          onPick={(srv) => addSshTerminal(srv, { x: remotePicker.x, y: remotePicker.y })}
+          onManage={() => {
+            setSettingsSection('ssh')
+            setSettingsOpen(true)
+          }}
+          onClose={() => setRemotePicker(null)}
+        />
+      )}
+
+      {bindTarget && (
+        <BindWorktreeDialog
+          initialRepoPath={
+            (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
+          }
+          defaultPath={(repoPath, branch) =>
+            computeWorktreePath('', repoPath.split('/').pop() || 'repo', sanitizeWorktreeBranch(branch))
+          }
+          onConfirm={confirmBind}
+          onCancel={() => setBindTarget(null)}
+        />
+      )}
+
+      {moveTarget && (
+        <ConfirmDialog
+          message="Move this terminal into the worktree? Its session restarts and any running process ends."
+          confirmLabel="Move"
+          danger={false}
+          onConfirm={confirmMoveIntoWorktree}
+          onCancel={() => setMoveTarget(null)}
+        />
+      )}
+
+      {removeTarget && (
+        <ConfirmDialog
+          message={`Remove this worktree and delete its branch?${
+            removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : ''
+          }`}
+          confirmLabel="Remove"
+          danger
+          onConfirm={confirmRemoveWorktree}
+          onCancel={() => setRemoveTarget(null)}
         />
       )}
 
@@ -1852,6 +2492,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
+        onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
         onSave={persist}
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}

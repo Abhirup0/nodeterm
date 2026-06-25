@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DirEntry } from '@shared/types'
 import { useProjects } from '../state/projects'
@@ -6,6 +6,9 @@ import { useProjects } from '../state/projects'
 interface ExplorerPanelProps {
   onClose: () => void
   onOpenFile: (path: string) => void
+  /** File to reveal (expand ancestors + select + scroll). `path` is relative to the active project
+   *  cwd; `nonce` increments per request so revealing the same file twice still re-fires. */
+  reveal?: { path: string; nonce: number } | null
 }
 
 type ContextFn = (x: number, y: number, path: string, isDir: boolean) => void
@@ -30,6 +33,8 @@ function TreeEntry({
   path,
   depth,
   selected,
+  forcedOpen,
+  revealNonce,
   onContext,
   onOpenFile,
   onSelect
@@ -38,18 +43,40 @@ function TreeEntry({
   path: string
   depth: number
   selected: string | null
+  forcedOpen: Set<string>
+  revealNonce: number | undefined
   onContext: ContextFn
   onOpenFile: OpenFn
   onSelect: SelectFn
 }) {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState<DirEntry[] | null>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  // The last reveal nonce this row force-opened for, so we honor each reveal edge exactly once
+  // and don't re-assert open afterwards (otherwise a manual collapse wouldn't stick).
+  const lastHonoredRef = useRef<number | undefined>(undefined)
 
   const expandDir = useCallback(async () => {
     const next = !open
     setOpen(next)
     if (next && children === null) setChildren(await window.nodeTerminal.fs.list(path))
   }, [open, children, path])
+
+  // Reveal: when this directory is force-opened (an ancestor of the reveal target), expand it
+  // ONCE per reveal edge. After the edge, a manual collapse sticks because this effect won't
+  // re-fire for the same nonce. Lazy-load children (awaiting the list, like the click path).
+  useEffect(() => {
+    if (!entry.dir || !forcedOpen.has(path)) return
+    if (revealNonce === lastHonoredRef.current) return
+    lastHonoredRef.current = revealNonce
+    if (children === null) void window.nodeTerminal.fs.list(path).then(setChildren)
+    setOpen(true)
+  }, [forcedOpen, path, entry.dir, children, revealNonce])
+
+  // Reveal: scroll the selected (target) row into view once it has mounted.
+  useEffect(() => {
+    if (selected === path) rowRef.current?.scrollIntoView({ block: 'center' })
+  }, [selected, path])
 
   // Files: first click selects, a second click (or double-click) opens the node.
   // Directories: a click toggles expansion (and selects for highlight).
@@ -67,6 +94,7 @@ function TreeEntry({
   return (
     <>
       <div
+        ref={rowRef}
         className={`ex-row${entry.ignored ? ' ignored' : ''}${selected === path ? ' selected' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
@@ -91,6 +119,8 @@ function TreeEntry({
             path={`${path}/${c.name}`}
             depth={depth + 1}
             selected={selected}
+            forcedOpen={forcedOpen}
+            revealNonce={revealNonce}
             onContext={onContext}
             onOpenFile={onOpenFile}
             onSelect={onSelect}
@@ -107,18 +137,42 @@ function TreeEntry({
  * filesystem yet. Once `canvas:state` carries the host cwd (Task 6), this can switch to
  * `remoteFs(connectionId)` (the per-connection `FsApi`) rooted at that path — the Editor already
  * proxies over the relay via `data.remote.connectionId`. */
-export function ExplorerPanel({ onClose, onOpenFile }: ExplorerPanelProps) {
+export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   const cwd = project?.cwd
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
+  const [forcedOpen, setForcedOpen] = useState<Set<string>>(new Set())
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
 
   useEffect(() => {
     if (cwd) window.nodeTerminal.fs.list(cwd).then(setRoots)
     else setRoots(null)
   }, [cwd, version])
+
+  // Reveal a file: force-open every ancestor directory under cwd, select the file, and
+  // let the matching row scroll itself into view. Only paths inside cwd are revealed.
+  // Keyed on the nonce so revealing the same file twice still re-triggers.
+  useEffect(() => {
+    const revealPath = reveal?.path
+    if (!revealPath || !cwd) return
+    const base = cwd.replace(/\/$/, '')
+    const rel = revealPath.startsWith(base + '/') ? revealPath.slice(base.length + 1) : revealPath
+    // Reject paths that escape cwd (absolute outside it, or "../" traversal).
+    if (rel.startsWith('/') || rel.split('/').includes('..')) return
+    const abs = `${base}/${rel}`
+    const parts = rel.split('/')
+    const dirs = new Set<string>()
+    let acc = base
+    for (let i = 0; i < parts.length - 1; i++) {
+      acc = `${acc}/${parts[i]}`
+      dirs.add(acc)
+    }
+    setForcedOpen(dirs)
+    setSelected(abs)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.nonce, cwd])
 
   const onContext: ContextFn = (x, y, path) => setMenu({ x, y, path })
 
@@ -153,6 +207,8 @@ export function ExplorerPanel({ onClose, onOpenFile }: ExplorerPanelProps) {
                 path={`${cwd}/${e.name}`}
                 depth={0}
                 selected={selected}
+                forcedOpen={forcedOpen}
+                revealNonce={reveal?.nonce}
                 onContext={onContext}
                 onOpenFile={onOpenFile}
                 onSelect={setSelected}

@@ -28,10 +28,21 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, agentConfig, type AgentId } from '@shared/agents/config'
+import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
   return p.replace(/([ \t"'`\\()&;|<>$!*?[\]{}#~])/g, '\\$1')
+}
+
+/**
+ * Move-into-worktree handler bridge. Like GroupNode's worktree-action bridge: React Flow
+ * instantiates custom nodes itself, so Canvas can't pass this callback through props. Canvas
+ * registers its handler here on mount; the "↪" header action calls it with the node id.
+ */
+let moveIntoWorktreeHandler: ((nodeId: string) => void) | null = null
+export function setMoveIntoWorktreeHandler(fn: ((nodeId: string) => void) | null): void {
+  moveIntoWorktreeHandler = fn
 }
 
 /**
@@ -41,8 +52,8 @@ function escapeDroppedPath(p: string): string {
  * toggles a markdown view of the terminal's output. Files dropped from Finder are pasted
  * as their (escaped) paths, like a native terminal — so Claude can read dropped images.
  */
-export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
-  const { updateNodeData, deleteElements, getZoom, setNodes } = useReactFlow()
+export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasNode>) {
+  const { updateNodeData, deleteElements, getZoom, setNodes, getNode } = useReactFlow()
   // Pick the session layer: a remote-bound node (data.remote) talks to a host over the relay
   // via RemoteTransport; otherwise the local PTY (LocalTransport). The connectionId is stable
   // for a node's lifetime, so the instance is created once and held in a ref.
@@ -83,6 +94,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
+  // "Move into worktree" affordance: shown only when this terminal is a child of a group that
+  // is bound to a worktree AND its current cwd differs from that worktree path (i.e. it's still
+  // running in the old folder). Reads the parent group from React Flow state (single source of
+  // truth); `parentId` is set by the group reparenting transforms.
+  const parentWtPath = parentId
+    ? ((getNode(parentId) as CanvasNode | undefined)?.data.worktree?.path as string | undefined)
+    : undefined
+  const canMoveIntoWorktree = !!parentWtPath && (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
@@ -146,7 +165,10 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (showLink) updateNodeInternals(id)
   }, [showLink, id, updateNodeInternals])
 
-  // Terminal lifecycle — set up exactly once.
+  // Terminal lifecycle — set up once on mount, and again whenever `respawnNonce` is bumped
+  // (e.g. moving this terminal into a worktree). Bumping the nonce runs the cleanup below
+  // (kill the old session + dispose xterm), then recreates the session with the latest
+  // `data.cwd`. The node `id` (= tmux persistKey) is unchanged, so it's the same target.
   useEffect(() => {
     const container = bodyRef.current
     if (!container) return
@@ -211,11 +233,13 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       )
     }
 
+    const ssh = data.ssh as SshConnection | undefined
     transport
       .create({
         cols: term.cols,
         rows: term.rows,
-        shell: data.shell,
+        shell: ssh ? 'ssh' : data.shell,
+        shellArgs: ssh ? buildSshArgs(ssh) : undefined,
         cwd: data.cwd,
         persistKey: id,
         agentId: data.agentId
@@ -279,7 +303,12 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
       useAgentStatus.getState().setActive(id, false)
-      useAgentStatus.getState().remove(id)
+      // Unmount happens on a project switch (a detach — the tmux session keeps running) as
+      // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
+      // persisted status (that would drop the sessionId the context meter looks up on remount,
+      // making the meter vanish when you switch projects); only clear the live state. Real
+      // deletion drops the entry in Canvas.deleteNodes.
+      useAgentStatus.getState().setState(id, undefined)
       useAgentNodes.getState().clearForParent(id)
       if (sessionId) transport.kill(sessionId)
       term.dispose()
@@ -288,7 +317,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
       searchAddonRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [data.respawnNonce])
 
   // Live-apply font/cursor settings to the running terminal.
   useEffect(() => {
@@ -435,9 +464,19 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
     }
   }, [data.mdMode, id, useChat])
 
+  // Unread = the agent finished (not still working/waiting/blocked) while you weren't looking.
+  // Drives both the header badge and a node-wide glow so it's obvious at a glance.
+  const isUnread =
+    !!status?.unread &&
+    status?.state !== 'working' &&
+    status?.state !== 'waiting' &&
+    status?.state !== 'blocked'
+
   return (
     <div
-      className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}
+      className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
+        isUnread ? ' unread' : ''
+      }`}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
@@ -522,6 +561,14 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             {status.session}
           </span>
         )}
+        {data.ssh ? (
+          <span
+            className="term-ssh-chip"
+            title={`ssh ${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}`}
+          >
+            SSH {(data.ssh as SshConnection).user}@{(data.ssh as SshConnection).host}
+          </span>
+        ) : null}
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
@@ -548,10 +595,7 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             NEEDS YOU
           </span>
         )}
-        {status?.unread &&
-          status?.state !== 'working' &&
-          status?.state !== 'waiting' &&
-          status?.state !== 'blocked' && (
+        {isUnread && (
             <span
               className="term-node__status term-node__status--unread"
               title="Finished — click to mark read"
@@ -561,6 +605,16 @@ export function TerminalNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </span>
           )}
         {!editingTitle && <span className="term-node__spacer" />}
+        {canMoveIntoWorktree && (
+          <Tooltip label="Move this terminal into the group's worktree">
+            <button
+              className="term-node__move-worktree nodrag"
+              onClick={() => moveIntoWorktreeHandler?.(id)}
+            >
+              ↪
+            </button>
+          </Tooltip>
+        )}
         <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
           <button
             className="term-node__search nodrag"

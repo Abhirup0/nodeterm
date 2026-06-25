@@ -16,10 +16,27 @@ interface ProjectsState {
   setProjectCwd(id: string, cwd: string): void
   /** Writes the serialized canvas (nodes + viewport + bridge links) back into a project. */
   commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport, bridges?: BridgeLink[]): void
+  /** Renames a node within a project (source of truth for inactive projects). */
+  renameNode(projectId: string, nodeId: string, title: string): void
+  /** Recolors a node within a project. */
+  recolorNode(projectId: string, nodeId: string, color: string): void
+  /** Removes a node from a project. */
+  removeNode(projectId: string, nodeId: string): void
+  /** Duplicates a node within a project (fresh id, offset position). */
+  duplicateNode(projectId: string, nodeId: string): void
   /** Removes a project; returns the id that should become active (never deletes the last one). */
   deleteProject(id: string): string
 
   toWorkspace(): Workspace
+}
+
+/** Returns `projects` with one project's nodes transformed; other projects untouched. */
+function mapProjectNodes(
+  projects: Project[],
+  projectId: string,
+  fn: (nodes: CanvasNodeState[]) => CanvasNodeState[]
+): Project[] {
+  return projects.map((p) => (p.id === projectId ? { ...p, nodes: fn(p.nodes) } : p))
 }
 
 export const useProjects = create<ProjectsState>((set, get) => ({
@@ -61,6 +78,46 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       projects: s.projects.map((p) =>
         p.id === id ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}) } : p
       )
+    }))
+  },
+
+  renameNode(projectId, nodeId, title) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) =>
+        nodes.map((n) => (n.id === nodeId ? { ...n, title } : n))
+      )
+    }))
+  },
+
+  recolorNode(projectId, nodeId, color) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) =>
+        nodes.map((n) => (n.id === nodeId ? { ...n, color } : n))
+      )
+    }))
+  },
+
+  removeNode(projectId, nodeId) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) =>
+        nodes.filter((n) => n.id !== nodeId)
+      )
+    }))
+  },
+
+  duplicateNode(projectId, nodeId) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) => {
+        const src = nodes.find((n) => n.id === nodeId)
+        if (!src) return nodes
+        const copy: CanvasNodeState = {
+          ...src,
+          id: `${src.kind}-${Math.random().toString(36).slice(2, 10)}`,
+          title: `${src.title} copy`,
+          position: { x: src.position.x + 24, y: src.position.y + 24 }
+        }
+        return [...nodes, copy]
+      })
     }))
   },
 

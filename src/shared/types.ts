@@ -2,9 +2,12 @@
 
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, PromptInjectionMode } from './agents/config'
+import type { GroupWorktree } from './worktree'
 
 export interface PtyCreateOptions {
   shell?: string
+  /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
+  shellArgs?: string[]
   cwd?: string
   cols: number
   rows: number
@@ -44,6 +47,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
+  ssh?: import('./ssh').SshConnection
   // sticky-only
   text?: string
   // editor / diff
@@ -52,6 +57,8 @@ export interface CanvasNodeState {
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
   commitOid?: string
+  /** group-only: when bound, the git worktree this group works in. */
+  worktree?: GroupWorktree
 }
 
 /**
@@ -190,6 +197,11 @@ export interface FsApi {
   write(filePath: string, content: string): Promise<boolean>
 }
 
+export interface FilesApi {
+  /** Fuzzy-open file index for a project root: root-relative `/`-paths ([] on failure). */
+  quickOpen(cwd: string): Promise<string[]>
+}
+
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
  * terminal-title + process status (no hooks/branch/loop/bridge). */
 export interface CustomAgent {
@@ -266,6 +278,14 @@ export interface SettingsApi {
   save(settings: Settings): Promise<void>
 }
 
+export interface SshApi {
+  list(): Promise<import('./ssh').SshServer[]>
+  save(server: import('./ssh').SshServer): Promise<import('./ssh').SshServer[]>
+  remove(id: string): Promise<import('./ssh').SshServer[]>
+  /** Parse `~/.ssh/config` into importable hosts (empty if none). */
+  importCandidates(): Promise<import('./ssh').ParsedSshHost[]>
+}
+
 export interface GitFileChange {
   path: string
   /** Single-letter status: M (modified), A (added), D (deleted), R (renamed), U (untracked). */
@@ -336,6 +356,33 @@ export interface GitApi {
   commitFiles(cwd: string, oid: string): Promise<GitFileChange[]>
   /** Remote web URL for a commit sha, or null if it can't be derived. */
   remoteCommitUrl(cwd: string, sha: string): Promise<string | null>
+  /** Merge a branch into the current branch. */
+  merge(cwd: string, ref: string): Promise<GitResult>
+  /** Rebase the current branch onto another. */
+  rebase(cwd: string, onto: string): Promise<GitResult>
+  /** Delete a branch (force = -D, for unmerged). */
+  deleteBranch(cwd: string, name: string, force: boolean): Promise<GitResult>
+  /** Rename the current branch. */
+  renameBranch(cwd: string, newName: string): Promise<GitResult>
+  /** Fetch all remotes and prune. */
+  fetch(cwd: string): Promise<GitResult>
+  /** Push with --force-with-lease. */
+  forcePush(cwd: string): Promise<GitResult>
+  /** Stash uncommitted changes (incl. untracked). */
+  stashPush(cwd: string): Promise<GitResult>
+  /** Pop the latest stash. */
+  stashPop(cwd: string): Promise<GitResult>
+  /** Revert a commit (--no-edit). */
+  revert(cwd: string, oid: string): Promise<GitResult>
+  /** Create + switch to a new branch at a commit. */
+  branchAt(cwd: string, name: string, oid: string): Promise<GitResult>
+  /** Checkout a commit (detached HEAD). */
+  checkoutCommit(cwd: string, oid: string): Promise<GitResult>
+  repoRoot(cwd: string): Promise<string | null>
+  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
+  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
+  worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
 }
 
 export interface UpdateInfo {
@@ -638,10 +685,12 @@ export interface NodeTerminalApi {
   workspace: WorkspaceApi
   dialog: DialogApi
   settings: SettingsApi
+  ssh: SshApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi
   fs: FsApi
+  files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi

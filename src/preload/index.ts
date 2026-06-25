@@ -72,6 +72,12 @@ const api: NodeTerminalApi = {
     load: () => ipcRenderer.invoke(IPC.settingsLoad),
     save: (settings) => ipcRenderer.invoke(IPC.settingsSave, settings)
   },
+  ssh: {
+    list: () => ipcRenderer.invoke(IPC.sshList),
+    save: (server) => ipcRenderer.invoke(IPC.sshSave, server),
+    remove: (id) => ipcRenderer.invoke(IPC.sshDelete, id),
+    importCandidates: () => ipcRenderer.invoke(IPC.sshImport)
+  },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
@@ -94,7 +100,26 @@ const api: NodeTerminalApi = {
     generateMessage: (cwd) => ipcRenderer.invoke(IPC.commitGenerate, cwd),
     history: (cwd, options) => ipcRenderer.invoke(IPC.gitHistory, cwd, options),
     commitFiles: (cwd, oid) => ipcRenderer.invoke(IPC.gitCommitFiles, cwd, oid),
-    remoteCommitUrl: (cwd, sha) => ipcRenderer.invoke(IPC.gitRemoteCommitUrl, cwd, sha)
+    remoteCommitUrl: (cwd, sha) => ipcRenderer.invoke(IPC.gitRemoteCommitUrl, cwd, sha),
+    merge: (cwd, ref) => ipcRenderer.invoke(IPC.gitMerge, cwd, ref),
+    rebase: (cwd, onto) => ipcRenderer.invoke(IPC.gitRebase, cwd, onto),
+    deleteBranch: (cwd, name, force) => ipcRenderer.invoke(IPC.gitDeleteBranch, cwd, name, force),
+    renameBranch: (cwd, newName) => ipcRenderer.invoke(IPC.gitRenameBranch, cwd, newName),
+    fetch: (cwd) => ipcRenderer.invoke(IPC.gitFetch, cwd),
+    forcePush: (cwd) => ipcRenderer.invoke(IPC.gitForcePush, cwd),
+    stashPush: (cwd) => ipcRenderer.invoke(IPC.gitStashPush, cwd),
+    stashPop: (cwd) => ipcRenderer.invoke(IPC.gitStashPop, cwd),
+    revert: (cwd, oid) => ipcRenderer.invoke(IPC.gitRevert, cwd, oid),
+    branchAt: (cwd, name, oid) => ipcRenderer.invoke(IPC.gitBranchAt, cwd, name, oid),
+    checkoutCommit: (cwd, oid) => ipcRenderer.invoke(IPC.gitCheckoutCommit, cwd, oid),
+    repoRoot: (cwd) => ipcRenderer.invoke(IPC.gitRepoRoot, cwd),
+    worktreeList: (repoPath) => ipcRenderer.invoke(IPC.gitWorktreeList, repoPath),
+    worktreeAdd: (repoPath, wtPath, branch, baseRef, isNew) =>
+      ipcRenderer.invoke(IPC.gitWorktreeAdd, repoPath, wtPath, branch, baseRef, isNew),
+    worktreeMerge: (repoPath, branch, baseRef) =>
+      ipcRenderer.invoke(IPC.gitWorktreeMerge, repoPath, branch, baseRef),
+    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
+      ipcRenderer.invoke(IPC.gitWorktreeRemove, repoPath, wtPath, deleteBranch)
   },
   clipboard: {
     writeText: (text: string) => clipboard.writeText(text)
@@ -109,6 +134,9 @@ const api: NodeTerminalApi = {
     read: (filePath: string) => ipcRenderer.invoke(IPC.fsRead, filePath),
     readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
+  },
+  files: {
+    quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
   },
   updates: {
     onAvailable: (listener) => {
