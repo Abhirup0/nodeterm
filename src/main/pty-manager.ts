@@ -200,9 +200,9 @@ export class PtyManager {
    * the node id as the `persistKey` reattaches the existing `nt-<nodeId>` session if it exists,
    * or creates it otherwise (graceful fallback). Used by the relay host so a mirrored terminal
    * resumes the host's live session instead of opening a blank shell. Pair with `captureSnapshot`
-   * to paint the current screen before live output starts streaming. Note: reusing
-   * `new-session -A -D` detaches the host's own local tmux client (a takeover) — acceptable
-   * because the B5 host is unattended while a client is mirroring it.
+   * to paint the current screen before live output starts streaming. Because `sinks` is set here,
+   * `spawnSession` attaches WITHOUT `-D` (co-attach), so the host's own local tmux client stays
+   * attached and both the host and the mirroring client view the same session simultaneously.
    */
   attachDetached(
     persistKey: string,
@@ -264,21 +264,27 @@ export class PtyManager {
     const programArgs = options.shellArgs ?? []
 
     if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
-      // attach-or-create the persistent session for this node; -D detaches any stale client.
+      // attach-or-create the persistent session for this node.
+      // `-A` = attach-or-create. `-D` = detach OTHER clients on attach. We use `-D` ONLY for the
+      // local renderer client (a remount should take sole ownership of its session). A host-served
+      // PTY (sinks set) MUST NOT detach others: the host's own local client is attached to the same
+      // `nt-<id>` session, and a connecting client should MIRROR it (tmux co-attach), not kick it
+      // off — `-D` there is exactly what showed "[detached]" in every host window on connect.
+      // (tmux sizes a co-attached session to the smallest client — the accepted mirroring tradeoff.)
       // `-e` sets the session environment explicitly (the tmux server is shared, so relying
       // on the client's inherited env would leak the first session's values into later ones).
       file = this.tmuxPath
       // The hook-server env (port/token/node id/agent id) is passed explicitly via `-e`
       // (one `-e KEY=VALUE` per key) since the shared tmux server can't rely on inherited env.
       const hookEnvArgs = Object.entries(hookEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+      const attachFlags = sinks ? ['-A'] : ['-A', '-D']
       args = [
         '-L',
         TMUX_SOCKET,
         '-f',
         this.confPath,
         'new-session',
-        '-A',
-        '-D',
+        ...attachFlags,
         ...hookEnvArgs,
         '-c',
         cwd,
