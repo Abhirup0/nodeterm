@@ -548,6 +548,21 @@ body,
   border-radius: 6px;
 }
 
+/* SSH-bound terminal: user@host chip beside the title. Mirrors the session chip. */
+.term-ssh-chip {
+  margin-left: 8px;
+  max-width: 180px;
+  padding: 1px 8px;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;
