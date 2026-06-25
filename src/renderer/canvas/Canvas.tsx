@@ -57,6 +57,8 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
 import { transport } from '../terminal/local-transport'
+import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
+import { opensInEditor } from '../lib/openTarget'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
@@ -113,6 +115,7 @@ export function Canvas() {
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
@@ -720,6 +723,36 @@ export function Canvas() {
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
+  )
+
+  // Load the quick-open file index when the palette opens.
+  useEffect(() => {
+    if (!paletteOpen) return
+    const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+    if (!cwd) {
+      setFileIndex([])
+      return
+    }
+    let cancelled = false
+    void window.nodeTerminal.files.quickOpen(cwd).then((files) => {
+      if (!cancelled) setFileIndex(prepareQuickOpenFiles(files))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [paletteOpen, activeProjectId])
+
+  /** Open a quick-open file result by root-relative path: editor node for text/images,
+   *  OS default app for binaries (e.g. .dmg). */
+  const openProjectFile = useCallback(
+    (relPath: string) => {
+      const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      if (!cwd) return
+      const abs = `${cwd.replace(/\/$/, '')}/${relPath}`
+      if (opensInEditor(relPath)) openFile(abs)
+      else window.nodeTerminal.shell.openPath(abs)
+    },
+    [activeProjectId, openFile]
   )
 
   /** Open a git diff editor node for a changed file (from Source Control). */
@@ -1794,7 +1827,12 @@ export function Canvas() {
       )}
 
       {paletteOpen && (
-        <CommandPalette commands={buildCommands()} onClose={() => setPaletteOpen(false)} />
+        <CommandPalette
+          commands={buildCommands()}
+          fileIndex={fileIndex}
+          onOpenFile={openProjectFile}
+          onClose={() => setPaletteOpen(false)}
+        />
       )}
 
       {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
