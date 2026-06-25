@@ -2,6 +2,7 @@
 
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, PromptInjectionMode } from './agents/config'
+import type { GroupWorktree } from './worktree'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -52,6 +53,8 @@ export interface CanvasNodeState {
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
   commitOid?: string
+  /** group-only: when bound, the git worktree this group works in. */
+  worktree?: GroupWorktree
 }
 
 /**

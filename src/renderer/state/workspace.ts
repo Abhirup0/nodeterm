@@ -43,6 +43,8 @@ export interface NodeData {
   commitOid?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** group-only: the git worktree this group is bound to (single source of truth). */
+  worktree?: import('@shared/worktree').GroupWorktree
   /**
    * When set, this terminal runs on a REMOTE host over the relay (RemoteTransport) rather than
    * the local PTY (LocalTransport). Not persisted — remote nodes are transient to a live
@@ -433,7 +435,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
-        agentId
+        agentId,
+        worktree: n.worktree
       }
     }
   })
@@ -481,7 +484,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
-        agentId: n.data.agentId
+        agentId: n.data.agentId,
+        worktree: n.data.worktree
       }
     })
 }
