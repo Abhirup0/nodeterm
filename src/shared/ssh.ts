@@ -61,3 +61,71 @@ export function buildSshArgs(conn: SshConnection): string[] {
   args.push(`${conn.user}@${conn.host}`)
   return args
 }
+
+/** A host parsed from `~/.ssh/config`, ready to seed a saved server (no id yet). */
+export interface ParsedSshHost {
+  /** The `Host` alias (display label). */
+  label: string
+  /** `HostName` if set, else the alias. */
+  host: string
+  user?: string
+  port?: number
+  identityFile?: string
+}
+
+/**
+ * Parse `~/.ssh/config` text into named hosts. Each non-wildcard `Host` alias becomes one
+ * entry, taking the block's `HostName`/`User`/`Port`/`IdentityFile`. Wildcard aliases
+ * (containing `*` or `?`) and the bare `Host *` catch-all are skipped — they aren't concrete
+ * servers. Keys are case-insensitive; `key=value` and `key value` forms are both accepted.
+ */
+export function parseSshConfig(text: string): ParsedSshHost[] {
+  const hosts: ParsedSshHost[] = []
+  // Aliases sharing one `Host` line all receive the block's settings.
+  let current: { aliases: string[]; settings: Record<string, string> } | null = null
+
+  const flush = () => {
+    if (!current) return
+    for (const alias of current.aliases) {
+      if (alias.includes('*') || alias.includes('?')) continue
+      const s = current.settings
+      const port = s.port ? Number(s.port) : undefined
+      hosts.push({
+        label: alias,
+        host: s.hostname || alias,
+        user: s.user || undefined,
+        port: Number.isFinite(port) ? port : undefined,
+        identityFile: s.identityfile || undefined
+      })
+    }
+    current = null
+  }
+
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/#.*$/, '').trim()
+    if (!line) continue
+    const eq = line.indexOf('=')
+    const sp = line.search(/\s/)
+    let key: string
+    let value: string
+    if (eq !== -1 && (sp === -1 || eq < sp)) {
+      key = line.slice(0, eq).trim()
+      value = line.slice(eq + 1).trim()
+    } else if (sp !== -1) {
+      key = line.slice(0, sp).trim()
+      value = line.slice(sp + 1).trim()
+    } else {
+      key = line
+      value = ''
+    }
+    const lkey = key.toLowerCase()
+    if (lkey === 'host') {
+      flush()
+      current = { aliases: value.split(/\s+/).filter(Boolean), settings: {} }
+    } else if (current) {
+      current.settings[lkey] = value
+    }
+  }
+  flush()
+  return hosts
+}

@@ -282,6 +282,8 @@ export interface SshApi {
   list(): Promise<import('./ssh').SshServer[]>
   save(server: import('./ssh').SshServer): Promise<import('./ssh').SshServer[]>
   remove(id: string): Promise<import('./ssh').SshServer[]>
+  /** Parse `~/.ssh/config` into importable hosts (empty if none). */
+  importCandidates(): Promise<import('./ssh').ParsedSshHost[]>
 }
 
 export interface GitFileChange {
