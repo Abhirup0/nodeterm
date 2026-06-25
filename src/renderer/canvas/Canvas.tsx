@@ -123,9 +123,9 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
-  // Reveal-in-Explorer target (relative to the active project cwd). Cleared shortly after so
-  // the same file can be revealed twice in a row.
-  const [revealPath, setRevealPath] = useState<string | null>(null)
+  // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
+  // distinct so revealing the same file twice still re-fires the Explorer effect.
+  const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{
@@ -751,6 +751,8 @@ export function Canvas() {
     (relPath: string) => {
       const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
       if (!cwd) return
+      // relPath comes from the trusted local file index (always cwd-relative), so the
+      // `cwd + relPath` join needs no traversal guard in v1; a future remote/untrusted source would.
       const abs = `${cwd.replace(/\/$/, '')}/${relPath}`
       if (opensInEditor(relPath)) openFile(abs)
       else window.nodeTerminal.shell.openPath(abs)
@@ -759,11 +761,10 @@ export function Canvas() {
   )
 
   /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
-   *  Cleared after a tick so revealing the same file twice still triggers the effect. */
+   *  Each call bumps a nonce so revealing the same file twice still re-fires the effect. */
   const revealProjectFile = useCallback((relPath: string) => {
     setExplorerOpen(true)
-    setRevealPath(relPath)
-    setTimeout(() => setRevealPath(null), 1000)
+    setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
 
   /** Open a git diff editor node for a changed file (from Source Control). */
@@ -1862,7 +1863,7 @@ export function Canvas() {
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
       {explorerOpen && (
-        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} revealPath={revealPath} />
+        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} reveal={reveal} />
       )}
 
       {confirm && (
