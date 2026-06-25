@@ -642,6 +642,23 @@ body,
   cursor: default;
 }
 
+.term-node__move-worktree {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.term-node__move-worktree:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: #6cb0ff;
+}
+
 .term-node__search {
   background: transparent;
   border: none;

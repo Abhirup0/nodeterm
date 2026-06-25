@@ -35,6 +35,12 @@ export interface NodeData {
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
+  /**
+   * Transient respawn trigger: bumping this number tears down a terminal node's session and
+   * recreates it (used to move an existing terminal into a worktree cwd). Not persisted —
+   * deliberately absent from flowToNodeStates, like initialCommand/expandedHeight.
+   */
+  respawnNonce?: number
   shell?: string
   cwd?: string
   text?: string

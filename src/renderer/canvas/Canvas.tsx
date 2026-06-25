@@ -15,7 +15,7 @@ import {
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
-import { TerminalNode } from '../nodes/TerminalNode'
+import { TerminalNode, setMoveIntoWorktreeHandler } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
@@ -136,6 +136,8 @@ export function Canvas() {
   const [consentOpen, setConsentOpen] = useState(false)
   // Group id awaiting a worktree bind (drives BindWorktreeDialog).
   const [bindTarget, setBindTarget] = useState<string | null>(null)
+  // Terminal node id awaiting confirmation to move into its group's worktree.
+  const [moveTarget, setMoveTarget] = useState<string | null>(null)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -1037,6 +1039,48 @@ export function Canvas() {
     setWorktreeActionHandler(onWorktreeAction)
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
+
+  // Move an existing terminal into its group's worktree. The "↪" header action requests it;
+  // confirming respawns the node's session in the worktree cwd. We bump `respawnNonce` (a
+  // transient, non-persisted trigger) so TerminalNode's session-creation effect re-runs —
+  // its cleanup kills the old tmux session (same node id = same target) and create() spawns a
+  // fresh one with the new cwd. Changing cwd alone wouldn't re-run that `[respawnNonce]` effect.
+  const requestMoveIntoWorktree = useCallback((nodeId: string) => setMoveTarget(nodeId), [])
+
+  const confirmMoveIntoWorktree = useCallback(() => {
+    const id = moveTarget
+    setMoveTarget(null)
+    if (!id) return
+    const node = nodesRef.current.find((n) => n.id === id)
+    const parent = nodesRef.current.find((p) => p.id === node?.parentId)
+    const wtPath = parent?.data.worktree?.path as string | undefined
+    if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
+    // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
+    // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
+    // (which would keep the old working directory). The node id / persistKey is unchanged.
+    transport.destroy(id)
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                cwd: wtPath,
+                respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+              }
+            }
+          : n
+      )
+    )
+    markDirty()
+  }, [moveTarget, setNodes, markDirty])
+
+  // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
+  useEffect(() => {
+    setMoveIntoWorktreeHandler(requestMoveIntoWorktree)
+    return () => setMoveIntoWorktreeHandler(null)
+  }, [requestMoveIntoWorktree])
 
   const toggleMarkdown = useCallback(
     (ids: string[]) => {
@@ -1940,6 +1984,16 @@ export function Canvas() {
           }
           onConfirm={confirmBind}
           onCancel={() => setBindTarget(null)}
+        />
+      )}
+
+      {moveTarget && (
+        <ConfirmDialog
+          message="Move this terminal into the worktree? Its session restarts and any running process ends."
+          confirmLabel="Move"
+          danger={false}
+          onConfirm={confirmMoveIntoWorktree}
+          onCancel={() => setMoveTarget(null)}
         />
       )}
 
