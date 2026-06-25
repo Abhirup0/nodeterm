@@ -2963,7 +2963,7 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  max-width: 70%;
+  max-width: 90%;
   padding: 3px 11px;
   background: #141416;
   border: 1px solid var(--border);
@@ -2990,6 +2990,39 @@ body,
   font-size: 12px;
   font-weight: 600;
   cursor: text;
+}
+
+/* Worktree binding chip — branch name + Unbind, shown in the label pill when bound. */
+.group-node__wt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.group-node__branch {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.group-node__wt-btn {
+  background: #141416;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.group-node__wt-btn:hover {
+  background: var(--panel-header);
+  color: var(--text);
 }
 
 /* ungroup / × — top-right, revealed on hover or when selected. */

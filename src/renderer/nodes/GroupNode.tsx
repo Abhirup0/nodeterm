@@ -2,6 +2,21 @@ import { useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
 
+export type WorktreeAction = 'merge' | 'remove' | 'unbind'
+
+/**
+ * Worktree-action handler bridge. React Flow instantiates custom nodes itself, so we can't
+ * pass Canvas callbacks through props; Canvas registers its handler here (the same indirection
+ * the file already relies on — GroupNode reaches React Flow state via `useReactFlow`). Set by
+ * Canvas on mount; called by the header chip's action buttons.
+ */
+let worktreeActionHandler: ((groupId: string, action: WorktreeAction) => void) | null = null
+export function setWorktreeActionHandler(
+  fn: ((groupId: string, action: WorktreeAction) => void) | null
+): void {
+  worktreeActionHandler = fn
+}
+
 /**
  * A group frame: a dashed, rounded, translucent box that contains child nodes. A floating
  * label pill (color dot + name) sits on the top border; ungroup/× appear top-right on hover.
@@ -59,6 +74,20 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
           spellCheck={false}
           onChange={(e) => updateNodeData(id, { title: e.target.value })}
         />
+        {data.worktree && (
+          <div className="group-node__wt nodrag">
+            <span className="group-node__branch" title={data.worktree.path}>
+              ⎇ {data.worktree.branch}
+            </span>
+            <button
+              className="group-node__wt-btn"
+              title="Unbind worktree (keeps the worktree on disk)"
+              onClick={() => worktreeActionHandler?.(id, 'unbind')}
+            >
+              Unbind
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="group-node__actions nodrag">

@@ -17,7 +17,7 @@ import {
 import type { Edge, Node } from '@xyflow/react'
 import { TerminalNode } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
-import { GroupNode } from '../nodes/GroupNode'
+import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -672,16 +672,37 @@ export function Canvas() {
     return screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
   }, [screenToFlowPosition])
 
+  // cwd for a node being created INTO a group: prefer the group's bound worktree path,
+  // then its default cwd, else undefined (caller falls back to the project cwd).
+  const cwdForNewNodeIn = useCallback((parentId: string | undefined): string | undefined => {
+    if (!parentId) return undefined
+    const parent = nodesRef.current.find((n) => n.id === parentId)
+    return parent?.data.worktree?.path || parent?.data.cwd || undefined
+  }, [])
+
+  // Reparent a freshly-created node into a group (parentId + extent 'parent', position made
+  // relative to the group frame). Mirrors how `groupSelectedNodes` parents its children.
+  const parentInto = useCallback((node: CanvasNode, groupId: string): CanvasNode => {
+    const group = nodesRef.current.find((n) => n.id === groupId)
+    if (!group) return node
+    return {
+      ...node,
+      parentId: groupId,
+      extent: 'parent' as const,
+      position: { x: node.position.x - group.position.x, y: node.position.y - group.position.y }
+    }
+  }, [])
+
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }, initialCommand?: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [
-        ...ns,
-        createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
-      ])
+    (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   /** Open a new terminal that runs a command on start (e.g. gh auth login). */
@@ -793,12 +814,15 @@ export function Canvas() {
   )
 
   const addAgentNode = useCallback(
-    (agentId: AgentId, center?: { x: number; y: number }) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())])
+    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
+      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => {
+        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
@@ -985,6 +1009,34 @@ export function Canvas() {
     },
     [bindTarget, setNodes, markDirty]
   )
+
+  // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
+  // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. For now only
+  // `unbind` is handled: forget the worktree binding without touching the on-disk worktree.
+  const onWorktreeAction = useCallback(
+    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+      switch (action) {
+        case 'unbind':
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n
+            )
+          )
+          markDirty()
+          break
+        // 'merge' (Task 8) and 'remove' (Task 9) are wired separately.
+        default:
+          break
+      }
+    },
+    [setNodes, markDirty]
+  )
+
+  // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
+  useEffect(() => {
+    setWorktreeActionHandler(onWorktreeAction)
+    return () => setWorktreeActionHandler(null)
+  }, [onWorktreeAction])
 
   const toggleMarkdown = useCallback(
     (ids: string[]) => {
@@ -1293,6 +1345,11 @@ export function Canvas() {
   const groupItems = useCallback(
     (groupId: string): MenuItem[] => [
       { type: 'label', label: 'Group' },
+      {
+        label: 'New terminal in group',
+        icon: <IconTerminal />,
+        onClick: () => addTerminal(undefined, undefined, groupId)
+      },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
       ...(groupHasWorktree(groupId)
@@ -1307,7 +1364,7 @@ export function Canvas() {
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
       { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
-    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree]
+    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree, addTerminal]
   )
 
   const onPaneContextMenu = useCallback(
