@@ -3708,3 +3708,45 @@ body,
 .pubdlg__opt:hover .pubdlg__opt-hint {
   opacity: 0.85;
 }
+
+/* Sessions sidebar — row + status dot */
+@keyframes nt-spin { to { transform: rotate(360deg); } }
+
+.ss-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.ss-row:hover { background: var(--panel-header); }
+.ss-row.is-active { background: rgba(255, 255, 255, 0.06); border-color: var(--border); }
+
+.ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
+.ss-dot--idle { background: rgba(160, 160, 160, 0.4); }
+.ss-dot--done { background: #30d158; }
+.ss-dot--attention { background: #ffd60a; }
+.ss-dot--working {
+  background: transparent;
+  border: 2px solid #ffd60a;
+  border-top-color: transparent;
+  animation: nt-spin 1s steps(12, end) infinite;
+}
+
+.ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.ss-row__titleline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-title.is-unread { font-weight: 600; }
+.ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
+.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.ss-loop { font-size: 9.5px; color: #ffd60a; border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
+.ss-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: rgba(180, 180, 185, 0.85); min-width: 0; }
+.ss-meta__cwd { font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-meta__ssh { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.ss-ctx { font-size: 9.5px; padding: 0 5px; border-radius: 4px; color: #000; font-weight: 600; flex: 0 0 auto; }
+.ss-row__close { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-row:hover .ss-row__close { opacity: 0.6; }
+.ss-row__close:hover { opacity: 1 !important; color: #ff453a; }
