@@ -15,6 +15,7 @@ import { CommitSection } from './sections/CommitSection'
 import { TmuxSection } from './sections/TmuxSection'
 import { LicenseSection } from './sections/LicenseSection'
 import { RemoteSection } from './sections/RemoteSection'
+import { SshSection } from './sections/SshSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { PrivacySection } from './sections/PrivacySection'
 
@@ -58,6 +59,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }): React.JSX.El
             <TmuxSection isActive={active === 'tmux'} />
             <LicenseSection isActive={active === 'license'} />
             <RemoteSection isActive={active === 'remote'} onClose={onClose} />
+            <SshSection isActive={active === 'ssh'} />
             <UpdatesSection isActive={active === 'updates'} />
             <PrivacySection isActive={active === 'privacy'} />
           </div>
