@@ -1029,8 +1029,10 @@ export function Canvas() {
   }, [])
 
   // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
-  // never touches a directory with live processes inside it, then remove the worktree + branch
-  // (git's `-d` refuses to delete an unmerged branch, so unmerged work survives).
+  // never touches a directory with live processes inside it, then remove the worktree + branch.
+  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; that failure
+  // is swallowed, so the worktree directory is removed, the branch is kept, and res.ok is still
+  // true — the binding is cleared either way (res.ok is false only if the worktree remove fails).
   const confirmRemoveWorktree = useCallback(async () => {
     const t = removeTarget
     if (!t) return
@@ -1044,7 +1046,9 @@ export function Canvas() {
       .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
       .map((n) => n.id)
     for (const id of childIds) transport.destroy(id)
-    // 2) Remove the worktree (and branch; -d protects unmerged branches).
+    // 2) Remove the worktree (and try to delete its branch). The branch delete uses `git -d`,
+    //    which refuses unmerged branches; that refusal is swallowed (branch kept), so res.ok is
+    //    false only when the worktree-directory removal itself fails.
     const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, true)
     if (!res.ok) {
       window.alert(res.message)
