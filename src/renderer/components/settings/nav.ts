@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | 'tmux'
   | 'license'
   | 'remote'
+  | 'ssh'
   | 'updates'
   | 'privacy'
 
@@ -50,7 +51,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     title: 'Account',
     sections: [
       { id: 'license', title: 'License' },
-      { id: 'remote', title: 'Remote access' }
+      { id: 'remote', title: 'Remote access' },
+      { id: 'ssh', title: 'Remote (SSH)' }
     ]
   },
   {

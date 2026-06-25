@@ -62,6 +62,12 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M2.5 8h11M8 2.5c1.9 1.7 1.9 9.3 0 11M8 2.5c-1.9 1.7-1.9 9.3 0 11" />
     </>
   ),
+  ssh: (
+    <>
+      <rect x="2" y="3" width="12" height="10" rx="2" />
+      <path d="M4.6 6.2 6.4 8l-1.8 1.8M8 10h3" />
+    </>
+  ),
   updates: <path d="M8 2.6v7M5 6.6 8 9.6l3-3M3.6 12.6h8.8" />,
   privacy: <path d="M8 2.4 12.4 4.2V8c0 3-2 4.8-4.4 5.6C5.6 12.8 3.6 11 3.6 8V4.2Z" />
 }
