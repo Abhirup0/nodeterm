@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { buildSessionList, type SessionNodeInput } from '../lib/sessionList'
+import { buildSessionList, isGroupCollapsed, type SessionNodeInput } from '../lib/sessionList'
 import { SessionRow } from './SessionRow'
 import { IconPin } from './icons'
 import { useProjects } from '../state/projects'
@@ -7,12 +7,22 @@ import { useAgentStatus } from '../state/agentStatus'
 
 const COLLAPSE_KEY = 'nodeterm.sessionsCollapsed'
 
-function loadCollapsed(): Set<string> {
+// Explicit per-project collapse choices (true = collapsed, false = expanded). Absent = follow
+// the default (active project expanded, others collapsed — see isGroupCollapsed).
+function loadOverrides(): Record<string, boolean> {
   try {
     const raw = localStorage.getItem(COLLAPSE_KEY)
-    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+    if (!raw) return {}
+    const data = JSON.parse(raw)
+    if (Array.isArray(data)) {
+      // Legacy format: a flat list of collapsed project ids.
+      const out: Record<string, boolean> = {}
+      for (const id of data as string[]) out[id] = true
+      return out
+    }
+    return data && typeof data === 'object' ? (data as Record<string, boolean>) : {}
   } catch {
-    return new Set()
+    return {}
   }
 }
 
@@ -38,7 +48,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const statusById = useAgentStatus((s) => s.byId)
 
   const [filter, setFilter] = useState('')
-  const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed)
+  const [overrides, setOverrides] = useState<Record<string, boolean>>(loadOverrides)
   const [branches, setBranches] = useState<Record<string, string>>({})
 
   // Look up the current git branch for each project cwd (best-effort, cached).
@@ -67,13 +77,11 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
 
   const total = groups.reduce((n, g) => n + g.sessions.length, 0)
 
-  const toggleCollapse = (id: string): void => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+  const toggleCollapse = (id: string, currentlyCollapsed: boolean): void => {
+    setOverrides((prev) => {
+      const next = { ...prev, [id]: !currentlyCollapsed }
       try {
-        localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]))
+        localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next))
       } catch {
         // ignore
       }
@@ -117,10 +125,10 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       <div className="sessions-sidebar__body">
         {groups.length === 0 && <div className="sessions-sidebar__empty">No sessions yet.</div>}
         {groups.map((g) => {
-          const isCollapsed = collapsed.has(g.projectId)
+          const isCollapsed = isGroupCollapsed(overrides, g.projectId, g.isActive)
           return (
             <div key={g.projectId} className={`ss-group${g.isActive ? ' is-active' : ''}`}>
-              <div className="ss-group__head" onClick={() => toggleCollapse(g.projectId)}>
+              <div className="ss-group__head" onClick={() => toggleCollapse(g.projectId, isCollapsed)}>
                 <span className="ss-group__chev">{isCollapsed ? '▶' : '▼'}</span>
                 <span className="ss-group__dot" style={{ background: g.projectColor }} />
                 <span className="ss-group__name">{g.projectName}</span>

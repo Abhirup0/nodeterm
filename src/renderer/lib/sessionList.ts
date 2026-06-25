@@ -31,6 +31,20 @@ const STATE_LABEL: Record<StatusKind, string> = {
   idle: 'Idle'
 }
 
+/**
+ * Whether a project group is collapsed in the sessions sidebar. The default keeps the active
+ * project expanded and every other project collapsed (so the list stays uncluttered); an
+ * explicit user toggle, recorded in `overrides` (true = collapsed, false = expanded), wins
+ * over that default.
+ */
+export function isGroupCollapsed(
+  overrides: Record<string, boolean>,
+  projectId: string,
+  isActive: boolean
+): boolean {
+  return projectId in overrides ? overrides[projectId] : !isActive
+}
+
 export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
   switch (state) {
     case 'working':

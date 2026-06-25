@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildSessionList, sessionStatusKind, type ProjectInput } from './sessionList'
+import { buildSessionList, sessionStatusKind, isGroupCollapsed, type ProjectInput } from './sessionList'
 import type { AgentNodeStatus } from '../state/agentStatus'
 
 const node = (id: string, over: Partial<ProjectInput['nodes'][number]> = {}) => ({
@@ -22,6 +22,18 @@ describe('sessionStatusKind', () => {
     expect(sessionStatusKind('blocked')).toBe('attention')
     expect(sessionStatusKind('done')).toBe('done')
     expect(sessionStatusKind(undefined)).toBe('idle')
+  })
+})
+
+describe('isGroupCollapsed', () => {
+  it('defaults to expanded for the active project and collapsed for the rest', () => {
+    expect(isGroupCollapsed({}, 'p1', true)).toBe(false)
+    expect(isGroupCollapsed({}, 'p2', false)).toBe(true)
+  })
+
+  it('lets an explicit override win over the default', () => {
+    expect(isGroupCollapsed({ p1: true }, 'p1', true)).toBe(true) // active but user collapsed
+    expect(isGroupCollapsed({ p2: false }, 'p2', false)).toBe(false) // inactive but user expanded
   })
 })
 
