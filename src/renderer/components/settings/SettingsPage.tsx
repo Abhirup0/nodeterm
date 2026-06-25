@@ -19,14 +19,26 @@ import { SshSection } from './sections/SshSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { PrivacySection } from './sections/PrivacySection'
 
-export function SettingsPage({ onClose }: { onClose: () => void }): React.JSX.Element {
+export function SettingsPage({
+  onClose,
+  initialSection
+}: {
+  onClose: () => void
+  /** Section to open on; lets callers deep-link (e.g. "Add SSH server…" → the SSH section). */
+  initialSection?: SettingsSectionId
+}): React.JSX.Element {
   const hydrate = useEntitlement((s) => s.hydrate)
-  const [active, setActive] = useState<SettingsSectionId>(FIRST_SECTION_ID)
+  const [active, setActive] = useState<SettingsSectionId>(initialSection ?? FIRST_SECTION_ID)
   const [query, setQuery] = useState('')
 
   useEffect(() => {
     void hydrate()
   }, [hydrate])
+
+  // Re-target when a caller opens settings to a specific section.
+  useEffect(() => {
+    if (initialSection) setActive(initialSection)
+  }, [initialSection])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

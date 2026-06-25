@@ -47,6 +47,7 @@ import {
   IconUngroup
 } from '../components/icons'
 import { SettingsPage } from '../components/settings/SettingsPage'
+import type { SettingsSectionId } from '../components/settings/nav'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
@@ -132,6 +133,8 @@ export function Canvas() {
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
@@ -1493,6 +1496,7 @@ export function Canvas() {
         setPaletteOpen((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.key === ',') {
         e.preventDefault()
+        setSettingsSection(undefined)
         setSettingsOpen(true)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
@@ -2202,7 +2206,13 @@ export function Canvas() {
         <button title="Source Control" onClick={() => setScOpen(true)}>
           ⎇
         </button>
-        <button title="Settings (⌘,)" onClick={() => setSettingsOpen(true)}>
+        <button
+          title="Settings (⌘,)"
+          onClick={() => {
+            setSettingsSection(undefined)
+            setSettingsOpen(true)
+          }}
+        >
           ⚙
         </button>
         <button title="Keyboard shortcuts (⌘/)" onClick={() => setShortcutsOpen(true)}>
@@ -2303,7 +2313,9 @@ export function Canvas() {
         />
       )}
 
-      {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsPage onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
 
       {scOpen && (
         <SourceControlPanel
@@ -2362,7 +2374,10 @@ export function Canvas() {
           x={remotePicker.x}
           y={remotePicker.y}
           onPick={(srv) => addSshTerminal(srv, { x: remotePicker.x, y: remotePicker.y })}
-          onManage={() => setSettingsOpen(true)}
+          onManage={() => {
+            setSettingsSection('ssh')
+            setSettingsOpen(true)
+          }}
           onClose={() => setRemotePicker(null)}
         />
       )}
