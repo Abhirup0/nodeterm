@@ -5,6 +5,8 @@ import type { AgentId, PromptInjectionMode } from './agents/config'
 
 export interface PtyCreateOptions {
   shell?: string
+  /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
+  shellArgs?: string[]
   cwd?: string
   cols: number
   rows: number
