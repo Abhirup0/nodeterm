@@ -346,6 +346,31 @@ export function Canvas() {
     })
   }, [])
 
+  // Hover-peek: the sidebar overlaps its trigger icon, so leaving the icon (mouseleave)
+  // must not close the peek while the cursor moves onto the sidebar body. A single shared
+  // timer lets entering either surface cancel a pending close from the other.
+  const sessionsCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const openSessionsPeek = useCallback(() => {
+    if (sessionsCloseTimer.current) {
+      clearTimeout(sessionsCloseTimer.current)
+      sessionsCloseTimer.current = null
+    }
+    setSessionsHover(true)
+  }, [])
+  const closeSessionsPeekSoon = useCallback(() => {
+    if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    sessionsCloseTimer.current = setTimeout(() => {
+      sessionsCloseTimer.current = null
+      setSessionsHover(false)
+    }, 140)
+  }, [])
+  useEffect(
+    () => () => {
+      if (sessionsCloseTimer.current) clearTimeout(sessionsCloseTimer.current)
+    },
+    []
+  )
+
   // Serialized inputs for the active project's terminal/agent nodes (the sidebar reads the
   // serialized nodes of *inactive* projects directly from the store, but the active project's
   // live state lives in React Flow — pass it through here).
@@ -1895,10 +1920,8 @@ export function Canvas() {
 
       <div
         className="sessions-icon-cluster"
-        onMouseEnter={() => setSessionsHover(true)}
-        onMouseLeave={() => {
-          if (!sessionsPinned) setTimeout(() => setSessionsHover(false), 60)
-        }}
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
       >
         <button title="Sessions (⌘⇧L)" onClick={toggleSessionsPin}>
           <IconSessions />
@@ -2052,6 +2075,8 @@ export function Canvas() {
         onRenameSession={renameSession}
         onRowContextMenu={onRowContextMenu}
         onAddToProject={addToProject}
+        onMouseEnter={openSessionsPeek}
+        onMouseLeave={closeSessionsPeekSoon}
       />
 
       {confirm && (

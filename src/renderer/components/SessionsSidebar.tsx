@@ -27,6 +27,8 @@ export interface SessionsSidebarProps {
   onRenameSession(projectId: string, id: string, title: string): void
   onRowContextMenu(e: React.MouseEvent, projectId: string, id: string): void
   onAddToProject(projectId: string): void
+  onMouseEnter?(): void
+  onMouseLeave?(): void
 }
 
 export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null {
@@ -82,7 +84,11 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   if (!open) return null
 
   return (
-    <aside className="sessions-sidebar" onMouseLeave={pinned ? undefined : props.onClose}>
+    <aside
+      className="sessions-sidebar"
+      onMouseEnter={props.onMouseEnter}
+      onMouseLeave={props.onMouseLeave}
+    >
       <div className="sessions-sidebar__head">
         <span className="sessions-sidebar__title">Sessions</span>
         <span className="sessions-sidebar__count">{total}</span>
