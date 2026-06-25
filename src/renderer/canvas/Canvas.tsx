@@ -106,6 +106,7 @@ import {
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
+  reparentNode,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -427,15 +428,19 @@ export function Canvas() {
   const liveActiveNodes = useMemo<SessionNodeInput[]>(
     () =>
       nodes
-        .filter((n) => (n.type ?? 'terminal') === 'terminal')
+        .filter((n) => {
+          const k = n.type ?? 'terminal'
+          return k === 'terminal' || k === 'group'
+        })
         .map((n) => ({
           id: n.id,
-          kind: 'terminal' as const,
+          kind: (n.type ?? 'terminal') as SessionNodeInput['kind'],
           title: n.data.title ?? n.id,
           color: n.data.color ?? '#888',
           agentId: n.data.agentId,
           cwd: n.data.cwd,
-          ssh: n.data.ssh
+          ssh: n.data.ssh,
+          parentId: n.parentId
         })),
     [nodes]
   )
@@ -1872,6 +1877,20 @@ export function Canvas() {
     [activeProjectId, addTerminal, switchProject]
   )
 
+  // Sidebar drag-to-group: reparent a session into a canvas group (groupId) or out (null).
+  const moveSessionToGroup = useCallback(
+    (projectId: string, nodeId: string, groupId: string | null) => {
+      if (projectId === activeProjectId) {
+        setNodes((ns) => reparentNode(ns, nodeId, groupId))
+        markDirty()
+      } else {
+        useProjects.getState().moveNodeToGroup(projectId, nodeId, groupId)
+        void writeDisk()
+      }
+    },
+    [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
   const onRowContextMenu = useCallback(
     (e: React.MouseEvent, projectId: string, id: string) => {
       e.preventDefault()
@@ -2398,6 +2417,7 @@ export function Canvas() {
         onCloseSession={closeSession}
         onRenameSession={renameSession}
         onAiNameSession={aiNameSession}
+        onMoveToGroup={moveSessionToGroup}
         onRowContextMenu={onRowContextMenu}
         onAddToProject={addToProject}
         onMouseEnter={openSessionsPeek}

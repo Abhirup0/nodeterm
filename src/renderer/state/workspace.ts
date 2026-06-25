@@ -425,6 +425,46 @@ export function ungroupNodes(nodes: CanvasNode[], groupId: string): CanvasNode[]
     )
 }
 
+/**
+ * Moves a node into an existing group frame (`groupId` set) or out to the top level
+ * (`groupId` null), keeping its on-canvas position fixed by converting between absolute and
+ * group-relative coordinates (one level of nesting). Returns a new array with group nodes kept
+ * before their children (React Flow requires parents first). No-op when the node is missing or
+ * is itself a group, when it already has the requested parent, or when `groupId` is not a group.
+ */
+export function reparentNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  groupId: string | null
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group') return nodes
+  if ((node.parentId ?? null) === groupId) return nodes
+
+  const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
+  const abs = {
+    x: node.position.x + (oldParent?.position.x ?? 0),
+    y: node.position.y + (oldParent?.position.y ?? 0)
+  }
+
+  let updated: CanvasNode
+  if (groupId === null) {
+    updated = { ...node, parentId: undefined, extent: undefined, position: abs }
+  } else {
+    const group = nodes.find((n) => n.id === groupId)
+    if (!group || group.type !== 'group') return nodes
+    updated = {
+      ...node,
+      parentId: group.id,
+      extent: 'parent' as const,
+      position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
+    }
+  }
+
+  const next = nodes.map((n) => (n.id === nodeId ? updated : n))
+  return [...next.filter((n) => n.type === 'group'), ...next.filter((n) => n.type !== 'group')]
+}
+
 /** Converts persisted node states into live React Flow nodes (parents first). */
 /**
  * Apply a single canvas mutation to a list of node states (renderer mirror of

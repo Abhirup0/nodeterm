@@ -12,6 +12,8 @@ export interface SessionNodeInput {
   agentId?: AgentId
   cwd?: string
   ssh?: SshConnection
+  /** Parent group node id when this node lives inside a canvas group frame. */
+  parentId?: string
 }
 
 export interface ProjectInput {
@@ -76,13 +78,24 @@ export interface SessionRowVM {
   usesContext: boolean
 }
 
+/** A canvas group frame and the sessions nested inside it. */
+export interface GroupBucket {
+  id: string
+  title: string
+  color: string
+  sessions: SessionRowVM[]
+}
+
 export interface SessionGroup {
   projectId: string
   projectName: string
   projectColor: string
   cwd?: string
   isActive: boolean
-  sessions: SessionRowVM[]
+  /** Canvas group frames in this project, each with its member sessions. */
+  groups: GroupBucket[]
+  /** Sessions not inside any canvas group. */
+  ungrouped: SessionRowVM[]
 }
 
 function toRow(n: SessionNodeInput, status: AgentNodeStatus | undefined): SessionRowVM {
@@ -118,26 +131,45 @@ export function buildSessionList(
   filter: string
 ): SessionGroup[] {
   const needle = filter.trim().toLowerCase()
+  const keep = (r: SessionRowVM): boolean => !needle || matches(r, needle)
+
   const groups: SessionGroup[] = projects.map((p) => {
     const isActive = p.id === activeProjectId
     const source = isActive && liveActiveNodes ? liveActiveNodes : p.nodes
-    let sessions = source
-      .filter((n) => n.kind === 'terminal')
+    const groupNodes = source.filter((n) => n.kind === 'group')
+    const groupIds = new Set(groupNodes.map((n) => n.id))
+    const terminals = source.filter((n) => n.kind === 'terminal')
+
+    const buckets: GroupBucket[] = groupNodes.map((gn) => ({
+      id: gn.id,
+      title: gn.title,
+      color: gn.color,
+      sessions: terminals
+        .filter((n) => n.parentId === gn.id)
+        .map((n) => toRow(n, statusById[n.id]))
+        .filter(keep)
+    }))
+
+    const ungrouped = terminals
+      .filter((n) => !n.parentId || !groupIds.has(n.parentId))
       .map((n) => toRow(n, statusById[n.id]))
-    if (needle) sessions = sessions.filter((r) => matches(r, needle))
+      .filter(keep)
+
     return {
       projectId: p.id,
       projectName: p.name,
       projectColor: p.color,
       cwd: p.cwd,
       isActive,
-      sessions
+      // When filtering, hide groups whose sessions all filtered out; otherwise keep empty
+      // groups so they remain visible drop targets.
+      groups: needle ? buckets.filter((b) => b.sessions.length > 0) : buckets,
+      ungrouped
     }
   })
 
-  const ordered = [
-    ...groups.filter((g) => g.isActive),
-    ...groups.filter((g) => !g.isActive)
-  ]
-  return needle ? ordered.filter((g) => g.sessions.length > 0) : ordered
+  const ordered = [...groups.filter((g) => g.isActive), ...groups.filter((g) => !g.isActive)]
+  return needle
+    ? ordered.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0)
+    : ordered
 }

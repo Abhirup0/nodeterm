@@ -24,6 +24,9 @@ interface ProjectsState {
   removeNode(projectId: string, nodeId: string): void
   /** Duplicates a node within a project (fresh id, offset position). */
   duplicateNode(projectId: string, nodeId: string): void
+  /** Moves a node into a group frame (groupId) or out to the top level (null), keeping its
+   *  on-canvas position fixed by converting absolute/relative coordinates. */
+  moveNodeToGroup(projectId: string, nodeId: string, groupId: string | null): void
   /** Removes a project; returns the id that should become active (never deletes the last one). */
   deleteProject(id: string): string
 
@@ -117,6 +120,34 @@ export const useProjects = create<ProjectsState>((set, get) => ({
           position: { x: src.position.x + 24, y: src.position.y + 24 }
         }
         return [...nodes, copy]
+      })
+    }))
+  },
+
+  moveNodeToGroup(projectId, nodeId, groupId) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) => {
+        const node = nodes.find((n) => n.id === nodeId)
+        if (!node || node.kind === 'group') return nodes
+        if ((node.parentId ?? null) === groupId) return nodes
+        const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
+        const abs = {
+          x: node.position.x + (oldParent?.position.x ?? 0),
+          y: node.position.y + (oldParent?.position.y ?? 0)
+        }
+        let next: CanvasNodeState
+        if (groupId === null) {
+          next = { ...node, parentId: undefined, position: abs }
+        } else {
+          const group = nodes.find((n) => n.id === groupId)
+          if (!group || group.kind !== 'group') return nodes
+          next = {
+            ...node,
+            parentId: group.id,
+            position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
+          }
+        }
+        return nodes.map((n) => (n.id === nodeId ? next : n))
       })
     }))
   },

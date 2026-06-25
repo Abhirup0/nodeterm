@@ -10,6 +10,8 @@ export interface SessionRowProps {
   onRename(title: string): void
   onAiName(): void | Promise<void>
   onContextMenu(e: React.MouseEvent): void
+  onDragStart(): void
+  onDragEnd(): void
 }
 
 function ctxColor(pct: number): string {
@@ -30,7 +32,9 @@ export function SessionRow({
   onClose,
   onRename,
   onAiName,
-  onContextMenu
+  onContextMenu,
+  onDragStart,
+  onDragEnd
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
@@ -52,7 +56,19 @@ export function SessionRow({
   }
 
   return (
-    <div className="ss-row" onClick={onClick} onContextMenu={onContextMenu}>
+    <div
+      className="ss-row"
+      draggable={!editing}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move'
+        // Some browsers require data to be set for a drag to start.
+        e.dataTransfer.setData('text/plain', row.id)
+        onDragStart()
+      }}
+      onDragEnd={onDragEnd}
+    >
       <span className={`ss-dot ss-dot--${row.statusKind}`} title={row.stateLabel} />
       <div className="ss-row__body">
         <div className="ss-row__titleline">
