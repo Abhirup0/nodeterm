@@ -40,6 +40,7 @@ import {
   IconRemote,
   IconSave,
   IconSelectAll,
+  IconSessions,
   IconSwitch,
   IconTerminal,
   IconTrash,
@@ -56,6 +57,8 @@ import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
+import { SessionsSidebar } from '../components/SessionsSidebar'
+import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
 import { transport } from '../terminal/local-transport'
@@ -127,6 +130,19 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [explorerOpen, setExplorerOpen] = useState(false)
+  // Sessions sidebar (left): hover-to-peek + click-to-pin (persisted).
+  const [sessionsPinned, setSessionsPinned] = useState(() => {
+    try {
+      return localStorage.getItem('nodeterm.sessionsPinned') === '1'
+    } catch {
+      return false
+    }
+  })
+  const [sessionsHover, setSessionsHover] = useState(false)
+  const sessionsOpen = sessionsPinned || sessionsHover
+  // When set, add a terminal to this project once its nodes have loaded into React Flow
+  // (cross-project "add" from the sidebar, which must switch projects first).
+  const pendingAddRef = useRef<string | null>(null)
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{
@@ -317,6 +333,38 @@ export function Canvas() {
     return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
   }, [linkEdges, ephemeralEdges, accent])
 
+  const toggleSessionsPin = useCallback(() => {
+    setSessionsPinned((v) => {
+      const next = !v
+      try {
+        localStorage.setItem('nodeterm.sessionsPinned', next ? '1' : '0')
+      } catch {
+        // ignore
+      }
+      if (!next) setSessionsHover(false)
+      return next
+    })
+  }, [])
+
+  // Serialized inputs for the active project's terminal/agent nodes (the sidebar reads the
+  // serialized nodes of *inactive* projects directly from the store, but the active project's
+  // live state lives in React Flow — pass it through here).
+  const liveActiveNodes = useMemo<SessionNodeInput[]>(
+    () =>
+      nodes
+        .filter((n) => (n.type ?? 'terminal') === 'terminal')
+        .map((n) => ({
+          id: n.id,
+          kind: 'terminal' as const,
+          title: n.data.title ?? n.id,
+          color: n.data.color ?? '#888',
+          agentId: n.data.agentId,
+          cwd: n.data.cwd,
+          ssh: n.data.ssh
+        })),
+    [nodes]
+  )
+
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
@@ -375,6 +423,12 @@ export function Canvas() {
           goToNode(node)
           useAgentStatus.getState().clearUnread(pending)
         }
+      }
+      // Consume a cross-project "add terminal" request from the sessions sidebar (which had
+      // to switch projects first). Only act if we landed on the requested project.
+      if (pendingAddRef.current === useProjects.getState().activeProjectId) {
+        pendingAddRef.current = null
+        addTerminal()
       }
     }, 0)
     return () => clearTimeout(t)
@@ -1173,6 +1227,9 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
         setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault()
+        toggleSessionsPin()
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
@@ -1186,7 +1243,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [toggleSessionsPin])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -1427,6 +1484,97 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // ---- sessions sidebar actions ----
+  // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
+  // inactive project's node even though it isn't mounted; then drop it from the store.
+  const closeSession = useCallback(
+    (projectId: string, id: string) => {
+      setConfirm({
+        message: 'End this session? This stops its tmux session.',
+        confirmLabel: 'End session',
+        danger: true,
+        onConfirm: () => {
+          if (projectId === activeProjectId) {
+            deleteNodes([id])
+          } else {
+            transport.destroy(id)
+            useAgentStatus.getState().remove(id)
+            useProjects.getState().removeNode(projectId, id)
+            void writeDisk()
+          }
+          setConfirm(null)
+        }
+      })
+    },
+    [activeProjectId, deleteNodes, writeDisk]
+  )
+
+  const renameSession = useCallback(
+    (projectId: string, id: string, title: string) => {
+      if (projectId === activeProjectId) {
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, title } } : n)))
+        markDirty()
+      } else {
+        useProjects.getState().renameNode(projectId, id, title)
+        void writeDisk()
+      }
+    },
+    [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
+  const addToProject = useCallback(
+    (projectId: string) => {
+      if (projectId === activeProjectId) {
+        addTerminal()
+      } else {
+        // Add once the project's nodes have loaded into React Flow (load effect consumes this).
+        pendingAddRef.current = projectId
+        switchProject(projectId)
+      }
+    },
+    [activeProjectId, addTerminal, switchProject]
+  )
+
+  const onRowContextMenu = useCallback(
+    (e: React.MouseEvent, projectId: string, id: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+          {
+            label: 'Rename',
+            icon: <IconEditor />,
+            onClick: () => {
+              const t = window.prompt('Rename session', '')
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            }
+          },
+          {
+            label: 'Duplicate',
+            icon: <IconDuplicate />,
+            onClick: () => {
+              if (projectId === activeProjectId) duplicateNodes([id])
+              else {
+                useProjects.getState().duplicateNode(projectId, id)
+                void writeDisk()
+              }
+            }
+          },
+          {
+            label: 'Close',
+            icon: <IconTrash />,
+            danger: true,
+            onClick: () => closeSession(projectId, id)
+          }
+        ]
+      })
+    },
+    [activeProjectId, focusNodeById, renameSession, duplicateNodes, closeSession, writeDisk]
+  )
 
   // Stream live subagent transcript chunks into the agent-nodes store.
   useEffect(
@@ -1745,6 +1893,18 @@ export function Canvas() {
       </div>
       <UpdateCard />
 
+      <div
+        className="sessions-icon-cluster"
+        onMouseEnter={() => setSessionsHover(true)}
+        onMouseLeave={() => {
+          if (!sessionsPinned) setTimeout(() => setSessionsHover(false), 60)
+        }}
+      >
+        <button title="Sessions (⌘⇧L)" onClick={toggleSessionsPin}>
+          <IconSessions />
+        </button>
+      </div>
+
       <div className="controls-cluster">
         <button
           className="cluster-search"
@@ -1872,6 +2032,27 @@ export function Canvas() {
       {explorerOpen && (
         <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} />
       )}
+
+      <SessionsSidebar
+        open={sessionsOpen}
+        pinned={sessionsPinned}
+        liveActiveNodes={liveActiveNodes}
+        onTogglePin={toggleSessionsPin}
+        onClose={() => {
+          setSessionsHover(false)
+          setSessionsPinned(false)
+          try {
+            localStorage.setItem('nodeterm.sessionsPinned', '0')
+          } catch {
+            // ignore
+          }
+        }}
+        onFocusNode={focusNodeById}
+        onCloseSession={closeSession}
+        onRenameSession={renameSession}
+        onRowContextMenu={onRowContextMenu}
+        onAddToProject={addToProject}
+      />
 
       {confirm && (
         <ConfirmDialog

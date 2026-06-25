@@ -3791,3 +3791,7 @@ body,
 .ss-group__head:hover .ss-group__add { opacity: 0.7; }
 .ss-group__add:hover { opacity: 1 !important; color: var(--accent); }
 .ss-group__empty { padding: 4px 8px 6px 22px; font-size: 11px; color: rgba(180, 180, 185, 0.6); }
+
+.sessions-icon-cluster { position: absolute; top: 54px; left: 14px; z-index: 11; }
+.sessions-icon-cluster button { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; background: rgba(40, 40, 42, 0.92); border: 1px solid var(--border); border-radius: 9px; color: var(--text); cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3); }
+.sessions-icon-cluster button:hover { background: var(--panel-header); }
