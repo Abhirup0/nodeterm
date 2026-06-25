@@ -2589,6 +2589,54 @@ body,
   padding: 18px;
 }
 
+/* ---- Bind-to-worktree dialog (reuses .confirm shell) ---- */
+.confirm.bind-dialog {
+  width: 420px;
+}
+
+.bind-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bind-field input {
+  background: var(--panel-header);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.bind-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.bind-mode {
+  display: flex;
+  gap: 18px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.bind-mode label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.confirm__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ---- Notification consent dialog (polished, icon + title + actions) ---- */
 .consent-overlay {
   position: fixed;

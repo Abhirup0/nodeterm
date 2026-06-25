@@ -52,6 +52,7 @@ import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { UsageIndicator } from '../components/UsageIndicator'
@@ -63,6 +64,7 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { computeWorktreePath, sanitizeWorktreeBranch } from '@shared/worktree'
 import {
   agentConfig,
   hasHooks,
@@ -132,6 +134,8 @@ export function Canvas() {
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
+  // Group id awaiting a worktree bind (drives BindWorktreeDialog).
+  const [bindTarget, setBindTarget] = useState<string | null>(null)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -942,6 +946,46 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  const groupHasWorktree = useCallback(
+    (groupId: string) => !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree,
+    []
+  )
+
+  const bindGroupToWorktree = useCallback((groupId: string) => setBindTarget(groupId), [])
+
+  const confirmBind = useCallback(
+    async (v: BindWorktreeValue) => {
+      const git = window.nodeTerminal.git
+      const res = await git.worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
+      if (!res.ok) {
+        window.alert(res.message)
+        return
+      }
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === bindTarget
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  worktree: {
+                    repoPath: v.repoPath,
+                    branch: v.branch,
+                    baseRef: v.baseRef,
+                    path: v.path,
+                    createdByApp: true
+                  }
+                }
+              }
+            : n
+        )
+      )
+      setBindTarget(null)
+      markDirty()
+    },
+    [bindTarget, setNodes, markDirty]
+  )
+
   const toggleMarkdown = useCallback(
     (ids: string[]) => {
       const set = new Set(ids)
@@ -1251,10 +1295,19 @@ export function Canvas() {
       { type: 'label', label: 'Group' },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
+      ...(groupHasWorktree(groupId)
+        ? []
+        : [
+            {
+              label: 'Bind to worktree…',
+              icon: <IconBranch />,
+              onClick: () => bindGroupToWorktree(groupId)
+            } as MenuItem
+          ]),
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
       { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
-    [setNodesColor, ungroup]
+    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree]
   )
 
   const onPaneContextMenu = useCallback(
@@ -1817,6 +1870,19 @@ export function Canvas() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {bindTarget && (
+        <BindWorktreeDialog
+          initialRepoPath={
+            (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
+          }
+          defaultPath={(repoPath, branch) =>
+            computeWorktreePath('', repoPath.split('/').pop() || 'repo', sanitizeWorktreeBranch(branch))
+          }
+          onConfirm={confirmBind}
+          onCancel={() => setBindTarget(null)}
         />
       )}
 
