@@ -585,7 +585,7 @@ export function SourceControlPanel({
           onClose={() => setBranchPick(null)}
           items={
             status.branches
-              .filter((b) => (branchPick.action === 'delete' ? b !== status.branch : b !== status.branch))
+              .filter((b) => b !== status.branch)
               .map((b) => ({
                 label: b,
                 onClick: () => {
