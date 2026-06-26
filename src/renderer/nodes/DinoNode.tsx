@@ -3,15 +3,13 @@ import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { type CanvasNode } from '../state/workspace'
 import { createDinoGame } from './dino/dino-game'
 
-const GAME_KEYS = new Set([' ', 'ArrowUp', 'ArrowDown', 'Spacebar'])
-
 /**
- * A dino node: Chromium's offline T-Rex Runner on a canvas. No PTY. The game is
- * created once on mount and destroyed on unmount (React Flow keys nodes by id, so
- * the instance survives re-renders). High score persists via data.highScore — we
- * seed the engine with it and store new records back silently; the player sees the
- * authentic on-canvas "HI" rather than a header chip (the engine's raw highestScore
- * doesn't match the canvas digits, which apply a coefficient).
+ * A dino node: a small self-contained T-Rex–style runner on a canvas. No PTY.
+ * The game is created once on mount and destroyed on unmount (React Flow keys
+ * nodes by id, so the instance survives re-renders). High score persists via
+ * data.highScore — we seed the game with it and store new records back. The game
+ * scopes its own keyboard/sound to the focusable host element, so it only reacts
+ * while this node is focused and stays silent when you're on another node.
  */
 export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements } = useReactFlow()
@@ -29,14 +27,6 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // as the seed only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // The engine listens for game keys at the document level, so we must NOT
-  // stopPropagation (React's root listener sits below document — that would
-  // starve the engine). preventDefault only stops the page from scrolling on
-  // Space/arrows; the event still bubbles to document and the engine handles it.
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (GAME_KEYS.has(e.key)) e.preventDefault()
-  }
 
   return (
     <div className={`dino-node${selected ? ' selected' : ''}`} style={{ borderColor: data.color }}>
@@ -59,7 +49,7 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
       </div>
 
-      <div ref={hostRef} className="dino-node__body nodrag nowheel" tabIndex={0} onKeyDown={onKeyDown} />
+      <div ref={hostRef} className="dino-node__body nodrag nowheel" tabIndex={0} />
     </div>
   )
 }
