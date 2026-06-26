@@ -10,6 +10,7 @@ interface DockProps {
   canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
+  onAddDino: () => void
   onAddAgent: (agentId: AgentId) => void
   onOpenFile: () => void
   onAddRemote: () => void
@@ -33,6 +34,7 @@ export function Dock({
   canRedo,
   onAddTerminal,
   onAddSticky,
+  onAddDino,
   onAddAgent,
   onOpenFile,
   onAddRemote,
@@ -85,6 +87,10 @@ export function Dock({
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
+            </button>
+            <button onClick={pick(onAddDino)}>
+              <NoteIcon />
+              <span>Dino Game</span>
             </button>
             <button onClick={pick(onOpenFile)}>
               <EditorIcon />

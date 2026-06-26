@@ -25,7 +25,7 @@ export interface PtyCreateOptions {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -51,6 +51,8 @@ export interface CanvasNodeState {
   ssh?: import('./ssh').SshConnection
   // sticky-only
   text?: string
+  // dino-only: best score reached in the T-Rex Runner game.
+  highScore?: number
   // editor / diff
   filePath?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */

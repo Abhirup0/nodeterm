@@ -20,6 +20,7 @@ import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
+import { DinoNode } from '../nodes/DinoNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
@@ -97,6 +98,7 @@ import {
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   createAgentNode,
+  createDinoNode,
   createDiffNode,
   createEditorNode,
   createSshTerminalNode,
@@ -210,7 +212,8 @@ export function Canvas() {
       editor: withNodeBoundary(EditorNode),
       diff: withNodeBoundary(DiffNode),
       subagent: withNodeBoundary(SubagentNode),
-      loop: withNodeBoundary(LoopNode)
+      loop: withNodeBoundary(LoopNode),
+      dino: withNodeBoundary(DinoNode)
     }),
     []
   )
@@ -989,6 +992,14 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter]
   )
 
+  const addDino = useCallback(
+    (center?: { x: number; y: number }) => {
+      setNodes((ns) => [...ns, createDinoNode(ns.length, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
       const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
@@ -1697,6 +1708,7 @@ export function Canvas() {
               })
             ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
+          { label: 'New dino game', icon: <IconNote />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           {
             label: 'New remote…',
@@ -1714,6 +1726,7 @@ export function Canvas() {
       addTerminal,
       addAgentNode,
       addSticky,
+      addDino,
       openFileDialog,
       openRemotePicker,
       selectAll,
@@ -2178,6 +2191,7 @@ export function Canvas() {
           })
         ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
+      { id: 'new-dino', label: 'New dino game', icon: <IconNote />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
@@ -2237,6 +2251,7 @@ export function Canvas() {
     addTerminal,
     addAgentNode,
     addSticky,
+    addDino,
     openFileDialog,
     addProject,
     fitView,
@@ -2527,6 +2542,7 @@ export function Canvas() {
         onRedo={redo}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
+        onAddDino={addDino}
         onAddAgent={(aid) => addAgentNode(aid)}
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
