@@ -9,6 +9,11 @@ import type { ContextWindowUsage } from '../shared/types'
 import { cachedWindowFor, resolveModelWindow } from './model-window'
 
 const POLL_MS = 1000
+// Cap the initial read: a resumed Claude transcript can be many MB, and reading the whole file
+// synchronously on the main thread (Buffer.alloc(size) + JSON.parse per line) stalls all IPC.
+// Only the LATEST assistant usage matters, so a tail of the file is enough; the partial first
+// line is dropped naturally by the JSON.parse guard.
+const INITIAL_READ_CAP = 1024 * 1024 // 1 MB
 
 interface Tracked {
   path: string
@@ -58,6 +63,8 @@ export function createContextTail(win: BrowserWindow): ContextTail {
     }
     if (size >= 0) {
       if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
+      // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
+      if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
       if (size > t.offset) {
         let chunk = ''
         try {

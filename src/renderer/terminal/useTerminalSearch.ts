@@ -60,8 +60,6 @@ export function useTerminalSearch({
       }
       if (!captured) captured = readBuffer()
       for (const t of captured.split('\n')) lines.push({ source: 'terminal', text: t })
-      // [find2] TEMP diagnostic — one line tells us which link is broken.
-      console.log('[find2] searchTranscript=', searchTranscript, '| sessionId=', sessionId, '| cwd=', cwd, '| terminalLines=', lines.length)
       // Search the full Claude transcript for agent nodes. Resolved by sessionId when known,
       // else by cwd (durable) — so it works even when no live hook event set the sessionId.
       if (searchTranscript) {
@@ -70,15 +68,12 @@ export function useTerminalSearch({
             sessionId,
             cwd
           )
-          console.log('[find2] readTranscript ->', tr.length, 'transcript lines')
           for (const l of tr) {
             for (const t of l.text.split('\n')) lines.push({ source: 'claude', role: l.role, text: t })
           }
-        } catch (e) {
-          console.error('[find2] readTranscript THREW (preload/main not reloaded?):', e)
+        } catch {
+          // transcript unavailable — fall back to terminal buffer only
         }
-      } else {
-        console.log('[find2] transcript SKIPPED — searchTranscript is false (not an agent node?)')
       }
       if (!cancelled) setSource(lines)
     })()

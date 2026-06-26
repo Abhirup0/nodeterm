@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { randomUUID } from 'crypto'
+import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { app } from 'electron'
@@ -66,7 +66,7 @@ class HookServer {
           res.end()
           return
         }
-        if (req.headers['x-nodeterm-hook-token'] !== this.token) {
+        if (!this.tokenMatches(req.headers['x-nodeterm-hook-token'])) {
           res.writeHead(403)
           res.end()
           return
@@ -113,6 +113,14 @@ class HookServer {
     })
   }
 
+  // Constant-time bearer-token check (avoids a timing side channel on the compare).
+  private tokenMatches(provided: string | string[] | undefined): boolean {
+    if (typeof provided !== 'string' || !this.token) return false
+    const a = Buffer.from(provided)
+    const b = Buffer.from(this.token)
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
   // The managed script sources this file at invocation to get the LIVE port/token.
   // tmux sessions outlive the app, so env-baked coords go stale after a restart.
   private writeEndpointFile(): void {
@@ -122,7 +130,9 @@ class HookServer {
       writeFileSync(
         p,
         `NODETERM_HOOK_PORT=${this.port}\nNODETERM_HOOK_TOKEN=${this.token}\nNODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n`,
-        'utf8'
+        // 0o600: this file holds the bearer token — owner read/write only so another local user
+        // can't read it and forge hook events.
+        { encoding: 'utf8', mode: 0o600 }
       )
     } catch (e) {
       console.warn('[agent-hooks] could not write endpoint file', e)

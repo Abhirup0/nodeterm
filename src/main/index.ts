@@ -35,6 +35,19 @@ import { initRemoteClient } from './remote/client-service'
 const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
 if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
 
+// Only hand the OS a URL with a vetted scheme. Blocks file://, smb://, and custom
+// protocol-handler schemes that could be smuggled in via remote announcement feeds or
+// rendered markdown links. Used by both the window-open handler and the IPC handler.
+function isSafeExternalUrl(url: unknown): url is string {
+  if (typeof url !== 'string') return false
+  try {
+    const { protocol } = new URL(url)
+    return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:'
+  } catch {
+    return false
+  }
+}
+
 const settingsStore = new SettingsStore()
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
@@ -44,6 +57,12 @@ const gitService = new GitService()
 // The single app window — kept at module scope so IPC handlers (e.g. notifications)
 // can check focus and route clicks back to the renderer.
 let mainWin: BrowserWindow | null = null
+
+// Node → live tail bookkeeping, so closing a node (× → pty:destroy) releases its file tailers.
+// Without this, a node closed mid-run never emits SessionEnd/PostToolUse, so context-tail (1s
+// poll) and subagent-tail (400ms poll) would keep stat/read-ing forever. Keyed by node id.
+const nodeContextSession = new Map<string, string>() // nodeId → claude sessionId
+const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subagent tool_use_ids
 
 // Enforce a single instance. A second instance would re-attach every node's tmux session
 // (`new-session -A -D`), whose `-D` detaches the first instance's clients — leaving
@@ -97,10 +116,20 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  // Open external links in the system browser.
+  // Open external links in the system browser — only safe schemes (no file://, no custom
+  // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered
+  // markdown links, so the allowlist mirrors the shellOpenExternal IPC handler.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (isSafeExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Block any in-page top-level navigation away from the app origin (defense in depth).
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('file://') && !url.startsWith(process.env['ELECTRON_RENDERER_URL'] ?? '\0')) {
+      e.preventDefault()
+      if (isSafeExternalUrl(url)) void shell.openExternal(url)
+    }
   })
 
   // Load the electron-vite dev server if present, otherwise the built file.
@@ -182,7 +211,7 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.on(IPC.shellOpenExternal, (_e, url: string) => {
-    if (typeof url === 'string' && /^https?:\/\//.test(url)) void shell.openExternal(url)
+    if (isSafeExternalUrl(url)) void shell.openExternal(url)
   })
 
   // The local Explorer/Editor fs IPC: thin wrappers over the shared fs-ops (the SAME logic the
@@ -275,13 +304,39 @@ app.whenReady().then(async () => {
     }
     // Context-window meter: tail the session transcript (any event carrying both fields).
     if (p.session_id && p.transcript_path) contextTail.track(p.session_id, p.transcript_path)
+    if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
     if (nodeId && p.session_id && p.transcript_path) setNodeTranscript(nodeId, p.session_id, p.transcript_path)
     if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
     // Subagent live transcript: track on PreToolUse / finish on PostToolUse for subagent tools.
     const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
     if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name)) {
-      if (p.hook_event_name === 'PreToolUse') subagentTail.track(p.tool_use_id, p.transcript_path)
-      else if (p.hook_event_name === 'PostToolUse') subagentTail.finish(p.tool_use_id)
+      if (p.hook_event_name === 'PreToolUse') {
+        subagentTail.track(p.tool_use_id, p.transcript_path)
+        if (nodeId) {
+          const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+          set.add(p.tool_use_id)
+          nodeSubagents.set(nodeId, set)
+        }
+      } else if (p.hook_event_name === 'PostToolUse') {
+        subagentTail.finish(p.tool_use_id)
+        if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
+      }
+    }
+  })
+
+  // Releasing tails on node close: pty:destroy fires when the user clicks × (persistKey = node
+  // id). pty-manager already handles the same channel to kill the tmux session; this extra
+  // listener tears down the per-node file tailers so they stop polling a now-dead session.
+  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => {
+    const sessionId = nodeContextSession.get(nodeId)
+    if (sessionId) {
+      contextTail.untrack(sessionId)
+      nodeContextSession.delete(nodeId)
+    }
+    const subs = nodeSubagents.get(nodeId)
+    if (subs) {
+      for (const toolUseId of subs) subagentTail.finish(toolUseId)
+      nodeSubagents.delete(nodeId)
     }
   })
   await hookServer.start()

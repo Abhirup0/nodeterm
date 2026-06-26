@@ -16,3 +16,6 @@ build/icon.png
 
 # private backend lives in its own repo (a-private-repo)
 /nodebaseserver/
+
+# local session handoff transcripts / app state
+.nodeterm/

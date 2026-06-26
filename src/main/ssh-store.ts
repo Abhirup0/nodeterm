@@ -52,7 +52,9 @@ export class SshStore {
     this.writeChain = this.writeChain
       .catch(() => {})
       .then(async () => {
-        await fs.writeFile(tmp, snapshot, 'utf-8')
+        // 0o600: this holds the user's SSH host inventory (hosts/users/identity-file paths) —
+        // owner read/write only, not world-readable.
+        await fs.writeFile(tmp, snapshot, { encoding: 'utf-8', mode: 0o600 })
         await fs.rename(tmp, this.path)
       })
     return this.writeChain
