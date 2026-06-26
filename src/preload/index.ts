@@ -45,6 +45,8 @@ const api: NodeTerminalApi = {
     kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
+    generateGroupName: (memberKeys, cwd) =>
+      ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
     sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
     onData: (sessionId, listener) => {

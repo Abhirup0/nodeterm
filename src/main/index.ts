@@ -7,7 +7,7 @@ import { WorkspaceStore } from './workspace-store'
 import { SettingsStore } from './settings-store'
 import { SshStore } from './ssh-store'
 import { GitService } from './git-service'
-import { generateCommitMessage, generateTerminalName } from './commit-message'
+import { generateCommitMessage, generateGroupName, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from './check'
 import { hookServer } from './agents/hook-server'
@@ -130,6 +130,11 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
     generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
   )
+
+  ipcMain.handle(IPC.ptyGenerateGroupName, async (_e, memberKeys: string[], cwd: string) => {
+    const contents = await Promise.all(memberKeys.map((k) => ptyManager.captureSession(k)))
+    return generateGroupName(contents, cwd, settingsStore.get())
+  })
 
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)

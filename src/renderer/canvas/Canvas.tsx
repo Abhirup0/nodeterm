@@ -1864,6 +1864,22 @@ export function Canvas() {
     [renameSession]
   )
 
+  // Sidebar "Name with AI" for a canvas group: generate a title from its member terminals'
+  // captured output, then apply it to the group node (renameSession renames any node by id).
+  const aiNameGroup = useCallback(
+    async (projectId: string, groupId: string, memberIds: string[], cwd?: string) => {
+      if (memberIds.length === 0) return
+      useSessionNaming.getState().set(groupId, true)
+      try {
+        const r = await window.nodeTerminal.pty.generateGroupName(memberIds, cwd ?? '')
+        if (r.ok) renameSession(projectId, groupId, r.message)
+      } finally {
+        useSessionNaming.getState().set(groupId, false)
+      }
+    },
+    [renameSession]
+  )
+
   const addToProject = useCallback(
     (projectId: string) => {
       if (projectId === activeProjectId) {
@@ -2417,6 +2433,7 @@ export function Canvas() {
         onCloseSession={closeSession}
         onRenameSession={renameSession}
         onAiNameSession={aiNameSession}
+        onAiNameGroup={aiNameGroup}
         onMoveToGroup={moveSessionToGroup}
         onRowContextMenu={onRowContextMenu}
         onAddToProject={addToProject}

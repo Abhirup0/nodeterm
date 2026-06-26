@@ -4,6 +4,7 @@ import { SessionRow } from './SessionRow'
 import { IconPin } from './icons'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useSessionNaming } from '../state/sessionNaming'
 
 const COLLAPSE_KEY = 'nodeterm.sessionsCollapsed'
 
@@ -40,6 +41,8 @@ export interface SessionsSidebarProps {
   onAddToProject(projectId: string): void
   /** Move a node into a canvas group (groupId) or out to the top level (null). */
   onMoveToGroup(projectId: string, nodeId: string, groupId: string | null): void
+  /** Name a canvas group with AI from its member terminals' output. */
+  onAiNameGroup(projectId: string, groupId: string, memberIds: string[], cwd?: string): void | Promise<void>
   onMouseEnter?(): void
   onMouseLeave?(): void
 }
@@ -49,6 +52,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const projects = useProjects((s) => s.projects)
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
+  const namingById = useSessionNaming((s) => s.byId)
 
   const [filter, setFilter] = useState('')
   const [overrides, setOverrides] = useState<Record<string, boolean>>(loadOverrides)
@@ -214,6 +218,25 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                         <span className="ss-subgroup__dot" style={{ background: bucket.color }} />
                         <span className="ss-subgroup__name">{bucket.title}</span>
                         <span className="ss-group__count">{bucket.sessions.length}</span>
+                        {bucket.sessions.length > 0 && (
+                          <button
+                            className="ss-subgroup__ai"
+                            title="Name group with AI (from members' output)"
+                            disabled={!!namingById[bucket.id]}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (namingById[bucket.id]) return
+                              void props.onAiNameGroup(
+                                g.projectId,
+                                bucket.id,
+                                bucket.sessions.map((s) => s.id),
+                                g.cwd
+                              )
+                            }}
+                          >
+                            {namingById[bucket.id] ? '…' : '✦'}
+                          </button>
+                        )}
                       </div>
                       {bucket.sessions.length === 0 ? (
                         <div className="ss-group__empty">Drop a session here</div>

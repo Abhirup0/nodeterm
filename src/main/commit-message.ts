@@ -262,3 +262,29 @@ ${clip}
     .slice(0, 40)
   return name ? { ok: true, message: name } : { ok: false, message: 'No name produced.' }
 }
+
+/** Suggest a short group title from the recent output of its member terminals. */
+export async function generateGroupName(
+  contents: string[],
+  cwd: string,
+  settings: Settings
+): Promise<GitResult> {
+  const blocks = contents
+    .map((c, i) => {
+      const clip = c.trim().split('\n').slice(-50).join('\n').slice(-2500)
+      return clip ? `Terminal ${i + 1}:\n\`\`\`\n${clip}\n\`\`\`` : ''
+    })
+    .filter(Boolean)
+  if (!blocks.length) return { ok: false, message: 'No terminal output to read yet.' }
+  const prompt = `Below are the recent outputs of several terminal sessions that belong to one group. Suggest a very short group title (2-4 words, Title Case, no surrounding quotes, no trailing punctuation) describing the group's shared purpose. Output ONLY the title.
+
+${blocks.join('\n\n')}`
+  const r = await runAgent(prompt, cwd, settings)
+  if (!r.ok) return r
+  const name = r.message
+    .split('\n')[0]
+    .replace(/["'`.]+$/g, '')
+    .trim()
+    .slice(0, 40)
+  return name ? { ok: true, message: name } : { ok: false, message: 'No name produced.' }
+}

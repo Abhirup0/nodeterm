@@ -8,6 +8,7 @@ export const IPC = {
   ptyKill: 'pty:kill',
   ptyDestroy: 'pty:destroy',
   ptyGenerateName: 'pty:generate-name',
+  ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
   ptySendText: 'pty:send-text',
   claudeReadTranscript: 'claude:read-transcript',

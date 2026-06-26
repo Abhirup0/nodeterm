@@ -4019,7 +4019,11 @@ body,
 .ss-subgroup { margin: 2px 0 2px 10px; }
 .ss-subgroup__head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; border: 1px solid transparent; }
 .ss-subgroup__dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
-.ss-subgroup__name { font-size: 11.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-subgroup__name { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-subgroup__ai { opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-subgroup__head:hover .ss-subgroup__ai { opacity: 0.6; }
+.ss-subgroup__ai:hover { opacity: 1 !important; color: var(--accent); }
+.ss-subgroup__ai:disabled { opacity: 0.6; cursor: default; color: var(--accent); }
 .ss-ungrouped { margin-top: 2px; border: 1px solid transparent; border-radius: 6px; }
 .ss-ungrouped__label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; color: rgba(180, 180, 185, 0.6); padding: 4px 6px 2px 8px; }
 /* Drop-target highlight while dragging a session onto a group / project header */
