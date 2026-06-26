@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useEntitlement } from '../state/entitlement'
 import { Button } from '@renderer/ui/Button'
+import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
 
 /**
@@ -93,9 +94,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
                 onFocus={(e) => e.target.select()}
               />
               <div className="remote-dialog__row">
-                <Button onClick={() => window.nodeTerminal.clipboard.writeText(hostOffer)}>
-                  Copy code
-                </Button>
+                <CopyButton text={hostOffer} label="Copy code" />
                 <Button onClick={() => void stopHosting()}>Stop sharing</Button>
               </div>
             </div>

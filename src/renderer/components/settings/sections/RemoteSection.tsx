@@ -4,6 +4,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Button } from '@renderer/ui/Button'
+import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
 
 const ROWS = {
@@ -91,9 +92,7 @@ export function RemoteSection({
                   }
                 />
                 <div className="flex gap-2">
-                  <Button onClick={() => window.nodeTerminal.clipboard.writeText(hostOffer)}>
-                    Copy code
-                  </Button>
+                  <CopyButton text={hostOffer} label="Copy code" />
                   <Button onClick={() => void stopHosting()}>Stop sharing</Button>
                 </div>
               </div>
