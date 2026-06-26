@@ -279,7 +279,8 @@ describe('B5 remote project mirror end-to-end (real relay + real handlers + fake
       onFrame: (frame) => hostHandlers?.onFrame(frame),
       onClose: () => hostHandlers?.closeAll()
     })
-    hostHandlers = createHostHandlers(makeEchoPty(), hostSocket, hostFs)
+    // Share the temp dir as the allowed fs root (fs jail) so the client's fs.* RPCs are served.
+    hostHandlers = createHostHandlers(makeEchoPty(), hostSocket, hostFs, () => [tmpDir])
     // Mirror the real host: a client mutation is applied to the host's authoritative state (the
     // single writer), then re-broadcast as the new `canvas:state`.
     hostCanvasSync = createHostCanvasSync(hostSocket, (mutation: CanvasMutation) => {

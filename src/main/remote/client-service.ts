@@ -296,8 +296,9 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
       ourKeys,
       theirPubB64: offer.hostPublicKeyB64,
       onReady: () => {
-        // Bridge established. Ask the host to (re-)push its current canvas, in case our mirror
-        // subscribed after the host's connect-time push (there is no replay otherwise).
+        // Bridge established. Surface the channel SAS so the client human can compare it with the
+        // code the host shows before approving. Then ask the host to (re-)push its current canvas.
+        send(IPC.remoteClientSas(connectionId), socket.sas())
         socket.notify(CANVAS_REQUEST_METHOD)
       },
       onRpc: (req) => {

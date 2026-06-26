@@ -81,7 +81,8 @@ describe('remote filesystem round-trip (client fs RPC → host fs-ops → real t
     // wire the host's `respond` back through the same pair.
     let host!: ReturnType<typeof createHostHandlers>
     const pair = fakePair(() => host)
-    host = createHostHandlers(noopPty(), pair.hostSocket)
+    // The temp dir is the shared root so the client's fs.* RPCs are permitted (fs jail).
+    host = createHostHandlers(noopPty(), pair.hostSocket, undefined, () => [dir])
     const client = createClientHandlers(pair.clientSocket, noopSinks)
 
     const file = path.join(dir, 'note.txt')
@@ -106,7 +107,7 @@ describe('remote filesystem round-trip (client fs RPC → host fs-ops → real t
   it('degrades to empty/false on host fs errors (read/list/write of a bad path)', async () => {
     let host!: ReturnType<typeof createHostHandlers>
     const pair = fakePair(() => host)
-    host = createHostHandlers(noopPty(), pair.hostSocket)
+    host = createHostHandlers(noopPty(), pair.hostSocket, undefined, () => [dir])
     const client = createClientHandlers(pair.clientSocket, noopSinks)
 
     expect(await client.fsRead(path.join(dir, 'does-not-exist.txt'))).toBe('')

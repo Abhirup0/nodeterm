@@ -22,6 +22,8 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
   const [error, setError] = useState('')
   const [clientCode, setClientCode] = useState('')
   const [connecting, setConnecting] = useState(false)
+  const [clientSas, setClientSas] = useState<string | null>(null)
+  const [connectedId, setConnectedId] = useState<string | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -50,6 +52,13 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
     setHostOffer('')
     setHostBusy(false)
   }
+  // Surface the channel SAS once the handshake completes, so the user can verify it matches the
+  // code the host shows before approving there. Keep the dialog open to display it.
+  useEffect(() => {
+    if (!connectedId) return
+    return window.nodeTerminal.remoteClient.onSas(connectedId, (sas) => setClientSas(sas))
+  }, [connectedId])
+
   const connect = async () => {
     const code = clientCode.trim()
     if (!code) return
@@ -60,7 +69,9 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
       window.dispatchEvent(
         new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
       )
-      onClose()
+      // Don't close yet: show the verification code + "waiting for host approval" status. The
+      // mirror node already opened; the user can close this dialog once approved.
+      setConnectedId(connectionId)
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -114,17 +125,28 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
         )}
 
         <h4 className="remote-dialog__head4">Connect to a host</h4>
-        <div className="remote-dialog__block">
-          <Input
-            className="w-full"
-            placeholder="paste the host's code"
-            value={clientCode}
-            onChange={(e) => setClientCode(e.target.value)}
-          />
-          <Button disabled={connecting || !clientCode.trim()} onClick={() => void connect()}>
-            {connecting ? 'Connecting…' : 'Connect'}
-          </Button>
-        </div>
+        {connectedId ? (
+          <div className="remote-dialog__block">
+            <p className="remote-dialog__hint">
+              Connected — waiting for the host to approve. Verify this code matches the one shown on
+              the host:
+            </p>
+            <Input className="w-full" readOnly value={clientSas ?? 'establishing…'} />
+            <Button onClick={onClose}>Done</Button>
+          </div>
+        ) : (
+          <div className="remote-dialog__block">
+            <Input
+              className="w-full"
+              placeholder="paste the host's code"
+              value={clientCode}
+              onChange={(e) => setClientCode(e.target.value)}
+            />
+            <Button disabled={connecting || !clientCode.trim()} onClick={() => void connect()}>
+              {connecting ? 'Connecting…' : 'Connect'}
+            </Button>
+          </div>
+        )}
 
         {error ? <p className="remote-dialog__err">{error}</p> : null}
       </div>

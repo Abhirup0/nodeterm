@@ -102,6 +102,12 @@ export const IPC = {
   commitGenerate: 'commit:generate',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
+  // Connection approval gate: main → renderer when a client finishes the handshake (carries the
+  // SAS to display); renderer → main to approve/reject. Until approved, the host serves no
+  // pty/fs RPCs or input frames, so a leaked offer cannot grant silent access.
+  remoteHostPeerPending: 'remote:host:peer-pending',
+  remoteHostApprove: 'remote:host:approve',
+  remoteHostReject: 'remote:host:reject',
   // Host canvas mirror: renderer pushes its serialized active-project canvas to main;
   // main pushes a client's mutation back to the host renderer to apply.
   remoteHostCanvasState: 'remote:host:canvas-state',
@@ -121,6 +127,9 @@ export const IPC = {
   remoteClientFsRead: 'remote:client:fs-read',
   remoteClientFsReadBinary: 'remote:client:fs-read-binary',
   remoteClientFsWrite: 'remote:client:fs-write',
+  // The channel SAS pushed main->renderer once the client handshake completes, so the client
+  // human can compare it with the code shown on the host before the host approves.
+  remoteClientSas: (connectionId: string) => `remote:client:sas:${connectionId}`,
   // Host canvas snapshot pushed main->renderer for a connection (connectionId appended).
   remoteClientCanvasState: (connectionId: string) => `remote:client:canvas-state:${connectionId}`,
   // Per-session events broadcast main->renderer (connectionId + streamId appended).

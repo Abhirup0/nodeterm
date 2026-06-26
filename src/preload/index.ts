@@ -35,6 +35,9 @@ function subscribe<A extends unknown[] = []>(channel: string) {
 // Fan-out subscriber for the host's inbound apply-mutation events (a single ipcRenderer
 // listener shared by all renderer subscribers, like the other event channels).
 const subscribeMutation = subscribe<[CanvasMutation]>(IPC.remoteHostApplyMutation)
+// Fan-out subscriber for the connection-approval prompt (main → host renderer when a client
+// finishes the handshake; carries the SAS to show in the approval dialog).
+const subscribePeerPending = subscribe<[{ sas: string | null }]>(IPC.remoteHostPeerPending)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -214,7 +217,10 @@ const api: NodeTerminalApi = {
     start: () => ipcRenderer.invoke(IPC.remoteHostStart),
     stop: () => ipcRenderer.invoke(IPC.remoteHostStop),
     sendCanvasState: (state) => ipcRenderer.send(IPC.remoteHostCanvasState, state),
-    onApplyMutation: subscribeMutation
+    onApplyMutation: subscribeMutation,
+    onPeerPending: subscribePeerPending,
+    approve: () => ipcRenderer.send(IPC.remoteHostApprove),
+    reject: () => ipcRenderer.send(IPC.remoteHostReject)
   },
   remoteClient: {
     connect: (offer) => ipcRenderer.invoke(IPC.remoteClientConnect, offer),
@@ -248,6 +254,12 @@ const api: NodeTerminalApi = {
     onCanvasState: (connectionId, listener) => {
       const channel = IPC.remoteClientCanvasState(connectionId)
       const handler = (_e: unknown, state: Parameters<typeof listener>[0]) => listener(state)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onSas: (connectionId, listener) => {
+      const channel = IPC.remoteClientSas(connectionId)
+      const handler = (_e: unknown, sas: string | null) => listener(sas)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     },

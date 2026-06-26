@@ -169,6 +169,8 @@ export function Canvas() {
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
+  // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
+  const [pendingPeer, setPendingPeer] = useState<{ sas: string | null } | null>(null)
   const [confirm, setConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -583,6 +585,12 @@ export function Canvas() {
       markDirty()
     })
   }, [setNodes, markDirty])
+
+  // Host connection-approval gate: when a client finishes the handshake, prompt the host to
+  // verify the SAS and allow/deny before any remote pty/fs RPC is served.
+  useEffect(() => {
+    return window.nodeTerminal.remoteHost.onPeerPending((info) => setPendingPeer(info))
+  }, [])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
@@ -2481,6 +2489,28 @@ export function Canvas() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {pendingPeer && (
+        <ConfirmDialog
+          message={
+            `A device wants to access this machine.\n\n` +
+            `Approve ONLY if you started this connection. The other device shows the same code:\n\n` +
+            `        ${pendingPeer.sas ?? '— — —'}\n\n` +
+            `If the codes don't match, deny it.`
+          }
+          confirmLabel="Allow"
+          cancelLabel="Deny"
+          danger={false}
+          onConfirm={() => {
+            window.nodeTerminal.remoteHost.approve()
+            setPendingPeer(null)
+          }}
+          onCancel={() => {
+            window.nodeTerminal.remoteHost.reject()
+            setPendingPeer(null)
+          }}
         />
       )}
 

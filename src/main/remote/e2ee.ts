@@ -44,6 +44,17 @@ export function encrypt(plain: Uint8Array, shared: Uint8Array): Uint8Array {
   return box
 }
 
+// Short Authentication String: a 6-digit code derived from the ECDH shared key. Both peers
+// compute the SAME value (same shared key), so the two humans can compare it out-of-band to
+// confirm they're on the same channel before the host approves a connection. Formatted "NNN NNN".
+export function sasFromSharedKey(shared: Uint8Array): string {
+  const h = nacl.hash(shared) // SHA-512
+  // Fold the first 4 bytes into a 32-bit int, then take 6 decimal digits.
+  const n = ((h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3]) >>> 0
+  const code = (n % 1_000_000).toString().padStart(6, '0')
+  return `${code.slice(0, 3)} ${code.slice(3)}`
+}
+
 // Decrypt a `nonce ‖ ciphertext ‖ mac` box. Returns null on malformed input or
 // a failed MAC check — never throws.
 export function decrypt(box: Uint8Array, shared: Uint8Array): Uint8Array | null {

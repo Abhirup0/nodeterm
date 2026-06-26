@@ -30,7 +30,7 @@
 // so tests drive two RelaySockets via in-process fakes with no real network;
 // production passes a `ws` WebSocket wrapped via `wrapWebSocket`.
 
-import { decrypt, deriveSharedKey, encrypt, publicKeyToB64, type KeyPair } from './e2ee'
+import { decrypt, deriveSharedKey, encrypt, publicKeyToB64, sasFromSharedKey, type KeyPair } from './e2ee'
 import { decodeFrame, encodeFrame, type Frame, MAX_BINARY_BUFFERED_AMOUNT } from './framing'
 
 // A minimal duplex transport. `send` accepts a string (handshake control) or a
@@ -64,6 +64,9 @@ export type RelaySocket = {
   // Send a terminal frame to the peer. Returns false when the transport is over
   // its buffered-amount threshold (backpressure) or not connected.
   sendFrame(op: number, streamId: number, seq: number, payload: Uint8Array): boolean
+  // The Short Authentication String for this channel (derived from the shared key), or null
+  // before the handshake has derived a key. Both peers compute the same value.
+  sas(): string | null
   // Tear down: stops reconnects and closes the transport.
   close(): void
 }
@@ -126,6 +129,13 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
   let keepaliveTimer: ReturnType<typeof setInterval> | null = null
   let requestCounter = 0
   let readyFired = false
+  // Replay/reorder protection: every encrypted message carries a strictly-increasing per-
+  // direction counter inside the authenticated plaintext. The receiver rejects any message whose
+  // counter is not greater than the last accepted one, so a relay (or on-path attacker) cannot
+  // replay a captured box (e.g. re-injecting an OP.Input keystroke frame or a pty.kill RPC) nor
+  // reorder traffic. Counters reset per (re)connection — a fresh handshake is a fresh stream.
+  let sendSeq = 0
+  let recvSeq = -1
 
   const pending = new Map<
     string,
@@ -146,6 +156,8 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     state = 'connecting'
     sharedKey = null
     readyFired = false
+    sendSeq = 0
+    recvSeq = -1
 
     if (opts.transport) {
       // Injected transport (tests). It is already "open"; treat that as the
@@ -172,11 +184,24 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     transport?.send(JSON.stringify(control))
   }
 
+  // Prepend the outbound monotonic counter (8 bytes LE) to the plaintext before sealing, so the
+  // peer can reject replays/reorders. Mirrors framing.ts's 64-bit split to stay within safe ints.
+  const SEQ_BYTES = 8
+  function withSeq(plaintext: Uint8Array): Uint8Array {
+    const seq = sendSeq++
+    const out = new Uint8Array(SEQ_BYTES + plaintext.length)
+    const view = new DataView(out.buffer)
+    view.setUint32(0, Math.floor(seq / 0x100000000), true)
+    view.setUint32(4, seq >>> 0, true)
+    out.set(plaintext, SEQ_BYTES)
+    return out
+  }
+
   function sendEncrypted(plaintext: Uint8Array): boolean {
     if (!transport || !sharedKey || state !== 'ready') {
       return false
     }
-    transport.send(encrypt(plaintext, sharedKey))
+    transport.send(encrypt(withSeq(plaintext), sharedKey))
     return true
   }
 
@@ -186,7 +211,7 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     if (!transport || !sharedKey) {
       return
     }
-    transport.send(encrypt(plaintext, sharedKey))
+    transport.send(encrypt(withSeq(plaintext), sharedKey))
   }
 
   function tagged(tag: number, body: Uint8Array): Uint8Array {
@@ -227,10 +252,19 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     if (!sharedKey) {
       return
     }
-    const plain = decrypt(bytes, sharedKey)
-    if (!plain) {
+    const sealed = decrypt(bytes, sharedKey)
+    if (!sealed || sealed.length < SEQ_BYTES) {
       return
     }
+    // Enforce the strictly-increasing per-direction counter inside the authenticated plaintext.
+    // A non-increasing counter means a replayed or reordered box — drop it.
+    const seqView = new DataView(sealed.buffer, sealed.byteOffset, sealed.byteLength)
+    const seq = seqView.getUint32(0, true) * 0x100000000 + seqView.getUint32(4, true)
+    if (seq <= recvSeq) {
+      return
+    }
+    recvSeq = seq
+    const plain = sealed.subarray(SEQ_BYTES)
 
     if (state === 'handshaking') {
       handleHandshakeEncrypted(plain)
@@ -449,6 +483,9 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
         return false
       }
       return sendEncrypted(tagged(TAG_FRAME, encodeFrame(op, streamId, seq, payload)))
+    },
+    sas() {
+      return sharedKey ? sasFromSharedKey(sharedKey) : null
     },
     close() {
       intentionallyClosed = true

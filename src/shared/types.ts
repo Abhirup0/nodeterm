@@ -249,7 +249,8 @@ export interface Settings {
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
-  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-out (default on). */
+  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
+   *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
   telemetryEnabled: boolean
 }
 
@@ -274,7 +275,7 @@ export const DEFAULT_SETTINGS: Settings = {
   customAgents: [],
   disabledAgents: [],
   defaultAgent: 'claude',
-  telemetryEnabled: true
+  telemetryEnabled: false
 }
 
 export interface SettingsApi {
@@ -635,6 +636,16 @@ export interface RemoteHostApi {
    * Flow (the single writer). Returns an unsubscribe function.
    */
   onApplyMutation(listener: (mutation: CanvasMutation) => void): () => void
+  /**
+   * Fires when a client finishes the E2EE handshake and is awaiting approval. The host must call
+   * `approve()` before any of the client's pty/fs RPCs are served; `sas` is the channel
+   * verification code to display. Returns an unsubscribe function.
+   */
+  onPeerPending(listener: (info: { sas: string | null }) => void): () => void
+  /** Approve the pending client → the host begins serving its pty/fs RPCs. */
+  approve(): void
+  /** Reject the pending client → the connection is dropped. */
+  reject(): void
 }
 
 export interface RemoteClientApi {
@@ -669,6 +680,11 @@ export interface RemoteClientApi {
    * Returns an unsubscribe function.
    */
   onCanvasState(connectionId: string, listener: (state: CanvasState) => void): () => void
+  /**
+   * Listen for the channel SAS once the handshake completes, so the client human can compare it
+   * with the code shown on the host before the host approves. Returns an unsubscribe function.
+   */
+  onSas(connectionId: string, listener: (sas: string | null) => void): () => void
   /**
    * Send a canvas mutation to the host (the client's optimistic edit). Main forwards it as a
    * `canvas:mutate` RPC; the host applies it and the next `canvas:state` reconciles.

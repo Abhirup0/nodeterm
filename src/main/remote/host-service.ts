@@ -110,10 +110,30 @@ function str(value: unknown): string | undefined {
  *
  * `nextStreamId` lets tests assert deterministic ids; production uses a monotonic counter.
  */
+/**
+ * Lexically resolve `target` and confirm it sits inside one of `roots` (or equals a root). Uses
+ * path.resolve so `..` traversal is normalized away — a remote client cannot reach `/etc/passwd`
+ * or `~/.ssh` via `../../`. (Symlinks inside a shared root are not chased; the shared roots are
+ * the user's own project directories.)
+ */
+function isWithinRoots(target: string, roots: string[]): boolean {
+  if (!target) return false
+  const resolved = path.resolve(target)
+  for (const root of roots) {
+    if (!root) continue
+    const r = path.resolve(root)
+    if (resolved === r || resolved.startsWith(r + path.sep)) return true
+  }
+  return false
+}
+
 export function createHostHandlers(
   pty: HostPtyManager,
   socket: HostRelaySocket,
-  fs: HostFsOps = fsOps
+  fs: HostFsOps = fsOps,
+  // Directories the remote client may read/write within. Empty ⇒ no filesystem access is served
+  // (deny-by-default). Production passes the cwds of the host's shared canvas nodes.
+  getRoots: () => string[] = () => []
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -151,33 +171,6 @@ export function createHostHandlers(
         dropStream(streamId)
       }
     }
-  }
-
-  function handleCreate(req: RpcRequest): void {
-    const p = asRecord(req.params)
-    const options: PtyCreateOptions = {
-      cols: Math.max(1, num(p.cols, 80)),
-      rows: Math.max(1, num(p.rows, 24)),
-      cwd: str(p.cwd),
-      shell: str(p.shell),
-      persistKey: str(p.persistKey),
-      agentId: str(p.agentId) as AgentId | undefined
-    }
-
-    const streamId = ++streamCounter
-    const stream: Stream = { sessionId: '', seq: 0, paused: false }
-    const sinks = makeSinks(streamId, stream)
-
-    let sessionId: string
-    try {
-      sessionId = pty.createDetached(options, sinks)
-    } catch (err) {
-      socket.respond(req.id, false, { message: (err as Error).message })
-      return
-    }
-    stream.sessionId = sessionId
-    streams.set(streamId, stream)
-    socket.respond(req.id, true, { streamId })
   }
 
   // Reassembled snapshot is sent as one or more OP.SnapshotChunk frames between Start and End.
@@ -254,6 +247,25 @@ export function createHostHandlers(
     const p = asRecord(req.params)
     const filePath = str(p.path) ?? ''
     const respond = (body: unknown): void => socket.respond(req.id, true, body)
+    // Confine remote filesystem access to the shared project roots. A path outside them (or any
+    // `../` traversal) is denied — degrade to the same empty/false shape fs-ops returns on error,
+    // so the remote Explorer/Editor just sees "nothing there" rather than a thrown RPC.
+    if (!isWithinRoots(filePath, getRoots())) {
+      switch (req.method) {
+        case 'fs.list':
+          respond({ entries: [] })
+          break
+        case 'fs.readBinary':
+          respond({ base64: '' })
+          break
+        case 'fs.write':
+          respond({ ok: false })
+          break
+        default:
+          respond({ content: '' })
+      }
+      return
+    }
     switch (req.method) {
       case 'fs.list':
         void fs.listDir(filePath).then((entries) => respond({ entries }))
@@ -284,7 +296,10 @@ export function createHostHandlers(
     onRpc(req) {
       switch (req.method) {
         case 'pty.create':
-          handleCreate(req)
+          // Reject: remote clients only ever attach to the host's existing tmux sessions
+          // (`pty.attach`). `pty.create` would let a client spawn an arbitrary shell with a
+          // client-chosen cwd — full remote command execution — so it is not served.
+          socket.respond(req.id, false, { message: 'pty.create is not permitted for remote clients.' })
           break
         case 'pty.attach':
           handleAttach(req)
@@ -389,6 +404,16 @@ export function createHostCanvasSync(
   }
 }
 
+// The directories a remote client may touch over fs.* = the cwds of the host's shared canvas
+// nodes (each terminal node carries its project cwd). Empty when nothing is shared yet ⇒
+// deny-by-default. Subdirectories are allowed via the prefix check in isWithinRoots.
+function rootsFromCanvas(canvas: CanvasState | null): string[] {
+  if (!canvas) return []
+  const roots = new Set<string>()
+  for (const node of canvas.nodes) if (node.cwd) roots.add(node.cwd)
+  return [...roots]
+}
+
 // --- pairing-token mint ------------------------------------------------------
 
 interface PairTokenResponse {
@@ -478,6 +503,10 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
   let socket: RelaySocket | null = null
   let handlers: HostHandlers | null = null
   let canvasSync: HostCanvasSync | null = null
+  // Connection-approval gate: a freshly-bridged client serves NO pty/fs RPCs or input frames
+  // until the host human approves it (so a leaked offer cannot grant silent access). Reset on
+  // every (re)connect and teardown.
+  let approved = false
   // Latest snapshot pushed from the renderer, kept across (re)connects so a freshly joined
   // client always gets the current state even if it connected after the last edit.
   let latestCanvas: CanvasState | null = null
@@ -491,6 +520,7 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
       clearTimeout(broadcastTimer)
       broadcastTimer = null
     }
+    approved = false
     handlers?.closeAll()
     handlers = null
     canvasSync = null
@@ -543,13 +573,23 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
       role: 'host',
       ourKeys: keys,
       onReady: () => {
-        // Bridge established with a client — push the current canvas so it mirrors immediately.
+        // Bridge established with a client. Require explicit host approval before serving any
+        // pty/fs RPC — surface the SAS so the human can verify + allow. Canvas state still pushes
+        // (read-only mirror) so the client isn't staring at a blank screen while pending.
+        approved = false
+        send(IPC.remoteHostPeerPending, { sas: socket?.sas() ?? null })
         if (latestCanvas) canvasSync?.setState(latestCanvas)
       },
       onRpc: (req) => {
-        // A client asking for a fresh canvas snapshot → re-push the current one.
+        // A client asking for a fresh canvas snapshot → re-push the current one (read-only).
         if (req.method === CANVAS_REQUEST_METHOD) {
           canvasSync?.broadcastCurrent()
+          return
+        }
+        // Until the host approves this device, refuse every state-changing request: pty/fs RPCs
+        // and client canvas mutations. (canvas:request above is the only allowed pre-approval op.)
+        if (!approved) {
+          if (req.id) socket?.respond(req.id, false, { message: 'Awaiting host approval.' })
           return
         }
         // Canvas mutations route to the canvas sync (which forwards them to the host renderer,
@@ -557,14 +597,19 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
         if (canvasSync?.handleRpc(req)) return
         handlers?.onRpc(req)
       },
-      onFrame: (frame) => handlers?.onFrame(frame),
+      // Input/resize frames are dropped until approved (no keystrokes reach a host PTY).
+      onFrame: (frame) => {
+        if (approved) handlers?.onFrame(frame)
+      },
       onClose: () => {
         // The client (or relay) dropped — kill served PTYs. relay-socket may reconnect; the
-        // handlers stay bound to the same socket object across reconnects.
+        // handlers stay bound to the same socket object across reconnects. Re-require approval.
+        approved = false
         handlers?.closeAll()
       }
     })
-    handlers = createHostHandlers(ptyManager, socket)
+    // Confine the client's fs.* access to the cwds of the host's currently-shared canvas nodes.
+    handlers = createHostHandlers(ptyManager, socket, fsOps, () => rootsFromCanvas(latestCanvas))
     // The host renderer applies inbound client mutations to its React Flow (single writer).
     canvasSync = createHostCanvasSync(socket, (mutation) =>
       send(IPC.remoteHostApplyMutation, mutation)
@@ -577,6 +622,15 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
         hostPublicKeyB64: publicKeyToB64(keys.publicKey)
       })
     }
+  })
+
+  // Host human approved the pending device → start serving its pty/fs RPCs.
+  ipcMain.on(IPC.remoteHostApprove, () => {
+    if (socket) approved = true
+  })
+  // Host human rejected the device → drop the connection entirely.
+  ipcMain.on(IPC.remoteHostReject, () => {
+    teardown()
   })
 
   ipcMain.handle(IPC.remoteHostStop, () => {

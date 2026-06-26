@@ -71,16 +71,26 @@ const resizePayload = (cols: number, rows: number) => {
   return buf
 }
 
+// Open a stream the only way a remote client can: pty.attach to an existing session. Resolves
+// once the async snapshot+attach has bound the sinks (sessionId 'pty-1'). Returns streamId 1.
+async function openViaAttach(
+  h: ReturnType<typeof createHostHandlers>,
+  nodeId = 'node-1'
+): Promise<void> {
+  h.onRpc({ id: `open-${nodeId}`, method: 'pty.attach', params: { nodeId, cols: 80, rows: 24 } })
+  await new Promise((r) => setTimeout(r, 0))
+}
+
 describe('createHostHandlers', () => {
-  it('maps pty.create to createDetached and returns a streamId', () => {
+  it('rejects pty.create — remote clients may only attach to existing sessions', () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
 
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 100, rows: 30, cwd: '/tmp' } })
+    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 100, rows: 30, cwd: '/', shell: '/bin/sh' } })
 
-    expect(pty.options()).toMatchObject({ cols: 100, rows: 30, cwd: '/tmp' })
-    expect(sock.responses).toEqual([{ id: 'r1', ok: true, body: { streamId: 1 } }])
+    expect(sock.responses[0]).toMatchObject({ id: 'r1', ok: false })
+    expect(pty.calls.some((c) => c.method === 'createDetached')).toBe(false)
   })
 
   it('maps pty.attach to a snapshot sequence then attachDetached on the existing session', async () => {
@@ -140,26 +150,27 @@ describe('createHostHandlers', () => {
     expect(sock.responses[0]).toMatchObject({ id: 'r1', ok: false })
   })
 
-  it('pipes PTY output into OP.Output frames with an incrementing seq', () => {
+  it('pipes PTY output into OP.Output frames with an incrementing seq', async () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h)
 
     pty.sinks().onData('hello')
     pty.sinks().onData('world')
 
-    expect(sock.frames).toHaveLength(2)
-    expect(sock.frames[0]).toMatchObject({ op: OP.Output, streamId: 1, seq: 0 })
-    expect(Buffer.from(sock.frames[0].payload).toString('utf8')).toBe('hello')
-    expect(sock.frames[1]).toMatchObject({ op: OP.Output, streamId: 1, seq: 1 })
+    const outs = sock.frames.filter((f) => f.op === OP.Output)
+    expect(outs).toHaveLength(2)
+    expect(outs[0]).toMatchObject({ op: OP.Output, streamId: 1 })
+    expect(Buffer.from(outs[0].payload).toString('utf8')).toBe('hello')
+    expect(outs[1].seq).toBe(outs[0].seq + 1) // monotonic
   })
 
-  it('routes OP.Input frames to write and OP.Resize frames to resize', () => {
+  it('routes OP.Input frames to write and OP.Resize frames to resize', async () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h)
 
     h.onFrame({ op: OP.Input, streamId: 1, seq: 0, payload: new TextEncoder().encode('ls\n') })
     h.onFrame({ op: OP.Resize, streamId: 1, seq: 0, payload: resizePayload(120, 40) })
@@ -176,11 +187,11 @@ describe('createHostHandlers', () => {
     expect(pty.calls).toHaveLength(0)
   })
 
-  it('pauses the PTY on backpressure and resumes on the next successful send', () => {
+  it('pauses the PTY on backpressure and resumes on the next successful send', async () => {
     const pty = fakePty()
     const sock = fakeSocket(false) // sendFrame returns false → backpressure
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h)
 
     pty.sinks().onData('a') // send fails → pause
     expect(pty.calls).toContainEqual({ method: 'setFlow', args: ['pty-1', false] })
@@ -199,11 +210,11 @@ describe('createHostHandlers', () => {
     expect(sock.responses[0]).toMatchObject({ id: 'r9', ok: false })
   })
 
-  it('pty.kill kills the session and forgets the stream', () => {
+  it('pty.kill kills the session and forgets the stream', async () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h)
     h.onRpc({ id: 'r2', method: 'pty.kill', params: { streamId: 1 } })
 
     expect(pty.calls).toContainEqual({ method: 'kill', args: ['pty-1'] })
@@ -213,11 +224,11 @@ describe('createHostHandlers', () => {
     expect(pty.calls).toHaveLength(0)
   })
 
-  it('emits an OP.Error frame on PTY exit and drops the stream', () => {
+  it('emits an OP.Error frame on PTY exit and drops the stream', async () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h)
 
     pty.sinks().onExit(0)
     const errFrame = sock.frames.find((f) => f.op === OP.Error)
@@ -225,12 +236,12 @@ describe('createHostHandlers', () => {
     expect(JSON.parse(Buffer.from(errFrame!.payload).toString('utf8'))).toEqual({ exitCode: 0 })
   })
 
-  it('closeAll kills every live session', () => {
+  it('closeAll kills every live session', async () => {
     const pty = fakePty()
     const sock = fakeSocket()
     const h = createHostHandlers(pty.mgr, sock.socket)
-    h.onRpc({ id: 'r1', method: 'pty.create', params: { cols: 80, rows: 24 } })
-    h.onRpc({ id: 'r2', method: 'pty.create', params: { cols: 80, rows: 24 } })
+    await openViaAttach(h, 'node-1')
+    await openViaAttach(h, 'node-2')
     h.closeAll()
     expect(pty.calls.filter((c) => c.method === 'kill')).toHaveLength(2)
   })
