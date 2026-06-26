@@ -1,12 +1,15 @@
+import spriteUrl from './sprite-1x.png'
+
 /**
  * A small, self-contained T-Rex–style endless runner rendered to a <canvas>.
  *
- * Written from scratch (no vendored engine, no sprite/sound assets) so it fits
- * the app cleanly: dark theme, and input + sound are scoped to the node — the
- * game only listens for keys while its host element is focused and pauses
- * (silently) when focus leaves, so it never bleeds into other nodes. The public
- * interface matches what DinoNode expects; high score is seeded in and reported
- * back out for persistence.
+ * Game logic is written from scratch (no vendored engine, no global listeners)
+ * so it fits the app: dark theme, and input + sound are scoped to the node — it
+ * only listens for keys while its host element is focused and pauses (silently)
+ * on blur, so it never bleeds into other nodes. The artwork is the authentic
+ * Chrome offline sprite sheet (`sprite-1x.png`), drawn frame-by-frame from its
+ * real atlas coordinates and tinted light so it reads on the dark field. The
+ * public interface matches DinoNode; high score is seeded in and reported out.
  */
 export function createDinoGame(
   host: HTMLElement,
@@ -22,115 +25,74 @@ export function createDinoGame(
   const COLOR_DIM = '#6b6b73'
   const COLOR_BG = '#0b0b0f'
 
-  // T-Rex drawn as pixel art (self-contained — no sprite asset). '#' = filled,
-  // '.' = transparent; the eye is a transparent hole so the background shows
-  // through. Rendered at 2px/cell and tinted to the theme. The body is shared;
-  // the legs swap each step to animate the run.
-  const PX = 2
-  const DINO_BODY = [
-    '............######..',
-    '............######..',
-    '............######..',
-    '............#.####..',
-    '............######..',
-    '............#######.',
-    '#...........#######.',
-    '##..........#######.',
-    '###........########.',
-    '####......#########.',
-    '######...##########.',
-    '###################.',
-    '####################',
-    '####################',
-    '.##################.',
-    '..################..',
-    '...##############...'
-  ]
-  const DINO_LEGS_A = [
-    '...####....#####....',
-    '...###......####....',
-    '...###.......##.....',
-    '...##........##.....',
-    '..###........###....'
-  ]
-  const DINO_LEGS_B = [
-    '...####....#####....',
-    '...####.....###.....',
-    '....##......####....',
-    '....##.......##.....',
-    '...###.......###....'
-  ]
-  const DINO_DUCK_A = [
-    '..................######',
-    '..................######',
-    '..................#.####',
-    '..................######',
-    '##................######',
-    '###..............#######',
-    '########################',
-    '########################',
-    '.######################.',
-    '..####...####....#####..',
-    '..###.....##.....####...',
-    '..##......##.....###....',
-    '..##......##.....###....'
-  ]
-  const DINO_DUCK_B = [
-    '..................######',
-    '..................######',
-    '..................#.####',
-    '..................######',
-    '##................######',
-    '###..............#######',
-    '########################',
-    '########################',
-    '.######################.',
-    '..####...####....#####..',
-    '...###....##......###...',
-    '...##.....##......##....',
-    '...##.....##......##....'
-  ]
+  // --- Sprite sheet (authentic Chrome offline atlas, 1x). All frames sit on
+  // row y=2. The sheet is dark grey on transparent; we recolor it to the theme
+  // foreground once into an offscreen canvas (source-in keeps the alpha).
+  const SY = 2
+  const TREX = {
+    IDLE: 848,
+    RUN: [936, 980],
+    CRASH: 1068,
+    DUCK: [1112, 1171],
+    W: 44,
+    DW: 59,
+    H: 47
+  }
+  // Obstacle frames: [sx, spriteW, spriteH] + a forgiving collision inset.
+  const CACTUS_SMALL = { sx: 228, w: 17, h: 35, col: { x: 2, y: 5, w: 13, h: 28 } }
+  const CACTUS_LARGE = { sx: 332, w: 25, h: 50, col: { x: 4, y: 6, w: 17, h: 42 } }
+  const BIRD = { sx: [134, 180], w: 46, h: 40, col: { x: 6, y: 8, w: 34, h: 22 } }
 
-  function drawBitmap(rows: string[], ox: number, oy: number, color: string) {
-    ctx.fillStyle = color
-    for (let r = 0; r < rows.length; r++) {
-      const row = rows[r]
-      for (let c = 0; c < row.length; c++) {
-        if (row[c] === '#') ctx.fillRect(ox + c * PX, oy + r * PX, PX, PX)
-      }
-    }
+  let tinted: HTMLCanvasElement | null = null
+  const img = new Image()
+  img.onload = () => {
+    const off = document.createElement('canvas')
+    off.width = img.naturalWidth
+    off.height = img.naturalHeight
+    const octx = off.getContext('2d')!
+    octx.drawImage(img, 0, 0)
+    octx.globalCompositeOperation = 'source-in'
+    octx.fillStyle = COLOR_FG
+    octx.fillRect(0, 0, off.width, off.height)
+    tinted = off
+    draw() // sprite arrived — refresh the current (possibly idle) frame
+  }
+  img.src = spriteUrl
+
+  function blit(sx: number, sw: number, sh: number, dx: number, dy: number, alpha = 1) {
+    if (!tinted) return
+    if (alpha !== 1) ctx.globalAlpha = alpha
+    ctx.drawImage(tinted, sx, SY, sw, sh, Math.round(dx), Math.round(dy), sw, sh)
+    if (alpha !== 1) ctx.globalAlpha = 1
   }
 
-  // Logical play-field size in CSS pixels; recomputed from the host on resize.
+  // --- Layout (canvas tracks the host size; logical units = CSS px) ---------
   let W = 600
   let H = 200
   let groundY = 0
-
   function layout() {
     const rect = host.getBoundingClientRect()
     W = Math.max(240, Math.round(rect.width))
     H = Math.max(120, Math.round(rect.height))
-    groundY = H - 28
+    groundY = H - 26
     const dpr = window.devicePixelRatio || 1
     canvas.width = Math.round(W * dpr)
     canvas.height = Math.round(H * dpr)
     canvas.style.width = W + 'px'
     canvas.style.height = H + 'px'
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.imageSmoothingEnabled = false
   }
 
   // --- Game state -----------------------------------------------------------
   const GRAVITY = 2400 // px/s^2
-  const JUMP_V = -780 // px/s
-  const DINO_X = 56
-  const DINO_W = 40
-  const DINO_H = 44
-  const DUCK_H = 26
+  const JUMP_V = -820 // px/s
+  const DINO_X = 24
 
   let best = Math.max(0, Math.round(opts.initialHighScore) || 0)
   let score = 0
   let speed = 320 // px/s, ramps up
-  let dinoY = 0 // offset above ground (0 = on ground)
+  let dinoY = 0 // <= 0, offset above ground
   let dinoV = 0
   let ducking = false
   let crashed = false
@@ -140,12 +102,14 @@ export function createDinoGame(
   let groundScroll = 0
 
   interface Obstacle {
+    kind: 'cactus' | 'bird'
     x: number
-    w: number
-    h: number
-    y: number // top offset above ground
-    bird: boolean
+    y: number // height above ground (0 for cacti)
+    sx: number
+    sw: number
+    sh: number
     flap: number
+    col: { x: number; y: number; w: number; h: number }
   }
   let obstacles: Obstacle[] = []
 
@@ -161,18 +125,14 @@ export function createDinoGame(
   }
 
   function spawn() {
-    // Mostly ground cacti; occasional flying bird at duck height.
-    const bird = Math.random() < 0.22 && score > 120
+    const bird = Math.random() < 0.2 && score > 150
     if (bird) {
-      const y = 30 + Math.round(Math.random() * 26) // hover above ground
-      obstacles.push({ x: W + 20, w: 34, h: 24, y, bird: true, flap: 0 })
+      const y = Math.random() < 0.5 ? 4 : 34 // low → jump, high → duck
+      obstacles.push({ kind: 'bird', x: W + 20, y, sx: BIRD.sx[0], sw: BIRD.w, sh: BIRD.h, flap: 0, col: BIRD.col })
     } else {
-      const big = Math.random() < 0.5
-      const w = big ? 26 : 16
-      const h = big ? 46 : 34
-      obstacles.push({ x: W + 20, w, h, y: 0, bird: false, flap: 0 })
+      const c = Math.random() < 0.45 ? CACTUS_LARGE : CACTUS_SMALL
+      obstacles.push({ kind: 'cactus', x: W + 20, y: 0, sx: c.sx, sw: c.w, sh: c.h, flap: 0, col: c.col })
     }
-    // Gap shrinks slightly as it speeds up.
     nextSpawn = 0.9 + Math.random() * 0.8 - Math.min(0.35, speed / 4000)
   }
 
@@ -211,6 +171,12 @@ export function createDinoGame(
     }
   }
 
+  // Dino collision box (forgiving inset around the visible body).
+  function dinoBox() {
+    if (ducking && dinoY === 0) return { x: DINO_X + 10, y: groundY - 24, w: 44, h: 22 }
+    return { x: DINO_X + 12, y: groundY - 40 + dinoY, w: 20, h: 38 }
+  }
+
   // --- Update + draw --------------------------------------------------------
   function update(dt: number) {
     if (crashed || !started) return
@@ -218,7 +184,6 @@ export function createDinoGame(
     speed += dt * 14
     groundScroll = (groundScroll + speed * dt) % 24
 
-    // dino physics
     if (dinoY < 0 || dinoV !== 0) {
       dinoV += GRAVITY * dt
       dinoY += dinoV * dt
@@ -228,21 +193,17 @@ export function createDinoGame(
       }
     }
 
-    // obstacles
     nextSpawn -= dt
     if (nextSpawn <= 0) spawn()
-    const dh = ducking && dinoY === 0 ? DUCK_H : DINO_H
-    const dinoRect = { x: DINO_X, y: groundY - dh + dinoY, w: DINO_W, h: dh }
+
+    const d = dinoBox()
     for (const o of obstacles) {
       o.x -= speed * dt
-      if (o.bird) o.flap += dt * 10
-      const oy = groundY - o.h - o.y
-      if (
-        dinoRect.x < o.x + o.w &&
-        dinoRect.x + dinoRect.w > o.x &&
-        dinoRect.y < oy + o.h &&
-        dinoRect.y + dinoRect.h > oy
-      ) {
+      if (o.kind === 'bird') o.flap += dt * 9
+      const oy = groundY - o.sh - o.y
+      const ox = o.x + o.col.x
+      const oyc = oy + o.col.y
+      if (d.x < ox + o.col.w && d.x + d.w > ox && d.y < oyc + o.col.h && d.y + d.h > oyc) {
         crashed = true
         if (Math.round(score) > best) {
           best = Math.round(score)
@@ -251,41 +212,27 @@ export function createDinoGame(
         blip(140, 0.25, 'sawtooth')
       }
     }
-    obstacles = obstacles.filter((o) => o.x + o.w > -10)
+    obstacles = obstacles.filter((o) => o.x + o.sw > -10)
   }
 
   function drawDino() {
-    const color = crashed ? COLOR_DIM : COLOR_FG
     const onGround = dinoY === 0
-    let rows: string[]
-    if (ducking && onGround && !crashed) {
-      rows = Math.floor(score * 0.6) % 2 === 0 ? DINO_DUCK_A : DINO_DUCK_B
-    } else {
-      // Animate legs only while actually running on the ground.
-      const legs =
-        started && onGround && !crashed
-          ? Math.floor(score * 0.5) % 2 === 0
-            ? DINO_LEGS_A
-            : DINO_LEGS_B
-          : DINO_LEGS_A
-      rows = DINO_BODY.concat(legs)
-    }
-    const oy = groundY - rows.length * PX + dinoY
-    drawBitmap(rows, DINO_X, oy, color)
+    let sx: number
+    let sw = TREX.W
+    if (crashed) sx = TREX.CRASH
+    else if (ducking && onGround) {
+      sx = Math.floor(score * 0.25) % 2 === 0 ? TREX.DUCK[0] : TREX.DUCK[1]
+      sw = TREX.DW
+    } else if (!onGround) sx = TREX.IDLE
+    else if (started) sx = Math.floor(score * 0.4) % 2 === 0 ? TREX.RUN[0] : TREX.RUN[1]
+    else sx = TREX.IDLE
+    blit(sx, sw, TREX.H, DINO_X, groundY - TREX.H + dinoY, crashed ? 0.55 : 1)
   }
 
   function drawObstacle(o: Obstacle) {
-    const oy = groundY - o.h - o.y
-    ctx.fillStyle = COLOR_FG
-    if (o.bird) {
-      const up = Math.floor(o.flap) % 2 === 0
-      ctx.fillRect(o.x, oy + (up ? 0 : 8), o.w, 6)
-      ctx.fillRect(o.x + o.w / 2 - 3, oy + 6, 6, o.h - 6)
-    } else {
-      ctx.fillRect(o.x, oy, o.w, o.h)
-      ctx.fillRect(o.x - 5, oy + o.h * 0.35, 5, 4)
-      ctx.fillRect(o.x + o.w, oy + o.h * 0.5, 5, 4)
-    }
+    const oy = groundY - o.sh - o.y
+    const sx = o.kind === 'bird' ? (Math.floor(o.flap) % 2 === 0 ? BIRD.sx[0] : BIRD.sx[1]) : o.sx
+    blit(sx, o.sw, o.sh, o.x, oy)
   }
 
   function draw() {
