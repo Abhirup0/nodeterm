@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { flowToNodeStates, nodeStatesToFlow, reparentNode } from './workspace'
+import { createDinoNode, flowToNodeStates, nodeStatesToFlow, reparentNode } from './workspace'
 import type { CanvasNode } from './workspace'
 
 const term = (id: string, pos: { x: number; y: number }, parentId?: string): CanvasNode =>
@@ -95,5 +95,33 @@ describe('group worktree serialization', () => {
       data: { title: 'G', color: '#fff', group: null }
     } as unknown as CanvasNode
     expect(flowToNodeStates([group])[0].worktree).toBeUndefined()
+  })
+})
+
+describe('dino node serialization', () => {
+  it('round-trips a dino node and its highScore', () => {
+    const dino = {
+      id: 'dino-1',
+      type: 'dino',
+      position: { x: 10, y: 20 },
+      width: 600,
+      height: 200,
+      data: { title: 'Dino', color: '#a2a2a2', group: null, highScore: 1337 }
+    } as unknown as CanvasNode
+
+    const states = flowToNodeStates([dino])
+    expect(states[0].kind).toBe('dino')
+    expect(states[0].highScore).toBe(1337)
+
+    const back = nodeStatesToFlow(states)
+    expect(back[0].type).toBe('dino')
+    expect(back[0].data.highScore).toBe(1337)
+  })
+
+  it('createDinoNode produces a dino node with highScore 0', () => {
+    const node = createDinoNode(0)
+    expect(node.type).toBe('dino')
+    expect(node.data.highScore).toBe(0)
+    expect(node.width).toBe(600)
   })
 })

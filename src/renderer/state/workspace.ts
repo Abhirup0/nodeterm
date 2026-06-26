@@ -20,6 +20,7 @@ const STICKY_SIZE = { width: 240, height: 200 }
 const GROUP_SIZE = { width: 520, height: 360 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
+const DINO_SIZE = { width: 600, height: 200 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -47,6 +48,8 @@ export interface NodeData {
   filePath?: string
   diffStaged?: boolean
   commitOid?: string
+  /** dino-only: best score reached in the T-Rex Runner game. */
+  highScore?: number
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
   /** group-only: the git worktree this group is bound to (single source of truth). */
@@ -312,6 +315,24 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
   }
 }
 
+/** Creates a new dino (T-Rex Runner) game node. */
+export function createDinoNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  return {
+    id: nextId('dino'),
+    type: 'dino',
+    position: placeAt(center, index, DINO_SIZE.width, DINO_SIZE.height),
+    width: DINO_SIZE.width,
+    height: DINO_SIZE.height,
+    style: { width: DINO_SIZE.width, height: DINO_SIZE.height },
+    data: {
+      title: 'Dino',
+      color: '#a2a2a2',
+      group: null,
+      highScore: 0
+    }
+  }
+}
+
 /** Creates a group frame node at a given position/size (children get parentId = its id). */
 export function createGroupNode(
   position: { x: number; y: number },
@@ -519,6 +540,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
+        highScore: n.highScore,
         agentId,
         ssh: n.ssh,
         worktree: n.worktree
@@ -538,7 +560,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
           ? EDITOR_SIZE
           : kind === 'diff'
             ? DIFF_SIZE
-            : TERMINAL_SIZE
+            : kind === 'dino'
+              ? DINO_SIZE
+              : TERMINAL_SIZE
   return nodes
     // Remote terminals are transient to a live relay connection — never persist them (their
     // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).
@@ -569,6 +593,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
+        highScore: n.data.highScore,
         agentId: n.data.agentId,
         ssh: n.data.ssh,
         worktree: n.data.worktree
