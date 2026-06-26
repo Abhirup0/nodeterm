@@ -226,7 +226,15 @@ export function createDinoGame(
     } else if (!onGround) sx = TREX.IDLE
     else if (started) sx = Math.floor(score * 0.4) % 2 === 0 ? TREX.RUN[0] : TREX.RUN[1]
     else sx = TREX.IDLE
-    blit(sx, sw, TREX.H, DINO_X, groundY - TREX.H + dinoY, crashed ? 0.55 : 1)
+    const top = groundY - TREX.H + dinoY
+    blit(sx, sw, TREX.H, DINO_X, top, crashed ? 0.55 : 1)
+    // Flattening the sprite to one tint fills its eye solid, so punch a small
+    // dark dot back into the head's upper-right (lower-forward when ducking).
+    if (tinted) {
+      const duck = ducking && onGround && !crashed
+      ctx.fillStyle = COLOR_BG
+      ctx.fillRect(DINO_X + (duck ? 48 : 36), top + (duck ? 27 : 6), 3, 3)
+    }
   }
 
   function drawObstacle(o: Obstacle) {
