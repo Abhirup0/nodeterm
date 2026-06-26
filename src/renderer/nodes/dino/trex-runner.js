@@ -425,10 +425,12 @@ const Runner = (function () {
          * Adjust game space dimensions on resize.
          */
         adjustDimensions: function () {
-            // nodeterm: bail if node was unmounted (engine has no teardown API)
-            if (!this.outerContainerEl || !this.outerContainerEl.isConnected) return;
+            // nodeterm: always clear the debounce timer first so a leaked resize
+            // handler can't leave a self-perpetuating 250ms interval after unmount.
             clearInterval(this.resizeTimerId_);
             this.resizeTimerId_ = null;
+            // nodeterm: bail if node was unmounted (engine has no teardown API)
+            if (!this.outerContainerEl || !this.outerContainerEl.isConnected) return;
 
             var boxStyles = window.getComputedStyle(this.outerContainerEl);
             var padding = Number(boxStyles.paddingLeft.substr(0,
