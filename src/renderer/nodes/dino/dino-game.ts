@@ -52,6 +52,15 @@ export function createDinoGame(
   template.content.appendChild(makeAudio('offline-sound-reached', DINO_SOUNDS.reached))
   host.appendChild(template)
 
+  // The engine's init() does `document.querySelector('.icon-offline').style…`
+  // (and setupDisabledRunner uses `.icon`); with no such element the query
+  // returns null and `.style` throws from the Runner constructor → blank node.
+  // A single hidden element satisfying BOTH selectors keeps init() happy.
+  const icon = document.createElement('div')
+  icon.className = 'icon icon-offline'
+  icon.style.display = 'none'
+  host.appendChild(icon)
+
   // The engine does `document.querySelector(selector)` for its outer container.
   const wrapper = document.createElement('div')
   wrapper.className = wrapperClass
@@ -79,8 +88,14 @@ export function createDinoGame(
   return {
     destroy() {
       window.clearInterval(poll)
+      // Separate try blocks so a throw in stop() can't skip stopListening()
+      // (which removes the gameplay key listeners — input must not leak).
       try {
         runner.stop()
+      } catch {
+        /* engine already torn down */
+      }
+      try {
         // Removes the gameplay keydown/keyup/mouse listeners (engine uses a
         // `handleEvent` method, so removeEventListener(…, this) works).
         ;(runner as unknown as { stopListening: () => void }).stopListening()
@@ -92,6 +107,7 @@ export function createDinoGame(
       wrapper.remove()
       sprites.forEach((el) => el.remove())
       template.remove()
+      icon.remove()
       // NOTE: the engine also binds window resize/visibility/blur/focus and one
       // anonymous document keydown that it has no API to remove — an accepted
       // minor leak. stopListening() drops the gameplay keys, which is what

@@ -30,9 +30,12 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Keep game keys from reaching React Flow (pan/scroll) while hovering the body.
+  // The engine listens for game keys at the document level, so we must NOT
+  // stopPropagation (React's root listener sits below document — that would
+  // starve the engine). preventDefault only stops the page from scrolling on
+  // Space/arrows; the event still bubbles to document and the engine handles it.
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (GAME_KEYS.has(e.key)) e.stopPropagation()
+    if (GAME_KEYS.has(e.key)) e.preventDefault()
   }
 
   return (
@@ -40,7 +43,7 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <NodeResizer minWidth={400} minHeight={160} isVisible={selected} color={data.color} />
 
       <div className="dino-node__header" style={{ background: `${data.color}33` }}>
-        <button className="term-node__color" style={{ background: data.color }} title="Color" disabled />
+        <span className="term-node__color" style={{ background: data.color }} />
         <input
           className="term-node__title nodrag"
           value={data.title}

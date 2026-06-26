@@ -425,6 +425,8 @@ const Runner = (function () {
          * Adjust game space dimensions on resize.
          */
         adjustDimensions: function () {
+            // nodeterm: bail if node was unmounted (engine has no teardown API)
+            if (!this.outerContainerEl || !this.outerContainerEl.isConnected) return;
             clearInterval(this.resizeTimerId_);
             this.resizeTimerId_ = null;
 
@@ -884,6 +886,8 @@ const Runner = (function () {
          * Pause the game if the tab is not in focus.
          */
         onVisibilityChange: function (e) {
+            // nodeterm: bail if node was unmounted (engine has no teardown API)
+            if (!this.outerContainerEl || !this.outerContainerEl.isConnected) return;
             if (document.hidden || document.webkitHidden || e.type == 'blur' ||
                 document.visibilityState != 'visible') {
                 this.stop();
