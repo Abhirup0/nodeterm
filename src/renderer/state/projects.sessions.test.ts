@@ -109,3 +109,49 @@ describe('moveNodeToGroup', () => {
     expect(useProjects.getState().getProject('p1')!.nodes).toBe(before)
   })
 })
+
+describe('reorderNode', () => {
+  const setup = (nodes: CanvasNodeState[]): void => {
+    useProjects.setState({
+      projects: [
+        { id: 'p1', name: 'P1', color: '#111', viewport: { x: 0, y: 0, zoom: 1 }, nodes }
+      ],
+      activeProjectId: 'p1'
+    })
+  }
+  const order = (): string[] =>
+    useProjects.getState().getProject('p1')!.nodes.map((n) => n.id)
+
+  it('moves a node to sit immediately before another in the same container', () => {
+    setup([mkNode('a'), mkNode('b'), mkNode('c')])
+    useProjects.getState().reorderNode('p1', 'c', 'a')
+    expect(order()).toEqual(['c', 'a', 'b'])
+  })
+
+  it('joins the target container when reordering across groups', () => {
+    const grp: CanvasNodeState = {
+      id: 'g1',
+      kind: 'group',
+      position: { x: 50, y: 50 },
+      size: { width: 400, height: 300 },
+      title: 'g1',
+      color: '#fff',
+      group: null
+    }
+    const t1: CanvasNodeState = { ...mkNode('t1'), position: { x: 10, y: 10 }, parentId: 'g1' }
+    const t2: CanvasNodeState = { ...mkNode('t2'), position: { x: 200, y: 150 } }
+    setup([grp, t1, t2])
+    useProjects.getState().reorderNode('p1', 't2', 't1')
+    const out = useProjects.getState().getProject('p1')!.nodes.find((n) => n.id === 't2')!
+    expect(out.parentId).toBe('g1')
+    expect(out.position).toEqual({ x: 150, y: 100 })
+  })
+
+  it('is a no-op for same / missing ids', () => {
+    setup([mkNode('a'), mkNode('b')])
+    const before = useProjects.getState().getProject('p1')!.nodes
+    useProjects.getState().reorderNode('p1', 'a', 'a')
+    useProjects.getState().reorderNode('p1', 'nope', 'a')
+    expect(useProjects.getState().getProject('p1')!.nodes).toBe(before)
+  })
+})

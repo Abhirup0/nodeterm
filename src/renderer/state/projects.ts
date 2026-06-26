@@ -27,10 +27,36 @@ interface ProjectsState {
   /** Moves a node into a group frame (groupId) or out to the top level (null), keeping its
    *  on-canvas position fixed by converting absolute/relative coordinates. */
   moveNodeToGroup(projectId: string, nodeId: string, groupId: string | null): void
+  /** Reorders a node to sit immediately before another (sidebar order = array order),
+   *  joining the target's container if they differ. */
+  reorderNode(projectId: string, draggedId: string, beforeId: string): void
   /** Removes a project; returns the id that should become active (never deletes the last one). */
   deleteProject(id: string): string
 
   toWorkspace(): Workspace
+}
+
+/** Returns `node` repositioned for a new parent (groupId, or null for top level), keeping its
+ *  on-canvas position fixed (one-level absolute↔relative). Unchanged if the target is not a
+ *  group. `extent` is omitted — nodeStatesToFlow re-derives it from parentId on load. */
+function repositionState(
+  node: CanvasNodeState,
+  groupId: string | null,
+  nodes: CanvasNodeState[]
+): CanvasNodeState {
+  const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
+  const abs = {
+    x: node.position.x + (oldParent?.position.x ?? 0),
+    y: node.position.y + (oldParent?.position.y ?? 0)
+  }
+  if (groupId === null) return { ...node, parentId: undefined, position: abs }
+  const group = nodes.find((n) => n.id === groupId)
+  if (!group || group.kind !== 'group') return node
+  return {
+    ...node,
+    parentId: group.id,
+    position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
+  }
 }
 
 /** Returns `projects` with one project's nodes transformed; other projects untouched. */
@@ -130,24 +156,28 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         const node = nodes.find((n) => n.id === nodeId)
         if (!node || node.kind === 'group') return nodes
         if ((node.parentId ?? null) === groupId) return nodes
-        const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
-        const abs = {
-          x: node.position.x + (oldParent?.position.x ?? 0),
-          y: node.position.y + (oldParent?.position.y ?? 0)
-        }
-        let next: CanvasNodeState
-        if (groupId === null) {
-          next = { ...node, parentId: undefined, position: abs }
-        } else {
-          const group = nodes.find((n) => n.id === groupId)
-          if (!group || group.kind !== 'group') return nodes
-          next = {
-            ...node,
-            parentId: group.id,
-            position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
-          }
-        }
+        const next = repositionState(node, groupId, nodes)
+        if (next === node) return nodes // target group missing / not a group
         return nodes.map((n) => (n.id === nodeId ? next : n))
+      })
+    }))
+  },
+
+  reorderNode(projectId, draggedId, beforeId) {
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) => {
+        if (draggedId === beforeId) return nodes
+        const dragged = nodes.find((n) => n.id === draggedId)
+        const before = nodes.find((n) => n.id === beforeId)
+        if (!dragged || !before || dragged.kind === 'group') return nodes
+        const targetParent = before.parentId ?? null
+        const moved =
+          (dragged.parentId ?? null) === targetParent
+            ? dragged
+            : repositionState(dragged, targetParent, nodes)
+        const without = nodes.filter((n) => n.id !== draggedId)
+        const idx = without.findIndex((n) => n.id === beforeId)
+        return [...without.slice(0, idx), moved, ...without.slice(idx)]
       })
     }))
   },

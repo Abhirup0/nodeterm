@@ -453,6 +453,39 @@ export function ungroupNodes(nodes: CanvasNode[], groupId: string): CanvasNode[]
  * before their children (React Flow requires parents first). No-op when the node is missing or
  * is itself a group, when it already has the requested parent, or when `groupId` is not a group.
  */
+/** Group (parent) nodes must precede their children in the array (React Flow requirement). */
+function groupsFirst(nodes: CanvasNode[]): CanvasNode[] {
+  return [...nodes.filter((n) => n.type === 'group'), ...nodes.filter((n) => n.type !== 'group')]
+}
+
+/**
+ * Returns `node` repositioned for a new parent (`targetParentId`, or null for top level),
+ * keeping its on-canvas position fixed via absolute↔relative conversion (one level). Returns
+ * the node unchanged if the target group is missing or not a group.
+ */
+function repositionForParent(
+  node: CanvasNode,
+  targetParentId: string | null,
+  nodes: CanvasNode[]
+): CanvasNode {
+  const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
+  const abs = {
+    x: node.position.x + (oldParent?.position.x ?? 0),
+    y: node.position.y + (oldParent?.position.y ?? 0)
+  }
+  if (targetParentId === null) {
+    return { ...node, parentId: undefined, extent: undefined, position: abs }
+  }
+  const group = nodes.find((n) => n.id === targetParentId)
+  if (!group || group.type !== 'group') return node
+  return {
+    ...node,
+    parentId: group.id,
+    extent: 'parent' as const,
+    position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
+  }
+}
+
 export function reparentNode(
   nodes: CanvasNode[],
   nodeId: string,
@@ -462,28 +495,37 @@ export function reparentNode(
   if (!node || node.type === 'group') return nodes
   if ((node.parentId ?? null) === groupId) return nodes
 
-  const oldParent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined
-  const abs = {
-    x: node.position.x + (oldParent?.position.x ?? 0),
-    y: node.position.y + (oldParent?.position.y ?? 0)
-  }
+  const updated = repositionForParent(node, groupId, nodes)
+  if (updated === node) return nodes // target group missing / not a group
+  return groupsFirst(nodes.map((n) => (n.id === nodeId ? updated : n)))
+}
 
-  let updated: CanvasNode
-  if (groupId === null) {
-    updated = { ...node, parentId: undefined, extent: undefined, position: abs }
-  } else {
-    const group = nodes.find((n) => n.id === groupId)
-    if (!group || group.type !== 'group') return nodes
-    updated = {
-      ...node,
-      parentId: group.id,
-      extent: 'parent' as const,
-      position: { x: abs.x - group.position.x, y: abs.y - group.position.y }
-    }
-  }
+/**
+ * Moves `draggedId` to sit immediately before `beforeId` in the array (sidebar order follows
+ * array order). The dragged node also joins `beforeId`'s container (same reposition math) so a
+ * drop both reorders within a group and can move across groups. No-op when either node is
+ * missing, they are the same, or the dragged node is a group.
+ */
+export function reorderNodeBefore(
+  nodes: CanvasNode[],
+  draggedId: string,
+  beforeId: string
+): CanvasNode[] {
+  if (draggedId === beforeId) return nodes
+  const dragged = nodes.find((n) => n.id === draggedId)
+  const before = nodes.find((n) => n.id === beforeId)
+  if (!dragged || !before || dragged.type === 'group') return nodes
 
-  const next = nodes.map((n) => (n.id === nodeId ? updated : n))
-  return [...next.filter((n) => n.type === 'group'), ...next.filter((n) => n.type !== 'group')]
+  const targetParent = before.parentId ?? null
+  const moved =
+    (dragged.parentId ?? null) === targetParent
+      ? dragged
+      : repositionForParent(dragged, targetParent, nodes)
+
+  const without = nodes.filter((n) => n.id !== draggedId)
+  const idx = without.findIndex((n) => n.id === beforeId)
+  const result = [...without.slice(0, idx), moved, ...without.slice(idx)]
+  return groupsFirst(result)
 }
 
 /** Converts persisted node states into live React Flow nodes (parents first). */

@@ -108,6 +108,7 @@ import {
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
+  reorderNodeBefore,
   reparentNode,
   ungroupNodes,
   type CanvasNode
@@ -1920,6 +1921,21 @@ export function Canvas() {
     [activeProjectId, setNodes, markDirty, writeDisk]
   )
 
+  // Sidebar reorder: place draggedId immediately before beforeId (sidebar order = node order),
+  // joining the target's container if they differ.
+  const reorderSession = useCallback(
+    (projectId: string, draggedId: string, beforeId: string) => {
+      if (projectId === activeProjectId) {
+        setNodes((ns) => reorderNodeBefore(ns, draggedId, beforeId))
+        markDirty()
+      } else {
+        useProjects.getState().reorderNode(projectId, draggedId, beforeId)
+        void writeDisk()
+      }
+    },
+    [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
   const onRowContextMenu = useCallback(
     (e: React.MouseEvent, projectId: string, id: string) => {
       e.preventDefault()
@@ -2450,6 +2466,7 @@ export function Canvas() {
         onAiNameSession={aiNameSession}
         onAiNameGroup={aiNameGroup}
         onMoveToGroup={moveSessionToGroup}
+        onReorder={reorderSession}
         onRowContextMenu={onRowContextMenu}
         onAddToProject={addToProject}
         onMouseEnter={openSessionsPeek}

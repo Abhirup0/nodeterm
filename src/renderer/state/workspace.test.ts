@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { createDinoNode, flowToNodeStates, nodeStatesToFlow, reparentNode } from './workspace'
+import {
+  createDinoNode,
+  flowToNodeStates,
+  nodeStatesToFlow,
+  reorderNodeBefore,
+  reparentNode
+} from './workspace'
 import type { CanvasNode } from './workspace'
 
 const term = (id: string, pos: { x: number; y: number }, parentId?: string): CanvasNode =>
@@ -57,6 +63,44 @@ describe('reparentNode', () => {
     const nodes = [grp('g1', { x: 50, y: 50 }), term('t1', { x: 10, y: 10 })]
     expect(reparentNode(nodes, 'nope', 'g1')).toBe(nodes)
     expect(reparentNode(nodes, 't1', 't1')).toBe(nodes) // target is a terminal, not a group
+  })
+})
+
+describe('reorderNodeBefore', () => {
+  const ids = (out: CanvasNode[]): string[] => out.filter((n) => n.type !== 'group').map((n) => n.id)
+
+  it('reorders within the same container (moves dragged before target)', () => {
+    const nodes = [term('a', { x: 0, y: 0 }), term('b', { x: 0, y: 0 }), term('c', { x: 0, y: 0 })]
+    expect(ids(reorderNodeBefore(nodes, 'c', 'a'))).toEqual(['c', 'a', 'b'])
+    expect(ids(reorderNodeBefore(nodes, 'a', 'c'))).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps position unchanged for a same-container reorder', () => {
+    const nodes = [term('a', { x: 5, y: 5 }), term('b', { x: 9, y: 9 })]
+    const out = reorderNodeBefore(nodes, 'b', 'a')
+    expect(out.find((n) => n.id === 'b')!.position).toEqual({ x: 9, y: 9 })
+  })
+
+  it('moves across containers (joins target group) and lands before the target', () => {
+    const nodes = [
+      grp('g1', { x: 50, y: 50 }),
+      term('t1', { x: 10, y: 10 }, 'g1'),
+      term('t2', { x: 200, y: 150 }) // ungrouped
+    ]
+    const out = reorderNodeBefore(nodes, 't2', 't1')
+    const t2 = out.find((n) => n.id === 't2')!
+    expect(t2.parentId).toBe('g1')
+    expect(t2.position).toEqual({ x: 150, y: 100 }) // 200-50, 150-50
+    expect(ids(out)).toEqual(['t2', 't1']) // t2 placed before t1
+  })
+
+  it('keeps group nodes first and is a no-op for same/ missing / group drags', () => {
+    const nodes = [grp('g1', { x: 0, y: 0 }), term('a', { x: 0, y: 0 }), term('b', { x: 0, y: 0 })]
+    expect(reorderNodeBefore(nodes, 'a', 'a')).toBe(nodes)
+    expect(reorderNodeBefore(nodes, 'nope', 'a')).toBe(nodes)
+    expect(reorderNodeBefore(nodes, 'g1', 'a')).toBe(nodes) // can't drag a group row
+    const out = reorderNodeBefore(nodes, 'b', 'a')
+    expect(out[0].id).toBe('g1')
   })
 })
 

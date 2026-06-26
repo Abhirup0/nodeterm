@@ -43,6 +43,8 @@ export interface SessionsSidebarProps {
   onMoveToGroup(projectId: string, nodeId: string, groupId: string | null): void
   /** Name a canvas group with AI from its member terminals' output. */
   onAiNameGroup(projectId: string, groupId: string, memberIds: string[], cwd?: string): void | Promise<void>
+  /** Reorder a session to sit immediately before another (within/across containers). */
+  onReorder(projectId: string, draggedId: string, beforeId: string): void
   onMouseEnter?(): void
   onMouseLeave?(): void
 }
@@ -127,22 +129,48 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const dropClass = (projectId: string, groupId: string | null): string =>
     dropKey === dropTargetKey(projectId, groupId) ? ' is-drop-target' : ''
 
-  const renderRow = (projectId: string, row: (typeof groups)[number]['ungrouped'][number]): JSX.Element => (
-    <SessionRow
-      key={row.id}
-      row={row}
-      onClick={() => props.onFocusNode(row.id)}
-      onClose={() => props.onCloseSession(projectId, row.id)}
-      onRename={(title) => props.onRenameSession(projectId, row.id, title)}
-      onAiName={() => props.onAiNameSession(projectId, row.id, row.cwd)}
-      onContextMenu={(e) => props.onRowContextMenu(e, projectId, row.id)}
-      onDragStart={() => setDrag({ projectId, nodeId: row.id })}
-      onDragEnd={() => {
-        setDrag(null)
-        setDropKey(null)
-      }}
-    />
-  )
+  // A row is both draggable and a drop target: dropping another row onto it reorders the
+  // dragged session to sit immediately before this one. stopPropagation keeps the enclosing
+  // group/ungrouped drop zone (which appends) from also firing.
+  const renderRow = (projectId: string, row: (typeof groups)[number]['ungrouped'][number]): JSX.Element => {
+    const rowKey = `row:${row.id}`
+    const canDrop = !!drag && drag.projectId === projectId && drag.nodeId !== row.id
+    return (
+      <div
+        key={row.id}
+        className={`ss-rowdrop${dropKey === rowKey ? ' is-drop-before' : ''}`}
+        onDragOver={(e) => {
+          if (!canDrop) return
+          e.preventDefault()
+          e.stopPropagation()
+          if (dropKey !== rowKey) setDropKey(rowKey)
+        }}
+        onDragLeave={() => setDropKey((k) => (k === rowKey ? null : k))}
+        onDrop={(e) => {
+          if (!canDrop) return
+          e.preventDefault()
+          e.stopPropagation()
+          props.onReorder(projectId, drag.nodeId, row.id)
+          setDrag(null)
+          setDropKey(null)
+        }}
+      >
+        <SessionRow
+          row={row}
+          onClick={() => props.onFocusNode(row.id)}
+          onClose={() => props.onCloseSession(projectId, row.id)}
+          onRename={(title) => props.onRenameSession(projectId, row.id, title)}
+          onAiName={() => props.onAiNameSession(projectId, row.id, row.cwd)}
+          onContextMenu={(e) => props.onRowContextMenu(e, projectId, row.id)}
+          onDragStart={() => setDrag({ projectId, nodeId: row.id })}
+          onDragEnd={() => {
+            setDrag(null)
+            setDropKey(null)
+          }}
+        />
+      </div>
+    )
+  }
 
   if (!open) return null
 
