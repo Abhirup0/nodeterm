@@ -43,6 +43,10 @@ export function createDinoGame(
   const CACTUS_LARGE = { sx: 332, w: 25, h: 50, col: { x: 4, y: 6, w: 17, h: 42 } }
   const BIRD = { sx: [134, 180], w: 46, h: 40, col: { x: 6, y: 8, w: 34, h: 22 } }
 
+  // RGB of the theme colors, used to recolor the sprite per pixel.
+  const fg = [0xe6, 0xe6, 0xea]
+  const bg = [0x0b, 0x0b, 0x0f]
+
   let tinted: HTMLCanvasElement | null = null
   const img = new Image()
   img.onload = () => {
@@ -51,9 +55,22 @@ export function createDinoGame(
     off.height = img.naturalHeight
     const octx = off.getContext('2d')!
     octx.drawImage(img, 0, 0)
-    octx.globalCompositeOperation = 'source-in'
-    octx.fillStyle = COLOR_FG
-    octx.fillRect(0, 0, off.width, off.height)
+    // The sprite is a dark-grey dino on transparent, with WHITE details (eye,
+    // open mouth). Recolor per pixel so the body reads light on the dark field
+    // while the white details become dark "holes" — preserving the eye/mouth
+    // for free, instead of flattening everything to one tint.
+    const id = octx.getImageData(0, 0, off.width, off.height)
+    const p = id.data
+    for (let i = 0; i < p.length; i += 4) {
+      if (p[i + 3] < 40) continue // transparent → leave as is
+      const lum = (p[i] + p[i + 1] + p[i + 2]) / 3
+      const c = lum > 150 ? bg : fg // white detail → dark hole; grey body → light
+      p[i] = c[0]
+      p[i + 1] = c[1]
+      p[i + 2] = c[2]
+      p[i + 3] = 255
+    }
+    octx.putImageData(id, 0, 0)
     tinted = off
     draw() // sprite arrived — refresh the current (possibly idle) frame
   }
@@ -226,15 +243,7 @@ export function createDinoGame(
     } else if (!onGround) sx = TREX.IDLE
     else if (started) sx = Math.floor(score * 0.4) % 2 === 0 ? TREX.RUN[0] : TREX.RUN[1]
     else sx = TREX.IDLE
-    const top = groundY - TREX.H + dinoY
-    blit(sx, sw, TREX.H, DINO_X, top, crashed ? 0.55 : 1)
-    // Flattening the sprite to one tint fills its eye solid, so punch a small
-    // dark dot back into the head's upper-right (lower-forward when ducking).
-    if (tinted) {
-      const duck = ducking && onGround && !crashed
-      ctx.fillStyle = COLOR_BG
-      ctx.fillRect(DINO_X + (duck ? 48 : 36), top + (duck ? 27 : 6), 3, 3)
-    }
+    blit(sx, sw, TREX.H, DINO_X, groundY - TREX.H + dinoY, crashed ? 0.55 : 1)
   }
 
   function drawObstacle(o: Obstacle) {
