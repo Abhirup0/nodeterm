@@ -24,3 +24,6 @@ build/icon.png
 /docs/superpowers/
 # release runbook (signing/notarization/Apple specifics) kept private
 /docs/RELEASING.md
+
+# local publish helper — never exported to the public repo
+/publish.sh

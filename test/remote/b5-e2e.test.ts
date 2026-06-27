@@ -49,7 +49,7 @@ import type {
 import type { DetachedSinks } from '../../src/main/pty-manager'
 
 const SERVER_DIR =
-  process.env.NODETERM_SERVER_DIR || '/Users/dev/projects/nodebasedterminal/nodebaseserver'
+  process.env.NODETERM_SERVER_DIR || path.resolve('nodebaseserver')
 const RELAY_ENTRY = path.join(SERVER_DIR, 'src/relay/index.ts')
 const TSX_BIN = path.join(SERVER_DIR, 'node_modules/.bin/tsx')
 
