@@ -5,8 +5,8 @@ import { useAgentStatus } from '../state/agentStatus'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
-  onAdd: () => void
-  onAddFromFolder: () => void
+  /** Open the start screen (New project / Open folder / Clone repo) — what "+" now shows. */
+  onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
   onDelete: (id: string) => void
@@ -22,8 +22,7 @@ interface TabBarProps {
  */
 export function TabBar({
   onSwitch,
-  onAdd,
-  onAddFromFolder,
+  onOpenWelcome,
   onRename,
   onSetFolder,
   onDelete,
@@ -34,7 +33,6 @@ export function TabBar({
   const statusById = useAgentStatus((s) => s.byId)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
-  const [addPos, setAddPos] = useState<{ top: number; left: number } | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
 
@@ -159,48 +157,11 @@ export function TabBar({
             )
           })}
 
-          <button
-            className="tab__add"
-            title="New project"
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect()
-              setAddPos({ top: r.bottom + 4, left: r.left })
-            }}
-          >
+          <button className="tab__add" title="New project" onClick={onOpenWelcome}>
             +
           </button>
         </div>
       </div>
-
-      {addPos &&
-        createPortal(
-          <>
-            <div className="tab-backdrop" onClick={() => setAddPos(null)} />
-            <div
-              className="tab-menu"
-              style={{ top: addPos.top, left: addPos.left }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => {
-                  onAdd()
-                  setAddPos(null)
-                }}
-              >
-                Empty project
-              </button>
-              <button
-                onClick={() => {
-                  onAddFromFolder()
-                  setAddPos(null)
-                }}
-              >
-                From folder…
-              </button>
-            </div>
-          </>,
-          document.body
-        )}
 
       {menuId &&
         menuPos &&

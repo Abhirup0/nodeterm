@@ -1,13 +1,52 @@
+import { useEffect } from 'react'
+
 interface WelcomeScreenProps {
   onNewProject: () => void
   onOpenFolder: () => void
   onCloneRepo: () => void
+  /**
+   * When provided, the screen is dismissable (opened on demand via "+", over existing projects)
+   * — adds a close button, Escape, and click-outside. Omitted for the permanent no-projects screen.
+   */
+  onClose?: () => void
 }
 
-/** Shown when there are no projects — a start screen with quick actions. */
-export function WelcomeScreen({ onNewProject, onOpenFolder, onCloneRepo }: WelcomeScreenProps) {
+/** Start screen with quick actions — shown when there are no projects, or on demand via "+". */
+export function WelcomeScreen({ onNewProject, onOpenFolder, onCloneRepo, onClose }: WelcomeScreenProps) {
+  useEffect(() => {
+    if (!onClose) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   return (
-    <div className="welcome">
+    <div
+      className="welcome"
+      onClick={onClose ? (e) => e.target === e.currentTarget && onClose() : undefined}
+    >
+      {onClose && (
+        <button
+          onClick={onClose}
+          title="Close"
+          aria-label="Close"
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 20,
+            background: 'transparent',
+            border: 'none',
+            color: 'rgba(235,235,245,0.6)',
+            fontSize: 26,
+            lineHeight: 1,
+            cursor: 'pointer'
+          }}
+        >
+          ×
+        </button>
+      )}
       <div className="welcome__brand">
         <svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true">
           <defs>

@@ -139,6 +139,8 @@ export function Canvas() {
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // "+" opens the start screen (WelcomeScreen) on demand over existing projects.
+  const [welcomeOpen, setWelcomeOpen] = useState(false)
   // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
@@ -2291,8 +2293,7 @@ export function Canvas() {
     <div className="canvas-root">
       <TabBar
         onSwitch={switchProject}
-        onAdd={addProject}
-        onAddFromFolder={addProjectFromFolder}
+        onOpenWelcome={() => setWelcomeOpen(true)}
         onRename={renameProject}
         onSetFolder={setProjectFolder}
         onDelete={deleteProject}
@@ -2407,11 +2408,21 @@ export function Canvas() {
           />
         </ReactFlow>
 
-        {!hasProjects && (
+        {(!hasProjects || welcomeOpen) && (
           <WelcomeScreen
-            onNewProject={addProject}
-            onOpenFolder={addProjectFromFolder}
-            onCloneRepo={cloneRepo}
+            onNewProject={() => {
+              setWelcomeOpen(false)
+              addProject()
+            }}
+            onOpenFolder={() => {
+              setWelcomeOpen(false)
+              void addProjectFromFolder()
+            }}
+            onCloneRepo={() => {
+              setWelcomeOpen(false)
+              void cloneRepo()
+            }}
+            onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
           />
         )}
 
