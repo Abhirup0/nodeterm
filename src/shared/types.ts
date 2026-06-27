@@ -481,7 +481,7 @@ export interface ContextLinkApi {
 
 /** One usage window (5h session or 7d weekly) as shown in the indicator. */
 export interface ClaudeUsageWindow {
-  /** 0–100; remaining quota. Drives the bar fill (REF shows "remaining"). */
+  /** 0–100; remaining quota. Drives the bar fill (shows "remaining"). */
   leftPercent: number
   /** Unix ms when this window resets, or null if unknown. */
   resetsAt: number | null

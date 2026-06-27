@@ -11,7 +11,7 @@ const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 const DAY_MS = 24 * 60 * 60 * 1000
 const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000 // client-side burst cap: never ping more often
 
-// Hardening (learned from REF's telemetry pipeline): never transmit unless it's an official
+// Hardening: never transmit unless it's an official
 // build AND the user hasn't opted out AND no kill switch is set. A dev can target a local
 // server by setting NODETERM_API_BASE explicitly.
 function telemetryAllowed(getSettings: () => Settings): boolean {

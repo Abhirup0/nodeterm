@@ -81,8 +81,7 @@ npm run typecheck  # fastest correctness gate (no test runner yet)
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
 ```
 
-`npm run dist` builds an unsigned `.dmg` for local testing. Signed, notarized releases
-are produced by CI — see [`docs/RELEASING.md`](./docs/RELEASING.md).
+`npm run dist` builds an unsigned `.dmg` for local testing.
 
 ## ⌨️ Keyboard shortcuts
 
@@ -110,12 +109,6 @@ are produced by CI — see [`docs/RELEASING.md`](./docs/RELEASING.md).
   nodes to `workspace.json`, and tmux keeps sessions alive across restarts.
 
 See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas.
-
-## 🚀 Releasing
-
-Versioned, signed, notarized releases are tag-driven and self-hosted on nodeterm.dev.
-The full flow (Apple Developer ID setup, CI secrets, update feed, announcement schema)
-is documented in [`docs/RELEASING.md`](./docs/RELEASING.md).
 
 ## 🤝 Contributing
 

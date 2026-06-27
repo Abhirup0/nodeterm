@@ -1,8 +1,8 @@
 // End-to-end encryption primitives for the relay transport.
 //
-// Ported from REF (src/shared/e2ee-crypto.ts). Pure functions over NaCl box
-// (Curve25519 + XSalsa20-Poly1305): no sockets, no Electron. The box format is
-// `nonce ‖ ciphertext ‖ mac` so a future REF-compatible peer interoperates.
+// Pure functions over NaCl box (Curve25519 + XSalsa20-Poly1305): no sockets, no
+// Electron. The box format is `nonce ‖ ciphertext ‖ mac` so an interoperable peer
+// can be implemented against the same wire format.
 import nacl from 'tweetnacl'
 
 export type KeyPair = {

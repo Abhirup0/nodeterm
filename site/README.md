@@ -23,7 +23,7 @@ the download buttons update themselves — no edit needed.
 ## Two feeds this site serves
 
 - **`/announcements.json`** — the in-app news banner reads this. Edit it to post news; see
-  the schema in [`../docs/RELEASING.md`](../docs/RELEASING.md).
+  the schema in [`../docs/announcements.example.json`](../docs/announcements.example.json).
 - **`/updates/`** — the app's auto-updater reads `latest-mac.yml` here. Populated per
   release (see [`updates/README.md`](./updates/README.md)).
 

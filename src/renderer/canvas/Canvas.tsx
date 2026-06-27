@@ -2010,7 +2010,7 @@ export function Canvas() {
   // (with consent, throttled) notify.
   const notifyCooldownRef = useRef<Record<string, number>>({})
   useEffect(() => {
-    // Notification context = the node's folder name (or its title), like REF's worktree label.
+    // Notification context = the node's folder name (or its title).
     const contextFor = (nodeId: string): string => {
       const node = nodesRef.current.find((n) => n.id === nodeId)
       const cwd = (node?.data.cwd as string) || ''
@@ -2026,7 +2026,7 @@ export function Canvas() {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
-      // REF-style: "<folder> — Claude finished" + last assistant message as the body.
+      // "<folder> — Claude finished" + last assistant message as the body.
       const alert = (statusText: string, fallbackBody: string) => {
         // Unread unless the user is actively in this node's terminal (focused window +
         // this node is the active terminal). So a finish while you're in another terminal,

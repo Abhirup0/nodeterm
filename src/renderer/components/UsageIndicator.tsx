@@ -24,7 +24,7 @@ function WindowRow({ title, w }: { title: string; w: ClaudeUsageWindow }) {
 
 /**
  * Bottom-left Claude usage pill + popover. Renders to the right of the React Flow Controls.
- * Mirrors REF: hidden when 'unavailable'; '···' while first-fetching; '⚠' on error w/o data;
+ * States: hidden when 'unavailable'; '···' while first-fetching; '⚠' on error w/o data;
  * last-known data shown on stale/error. Compact pill = mini-bar + "62% 5h · 76% wk".
  */
 export function UsageIndicator(): JSX.Element | null {

@@ -1,13 +1,12 @@
-/* Codex hook trust core. Ported VERBATIM from REF's
- * src/main/codex/config-toml-trust.ts — the hash serialization in
- * computeTrustedHash() must stay byte-identical to codex-rs or Codex silently
+/* Codex hook trust core. The hash serialization in computeTrustedHash() must
+ * stay byte-identical to codex-rs or Codex silently
  * rejects the hook (it sits in the "review required" pile and never fires).
  *
  * Self-contained: only node fs/path/crypto. We port just the functions our
  * installer needs (trust hashing/keys, byte-preserving config.toml edits) and
- * deliberately drop REF's project-trust path (upsertProjectTrustLevel) — out
+ * deliberately drop the project-trust path (upsertProjectTrustLevel) — out
  * of scope. `escapeRegex` and the tiny atomic-rename fs helpers are inlined
- * (rather than pulling in unrelated REF modules).
+ * (rather than pulling in unrelated modules).
  */
 import {
   copyFileSync,
@@ -197,7 +196,7 @@ function readTomlFile(configPath: string): string {
 }
 
 // Why: escape special regex characters so a path/key can be matched literally
-// in a RegExp. Inlined from REF's shared/string-utils to keep this module
+// in a RegExp. Inlined to keep this module
 // self-contained.
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -519,7 +518,7 @@ function skipTomlLiteralString(line: string, startIndex: number): number {
 // Why: atomic-rename + .bak rotation — a half-written config.toml can brick a
 // user's Codex install, so write to tmp and rename. Random-suffix tmp name
 // avoids cross-process races on rapid reinstalls.
-// NOTE: the Windows-retry copy/rename helpers from REF are inlined as plain
+// NOTE: the Windows-retry copy/rename helpers are inlined as plain
 // copyFileSync/renameSync here — POSIX (macOS) is the target.
 export function writeConfigAtomically(configPath: string, contents: string): void {
   const dir = dirname(configPath)
@@ -530,7 +529,7 @@ export function writeConfigAtomically(configPath: string, contents: string): voi
     writeFileSync(tmpPath, contents, 'utf-8')
     if (existsSync(configPath)) {
       // Why: rotate a .bak before overwriting so a user can recover if our
-      // edit ever goes wrong. (REF uses a Windows-retry copy here; on macOS
+      // edit ever goes wrong. (on macOS
       // a plain copyFileSync is sufficient.)
       copyFileSync(configPath, `${configPath}.bak`)
     }

@@ -134,7 +134,7 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
 }
 
 // Codex hook payload. Event name is read defensively; codex emits a session id under
-// `session_id`. Mapping confirmed against REF's agent-hook-listener.
+// `session_id`.
 interface CodexPayload {
   hook_event_name?: string
   hookEventName?: string
@@ -161,7 +161,7 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   return null
 }
 
-// Gemini hook payload. Event name is read defensively (REF reads
+// Gemini hook payload. Event name is read defensively (some builds use
 // `hook_event_name`/`hookEventName`); a session id may be present under `session_id`.
 interface GeminiPayload {
   hook_event_name?: string

@@ -1,6 +1,6 @@
 /**
- * Pure Quick Open (⌘K file search) listing policy — no IO, no Electron. Trimmed port of
- * REF's quick-open-filter.ts: a noise blocklist + rg/git arg builders + line normalization.
+ * Pure Quick Open (⌘K file search) listing policy — no IO, no Electron. Provides
+ * a noise blocklist + rg/git arg builders + line normalization.
  * The caller (main process) owns process execution. v1 is single local root (no
  * WSL/SSH/exclude-prefix logic).
  */

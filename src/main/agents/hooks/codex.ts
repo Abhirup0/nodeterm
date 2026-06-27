@@ -11,7 +11,7 @@
 // hooks.json merge instead of using install-helper. It writes into the user's
 // REAL ~/.codex (default CODEX_HOME) — no managed home, no auth/config mirror.
 //
-// Adapted from REF's src/main/codex/hook-service.ts (local install path only):
+// Adapted for the REAL ~/.codex (local install path only):
 // dropped the managed CODEX_HOME, system-hook mirroring, project-trust, legacy
 // cleanup, and Windows/remote paths. POSIX (macOS) is the target.
 import { homedir } from 'os'
@@ -39,7 +39,7 @@ import {
   type CodexTrustEntry
 } from './codex-trust'
 
-// Confirmed codex event set (verified against REF's agent-hook-listener).
+// Confirmed codex event set.
 const CODEX_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
@@ -89,8 +89,8 @@ function scriptPath(): string {
 
 // Why: match managed entries by the `agent-hooks/codex.sh` path segment (not
 // the exact command string) so a fresh install also sweeps stale entries from
-// an older build or a different userData path. Mirrors REF's
-// createManagedCommandMatcher.
+// an older build or a different userData path. The managed-command matcher
+// keys off the path segment, not the exact command string.
 function isManagedCommand(command: string | undefined): boolean {
   if (!command) return false
   return command.replaceAll('\\', '/').includes(`agent-hooks/${SCRIPT_FILE_NAME}`)
@@ -118,7 +118,7 @@ function removeManagedFromDefinitions(defs: HookDefinition[]): HookDefinition[] 
 
 // Why: form the POSIX command the SAME way for hooks.json AND the trust entry —
 // the trust hash is computed over this exact byte string, so any divergence
-// makes Codex reject the hook. Ported from REF's wrapPosixHookCommand: the
+// makes Codex reject the hook. The POSIX wrapper's
 // `[ -x ... ]` guard makes a missing/non-executable script a silent no-op so a
 // broken install never poisons the session with exit-127 noise.
 function buildManagedCommand(script: string): string {

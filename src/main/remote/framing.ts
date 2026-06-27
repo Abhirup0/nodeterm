@@ -1,8 +1,8 @@
 // Terminal-stream binary framing for the relay transport.
 //
-// Ported from REF (src/shared/terminal-stream-protocol.ts). The 16-byte header
-// layout and opcode numbers are kept verbatim so a future REF-compatible peer
-// interoperates. Pure functions: no sockets, no Electron.
+// The 16-byte header layout and opcode numbers are stable wire constants so an
+// interoperable peer can be implemented against them. Pure functions: no sockets,
+// no Electron.
 //
 // Header (16 bytes, little-endian where multi-byte):
 //   [0]      kind    = 0x74
@@ -18,7 +18,7 @@ const STREAM_KIND = 0x74
 const STREAM_VERSION = 1
 const HEADER_BYTES = 16
 
-// Opcode numbers MUST match REF's TerminalStreamOpcode for interop.
+// Opcode numbers are part of the stable wire contract — do not renumber.
 export const OP = {
   Output: 1,
   SnapshotStart: 2,

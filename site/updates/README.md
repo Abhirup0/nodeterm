@@ -13,6 +13,5 @@ nodeterm-<version>-arm64-mac.zip    (+ .blockmap)   # used by auto-update
 nodeterm-<version>-mac.zip          (+ .blockmap)
 ```
 
-See [`../../docs/RELEASING.md`](../../docs/RELEASING.md) for the full flow. These files are
-intentionally **not** committed to git (they are large binaries); deploy them straight to
-the host.
+These files are intentionally **not** committed to git (they are large binaries); deploy
+them straight to the host.

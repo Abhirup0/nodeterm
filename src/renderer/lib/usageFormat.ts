@@ -1,4 +1,4 @@
-// Pure formatting helpers for the usage indicator (ported from REF's status bar).
+// Pure formatting helpers for the usage indicator.
 
 /** "just now" / "5m ago" / "2h ago". */
 export function formatTimeAgo(ts: number): string {

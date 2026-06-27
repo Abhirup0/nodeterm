@@ -5,7 +5,7 @@
 // it never decrypts. So the end-to-end-encrypted handshake and all traffic run
 // HOST<->CLIENT *through* the relay — the relay is not a handshake participant.
 //
-// Ported from REF's `web-runtime-client.ts` state machine, adapted:
+// The handshake/RPC state machine, in brief:
 //   - The token gates entry at the relay via a `?token=<token>` QUERY PARAM on
 //     the wss URL (cross-task decision; matches the relay's index.ts). It is NOT
 //     interleaved as a data frame — every frame on the wire is opaque peer

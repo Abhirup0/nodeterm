@@ -1,8 +1,8 @@
 // Pairing-offer codec for the relay transport.
 //
-// Ported from REF (src/shared/pairing.ts), adapted to nodeterm's offer shape
-// and `nodeterm://pair` scheme. Pure functions: no sockets, no Electron, and no
-// zod — validation is hand-rolled so decode never throws (returns null instead).
+// Encodes/decodes the `nodeterm://pair` offer. Pure functions: no sockets, no
+// Electron, and no zod — validation is hand-rolled so decode never throws
+// (returns null instead).
 
 export type PairingOffer = {
   // The relay WebSocket endpoint the client connects to.

@@ -1,5 +1,5 @@
 // Single source of truth for agent launch behavior and capabilities.
-// REF-faithful: an open AgentId string, a declarative config record, and
+// Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
 export type BuiltinAgentId = 'claude' | 'codex' | 'gemini'
@@ -42,7 +42,7 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
   }
 }
 
-// Capabilities = REF-style membership lists. A custom agent is in no list, so it
+// Capabilities = const membership lists. A custom agent is in no list, so it
 // automatically gets only spawn + terminal-title + process status.
 export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini'] as const
 export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini'] as const

@@ -29,7 +29,7 @@ describe('framing', () => {
     expect(f!.payload.length).toEqual(0)
   })
 
-  it('exposes REF-compatible opcode numbers', () => {
+  it('exposes stable wire opcode numbers', () => {
     expect(OP.Output).toEqual(1)
     expect(OP.Input).toEqual(7)
     expect(OP.Resize).toEqual(8)

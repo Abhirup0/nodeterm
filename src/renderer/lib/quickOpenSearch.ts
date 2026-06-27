@@ -1,4 +1,4 @@
-/** Pure fuzzy ranking for Quick Open (⌘K file search). Port of REF's quick-open-search.ts. */
+/** Pure fuzzy ranking for Quick Open (⌘K file search). */
 export const QUICK_OPEN_RESULT_LIMIT = 50
 
 export type QuickOpenIndexedFile = {
