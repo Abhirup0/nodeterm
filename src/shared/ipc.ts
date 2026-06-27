@@ -29,6 +29,7 @@ export const IPC = {
   appUpdateNotAvailable: 'app:update-not-available',
   appCheckForUpdates: 'app:check-for-updates',
   appGetVersion: 'app:get-version',
+  appUserDataDir: 'app:user-data-dir',
   appUpdatePolicy: 'app:update-policy',
   licenseActivate: 'license:activate',
   licenseDeactivate: 'license:deactivate',

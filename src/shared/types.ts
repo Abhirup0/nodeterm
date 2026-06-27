@@ -732,6 +732,8 @@ export interface NodeTerminalApi {
   setBadgeCount(count: number): void
   /** Absolute filesystem path for a dropped/picked File (for drag-into-terminal). */
   getPathForFile(file: File): string
+  /** Absolute writable base dir (Electron userData) for app-managed files like default worktrees. */
+  userDataDir(): Promise<string>
   /** Show an OS notification (main suppresses it if the window is focused). Returns whether shown. */
   notify(payload: NotifyPayload): Promise<boolean>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */

@@ -287,6 +287,7 @@ const api: NodeTerminalApi = {
   setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
   // Absolute path of a dropped/picked File (File.path was removed in Electron 30+).
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  userDataDir: () => ipcRenderer.invoke(IPC.appUserDataDir),
   notify: (payload) => ipcRenderer.invoke(IPC.appNotify, payload),
   onFocusNode: (listener) => {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)

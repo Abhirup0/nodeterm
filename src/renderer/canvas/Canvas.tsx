@@ -186,6 +186,13 @@ export function Canvas() {
   const [consentOpen, setConsentOpen] = useState(false)
   // Group id awaiting a worktree bind (drives BindWorktreeDialog).
   const [bindTarget, setBindTarget] = useState<string | null>(null)
+  // Writable base dir for the default worktree path (Electron userData), fetched once on mount.
+  const userDataDirRef = useRef('')
+  useEffect(() => {
+    void window.nodeTerminal.userDataDir().then((d) => {
+      userDataDirRef.current = d
+    })
+  }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTarget] = useState<string | null>(null)
   // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
@@ -2547,7 +2554,11 @@ export function Canvas() {
             (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
           }
           defaultPath={(repoPath, branch) =>
-            computeWorktreePath('', repoPath.split('/').pop() || 'repo', sanitizeWorktreeBranch(branch))
+            computeWorktreePath(
+              userDataDirRef.current,
+              repoPath.split('/').pop() || 'repo',
+              sanitizeWorktreeBranch(branch)
+            )
           }
           onConfirm={confirmBind}
           onCancel={() => setBindTarget(null)}

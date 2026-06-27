@@ -202,6 +202,9 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
   ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)
 
+  // Writable base dir for app-managed files (e.g. default git worktree location).
+  ipcMain.handle(IPC.appUserDataDir, () => app.getPath('userData'))
+
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
   })
