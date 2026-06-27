@@ -24,6 +24,19 @@ export const IconNote = () => (
   </svg>
 )
 
+export const IconDino = () => (
+  <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    {/* Blocky right-facing T-Rex silhouette (tail, body, head+snout, arm, legs). */}
+    <rect x="3" y="11" width="6" height="3" />
+    <rect x="8" y="9" width="11" height="7" />
+    <rect x="14" y="3" width="7" height="7" />
+    <rect x="21" y="7" width="2" height="2" />
+    <rect x="18" y="12" width="2" height="3" />
+    <rect x="9" y="16" width="2" height="5" />
+    <rect x="14" y="16" width="2" height="5" />
+  </svg>
+)
+
 export const IconPlus = () => (
   <svg {...S}>
     <path d="M12 5v14M5 12h14" />

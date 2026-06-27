@@ -89,7 +89,7 @@ export function Dock({
               <span>Sticky Note</span>
             </button>
             <button onClick={pick(onAddDino)}>
-              <NoteIcon />
+              <DinoIcon />
               <span>Dino Game</span>
             </button>
             <button onClick={pick(onOpenFile)}>
@@ -210,6 +210,19 @@ function NoteIcon() {
     <svg {...S}>
       <path d="M4 4h16v11l-5 5H4z" />
       <path d="M20 15h-5v5" />
+    </svg>
+  )
+}
+function DinoIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <rect x="3" y="11" width="6" height="3" />
+      <rect x="8" y="9" width="11" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="21" y="7" width="2" height="2" />
+      <rect x="18" y="12" width="2" height="3" />
+      <rect x="9" y="16" width="2" height="5" />
+      <rect x="14" y="16" width="2" height="5" />
     </svg>
   )
 }

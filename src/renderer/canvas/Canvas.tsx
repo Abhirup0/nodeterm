@@ -34,6 +34,7 @@ import {
   IconFit,
   IconGrid,
   IconGroup,
+  IconDino,
   IconJump,
   IconMarkdown,
   IconNote,
@@ -1719,7 +1720,7 @@ export function Canvas() {
               })
             ),
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
-          { label: 'New dino game', icon: <IconNote />, onClick: () => addDino(at) },
+          { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           {
             label: 'New remote…',
@@ -2217,7 +2218,7 @@ export function Canvas() {
           })
         ),
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
-      { id: 'new-dino', label: 'New dino game', icon: <IconNote />, run: () => addDino() },
+      { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
