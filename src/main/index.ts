@@ -28,6 +28,7 @@ import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
+import { initSshProject } from './remote-ssh/ssh-project'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
@@ -350,6 +351,7 @@ app.whenReady().then(async () => {
   initLicense(win)
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
+  initSshProject(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

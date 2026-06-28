@@ -736,8 +736,7 @@ export interface NodeTerminalApi {
   dialog: DialogApi
   settings: SettingsApi
   ssh: SshApi
-  /** Optional until the preload wiring task lands its implementation (SSH Projects Phase 1). */
-  sshProject?: SshProjectApi
+  sshProject: SshProjectApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi

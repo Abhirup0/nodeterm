@@ -84,6 +84,16 @@ const api: NodeTerminalApi = {
     remove: (id) => ipcRenderer.invoke(IPC.sshDelete, id),
     importCandidates: () => ipcRenderer.invoke(IPC.sshImport)
   },
+  sshProject: {
+    connect: (projectId, conn) => ipcRenderer.invoke(IPC.sshConnectProject, projectId, conn),
+    disconnect: (projectId) => ipcRenderer.invoke(IPC.sshDisconnectProject, projectId),
+    listDir: (projectId, dir) => ipcRenderer.invoke(IPC.sshListDir, projectId, dir),
+    onStatus: (cb) => {
+      const h = (_e: unknown, e: unknown) => cb(e as never)
+      ipcRenderer.on(IPC.sshProjectStatus, h)
+      return () => ipcRenderer.removeListener(IPC.sshProjectStatus, h)
+    }
+  },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
