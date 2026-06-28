@@ -531,6 +531,23 @@ export class PtyManager {
    * markdown view); otherwise the recent ~200 lines (AI naming, palette search).
    */
   async captureSession(persistKey: string, full = false): Promise<string> {
+    // Remote (ssh-project) node: there is no local tmux session — capture from the REMOTE tmux
+    // over the project's ControlMaster (mirrors snapshotScrollback / destroySession).
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return ''
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteCapturePaneArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), full),
+          { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+        )
+        return stdout
+      } catch {
+        return ''
+      }
+    }
     if (!this.tmuxPath) return ''
     try {
       const { stdout } = await runAsync(
