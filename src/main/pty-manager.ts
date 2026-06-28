@@ -13,6 +13,12 @@ import {
   type Settings
 } from '../shared/types'
 import { hookServer } from './agents/hook-server'
+import {
+  remoteTmuxHasSessionArgs,
+  remoteTmuxKillArgs,
+  remoteTmuxPtyArgs,
+  remoteCapturePaneArgs
+} from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 
@@ -112,6 +118,8 @@ interface Session {
   flushTimer: ReturnType<typeof setTimeout> | null
   /** Node id this session persists under (when tmux-backed) — used for scrollback snapshots. */
   persistKey?: string
+  /** When set, the session runs on a remote host via ssh; kill/capture target the REMOTE tmux. */
+  sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Periodic scrollback-to-disk snapshot timer (tmux-backed sessions only). */
   snapshotTimer: ReturnType<typeof setInterval> | null
 }
@@ -206,9 +214,40 @@ export class PtyManager {
     // to decide whether to replay the persisted scrollback and re-launch a resumable agent.
     const tmuxBacked =
       !!this.tmuxPath && this.getSettings().tmuxEnabled && !!options.persistKey
-    const fresh = tmuxBacked ? !this.tmuxSessionExists(options.persistKey as string) : true
+    // For an SSH-project node, "fresh" is decided by the REMOTE tmux server (over the project's
+    // ControlMaster), not the local one. Falls through to the local tmux/plain logic otherwise.
+    const fresh = options.sshRemote
+      ? !this.remoteSessionExists(options.sshRemote, sessionName(options.persistKey as string))
+      : tmuxBacked
+        ? !this.tmuxSessionExists(options.persistKey as string)
+        : true
     const sessionId = this.spawnSession(options, webContentsId, undefined)
     return { sessionId, fresh }
+  }
+
+  /** Does the node's remote tmux session exist (over the project's ControlMaster)? */
+  private remoteSessionExists(
+    sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
+    sessionId: string
+  ): boolean {
+    const ssh = findSsh()
+    if (!ssh) return false
+    try {
+      execFileSync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId), {
+        stdio: 'ignore'
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Find the live session registered under a node id (persistKey), if any. */
+  private sessionByPersistKey(persistKey: string): Session | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.persistKey === persistKey) return session
+    }
+    return undefined
   }
 
   /** Whether a tmux session for this node id currently exists (server alive + session present). */
@@ -277,7 +316,10 @@ export class PtyManager {
     sinks: DetachedSinks | undefined
   ): string {
     const sessionId = `pty-${++this.counter}`
-    const cwd = options.cwd || os.homedir()
+    // For a remote (ssh-project) node the local PTY just holds the ssh client, so its local cwd
+    // must be a real LOCAL directory (options.cwd is a REMOTE path that wouldn't exist locally and
+    // would make pty.spawn throw). The remote working dir is passed to tmux via sshRemote.remoteCwd.
+    const cwd = options.sshRemote ? os.homedir() : options.cwd || os.homedir()
 
     // Strip TMUX so tmux doesn't refuse to nest if the app itself was launched
     // from inside a tmux session.
@@ -303,7 +345,23 @@ export class PtyManager {
     const program = reqShell === 'ssh' ? findSsh() ?? 'ssh' : reqShell
     const programArgs = options.shellArgs ?? []
 
-    if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
+    // SSH project node: run `ssh -t '<remote tmux attach-or-create>'` as the PTY program. The
+    // REMOTE tmux provides persistence (over the project's ControlMaster); the local PTY just
+    // holds the ssh client. Only when BOTH sshRemote and persistKey are set and ssh resolves —
+    // otherwise this falls through to the unchanged local-tmux / plain-shell branches below.
+    const remoteSsh = options.sshRemote && options.persistKey ? findSsh() : null
+    if (options.sshRemote && options.persistKey && remoteSsh) {
+      file = remoteSsh
+      args = remoteTmuxPtyArgs(
+        options.sshRemote.conn,
+        options.sshRemote.controlPath,
+        sessionName(options.persistKey),
+        options.sshRemote.remoteCwd,
+        // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
+        options.shell,
+        options.shellArgs
+      )
+    } else if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
       // attach-or-create the persistent session for this node.
       // `-A` = attach-or-create. `-D` = detach OTHER clients on attach. We use `-D` ONLY for the
       // local renderer client (a remount should take sole ownership of its session). A host-served
@@ -355,8 +413,11 @@ export class PtyManager {
     })
 
     // tmux-backed sessions snapshot their scrollback to disk periodically so a machine reboot
-    // (which kills the tmux server) can still replay recent output on cold restart.
+    // (which kills the tmux server) can still replay recent output on cold restart. A remote
+    // (ssh-project) node is persisted too — the snapshot is captured from the REMOTE tmux.
+    const remote = options.sshRemote && options.persistKey ? options.sshRemote : undefined
     const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
+    const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
     const session: Session = {
       proc,
       webContentsId,
@@ -365,13 +426,14 @@ export class PtyManager {
       buf: [],
       bufBytes: 0,
       flushTimer: null,
-      persistKey: tmuxBacked ? options.persistKey : undefined,
+      persistKey: persisted ? options.persistKey : undefined,
+      sshRemote: remote,
       snapshotTimer: null
     }
-    if (tmuxBacked && options.persistKey) {
+    if (persisted && options.persistKey) {
       const key = options.persistKey
       session.snapshotTimer = setInterval(() => {
-        void this.snapshotScrollback(key)
+        void this.snapshotScrollback(key, remote)
       }, SCROLLBACK_SNAPSHOT_MS)
     }
     this.sessions.set(sessionId, session)
@@ -459,7 +521,7 @@ export class PtyManager {
     if (session.snapshotTimer) clearInterval(session.snapshotTimer)
     // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
     // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
-    if (session.persistKey) void this.snapshotScrollback(session.persistKey)
+    if (session.persistKey) void this.snapshotScrollback(session.persistKey, session.sshRemote)
     session.proc.kill()
     this.sessions.delete(sessionId)
   }
@@ -486,7 +548,26 @@ export class PtyManager {
    * Snapshot a node's recent scrollback (with colors, `-e`) to disk for cold-restart replay.
    * Best-effort: a missing session / unavailable tmux just leaves the prior snapshot in place.
    */
-  private async snapshotScrollback(persistKey: string): Promise<void> {
+  private async snapshotScrollback(
+    persistKey: string,
+    sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
+  ): Promise<void> {
+    if (sshRemote) {
+      // Remote (ssh-project) node: capture from the REMOTE tmux over the project's ControlMaster.
+      const ssh = findSsh()
+      if (!ssh) return
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteCapturePaneArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), false),
+          { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+        )
+        if (stdout) writeScrollback(persistKey, stdout)
+      } catch {
+        // remote session gone / master down — keep the last good snapshot
+      }
+      return
+    }
     if (!this.tmuxPath) return
     try {
       const { stdout } = await runAsync(
@@ -522,6 +603,20 @@ export class PtyManager {
   async destroySession(persistKey: string): Promise<void> {
     // The node is gone for good — drop its cold-restore snapshot too.
     deleteScrollback(persistKey)
+    // destroy() is called (close button) while the session is still live, so its sshRemote is
+    // known. Capture it synchronously before any await.
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    if (sshRemote) {
+      // Remote (ssh-project) node: there is no local tmux session — end the REMOTE one.
+      const ssh = findSsh()
+      if (!ssh) return
+      try {
+        await runAsync(ssh, remoteTmuxKillArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey)))
+      } catch {
+        // remote session may not exist / master down; ignore
+      }
+      return
+    }
     if (!this.tmuxPath) return
     try {
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'kill-session', '-t', sessionName(persistKey)])
@@ -540,7 +635,7 @@ export class PtyManager {
       if (session.snapshotTimer) clearInterval(session.snapshotTimer)
       // Best-effort final scrollback snapshot on quit so a reboot can replay it. Fire-and-forget:
       // the tmux server (and the snapshot capture against it) outlives this process.
-      if (session.persistKey) void this.snapshotScrollback(session.persistKey)
+      if (session.persistKey) void this.snapshotScrollback(session.persistKey, session.sshRemote)
       session.proc.kill()
     }
     this.sessions.clear()
