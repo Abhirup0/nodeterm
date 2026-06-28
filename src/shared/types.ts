@@ -22,6 +22,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
+  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string }
 }
 
 /**
@@ -111,6 +113,8 @@ export interface Project {
   color: string
   /** Default working directory for new terminals created in this project. */
   cwd?: string
+  /** When set, this is an SSH project: its terminals run on `server` in `remoteCwd` (remote tmux). */
+  ssh?: { server: import('./ssh').SshConnection; remoteCwd: string }
   viewport: Viewport
   nodes: CanvasNodeState[]
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
@@ -303,6 +307,18 @@ export interface SshApi {
   remove(id: string): Promise<import('./ssh').SshServer[]>
   /** Parse `~/.ssh/config` into importable hosts (empty if none). */
   importCandidates(): Promise<import('./ssh').ParsedSshHost[]>
+}
+
+export type SshProjectStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error'
+
+export interface SshProjectApi {
+  /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
+  connect(projectId: string, server: import('./ssh').SshConnection): Promise<{ controlPath: string }>
+  /** Tear down the master (remote tmux is unaffected). */
+  disconnect(projectId: string): Promise<void>
+  /** List remote sub-directories of `path` (default ~). */
+  listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
+  onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
 }
 
 export interface GitFileChange {
@@ -720,6 +736,8 @@ export interface NodeTerminalApi {
   dialog: DialogApi
   settings: SettingsApi
   ssh: SshApi
+  /** Optional until the preload wiring task lands its implementation (SSH Projects Phase 1). */
+  sshProject?: SshProjectApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi

@@ -62,6 +62,48 @@ export function buildSshArgs(conn: SshConnection): string[] {
   return args
 }
 
+/** Single-quote a string for use as ONE POSIX shell token (safe inside a remote command). */
+export function posixQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+/** Build the remote shell command that attaches-or-creates this node's remote tmux session. */
+export function remoteTmuxCommand(opts: {
+  sessionId: string
+  remoteCwd: string
+  program?: string
+  programArgs?: string[]
+  socket?: string
+}): string {
+  const socket = opts.socket ?? 'nodeterm-rmt'
+  const parts = [
+    'tmux',
+    '-L',
+    socket,
+    'new-session',
+    '-A',
+    '-s',
+    posixQuote(opts.sessionId),
+    '-c',
+    posixQuote(opts.remoteCwd)
+  ]
+  if (opts.program) {
+    parts.push(posixQuote(opts.program))
+    for (const a of opts.programArgs ?? []) parts.push(posixQuote(a))
+  }
+  return parts.join(' ')
+}
+
+/** Parse `ls -1Ap <dir>` output into sorted directory names (trailing `/`), excluding . and .. */
+export function parseLsDirs(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.endsWith('/') && l !== './' && l !== '../')
+    .map((l) => l.slice(0, -1))
+    .sort((a, b) => a.localeCompare(b))
+}
+
 /** A host parsed from `~/.ssh/config`, ready to seed a saved server (no id yet). */
 export interface ParsedSshHost {
   /** The `Host` alias (display label). */
