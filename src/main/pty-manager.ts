@@ -6,9 +6,20 @@ import { promisify } from 'util'
 import { app, ipcMain, webContents } from 'electron'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
-import { DEFAULT_SETTINGS, type PtyCreateOptions, type Settings } from '../shared/types'
+import {
+  DEFAULT_SETTINGS,
+  type PtyCreateOptions,
+  type PtyCreateResult,
+  type Settings
+} from '../shared/types'
 import { hookServer } from './agents/hook-server'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
+import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
+
+// How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
+// kills the tmux server) can still replay recent output on cold restart. A final snapshot also
+// runs on detach; the interval covers an ungraceful power loss between detaches.
+const SCROLLBACK_SNAPSHOT_MS = 15_000
 
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
@@ -99,6 +110,10 @@ interface Session {
   buf: string[]
   bufBytes: number
   flushTimer: ReturnType<typeof setTimeout> | null
+  /** Node id this session persists under (when tmux-backed) — used for scrollback snapshots. */
+  persistKey?: string
+  /** Periodic scrollback-to-disk snapshot timer (tmux-backed sessions only). */
+  snapshotTimer: ReturnType<typeof setInterval> | null
 }
 
 /** Sinks for a detached session whose output is served somewhere other than the renderer
@@ -161,8 +176,9 @@ export class PtyManager {
   }
 
   registerIpc(): void {
-    ipcMain.handle(IPC.ptyCreate, (event, options: PtyCreateOptions) =>
-      this.create(event.sender.id, options)
+    ipcMain.handle(
+      IPC.ptyCreate,
+      (event, options: PtyCreateOptions): PtyCreateResult => this.create(event.sender.id, options)
     )
     ipcMain.on(IPC.ptyWrite, (_event, sessionId: string, data: string) =>
       this.write(sessionId, data)
@@ -175,13 +191,37 @@ export class PtyManager {
     )
     ipcMain.on(IPC.ptyKill, (_event, sessionId: string) => this.kill(sessionId))
     ipcMain.on(IPC.ptyDestroy, (_event, persistKey: string) => this.destroySession(persistKey))
+    ipcMain.handle(IPC.ptyReadScrollback, (_event, persistKey: string) =>
+      readScrollback(persistKey)
+    )
     ipcMain.handle(IPC.ptySendText, (_event, persistKey: string, text: string) =>
       this.sendText(persistKey, text)
     )
   }
 
-  private create(webContentsId: number, options: PtyCreateOptions): string {
-    return this.spawnSession(options, webContentsId, undefined)
+  private create(webContentsId: number, options: PtyCreateOptions): PtyCreateResult {
+    // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
+    // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
+    // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
+    // to decide whether to replay the persisted scrollback and re-launch a resumable agent.
+    const tmuxBacked =
+      !!this.tmuxPath && this.getSettings().tmuxEnabled && !!options.persistKey
+    const fresh = tmuxBacked ? !this.tmuxSessionExists(options.persistKey as string) : true
+    const sessionId = this.spawnSession(options, webContentsId, undefined)
+    return { sessionId, fresh }
+  }
+
+  /** Whether a tmux session for this node id currently exists (server alive + session present). */
+  private tmuxSessionExists(persistKey: string): boolean {
+    if (!this.tmuxPath) return false
+    try {
+      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)], {
+        stdio: 'ignore'
+      })
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -314,6 +354,9 @@ export class PtyManager {
       env
     })
 
+    // tmux-backed sessions snapshot their scrollback to disk periodically so a machine reboot
+    // (which kills the tmux server) can still replay recent output on cold restart.
+    const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
     const session: Session = {
       proc,
       webContentsId,
@@ -321,13 +364,22 @@ export class PtyManager {
       onExit: sinks?.onExit,
       buf: [],
       bufBytes: 0,
-      flushTimer: null
+      flushTimer: null,
+      persistKey: tmuxBacked ? options.persistKey : undefined,
+      snapshotTimer: null
+    }
+    if (tmuxBacked && options.persistKey) {
+      const key = options.persistKey
+      session.snapshotTimer = setInterval(() => {
+        void this.snapshotScrollback(key)
+      }, SCROLLBACK_SNAPSHOT_MS)
     }
     this.sessions.set(sessionId, session)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
+      if (session.snapshotTimer) clearInterval(session.snapshotTimer)
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
       if (session.onExit) {
         session.onExit(exitCode)
@@ -404,6 +456,10 @@ export class PtyManager {
     const session = this.sessions.get(sessionId)
     if (!session) return
     if (session.flushTimer) clearTimeout(session.flushTimer)
+    if (session.snapshotTimer) clearInterval(session.snapshotTimer)
+    // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
+    // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
+    if (session.persistKey) void this.snapshotScrollback(session.persistKey)
     session.proc.kill()
     this.sessions.delete(sessionId)
   }
@@ -427,6 +483,24 @@ export class PtyManager {
   }
 
   /**
+   * Snapshot a node's recent scrollback (with colors, `-e`) to disk for cold-restart replay.
+   * Best-effort: a missing session / unavailable tmux just leaves the prior snapshot in place.
+   */
+  private async snapshotScrollback(persistKey: string): Promise<void> {
+    if (!this.tmuxPath) return
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', '-1500'],
+        { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+      )
+      if (stdout) writeScrollback(persistKey, stdout)
+    } catch {
+      // session gone / tmux unavailable — keep the last good snapshot
+    }
+  }
+
+  /**
    * Send literal text followed by Enter into a node's tmux session (e.g. a slash command).
    * Works whether or not a client is attached. Returns false if tmux is unavailable or the
    * session doesn't exist yet.
@@ -446,6 +520,8 @@ export class PtyManager {
 
   /** Permanently end a node's persistent tmux session (called when the user closes it). */
   async destroySession(persistKey: string): Promise<void> {
+    // The node is gone for good — drop its cold-restore snapshot too.
+    deleteScrollback(persistKey)
     if (!this.tmuxPath) return
     try {
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'kill-session', '-t', sessionName(persistKey)])
@@ -461,6 +537,10 @@ export class PtyManager {
   killAll(): void {
     for (const session of this.sessions.values()) {
       if (session.flushTimer) clearTimeout(session.flushTimer)
+      if (session.snapshotTimer) clearInterval(session.snapshotTimer)
+      // Best-effort final scrollback snapshot on quit so a reboot can replay it. Fire-and-forget:
+      // the tmux server (and the snapshot capture against it) outlives this process.
+      if (session.persistKey) void this.snapshotScrollback(session.persistKey)
       session.proc.kill()
     }
     this.sessions.clear()

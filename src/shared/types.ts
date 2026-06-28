@@ -24,6 +24,17 @@ export interface PtyCreateOptions {
   agentId?: AgentId
 }
 
+/**
+ * Result of creating a PTY session. `fresh` distinguishes a tmux session that had to be
+ * created anew (cold start — e.g. after a machine reboot killed the tmux server) from a
+ * reattach to a still-running session (warm — e.g. an app restart). The renderer uses it to
+ * replay the persisted scrollback and re-launch a resumable agent only on a cold start.
+ */
+export interface PtyCreateResult {
+  sessionId: string
+  fresh: boolean
+}
+
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
 export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop' | 'dino'
 
@@ -132,8 +143,9 @@ export const EMPTY_WORKSPACE: Workspace = {
 // ---- Contract for the API exposed to the renderer via preload ----
 
 export interface PtyApi {
-  /** Starts a new PTY session, returns its sessionId. */
-  create(options: PtyCreateOptions): Promise<string>
+  /** Starts a new PTY session; returns its sessionId and whether the session was freshly
+   *  created (cold start) vs reattached to a still-running tmux session (warm). */
+  create(options: PtyCreateOptions): Promise<PtyCreateResult>
   /** Sends user input to the PTY. */
   write(sessionId: string, data: string): void
   /** Updates the PTY when the terminal is resized. */
@@ -150,6 +162,8 @@ export interface PtyApi {
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
   capture(persistKey: string, full?: boolean): Promise<string>
+  /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
+  readScrollback(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
   /** Listens for PTY output. Returns an unsubscribe function. */

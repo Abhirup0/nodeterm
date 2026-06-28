@@ -10,6 +10,7 @@ export const IPC = {
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
+  ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   claudeReadTranscript: 'claude:read-transcript',
   chatReadTranscript: 'chat:read-transcript',

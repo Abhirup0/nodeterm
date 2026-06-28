@@ -71,3 +71,29 @@ export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURC
 // Returns the builtin config for an id, or undefined for custom/unknown agents.
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>
   (AGENT_CONFIG as Record<string, AgentConfig>)[id]
+
+// Session ids are interpolated into a shell command line (written into the live shell on a
+// cold restart), so accept only the safe charset agents actually use (UUIDs etc.) — never a
+// flag-like or metacharacter-bearing value.
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * The command that resumes a resumable agent's prior conversation by its provider session id.
+ * Used on a cold restart (machine reboot) where the tmux session — and the live agent — are
+ * gone, so the conversation must be reconstructed via the agent CLI's own `--resume`.
+ * Returns null for non-resumable/custom agents or an unsafe/empty session id.
+ */
+export function resumeCommand(id: AgentId, sessionId: string): string | null {
+  if (!canResume(id)) return null
+  const sid = sessionId.trim()
+  if (!sid || !SAFE_SESSION_ID.test(sid)) return null
+  switch (id) {
+    case 'codex':
+      return `codex resume ${sid}`
+    case 'claude':
+    case 'gemini':
+      return `${id} --resume ${sid}`
+    default:
+      return null
+  }
+}

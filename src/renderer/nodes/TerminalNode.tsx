@@ -27,7 +27,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, agentConfig, type AgentId } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, resumeCommand, agentConfig, type AgentId } from '@shared/agents/config'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
@@ -234,6 +234,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
 
     const ssh = data.ssh as SshConnection | undefined
+    // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
+    // instant the session resolves (a cold restart after a reboot recreates the tmux session
+    // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
+    const scrollbackPromise = window.nodeTerminal.pty.readScrollback(id).catch(() => '')
     transport
       .create({
         cols: term.cols,
@@ -244,12 +248,27 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         persistKey: id,
         agentId: data.agentId
       })
-      .then((sid) => {
+      .then(async ({ sessionId: sid, fresh }) => {
         if (disposed) {
           transport.kill(sid)
           return
         }
         sessionId = sid
+        // Cold restart: the tmux session (and anything that was running in it) is gone — replay
+        // the last persisted scrollback so the user sees where they left off. Warm reattach
+        // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
+        // duplicate it. Skipped on the very first open too (`fresh` true but initialCommand set).
+        if (fresh && !data.initialCommand) {
+          const snapshot = await scrollbackPromise
+          if (disposed) {
+            transport.kill(sid)
+            return
+          }
+          if (snapshot) {
+            term.write(snapshot)
+            term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
+          }
+        }
         // Flow control: track xterm's unprocessed write backlog (bytes handed to
         // term.write but not yet parsed). Past a high watermark we pause the source so
         // a flood can't grow this buffer without bound; we resume once it drains.
@@ -279,10 +298,18 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           })
         )
         cleanups.push(term.onData((input) => transport.write(sid, input)).dispose)
-        // Run a one-shot command on first open (e.g. "gh auth login"), then forget it.
+        // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
+        // forget it.
         if (data.initialCommand) {
           transport.write(sid, `${data.initialCommand}\n`)
           updateNodeData(id, { initialCommand: undefined })
+        } else if (fresh && agentId && canResume(agentId)) {
+          // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
+          // prior conversation by its session id (known from hooks) when we have one; otherwise
+          // start the agent fresh. Plain terminals get nothing here — just the restored shell.
+          const priorId = useAgentStatus.getState().byId[id]?.sessionId
+          const cmd = (priorId && resumeCommand(agentId, priorId)) || agentConfig(agentId)?.launchCmd
+          if (cmd) transport.write(sid, `${cmd}\n`)
         }
       })
 

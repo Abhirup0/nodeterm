@@ -1,4 +1,4 @@
-import type { PtyCreateOptions } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
 import type { TerminalTransport } from './transport'
 
 /**
@@ -20,8 +20,11 @@ export class RemoteTransport implements TerminalTransport {
     return window.nodeTerminal.remoteClient
   }
 
-  create(options: PtyCreateOptions): Promise<string> {
-    return this.client.create(this.connectionId, options)
+  async create(options: PtyCreateOptions): Promise<PtyCreateResult> {
+    const sessionId = await this.client.create(this.connectionId, options)
+    // Cold-restore (scrollback replay / agent resume) is the host's responsibility; a mirroring
+    // client must never re-launch or replay, so it always reports a warm (non-fresh) attach.
+    return { sessionId, fresh: false }
   }
 
   write(sessionId: string, data: string): void {

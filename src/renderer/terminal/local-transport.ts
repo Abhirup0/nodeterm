@@ -1,4 +1,4 @@
-import type { PtyCreateOptions } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
 import type { TerminalTransport } from './transport'
 
 /**
@@ -11,7 +11,7 @@ export class LocalTransport implements TerminalTransport {
     return window.nodeTerminal.pty
   }
 
-  create(options: PtyCreateOptions): Promise<string> {
+  create(options: PtyCreateOptions): Promise<PtyCreateResult> {
     return this.pty.create(options)
   }
 

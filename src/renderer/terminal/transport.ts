@@ -1,4 +1,4 @@
-import type { PtyCreateOptions } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
 
 /**
  * Abstraction over the terminal session layer.
@@ -9,7 +9,7 @@ import type { PtyCreateOptions } from '@shared/types'
  * the same interface, so remote access can be added without changing the UI.
  */
 export interface TerminalTransport {
-  create(options: PtyCreateOptions): Promise<string>
+  create(options: PtyCreateOptions): Promise<PtyCreateResult>
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
   /** Flow control: pause (false) / resume (true) the source when the terminal is backed up. */
