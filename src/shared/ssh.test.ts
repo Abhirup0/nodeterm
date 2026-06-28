@@ -4,6 +4,7 @@ import {
   parseExtraArgs,
   parseSshConfig,
   posixQuote,
+  quoteRemotePath,
   remoteTmuxCommand,
   parseLsDirs
 } from './ssh'
@@ -93,10 +94,33 @@ describe('posixQuote', () => {
   })
 })
 
+describe('quoteRemotePath', () => {
+  it('leaves a bare ~ unquoted so the remote shell expands it', () => {
+    expect(quoteRemotePath('~')).toBe('~')
+  })
+  it('keeps a leading ~/ unquoted and single-quotes the remainder', () => {
+    expect(quoteRemotePath('~/a b')).toBe(`~/'a b'`)
+  })
+  it('a bare ~/ stays ~/', () => {
+    expect(quoteRemotePath('~/')).toBe('~/')
+  })
+  it('fully quotes an absolute path (byte-identical to posixQuote)', () => {
+    expect(quoteRemotePath('/srv/x')).toBe(`'/srv/x'`)
+  })
+  it('only a leading ~ or ~/ is special — ~weird is fully quoted', () => {
+    expect(quoteRemotePath('~weird')).toBe(`'~weird'`)
+  })
+})
+
 describe('remoteTmuxCommand', () => {
   it('builds attach-or-create on the remote socket with a quoted cwd', () => {
     expect(remoteTmuxCommand({ sessionId: 'nt-x', remoteCwd: '/srv/app' })).toBe(
       `tmux -L nodeterm-rmt new-session -A -s 'nt-x' -c '/srv/app'`
+    )
+  })
+  it('tilde-expands a home-relative cwd (leaves ~/ unquoted)', () => {
+    expect(remoteTmuxCommand({ sessionId: 'nt-x', remoteCwd: '~/project' })).toBe(
+      `tmux -L nodeterm-rmt new-session -A -s 'nt-x' -c ~/'project'`
     )
   })
   it('appends a quoted program + args when given', () => {

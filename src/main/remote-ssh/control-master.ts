@@ -1,6 +1,6 @@
 // Pure ssh/tmux argv + remote-command builders for SSH projects. No electron/node-pty imports
 // — unit-testable in isolation. The electron/spawn wiring lives in ssh-project.ts + pty-manager.
-import { posixQuote, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
@@ -68,7 +68,7 @@ export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[
   return childArgs(conn, controlPath, 'command -v tmux')
 }
 export function listDirArgs(conn: SshConnection, controlPath: string, path: string): string[] {
-  return childArgs(conn, controlPath, `ls -1Ap ${posixQuote(path)}`)
+  return childArgs(conn, controlPath, `ls -1Ap ${quoteRemotePath(path)}`)
 }
 
 /** The remote PTY program is `ssh <childArgs> host -t '<remoteTmuxCommand>'`. */

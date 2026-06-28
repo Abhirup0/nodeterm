@@ -54,11 +54,25 @@ describe('remoteTmuxHasSessionArgs', () => {
 })
 
 describe('listDirArgs', () => {
-  it('lists directory entries of a quoted path', () => {
+  it('lists directory entries of a quoted absolute path', () => {
     expect(listDirArgs(conn, '/s.sock', '/srv/app')).toEqual([
       '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
       'deploy@h.example.com',
       `ls -1Ap '/srv/app'`
+    ])
+  })
+  it('leaves a bare ~ unquoted so the remote shell expands it', () => {
+    expect(listDirArgs(conn, '/s.sock', '~')).toEqual([
+      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      'deploy@h.example.com',
+      `ls -1Ap ~`
+    ])
+  })
+  it('tilde-expands a home-relative path, quoting the remainder', () => {
+    expect(listDirArgs(conn, '/s.sock', '~/my dir')).toEqual([
+      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      'deploy@h.example.com',
+      `ls -1Ap ~/'my dir'`
     ])
   })
 })

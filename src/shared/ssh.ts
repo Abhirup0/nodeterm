@@ -67,6 +67,17 @@ export function posixQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
+/**
+ * Quote a remote path as one shell token, but leave a leading `~` / `~/` UNQUOTED so the remote
+ * shell tilde-expands it (single quotes suppress `~` expansion). The remainder stays quoted, so a
+ * directory name can never inject shell. `~` alone → `~`; `~/a b` → `~/'a b'`; `/srv/x` → `'/srv/x'`.
+ */
+export function quoteRemotePath(p: string): string {
+  if (p === '~') return '~'
+  if (p.startsWith('~/')) return p.length > 2 ? `~/${posixQuote(p.slice(2))}` : '~/'
+  return posixQuote(p)
+}
+
 /** Build the remote shell command that attaches-or-creates this node's remote tmux session. */
 export function remoteTmuxCommand(opts: {
   sessionId: string
@@ -85,7 +96,7 @@ export function remoteTmuxCommand(opts: {
     '-s',
     posixQuote(opts.sessionId),
     '-c',
-    posixQuote(opts.remoteCwd)
+    quoteRemotePath(opts.remoteCwd)
   ]
   if (opts.program) {
     parts.push(posixQuote(opts.program))
