@@ -4,6 +4,8 @@ interface WelcomeScreenProps {
   onNewProject: () => void
   onOpenFolder: () => void
   onCloneRepo: () => void
+  /** Open the "Connect over SSH…" flow to create a project hosted on a remote server. */
+  onConnectSsh: () => void
   /**
    * When provided, the screen is dismissable (opened on demand via "+", over existing projects)
    * — adds a close button, Escape, and click-outside. Omitted for the permanent no-projects screen.
@@ -12,7 +14,13 @@ interface WelcomeScreenProps {
 }
 
 /** Start screen with quick actions — shown when there are no projects, or on demand via "+". */
-export function WelcomeScreen({ onNewProject, onOpenFolder, onCloneRepo, onClose }: WelcomeScreenProps) {
+export function WelcomeScreen({
+  onNewProject,
+  onOpenFolder,
+  onCloneRepo,
+  onConnectSsh,
+  onClose
+}: WelcomeScreenProps) {
   useEffect(() => {
     if (!onClose) return
     const onKey = (e: KeyboardEvent) => {
@@ -94,6 +102,14 @@ export function WelcomeScreen({ onNewProject, onOpenFolder, onCloneRepo, onClose
             <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" />
           </svg>
           <span>Clone repo…</span>
+        </button>
+
+        <button className="welcome__card" onClick={onConnectSsh}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <path d="M7 10l3 2-3 2M13 14h4" />
+          </svg>
+          <span>Connect over SSH…</span>
         </button>
       </div>
     </div>

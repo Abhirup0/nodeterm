@@ -66,6 +66,7 @@ import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
+import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { opensInEditor } from '../lib/openTarget'
@@ -92,8 +93,10 @@ import { useSettings } from '../state/settings'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
+import { useSshConn } from '../state/sshConn'
 import { requireProOr } from '../state/upgradeGate'
 import type { SshServer } from '@shared/ssh'
+import type { SshProjectStatus } from '@shared/types'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -172,6 +175,10 @@ export function Canvas() {
   // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
   const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
+  // "Connect over SSH…" project-creation dialog (from the Welcome screen).
+  const [sshDialogOpen, setSshDialogOpen] = useState(false)
+  // Live SSH ControlMaster status per project id (drives the thin connection banner).
+  const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
   const [pendingPeer, setPendingPeer] = useState<{ sas: string | null } | null>(null)
   const [confirm, setConfirm] = useState<{
@@ -215,6 +222,10 @@ export function Canvas() {
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const hasProjects = useProjects((s) => s.projects.length > 0)
+  // The active project's SSH server (if it's an SSH project) — drives the connection banner.
+  const activeSshServer = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
+  )
   nodesRef.current = nodes
 
   const nodeTypes = useMemo(
@@ -489,6 +500,17 @@ export function Canvas() {
     if (!activeProjectId) return
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
+    // SSH project: (re)open its ControlMaster and record the controlPath so this project's
+    // terminal nodes can run over it. Idempotent in main (a live master is reused), so a tab
+    // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
+    if (project.ssh) {
+      window.nodeTerminal.sshProject
+        .connect(project.id, project.ssh.server)
+        .then(({ controlPath }) => useSshConn.getState().setControlPath(project.id, controlPath))
+        .catch(() => {
+          /* status surfaced via onStatus → the connection banner */
+        })
+    }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
@@ -854,9 +876,12 @@ export function Canvas() {
 
   const addTerminal = useCallback(
     (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
-      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      const project = useProjects.getState().getProject(activeProjectId)
+      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
       setNodes((ns) => {
-        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand)
+        // In an SSH project the node is stamped remote (runs over the project's master); the
+        // factory takes the project's ssh and roots the terminal at its remoteCwd.
+        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand, project?.ssh)
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
@@ -1021,9 +1046,10 @@ export function Canvas() {
 
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
-      const cwd = cwdForNewNodeIn(groupId) ?? useProjects.getState().getProject(activeProjectId)?.cwd
+      const project = useProjects.getState().getProject(activeProjectId)
+      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
       setNodes((ns) => {
-        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter())
+        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter(), undefined, project?.ssh)
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
@@ -2144,6 +2170,27 @@ export function Canvas() {
     void useSshServers.getState().hydrate()
   }, [])
 
+  // Track SSH project connection status for the thin connection banner (keyed by project id).
+  useEffect(() => {
+    return window.nodeTerminal.sshProject.onStatus((e) =>
+      setSshStatus((prev) => ({ ...prev, [e.projectId]: e.status }))
+    )
+  }, [])
+
+  // Create an SSH project from the dialog: commit the current canvas, add + switch to the new
+  // project (its master is opened by the active-project effect on switch), persist.
+  const createSshProject = useCallback(
+    (input: { server: SshServer; remoteCwd: string; label: string }) => {
+      commitActiveToStore()
+      const project = useProjects
+        .getState()
+        .addProject(input.label, undefined, { server: input.server, remoteCwd: input.remoteCwd })
+      useProjects.getState().setActive(project.id)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   const addProject = useCallback(() => {
     commitActiveToStore()
     const project = useProjects.getState().addProject()
@@ -2191,10 +2238,17 @@ export function Canvas() {
       if (id === store.activeProjectId) commitActiveToStore()
       // End the tmux sessions of every terminal in the deleted project, and drop their
       // persisted agent status (node unmount no longer removes it).
-      store.getProject(id)?.nodes.forEach((n) => {
+      const project = store.getProject(id)
+      project?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
         useAgentStatus.getState().remove(n.id)
       })
+      // SSH project: tear down its ControlMaster (after the terminals' remote tmux sessions are
+      // ended above) and drop the cached controlPath.
+      if (project?.ssh) {
+        void window.nodeTerminal.sshProject.disconnect(id)
+        useSshConn.getState().clear(id)
+      }
       store.deleteProject(id)
       void writeDisk()
     },
@@ -2310,6 +2364,47 @@ export function Canvas() {
 
       <div className="top-banners">
         <AnnouncementBanner />
+        {activeSshServer &&
+          sshStatus[activeProjectId] &&
+          sshStatus[activeProjectId] !== 'connected' &&
+          (() => {
+            const st = sshStatus[activeProjectId]
+            const isError = st === 'error' || st === 'disconnected'
+            const text =
+              st === 'connecting'
+                ? `Connecting to ${activeSshServer.label}…`
+                : st === 'reconnecting'
+                  ? `Reconnecting to ${activeSshServer.label}…`
+                  : st === 'disconnected'
+                    ? `Disconnected from ${activeSshServer.label}`
+                    : `SSH connection error — ${activeSshServer.label}`
+            return (
+              <div
+                title={`${activeSshServer.user}@${activeSshServer.host}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 12px',
+                  fontSize: 12,
+                  color: 'var(--text)',
+                  background: isError ? 'rgba(120,40,40,0.92)' : 'rgba(90,72,30,0.92)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: isError ? '#ff6b6b' : '#e0b341'
+                  }}
+                />
+                {text}
+              </div>
+            )
+          })()}
       </div>
       <UpdateCard />
 
@@ -2430,6 +2525,10 @@ export function Canvas() {
               setWelcomeOpen(false)
               void cloneRepo()
             }}
+            onConnectSsh={() => {
+              setWelcomeOpen(false)
+              setSshDialogOpen(true)
+            }}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
           />
         )}
@@ -2442,6 +2541,17 @@ export function Canvas() {
       </div>
 
       {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}
+
+      {sshDialogOpen && (
+        <SshProjectDialog
+          onCreate={createSshProject}
+          onManage={() => {
+            setSettingsSection('ssh')
+            setSettingsOpen(true)
+          }}
+          onClose={() => setSshDialogOpen(false)}
+        />
+      )}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />

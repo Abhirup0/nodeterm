@@ -26,6 +26,8 @@ import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
+import { useProjects } from '../state/projects'
+import { useSshConn } from '../state/sshConn'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, resumeCommand, agentConfig, type AgentId } from '@shared/agents/config'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
@@ -33,6 +35,41 @@ import { buildSshArgs, type SshConnection } from '@shared/ssh'
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
   return p.replace(/([ \t"'`\\()&;|<>$!*?[\]{}#~])/g, '\\$1')
+}
+
+/**
+ * Resolve the `sshRemote` create option for an SSH-project terminal: the owning project's live
+ * ControlMaster `controlPath` (set by Canvas's active-project effect on connect) plus the inline
+ * connection and remote cwd. The controlPath may not be ready yet on a cold app load (child
+ * effects run before the parent's connect resolves), so wait for it — briefly — before spawning.
+ * Returns undefined if no master appears within the window (connection failed); the caller then
+ * degrades gracefully instead of spawning a local tmux in a non-existent remote directory.
+ */
+async function resolveSshRemote(
+  conn: SshConnection,
+  cwd: string | undefined
+): Promise<{ controlPath: string; conn: SshConnection; remoteCwd: string } | undefined> {
+  const projectId = useProjects.getState().activeProjectId
+  let controlPath = useSshConn.getState().getControlPath(projectId)
+  if (!controlPath) {
+    controlPath = await new Promise<string | undefined>((resolve) => {
+      let settled = false
+      const finish = (v?: string) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        unsub()
+        resolve(v)
+      }
+      const unsub = useSshConn.subscribe((s) => {
+        const v = s.byProject[projectId]
+        if (v) finish(v)
+      })
+      const timer = setTimeout(() => finish(useSshConn.getState().getControlPath(projectId)), 20000)
+    })
+  }
+  if (!controlPath) return undefined
+  return { controlPath, conn, remoteCwd: cwd || '~' }
 }
 
 /**
@@ -234,21 +271,38 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
 
     const ssh = data.ssh as SshConnection | undefined
+    // An SSH-project node (`sshRemoteTmux`) runs its tmux on the remote host over the project's
+    // ControlMaster (`sshRemote`); a plain ssh-terminal node (createSshTerminalNode) instead runs
+    // `ssh` as a LOCAL pty program. Only the latter sets shell:'ssh' + buildSshArgs.
+    const sshRemoteTmux = !!data.sshRemoteTmux
+    const localSsh = !!ssh && !sshRemoteTmux
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
     const scrollbackPromise = window.nodeTerminal.pty.readScrollback(id).catch(() => '')
-    transport
-      .create({
-        cols: term.cols,
-        rows: term.rows,
-        shell: ssh ? 'ssh' : data.shell,
-        shellArgs: ssh ? buildSshArgs(ssh) : undefined,
-        cwd: data.cwd,
-        persistKey: id,
-        agentId: data.agentId
-      })
-      .then(async ({ sessionId: sid, fresh }) => {
+    void (async () => {
+      // SSH-project terminal: the project's live ControlMaster controlPath is established by
+      // Canvas's active-project effect. On a cold app load child effects run before that parent
+      // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
+      // active project's React Flow, so the active project is its owner.
+      const sshRemote =
+        sshRemoteTmux && ssh
+          ? await resolveSshRemote(ssh, data.cwd as string | undefined)
+          : undefined
+      if (disposed) return
+      transport
+        .create({
+          cols: term.cols,
+          rows: term.rows,
+          shell: localSsh ? 'ssh' : data.shell,
+          shellArgs: localSsh ? buildSshArgs(ssh) : undefined,
+          // Don't spawn a LOCAL tmux in a non-existent remote cwd if the master never came up.
+          cwd: sshRemoteTmux && !sshRemote ? undefined : data.cwd,
+          persistKey: id,
+          agentId: data.agentId,
+          sshRemote
+        })
+        .then(async ({ sessionId: sid, fresh }) => {
         if (disposed) {
           transport.kill(sid)
           return
@@ -312,6 +366,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           if (cmd) transport.write(sid, `${cmd}\n`)
         }
       })
+    })()
 
     const resize = () => {
       try {
