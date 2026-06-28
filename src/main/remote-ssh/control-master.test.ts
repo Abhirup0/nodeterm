@@ -4,6 +4,8 @@ import {
   masterArgs,
   childArgs,
   remoteTmuxHasSessionArgs,
+  remoteCapturePaneArgs,
+  remoteTmuxPtyArgs,
   listDirArgs,
   RMT_TMUX_SOCKET
 } from './control-master'
@@ -50,6 +52,26 @@ describe('remoteTmuxHasSessionArgs', () => {
       'deploy@h.example.com',
       `tmux -L ${RMT_TMUX_SOCKET} has-session -t nt-x`
     ])
+  })
+})
+
+describe('remoteCapturePaneArgs', () => {
+  it('captures the whole scrollback (-S -) when full', () => {
+    const args = remoteCapturePaneArgs(conn, '/s.sock', 'nt-x', true)
+    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t nt-x -S -`)
+  })
+  it('captures the recent ~200 lines (-S -200) when not full', () => {
+    const args = remoteCapturePaneArgs(conn, '/s.sock', 'nt-x', false)
+    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t nt-x -S -200`)
+  })
+})
+
+describe('remoteTmuxPtyArgs', () => {
+  it('runs the remote tmux command as a forced-TTY child (-t then childArgs)', () => {
+    const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app')
+    expect(args[0]).toBe('-t')
+    const cmd = args[args.length - 1]
+    expect(args.slice(1)).toEqual(childArgs(conn, '/s.sock', cmd))
   })
 })
 

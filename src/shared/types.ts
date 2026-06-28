@@ -318,6 +318,13 @@ export interface SshProjectApi {
   connect(projectId: string, server: import('./ssh').SshConnection): Promise<{ controlPath: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
+  /**
+   * End the given terminal nodes' REMOTE tmux sessions over the project's live master.
+   * Authoritative teardown on project delete: works regardless of whether the nodes are
+   * mounted, and must be awaited BEFORE disconnect (which kills the master). `nodeIds` are
+   * raw node ids; main maps them to `nt-<id>` session names.
+   */
+  killSessions(projectId: string, nodeIds: string[]): Promise<void>
   /** List remote sub-directories of `path` (default ~). */
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
   onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void

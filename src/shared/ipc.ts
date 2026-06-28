@@ -66,6 +66,7 @@ export const IPC = {
   sshImport: 'ssh:import-candidates',
   sshConnectProject: 'ssh:connect-project',
   sshDisconnectProject: 'ssh:disconnect-project',
+  sshKillSessions: 'ssh:kill-sessions',
   sshListDir: 'ssh:list-dir',
   sshProjectStatus: 'ssh-project:status',
   gitStatus: 'git:status',

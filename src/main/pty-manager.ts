@@ -186,7 +186,8 @@ export class PtyManager {
   registerIpc(): void {
     ipcMain.handle(
       IPC.ptyCreate,
-      (event, options: PtyCreateOptions): PtyCreateResult => this.create(event.sender.id, options)
+      (event, options: PtyCreateOptions): Promise<PtyCreateResult> =>
+        this.create(event.sender.id, options)
     )
     ipcMain.on(IPC.ptyWrite, (_event, sessionId: string, data: string) =>
       this.write(sessionId, data)
@@ -207,7 +208,10 @@ export class PtyManager {
     )
   }
 
-  private create(webContentsId: number, options: PtyCreateOptions): PtyCreateResult {
+  private async create(
+    webContentsId: number,
+    options: PtyCreateOptions
+  ): Promise<PtyCreateResult> {
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -215,9 +219,15 @@ export class PtyManager {
     const tmuxBacked =
       !!this.tmuxPath && this.getSettings().tmuxEnabled && !!options.persistKey
     // For an SSH-project node, "fresh" is decided by the REMOTE tmux server (over the project's
-    // ControlMaster), not the local one. Falls through to the local tmux/plain logic otherwise.
+    // ControlMaster), not the local one. The remote `has-session` is a full network round-trip,
+    // so it MUST be async (`runAsync`) — a synchronous probe here would freeze every window/IPC
+    // for its duration. Falls through to the local tmux/plain logic otherwise (a local socket
+    // probe is cheap and stays synchronous).
     const fresh = options.sshRemote
-      ? !this.remoteSessionExists(options.sshRemote, sessionName(options.persistKey as string))
+      ? !(await this.remoteSessionExists(
+          options.sshRemote,
+          sessionName(options.persistKey as string)
+        ))
       : tmuxBacked
         ? !this.tmuxSessionExists(options.persistKey as string)
         : true
@@ -225,17 +235,16 @@ export class PtyManager {
     return { sessionId, fresh }
   }
 
-  /** Does the node's remote tmux session exist (over the project's ControlMaster)? */
-  private remoteSessionExists(
+  /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
+   *  network round-trip never blocks the main event loop. */
+  private async remoteSessionExists(
     sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
     sessionId: string
-  ): boolean {
+  ): Promise<boolean> {
     const ssh = findSsh()
     if (!ssh) return false
     try {
-      execFileSync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId), {
-        stdio: 'ignore'
-      })
+      await runAsync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId))
       return true
     } catch {
       return false
@@ -415,7 +424,11 @@ export class PtyManager {
     // tmux-backed sessions snapshot their scrollback to disk periodically so a machine reboot
     // (which kills the tmux server) can still replay recent output on cold restart. A remote
     // (ssh-project) node is persisted too — the snapshot is captured from the REMOTE tmux.
-    const remote = options.sshRemote && options.persistKey ? options.sshRemote : undefined
+    // Mark the session remote ONLY when the remote branch above actually ran (`remoteSsh` resolved).
+    // If ssh is missing, the node fell through to a LOCAL tmux/plain spawn, so it must NOT be
+    // marked remote — otherwise destroy/capture would target a remote tmux that was never spawned
+    // and silently leak the local session.
+    const remote = options.sshRemote && options.persistKey && remoteSsh ? options.sshRemote : undefined
     const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
     const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
     const session: Session = {

@@ -87,6 +87,8 @@ const api: NodeTerminalApi = {
   sshProject: {
     connect: (projectId, conn) => ipcRenderer.invoke(IPC.sshConnectProject, projectId, conn),
     disconnect: (projectId) => ipcRenderer.invoke(IPC.sshDisconnectProject, projectId),
+    killSessions: (projectId, nodeIds) =>
+      ipcRenderer.invoke(IPC.sshKillSessions, projectId, nodeIds),
     listDir: (projectId, dir) => ipcRenderer.invoke(IPC.sshListDir, projectId, dir),
     onStatus: (cb) => {
       const h = (_e: unknown, e: unknown) => cb(e as never)

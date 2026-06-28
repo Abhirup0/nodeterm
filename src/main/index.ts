@@ -54,6 +54,8 @@ const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
+// Set once the app window is ready; used by the quit hooks to tear down SSH-project masters.
+let sshProjectManager: ReturnType<typeof initSshProject> | undefined
 
 // The single app window — kept at module scope so IPC handlers (e.g. notifications)
 // can check focus and route clicks back to the renderer.
@@ -351,7 +353,7 @@ app.whenReady().then(async () => {
   initLicense(win)
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
-  initSshProject(win)
+  sshProjectManager = initSshProject(win)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -360,7 +362,11 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   ptyManager.killAll()
+  sshProjectManager?.disconnectAll()
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => ptyManager.killAll())
+app.on('before-quit', () => {
+  ptyManager.killAll()
+  sshProjectManager?.disconnectAll()
+})

@@ -10,8 +10,10 @@ import {
   masterArgs,
   listDirArgs,
   exitMasterArgs,
-  checkMasterArgs
+  checkMasterArgs,
+  remoteTmuxKillArgs
 } from './control-master'
+import { sessionName } from '../tmux-naming'
 
 interface Runners {
   userDataDir: string
@@ -64,7 +66,16 @@ export class SshProjectManager {
 
   async connect(projectId: string, conn: SshConnection): Promise<{ controlPath: string }> {
     const existing = this.conns.get(projectId)
-    if (existing) return { controlPath: existing.controlPath }
+    if (existing) {
+      // Verify the cached master is still alive before reusing it — a dropped/timed-out master
+      // would otherwise leave us reusing a dead socket. If `-O check` fails, surface
+      // `reconnecting`, drop the stale entry, and fall through to re-establish.
+      const { code } = await this.r.run(checkMasterArgs(existing.conn, existing.controlPath))
+      if (code === 0) return { controlPath: existing.controlPath }
+      this.r.onStatus({ projectId, status: 'reconnecting' })
+      existing.master.kill()
+      this.conns.delete(projectId)
+    }
     const controlPath = controlPathFor(this.r.userDataDir, projectId)
     // Best-effort: the socket dir lives under <userData> in production. If it can't be made,
     // the master/`-O check` loop below fails and we report an error status anyway.
@@ -97,6 +108,26 @@ export class SshProjectManager {
     return { path: dir, dirs: parseLsDirs(stdout) }
   }
 
+  /**
+   * Authoritatively end the given nodes' REMOTE tmux sessions over the project's live master.
+   * Called on project delete BEFORE disconnect, so the remote `nt-<id>` sessions are killed
+   * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
+   * are raw node ids; we map each to its `nt-<id>` session name (the same name `spawnSession` /
+   * `remoteTmuxHasSessionArgs` use). Best-effort per id — a missing session is ignored.
+   */
+  async killSessions(projectId: string, nodeIds: string[]): Promise<void> {
+    const c = this.conns.get(projectId)
+    if (!c) return
+    await Promise.all(
+      nodeIds.map((id) =>
+        this.r.run(remoteTmuxKillArgs(c.conn, c.controlPath, sessionName(id))).then(
+          () => undefined,
+          () => undefined
+        )
+      )
+    )
+  }
+
   disconnect(projectId: string): void {
     const c = this.conns.get(projectId)
     if (!c) return
@@ -104,6 +135,11 @@ export class SshProjectManager {
     c.master.kill()
     this.conns.delete(projectId)
     this.r.onStatus({ projectId, status: 'disconnected' })
+  }
+
+  /** Tear down every live master (on app quit) so no `-N` master ssh child is orphaned. */
+  disconnectAll(): void {
+    for (const projectId of [...this.conns.keys()]) this.disconnect(projectId)
   }
 }
 
@@ -126,6 +162,9 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
     mgr.connect(projectId, conn)
   )
   ipcMain.handle(IPC.sshDisconnectProject, (_e, projectId: string) => mgr.disconnect(projectId))
+  ipcMain.handle(IPC.sshKillSessions, (_e, projectId: string, nodeIds: string[]) =>
+    mgr.killSessions(projectId, nodeIds)
+  )
   ipcMain.handle(IPC.sshListDir, (_e, projectId: string, dir: string) => mgr.listDir(projectId, dir))
   return mgr
 }

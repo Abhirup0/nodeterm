@@ -2243,10 +2243,20 @@ export function Canvas() {
         if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
         useAgentStatus.getState().remove(n.id)
       })
-      // SSH project: tear down its ControlMaster (after the terminals' remote tmux sessions are
-      // ended above) and drop the cached controlPath.
+      // SSH project: the per-node `transport.destroy` above only ends the REMOTE session for
+      // the (mounted) ACTIVE project's nodes — a non-active project has no live local sessions,
+      // so its remote `nt-<id>` sessions would leak. Drive the remote teardown authoritatively
+      // from main, keyed on the project binding, and sequence it BEFORE disconnect (which kills
+      // the master): kill every terminal node's remote session over the still-alive master, then
+      // tear the master down. Drop the cached controlPath immediately.
       if (project?.ssh) {
-        void window.nodeTerminal.sshProject.disconnect(id)
+        const nodeIds = project.nodes
+          .filter((n) => (n.kind ?? 'terminal') === 'terminal')
+          .map((n) => n.id)
+        void window.nodeTerminal.sshProject
+          .killSessions(id, nodeIds)
+          .catch(() => {})
+          .finally(() => void window.nodeTerminal.sshProject.disconnect(id))
         useSshConn.getState().clear(id)
       }
       store.deleteProject(id)
