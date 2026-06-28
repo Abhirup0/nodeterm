@@ -11,7 +11,7 @@ interface ProjectsState {
 
   setActive(id: string): void
   /** Adds a new project and returns it (caller commits the current canvas first). */
-  addProject(name?: string, cwd?: string): Project
+  addProject(name?: string, cwd?: string, ssh?: Project['ssh']): Project
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
   /** Writes the serialized canvas (nodes + viewport + bridge links) back into a project. */
@@ -84,8 +84,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     set({ activeProjectId: id })
   },
 
-  addProject(name, cwd) {
-    const project = createProject(get().projects.length, name, cwd)
+  addProject(name, cwd, ssh) {
+    const project = createProject(get().projects.length, name, cwd, ssh)
     set((s) => ({ projects: [...s.projects, project] }))
     return project
   },

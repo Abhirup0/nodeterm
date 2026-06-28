@@ -62,6 +62,8 @@ export interface CanvasNodeState {
   agentId?: AgentId
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
+  /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
+  sshRemoteTmux?: boolean
   // sticky-only
   text?: string
   // dino-only: best score reached in the T-Rex Runner game.

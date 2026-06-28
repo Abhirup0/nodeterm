@@ -65,6 +65,11 @@ export interface NodeData {
    * Unlike `remote` (relay), this IS persisted — the node auto-reconnects on relaunch.
    */
   ssh?: import('@shared/ssh').SshConnection
+  /**
+   * When true (SSH-project terminals), this node runs in REMOTE tmux on the host in `ssh`
+   * (LocalTransport passes `sshRemote` to the PTY), rather than plain `ssh`-on-local-PTY. Persisted.
+   */
+  sshRemoteTmux?: boolean
   [key: string]: unknown
 }
 
@@ -91,12 +96,17 @@ function placeAt(center: { x: number; y: number } | undefined, index: number, w:
   return center ? { x: center.x - w / 2, y: center.y - h / 2 } : staggeredPosition(index)
 }
 
-/** Creates a new terminal node. `cwd` comes from the active project's default folder. */
+/**
+ * Creates a new terminal node. `cwd` comes from the active project's default folder. When `ssh`
+ * (the active SSH project's binding) is given, the node runs in REMOTE tmux on that host: its
+ * `data.ssh`/`data.sshRemoteTmux`/`data.cwd` are stamped from the binding instead of `cwd`.
+ */
 export function createTerminalNode(
   index: number,
   cwd?: string,
   center?: { x: number; y: number },
-  initialCommand?: string
+  initialCommand?: string,
+  ssh?: Project['ssh']
 ): CanvasNode {
   return {
     id: nextId('term'),
@@ -110,8 +120,9 @@ export function createTerminalNode(
       color: NODE_COLORS[index % NODE_COLORS.length],
       group: null,
       tags: [],
-      cwd,
-      initialCommand
+      cwd: ssh ? ssh.remoteCwd : cwd,
+      initialCommand,
+      ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
     }
   }
 }
@@ -212,7 +223,8 @@ export function createAgentNode(
   index: number,
   cwd?: string,
   center?: { x: number; y: number },
-  initialPrompt?: string
+  initialPrompt?: string,
+  ssh?: Project['ssh']
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
@@ -232,8 +244,9 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      cwd,
-      initialCommand
+      cwd: ssh ? ssh.remoteCwd : cwd,
+      initialCommand,
+      ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
     }
   }
 }
@@ -354,13 +367,19 @@ export function createGroupNode(
   }
 }
 
-/** Creates a new project. */
-export function createProject(index: number, name?: string, cwd?: string): Project {
+/** Creates a new project. When `ssh` is set, this is an SSH project (its terminals run remote). */
+export function createProject(
+  index: number,
+  name?: string,
+  cwd?: string,
+  ssh?: Project['ssh']
+): Project {
   return {
     id: nextId('project'),
     name: name ?? `Project ${index + 1}`,
     color: NODE_COLORS[index % NODE_COLORS.length],
     cwd,
+    ...(ssh ? { ssh } : {}),
     viewport: { x: 0, y: 0, zoom: 1 },
     nodes: []
   }
@@ -585,6 +604,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         highScore: n.highScore,
         agentId,
         ssh: n.ssh,
+        sshRemoteTmux: n.sshRemoteTmux,
         worktree: n.worktree
       }
     }
@@ -638,6 +658,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         highScore: n.data.highScore,
         agentId: n.data.agentId,
         ssh: n.data.ssh,
+        sshRemoteTmux: n.data.sshRemoteTmux,
         worktree: n.data.worktree
       }
     })
