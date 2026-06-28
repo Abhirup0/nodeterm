@@ -5,7 +5,7 @@ import { app } from 'electron'
 
 // On a machine reboot the tmux server dies, so the live scrollback is lost. We persist a
 // byte-capped snapshot of each terminal's recent output to disk while it's running and replay
-// it into xterm on a cold restart, so the user sees where they left off (REF-style cold
+// it into xterm on a cold restart, so the user sees where they left off (a cold
 // restore). Warm reattach (app restart, tmux alive) ignores the snapshot — tmux redraws.
 
 const DIR_NAME = 'terminal-scrollback'
