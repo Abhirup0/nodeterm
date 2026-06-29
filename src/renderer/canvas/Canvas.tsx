@@ -1582,7 +1582,14 @@ export function Canvas() {
     (node: Node) => {
       const w = node.measured?.width ?? (node.width as number) ?? 0
       const h = node.measured?.height ?? (node.height as number) ?? 0
-      setCenter(node.position.x + w / 2, node.position.y + h / 2, {
+      // A grouped node's position is relative to its parent group frame — convert to absolute
+      // before centering, or focusing a session inside a group jumps to the wrong spot.
+      const parent = node.parentId
+        ? nodesRef.current.find((p) => p.id === node.parentId)
+        : undefined
+      const x = node.position.x + (parent?.position.x ?? 0)
+      const y = node.position.y + (parent?.position.y ?? 0)
+      setCenter(x + w / 2, y + h / 2, {
         zoom: Math.max(getZoom(), 1),
         duration: 300
       })
