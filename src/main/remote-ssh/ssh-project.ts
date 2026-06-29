@@ -223,7 +223,12 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
     spawnMaster: (args) => spawn(ssh, args, { stdio: 'ignore' }),
     run: (args, stdin) =>
       new Promise((resolve) => {
-        const child = execFile(ssh, args, { timeout: 15000 }, (err, stdout) =>
+        // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
+        // RemoteFile; the default 1 MB maxBuffer would kill the child and silently break the
+        // remote context meter / subagent transcript / content search for large transcripts.
+        // (cf. pty-manager tmux capture 50 MB, git-service 20–50 MB.) Just a ceiling — safe for
+        // the small Phase-1/2a control commands too.
+        const child = execFile(ssh, args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
           resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
         )
         if (stdin !== undefined) {

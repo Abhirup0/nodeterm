@@ -275,7 +275,13 @@ app.whenReady().then(async () => {
   const remoteTranscriptBySession = new Map<string, RemoteFileRef>()
   // toolUseIds whose remote subagent file resolution was cancelled (PostToolUse / node close
   // arrived before the file appeared) — checked by the async resolver to avoid a late track.
+  // Bounded by `remoteSubagentResolving`: a cancel flag is only added (and only matters) while a
+  // resolver is in flight, and the resolver clears BOTH sets in its `finally` once it settles, so
+  // neither set can accumulate dead ids over the app lifetime.
   const remoteSubagentCancel = new Set<string>()
+  // toolUseIds with an in-flight `resolveRemoteSubagentFile` poll. PostToolUse / node-close only
+  // raise a cancel flag while resolution is still running (otherwise the add would leak).
+  const remoteSubagentResolving = new Set<string>()
 
   // Resolve a remote subagent's transcript FILE (`agent-<id>.jsonl`) by matching the spawning
   // toolUseId inside its sibling `.meta.json` — the remote analogue of the local subagent tail's
@@ -417,19 +423,27 @@ app.whenReady().then(async () => {
         const toolUseId = p.tool_use_id
         if (p.hook_event_name === 'PreToolUse') {
           remoteSubagentCancel.delete(toolUseId)
+          remoteSubagentResolving.add(toolUseId)
           // Resolve the remote subagent file asynchronously (it appears shortly after), then track.
-          void resolveRemoteSubagentFile(rt, transcriptPath, toolUseId).then((file) => {
-            if (file && !remoteSubagentCancel.has(toolUseId)) {
-              remoteSubagentTail.track(toolUseId, { conn: rt.conn, controlPath: rt.controlPath, path: file })
-            }
-          })
+          // The `finally` always clears both bookkeeping sets so they can't accumulate dead ids.
+          void resolveRemoteSubagentFile(rt, transcriptPath, toolUseId)
+            .then((file) => {
+              if (file && !remoteSubagentCancel.has(toolUseId)) {
+                remoteSubagentTail.track(toolUseId, { conn: rt.conn, controlPath: rt.controlPath, path: file })
+              }
+            })
+            .finally(() => {
+              remoteSubagentResolving.delete(toolUseId)
+              remoteSubagentCancel.delete(toolUseId)
+            })
           if (nodeId) {
             const set = nodeSubagents.get(nodeId) ?? new Set<string>()
             set.add(toolUseId)
             nodeSubagents.set(nodeId, set)
           }
         } else if (p.hook_event_name === 'PostToolUse') {
-          remoteSubagentCancel.add(toolUseId)
+          // Only cancel an in-flight resolve; if it already settled, adding here would leak.
+          if (remoteSubagentResolving.has(toolUseId)) remoteSubagentCancel.add(toolUseId)
           remoteSubagentTail.untrack(toolUseId)
           if (nodeId) nodeSubagents.get(nodeId)?.delete(toolUseId)
         }
@@ -476,7 +490,8 @@ app.whenReady().then(async () => {
     if (subs) {
       for (const toolUseId of subs) {
         subagentTail.finish(toolUseId)
-        remoteSubagentCancel.add(toolUseId)
+        // Only cancel an in-flight resolve; if it already settled, adding here would leak.
+        if (remoteSubagentResolving.has(toolUseId)) remoteSubagentCancel.add(toolUseId)
         remoteSubagentTail.untrack(toolUseId)
       }
       nodeSubagents.delete(nodeId)
