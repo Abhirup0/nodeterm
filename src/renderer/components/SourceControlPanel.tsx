@@ -541,6 +541,7 @@ export function SourceControlPanel({
         <ContextMenu
           x={moreMenu.x}
           y={moreMenu.y}
+          zIndex={80}
           onClose={() => setMoreMenu(null)}
           items={[
             { label: 'Fetch', onClick: () => void act(() => git.fetch(cwd!)) },
@@ -582,6 +583,7 @@ export function SourceControlPanel({
         <ContextMenu
           x={branchPick.x}
           y={branchPick.y}
+          zIndex={80}
           onClose={() => setBranchPick(null)}
           items={
             status.branches
