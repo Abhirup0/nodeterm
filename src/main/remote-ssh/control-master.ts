@@ -1,13 +1,25 @@
 // Pure ssh/tmux argv + remote-command builders for SSH projects. No electron/node-pty imports
 // — unit-testable in isolation. The electron/spawn wiring lives in ssh-project.ts + pty-manager.
+import os from 'os'
+import path from 'path'
+import { createHash } from 'crypto'
 import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
 
-/** Per-project ControlMaster socket path under <userData>/ssh-cm. */
-export function controlPathFor(userDataDir: string, projectId: string): string {
-  return `${userDataDir}/ssh-cm/${projectId}.sock`
+/**
+ * Per-project ControlMaster socket path. Deliberately SHORT and space-free. The macOS userData dir
+ * (`~/Library/Application Support/<app>`) cannot host the socket: it both exceeds the unix-domain
+ * socket `sun_path` limit (104 bytes — and ssh appends a ~17-char temp suffix while binding the
+ * master, pushing a ~102-char path over) AND contains a space, which ssh's `-o ControlPath=` parser
+ * rejects ("extra arguments at end of line"). Either makes the master silently fail to bind. So we
+ * hash the project id to a fixed length under a short home dir (`~/.nodeterm/ssh-cm/`) — the master
+ * socket then always binds, regardless of project id or platform userData location.
+ */
+export function controlPathFor(projectId: string): string {
+  const id = createHash('sha256').update(projectId).digest('hex').slice(0, 16)
+  return path.join(os.homedir(), '.nodeterm', 'ssh-cm', `${id}.sock`)
 }
 
 function target(conn: SshConnection): string {

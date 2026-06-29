@@ -1,3 +1,4 @@
+import os from 'os'
 import { describe, expect, it } from 'vitest'
 import {
   controlPathFor,
@@ -17,8 +18,19 @@ import {
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
 describe('controlPathFor', () => {
-  it('puts a per-project socket under <userData>/ssh-cm', () => {
-    expect(controlPathFor('/ud', 'proj1')).toBe('/ud/ssh-cm/proj1.sock')
+  it('returns a SHORT, space-free socket path under ~/.nodeterm/ssh-cm (not the long/spaced userData)', () => {
+    // Regression: macOS userData is `~/Library/Application Support/<app>` — too long for a unix
+    // socket (sun_path 104, minus ssh's ~17-char bind suffix) AND has a space ssh's `-o` rejects.
+    const cp = controlPathFor('a-fairly-long-project-id-0123456789')
+    expect(cp.startsWith(`${os.homedir()}/.nodeterm/ssh-cm/`)).toBe(true)
+    expect(cp.endsWith('.sock')).toBe(true)
+    expect(cp).not.toContain(' ')
+    // Must stay well under 104 even after ssh appends its ~17-char temp suffix while binding.
+    expect(cp.length).toBeLessThan(87)
+  })
+  it('is deterministic and distinct per project id', () => {
+    expect(controlPathFor('proj1')).toBe(controlPathFor('proj1'))
+    expect(controlPathFor('proj1')).not.toBe(controlPathFor('proj2'))
   })
 })
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SshProjectManager } from './ssh-project'
+import { controlPathFor } from './control-master'
 
 const conn = { host: 'h', user: 'u' }
 
@@ -22,7 +23,7 @@ describe('SshProjectManager', () => {
   it('connect emits connecting→connected and returns the control path', async () => {
     const { mgr, statuses } = makeMgr()
     const { controlPath } = await mgr.connect('p1', conn)
-    expect(controlPath).toBe('/ud/ssh-cm/p1.sock')
+    expect(controlPath).toBe(controlPathFor('p1'))
     expect(statuses).toEqual(['connecting', 'connected'])
   })
 
@@ -44,7 +45,7 @@ describe('SshProjectManager', () => {
     const { mgr } = makeMgr()
     expect(mgr.refForProject('p1')).toBeUndefined()
     await mgr.connect('p1', conn)
-    expect(mgr.refForProject('p1')).toEqual({ conn, controlPath: '/ud/ssh-cm/p1.sock' })
+    expect(mgr.refForProject('p1')).toEqual({ conn, controlPath: controlPathFor('p1') })
     expect(mgr.refForProject('nope')).toBeUndefined()
   })
 })

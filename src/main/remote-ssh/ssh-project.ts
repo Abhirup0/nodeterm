@@ -91,13 +91,13 @@ export class SshProjectManager {
       existing.master.kill()
       this.conns.delete(projectId)
     }
-    const controlPath = controlPathFor(this.r.userDataDir, projectId)
-    // Best-effort: the socket dir lives under <userData> in production. If it can't be made,
-    // the master/`-O check` loop below fails and we report an error status anyway.
+    const controlPath = controlPathFor(projectId)
+    // Best-effort: the socket dir is a short, space-free home dir (~/.nodeterm/ssh-cm). If it can't
+    // be made, the master/`-O check` loop below fails and we report an error status anyway.
     try {
       await fs.mkdir(path.dirname(controlPath), { recursive: true, mode: 0o700 })
     } catch {
-      // ignore — keeps the manager unit-testable with a synthetic userDataDir
+      // ignore — keeps the manager unit-testable
     }
     this.r.onStatus({ projectId, status: 'connecting' })
     const master = this.r.spawnMaster(masterArgs(conn, controlPath))
