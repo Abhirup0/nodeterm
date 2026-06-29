@@ -325,7 +325,8 @@ export interface SshProjectApi {
   /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
   connect(
     projectId: string,
-    server: import('./ssh').SshConnection
+    server: import('./ssh').SshConnection,
+    remoteCwd?: string
   ): Promise<{ controlPath: string; hookEndpointPath?: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>

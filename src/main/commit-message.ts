@@ -3,6 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import { promisify } from 'util'
 import type { GitResult, Settings } from '../shared/types'
+import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 
 const run = promisify(execFile)
 
@@ -45,6 +46,13 @@ function resolveBinary(name: string): string | null {
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
+  // SSH projects read the staged diff over the project's ControlMaster (the agent spawn stays
+  // local). Local path is untouched when no remote owns this cwd.
+  const ref = resolveGitRemote(cwd)
+  if (ref) {
+    const r = await runRemoteGit(ref, cwd, args, 50 * 1024 * 1024)
+    return r.ok ? r.out : ''
+  }
   try {
     const { stdout } = await run('git', args, { cwd, maxBuffer: 50 * 1024 * 1024 })
     return stdout

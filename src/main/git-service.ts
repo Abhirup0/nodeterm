@@ -9,6 +9,7 @@ import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
+import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 
 const run = promisify(execFile)
 
@@ -63,6 +64,14 @@ interface Exec {
 }
 
 async function git(cwd: string, args: string[]): Promise<Exec> {
+  // SSH projects route every pure-git op over the project's ControlMaster. runRemoteGit returns
+  // the same { ok, out, err } shape, so the rest of GitService is transport-agnostic. Local path
+  // (and gh ops) are untouched when no remote owns this cwd.
+  const ref = resolveGitRemote(cwd)
+  if (ref) {
+    const r = await runRemoteGit(ref, cwd, args, 20 * 1024 * 1024)
+    return { ok: r.ok, out: r.out, err: r.err }
+  }
   try {
     const { stdout } = await run('git', args, { cwd, env: GIT_ENV, maxBuffer: 20 * 1024 * 1024 })
     return { ok: true, out: stdout.replace(/\n$/, ''), err: '' }

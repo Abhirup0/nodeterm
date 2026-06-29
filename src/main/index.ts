@@ -37,6 +37,7 @@ import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
+import { setGitRemoteResolver } from './remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
@@ -533,6 +534,9 @@ app.whenReady().then(async () => {
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)
+  // Route git-service + commit-message git ops over the project's master when the cwd belongs to a
+  // connected SSH project; returns undefined for local cwds so the local path is byte-identical.
+  setGitRemoteResolver((cwd) => sshProjectManager?.refForRemoteCwd(cwd))
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
