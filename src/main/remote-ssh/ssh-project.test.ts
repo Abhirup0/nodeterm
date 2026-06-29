@@ -48,4 +48,11 @@ describe('SshProjectManager', () => {
     expect(mgr.refForProject('p1')).toEqual({ conn, controlPath: controlPathFor('p1') })
     expect(mgr.refForProject('nope')).toBeUndefined()
   })
+
+  it('refForRemoteCwd resolves {conn, controlPath} by the connected project remote cwd', async () => {
+    const { mgr } = makeMgr()
+    await mgr.connect('p1', conn, '/srv/repo')
+    expect(mgr.refForRemoteCwd('/srv/repo')).toEqual({ conn, controlPath: controlPathFor('p1') })
+    expect(mgr.refForRemoteCwd('/nope')).toBeUndefined()
+  })
 })

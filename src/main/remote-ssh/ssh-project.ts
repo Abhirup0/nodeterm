@@ -38,6 +38,9 @@ interface Conn {
   /** The remote `$HOME`, resolved at connect. Used (Phase 2b) to jail remote transcript reads
    * under `<remoteHome>/.claude/projects`. Undefined if it couldn't be resolved (fail-open). */
   remoteHome?: string
+  /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
+   * connection's master. Undefined when the project has no folder selected. */
+  remoteCwd?: string
 }
 
 /**
@@ -79,7 +82,8 @@ export class SshProjectManager {
 
   async connect(
     projectId: string,
-    conn: SshConnection
+    conn: SshConnection,
+    remoteCwd?: string
   ): Promise<{ controlPath: string; hookEndpointPath?: string }> {
     const existing = this.conns.get(projectId)
     if (existing) {
@@ -87,7 +91,11 @@ export class SshProjectManager {
       // would otherwise leave us reusing a dead socket. If `-O check` fails, surface
       // `reconnecting`, drop the stale entry, and fall through to re-establish.
       const { code } = await this.r.run(checkMasterArgs(existing.conn, existing.controlPath))
-      if (code === 0) return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath }
+      if (code === 0) {
+        // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
+        existing.remoteCwd = remoteCwd
+        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath }
+      }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
       this.conns.delete(projectId)
@@ -102,7 +110,7 @@ export class SshProjectManager {
     }
     this.r.onStatus({ projectId, status: 'connecting' })
     const master = this.r.spawnMaster(masterArgs(conn, controlPath))
-    this.conns.set(projectId, { conn, controlPath, master })
+    this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
     // Wait until the master answers `-O check`, retrying briefly.
     for (let i = 0; i < 50; i++) {
       const { code } = await this.r.run(checkMasterArgs(conn, controlPath))
@@ -188,6 +196,18 @@ export class SshProjectManager {
   refForProject(projectId: string): { conn: SshConnection; controlPath: string } | undefined {
     const c = this.conns.get(projectId)
     return c ? { conn: c.conn, controlPath: c.controlPath } : undefined
+  }
+
+  /**
+   * Resolve the `{ conn, controlPath }` ref for the connected project whose remote repo cwd matches
+   * `cwd` (Phase 4). Backs the git-remote resolver registry so remote git ops route to the right
+   * master by working directory. Returns `undefined` when no connected project owns that cwd.
+   */
+  refForRemoteCwd(cwd: string): { conn: SshConnection; controlPath: string } | undefined {
+    for (const c of this.conns.values()) {
+      if (c.remoteCwd && c.remoteCwd === cwd) return { conn: c.conn, controlPath: c.controlPath }
+    }
+    return undefined
   }
 
   /** The resolved remote `$HOME` for a connected project, if known. */
