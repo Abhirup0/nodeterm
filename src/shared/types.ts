@@ -315,7 +315,10 @@ export type SshProjectStatus = 'connecting' | 'connected' | 'disconnected' | 're
 
 export interface SshProjectApi {
   /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
-  connect(projectId: string, server: import('./ssh').SshConnection): Promise<{ controlPath: string }>
+  connect(
+    projectId: string,
+    server: import('./ssh').SshConnection
+  ): Promise<{ controlPath: string; hookEndpointPath?: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**

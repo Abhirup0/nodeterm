@@ -506,7 +506,9 @@ export function Canvas() {
     if (project.ssh) {
       window.nodeTerminal.sshProject
         .connect(project.id, project.ssh.server)
-        .then(({ controlPath }) => useSshConn.getState().setControlPath(project.id, controlPath))
+        .then(({ controlPath, hookEndpointPath }) =>
+          useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath })
+        )
         .catch(() => {
           /* status surfaced via onStatus → the connection banner */
         })
