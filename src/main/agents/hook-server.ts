@@ -45,6 +45,16 @@ class HookServer {
     return this.endpointPath
   }
 
+  getPort(): number {
+    return this.port
+  }
+  getToken(): string {
+    return this.token
+  }
+  getVersion(): string {
+    return NODETERM_HOOK_PROTOCOL_VERSION
+  }
+
   setListener(cb: (e: NormalizedAgentEvent) => void): void {
     this.listener = cb
   }

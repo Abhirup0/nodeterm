@@ -14,6 +14,7 @@ import {
 } from '../shared/types'
 import { hookServer } from './agents/hook-server'
 import {
+  remoteHookEnvArgs,
   remoteTmuxHasSessionArgs,
   remoteTmuxKillArgs,
   remoteTmuxPtyArgs,
@@ -339,9 +340,14 @@ export class PtyManager {
     // Agent hooks: each session carries the hook-server coordinates + its node/agent id.
     // Our managed hook (installed globally in each agent's config, but a no-op without these
     // vars) then posts state back to us for any agent run in this session.
-    const hookEnv = options.persistKey
-      ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude')
-      : {}
+    // A REMOTE (ssh-project) session must NOT get the LOCAL hook env: it points at
+    // 127.0.0.1:<localPort>, which is useless (and misleading) on the remote host. The remote
+    // session's hook env is injected via the remote tmux `-e` below (from the reverse-tunnel
+    // endpoint file), so leave the local hook env out entirely here.
+    const hookEnv =
+      options.persistKey && !options.sshRemote
+        ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude')
+        : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
     const settings = this.getSettings()
@@ -361,6 +367,22 @@ export class PtyManager {
     const remoteSsh = options.sshRemote && options.persistKey ? findSsh() : null
     if (options.sshRemote && options.persistKey && remoteSsh) {
       file = remoteSsh
+      // When the project's reverse tunnel + remote endpoint file are set up (Task 2), inject the
+      // remote hook env into the remote tmux session so the installed hook script POSTs state back
+      // over the unix-socket tunnel. Fail-open: no hookEndpointPath → no hook env (Phase-1 status).
+      //
+      // NODETERM_NODE_ID MUST be the RAW persistKey (the React Flow node id), NOT the tmux
+      // session name (`nt-<id>`). The local path's hookServer.buildPtyEnv(persistKey, …) sets
+      // NODETERM_NODE_ID = persistKey, and Canvas.tsx onAgentStatus keys agentStatus.byId /
+      // selection off that raw id with no `nt-` stripping. Passing the session name here would
+      // emit events under `nt-<id>` that match no node → no badge/notification/session/loop.
+      const hookExtraEnv = options.sshRemote.hookEndpointPath
+        ? remoteHookEnvArgs(
+            options.sshRemote.hookEndpointPath,
+            options.persistKey,
+            hookServer.getVersion()
+          )
+        : []
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -368,7 +390,8 @@ export class PtyManager {
         options.sshRemote.remoteCwd,
         // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
         options.shell,
-        options.shellArgs
+        options.shellArgs,
+        hookExtraEnv
       )
     } else if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
       // attach-or-create the persistent session for this node.

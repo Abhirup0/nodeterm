@@ -1,4 +1,5 @@
-import { join } from 'path'
+import { join, resolve, sep } from 'path'
+import { homedir } from 'os'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import * as fsOps from './fs-ops'
@@ -299,6 +300,18 @@ app.whenReady().then(async () => {
   hookServer.setListener((e) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)
   })
+  // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
+  // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
+  // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts
+  // always live under ~/.claude/projects. Phase 2a does NOT tail remote transcripts (that's 2b),
+  // so we jail transcript_path to that root and skip the read otherwise. Returns the path only
+  // when it resolves under the projects root.
+  const TRANSCRIPT_ROOT = join(homedir(), '.claude', 'projects')
+  const safeTranscriptPath = (tp: string | undefined): string | undefined => {
+    if (!tp) return undefined
+    const abs = resolve(tp)
+    return abs === TRANSCRIPT_ROOT || abs.startsWith(TRANSCRIPT_ROOT + sep) ? abs : undefined
+  }
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId !== 'claude') return
     const p = payload as {
@@ -308,16 +321,17 @@ app.whenReady().then(async () => {
       tool_name?: string
       tool_use_id?: string
     }
+    const transcriptPath = safeTranscriptPath(p.transcript_path)
     // Context-window meter: tail the session transcript (any event carrying both fields).
-    if (p.session_id && p.transcript_path) contextTail.track(p.session_id, p.transcript_path)
+    if (p.session_id && transcriptPath) contextTail.track(p.session_id, transcriptPath)
     if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
-    if (nodeId && p.session_id && p.transcript_path) setNodeTranscript(nodeId, p.session_id, p.transcript_path)
+    if (nodeId && p.session_id && transcriptPath) setNodeTranscript(nodeId, p.session_id, transcriptPath)
     if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
     // Subagent live transcript: track on PreToolUse / finish on PostToolUse for subagent tools.
     const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
     if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name)) {
       if (p.hook_event_name === 'PreToolUse') {
-        subagentTail.track(p.tool_use_id, p.transcript_path)
+        subagentTail.track(p.tool_use_id, transcriptPath)
         if (nodeId) {
           const set = nodeSubagents.get(nodeId) ?? new Set<string>()
           set.add(p.tool_use_id)

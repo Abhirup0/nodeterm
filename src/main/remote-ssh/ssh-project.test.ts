@@ -7,11 +7,12 @@ function makeMgr() {
   const statuses: string[] = []
   // spawnMaster: returns a fake child that "stays up"; run: resolves stdout for one-shot ssh.
   const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
-  const run = vi.fn(async (_args: string[]) => ({ code: 0, stdout: 'src/\nbin/\n' }))
+  const run = vi.fn(async (_args: string[], _stdin?: string) => ({ code: 0, stdout: 'src/\nbin/\n' }))
   const mgr = new SshProjectManager({
     userDataDir: '/ud',
     spawnMaster,
     run,
+    getHook: () => ({ port: 51234, token: 'tok', version: '1' }),
     onStatus: (e) => statuses.push(e.status)
   })
   return { mgr, statuses, spawnMaster, run }

@@ -48,7 +48,10 @@ function escapeDroppedPath(p: string): string {
 async function resolveSshRemote(
   conn: SshConnection,
   cwd: string | undefined
-): Promise<{ controlPath: string; conn: SshConnection; remoteCwd: string } | undefined> {
+): Promise<
+  | { controlPath: string; conn: SshConnection; remoteCwd: string; hookEndpointPath?: string }
+  | undefined
+> {
   const projectId = useProjects.getState().activeProjectId
   let controlPath = useSshConn.getState().getControlPath(projectId)
   if (!controlPath) {
@@ -62,14 +65,17 @@ async function resolveSshRemote(
         resolve(v)
       }
       const unsub = useSshConn.subscribe((s) => {
-        const v = s.byProject[projectId]
+        const v = s.byProject[projectId]?.controlPath
         if (v) finish(v)
       })
       const timer = setTimeout(() => finish(useSshConn.getState().getControlPath(projectId)), 20000)
     })
   }
   if (!controlPath) return undefined
-  return { controlPath, conn, remoteCwd: cwd || '~' }
+  // The remote hook endpoint (reverse tunnel + remote install) is set up alongside the master;
+  // pass it through so the remote tmux session carries the hook env. Optional (fail-open).
+  const hookEndpointPath = useSshConn.getState().getHookEndpointPath(projectId)
+  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath }
 }
 
 /**
