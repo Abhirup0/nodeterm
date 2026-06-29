@@ -37,7 +37,7 @@ import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
-import { setGitRemoteResolver } from './remote-ssh/remote-git'
+import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
@@ -66,6 +66,12 @@ const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
+
+// Remote git routing is scoped to the ACTIVE project only (set via `git:set-active-remote`).
+// A global cwd-keyed match would misroute when two SSH projects share a remote path, or when a
+// LOCAL project's cwd equals a connected SSH project's remoteCwd. The renderer drives this on every
+// project switch: the active SSH project's ref, or null for a local project (→ all git runs local).
+let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 
 // The single app window — kept at module scope so IPC handlers (e.g. notifications)
 // can check focus and route clicks back to the renderer.
@@ -534,9 +540,19 @@ app.whenReady().then(async () => {
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)
-  // Route git-service + commit-message git ops over the project's master when the cwd belongs to a
-  // connected SSH project; returns undefined for local cwds so the local path is byte-identical.
-  setGitRemoteResolver((cwd) => sshProjectManager?.refForRemoteCwd(cwd))
+  // Route git-service + commit-message git ops over the active SSH project's master only — and only
+  // for that project's exact remoteCwd. Any other cwd (a local project, or a different connected
+  // project) resolves to undefined, so the local path stays byte-identical.
+  setGitRemoteResolver((cwd) => (activeRemote && activeRemote.cwd === cwd ? activeRemote.ref : undefined))
+  // The renderer's active-project effect calls this on every switch: a non-null projectId of a
+  // connected SSH project (whose ref carries a remoteCwd) arms remote routing; null/local disarms it.
+  ipcMain.handle(IPC.gitSetActiveRemote, (_e, projectId: string | null) => {
+    const ref = projectId ? sshProjectManager?.refForProject(projectId) : undefined
+    activeRemote =
+      ref && ref.remoteCwd
+        ? { cwd: ref.remoteCwd, ref: { conn: ref.conn, controlPath: ref.controlPath } }
+        : null
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

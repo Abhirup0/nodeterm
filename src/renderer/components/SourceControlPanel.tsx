@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
 import type { GitHistoryItem, GitHistoryResult } from '@shared/git-history'
 import { useProjects } from '../state/projects'
+import { useSshConn } from '../state/sshConn'
 import { useScmDraft } from '../state/scmDraft'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
@@ -49,6 +50,10 @@ export function SourceControlPanel({
   // Local projects are byte-identical (the SSH branch fires only when `project.ssh` is set).
   const isSsh = !!project?.ssh
   const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+  // For an SSH project the master may still be connecting when the panel mounts; its controlPath
+  // appears once `setConn` runs (after `setActiveRemote` arms remote routing). Observing it lets the
+  // refresh re-run when the master connects. Local projects have no entry → undefined → no effect.
+  const sshControlPath = useSshConn((s) => (project?.id ? s.byProject[project.id]?.controlPath : undefined))
   const [status, setStatus] = useState<GitStatus | null>(null)
   // Commit message + AI-generate state live in a per-repo store (keyed by cwd), so closing the
   // panel mid-generation neither discards the message nor abandons the run — reopening shows it.
@@ -83,7 +88,10 @@ export function SourceControlPanel({
 
   const refresh = useCallback(async () => {
     setStatus(cwd ? await git.status(cwd) : null)
-  }, [cwd, git])
+    // `sshControlPath` is a dep so an SSH project whose master finishes connecting after the panel
+    // opened re-fetches once the connection is live (instead of staying "no repo"/empty).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, git, sshControlPath])
 
   const refreshHistory = useCallback(async () => {
     if (!cwd) {

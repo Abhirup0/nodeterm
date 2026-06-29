@@ -506,12 +506,18 @@ export function Canvas() {
     if (project.ssh) {
       window.nodeTerminal.sshProject
         .connect(project.id, project.ssh.server, project.ssh.remoteCwd)
-        .then(({ controlPath, hookEndpointPath }) =>
+        .then(async ({ controlPath, hookEndpointPath }) => {
+          // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
+          // Source Control panel's re-fetch (which keys off that entry) already hits the master.
+          await window.nodeTerminal.git.setActiveRemote(project.id)
           useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath })
-        )
+        })
         .catch(() => {
           /* status surfaced via onStatus → the connection banner */
         })
+    } else {
+      // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
+      void window.nodeTerminal.git.setActiveRemote(null)
     }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)

@@ -23,6 +23,21 @@ export function remoteGitArgs(conn: SshConnection, controlPath: string, cwd: str
 let sshPath: string | null | undefined
 function findSsh(): string | null {
   if (sshPath !== undefined) return sshPath
+  // GUI apps don't inherit the shell PATH, so probe a login shell first (mirrors
+  // commit-message.ts). Kept self-contained — importing ssh-project.ts would pull in electron and
+  // break this module's pure vitest tests.
+  try {
+    const out = execFileSync('/usr/bin/env', ['sh', '-lc', 'command -v ssh'], {
+      encoding: 'utf-8'
+    }).trim()
+    if (out) {
+      execFileSync(out, ['-V'], { stdio: 'ignore' })
+      sshPath = out
+      return out
+    }
+  } catch {
+    /* fall back to the hardcoded paths */
+  }
   for (const p of ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh']) {
     try {
       execFileSync(p, ['-V'], { stdio: 'ignore' })

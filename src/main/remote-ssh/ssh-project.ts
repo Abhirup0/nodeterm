@@ -93,7 +93,8 @@ export class SshProjectManager {
       const { code } = await this.r.run(checkMasterArgs(existing.conn, existing.controlPath))
       if (code === 0) {
         // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
-        existing.remoteCwd = remoteCwd
+        // Guard against a later connect without remoteCwd clearing a known cwd.
+        existing.remoteCwd = remoteCwd ?? existing.remoteCwd
         return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
@@ -193,9 +194,11 @@ export class SshProjectManager {
    * SshFs ops take). Returns `undefined` when the project isn't connected, so the `sshFs:*` IPC
    * handlers can fail open (empty result) rather than throw.
    */
-  refForProject(projectId: string): { conn: SshConnection; controlPath: string } | undefined {
+  refForProject(
+    projectId: string
+  ): { conn: SshConnection; controlPath: string; remoteCwd?: string } | undefined {
     const c = this.conns.get(projectId)
-    return c ? { conn: c.conn, controlPath: c.controlPath } : undefined
+    return c ? { conn: c.conn, controlPath: c.controlPath, remoteCwd: c.remoteCwd } : undefined
   }
 
   /**

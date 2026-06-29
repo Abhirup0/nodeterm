@@ -110,6 +110,7 @@ export const IPC = {
   gitWorktreeAdd: 'git:worktree-add',
   gitWorktreeMerge: 'git:worktree-merge',
   gitWorktreeRemove: 'git:worktree-remove',
+  gitSetActiveRemote: 'git:set-active-remote',
   shellOpenExternal: 'shell:open-external',
   commitGenerate: 'commit:generate',
   remoteHostStart: 'remote:host:start',

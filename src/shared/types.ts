@@ -455,6 +455,9 @@ export interface GitApi {
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
   worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
   worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
+  /** Scope remote git routing to the active project: pass its id to route git over that SSH
+   *  project's master, or null for a local project so all git ops run locally. */
+  setActiveRemote(projectId: string | null): Promise<void>
 }
 
 export interface UpdateInfo {
