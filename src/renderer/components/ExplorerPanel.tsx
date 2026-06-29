@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { DirEntry } from '@shared/types'
+import type { DirEntry, FsApi } from '@shared/types'
 import { useProjects } from '../state/projects'
+import { sshFs } from '../terminal/ssh-fs'
 
 interface ExplorerPanelProps {
   onClose: () => void
@@ -32,6 +33,7 @@ function TreeEntry({
   entry,
   path,
   depth,
+  fs,
   selected,
   forcedOpen,
   revealNonce,
@@ -42,6 +44,7 @@ function TreeEntry({
   entry: DirEntry
   path: string
   depth: number
+  fs: FsApi
   selected: string | null
   forcedOpen: Set<string>
   revealNonce: number | undefined
@@ -59,8 +62,8 @@ function TreeEntry({
   const expandDir = useCallback(async () => {
     const next = !open
     setOpen(next)
-    if (next && children === null) setChildren(await window.nodeTerminal.fs.list(path))
-  }, [open, children, path])
+    if (next && children === null) setChildren(await fs.list(path))
+  }, [open, children, path, fs])
 
   // Reveal: when this directory is force-opened (an ancestor of the reveal target), expand it
   // ONCE per reveal edge. After the edge, a manual collapse sticks because this effect won't
@@ -69,9 +72,9 @@ function TreeEntry({
     if (!entry.dir || !forcedOpen.has(path)) return
     if (revealNonce === lastHonoredRef.current) return
     lastHonoredRef.current = revealNonce
-    if (children === null) void window.nodeTerminal.fs.list(path).then(setChildren)
+    if (children === null) void fs.list(path).then(setChildren)
     setOpen(true)
-  }, [forcedOpen, path, entry.dir, children, revealNonce])
+  }, [forcedOpen, path, entry.dir, children, revealNonce, fs])
 
   // Reveal: scroll the selected (target) row into view once it has mounted.
   useEffect(() => {
@@ -118,6 +121,7 @@ function TreeEntry({
             entry={c}
             path={`${path}/${c.name}`}
             depth={depth + 1}
+            fs={fs}
             selected={selected}
             forcedOpen={forcedOpen}
             revealNonce={revealNonce}
@@ -132,14 +136,23 @@ function TreeEntry({
 
 /** Project file explorer — a lazy-loaded tree of the active project's folder.
  *
- * NOTE (Task 6): this Explorer is LOCAL-only. In a remote session the host's root cwd isn't known
- * client-side (the local project's `cwd` is the client's), so it can't be pointed at the host
- * filesystem yet. Once `canvas:state` carries the host cwd (Task 6), this can switch to
- * `remoteFs(connectionId)` (the per-connection `FsApi`) rooted at that path — the Editor already
- * proxies over the relay via `data.remote.connectionId`. */
+ * SSH projects browse the REMOTE filesystem (rooted at `project.ssh.remoteCwd`, listed via
+ * `sshFs(projectId)` over the ControlMaster); local projects use the local fs rooted at `cwd`.
+ *
+ * NOTE (relay, Task 6): the RELAY path is still local-only — in a relay session the host's root cwd
+ * isn't known client-side (the local project's `cwd` is the client's). Once `canvas:state` carries
+ * the host cwd, this can also switch to `remoteFs(connectionId)` for relay projects (the Editor
+ * already proxies over the relay via `data.remote.connectionId`). */
 export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
-  const cwd = project?.cwd
+  // SSH projects browse the REMOTE filesystem: root at the project's `remoteCwd` and list over the
+  // ControlMaster via `sshFs`. Local (and relay) projects keep the local fs rooted at `cwd`.
+  const ssh = project?.ssh
+  const cwd = ssh ? ssh.remoteCwd : project?.cwd
+  const fs = useMemo<FsApi>(
+    () => (ssh && project ? sshFs(project.id) : window.nodeTerminal.fs),
+    [project?.id, ssh]
+  )
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
@@ -147,9 +160,9 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
 
   useEffect(() => {
-    if (cwd) window.nodeTerminal.fs.list(cwd).then(setRoots)
+    if (cwd) fs.list(cwd).then(setRoots)
     else setRoots(null)
-  }, [cwd, version])
+  }, [cwd, version, fs])
 
   // Reveal a file: force-open every ancestor directory under cwd, select the file, and
   // let the matching row scroll itself into view. Only paths inside cwd are revealed.
@@ -206,6 +219,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 entry={e}
                 path={`${cwd}/${e.name}`}
                 depth={0}
+                fs={fs}
                 selected={selected}
                 forcedOpen={forcedOpen}
                 revealNonce={reveal?.nonce}

@@ -3,6 +3,7 @@ import type { CanvasMutation, CanvasNodeState, NodeKind, Project } from '@shared
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
 import { useSettings } from './settings'
+import { useProjects } from './projects'
 
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
@@ -70,6 +71,12 @@ export interface NodeData {
    * (LocalTransport passes `sshRemote` to the PTY), rather than plain `ssh`-on-local-PTY. Persisted.
    */
   sshRemoteTmux?: boolean
+  /**
+   * editor-only: when true (an editor created in an SSH project), reads/writes/image-previews go to
+   * the project's REMOTE filesystem via `sshFs(projectId)` instead of the local fs. Persisted, so an
+   * SSH-project editor still routes to the remote fs after reopen.
+   */
+  sshFs?: boolean
   [key: string]: unknown
 }
 
@@ -260,12 +267,20 @@ export function createClaudeNode(
   return createAgentNode('claude', index, cwd, center)
 }
 
-/** Creates a code editor node for a file. */
+/**
+ * Creates a code editor node for a file. When created in an SSH project (the active project has an
+ * `ssh` binding), `data.sshFs` is stamped so EditorNode reads/writes over the project's remote fs
+ * (`sshFs`) and `filePath` is the remote path — mirroring how `createTerminalNode` stamps
+ * `data.sshRemoteTmux`. The SSH binding is read from the projects store (the editor always belongs
+ * to the active project), so every open path (Explorer, palette) routes consistently.
+ */
 export function createEditorNode(
   index: number,
   filePath: string,
   center?: { x: number; y: number }
 ): CanvasNode {
+  const active = useProjects.getState()
+  const isSsh = !!active.getProject(active.activeProjectId)?.ssh
   return {
     id: nextId('editor'),
     type: 'editor',
@@ -277,7 +292,8 @@ export function createEditorNode(
       title: filePath.split('/').pop() || 'untitled',
       color: '#6ac4dc',
       group: null,
-      filePath
+      filePath,
+      ...(isSsh ? { sshFs: true } : {})
     }
   }
 }
@@ -605,6 +621,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         agentId,
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
+        sshFs: n.sshFs,
         worktree: n.worktree
       }
     }
@@ -659,6 +676,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         agentId: n.data.agentId,
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
+        sshFs: n.data.sshFs,
         worktree: n.data.worktree
       }
     })

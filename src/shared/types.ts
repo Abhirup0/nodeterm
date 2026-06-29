@@ -64,6 +64,8 @@ export interface CanvasNodeState {
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
   sshRemoteTmux?: boolean
+  /** editor-only: when true (SSH-project editors), reads/writes go to the project's remote fs via `sshFs`. */
+  sshFs?: boolean
   // sticky-only
   text?: string
   // dino-only: best score reached in the T-Rex Runner game.

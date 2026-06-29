@@ -4,6 +4,8 @@ import { monaco } from '../editor/monaco-setup'
 import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
 import { remoteFs } from '../terminal/remote-fs'
+import { sshFs } from '../terminal/ssh-fs'
+import { useProjects } from '../state/projects'
 import type { CanvasNode } from '../state/workspace'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
@@ -37,10 +39,16 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [imageDims, setImageDims] = useState('')
   const [imageError, setImageError] = useState('')
   const filePath = (data.filePath as string) ?? ''
-  // In a remote session the node operates on the HOST's filesystem via the relay; otherwise the
-  // local fs. The `FsApi` shape is identical, so the rest of the component is unchanged.
+  // Backend pick (the `FsApi` shape is identical across all three, so the rest of the component is
+  // unchanged): a relay session operates on the HOST's filesystem via the relay; an SSH-project
+  // editor (`data.sshFs`) on the project's remote fs over the ControlMaster; otherwise the local fs.
+  const activeProjectId = useProjects((s) => s.activeProjectId)
   const connectionId = data.remote?.connectionId
-  const fs = connectionId ? remoteFs(connectionId) : window.nodeTerminal.fs
+  const fs = connectionId
+    ? remoteFs(connectionId)
+    : data.sshFs && activeProjectId
+      ? sshFs(activeProjectId)
+      : window.nodeTerminal.fs
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
   const isImage = ext in IMAGE_MIME
