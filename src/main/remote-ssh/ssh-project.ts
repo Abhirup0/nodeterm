@@ -13,14 +13,18 @@ import {
   checkMasterArgs,
   remoteTmuxKillArgs
 } from './control-master'
+import { RemoteHooks } from './remote-hooks'
+import { hookServer } from '../agents/hook-server'
 import { sessionName } from '../tmux-naming'
 
 interface Runners {
   userDataDir: string
   /** Spawn the long-lived master; returns a handle we can kill. */
   spawnMaster: (args: string[]) => { kill: () => void; on: (ev: string, cb: (...a: unknown[]) => void) => void }
-  /** Run a one-shot ssh, resolving its stdout + exit code. */
-  run: (args: string[]) => Promise<{ code: number; stdout: string }>
+  /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
+  run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
+  /** Live loopback hook-server coordinates (injected so the manager stays testable). */
+  getHook: () => { port: number; token: string; version: string }
   onStatus: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void
 }
 
@@ -28,6 +32,7 @@ interface Conn {
   conn: SshConnection
   controlPath: string
   master: ReturnType<Runners['spawnMaster']>
+  hookEndpointPath?: string
 }
 
 /**
@@ -62,16 +67,22 @@ function sshBin(): string {
 
 export class SshProjectManager {
   private conns = new Map<string, Conn>()
-  constructor(private r: Runners) {}
+  private remoteHooks: RemoteHooks
+  constructor(private r: Runners) {
+    this.remoteHooks = new RemoteHooks({ run: r.run })
+  }
 
-  async connect(projectId: string, conn: SshConnection): Promise<{ controlPath: string }> {
+  async connect(
+    projectId: string,
+    conn: SshConnection
+  ): Promise<{ controlPath: string; hookEndpointPath?: string }> {
     const existing = this.conns.get(projectId)
     if (existing) {
       // Verify the cached master is still alive before reusing it — a dropped/timed-out master
       // would otherwise leave us reusing a dead socket. If `-O check` fails, surface
       // `reconnecting`, drop the stale entry, and fall through to re-establish.
       const { code } = await this.r.run(checkMasterArgs(existing.conn, existing.controlPath))
-      if (code === 0) return { controlPath: existing.controlPath }
+      if (code === 0) return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
       this.conns.delete(projectId)
@@ -91,12 +102,18 @@ export class SshProjectManager {
     for (let i = 0; i < 50; i++) {
       const { code } = await this.r.run(checkMasterArgs(conn, controlPath))
       if (code === 0) {
+        // Master is up. Best-effort remote hook setup (reverse tunnel + endpoint + install);
+        // fail-open — a null result just means the remote agents run without hooks.
+        const res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
+        const hookEndpointPath = res?.endpointPath
+        const entry = this.conns.get(projectId)
+        if (entry) entry.hookEndpointPath = hookEndpointPath
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath }
+        return { controlPath, hookEndpointPath }
       }
       await new Promise((res) => setTimeout(res, 100))
     }
-    this.disconnect(projectId)
+    await this.disconnect(projectId)
     this.r.onStatus({ projectId, status: 'error', error: 'Could not establish the SSH connection.' })
     throw new Error('Could not establish the SSH connection.')
   }
@@ -128,9 +145,11 @@ export class SshProjectManager {
     )
   }
 
-  disconnect(projectId: string): void {
+  async disconnect(projectId: string): Promise<void> {
     const c = this.conns.get(projectId)
     if (!c) return
+    // Cancel the reverse hook tunnel (over the still-live master) BEFORE tearing the master down.
+    await this.remoteHooks.teardown(projectId, c.conn, c.controlPath)
     void this.r.run(exitMasterArgs(c.conn, c.controlPath))
     c.master.kill()
     this.conns.delete(projectId)
@@ -139,7 +158,7 @@ export class SshProjectManager {
 
   /** Tear down every live master (on app quit) so no `-N` master ssh child is orphaned. */
   disconnectAll(): void {
-    for (const projectId of [...this.conns.keys()]) this.disconnect(projectId)
+    for (const projectId of [...this.conns.keys()]) void this.disconnect(projectId)
   }
 }
 
@@ -148,12 +167,16 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
   const mgr = new SshProjectManager({
     userDataDir: app.getPath('userData'),
     spawnMaster: (args) => spawn(ssh, args, { stdio: 'ignore' }),
-    run: (args) =>
-      new Promise((resolve) =>
-        execFile(ssh, args, { timeout: 15000 }, (err, stdout) =>
+    run: (args, stdin) =>
+      new Promise((resolve) => {
+        const child = execFile(ssh, args, { timeout: 15000 }, (err, stdout) =>
           resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
         )
-      ),
+        if (stdin !== undefined) {
+          child.stdin?.end(stdin)
+        }
+      }),
+    getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
     onStatus: (e) => {
       if (!win.isDestroyed()) win.webContents.send(IPC.sshProjectStatus, e)
     }
