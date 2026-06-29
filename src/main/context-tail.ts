@@ -15,6 +15,32 @@ const POLL_MS = 1000
 // line is dropped naturally by the JSON.parse guard.
 const INITIAL_READ_CAP = 1024 * 1024 // 1 MB
 
+/** Scan transcript text for the LATEST assistant message's token usage + model. Pure. */
+export function parseLatestUsage(text: string): { used: number; model: string | null } | null {
+  let found = false
+  let usedTokens = 0
+  let model: string | null = null
+  for (const line of text.split('\n')) {
+    const s = line.trim()
+    if (!s) continue
+    let o: { type?: string; message?: { model?: string; usage?: Record<string, number> } }
+    try {
+      o = JSON.parse(s)
+    } catch {
+      continue
+    }
+    if (o.type !== 'assistant' || !o.message?.usage) continue
+    const u = o.message.usage
+    const used =
+      (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+    if (used <= 0) continue
+    found = true
+    usedTokens = used
+    model = o.message.model ?? model // carry the prior model forward when this line omits it
+  }
+  return found ? { used: usedTokens, model } : null
+}
+
 interface Tracked {
   path: string
   offset: number
@@ -77,24 +103,10 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         } catch {
           return
         }
-        for (const line of chunk.split('\n')) {
-          const s = line.trim()
-          if (!s) continue
-          let o: { type?: string; message?: { model?: string; usage?: Record<string, number> } }
-          try {
-            o = JSON.parse(s)
-          } catch {
-            continue // partial/garbled line
-          }
-          if (o.type !== 'assistant' || !o.message?.usage) continue
-          const u = o.message.usage
-          const used =
-            (u.input_tokens ?? 0) +
-            (u.cache_read_input_tokens ?? 0) +
-            (u.cache_creation_input_tokens ?? 0)
-          if (used <= 0) continue
-          t.used = used
-          t.model = o.message.model ?? t.model
+        const latest = parseLatestUsage(chunk)
+        if (latest) {
+          t.used = latest.used
+          t.model = latest.model ?? t.model
         }
       }
     }

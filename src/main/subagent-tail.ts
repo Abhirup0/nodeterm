@@ -58,7 +58,7 @@ function summarizeResult(content: unknown): string {
 
 // Render one transcript line as a clean activity log: assistant prose verbatim,
 // tool calls as `$ Tool arg`, tool results as a one-line summary. Skips metadata.
-function formatLine(line: string): string {
+export function formatLine(line: string): string {
   let o: { type?: string; message?: { content?: unknown } }
   try {
     o = JSON.parse(line)
@@ -90,6 +90,18 @@ function formatLine(line: string): string {
       .join('\n')
   }
   return ''
+}
+
+// Format a chunk of newly-read transcript bytes into the activity-log text streamed to the
+// renderer: drop blank lines, format each surviving line, drop empties, join with '\n'.
+// Mirrors the tail read loop exactly so local + remote streamed output stay byte-identical.
+export function formatSubagentChunk(text: string): string {
+  return text
+    .split('\n')
+    .filter(Boolean)
+    .map(formatLine)
+    .filter(Boolean)
+    .join('\n')
 }
 
 export interface SubagentTail {
@@ -135,13 +147,7 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
       fs.readSync(fd, buf, 0, buf.length, e.offset)
       fs.closeSync(fd)
       e.offset = size
-      const out = buf
-        .toString('utf-8')
-        .split('\n')
-        .filter(Boolean)
-        .map(formatLine)
-        .filter(Boolean)
-        .join('\n')
+      const out = formatSubagentChunk(buf.toString('utf-8'))
       if (out) send(toolUseId, out + '\n')
     } catch {
       // file may not exist yet / transient read error

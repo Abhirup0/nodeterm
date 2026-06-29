@@ -91,14 +91,20 @@ async function readCappedTail(filePath: string): Promise<string | undefined> {
   }
 }
 
-export async function readTranscriptLines(filePath: string): Promise<TranscriptLine[]> {
-  const buf = await readCappedTail(filePath)
-  if (buf === undefined) return []
+// Parse transcript text into flat searchable lines. Pure — splits on newlines and maps each
+// non-blank line via linesFrom. Reused by the remote reader (which fetches the text over SSH).
+export function parseTranscriptLines(text: string): TranscriptLine[] {
   const lines: TranscriptLine[] = []
-  for (const raw of buf.split('\n')) {
+  for (const raw of text.split('\n')) {
     if (raw.trim()) lines.push(...linesFrom(raw))
   }
   return lines
+}
+
+export async function readTranscriptLines(filePath: string): Promise<TranscriptLine[]> {
+  const buf = await readCappedTail(filePath)
+  if (buf === undefined) return []
+  return parseTranscriptLines(buf)
 }
 
 // Reconstruct structured chat messages from raw transcript JSONL lines. An assistant line's
