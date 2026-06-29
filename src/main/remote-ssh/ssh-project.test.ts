@@ -39,4 +39,12 @@ describe('SshProjectManager', () => {
     const { dirs } = await mgr.listDir('p1', '~')
     expect(dirs).toEqual(['bin', 'src'])
   })
+
+  it('refForProject resolves {conn, controlPath} after connect, undefined otherwise', async () => {
+    const { mgr } = makeMgr()
+    expect(mgr.refForProject('p1')).toBeUndefined()
+    await mgr.connect('p1', conn)
+    expect(mgr.refForProject('p1')).toEqual({ conn, controlPath: '/ud/ssh-cm/p1.sock' })
+    expect(mgr.refForProject('nope')).toBeUndefined()
+  })
 })

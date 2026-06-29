@@ -167,8 +167,18 @@ export class SshProjectManager {
    * search read over the SAME ControlMaster. `args` are full ssh child args (e.g. from
    * `childArgs(conn, controlPath, cmd)`); returns `{ code, stdout }`.
    */
-  sshRun(args: string[]): Promise<{ code: number; stdout: string }> {
-    return this.r.run(args)
+  sshRun(args: string[], stdin?: string): Promise<{ code: number; stdout: string }> {
+    return this.r.run(args, stdin)
+  }
+
+  /**
+   * Resolve the `{ conn, controlPath }` ref for a connected project (the `SshFsRef` shape Phase 3's
+   * SshFs ops take). Returns `undefined` when the project isn't connected, so the `sshFs:*` IPC
+   * handlers can fail open (empty result) rather than throw.
+   */
+  refForProject(projectId: string): { conn: SshConnection; controlPath: string } | undefined {
+    const c = this.conns.get(projectId)
+    return c ? { conn: c.conn, controlPath: c.controlPath } : undefined
   }
 
   /** The resolved remote `$HOME` for a connected project, if known. */

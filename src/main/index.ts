@@ -37,6 +37,7 @@ import { initLicense } from './license'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
+import { SshFs } from './ssh-fs'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
@@ -237,6 +238,32 @@ app.whenReady().then(async () => {
     fsOps.writeText(filePath, content)
   )
   ipcMain.handle(IPC.filesQuickOpen, (_e, cwd: string) => fsOps.listQuickOpenFiles(cwd))
+
+  // SSH-project Explorer/Editor fs: the remote analog of the fs:* handlers above, scoped to a
+  // project's ControlMaster. One SshFs bound to the SSH-project manager's own ssh runner (the SAME
+  // runner RemoteFile reuses — just forwarding stdin so writes work), resolved lazily because
+  // sshProjectManager is created below. The ref is looked up per call; a call before the manager
+  // exists, or for an unconnected project, finds no ref and fails open ([]/''/false).
+  const sshFs = new SshFs((args, stdin) =>
+    sshProjectManager ? sshProjectManager.sshRun(args, stdin) : Promise.resolve({ code: 1, stdout: '' })
+  )
+  const sshFsRefFor = (projectId: string) => sshProjectManager?.refForProject(projectId)
+  ipcMain.handle(IPC.sshFsList, (_e, projectId: string, p: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.listDir(ref, p) : Promise.resolve([])
+  })
+  ipcMain.handle(IPC.sshFsRead, (_e, projectId: string, p: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.readText(ref, p) : Promise.resolve('')
+  })
+  ipcMain.handle(IPC.sshFsReadBinary, (_e, projectId: string, p: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.readBinary(ref, p) : Promise.resolve('')
+  })
+  ipcMain.handle(IPC.sshFsWrite, (_e, projectId: string, p: string, content: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.writeText(ref, p, content) : Promise.resolve(false)
+  })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

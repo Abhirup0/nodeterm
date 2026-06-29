@@ -333,6 +333,20 @@ export interface SshProjectApi {
   onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
 }
 
+/**
+ * SSH-project Explorer/Editor filesystem API: the same `FsApi` contract scoped to a project,
+ * proxied over the project's ControlMaster (renderer → `sshFs:*` IPC → main `SshFs`). The renderer
+ * `sshFs(projectId)` helper closes over `projectId` to expose a plain `FsApi`. Mirrors
+ * `RemoteClientApi.fs*` for relay connections; fails open ([]/''/false) when the project is not
+ * connected.
+ */
+export interface SshFsApi {
+  list(projectId: string, path: string): Promise<DirEntry[]>
+  read(projectId: string, path: string): Promise<string>
+  readBinary(projectId: string, path: string): Promise<string>
+  write(projectId: string, path: string, content: string): Promise<boolean>
+}
+
 export interface GitFileChange {
   path: string
   /** Single-letter status: M (modified), A (added), D (deleted), R (renamed), U (untracked). */
@@ -749,6 +763,7 @@ export interface NodeTerminalApi {
   settings: SettingsApi
   ssh: SshApi
   sshProject: SshProjectApi
+  sshFs: SshFsApi
   git: GitApi
   clipboard: ClipboardApi
   shell: ShellApi

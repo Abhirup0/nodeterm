@@ -96,6 +96,14 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.sshProjectStatus, h)
     }
   },
+  sshFs: {
+    list: (projectId: string, path: string) => ipcRenderer.invoke(IPC.sshFsList, projectId, path),
+    read: (projectId: string, path: string) => ipcRenderer.invoke(IPC.sshFsRead, projectId, path),
+    readBinary: (projectId: string, path: string) =>
+      ipcRenderer.invoke(IPC.sshFsReadBinary, projectId, path),
+    write: (projectId: string, path: string, content: string) =>
+      ipcRenderer.invoke(IPC.sshFsWrite, projectId, path, content)
+  },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
