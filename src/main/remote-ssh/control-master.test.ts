@@ -7,7 +7,11 @@ import {
   remoteCapturePaneArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
-  RMT_TMUX_SOCKET
+  RMT_TMUX_SOCKET,
+  hookForwardArgs,
+  hookForwardCancelArgs,
+  remoteHookEnvArgs,
+  remoteEndpointFileContents
 } from './control-master'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
@@ -72,6 +76,38 @@ describe('remoteTmuxPtyArgs', () => {
     expect(args[0]).toBe('-t')
     const cmd = args[args.length - 1]
     expect(args.slice(1)).toEqual(childArgs(conn, '/s.sock', cmd))
+  })
+  it('splices extraEnv -e pairs right after new-session -A (before -s)', () => {
+    const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [
+      '-e', 'NODETERM_HOOK_ENDPOINT=/r/ep.env',
+      '-e', 'NODETERM_NODE_ID=nt-x'
+    ])
+    const cmd = args[args.length - 1]
+    expect(cmd).toContain('new-session -A -e NODETERM_HOOK_ENDPOINT=/r/ep.env -e NODETERM_NODE_ID=nt-x -s')
+  })
+})
+
+describe('hook forwarding', () => {
+  it('hookForwardArgs builds a reverse unix-socket forward over the master', () => {
+    expect(hookForwardArgs(conn, '/s.sock', '/home/u/.nodeterm/h.sock', 51234)).toEqual([
+      '-O', 'forward', '-R', '/home/u/.nodeterm/h.sock:127.0.0.1:51234',
+      '-o', 'ControlPath=/s.sock', '-p', '2222', 'deploy@h.example.com'
+    ])
+  })
+  it('hookForwardCancelArgs mirrors it with -O cancel', () => {
+    expect(hookForwardCancelArgs(conn, '/s.sock', '/r.sock', 51234)[1]).toBe('cancel')
+  })
+  it('remoteHookEnvArgs builds tmux -e pairs (endpoint + node id + version)', () => {
+    expect(remoteHookEnvArgs('/r/.nodeterm/ep.env', 'nt-x', '1')).toEqual([
+      '-e', 'NODETERM_HOOK_ENDPOINT=/r/.nodeterm/ep.env',
+      '-e', 'NODETERM_NODE_ID=nt-x',
+      '-e', 'NODETERM_HOOK_VERSION=1'
+    ])
+  })
+  it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION', () => {
+    expect(remoteEndpointFileContents('/r.sock', 'tok', '1')).toBe(
+      'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=1\n'
+    )
   })
 })
 

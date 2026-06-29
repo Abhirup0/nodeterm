@@ -71,15 +71,44 @@ export function listDirArgs(conn: SshConnection, controlPath: string, path: stri
   return childArgs(conn, controlPath, `ls -1Ap ${quoteRemotePath(path)}`)
 }
 
-/** The remote PTY program is `ssh <childArgs> host -t '<remoteTmuxCommand>'`. */
+/**
+ * Reverse-forward the local hook server's loopback TCP port to a remote unix socket over the
+ * existing master (`ssh -O forward -R <remoteSock>:127.0.0.1:<hookPort>`), so remote hook scripts
+ * can POST to it via `curl --unix-socket`.
+ */
+function fwdSpec(remoteSock: string, hookPort: number): string {
+  return `${remoteSock}:127.0.0.1:${hookPort}`
+}
+export function hookForwardArgs(conn: SshConnection, controlPath: string, remoteSock: string, hookPort: number): string[] {
+  return ['-O', 'forward', '-R', fwdSpec(remoteSock, hookPort), '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
+}
+export function hookForwardCancelArgs(conn: SshConnection, controlPath: string, remoteSock: string, hookPort: number): string[] {
+  return ['-O', 'cancel', '-R', fwdSpec(remoteSock, hookPort), '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
+}
+/** tmux `-e KEY=VALUE` pairs injecting the remote hook endpoint file + node id + protocol version. */
+export function remoteHookEnvArgs(endpointPath: string, nodeId: string, version: string): string[] {
+  return ['-e', `NODETERM_HOOK_ENDPOINT=${endpointPath}`, '-e', `NODETERM_NODE_ID=${nodeId}`, '-e', `NODETERM_HOOK_VERSION=${version}`]
+}
+/** Contents of the remote endpoint env file the managed hook script sources (unix-socket transport). */
+export function remoteEndpointFileContents(sock: string, token: string, version: string): string {
+  return `NODETERM_HOOK_SOCK=${sock}\nNODETERM_HOOK_TOKEN=${token}\nNODETERM_HOOK_VERSION=${version}\n`
+}
+
+/**
+ * The remote PTY program is `ssh <childArgs> host -t '<remoteTmuxCommand>'`. `extraEnv` is an
+ * already-built list of tmux `-e KEY=VALUE` pairs (e.g. from `remoteHookEnvArgs`) spliced into
+ * the `new-session` command right after `-A`, mirroring the local tmux `-e` placement.
+ */
 export function remoteTmuxPtyArgs(
   conn: SshConnection,
   controlPath: string,
   sessionId: string,
   remoteCwd: string,
   program?: string,
-  programArgs?: string[]
+  programArgs?: string[],
+  extraEnv: string[] = []
 ): string[] {
-  const cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET })
+  let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET })
+  if (extraEnv.length) cmd = cmd.replace('new-session -A ', `new-session -A ${extraEnv.join(' ')} `)
   return ['-t', ...childArgs(conn, controlPath, cmd)]
 }

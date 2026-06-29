@@ -23,7 +23,7 @@ export interface PtyCreateOptions {
    */
   agentId?: AgentId
   /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
-  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string }
+  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string }
 }
 
 /**

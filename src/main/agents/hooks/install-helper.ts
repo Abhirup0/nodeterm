@@ -17,6 +17,9 @@ import { buildManagedScript } from './managed-script'
 type HookDef = { hooks?: { type: string; command: string }[] }
 type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
 
+/** Public alias for the hook settings shape, shared by local + remote merge callers. */
+export type HookSettings = Settings
+
 function scriptPathFor(scriptFileName: string): string {
   return path.join(app.getPath('userData'), 'agent-hooks', scriptFileName)
 }
@@ -26,6 +29,17 @@ function isManaged(d: HookDef): boolean {
   return !!d.hooks?.some(
     (h) => h.command.includes('agent-hooks') || h.command.includes('claude-signals')
   )
+}
+
+/** Pure: merge the managed `command` into each event, dropping any prior managed entry. */
+export function mergeManagedHook(config: HookSettings, command: string, events: readonly string[]): HookSettings {
+  const next: HookSettings = { ...config, hooks: { ...(config.hooks ?? {}) } }
+  for (const ev of events) {
+    const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d))
+    existing.push({ hooks: [{ type: 'command', command }] })
+    next.hooks![ev] = existing
+  }
+  return next
 }
 
 export interface InstallHooksOptions {
@@ -59,12 +73,7 @@ export function installHooksInto(opts: InstallHooksOptions): void {
   } catch {
     config = {}
   }
-  config.hooks = config.hooks ?? {}
-  for (const ev of events) {
-    const existing = (config.hooks[ev] ?? []).filter((d) => !isManaged(d))
-    existing.push({ hooks: [{ type: 'command', command }] })
-    config.hooks[ev] = existing
-  }
+  config = mergeManagedHook(config, command, events)
   try {
     mkdirSync(path.dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8')
