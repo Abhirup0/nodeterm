@@ -260,6 +260,19 @@ export class PtyManager {
     return undefined
   }
 
+  /**
+   * The live SSH-remote handle for a node id, if its session is running on a remote host.
+   * Used by the remote context/subagent tails to read the node's transcript over the same
+   * ControlMaster. Returns undefined for local sessions or unknown nodes.
+   */
+  sshRemoteForNode(
+    nodeId: string
+  ): { controlPath: string; conn: import('../shared/ssh').SshConnection } | undefined {
+    const s = this.sessionByPersistKey(nodeId)
+    if (!s?.sshRemote) return undefined
+    return { controlPath: s.sshRemote.controlPath, conn: s.sshRemote.conn }
+  }
+
   /** Whether a tmux session for this node id currently exists (server alive + session present). */
   private tmuxSessionExists(persistKey: string): boolean {
     if (!this.tmuxPath) return false
