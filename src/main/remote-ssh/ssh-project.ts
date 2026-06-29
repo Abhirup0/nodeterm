@@ -11,7 +11,8 @@ import {
   listDirArgs,
   exitMasterArgs,
   checkMasterArgs,
-  remoteTmuxKillArgs
+  remoteTmuxKillArgs,
+  childArgs
 } from './control-master'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../agents/hook-server'
@@ -33,6 +34,9 @@ interface Conn {
   controlPath: string
   master: ReturnType<Runners['spawnMaster']>
   hookEndpointPath?: string
+  /** The remote `$HOME`, resolved at connect. Used (Phase 2b) to jail remote transcript reads
+   * under `<remoteHome>/.claude/projects`. Undefined if it couldn't be resolved (fail-open). */
+  remoteHome?: string
 }
 
 /**
@@ -106,8 +110,21 @@ export class SshProjectManager {
         // fail-open — a null result just means the remote agents run without hooks.
         const res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
         const hookEndpointPath = res?.endpointPath
+        // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
+        // doesn't surface it). Phase 2b uses it to jail remote transcript reads. Fail-open: an
+        // unresolved home just disables the remote context meter / subagent transcript / search.
+        let remoteHome: string | undefined
+        try {
+          const r = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
+          if (r.code === 0 && r.stdout.trim()) remoteHome = r.stdout.trim()
+        } catch {
+          // fail-open
+        }
         const entry = this.conns.get(projectId)
-        if (entry) entry.hookEndpointPath = hookEndpointPath
+        if (entry) {
+          entry.hookEndpointPath = hookEndpointPath
+          entry.remoteHome = remoteHome
+        }
         this.r.onStatus({ projectId, status: 'connected' })
         return { controlPath, hookEndpointPath }
       }
@@ -143,6 +160,30 @@ export class SshProjectManager {
         )
       )
     )
+  }
+
+  /**
+   * The async ssh runner the manager uses, exposed so the Phase-2b remote transcript tails /
+   * search read over the SAME ControlMaster. `args` are full ssh child args (e.g. from
+   * `childArgs(conn, controlPath, cmd)`); returns `{ code, stdout }`.
+   */
+  sshRun(args: string[]): Promise<{ code: number; stdout: string }> {
+    return this.r.run(args)
+  }
+
+  /** The resolved remote `$HOME` for a connected project, if known. */
+  remoteHomeFor(projectId: string): string | undefined {
+    return this.conns.get(projectId)?.remoteHome
+  }
+
+  /**
+   * The resolved remote `$HOME` for the project owning this `controlPath`, if known. The hook
+   * raw-listener only has the node's `{ controlPath, conn }` (from `sshRemoteForNode`), so it
+   * resolves the jail root by controlPath rather than projectId.
+   */
+  remoteHomeForControlPath(controlPath: string): string | undefined {
+    for (const c of this.conns.values()) if (c.controlPath === controlPath) return c.remoteHome
+    return undefined
   }
 
   async disconnect(projectId: string): Promise<void> {

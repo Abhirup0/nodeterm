@@ -1,4 +1,4 @@
-import { join, resolve, sep } from 'path'
+import { join, resolve, sep, posix } from 'path'
 import { homedir } from 'os'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
@@ -20,8 +20,15 @@ import {
   readChatMessages,
   resolveTranscriptPath,
   transcriptPathForCwd,
+  parseTranscriptLines,
+  parseChatMessages,
   SESSION_ID_RE
 } from './transcript-reader'
+import { createRemoteContextTail } from './remote-context-tail'
+import { createRemoteSubagentTail } from './remote-subagent-tail'
+import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
+import { childArgs } from './remote-ssh/control-master'
+import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { initContextLink, setNodeTranscript } from './context-link'
 import { initTelemetry } from './telemetry'
@@ -251,6 +258,47 @@ app.whenReady().then(async () => {
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(win)
   const contextTail = createContextTail(win)
+  // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
+  // transcript on that host, so its meter / subagent transcript / search must read over the
+  // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
+  // (so reads reuse the live master); resolved lazily — sshProjectManager is created below but
+  // these are only invoked once a remote hook POST arrives, long after init. Fail-open: a read
+  // before the manager exists returns a non-zero code (RemoteFile maps that to empty).
+  const remoteFile = new RemoteFile((args) =>
+    sshProjectManager ? sshProjectManager.sshRun(args) : Promise.resolve({ code: 1, stdout: '' })
+  )
+  const remoteContextTail = createRemoteContextTail(win, remoteFile)
+  const remoteSubagentTail = createRemoteSubagentTail(win, remoteFile)
+  // Remote transcript ref learned from the hook raw-listener, keyed by sessionId — lets the
+  // search/chat read handlers (which receive only sessionId + cwd) read remotely without a
+  // nodeId. Only remote sessions are ever inserted, so local reads stay on the local reader.
+  const remoteTranscriptBySession = new Map<string, RemoteFileRef>()
+  // toolUseIds whose remote subagent file resolution was cancelled (PostToolUse / node close
+  // arrived before the file appeared) — checked by the async resolver to avoid a late track.
+  const remoteSubagentCancel = new Set<string>()
+
+  // Resolve a remote subagent's transcript FILE (`agent-<id>.jsonl`) by matching the spawning
+  // toolUseId inside its sibling `.meta.json` — the remote analogue of the local subagent tail's
+  // dir scan (the remote tail takes a resolved file path, so we resolve it here). The file
+  // appears shortly after PreToolUse, so we poll briefly over the master. Fail-open throughout.
+  const resolveRemoteSubagentFile = async (
+    rt: { conn: import('../shared/ssh').SshConnection; controlPath: string },
+    parentTranscript: string,
+    toolUseId: string
+  ): Promise<string | undefined> => {
+    if (!sshProjectManager) return undefined
+    const dir = parentTranscript.replace(/\.jsonl$/, '') + '/subagents'
+    // grep -lF prints the matching meta path; `… /*.meta.json` glob is left unquoted to expand.
+    const cmd = `grep -lF ${posixQuote(toolUseId)} ${posixQuote(dir)}/*.meta.json 2>/dev/null | head -1`
+    for (let i = 0; i < 12; i++) {
+      if (remoteSubagentCancel.has(toolUseId)) return undefined
+      const { stdout } = await sshProjectManager.sshRun(childArgs(rt.conn, rt.controlPath, cmd))
+      const meta = stdout.trim()
+      if (meta) return meta.replace(/\.meta\.json$/, '.jsonl')
+      await new Promise((r) => setTimeout(r, 600))
+    }
+    return undefined
+  }
   // Resolve a session's transcript path: prefer the exact session path when a (valid)
   // sessionId is known; otherwise fall back to the node's cwd, which is durable and doesn't
   // need a live hook event.
@@ -266,9 +314,18 @@ app.whenReady().then(async () => {
     return p
   }
 
+  // Read at most the last 5 MB of a transcript (mirrors transcript-reader's READ_CAP_BYTES) —
+  // the remote read fetches the tail over ssh, then reuses the SAME pure parsers as local, so
+  // the returned shape is byte-identical to the local reader.
+  const REMOTE_TRANSCRIPT_CAP = 5 * 1024 * 1024
   ipcMain.handle(
     IPC.claudeReadTranscript,
     async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+      const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
+      if (ref) {
+        const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
+        return parseTranscriptLines(text)
+      }
       const p = await resolveTranscript(sessionId, cwd)
       return p ? readTranscriptLines(p) : []
     }
@@ -277,6 +334,11 @@ app.whenReady().then(async () => {
   ipcMain.handle(
     IPC.chatReadTranscript,
     async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+      const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
+      if (ref) {
+        const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
+        return parseChatMessages(text.split('\n'))
+      }
       const p = await resolveTranscript(sessionId, cwd)
       return p ? readChatMessages(p) : []
     }
@@ -312,6 +374,20 @@ app.whenReady().then(async () => {
     const abs = resolve(tp)
     return abs === TRANSCRIPT_ROOT || abs.startsWith(TRANSCRIPT_ROOT + sep) ? abs : undefined
   }
+  // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
+  // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
+  // Jail it under the project's remote `<remoteHome>/.claude/projects` using POSIX semantics
+  // (remote hosts are POSIX). The `+ '/'` boundary rejects sibling-prefix paths (…/projects-evil).
+  const safeRemoteTranscriptPath = (
+    tp: string | undefined,
+    remoteHome: string | undefined
+  ): string | undefined => {
+    if (!tp || !remoteHome) return undefined
+    const root = posix.join(remoteHome, '.claude', 'projects')
+    const abs = posix.resolve(tp)
+    return abs === root || abs.startsWith(root + '/') ? abs : undefined
+  }
+  const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId !== 'claude') return
     const p = payload as {
@@ -321,6 +397,45 @@ app.whenReady().then(async () => {
       tool_name?: string
       tool_use_id?: string
     }
+    // REMOTE node: route to the remote tails/search, jailing the path under the project's remote
+    // ~/.claude/projects. Diverges from the local path ONLY when the node has a live ssh remote.
+    const rt = nodeId ? ptyManager.sshRemoteForNode(nodeId) : undefined
+    if (rt) {
+      const remoteHome = sshProjectManager?.remoteHomeForControlPath(rt.controlPath)
+      const transcriptPath = safeRemoteTranscriptPath(p.transcript_path, remoteHome)
+      if (p.session_id && transcriptPath) {
+        const ref: RemoteFileRef = { conn: rt.conn, controlPath: rt.controlPath, path: transcriptPath }
+        remoteContextTail.track(p.session_id, ref)
+        remoteTranscriptBySession.set(p.session_id, ref)
+      }
+      if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) {
+        remoteContextTail.untrack(p.session_id)
+        remoteTranscriptBySession.delete(p.session_id)
+      }
+      if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name) && transcriptPath) {
+        const toolUseId = p.tool_use_id
+        if (p.hook_event_name === 'PreToolUse') {
+          remoteSubagentCancel.delete(toolUseId)
+          // Resolve the remote subagent file asynchronously (it appears shortly after), then track.
+          void resolveRemoteSubagentFile(rt, transcriptPath, toolUseId).then((file) => {
+            if (file && !remoteSubagentCancel.has(toolUseId)) {
+              remoteSubagentTail.track(toolUseId, { conn: rt.conn, controlPath: rt.controlPath, path: file })
+            }
+          })
+          if (nodeId) {
+            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+            set.add(toolUseId)
+            nodeSubagents.set(nodeId, set)
+          }
+        } else if (p.hook_event_name === 'PostToolUse') {
+          remoteSubagentCancel.add(toolUseId)
+          remoteSubagentTail.untrack(toolUseId)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(toolUseId)
+        }
+      }
+      return
+    }
     const transcriptPath = safeTranscriptPath(p.transcript_path)
     // Context-window meter: tail the session transcript (any event carrying both fields).
     if (p.session_id && transcriptPath) contextTail.track(p.session_id, transcriptPath)
@@ -328,7 +443,6 @@ app.whenReady().then(async () => {
     if (nodeId && p.session_id && transcriptPath) setNodeTranscript(nodeId, p.session_id, transcriptPath)
     if (p.hook_event_name === 'SessionEnd' && p.session_id) contextTail.untrack(p.session_id)
     // Subagent live transcript: track on PreToolUse / finish on PostToolUse for subagent tools.
-    const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
     if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name)) {
       if (p.hook_event_name === 'PreToolUse') {
         subagentTail.track(p.tool_use_id, transcriptPath)
@@ -350,12 +464,21 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => {
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
+      // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
+      // regardless of whether the closed node was local or remote (avoids an ordering race
+      // with pty-manager's own ptyDestroy handler clearing the ssh-remote registration).
       contextTail.untrack(sessionId)
+      remoteContextTail.untrack(sessionId)
+      remoteTranscriptBySession.delete(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)
     if (subs) {
-      for (const toolUseId of subs) subagentTail.finish(toolUseId)
+      for (const toolUseId of subs) {
+        subagentTail.finish(toolUseId)
+        remoteSubagentCancel.add(toolUseId)
+        remoteSubagentTail.untrack(toolUseId)
+      }
       nodeSubagents.delete(nodeId)
     }
   })
