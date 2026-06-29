@@ -15,28 +15,26 @@ export interface RemoteRunner {
 }
 
 // Per-agent remote install targets (JSON-config agents only in Phase 2a; codex deferred).
-const REMOTE_DIR = '~/.nodeterm'
-const AGENT_TARGETS: { agentId: string; config: string; script: string; events: string[] }[] = [
+// Paths are relative to the remote $HOME and are made absolute once it is resolved at setup
+// (a literal `~` is NOT expanded inside double quotes or when passed as data, so the merged
+// hook command / endpoint file / `-R` bind path would otherwise carry an unexpanded tilde).
+const AGENT_TARGETS: { agentId: string; config: string; events: string[] }[] = [
   {
     agentId: 'claude',
-    config: '~/.claude/settings.json',
-    script: `${REMOTE_DIR}/agent-hooks/claude.sh`,
+    config: '.claude/settings.json',
     events: ['Stop', 'Notification', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SessionStart', 'SessionEnd', 'SubagentStop']
   },
   {
     agentId: 'gemini',
-    config: '~/.gemini/settings.json',
-    script: `${REMOTE_DIR}/agent-hooks/gemini.sh`,
+    config: '.gemini/settings.json',
     events: ['Stop', 'Notification', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse']
   }
 ]
 
-const REMOTE_SOCK = (projectId: string): string => `${REMOTE_DIR}/hook-${projectId}.sock`
-const REMOTE_ENDPOINT = `${REMOTE_DIR}/hook-endpoint.env`
-
 export class RemoteHooks {
-  // Remember the hook port used at setup per project so teardown cancels the exact `-R` spec.
-  private ports = new Map<string, number>()
+  // Remember the absolute sock path + hook port used at setup per project so teardown cancels
+  // the exact `-R` spec (teardown does not re-resolve $HOME).
+  private specs = new Map<string, { sock: string; port: number }>()
 
   constructor(private r: RemoteRunner) {}
 
@@ -47,47 +45,56 @@ export class RemoteHooks {
     hook: { port: number; token: string; version: string }
   ): Promise<{ endpointPath: string } | null> {
     if (!hook.port || !hook.token) return null
-    const sock = REMOTE_SOCK(projectId)
     try {
+      // 0. resolve the remote $HOME once → build all remote paths absolute (no unexpanded ~).
+      const { code, stdout } = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
+      const home = stdout.trim()
+      if (code !== 0 || !home) return null // fail-open: nothing else would work
+      const remoteDir = `${home}/.nodeterm`
+      const sock = `${remoteDir}/hook-${projectId}.sock`
+      const endpoint = `${remoteDir}/hook-endpoint.env`
       // 1. reverse unix-socket forward (stale socket → remove first so -R can bind).
-      await this.r.run(childArgs(conn, controlPath, `mkdir -p ${REMOTE_DIR} && rm -f ${sock}`))
+      await this.r.run(childArgs(conn, controlPath, `mkdir -p ${remoteDir} && rm -f ${sock}`))
       await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
-      this.ports.set(projectId, hook.port)
+      this.specs.set(projectId, { sock, port: hook.port })
       // 2. remote endpoint file (0600 via umask).
       await this.r.run(
-        childArgs(conn, controlPath, `umask 077; cat > ${REMOTE_ENDPOINT}`),
+        childArgs(conn, controlPath, `umask 077; cat > ${endpoint}`),
         remoteEndpointFileContents(sock, hook.token, hook.version)
       )
       // 3. install the managed hook for each JSON agent (script + merged config).
       for (const t of AGENT_TARGETS) {
+        const script = `${remoteDir}/agent-hooks/${t.agentId}.sh`
+        const config = `${home}/${t.config}`
         await this.r.run(
-          childArgs(conn, controlPath, `mkdir -p ${REMOTE_DIR}/agent-hooks && cat > ${t.script} && chmod 755 ${t.script}`),
+          childArgs(conn, controlPath, `mkdir -p ${remoteDir}/agent-hooks && cat > ${script} && chmod 755 ${script}`),
           buildManagedScript(t.agentId)
         )
-        const { stdout } = await this.r.run(childArgs(conn, controlPath, `cat ${t.config} 2>/dev/null || echo '{}'`))
+        const { stdout: cfgRaw } = await this.r.run(childArgs(conn, controlPath, `cat ${config} 2>/dev/null || echo '{}'`))
         let cfg: HookSettings = {}
         try {
-          cfg = JSON.parse(stdout || '{}') as HookSettings
+          cfg = JSON.parse(cfgRaw || '{}') as HookSettings
         } catch {
           cfg = {}
         }
-        const merged = mergeManagedHook(cfg, `sh "${t.script}"`, t.events)
+        const merged = mergeManagedHook(cfg, `sh "${script}"`, t.events)
         await this.r.run(
-          childArgs(conn, controlPath, `mkdir -p $(dirname ${t.config}) && cat > ${t.config}`),
+          childArgs(conn, controlPath, `mkdir -p $(dirname ${config}) && cat > ${config}`),
           JSON.stringify(merged, null, 2)
         )
       }
-      return { endpointPath: REMOTE_ENDPOINT }
+      return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
     }
   }
 
   async teardown(projectId: string, conn: SshConnection, controlPath: string): Promise<void> {
-    const port = this.ports.get(projectId) ?? 0
-    this.ports.delete(projectId)
+    const spec = this.specs.get(projectId)
+    this.specs.delete(projectId)
+    if (!spec) return // nothing was set up (or already torn down)
     try {
-      await this.r.run(hookForwardCancelArgs(conn, controlPath, REMOTE_SOCK(projectId), port))
+      await this.r.run(hookForwardCancelArgs(conn, controlPath, spec.sock, spec.port))
     } catch {
       /* fail open */
     }
