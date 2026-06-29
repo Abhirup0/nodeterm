@@ -370,10 +370,16 @@ export class PtyManager {
       // When the project's reverse tunnel + remote endpoint file are set up (Task 2), inject the
       // remote hook env into the remote tmux session so the installed hook script POSTs state back
       // over the unix-socket tunnel. Fail-open: no hookEndpointPath → no hook env (Phase-1 status).
+      //
+      // NODETERM_NODE_ID MUST be the RAW persistKey (the React Flow node id), NOT the tmux
+      // session name (`nt-<id>`). The local path's hookServer.buildPtyEnv(persistKey, …) sets
+      // NODETERM_NODE_ID = persistKey, and Canvas.tsx onAgentStatus keys agentStatus.byId /
+      // selection off that raw id with no `nt-` stripping. Passing the session name here would
+      // emit events under `nt-<id>` that match no node → no badge/notification/session/loop.
       const hookExtraEnv = options.sshRemote.hookEndpointPath
         ? remoteHookEnvArgs(
             options.sshRemote.hookEndpointPath,
-            sessionName(options.persistKey),
+            options.persistKey,
             hookServer.getVersion()
           )
         : []

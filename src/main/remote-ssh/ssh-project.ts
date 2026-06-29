@@ -156,9 +156,22 @@ export class SshProjectManager {
     this.r.onStatus({ projectId, status: 'disconnected' })
   }
 
-  /** Tear down every live master (on app quit) so no `-N` master ssh child is orphaned. */
+  /**
+   * Tear down every live master (on app quit) so no `-N` master ssh child is orphaned.
+   * This MUST be synchronous: `before-quit` (index.ts) is sync and the process can exit before
+   * any awaited work runs. `disconnect()` awaits an `ssh -O cancel` round-trip BEFORE killing the
+   * master, so on a hard quit `c.master.kill()` would never run → orphaned `-N` master (~5 min
+   * ControlPersist). Here we kill the master immediately and skip the graceful `-O cancel`: the
+   * reverse hook forward dies with the master, so cancelling it is unnecessary on quit.
+   */
   disconnectAll(): void {
-    for (const projectId of [...this.conns.keys()]) void this.disconnect(projectId)
+    for (const projectId of [...this.conns.keys()]) {
+      const c = this.conns.get(projectId)
+      if (!c) continue
+      c.master.kill()
+      this.conns.delete(projectId)
+      this.r.onStatus({ projectId, status: 'disconnected' })
+    }
   }
 }
 

@@ -104,6 +104,17 @@ describe('hook forwarding', () => {
       '-e', 'NODETERM_HOOK_VERSION=1'
     ])
   })
+  it('emits NODETERM_NODE_ID as the RAW persistKey (not the nt-<id> tmux session name)', () => {
+    // Cross-boundary contract: the remote hook env's NODETERM_NODE_ID MUST equal what the
+    // LOCAL path's hookServer.buildPtyEnv(persistKey, …) sets — i.e. the RAW React Flow node id.
+    // Canvas.tsx onAgentStatus keys agentStatus.byId / selection off that raw id with no `nt-`
+    // stripping, so passing the session name (`nt-<id>`) would orphan every remote event.
+    const persistKey = 'node-abc'
+    const env = remoteHookEnvArgs('/ep', persistKey, '1')
+    expect(env).toContain(`NODETERM_NODE_ID=${persistKey}`)
+    // Guard against a regression that passes sessionName(persistKey) = `nt-<id>`.
+    expect(env).not.toContain(`NODETERM_NODE_ID=nt-${persistKey}`)
+  })
   it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION', () => {
     expect(remoteEndpointFileContents('/r.sock', 'tok', '1')).toBe(
       'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=1\n'
