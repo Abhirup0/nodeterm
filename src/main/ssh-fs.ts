@@ -1,8 +1,10 @@
 // SSH filesystem ops over a project's ControlMaster. The remote analog of fs-ops.ts: same
 // fail-open contract ([]/''/false on any error), reused by the renderer's sshFs(projectId) FsApi.
-// Every path is posixQuote'd; write content goes on stdin (never interpolated).
+// Paths are quoteRemotePath'd (a leading `~`/`~/` stays UNQUOTED so the remote shell tilde-expands
+// it — SSH projects default to a home-relative remoteCwd); write content goes on stdin (never
+// interpolated). check-ignore entry NAMES are bare filenames, so they stay posixQuote'd.
 import { childArgs } from './remote-ssh/control-master'
-import { posixQuote, type SshConnection } from '../shared/ssh'
+import { posixQuote, quoteRemotePath, type SshConnection } from '../shared/ssh'
 import type { DirEntry } from '../shared/types'
 
 export interface SshFsRef {
@@ -17,19 +19,21 @@ function dirname(p: string): string {
 }
 
 export function sshListArgs(conn: SshConnection, cp: string, path: string): string[] {
-  return childArgs(conn, cp, `ls -Ap1 ${posixQuote(path)}`)
+  return childArgs(conn, cp, `ls -Ap1 ${quoteRemotePath(path)}`)
 }
 export function sshReadArgs(conn: SshConnection, cp: string, path: string): string[] {
-  return childArgs(conn, cp, `cat ${posixQuote(path)}`)
+  return childArgs(conn, cp, `cat ${quoteRemotePath(path)}`)
 }
 export function sshReadBinaryArgs(conn: SshConnection, cp: string, path: string): string[] {
-  return childArgs(conn, cp, `base64 ${posixQuote(path)}`)
+  return childArgs(conn, cp, `base64 ${quoteRemotePath(path)}`)
 }
 export function sshWriteArgs(conn: SshConnection, cp: string, path: string): string[] {
-  return childArgs(conn, cp, `mkdir -p ${posixQuote(dirname(path))} && cat > ${posixQuote(path)}`)
+  return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(dirname(path))} && cat > ${quoteRemotePath(path)}`)
 }
 export function sshCheckIgnoreArgs(conn: SshConnection, cp: string, dir: string, names: string[]): string[] {
-  return childArgs(conn, cp, `git -C ${posixQuote(dir)} check-ignore -- ${names.map(posixQuote).join(' ')}`)
+  // The dir is a remote path (may be tilde-prefixed) → quoteRemotePath; the entry NAMES are bare
+  // filenames with no tilde → posixQuote literally (and inject-safe).
+  return childArgs(conn, cp, `git -C ${quoteRemotePath(dir)} check-ignore -- ${names.map(posixQuote).join(' ')}`)
 }
 
 /** Parse `ls -Ap1` output → DirEntry[]: trailing-slash = dir, hide .git, folders-first alpha. */

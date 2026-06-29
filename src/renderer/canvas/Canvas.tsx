@@ -924,10 +924,12 @@ export function Canvas() {
     }
   }, [mountRemoteMirror])
 
-  /** Open a file as a code editor node on the canvas. */
+  /** Open a file as a code editor node on the canvas. `sshFs` must be passed explicitly by the
+   *  caller: only genuinely-remote, Explorer-opened files in an SSH project pass `true`; native
+   *  dialog / quick-open paths are LOCAL and stay local (so their ⌘S never writes to the host). */
   const openFile = useCallback(
-    (filePath: string, center?: { x: number; y: number }) => {
-      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, center ?? viewCenter())])
+    (filePath: string, center?: { x: number; y: number }, sshFs?: boolean) => {
+      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -2596,7 +2598,11 @@ export function Canvas() {
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
       {explorerOpen && (
-        <ExplorerPanel onClose={() => setExplorerOpen(false)} onOpenFile={openFile} reveal={reveal} />
+        <ExplorerPanel
+          onClose={() => setExplorerOpen(false)}
+          onOpenFile={(path, isSsh) => openFile(path, undefined, isSsh)}
+          reveal={reveal}
+        />
       )}
 
       <SessionsSidebar

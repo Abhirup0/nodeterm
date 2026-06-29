@@ -6,7 +6,9 @@ import { sshFs } from '../terminal/ssh-fs'
 
 interface ExplorerPanelProps {
   onClose: () => void
-  onOpenFile: (path: string) => void
+  /** Open a file as an editor node. `sshFs` is true for SSH projects (the path is remote, read/
+   *  written over the project's ControlMaster fs); false/omitted for local + relay projects. */
+  onOpenFile: (path: string, sshFs?: boolean) => void
   /** File to reveal (expand ancestors + select + scroll). `path` is relative to the active project
    *  cwd; `nonce` increments per request so revealing the same file twice still re-fires. */
   reveal?: { path: string; nonce: number } | null
@@ -153,6 +155,9 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
     () => (ssh && project ? sshFs(project.id) : window.nodeTerminal.fs),
     [project?.id, ssh]
   )
+  // Files opened from an SSH project's Explorer are genuinely remote — stamp `sshFs` so the editor
+  // node routes its read/write over the project's ControlMaster fs (local/relay projects pass false).
+  const handleOpenFile = useCallback<OpenFn>((path) => onOpenFile(path, !!ssh), [onOpenFile, ssh])
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
@@ -224,7 +229,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 forcedOpen={forcedOpen}
                 revealNonce={reveal?.nonce}
                 onContext={onContext}
-                onOpenFile={onOpenFile}
+                onOpenFile={handleOpenFile}
                 onSelect={setSelected}
               />
             ))}

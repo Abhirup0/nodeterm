@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, parseLsEntries, SshFs } from './ssh-fs'
+import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, sshCheckIgnoreArgs, parseLsEntries, SshFs } from './ssh-fs'
 
 const conn = { host: 'h', user: 'u' }
 const ref = { conn, controlPath: '/s.sock' }
@@ -18,6 +18,20 @@ describe('ssh-fs arg builders', () => {
     const j = sshWriteArgs(conn, '/s.sock', '/d/e/f.txt').join(' ')
     expect(j).toContain(`mkdir -p '/d/e'`)
     expect(j).toContain(`cat > '/d/e/f.txt'`)
+  })
+  // CRITICAL: SSH projects default to a home-relative remoteCwd (`~`). quoteRemotePath must leave a
+  // leading `~/` UNQUOTED so the remote shell tilde-expands it; the remainder stays single-quoted.
+  it('list leaves a leading ~/ unquoted so the remote shell tilde-expands the path', () => {
+    expect(sshListArgs(conn, '/s', '~/projects').join(' ')).toContain(`ls -Ap1 ~/'projects'`)
+  })
+  it('write keeps ~/ unquoted for BOTH the mkdir dirname and the cat target', () => {
+    const j = sshWriteArgs(conn, '/s', '~/projects/file.txt').join(' ')
+    expect(j).toContain(`mkdir -p ~/'projects'`)
+    expect(j).toContain(`cat > ~/'projects/file.txt'`)
+  })
+  it('check-ignore quotes the dir as a remote path (~ expands) but quotes entry NAMES literally', () => {
+    const j = sshCheckIgnoreArgs(conn, '/s', '~/p', ['node_modules', "a'b"]).join(' ')
+    expect(j).toContain(`git -C ~/'p' check-ignore -- 'node_modules' 'a'\\''b'`)
   })
 })
 
