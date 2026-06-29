@@ -8,6 +8,7 @@ import {
   remoteCapturePaneArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
+  mkDirArgs,
   RMT_TMUX_SOCKET,
   hookForwardArgs,
   hookForwardCancelArgs,
@@ -16,6 +17,12 @@ import {
 } from './control-master'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
+
+describe('mkDirArgs', () => {
+  it('mkdir -p the quoted remote path, leaving a leading ~ unquoted', () => {
+    expect(mkDirArgs(conn, '/s.sock', '~/new dir').join(' ')).toContain(`mkdir -p ~/'new dir'`)
+  })
+})
 
 describe('controlPathFor', () => {
   it('returns a SHORT, space-free socket path under ~/.nodeterm/ssh-cm (not the long/spaced userData)', () => {

@@ -9,6 +9,7 @@ import {
   controlPathFor,
   masterArgs,
   listDirArgs,
+  mkDirArgs,
   exitMasterArgs,
   checkMasterArgs,
   remoteTmuxKillArgs,
@@ -142,6 +143,14 @@ export class SshProjectManager {
     return { path: dir, dirs: parseLsDirs(stdout) }
   }
 
+  /** Create a remote directory (mkdir -p). Returns false when not connected or the mkdir fails. */
+  async makeDir(projectId: string, dir: string): Promise<boolean> {
+    const c = this.conns.get(projectId)
+    if (!c) return false
+    const { code } = await this.r.run(mkDirArgs(c.conn, c.controlPath, dir))
+    return code === 0
+  }
+
   /**
    * Authoritatively end the given nodes' REMOTE tmux sessions over the project's live master.
    * Called on project delete BEFORE disconnect, so the remote `nt-<id>` sessions are killed
@@ -258,5 +267,6 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
     mgr.killSessions(projectId, nodeIds)
   )
   ipcMain.handle(IPC.sshListDir, (_e, projectId: string, dir: string) => mgr.listDir(projectId, dir))
+  ipcMain.handle(IPC.sshMkdir, (_e, projectId: string, dir: string) => mgr.makeDir(projectId, dir))
   return mgr
 }

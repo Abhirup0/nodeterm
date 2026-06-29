@@ -83,6 +83,11 @@ export function listDirArgs(conn: SshConnection, controlPath: string, path: stri
   return childArgs(conn, controlPath, `ls -1Ap ${quoteRemotePath(path)}`)
 }
 
+/** Create a remote directory (and any missing parents). `quoteRemotePath` keeps a leading `~`. */
+export function mkDirArgs(conn: SshConnection, controlPath: string, path: string): string[] {
+  return childArgs(conn, controlPath, `mkdir -p ${quoteRemotePath(path)}`)
+}
+
 /**
  * Reverse-forward the local hook server's loopback TCP port to a remote unix socket over the
  * existing master (`ssh -O forward -R <remoteSock>:127.0.0.1:<hookPort>`), so remote hook scripts

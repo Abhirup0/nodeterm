@@ -123,6 +123,12 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
+  /**
+   * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
+   * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
+   * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
+   */
+  closed?: boolean
 }
 
 /** The full workspace written to / read from disk. */
@@ -332,6 +338,8 @@ export interface SshProjectApi {
   killSessions(projectId: string, nodeIds: string[]): Promise<void>
   /** List remote sub-directories of `path` (default ~). */
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
+  /** Create a remote directory (mkdir -p). Resolves false when not connected or the mkdir fails. */
+  mkdir(projectId: string, path: string): Promise<boolean>
   onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
 }
 

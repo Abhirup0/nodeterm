@@ -68,6 +68,7 @@ export const IPC = {
   sshDisconnectProject: 'ssh:disconnect-project',
   sshKillSessions: 'ssh:kill-sessions',
   sshListDir: 'ssh:list-dir',
+  sshMkdir: 'ssh:mkdir',
   sshFsList: 'sshFs:list',
   sshFsRead: 'sshFs:read',
   sshFsReadBinary: 'sshFs:read-binary',

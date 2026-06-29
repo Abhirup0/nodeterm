@@ -60,6 +60,10 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
   const [path, setPath] = useState('~')
   const [dirs, setDirs] = useState<string[]>([])
   const [error, setError] = useState('')
+  // Inline "new folder" creation in the browse step.
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [mkdirErr, setMkdirErr] = useState('')
   // Stable id for the temporary browse master, generated once.
   const browseIdRef = useRef(`ssh-browse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
   const connectedRef = useRef(false)
@@ -93,6 +97,22 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
     setPath(res.path)
     setDirs(res.dirs)
   }, [])
+
+  // Create a folder under the current path on the remote, then navigate into it.
+  const createFolder = useCallback(async () => {
+    const name = newName.trim()
+    if (!name) return
+    setMkdirErr('')
+    const full = `${path.replace(/\/+$/, '')}/${name}`
+    const ok = await window.nodeTerminal.sshProject.mkdir(browseIdRef.current, full)
+    if (!ok) {
+      setMkdirErr('Could not create the folder.')
+      return
+    }
+    setCreating(false)
+    setNewName('')
+    await list(full)
+  }, [newName, path, list])
 
   const connect = useCallback(
     async (srv: SshServer) => {
@@ -230,13 +250,68 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
           >
             ↑ Up
           </button>
+          <button
+            className="confirm__btn"
+            style={{ padding: '3px 9px' }}
+            onClick={() => {
+              setMkdirErr('')
+              setNewName('')
+              setCreating(true)
+            }}
+          >
+            ＋ New folder
+          </button>
           <span
             title={path}
-            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
           >
             {path}
           </span>
         </div>
+        {creating && (
+          <div style={{ display: 'flex', gap: 8, margin: '0 0 8px' }}>
+            <input
+              autoFocus
+              value={newName}
+              placeholder="Folder name"
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void createFolder()
+                else if (e.key === 'Escape') {
+                  setCreating(false)
+                  setNewName('')
+                  setMkdirErr('')
+                }
+              }}
+              style={{ flex: 1, minWidth: 0 }}
+            />
+            <button className="confirm__btn primary" style={{ padding: '3px 9px' }} onClick={() => void createFolder()}>
+              Create
+            </button>
+            <button
+              className="confirm__btn"
+              style={{ padding: '3px 9px' }}
+              onClick={() => {
+                setCreating(false)
+                setNewName('')
+                setMkdirErr('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {mkdirErr && (
+          <p className="confirm__msg" style={{ color: 'var(--danger, #e5534b)', margin: '0 0 8px', fontSize: 12 }}>
+            {mkdirErr}
+          </p>
+        )}
         <div
           style={{
             maxHeight: 240,
