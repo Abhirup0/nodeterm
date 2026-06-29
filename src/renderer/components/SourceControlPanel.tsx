@@ -44,7 +44,11 @@ export function SourceControlPanel({
   onExplainCommit
 }: SourceControlPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
-  const cwd = project?.cwd
+  // SSH project: git ops run on the remote repo over the master, so the cwd is the project's
+  // exact remoteCwd (the remote-git registry matches by exact string — must not be transformed).
+  // Local projects are byte-identical (the SSH branch fires only when `project.ssh` is set).
+  const isSsh = !!project?.ssh
+  const cwd = project?.ssh?.remoteCwd ?? project?.cwd
   const [status, setStatus] = useState<GitStatus | null>(null)
   // Commit message + AI-generate state live in a per-repo store (keyed by cwd), so closing the
   // panel mid-generation neither discards the message nor abandons the run — reopening shows it.
@@ -188,7 +192,11 @@ export function SourceControlPanel({
    */
   const renderRemoteAction = () => {
     if (!status) return null
+    // gh-based "Publish to GitHub" is local-only: gh isn't bridged over the SSH master yet, so
+    // SSH projects hide it (a future follow-up could detect remote gh). Plain git push/pull/sync
+    // below still route remotely via the chokepoint.
     if (!status.hasRemote) {
+      if (isSsh) return null
       return (
         <button
           className="scm-sync"

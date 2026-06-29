@@ -505,7 +505,7 @@ export function Canvas() {
     // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
     if (project.ssh) {
       window.nodeTerminal.sshProject
-        .connect(project.id, project.ssh.server)
+        .connect(project.id, project.ssh.server, project.ssh.remoteCwd)
         .then(({ controlPath, hookEndpointPath }) =>
           useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath })
         )
@@ -977,7 +977,10 @@ export function Canvas() {
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
     (relPath: string, staged: boolean) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      const project = useProjects.getState().getProject(activeProjectId)
+      // SSH project: the diff node operates on the remote repo, so its cwd must be the exact
+      // remoteCwd (the git remote registry matches by exact string; same value passed to connect).
+      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, staged, viewCenter())])
       markDirty()
@@ -988,7 +991,8 @@ export function Canvas() {
   /** Open a parent↔commit diff node for a file from the history graph. */
   const openCommitDiff = useCallback(
     (relPath: string, commitOid: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      const project = useProjects.getState().getProject(activeProjectId)
+      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, false, viewCenter(), commitOid)])
       markDirty()

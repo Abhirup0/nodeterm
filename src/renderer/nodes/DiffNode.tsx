@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
 import { useSettings } from '../state/settings'
+import { useProjects } from '../state/projects'
+import { sshFs } from '../terminal/ssh-fs'
 import type { CanvasNode } from '../state/workspace'
 
 /**
@@ -26,6 +28,14 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
     const git = window.nodeTerminal.git
     const abs = `${cwd}/${rel}`
+    // SSH project: `git.showFile` already routes remotely (Task 2 chokepoint), but the working-tree
+    // side is a raw fs read — for an SSH project (active project has `ssh`) read it over the master
+    // via sshFs (the node's cwd is already the remoteCwd). Local projects use the local fs unchanged.
+    const projState = useProjects.getState()
+    const sshProjectId = projState.getProject(projState.activeProjectId)?.ssh
+      ? projState.activeProjectId
+      : null
+    const workingFs = sshProjectId ? sshFs(sshProjectId) : window.nodeTerminal.fs
     // commit mode: parent (<oid>^) vs commit (<oid>). staged: HEAD vs index. unstaged: index vs working.
     const origP = commitOid
       ? git.showFile(cwd, `${commitOid}^`, rel)
@@ -36,7 +46,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       ? git.showFile(cwd, commitOid, rel)
       : staged
         ? git.showFile(cwd, '', rel)
-        : window.nodeTerminal.fs.read(abs)
+        : workingFs.read(abs)
 
     Promise.all([origP, modP]).then(([orig, mod]) => {
       if (disposed) return
