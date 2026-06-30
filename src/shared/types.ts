@@ -38,7 +38,7 @@ export interface PtyCreateResult {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop' | 'dino'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -78,6 +78,8 @@ export interface CanvasNodeState {
   highScore?: number
   // editor / diff
   filePath?: string
+  /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
+  url?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */

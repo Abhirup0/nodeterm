@@ -21,6 +21,8 @@ const GROUP_SIZE = { width: 520, height: 360 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
+const VIDEO_SIZE = { width: 640, height: 420 }
+const WEB_SIZE = { width: 720, height: 520 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -52,6 +54,8 @@ export interface NodeData {
   cwd?: string
   text?: string
   filePath?: string
+  /** web-only: live URL to load in the web (webview) node. */
+  url?: string
   diffStaged?: boolean
   commitOid?: string
   /** dino-only: best score reached in the T-Rex Runner game. */
@@ -301,6 +305,62 @@ export function createEditorNode(
       group: null,
       filePath,
       ...(sshFs ? { sshFs: true } : {})
+    }
+  }
+}
+
+const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'm4v', 'mkv', 'ogv', 'avi']
+
+/** True when a path looks like a playable video file (by extension). */
+export function isVideoFile(path: string): boolean {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  return VIDEO_EXTS.includes(ext)
+}
+
+/** Creates a video player node for a local video file (streamed via nt-media://). */
+export function createVideoNode(
+  index: number,
+  filePath: string,
+  center?: { x: number; y: number }
+): CanvasNode {
+  return {
+    id: nextId('video'),
+    type: 'video',
+    position: placeAt(center, index, VIDEO_SIZE.width, VIDEO_SIZE.height),
+    width: VIDEO_SIZE.width,
+    height: VIDEO_SIZE.height,
+    style: { width: VIDEO_SIZE.width, height: VIDEO_SIZE.height },
+    data: {
+      title: filePath.split('/').pop() || 'video',
+      color: '#bf5af2',
+      group: null,
+      filePath
+    }
+  }
+}
+
+/** Creates a web (webview) node showing a live URL or a local html file. */
+export function createWebNode(
+  index: number,
+  src: { url?: string; filePath?: string },
+  center?: { x: number; y: number }
+): CanvasNode {
+  const title = src.url
+    ? src.url.replace(/^https?:\/\//, '').slice(0, 40)
+    : src.filePath?.split('/').pop() || 'web'
+  return {
+    id: nextId('web'),
+    type: 'web',
+    position: placeAt(center, index, WEB_SIZE.width, WEB_SIZE.height),
+    width: WEB_SIZE.width,
+    height: WEB_SIZE.height,
+    style: { width: WEB_SIZE.width, height: WEB_SIZE.height },
+    data: {
+      title,
+      color: '#6ac4dc',
+      group: null,
+      ...(src.url ? { url: src.url } : {}),
+      ...(src.filePath ? { filePath: src.filePath } : {})
     }
   }
 }
@@ -625,6 +685,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         cwd: n.cwd,
         text: n.text,
         filePath: n.filePath,
+        url: n.url,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
         highScore: n.highScore,
@@ -649,9 +710,13 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
           ? EDITOR_SIZE
           : kind === 'diff'
             ? DIFF_SIZE
-            : kind === 'dino'
-              ? DINO_SIZE
-              : TERMINAL_SIZE
+            : kind === 'video'
+              ? VIDEO_SIZE
+              : kind === 'web'
+                ? WEB_SIZE
+                : kind === 'dino'
+                  ? DINO_SIZE
+                  : TERMINAL_SIZE
   return nodes
     // Remote terminals are transient to a live relay connection — never persist them (their
     // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).
@@ -681,6 +746,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         cwd: n.data.cwd,
         text: n.data.text,
         filePath: n.data.filePath,
+        url: n.data.url,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
