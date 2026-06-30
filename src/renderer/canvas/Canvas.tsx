@@ -249,6 +249,10 @@ export function Canvas() {
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
   )
   nodesRef.current = nodes
+  // Mirror the open-confirm state into a ref so the []-dep agent-control effect can see the
+  // CURRENT dialog (it closes over a stale `confirm`), to reject overlapping destructive verbs.
+  const confirmRef = useRef(confirm)
+  confirmRef.current = confirm
 
   const nodeTypes = useMemo(
     () => ({
@@ -2060,7 +2064,8 @@ export function Canvas() {
               reply({ ok: false, error: 'show-image requires --path' })
               return
             }
-            await window.nodeTerminal.media.allow(args.path)
+            // EditorNode renders images via fs:read-binary → base64 data URL (not nt-media://),
+            // so no media allowlist entry is needed here.
             const id = addAndConnect(createEditorNode(nodesRef.current.length, args.path, center))
             reply({ ok: true, message: `showing image ${id}`, result: { id } })
             return
@@ -2098,6 +2103,12 @@ export function Canvas() {
               reply({ ok: false, error: 'write requires --node' })
               return
             }
+            // One confirm dialog at a time: setConfirm would replace a pending one, orphaning its
+            // reply and hanging that earlier request to its 120s timeout. Reject instead.
+            if (confirmRef.current) {
+              reply({ ok: false, error: 'a confirmation is already pending — try again' })
+              return
+            }
             // Destructive → confirm. Replies on confirm AND cancel.
             setConfirm({
               message: `Agent "${srcTitle}" wants to send to ${args.node}:\n\n${args.text ?? ''}`,
@@ -2124,6 +2135,11 @@ export function Canvas() {
               reply({ ok: false, error: 'close requires --node' })
               return
             }
+            // One confirm dialog at a time (see `write`): reject rather than orphan a pending one.
+            if (confirmRef.current) {
+              reply({ ok: false, error: 'a confirmation is already pending — try again' })
+              return
+            }
             // Destructive → confirm. Replies on confirm AND cancel.
             setConfirm({
               message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
@@ -2131,12 +2147,12 @@ export function Canvas() {
               danger: true,
               onConfirm: () => {
                 setConfirm(null)
-                window.nodeTerminal.pty.destroy(args.node)
-                setNodes((ns) => ns.filter((n) => n.id !== args.node))
+                // Canonical teardown: deleteNodes() destroys the local tmux session (remote-guarded),
+                // drops persisted agentStatus, and reparents any group children. Don't hand-roll it.
+                deleteNodes([args.node])
                 setControlEdges((es) =>
                   es.filter((e) => e.source !== args.node && e.target !== args.node)
                 )
-                markDirty()
                 reply({ ok: true, message: `closed ${args.node}` })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
