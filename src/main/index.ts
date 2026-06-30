@@ -1,5 +1,6 @@
 import { join, resolve, sep, posix } from 'path'
 import { homedir } from 'os'
+import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import * as fsOps from './fs-ops'
@@ -555,6 +556,41 @@ app.whenReady().then(async () => {
       }
       nodeSubagents.delete(nodeId)
     }
+  })
+  // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
+  // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
+  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
+  const pendingControl = new Map<
+    string,
+    {
+      resolve: (r: { ok: boolean; message?: string; result?: unknown; error?: string }) => void
+      timer: NodeJS.Timeout
+    }
+  >()
+  ipcMain.on(
+    IPC.agentControlResult,
+    (
+      _e,
+      payload: { requestId: string; ok: boolean; message?: string; result?: unknown; error?: string }
+    ) => {
+      const pending = pendingControl.get(payload.requestId)
+      if (!pending) return
+      clearTimeout(pending.timer)
+      pendingControl.delete(payload.requestId)
+      pending.resolve(payload)
+    }
+  )
+  hookServer.setControlHandler(async ({ verb, nodeId, args }) => {
+    if (!mainWin || mainWin.isDestroyed()) return { ok: false, error: 'window unavailable' }
+    const requestId = randomUUID()
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingControl.delete(requestId)
+        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
+      }, 120_000)
+      pendingControl.set(requestId, { resolve, timer })
+      mainWin!.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
+    })
   })
   await hookServer.start()
   initMediaProtocol()

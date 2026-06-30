@@ -859,4 +859,21 @@ export interface NodeTerminalApi {
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
+  /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */
+  onAgentControl(
+    listener: (cmd: {
+      requestId: string
+      sourceNodeId: string
+      verb: string
+      args: Record<string, string>
+    }) => void
+  ): () => void
+  /** Reply to an agent control request (resolves the awaiting CLI call in main). */
+  sendAgentControlResult(payload: {
+    requestId: string
+    ok: boolean
+    message?: string
+    result?: unknown
+    error?: string
+  }): void
 }

@@ -24,6 +24,8 @@ export const IPC = {
   appSetBadge: 'app:set-badge',
   agentStatus: 'agent:status',
   agentSubagentActivity: 'agent:subagent-activity',
+  agentControl: 'agent:control',
+  agentControlResult: 'agent:control-result',
   contextLinkSetLinks: 'context-link:set-links',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',

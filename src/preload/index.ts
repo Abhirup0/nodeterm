@@ -338,7 +338,13 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentSubagentActivity, handler)
     return () => ipcRenderer.removeListener(IPC.agentSubagentActivity, handler)
-  }
+  },
+  onAgentControl: (listener) => {
+    const handler = (_e: unknown, cmd: unknown) => listener(cmd as never)
+    ipcRenderer.on(IPC.agentControl, handler)
+    return () => ipcRenderer.removeListener(IPC.agentControl, handler)
+  },
+  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload)
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)
