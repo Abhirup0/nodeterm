@@ -20,10 +20,9 @@ build/icon.png
 # local session handoff transcripts / app state
 .nodeterm/
 
-# internal planning artifacts (SDD plans/specs) — not for the public repo
-/docs/superpowers/
-# release runbook (signing/notarization/Apple specifics) kept private
-/docs/RELEASING.md
+# NOTE: internal dev docs (docs/superpowers/ SDD plans+specs, docs/RELEASING.md) are
+# TRACKED in this private repo so the full dev environment clones cleanly on a remote
+# server. They are stripped from the PUBLIC mirror by publish.sh (PRIVATE_PATHS), not here.
 
 # local publish helper — never exported to the public repo
 /publish.sh
