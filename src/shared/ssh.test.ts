@@ -139,6 +139,10 @@ describe('remoteTmuxConf', () => {
     expect(c).toContain('copy-pipe-and-cancel')
     expect(c).not.toContain('pbcopy')
   })
+  it('advertises the OSC 52 clipboard-set capability via terminal-overrides (Ms)', () => {
+    expect(c).toContain('terminal-overrides')
+    expect(c).toContain('Ms=')
+  })
   it('floors history-limit at 1000', () => {
     expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')
     expect(remoteTmuxConf(50000)).toContain('set -g history-limit 50000')

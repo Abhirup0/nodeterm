@@ -248,8 +248,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
     // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
     // query so a remote program can never read the local clipboard. Returning true swallows the
-    // sequence (also the read query). Local tmux uses pbcopy → emits no OSC 52, so this is a no-op
-    // for local terminals.
+    // sequence (also the read query). This is additive: the local tmux conf also has set-clipboard
+    // on, so local tmux DOES emit OSC 52 and this handler fires too — a harmless redundant write of
+    // the same selection (pbcopy already wrote it), NOT a no-op.
     term.parser.registerOscHandler(52, (data) => {
       const text = parseOsc52(data)
       if (text !== null) window.nodeTerminal.clipboard.writeText(text)

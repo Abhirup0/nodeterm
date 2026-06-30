@@ -92,6 +92,7 @@ set -sg escape-time 10
 set -g destroy-unattached off
 setw -g aggressive-resize on
 set -g set-clipboard on
+set -ag terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007'
 bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
 bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
 bind -T copy-mode    DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe-and-cancel
