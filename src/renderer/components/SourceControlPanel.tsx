@@ -594,6 +594,17 @@ export function SourceControlPanel({
           zIndex={80}
           onClose={() => setMoreMenu(null)}
           items={[
+            // Plain Pull/Push/Sync (always available when the branch has an upstream), independent
+            // of the morphing primary button's current state — like VS Code's "…" menu. SSH-project
+            // repos route these to the remote over the master via the Phase-4 git chokepoint.
+            ...(status.hasUpstream
+              ? ([
+                  { label: 'Pull', onClick: () => void act(() => git.pull(cwd!)) },
+                  { label: 'Push', onClick: () => void act(() => git.push(cwd!)) },
+                  { label: 'Sync', onClick: () => void act(() => git.sync(cwd!)) },
+                  { type: 'separator' }
+                ] as MenuItem[])
+              : []),
             { label: 'Fetch', onClick: () => void act(() => git.fetch(cwd!)) },
             {
               label: 'Force Push',
