@@ -6,6 +6,7 @@ import {
   posixQuote,
   quoteRemotePath,
   remoteTmuxCommand,
+  remoteTmuxConf,
   parseLsDirs
 } from './ssh'
 
@@ -127,6 +128,31 @@ describe('remoteTmuxCommand', () => {
     expect(
       remoteTmuxCommand({ sessionId: 'nt-x', remoteCwd: '/a', program: 'ssh', programArgs: ['-A', 'h'] })
     ).toBe(`tmux -L nodeterm-rmt new-session -A -s 'nt-x' -c '/a' 'ssh' '-A' 'h'`)
+  })
+})
+
+describe('remoteTmuxConf', () => {
+  const c = remoteTmuxConf(50000)
+  it('enables mouse + clipboard and uses OSC 52 (no pbcopy)', () => {
+    expect(c).toContain('set -g mouse on')
+    expect(c).toContain('set -g set-clipboard on')
+    expect(c).toContain('copy-pipe-and-cancel')
+    expect(c).not.toContain('pbcopy')
+  })
+  it('floors history-limit at 1000', () => {
+    expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')
+    expect(remoteTmuxConf(50000)).toContain('set -g history-limit 50000')
+  })
+})
+
+describe('remoteTmuxCommand confPath', () => {
+  it('adds -f <confPath> before new-session when given', () => {
+    const cmd = remoteTmuxCommand({ sessionId: 'nt-x', remoteCwd: '~/app', socket: 'nodeterm-rmt', confPath: '/home/u/.nodeterm/tmux.conf' })
+    expect(cmd).toContain(`-f '/home/u/.nodeterm/tmux.conf' new-session`)
+  })
+  it('omits -f when no confPath', () => {
+    const cmd = remoteTmuxCommand({ sessionId: 'nt-x', remoteCwd: '~/app', socket: 'nodeterm-rmt' })
+    expect(cmd).not.toContain('-f ')
   })
 })
 
