@@ -180,6 +180,21 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return // losing second instance — quitting; don't touch tmux
+
+  // Harden every <webview> guest (WebNode runs its page in its own webContents, so the main
+  // window's setWindowOpenHandler / will-navigate above don't cover it). Registered once at
+  // startup for all current and future guests.
+  app.on('web-contents-created', (_e, contents) => {
+    if (contents.getType() !== 'webview') return
+    // Web nodes may only show http(s) pages or local content we serve via the jailed
+    // nt-media:// scheme.
+    contents.on('will-navigate', (e, url) => {
+      if (!/^https?:\/\//i.test(url) && !/^nt-media:\/\//i.test(url)) e.preventDefault()
+    })
+    // Deny popups / window.open from guest pages (defense-in-depth; allowpopups is already unset).
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  })
+
   settingsStore.init()
   settingsStore.registerIpc()
   sshStore.registerIpc()
