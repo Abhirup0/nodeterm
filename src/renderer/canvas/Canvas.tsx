@@ -144,6 +144,8 @@ export function Canvas() {
   const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
   const [transcriptHits, setTranscriptHits] = useState<TranscriptHit[]>([])
   const transcriptQueryRef = useRef('')
+  // Pending debounce timer for the palette transcript search (reset on each keystroke).
+  const transcriptSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
@@ -1896,15 +1898,20 @@ export function Canvas() {
 
   const onPaletteQuery = useCallback((q: string) => {
     transcriptQueryRef.current = q
+    // Reset any pending search so rapid keystrokes only fire one IPC call.
+    if (transcriptSearchTimer.current) clearTimeout(transcriptSearchTimer.current)
     if (q.trim().length < 2) {
       setTranscriptHits([])
       return
     }
     const mine = q
-    window.nodeTerminal.transcripts.search(q).then((hits) => {
-      // Stale-response guard: ignore results for a query the user has moved past.
-      if (transcriptQueryRef.current === mine) setTranscriptHits(hits)
-    })
+    // Debounce the actual search by ~180ms.
+    transcriptSearchTimer.current = setTimeout(() => {
+      window.nodeTerminal.transcripts.search(q).then((hits) => {
+        // Stale-response guard: ignore results for a query the user has moved past.
+        if (transcriptQueryRef.current === mine) setTranscriptHits(hits)
+      })
+    }, 180)
   }, [])
 
   // Map a transcript hit's sessionId to a live node (via agentStatus). If that node still
@@ -2379,7 +2386,7 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
-  const now = Date.now()
+  const now = useMemo(() => Date.now(), [transcriptHits])
   const transcriptCommands = useMemo<Command[]>(
     () =>
       transcriptHits.map((hit) => ({
@@ -2709,6 +2716,7 @@ export function Canvas() {
           onClose={() => {
             setPaletteOpen(false)
             setTranscriptHits([])
+            if (transcriptSearchTimer.current) clearTimeout(transcriptSearchTimer.current)
           }}
         />
       )}

@@ -96,9 +96,9 @@ function loadPersisted(): TranscriptIndexEntry[] {
   }
 }
 
-function persist(): void {
+async function persist(): Promise<void> {
   try {
-    fs.writeFileSync(indexFilePath(), JSON.stringify(entries), 'utf8')
+    await fs.promises.writeFile(indexFilePath(), JSON.stringify(entries), 'utf8')
   } catch {
     /* best-effort */
   }
@@ -107,6 +107,8 @@ function persist(): void {
 async function refresh(): Promise<void> {
   const scan = await scanTranscripts()
   const { toRead, keep } = planRefresh(entries, scan)
+  // Only persist when the index actually changed (new/updated entries or dropped ones).
+  const changed = toRead.length > 0 || keep.length !== entries.length
   const fresh: TranscriptIndexEntry[] = [...keep]
   for (const f of toRead) {
     const text = await readTail(f.transcriptPath)
@@ -121,7 +123,7 @@ async function refresh(): Promise<void> {
     })
   }
   entries = fresh
-  persist()
+  if (changed) await persist()
 }
 
 export function searchTranscripts(query: string): TranscriptHit[] {
