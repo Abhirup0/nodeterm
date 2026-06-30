@@ -86,6 +86,7 @@ import {
   canRename,
   canTransferFrom,
   canContextLink,
+  canControlCanvas,
   resumeCommand,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
@@ -141,6 +142,10 @@ export function Canvas() {
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
   const linkEdgesRef = useRef<Edge[]>([])
   linkEdgesRef.current = linkEdges
+  // Display-only edges drawn from a control-capable agent to the nodes it spawns via the
+  // `nodeterm` CLI (see the onAgentControl effect). Like ephemeralEdges, these are merged only at
+  // the <ReactFlow> prop: never persisted (not bridges) and never turned into context links.
+  const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
@@ -196,6 +201,8 @@ export function Canvas() {
   const [confirm, setConfirm] = useState<{
     message: string
     onConfirm: () => void
+    /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
+    onCancel?: () => void
     confirmLabel?: string
     cancelLabel?: string
     danger?: boolean
@@ -403,8 +410,9 @@ export function Canvas() {
         markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 }
       }
     })
-    return ephemeralEdges.length ? [...decorated, ...ephemeralEdges] : decorated
-  }, [linkEdges, ephemeralEdges, accent])
+    const extra = ephemeralEdges.length || controlEdges.length ? [...ephemeralEdges, ...controlEdges] : []
+    return extra.length ? [...decorated, ...extra] : decorated
+  }, [linkEdges, ephemeralEdges, controlEdges, accent])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -1968,6 +1976,183 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
+  // Apply canvas-control commands issued by a control-capable agent's `nodeterm` CLI. Reads the
+  // LATEST nodes via nodesRef (so the effect deps stay []), validates the source as the real
+  // authorization boundary, then applies the verb. Non-destructive verbs (list/open-*/show-*)
+  // apply + reply immediately; destructive ones (write/close) go through the confirm dialog and
+  // reply on BOTH confirm and cancel. Every path replies EXACTLY ONCE so the awaiting CLI call in
+  // main never hangs to its 120s timeout.
+  useEffect(() => {
+    return window.nodeTerminal.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
+      const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
+        window.nodeTerminal.sendAgentControlResult({ requestId, ...r })
+
+      // Authorization boundary: the source must be a live, control-capable agent node.
+      const src = nodesRef.current.find((n) => n.id === sourceNodeId)
+      if (!src || !canControlCanvas((src.data.agentId as AgentId | undefined) ?? '')) {
+        reply({ ok: false, error: 'source node is not a control-capable agent' })
+        return
+      }
+      const srcTitle = (src.data.title as string) || sourceNodeId
+      const srcCwd = src.data.cwd as string | undefined
+      const center = { x: src.position.x + 360, y: src.position.y }
+      const connect = (newId: string) =>
+        setControlEdges((es) => [
+          ...es,
+          { id: `ctrl-${sourceNodeId}-${newId}`, source: sourceNodeId, target: newId, type: 'default' }
+        ])
+      // Append a freshly-created node, draw its connecting edge, and mark the canvas dirty so it
+      // persists. Returns the new node id.
+      const addAndConnect = (node: CanvasNode) => {
+        setNodes((ns) => [...ns, node])
+        connect(node.id)
+        markDirty()
+        return node.id
+      }
+
+      try {
+        switch (verb) {
+          case 'list': {
+            const list = nodesRef.current.map((n) => ({
+              id: n.id,
+              kind: n.type,
+              title: n.data.title as string
+            }))
+            reply({
+              ok: true,
+              result: list,
+              message: list.map((n) => `${n.id} [${n.kind}] ${n.title}`).join('\n')
+            })
+            return
+          }
+          case 'open-terminal': {
+            const id = addAndConnect(
+              createTerminalNode(nodesRef.current.length, args.cwd || srcCwd, center, args.cmd)
+            )
+            reply({ ok: true, message: `opened terminal ${id}`, result: { id } })
+            return
+          }
+          case 'open-claude': {
+            const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
+            const ids: string[] = []
+            for (let i = 0; i < count; i++) {
+              ids.push(
+                addAndConnect(
+                  createAgentNode(
+                    'claude',
+                    nodesRef.current.length + i,
+                    args.cwd || srcCwd,
+                    { x: center.x, y: center.y + i * 80 },
+                    args.prompt
+                  )
+                )
+              )
+            }
+            reply({
+              ok: true,
+              message: `opened ${count} claude session(s): ${ids.join(', ')}`,
+              result: { ids }
+            })
+            return
+          }
+          case 'show-image': {
+            if (!args.path) {
+              reply({ ok: false, error: 'show-image requires --path' })
+              return
+            }
+            await window.nodeTerminal.media.allow(args.path)
+            const id = addAndConnect(createEditorNode(nodesRef.current.length, args.path, center))
+            reply({ ok: true, message: `showing image ${id}`, result: { id } })
+            return
+          }
+          case 'show-video': {
+            if (!args.path) {
+              reply({ ok: false, error: 'show-video requires --path' })
+              return
+            }
+            await window.nodeTerminal.media.allow(args.path)
+            const id = addAndConnect(createVideoNode(nodesRef.current.length, args.path, center))
+            reply({ ok: true, message: `showing video ${id}`, result: { id } })
+            return
+          }
+          case 'show-web': {
+            let webSrc: { url?: string; filePath?: string }
+            if (args.url) webSrc = { url: args.url }
+            else if (args.file) webSrc = { filePath: args.file }
+            else if (args.html) {
+              // Raw HTML the agent wrote → persist via main, then load the file in the webview.
+              const p = await window.nodeTerminal.media.writeHtml(args.html)
+              webSrc = { filePath: p }
+            } else {
+              reply({ ok: false, error: 'show-web requires --url, --file or --html' })
+              return
+            }
+            // For an agent-provided --file (not html we just wrote), allowlist it first.
+            if (webSrc.filePath && args.file) await window.nodeTerminal.media.allow(webSrc.filePath)
+            const id = addAndConnect(createWebNode(nodesRef.current.length, webSrc, center))
+            reply({ ok: true, message: `showing web ${id}`, result: { id } })
+            return
+          }
+          case 'write': {
+            if (!args.node) {
+              reply({ ok: false, error: 'write requires --node' })
+              return
+            }
+            // Destructive → confirm. Replies on confirm AND cancel.
+            setConfirm({
+              message: `Agent "${srcTitle}" wants to send to ${args.node}:\n\n${args.text ?? ''}`,
+              confirmLabel: 'Send',
+              onConfirm: async () => {
+                setConfirm(null)
+                try {
+                  const ok = await window.nodeTerminal.pty.sendText(args.node, args.text ?? '')
+                  reply({
+                    ok,
+                    message: ok ? 'sent' : 'failed',
+                    error: ok ? undefined : 'sendText failed'
+                  })
+                } catch (e) {
+                  reply({ ok: false, error: String(e) })
+                }
+              },
+              onCancel: () => reply({ ok: false, error: 'denied by user' })
+            })
+            return
+          }
+          case 'close': {
+            if (!args.node) {
+              reply({ ok: false, error: 'close requires --node' })
+              return
+            }
+            // Destructive → confirm. Replies on confirm AND cancel.
+            setConfirm({
+              message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
+              confirmLabel: 'Close',
+              danger: true,
+              onConfirm: () => {
+                setConfirm(null)
+                window.nodeTerminal.pty.destroy(args.node)
+                setNodes((ns) => ns.filter((n) => n.id !== args.node))
+                setControlEdges((es) =>
+                  es.filter((e) => e.source !== args.node && e.target !== args.node)
+                )
+                markDirty()
+                reply({ ok: true, message: `closed ${args.node}` })
+              },
+              onCancel: () => reply({ ok: false, error: 'denied by user' })
+            })
+            return
+          }
+          default:
+            reply({ ok: false, error: `unknown verb: ${verb}` })
+        }
+      } catch (e) {
+        reply({ ok: false, error: String(e) })
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ---- sessions sidebar actions ----
   // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
   // inactive project's node even though it isn't mounted; then drop it from the store.
@@ -2812,7 +2997,10 @@ export function Canvas() {
           cancelLabel={confirm.cancelLabel}
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
-          onCancel={() => setConfirm(null)}
+          onCancel={() => {
+            confirm.onCancel?.()
+            setConfirm(null)
+          }}
         />
       )}
 
