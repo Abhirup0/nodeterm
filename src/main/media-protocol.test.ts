@@ -23,4 +23,11 @@ describe('resolveMediaPath (path jail)', () => {
     const url = mediaUrlFor('/a b/çlip.mp4')
     expect(resolveMediaPath(new URL(url).pathname, allow2)).toBe('/a b/çlip.mp4')
   })
+
+  it('round-trips a path containing ? through mediaUrlFor', () => {
+    const original = '/projects/app/q?x&y#z.mp4'
+    const allow3 = new Set([original])
+    const url = mediaUrlFor(original)
+    expect(resolveMediaPath(new URL(url).pathname, allow3)).toBe(original)
+  })
 })
