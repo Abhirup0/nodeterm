@@ -79,7 +79,7 @@ describe('SshProjectManager', () => {
     const out = await mgr.uploadFile('p1', '/local/img.png', 'img.png')
     expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/img\.png$/)
     // scp targeted that exact absolute remote path (conn is { host: 'h', user: 'u' }).
-    expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
+    expect(scpCalls[0].join(' ')).toContain(`u@h:${out}`)
   })
 
   it('uploadFile basenames a traversal fileName so it cannot escape the token dir', async () => {
@@ -104,7 +104,7 @@ describe('SshProjectManager', () => {
     const out = await mgr.uploadFile('p1', '/local/evil', '../../evil')
     expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/evil$/)
     expect(out).not.toContain('..')
-    expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
+    expect(scpCalls[0].join(' ')).toContain(`u@h:${out}`)
   })
 
   it('connect writes + source-files the remote tmux.conf and returns its absolute path', async () => {

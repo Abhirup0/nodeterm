@@ -3,7 +3,7 @@
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
@@ -89,11 +89,16 @@ export function mkDirArgs(conn: SshConnection, controlPath: string, path: string
 }
 
 /** scp argv that reuses the project's ControlMaster. `localPath` is a raw local arg; the absolute
- *  `remotePath` is posixQuote'd (the remote shell interprets it). scp uses `-P` for the port. */
+ *  `remotePath` is passed RAW (NOT posixQuote'd). Modern scp (OpenSSH 9+) uses the SFTP protocol by
+ *  default and does NOT run the remote path through a shell — it opens the literal string after the
+ *  `host:`, so a quoted path makes the SFTP server look for a file literally named `'…'` (the upload
+ *  then silently fails). Leaving it raw means SFTP opens the exact absolute path (spaces and all);
+ *  there is no remote shell, so no quoting is needed and no injection is possible (`fileName` is also
+ *  basenamed by the caller, and the path is absolute). scp uses `-P` (uppercase) for the port. */
 export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
   if (conn.identityFile) args.push('-i', conn.identityFile)
-  args.push(localPath, `${conn.user}@${conn.host}:${posixQuote(remotePath)}`)
+  args.push(localPath, `${conn.user}@${conn.host}:${remotePath}`)
   return args
 }
 
