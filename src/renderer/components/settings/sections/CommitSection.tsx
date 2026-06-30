@@ -4,8 +4,13 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Select } from '@renderer/ui/Select'
 import { Input } from '@renderer/ui/Input'
+import { Switch } from '@renderer/ui/Switch'
 
 const ROWS = {
+  autoFetch: {
+    title: 'Auto-fetch git status',
+    keywords: ['git', 'fetch', 'source control', 'ahead', 'behind', 'sync', 'remote']
+  },
   agent: {
     title: 'Commit agent',
     keywords: ['commit', 'message', 'ai', 'claude', 'codex', 'generate']
@@ -26,6 +31,19 @@ export function CommitSection({ isActive }: { isActive: boolean }): React.JSX.El
       isActive={isActive}
       searchEntries={ENTRIES}
     >
+      <SearchableRow {...ROWS.autoFetch}>
+        <FieldRow
+          label="Auto-fetch git status"
+          description="Periodically refresh ahead/behind from the remote while Source Control is open."
+          control={
+            <Switch
+              checked={settings.gitAutoFetch}
+              ariaLabel="Auto-fetch git status"
+              onChange={(on) => update({ gitAutoFetch: on })}
+            />
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.agent}>
         <FieldRow
           label="Agent"

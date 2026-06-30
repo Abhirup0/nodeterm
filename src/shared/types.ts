@@ -269,6 +269,9 @@ export interface Settings {
   seenShortcuts: boolean
   /** Notify (OS notification) when a Claude Code turn finishes while the app is in the background. */
   notifyOnClaudeDone: boolean
+  /** Periodically `git fetch` while the Source Control panel is open, so ahead/behind stays
+   *  accurate (remote/SSH projects fetch on the remote). */
+  gitAutoFetch: boolean
   /** Whether the one-time notification consent prompt has been shown. */
   notifyConsentAsked: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
@@ -299,6 +302,7 @@ export const DEFAULT_SETTINGS: Settings = {
   commitExtraPrompt: '',
   seenShortcuts: false,
   notifyOnClaudeDone: true,
+  gitAutoFetch: true,
   notifyConsentAsked: false,
   customAgents: [],
   disabledAgents: [],
