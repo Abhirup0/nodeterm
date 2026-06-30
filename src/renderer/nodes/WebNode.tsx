@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
+import { httpUrl } from './webUrl'
 
 /**
  * A web view node. When `data.url` is set it loads that live URL; otherwise it serves the
@@ -19,7 +20,12 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
   useEffect(() => {
     let alive = true
     if (url) {
-      setSrc(url)
+      const safe = httpUrl(url)
+      if (safe) {
+        setSrc(safe)
+      } else {
+        setError('Unsupported URL scheme — only http/https')
+      }
     } else if (filePath) {
       window.nodeTerminal.media
         .allow(filePath)
@@ -51,7 +57,10 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
           <button
             className="term-node__close"
             title="Open in browser"
-            onClick={() => window.nodeTerminal.shell.openExternal(url)}
+            onClick={() => {
+              const safe = httpUrl(url)
+              if (safe) window.nodeTerminal.shell.openExternal(safe)
+            }}
           >
             ↗
           </button>
