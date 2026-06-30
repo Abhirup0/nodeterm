@@ -27,6 +27,10 @@ interface CommandPaletteProps {
   onOpenFile?: (relPath: string) => void
   /** Reveal a file result in the Explorer by its root-relative path. */
   onRevealFile?: (relPath: string) => void
+  /** Called whenever the query input changes (for async result sources). */
+  onQueryChange?: (q: string) => void
+  /** Pre-filtered commands appended verbatim (NOT re-filtered) — e.g. transcript hits. */
+  extraCommands?: Command[]
 }
 
 /** Case-insensitive subsequence match — "ntr" matches "New TeRminal". */
@@ -48,7 +52,9 @@ export function CommandPalette({
   onClose,
   fileIndex,
   onOpenFile,
-  onRevealFile
+  onRevealFile,
+  onQueryChange,
+  extraCommands
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -81,7 +87,10 @@ export function CommandPalette({
     })
   }, [fileIndex, onOpenFile, onRevealFile, query])
 
-  const items = useMemo(() => [...filtered, ...fileCommands], [filtered, fileCommands])
+  const items = useMemo(
+    () => [...filtered, ...fileCommands, ...(extraCommands ?? [])],
+    [filtered, fileCommands, extraCommands]
+  )
 
   const run = (cmd?: Command) => {
     if (!cmd) return
@@ -101,6 +110,7 @@ export function CommandPalette({
           onChange={(e) => {
             setQuery(e.target.value)
             setActive(0)
+            onQueryChange?.(e.target.value)
           }}
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') {

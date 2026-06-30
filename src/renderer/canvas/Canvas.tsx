@@ -84,10 +84,12 @@ import {
   canRename,
   canTransferFrom,
   canContextLink,
+  resumeCommand,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
   type AgentId
 } from '@shared/agents/config'
+import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
@@ -97,7 +99,7 @@ import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
 import { requireProOr } from '../state/upgradeGate'
 import type { SshServer } from '@shared/ssh'
-import type { SshProjectStatus } from '@shared/types'
+import type { SshProjectStatus, TranscriptHit } from '@shared/types'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -140,6 +142,8 @@ export function Canvas() {
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
+  const [transcriptHits, setTranscriptHits] = useState<TranscriptHit[]>([])
+  const transcriptQueryRef = useRef('')
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
@@ -1890,6 +1894,48 @@ export function Canvas() {
     [setNodes, goToNode, switchProject]
   )
 
+  const onPaletteQuery = useCallback((q: string) => {
+    transcriptQueryRef.current = q
+    if (q.trim().length < 2) {
+      setTranscriptHits([])
+      return
+    }
+    const mine = q
+    window.nodeTerminal.transcripts.search(q).then((hits) => {
+      // Stale-response guard: ignore results for a query the user has moved past.
+      if (transcriptQueryRef.current === mine) setTranscriptHits(hits)
+    })
+  }, [])
+
+  // Map a transcript hit's sessionId to a live node (via agentStatus). If that node still
+  // exists anywhere, focus it; otherwise open a new Claude node that resumes the session.
+  const openTranscriptHit = useCallback(
+    (hit: TranscriptHit) => {
+      const byId = useAgentStatus.getState().byId
+      const projects = useProjects.getState().projects
+      const boundNodeId = Object.entries(byId).find(
+        ([nodeId, st]) =>
+          st.sessionId === hit.sessionId &&
+          (nodesRef.current.some((n) => n.id === nodeId) ||
+            projects.some((p) => p.nodes.some((n) => n.id === nodeId)))
+      )?.[0]
+      if (boundNodeId) {
+        focusNodeById(boundNodeId)
+        return
+      }
+      // No live node — open a resume node in the active project, using the transcript's cwd.
+      const cmd = resumeCommand('claude', hit.sessionId)
+      if (!cmd) return
+      const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
+      node.data = { ...node.data, initialCommand: cmd }
+      node.selected = true
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
+      markDirty()
+      goToNode(node)
+    },
+    [focusNodeById, setNodes, markDirty, goToNode, viewCenter]
+  )
+
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
   // ---- sessions sidebar actions ----
@@ -2333,6 +2379,20 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  const now = Date.now()
+  const transcriptCommands = useMemo<Command[]>(
+    () =>
+      transcriptHits.map((hit) => ({
+        id: `transcript:${hit.sessionId}`,
+        label: hit.title || hit.sessionId,
+        hint: [hit.projectLabel, relativeTime(hit.mtime, now)].filter(Boolean).join(' · '),
+        section: 'Conversations',
+        icon: <IconJump />,
+        run: () => openTranscriptHit(hit)
+      })),
+    [transcriptHits, openTranscriptHit, now]
+  )
+
   const buildCommands = useCallback((): Command[] => {
     const disabled = useSettings.getState().settings.disabledAgents
     const cmds: Command[] = [
@@ -2644,7 +2704,12 @@ export function Canvas() {
           fileIndex={fileIndex}
           onOpenFile={openProjectFile}
           onRevealFile={revealProjectFile}
-          onClose={() => setPaletteOpen(false)}
+          onQueryChange={onPaletteQuery}
+          extraCommands={transcriptCommands}
+          onClose={() => {
+            setPaletteOpen(false)
+            setTranscriptHits([])
+          }}
         />
       )}
 
