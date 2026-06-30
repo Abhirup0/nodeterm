@@ -33,6 +33,7 @@ import { childArgs } from './remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { initContextLink, setNodeTranscript } from './context-link'
+import { initCanvasControl } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -596,6 +597,7 @@ app.whenReady().then(async () => {
   initMediaProtocol()
 
   initContextLink(win, ptyManager)
+  initCanvasControl()
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
