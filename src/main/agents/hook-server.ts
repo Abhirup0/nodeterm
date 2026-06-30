@@ -3,7 +3,7 @@ import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { app } from 'electron'
-import type { AgentId } from '../../shared/agents/config'
+import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 
 export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
@@ -157,7 +157,8 @@ class HookServer {
       NODETERM_HOOK_VERSION: NODETERM_HOOK_PROTOCOL_VERSION,
       NODETERM_HOOK_ENDPOINT: this.endpointFilePath(),
       NODETERM_NODE_ID: nodeId,
-      NODETERM_AGENT_ID: agentId
+      NODETERM_AGENT_ID: agentId,
+      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
     }
   }
 
