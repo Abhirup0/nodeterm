@@ -2394,7 +2394,7 @@ export function Canvas() {
         label: hit.title || hit.sessionId,
         hint: [hit.projectLabel, relativeTime(hit.mtime, now)].filter(Boolean).join(' · '),
         section: 'Conversations',
-        icon: <IconJump />,
+        icon: <AgentIcon agentId="claude" />,
         run: () => openTranscriptHit(hit)
       })),
     [transcriptHits, openTranscriptHit, now]
