@@ -21,6 +21,7 @@ import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { DinoNode } from '../nodes/DinoNode'
+import VideoNode from '../nodes/VideoNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
@@ -111,6 +112,8 @@ import {
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
+  createVideoNode,
+  isVideoFile,
   duplicateNode,
   flowToNodeStates,
   groupSelectedNodes,
@@ -247,7 +250,8 @@ export function Canvas() {
       diff: withNodeBoundary(DiffNode),
       subagent: withNodeBoundary(SubagentNode),
       loop: withNodeBoundary(LoopNode),
-      dino: withNodeBoundary(DinoNode)
+      dino: withNodeBoundary(DinoNode),
+      video: withNodeBoundary(VideoNode)
     }),
     []
   )
@@ -945,7 +949,12 @@ export function Canvas() {
    *  dialog / quick-open paths are LOCAL and stay local (so their ⌘S never writes to the host). */
   const openFile = useCallback(
     (filePath: string, center?: { x: number; y: number }, sshFs?: boolean) => {
-      setNodes((ns) => [...ns, createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)])
+      setNodes((ns) => [
+        ...ns,
+        isVideoFile(filePath)
+          ? createVideoNode(ns.length, filePath, center ?? viewCenter())
+          : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)
+      ])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
