@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
 import type { GitHistoryItem, GitHistoryResult } from '@shared/git-history'
 import { useProjects } from '../state/projects'
+import { useSettings } from '../state/settings'
 import { useSshConn } from '../state/sshConn'
 import { useScmDraft } from '../state/scmDraft'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
@@ -17,6 +18,8 @@ interface SourceControlPanelProps {
   onOpenCommitDiff: (relPath: string, commitOid: string) => void
   onExplainCommit: (prompt: string) => void
 }
+
+const AUTO_FETCH_MS = 180_000
 
 const STATUS_COLOR: Record<string, string> = {
   M: '#ffd60a',
@@ -93,6 +96,8 @@ export function SourceControlPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, git, sshControlPath])
 
+  const autoFetchOn = useSettings((s) => s.settings.gitAutoFetch)
+
   const refreshHistory = useCallback(async () => {
     if (!cwd) {
       setHistory(null)
@@ -112,6 +117,35 @@ export function SourceControlPanel({
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // Keep `refresh` current without re-creating the interval below on every status change.
+  const refreshRef = useRef(refresh)
+  useEffect(() => {
+    refreshRef.current = refresh
+  }, [refresh])
+
+  // Auto-fetch while the panel is open so ahead/behind ("Synced") stays accurate — git's ahead/
+  // behind is computed against the local remote-tracking ref, which only updates on `git fetch`.
+  // SSH-project repos fetch on the remote via the Phase-4 chokepoint. Silent + fail-open: a failed
+  // fetch is swallowed (status left as-is), bypassing the act() busy/error UI.
+  useEffect(() => {
+    if (!cwd || !autoFetchOn) return
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      try {
+        await git.fetch(cwd)
+        if (!cancelled) await refreshRef.current()
+      } catch {
+        /* offline / auth / no remote — keep the last good status */
+      }
+    }
+    void tick() // once on open (or cwd/connection change)
+    const id = setInterval(() => void tick(), AUTO_FETCH_MS)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [cwd, autoFetchOn, sshControlPath, git])
 
   useEffect(() => {
     void refreshHistory()
