@@ -174,12 +174,19 @@ export class SshProjectManager {
           const confPath = `${remoteHome}/.nodeterm/tmux.conf`
           try {
             const dir = `${remoteHome}/.nodeterm`
-            await this.r.run(
+            // The runner RESOLVES (doesn't throw) on a non-zero remote exit, so the catch below
+            // only guards a thrown error. Gate `tmuxConfPath` on the WRITE's exit code: a failed
+            // write (mkdir perms, disk full, …) must leave it undefined so `remoteTmuxCommand`
+            // never passes `-f <missing-conf>` (which makes tmux refuse to start → terminal dies).
+            const w = await this.r.run(
               childArgs(conn, controlPath, `mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(confPath)}`),
               remoteTmuxConf(50000)
             )
-            await this.r.run(childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
-            tmuxConfPath = confPath
+            if (w.code === 0) {
+              // source-file is best-effort (pushes options into a warm server); ignore its result.
+              await this.r.run(childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
+              tmuxConfPath = confPath
+            }
           } catch {
             /* fail-open: no conf → remote tmux uses host defaults */
           }

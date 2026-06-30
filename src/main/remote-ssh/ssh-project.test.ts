@@ -132,6 +132,30 @@ describe('SshProjectManager', () => {
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
   })
 
+  it('connect leaves tmuxConfPath undefined when the remote conf write fails (no -f to a missing conf)', async () => {
+    // The runner resolves (does not throw) on a non-zero remote exit. Fail the `cat >`/mkdir write
+    // with code 1 while letting the $HOME probe succeed so remoteHome resolves — this isolates the
+    // write-failure path. tmuxConfPath must stay undefined (so no `-f <missing-conf>`), yet connect
+    // still succeeds and returns the control path.
+    const run = vi.fn(async (args: string[]) => {
+      const cmd = args.join(' ')
+      if (cmd.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+      if (cmd.includes('cat > ') || cmd.includes('mkdir -p')) return { code: 1, stdout: '' }
+      return { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    const { controlPath, tmuxConfPath } = await mgr.connect('p1', conn)
+    expect(tmuxConfPath).toBeUndefined()
+    expect(controlPath).toBe(controlPathFor('p1'))
+  })
+
   it('uploadFile fails open (null) when not connected', async () => {
     const { mgr } = makeMgr()
     expect(await mgr.uploadFile('nope', '/x', 'x')).toBeNull()
