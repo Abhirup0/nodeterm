@@ -245,6 +245,13 @@ export interface FilesApi {
   quickOpen(cwd: string): Promise<string[]>
 }
 
+export interface MediaApi {
+  /** Allow an absolute local path to be served, and return its nt-media:// URL. */
+  allow(absPath: string): Promise<string>
+  /** Persist raw HTML to <userData>/agent-web/<id>.html, allowlist it, return its absolute path. */
+  writeHtml(html: string): Promise<string>
+}
+
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
  * terminal-title + process status (no hooks/branch/loop/bridge). */
 export interface CustomAgent {
@@ -818,6 +825,7 @@ export interface NodeTerminalApi {
   clipboard: ClipboardApi
   shell: ShellApi
   fs: FsApi
+  media: MediaApi
   files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi

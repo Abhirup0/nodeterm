@@ -41,6 +41,12 @@ import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
+import {
+  registerMediaScheme,
+  initMediaProtocol,
+  allowMediaPath,
+  writeAgentHtml
+} from './media-protocol'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
@@ -100,6 +106,10 @@ if (!gotSingleInstanceLock) {
     mainWin.focus()
   })
 }
+
+// Declare the nt-media:// scheme privileged BEFORE the app is ready (required by Electron).
+// The actual request handler is installed post-ready via initMediaProtocol().
+registerMediaScheme()
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -176,6 +186,9 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())
   )
+
+  ipcMain.handle(IPC.mediaAllow, (_e, absPath: string) => allowMediaPath(absPath))
+  ipcMain.handle(IPC.mediaWriteHtml, (_e, html: string) => writeAgentHtml(html))
 
   ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
     generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
@@ -541,6 +554,7 @@ app.whenReady().then(async () => {
     }
   })
   await hookServer.start()
+  initMediaProtocol()
 
   initContextLink(win, ptyManager)
   initClaudeUsage(win)

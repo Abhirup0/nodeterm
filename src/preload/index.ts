@@ -168,6 +168,10 @@ const api: NodeTerminalApi = {
     readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
   },
+  media: {
+    allow: (absPath: string) => ipcRenderer.invoke(IPC.mediaAllow, absPath),
+    writeHtml: (html: string) => ipcRenderer.invoke(IPC.mediaWriteHtml, html)
+  },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
   },

@@ -116,6 +116,8 @@ export const IPC = {
   gitSetActiveRemote: 'git:set-active-remote',
   shellOpenExternal: 'shell:open-external',
   commitGenerate: 'commit:generate',
+  mediaAllow: 'media:allow',
+  mediaWriteHtml: 'media:write-html',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
   // Connection approval gate: main → renderer when a client finishes the handshake (carries the
