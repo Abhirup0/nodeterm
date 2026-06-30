@@ -3,7 +3,9 @@ import {
   extractEntryFields,
   makeSnippet,
   searchEntries,
+  planRefresh,
   INDEX_TEXT_CAP_BYTES,
+  type ScanFile,
   type TranscriptIndexEntry
 } from './transcript-index-core'
 
@@ -63,5 +65,29 @@ describe('searchEntries', () => {
 
   it('respects the limit', () => {
     expect(searchEntries(entries, 'tmux', 1)).toHaveLength(1)
+  })
+})
+
+describe('planRefresh', () => {
+  const prior: TranscriptIndexEntry[] = [
+    { sessionId: 'a', transcriptPath: '/p/a.jsonl', cwd: '/c', mtime: 100, title: 't', text: 'x' },
+    { sessionId: 'b', transcriptPath: '/p/b.jsonl', cwd: '/c', mtime: 100, title: 't', text: 'x' }
+  ]
+
+  it('re-reads new and changed files, keeps unchanged, drops vanished', () => {
+    const scan: ScanFile[] = [
+      { sessionId: 'a', transcriptPath: '/p/a.jsonl', mtime: 100 }, // unchanged -> keep
+      { sessionId: 'b', transcriptPath: '/p/b.jsonl', mtime: 200 }, // changed -> read
+      { sessionId: 'c', transcriptPath: '/p/c.jsonl', mtime: 50 }   // new -> read
+    ]
+    const plan = planRefresh(prior, scan)
+    expect(plan.keep.map((e) => e.sessionId)).toEqual(['a'])
+    expect(plan.toRead.map((f) => f.sessionId).sort()).toEqual(['b', 'c'])
+  })
+
+  it('drops entries whose file is gone (not in scan)', () => {
+    const plan = planRefresh(prior, [{ sessionId: 'a', transcriptPath: '/p/a.jsonl', mtime: 100 }])
+    expect(plan.keep.map((e) => e.sessionId)).toEqual(['a'])
+    expect(plan.toRead).toEqual([])
   })
 })

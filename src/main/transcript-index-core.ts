@@ -78,3 +78,31 @@ export function searchEntries(
       mtime: e.mtime
     }))
 }
+
+// A directory listing of one transcript file (path + mtime), without its parsed contents.
+export interface ScanFile {
+  sessionId: string
+  transcriptPath: string
+  mtime: number
+}
+
+// The outcome of diffing a fresh scan against the prior index: which files to (re-)read and
+// which prior entries to keep as-is. Entries absent from the scan are dropped (not returned).
+export interface RefreshPlan {
+  toRead: ScanFile[]
+  keep: TranscriptIndexEntry[]
+}
+
+// Decide what an incremental refresh must do: re-read scan files that are new or whose mtime
+// increased, keep prior entries whose file is unchanged and still present, drop the rest.
+export function planRefresh(prior: TranscriptIndexEntry[], scan: ScanFile[]): RefreshPlan {
+  const priorById = new Map(prior.map((e) => [e.sessionId, e]))
+  const toRead: ScanFile[] = []
+  const keep: TranscriptIndexEntry[] = []
+  for (const f of scan) {
+    const p = priorById.get(f.sessionId)
+    if (p && p.mtime === f.mtime) keep.push(p)
+    else toRead.push(f)
+  }
+  return { toRead, keep }
+}
