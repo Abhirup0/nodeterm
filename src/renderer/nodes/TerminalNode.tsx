@@ -16,6 +16,7 @@ import { transport as localTransport } from '../terminal/local-transport'
 import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
+import { parseOsc52 } from '../terminal/osc52'
 import { FindBar } from '../components/FindBar'
 import { IconSearch } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -49,7 +50,13 @@ async function resolveSshRemote(
   conn: SshConnection,
   cwd: string | undefined
 ): Promise<
-  | { controlPath: string; conn: SshConnection; remoteCwd: string; hookEndpointPath?: string }
+  | {
+      controlPath: string
+      conn: SshConnection
+      remoteCwd: string
+      hookEndpointPath?: string
+      tmuxConfPath?: string
+    }
   | undefined
 > {
   const projectId = useProjects.getState().activeProjectId
@@ -75,7 +82,10 @@ async function resolveSshRemote(
   // The remote hook endpoint (reverse tunnel + remote install) is set up alongside the master;
   // pass it through so the remote tmux session carries the hook env. Optional (fail-open).
   const hookEndpointPath = useSshConn.getState().getHookEndpointPath(projectId)
-  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath }
+  // The remote tmux config (mouse on → scroll; set-clipboard on → OSC 52) is written + sourced
+  // alongside the master; pass its path so a fresh remote session launches with `-f`. Optional.
+  const tmuxConfPath = useSshConn.getState().getTmuxConfPath(projectId)
+  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath, tmuxConfPath }
 }
 
 /**
@@ -234,6 +244,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.open(container)
     fit.fit()
     patchTerminalScale(term, getZoom)
+
+    // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
+    // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
+    // query so a remote program can never read the local clipboard. Returning true swallows the
+    // sequence (also the read query). Local tmux uses pbcopy → emits no OSC 52, so this is a no-op
+    // for local terminals.
+    term.parser.registerOscHandler(52, (data) => {
+      const text = parseOsc52(data)
+      if (text !== null) window.nodeTerminal.clipboard.writeText(text)
+      return true
+    })
 
     // Cmd+C copies the terminal selection (xterm renders to canvas, so the DOM-selection
     // copy used elsewhere can't see it). Ctrl+C is left alone so it still sends SIGINT.

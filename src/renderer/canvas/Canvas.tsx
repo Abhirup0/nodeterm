@@ -509,11 +509,11 @@ export function Canvas() {
     if (project.ssh) {
       window.nodeTerminal.sshProject
         .connect(project.id, project.ssh.server, project.ssh.remoteCwd)
-        .then(async ({ controlPath, hookEndpointPath }) => {
+        .then(async ({ controlPath, hookEndpointPath, tmuxConfPath }) => {
           // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
           // Source Control panel's re-fetch (which keys off that entry) already hits the master.
           await window.nodeTerminal.git.setActiveRemote(project.id)
-          useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath })
+          useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath })
         })
         .catch(() => {
           /* status surfaced via onStatus → the connection banner */

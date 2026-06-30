@@ -7,6 +7,9 @@ export interface SshConnInfo {
   /** Remote endpoint file the managed hook script sources (reverse-tunnel hook transport).
    *  Optional: absent when forwarding/remote install failed (fail-open → Phase-1 status). */
   hookEndpointPath?: string
+  /** Remote path of the injected tmux config (`-f`), written + sourced on connect.
+   *  Optional: absent when the conf write failed (fail-open → remote tmux defaults). */
+  tmuxConfPath?: string
 }
 
 /**
@@ -21,6 +24,7 @@ interface SshConnState {
   setConn(projectId: string, info: SshConnInfo): void
   getControlPath(projectId: string): string | undefined
   getHookEndpointPath(projectId: string): string | undefined
+  getTmuxConfPath(projectId: string): string | undefined
   clear(projectId: string): void
 }
 
@@ -34,6 +38,9 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   getHookEndpointPath(projectId) {
     return get().byProject[projectId]?.hookEndpointPath
+  },
+  getTmuxConfPath(projectId) {
+    return get().byProject[projectId]?.tmuxConfPath
   },
   clear(projectId) {
     set((s) => {
