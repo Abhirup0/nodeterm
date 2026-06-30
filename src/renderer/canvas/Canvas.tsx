@@ -22,6 +22,7 @@ import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { DinoNode } from '../nodes/DinoNode'
 import VideoNode from '../nodes/VideoNode'
+import WebNode from '../nodes/WebNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
 import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
@@ -113,6 +114,7 @@ import {
   createStickyNode,
   createTerminalNode,
   createVideoNode,
+  createWebNode,
   isVideoFile,
   duplicateNode,
   flowToNodeStates,
@@ -251,7 +253,8 @@ export function Canvas() {
       subagent: withNodeBoundary(SubagentNode),
       loop: withNodeBoundary(LoopNode),
       dino: withNodeBoundary(DinoNode),
-      video: withNodeBoundary(VideoNode)
+      video: withNodeBoundary(VideoNode),
+      web: withNodeBoundary(WebNode)
     }),
     []
   )
@@ -1072,6 +1075,17 @@ export function Canvas() {
   const addDino = useCallback(
     (center?: { x: number; y: number }) => {
       setNodes((ns) => [...ns, createDinoNode(ns.length, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
+  const addWebView = useCallback(
+    (center?: { x: number; y: number }) => {
+      const input = window.prompt('Open web view — enter a URL:')
+      const url = input?.trim()
+      if (!url) return
+      setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -2435,6 +2449,7 @@ export function Canvas() {
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
+      { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
           id: `new-remote-${srv.id}`,
@@ -2506,6 +2521,7 @@ export function Canvas() {
     addAgentNode,
     addSticky,
     addDino,
+    addWebView,
     openFileDialog,
     addProject,
     fitView,

@@ -125,7 +125,10 @@ function createWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Enables the <webview> tag used by WebNode (embedded content stays locked down —
+      // no nodeintegration is set on the webview element itself).
+      webviewTag: true
     }
   })
 
