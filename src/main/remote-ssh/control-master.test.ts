@@ -105,6 +105,11 @@ describe('remoteTmuxPtyArgs', () => {
     const cmd = args[args.length - 1]
     expect(cmd).toContain('new-session -A -e NODETERM_HOOK_ENDPOINT=/r/ep.env -e NODETERM_NODE_ID=nt-x -s')
   })
+  it('threads confPath to remoteTmuxCommand as a `-f` source before new-session', () => {
+    const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf')
+    const cmd = args[args.length - 1]
+    expect(cmd).toContain(`-f '/home/u/.nodeterm/tmux.conf' new-session -A`)
+  })
 })
 
 describe('hook forwarding', () => {

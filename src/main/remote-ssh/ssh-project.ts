@@ -3,7 +3,7 @@ import path from 'path'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { parseLsDirs, posixQuote, type SshConnection } from '../../shared/ssh'
+import { parseLsDirs, posixQuote, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatus } from '../../shared/types'
 import {
   controlPathFor,
@@ -14,7 +14,8 @@ import {
   checkMasterArgs,
   remoteTmuxKillArgs,
   childArgs,
-  scpArgs
+  scpArgs,
+  RMT_TMUX_SOCKET
 } from './control-master'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../agents/hook-server'
@@ -38,6 +39,10 @@ interface Conn {
   controlPath: string
   master: ReturnType<Runners['spawnMaster']>
   hookEndpointPath?: string
+  /** The remote path of nodeterm's tmux.conf (`<remoteHome>/.nodeterm/tmux.conf`), written +
+   * source-filed at connect. Threaded to `remoteTmuxCommand`'s `-f` so cold-start remote sessions
+   * get mouse/clipboard/scrollback. Undefined if the write/source failed (fail-open). */
+  tmuxConfPath?: string
   /** The remote `$HOME`, resolved at connect. Used (Phase 2b) to jail remote transcript reads
    * under `<remoteHome>/.claude/projects`. Undefined if it couldn't be resolved (fail-open). */
   remoteHome?: string
@@ -115,7 +120,7 @@ export class SshProjectManager {
     projectId: string,
     conn: SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string }> {
+  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string }> {
     const existing = this.conns.get(projectId)
     if (existing) {
       // Verify the cached master is still alive before reusing it — a dropped/timed-out master
@@ -126,7 +131,7 @@ export class SshProjectManager {
         // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
         // Guard against a later connect without remoteCwd clearing a known cwd.
         existing.remoteCwd = remoteCwd ?? existing.remoteCwd
-        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath }
+        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath, tmuxConfPath: existing.tmuxConfPath }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
@@ -161,13 +166,32 @@ export class SshProjectManager {
         } catch {
           // fail-open
         }
+        // Write nodeterm's remote tmux.conf + source it into the (warm) server, best-effort. The
+        // tmux server only reads `-f` when it starts; source-file pushes the options into an
+        // already-running server (warm reattach) so existing + new sessions get mouse/clipboard.
+        let tmuxConfPath: string | undefined
+        if (remoteHome) {
+          const confPath = `${remoteHome}/.nodeterm/tmux.conf`
+          try {
+            const dir = `${remoteHome}/.nodeterm`
+            await this.r.run(
+              childArgs(conn, controlPath, `mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(confPath)}`),
+              remoteTmuxConf(50000)
+            )
+            await this.r.run(childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
+            tmuxConfPath = confPath
+          } catch {
+            /* fail-open: no conf → remote tmux uses host defaults */
+          }
+        }
         const entry = this.conns.get(projectId)
         if (entry) {
           entry.hookEndpointPath = hookEndpointPath
           entry.remoteHome = remoteHome
+          entry.tmuxConfPath = tmuxConfPath
         }
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath, hookEndpointPath }
+        return { controlPath, hookEndpointPath, tmuxConfPath }
       }
       await new Promise((res) => setTimeout(res, 100))
     }

@@ -107,6 +107,31 @@ describe('SshProjectManager', () => {
     expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
   })
 
+  it('connect writes + source-files the remote tmux.conf and returns its absolute path', async () => {
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      return args.join(' ').includes('printf %s')
+        ? { code: 0, stdout: '/home/u' }
+        : { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    const { tmuxConfPath } = await mgr.connect('p1', conn)
+    expect(tmuxConfPath).toBe('/home/u/.nodeterm/tmux.conf')
+    // The conf was written via `cat >` (with the conf body as stdin) and then source-file'd.
+    const write = calls.find((c) => c.args.join(' ').includes(`cat > '/home/u/.nodeterm/tmux.conf'`))
+    expect(write).toBeDefined()
+    expect(write?.stdin).toContain('set -g mouse on')
+    expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
+  })
+
   it('uploadFile fails open (null) when not connected', async () => {
     const { mgr } = makeMgr()
     expect(await mgr.uploadFile('nope', '/x', 'x')).toBeNull()

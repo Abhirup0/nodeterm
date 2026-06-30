@@ -132,9 +132,10 @@ export function remoteTmuxPtyArgs(
   remoteCwd: string,
   program?: string,
   programArgs?: string[],
-  extraEnv: string[] = []
+  extraEnv: string[] = [],
+  confPath?: string
 ): string[] {
-  let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET })
+  let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET, confPath })
   if (extraEnv.length) cmd = cmd.replace('new-session -A ', `new-session -A ${extraEnv.join(' ')} `)
   return ['-t', ...childArgs(conn, controlPath, cmd)]
 }

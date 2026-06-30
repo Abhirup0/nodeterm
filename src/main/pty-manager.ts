@@ -404,7 +404,10 @@ export class PtyManager {
         // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
         options.shell,
         options.shellArgs,
-        hookExtraEnv
+        hookExtraEnv,
+        // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
+        // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
+        options.sshRemote.tmuxConfPath
       )
     } else if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
       // attach-or-create the persistent session for this node.

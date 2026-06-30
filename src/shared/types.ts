@@ -23,7 +23,7 @@ export interface PtyCreateOptions {
    */
   agentId?: AgentId
   /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
-  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string }
+  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string }
 }
 
 /**
@@ -327,7 +327,7 @@ export interface SshProjectApi {
     projectId: string,
     server: import('./ssh').SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string }>
+  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**
