@@ -18,6 +18,7 @@ import { createContextTail } from './context-tail'
 import {
   readTranscriptLines,
   readChatMessages,
+  readSessionName,
   resolveTranscriptPath,
   transcriptPathForCwd,
   parseTranscriptLines,
@@ -186,6 +187,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
+  )
+
+  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string, cwd: string) =>
+    readSessionName(sessionId ?? '', cwd ?? '')
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())

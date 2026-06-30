@@ -55,6 +55,9 @@ export const USAGE_CAPABLE = ['claude'] as const
 export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
+// Agents that support naming the session in two directions: they emit a session title we adopt
+// into the node title, and accept `/rename <name>` to push a renamed node title back. Claude-only.
+export const RENAME_CAPABLE = ['claude'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
@@ -67,6 +70,7 @@ export const canContextLink = (id: AgentId): boolean => includes(CONTEXT_LINK_CA
 export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
+export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 
 // Returns the builtin config for an id, or undefined for custom/unknown agents.
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>

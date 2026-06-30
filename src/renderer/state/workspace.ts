@@ -28,6 +28,12 @@ export const COLLAPSED_HEIGHT = 40
 /** User data carried in the React Flow node's data field. */
 export interface NodeData {
   title: string
+  /**
+   * Agent nodes only: while true (the default for agent nodes), the title auto-tracks the
+   * agent's session name (see TerminalNode's onTitleChange). Flipped to false the moment the
+   * user renames the node by hand — then the user's name is pushed back via `/rename`.
+   */
+  titleAuto?: boolean
   color: string
   group: string | null
   tags?: string[]
@@ -246,6 +252,8 @@ export function createAgentNode(
     style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
     data: {
       title: label,
+      // Adopt the agent's own session name into the title until the user renames it by hand.
+      titleAuto: true,
       color,
       group: null,
       tags: [],
@@ -605,6 +613,9 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       ...(n.parentId ? { parentId: n.parentId, extent: 'parent' as const } : {}),
       data: {
         title: n.title,
+        // Default true for older agent nodes saved before titleAuto existed, so they start
+        // tracking the session name; non-agent nodes ignore it.
+        titleAuto: n.titleAuto ?? true,
         color: n.color,
         group: n.group,
         tags: n.tags,
@@ -660,6 +671,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
             : n.measured?.height ?? n.height ?? sizeFor(kind).height
         },
         title: n.data.title,
+        titleAuto: n.data.titleAuto,
         color: n.data.color,
         group: n.data.group,
         tags: n.data.tags,

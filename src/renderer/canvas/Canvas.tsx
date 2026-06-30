@@ -81,6 +81,7 @@ import {
   agentConfig,
   hasHooks,
   canBranch,
+  canRename,
   canTransferFrom,
   canContextLink,
   AGENT_CONFIG,
@@ -1919,11 +1920,26 @@ export function Canvas() {
   const renameSession = useCallback(
     (projectId: string, id: string, title: string) => {
       if (projectId === activeProjectId) {
-        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, title } } : n)))
+        // An explicit rename takes ownership of the name → stop auto-tracking the session.
+        setNodes((ns) =>
+          ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, title, titleAuto: false } } : n))
+        )
         markDirty()
       } else {
         useProjects.getState().renameNode(projectId, id, title)
         void writeDisk()
+      }
+      // Mirror the new name into a rename-capable agent's live session (tmux send-keys works
+      // whether or not the node is currently mounted). Same one-way push as the node header's ✦.
+      const liveAgent = nodesRef.current.find((n) => n.id === id)?.data.agentId as AgentId | undefined
+      const storedAgent = useProjects
+        .getState()
+        .projects.find((p) => p.id === projectId)
+        ?.nodes.find((n) => n.id === id)?.agentId
+      const agentId = liveAgent ?? storedAgent
+      const name = title.trim()
+      if (agentId && canRename(agentId) && name) {
+        void window.nodeTerminal.pty.sendText(id, `/rename ${name}`)
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]

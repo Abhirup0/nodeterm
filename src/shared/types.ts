@@ -47,6 +47,12 @@ export interface CanvasNodeState {
   position: { x: number; y: number }
   size: { width: number; height: number }
   title: string
+  /**
+   * Agent nodes only: while true (the default), the node title auto-tracks the agent's own
+   * session name. Set false once the user renames the node by hand, so we stop overwriting it
+   * and instead push the user's name back to the agent via `/rename`. Persisted.
+   */
+  titleAuto?: boolean
   color: string
   group: string | null
   /** Labels for organizing/filtering terminals. */
@@ -180,6 +186,9 @@ export interface PtyApi {
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
+  /** The agent session's display name (`/rename` name, else auto name) read from its transcript;
+   *  null if none. Used to keep a node title in sync with the `/resume` name (e.g. after resume). */
+  readSessionName(sessionId: string, cwd: string): Promise<string | null>
   /** Listens for PTY output. Returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
@@ -645,6 +654,21 @@ export interface ChatApi {
   ): Promise<ChatMessage[]>
 }
 
+/** One ranked search hit across all on-disk Claude session transcripts. */
+export interface TranscriptHit {
+  sessionId: string
+  title: string
+  snippet: string
+  cwd: string
+  projectLabel: string
+  mtime: number
+}
+
+export interface TranscriptsApi {
+  /** Search all on-disk Claude session transcripts by content. */
+  search(query: string): Promise<TranscriptHit[]>
+}
+
 export interface ClaudeApi {
   /**
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
@@ -801,6 +825,7 @@ export interface NodeTerminalApi {
   context: ContextApi
   claude: ClaudeApi
   chat: ChatApi
+  transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi
   handoff: HandoffApi

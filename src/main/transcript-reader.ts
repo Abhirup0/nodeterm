@@ -202,6 +202,63 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
   return undefined
 }
 
+// Read only the last `cap` bytes of a file as UTF-8 (whole file if smaller). Drops the partial
+// leading line on a capped read. Cheaper than readCappedTail for tiny scans (session title).
+async function readSmallTail(filePath: string, cap: number): Promise<string | undefined> {
+  try {
+    const stat = await fs.promises.stat(filePath)
+    if (stat.size <= cap) return await fs.promises.readFile(filePath, 'utf8')
+    const fd = await fs.promises.open(filePath, 'r')
+    try {
+      const { buffer } = await fd.read({
+        position: stat.size - cap,
+        length: cap,
+        buffer: Buffer.alloc(cap)
+      })
+      const s = buffer.toString('utf8')
+      const nl = s.indexOf('\n')
+      return nl >= 0 ? s.slice(nl + 1) : s
+    } finally {
+      await fd.close()
+    }
+  } catch {
+    return undefined
+  }
+}
+
+// Pure: pick a session's display name from transcript text. Prefers the user's `/rename` name
+// (latest `custom-title` record's `customTitle`), else Claude's auto name (latest `ai-title`'s
+// `aiTitle`) — mirroring what `/resume` shows. Returns null if neither is present.
+export function pickSessionName(text: string): string | null {
+  let custom: string | null = null
+  let ai: string | null = null
+  for (const raw of text.split('\n')) {
+    if (!raw.includes('title')) continue
+    try {
+      const o = JSON.parse(raw) as { type?: string; customTitle?: unknown; aiTitle?: unknown }
+      if (o.type === 'custom-title' && typeof o.customTitle === 'string') custom = o.customTitle
+      else if (o.type === 'ai-title' && typeof o.aiTitle === 'string') ai = o.aiTitle
+    } catch {
+      /* skip non-JSON line */
+    }
+  }
+  const name = (custom ?? ai)?.trim()
+  return name ? name : null
+}
+
+// The current display name of a Claude session, read from its transcript. This is the name shown
+// in `/resume` — the authoritative source, since `/rename` does NOT push to the OSC terminal
+// title. Resolved by sessionId when known, else by cwd. Returns null if none found.
+const TITLE_TAIL_BYTES = 128 * 1024
+export async function readSessionName(sessionId: string, cwd: string): Promise<string | null> {
+  let p = sessionId ? await resolveTranscriptPath(sessionId) : undefined
+  if (!p && cwd) p = await transcriptPathForCwd(cwd)
+  if (!p) return null
+  const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
+  if (!tail) return null
+  return pickSessionName(tail)
+}
+
 // Durable resolver by working directory: Claude stores a project's transcripts under
 // ~/.claude/projects/<cwd with every '/' and '.' replaced by '-'>/. We pick the most
 // recently modified .jsonl there — the node's active session. Unlike the sessionId path

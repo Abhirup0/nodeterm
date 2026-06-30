@@ -118,7 +118,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   renameNode(projectId, nodeId, title) {
     set((s) => ({
       projects: mapProjectNodes(s.projects, projectId, (nodes) =>
-        nodes.map((n) => (n.id === nodeId ? { ...n, title } : n))
+        // An explicit rename means the user owns the name now: stop auto-tracking the session.
+        nodes.map((n) => (n.id === nodeId ? { ...n, title, titleAuto: false } : n))
       )
     }))
   },
