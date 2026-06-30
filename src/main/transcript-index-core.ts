@@ -2,7 +2,10 @@
 // JSONL text, build snippets, and rank sessions by a query. No filesystem access — the
 // service layer (transcript-index.ts) reads files and calls these. Reuses the same JSONL
 // parser as the single-session reader so indexed text stays consistent with the find-bar.
+import type { TranscriptHit } from '../shared/types'
 import { parseTranscriptLines } from './transcript-reader'
+
+export type { TranscriptHit }
 
 export const INDEX_TEXT_CAP_BYTES = 200 * 1024
 
@@ -13,15 +16,6 @@ export interface TranscriptIndexEntry {
   mtime: number
   title: string
   text: string
-}
-
-export interface TranscriptHit {
-  sessionId: string
-  title: string
-  snippet: string
-  cwd: string
-  projectLabel: string
-  mtime: number
 }
 
 // Read `cwd` from the first JSONL line that carries it (every Claude line does); reliable,

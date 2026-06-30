@@ -32,6 +32,7 @@ import { childArgs } from './remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { initContextLink, setNodeTranscript } from './context-link'
+import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
@@ -388,6 +389,9 @@ app.whenReady().then(async () => {
       return p ? readChatMessages(p) : []
     }
   )
+
+  initTranscriptIndex()
+  ipcMain.handle(IPC.transcriptSearch, (_e, query: string) => searchTranscripts(query))
   // Populate the context meter without a live hook event: the renderer calls this on mount
   // (the continuing session may be idle after a restart). Track under the sessionId (the key
   // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
