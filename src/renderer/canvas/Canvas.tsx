@@ -2468,13 +2468,25 @@ export function Canvas() {
           (n.data.agentId as AgentId | undefined) ?? (tags.includes('claude') ? 'claude' : undefined)
         const isAgent = !!a && hasHooks(a)
         const session = isAgent ? cs.byId[n.id]?.session : undefined
+        // Show the running agent's icon (claude/codex/gemini/custom) when the node is an agent,
+        // otherwise an icon matching the node kind — mirrors the right-click/add-node actions.
+        const icon = a ? (
+          <AgentIcon agentId={a} />
+        ) : n.type === 'editor' ? (
+          <IconEditor />
+        ) : n.type === 'sticky' ? (
+          <IconNote />
+        ) : (
+          <IconTerminal />
+        )
         cmds.push({
           id: `node-${n.id}`,
           label: `Go to ${n.data.title}`,
+          section: 'Opened terminals',
           hint: [tags.join(' '), session, isAgent ? `nt-${n.id}` : '']
             .filter(Boolean)
             .join(' '),
-          icon: <IconJump />,
+          icon,
           content: bufferCache[n.id],
           run: () => goToNode(n)
         })
