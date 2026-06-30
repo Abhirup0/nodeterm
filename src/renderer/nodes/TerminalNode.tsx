@@ -478,19 +478,34 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const rt = e.relatedTarget as Node | null
     if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
   }
-  const onBodyDrop = (e: React.DragEvent) => {
+  const onBodyDrop = async (e: React.DragEvent) => {
     const files = Array.from(e.dataTransfer.files)
     setDropping(false)
     if (!files.length) return
     e.preventDefault()
     e.stopPropagation()
-    const paths = files
-      .map((f) => window.nodeTerminal.getPathForFile(f))
-      .filter(Boolean)
-      .map(escapeDroppedPath)
-    if (!paths.length) return
     const term = termRef.current
     if (!term) return
+
+    let paths: string[]
+    if (data.sshRemoteTmux) {
+      // Remote terminal: a local path is useless on the remote host. Upload each file over the
+      // project's ControlMaster and paste the REMOTE absolute path instead. Fail-open: skip nulls.
+      const projectId = useProjects.getState().activeProjectId
+      const uploaded = await Promise.all(
+        files.map((f) => {
+          const lp = window.nodeTerminal.getPathForFile(f)
+          return lp ? window.nodeTerminal.sshProject.uploadFile(projectId, lp, f.name) : Promise.resolve(null)
+        })
+      )
+      paths = uploaded.filter((p): p is string => !!p).map(escapeDroppedPath)
+    } else {
+      paths = files
+        .map((f) => window.nodeTerminal.getPathForFile(f))
+        .filter(Boolean)
+        .map(escapeDroppedPath)
+    }
+    if (!paths.length) return
     // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
     if (dwellRef.current) clearTimeout(dwellRef.current)
     setArmed(false)
