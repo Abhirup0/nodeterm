@@ -9,7 +9,8 @@ interface TabBarProps {
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
-  onDelete: (id: string) => void
+  /** Close (hide) the project without destroying it — reopenable from the start screen. */
+  onCloseProject: (id: string) => void
   /** Open the Remote access dialog (host/share + connect). Shown for every project. */
   onRemoteAccess: () => void
 }
@@ -25,10 +26,11 @@ export function TabBar({
   onOpenWelcome,
   onRename,
   onSetFolder,
-  onDelete,
+  onCloseProject,
   onRemoteAccess
 }: TabBarProps) {
-  const projects = useProjects((s) => s.projects)
+  // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
+  const projects = useProjects((s) => s.projects.filter((p) => !p.closed))
   const activeId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
   const [menuId, setMenuId] = useState<string | null>(null)
@@ -190,13 +192,12 @@ export function TabBar({
               Remote access…
             </button>
             <button
-              className="danger"
               onClick={() => {
-                onDelete(menuProject.id)
+                onCloseProject(menuProject.id)
                 closeMenu()
               }}
             >
-              Delete project
+              Close project
             </button>
           </div>,
           document.body

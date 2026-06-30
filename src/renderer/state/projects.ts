@@ -30,8 +30,13 @@ interface ProjectsState {
   /** Reorders a node to sit immediately before another (sidebar order = array order),
    *  joining the target's container if they differ. */
   reorderNode(projectId: string, draggedId: string, beforeId: string): void
-  /** Removes a project; returns the id that should become active (never deletes the last one). */
+  /** Removes a project permanently; returns the id that should become active ('' = welcome). */
   deleteProject(id: string): string
+  /** Hides a project from the tab bar without destroying it; returns the next active open
+   *  project id ('' = welcome screen). The project (and its sessions) is kept for reopening. */
+  closeProject(id: string): string
+  /** Restores a closed project and makes it active. No-op if the id is unknown. */
+  reopenProject(id: string): void
 
   toWorkspace(): Workspace
 }
@@ -193,6 +198,33 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }
     set({ projects: remaining, activeProjectId: nextActive })
     return nextActive
+  },
+
+  closeProject(id) {
+    const { projects, activeProjectId } = get()
+    const index = projects.findIndex((p) => p.id === id)
+    const next = projects.map((p) => (p.id === id ? { ...p, closed: true } : p))
+    let nextActive = activeProjectId
+    if (activeProjectId === id) {
+      // Move focus to the nearest still-open project (search outward), or the welcome screen.
+      const open = next.filter((p) => !p.closed)
+      const byDistance = open
+        .map((p) => ({ id: p.id, d: Math.abs(next.findIndex((q) => q.id === p.id) - index) }))
+        .sort((a, b) => a.d - b.d)
+      nextActive = byDistance.length ? byDistance[0].id : ''
+    }
+    set({ projects: next, activeProjectId: nextActive })
+    return nextActive
+  },
+
+  reopenProject(id) {
+    set((s) => {
+      if (!s.projects.some((p) => p.id === id)) return s
+      return {
+        projects: s.projects.map((p) => (p.id === id ? { ...p, closed: false } : p)),
+        activeProjectId: id
+      }
+    })
   },
 
   toWorkspace() {

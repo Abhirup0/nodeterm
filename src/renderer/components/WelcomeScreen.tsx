@@ -6,6 +6,12 @@ interface WelcomeScreenProps {
   onCloneRepo: () => void
   /** Open the "Connect over SSH…" flow to create a project hosted on a remote server. */
   onConnectSsh: () => void
+  /** Closed projects that can be reopened (id + display name + folder). */
+  closedProjects?: { id: string; name: string; cwd?: string }[]
+  /** Reopen a closed project (restores its nodes + sessions). */
+  onReopen?: (id: string) => void
+  /** Permanently delete a closed project (ends its tmux sessions). */
+  onDeleteClosed?: (id: string) => void
   /**
    * When provided, the screen is dismissable (opened on demand via "+", over existing projects)
    * — adds a close button, Escape, and click-outside. Omitted for the permanent no-projects screen.
@@ -19,6 +25,9 @@ export function WelcomeScreen({
   onOpenFolder,
   onCloneRepo,
   onConnectSsh,
+  closedProjects = [],
+  onReopen,
+  onDeleteClosed,
   onClose
 }: WelcomeScreenProps) {
   useEffect(() => {
@@ -112,6 +121,46 @@ export function WelcomeScreen({
           <span>Connect over SSH…</span>
         </button>
       </div>
+
+      {closedProjects.length > 0 && (
+        <div className="welcome__recent">
+          <div className="welcome__recent-title">Recently closed</div>
+          <div className="welcome__recent-list">
+            {closedProjects.map((p) => (
+              <div
+                key={p.id}
+                className="welcome__recent-item"
+                role="button"
+                tabIndex={0}
+                title={p.cwd || p.name}
+                onClick={() => onReopen?.(p.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') onReopen?.(p.id)
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                </svg>
+                <span className="welcome__recent-name">{p.name}</span>
+                {p.cwd && <span className="welcome__recent-path">{p.cwd}</span>}
+                {onDeleteClosed && (
+                  <button
+                    className="welcome__recent-del"
+                    title="Delete permanently (ends its sessions)"
+                    aria-label="Delete permanently"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onDeleteClosed(p.id)
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

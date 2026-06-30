@@ -221,7 +221,10 @@ export function Canvas() {
     useReactFlow()
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
-  const hasProjects = useProjects((s) => s.projects.length > 0)
+  // "Has projects" = at least one OPEN (non-closed) tab. With only closed projects left, the
+  // welcome screen shows (and lists them under "Recently closed" for reopening).
+  const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
+  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed))
   // The active project's SSH server (if it's an SSH project) — drives the connection banner.
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
@@ -2246,6 +2249,34 @@ export function Canvas() {
     [persist]
   )
 
+  // Close a project: hide it from the tab bar but keep it (and its tmux/agent sessions) intact
+  // so it can be reopened later from the start screen. Non-destructive — the inverse of the old
+  // "Delete project". Switching away unmounts its nodes (a detach, not a kill); the sessions
+  // survive exactly like a project switch, and a cold restart later reconstructs them.
+  const closeProject = useCallback(
+    (id: string) => {
+      const store = useProjects.getState()
+      if (id === store.activeProjectId) commitActiveToStore()
+      store.closeProject(id)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
+  // Reopen a previously closed project and make it active — the active-project effect reloads its
+  // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
+  const reopenProject = useCallback(
+    (id: string) => {
+      commitActiveToStore()
+      useProjects.getState().reopenProject(id)
+      setWelcomeOpen(false)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
+  // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux
+  // session, drop persisted agent status, tear down any SSH master, then delete it from disk.
   const deleteProject = useCallback(
     (id: string) => {
       const store = useProjects.getState()
@@ -2382,7 +2413,7 @@ export function Canvas() {
         onOpenWelcome={() => setWelcomeOpen(true)}
         onRename={renameProject}
         onSetFolder={setProjectFolder}
-        onDelete={deleteProject}
+        onCloseProject={closeProject}
         onRemoteAccess={() => setRemoteDialogOpen(true)}
       />
 
@@ -2553,6 +2584,9 @@ export function Canvas() {
               setWelcomeOpen(false)
               setSshDialogOpen(true)
             }}
+            closedProjects={closedProjects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd }))}
+            onReopen={reopenProject}
+            onDeleteClosed={deleteProject}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
           />
         )}
