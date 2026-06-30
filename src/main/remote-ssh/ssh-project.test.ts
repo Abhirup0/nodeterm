@@ -111,4 +111,21 @@ describe('SshProjectManager', () => {
     const { mgr } = makeMgr()
     expect(await mgr.uploadFile('nope', '/x', 'x')).toBeNull()
   })
+
+  it('uploadFile rejects a non-absolute localPath (argv flag-smuggling guard)', async () => {
+    const scpCalls: string[][] = []
+    const run = vi.fn(async (args: string[]) =>
+      args.join(' ').includes('printf %s') ? { code: 0, stdout: '/home/u' } : { code: 0, stdout: '' }
+    )
+    const runScp = vi.fn(async (args: string[]) => { scpCalls.push(args); return { code: 0 } })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud', spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run, runScp, getHook: () => ({ port: 1, token: 't', version: '1' }), onStatus: vi.fn()
+    })
+    await mgr.connect('p1', conn, '/srv/repo')
+    // A leading `-` would be parsed by scp as an OPTION (e.g. -oProxyCommand=…) → reject; also relative.
+    expect(await mgr.uploadFile('p1', '-oProxyCommand=touch /tmp/pwned', 'x.png')).toBeNull()
+    expect(await mgr.uploadFile('p1', 'relative/path.png', 'x.png')).toBeNull()
+    expect(scpCalls).toHaveLength(0) // scp never invoked for an unsafe localPath
+  })
 })

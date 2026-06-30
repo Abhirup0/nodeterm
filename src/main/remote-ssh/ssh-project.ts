@@ -195,6 +195,11 @@ export class SshProjectManager {
   async uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null> {
     const c = this.conns.get(projectId)
     if (!c) return null
+    // `localPath` is a renderer string passed straight to scp as a positional arg. A value starting
+    // with `-` (e.g. `-oProxyCommand=…`) would be parsed by scp as an OPTION (argv flag smuggling →
+    // RCE), not a file. A real OS file drop is always an absolute path, so require one here — this
+    // rejects `-`-prefixed, relative, and empty paths and fully closes the flag-smuggling vector.
+    if (!localPath.startsWith('/')) return null
     try {
       let home = c.remoteHome
       if (!home) {
