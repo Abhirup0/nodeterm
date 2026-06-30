@@ -82,6 +82,31 @@ describe('SshProjectManager', () => {
     expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
   })
 
+  it('uploadFile basenames a traversal fileName so it cannot escape the token dir', async () => {
+    const scpCalls: string[][] = []
+    const run = vi.fn(async (args: string[]) =>
+      args.join(' ').includes('printf %s') ? { code: 0, stdout: '/home/u' } : { code: 0, stdout: '' }
+    )
+    const runScp = vi.fn(async (args: string[]) => {
+      scpCalls.push(args)
+      return { code: 0 }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp,
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    await mgr.connect('p1', conn, '/srv/repo')
+    // basename('../../evil') === 'evil' → sanitized to <dir>/evil; never escapes the token dir.
+    const out = await mgr.uploadFile('p1', '/local/evil', '../../evil')
+    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/evil$/)
+    expect(out).not.toContain('..')
+    expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
+  })
+
   it('uploadFile fails open (null) when not connected', async () => {
     const { mgr } = makeMgr()
     expect(await mgr.uploadFile('nope', '/x', 'x')).toBeNull()

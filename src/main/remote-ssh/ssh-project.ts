@@ -206,7 +206,12 @@ export class SshProjectManager {
       const dir = `${home}/.nodeterm/uploads/${token}`
       const mk = await this.r.run(childArgs(c.conn, c.controlPath, `mkdir -p ${posixQuote(dir)}`))
       if (mk.code !== 0) return null
-      const remotePath = `${dir}/${fileName}`
+      // `fileName` is a renderer string: posixQuote blocks shell injection but NOT filesystem
+      // traversal (e.g. `../../../.bashrc` would escape the token dir and overwrite a remote file).
+      // Basename it in main before building the write path — never trust it for a write target.
+      const safe = path.posix.basename(fileName)
+      if (!safe || safe === '.' || safe === '..') return null
+      const remotePath = `${dir}/${safe}`
       const up = await this.r.runScp(scpArgs(c.conn, c.controlPath, localPath, remotePath))
       return up.code === 0 ? remotePath : null
     } catch {

@@ -91,7 +91,7 @@ export function mkDirArgs(conn: SshConnection, controlPath: string, path: string
 /** scp argv that reuses the project's ControlMaster. `localPath` is a raw local arg; the absolute
  *  `remotePath` is posixQuote'd (the remote shell interprets it). scp uses `-P` for the port. */
 export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
-  const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-P', String(conn.port ?? 22)]
+  const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
   if (conn.identityFile) args.push('-i', conn.identityFile)
   args.push(localPath, `${conn.user}@${conn.host}:${posixQuote(remotePath)}`)
   return args

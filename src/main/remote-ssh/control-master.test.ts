@@ -146,6 +146,7 @@ describe('scpArgs', () => {
   it('reuses the master socket, uses scp -P for the port, and quotes the absolute remote path', () => {
     const j = scpArgs(conn, '/s.sock', '/local/i m.png', '/home/u/.nodeterm/uploads/t/i m.png').join(' ')
     expect(j).toContain('-o ControlPath=/s.sock')
+    expect(j).toContain('-o BatchMode=yes')  // fail fast on a fallback connection (no tty prompt)
     expect(j).toContain('-P 2222')          // scp uses uppercase -P
     expect(j).toContain('-i /k/id')          // identityFile
     // local path raw; remote spec is user@host:<posixQuote(remotePath)>
