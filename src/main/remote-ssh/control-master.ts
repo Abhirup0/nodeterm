@@ -3,7 +3,7 @@
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
@@ -86,6 +86,15 @@ export function listDirArgs(conn: SshConnection, controlPath: string, path: stri
 /** Create a remote directory (and any missing parents). `quoteRemotePath` keeps a leading `~`. */
 export function mkDirArgs(conn: SshConnection, controlPath: string, path: string): string[] {
   return childArgs(conn, controlPath, `mkdir -p ${quoteRemotePath(path)}`)
+}
+
+/** scp argv that reuses the project's ControlMaster. `localPath` is a raw local arg; the absolute
+ *  `remotePath` is posixQuote'd (the remote shell interprets it). scp uses `-P` for the port. */
+export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
+  const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-P', String(conn.port ?? 22)]
+  if (conn.identityFile) args.push('-i', conn.identityFile)
+  args.push(localPath, `${conn.user}@${conn.host}:${posixQuote(remotePath)}`)
+  return args
 }
 
 /**

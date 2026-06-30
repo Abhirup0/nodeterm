@@ -69,6 +69,7 @@ export const IPC = {
   sshKillSessions: 'ssh:kill-sessions',
   sshListDir: 'ssh:list-dir',
   sshMkdir: 'ssh:mkdir',
+  sshUploadFile: 'ssh:upload-file',
   sshFsList: 'sshFs:list',
   sshFsRead: 'sshFs:read',
   sshFsReadBinary: 'sshFs:read-binary',

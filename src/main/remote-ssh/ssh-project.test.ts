@@ -9,10 +9,12 @@ function makeMgr() {
   // spawnMaster: returns a fake child that "stays up"; run: resolves stdout for one-shot ssh.
   const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
   const run = vi.fn(async (_args: string[], _stdin?: string) => ({ code: 0, stdout: 'src/\nbin/\n' }))
+  const runScp = vi.fn(async (_args: string[]) => ({ code: 0 }))
   const mgr = new SshProjectManager({
     userDataDir: '/ud',
     spawnMaster,
     run,
+    runScp,
     getHook: () => ({ port: 51234, token: 'tok', version: '1' }),
     onStatus: (e) => statuses.push(e.status)
   })
@@ -54,5 +56,34 @@ describe('SshProjectManager', () => {
     await mgr.connect('p1', conn, '/srv/repo')
     expect(mgr.refForRemoteCwd('/srv/repo')).toEqual({ conn, controlPath: controlPathFor('p1') })
     expect(mgr.refForRemoteCwd('/nope')).toBeUndefined()
+  })
+
+  it('uploadFile uploads via scp under <remoteHome>/.nodeterm/uploads/<token> and returns the abs path', async () => {
+    const scpCalls: string[][] = []
+    const run = vi.fn(async (args: string[]) =>
+      args.join(' ').includes('printf %s') ? { code: 0, stdout: '/home/u' } : { code: 0, stdout: '' }
+    )
+    const runScp = vi.fn(async (args: string[]) => {
+      scpCalls.push(args)
+      return { code: 0 }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp,
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    await mgr.connect('p1', conn, '/srv/repo')
+    const out = await mgr.uploadFile('p1', '/local/img.png', 'img.png')
+    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/img\.png$/)
+    // scp targeted that exact absolute remote path (conn is { host: 'h', user: 'u' }).
+    expect(scpCalls[0].join(' ')).toContain(`u@h:'${out}'`)
+  })
+
+  it('uploadFile fails open (null) when not connected', async () => {
+    const { mgr } = makeMgr()
+    expect(await mgr.uploadFile('nope', '/x', 'x')).toBeNull()
   })
 })

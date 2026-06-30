@@ -341,6 +341,12 @@ export interface SshProjectApi {
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
   /** Create a remote directory (mkdir -p). Resolves false when not connected or the mkdir fails. */
   mkdir(projectId: string, path: string): Promise<boolean>
+  /**
+   * Upload a local file to the remote over the project's ControlMaster, into
+   * `<remoteHome>/.nodeterm/uploads/<token>/<fileName>`. Resolves the ABSOLUTE remote path on
+   * success, or null on any failure (not connected, unresolved remote home, mkdir/scp failure).
+   */
+  uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null>
   onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
 }
 

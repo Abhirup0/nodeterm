@@ -3,7 +3,7 @@ import path from 'path'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { parseLsDirs, type SshConnection } from '../../shared/ssh'
+import { parseLsDirs, posixQuote, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatus } from '../../shared/types'
 import {
   controlPathFor,
@@ -13,7 +13,8 @@ import {
   exitMasterArgs,
   checkMasterArgs,
   remoteTmuxKillArgs,
-  childArgs
+  childArgs,
+  scpArgs
 } from './control-master'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../agents/hook-server'
@@ -25,6 +26,8 @@ interface Runners {
   spawnMaster: (args: string[]) => { kill: () => void; on: (ev: string, cb: (...a: unknown[]) => void) => void }
   /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
+  /** Run a one-shot scp (file upload over the master); resolves its exit code. */
+  runScp: (args: string[]) => Promise<{ code: number }>
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
   getHook: () => { port: number; token: string; version: string }
   onStatus: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void
@@ -73,9 +76,37 @@ function sshBin(): string {
   return cachedSsh ?? 'ssh'
 }
 
+/** Resolve an absolute `scp` path the same way `sshBin()` resolves `ssh` (GUI apps lack shell PATH). */
+let cachedScp: string | null | undefined
+function scpBin(): string {
+  if (cachedScp !== undefined) return cachedScp ?? 'scp'
+  try {
+    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v scp'], {
+      encoding: 'utf-8'
+    }).trim()
+    cachedScp = out || null
+  } catch {
+    cachedScp = null
+  }
+  if (!cachedScp) {
+    for (const p of ['/usr/bin/scp', '/usr/local/bin/scp', '/opt/homebrew/bin/scp']) {
+      try {
+        execFileSync(p, ['-V'], { stdio: 'ignore' })
+        cachedScp = p
+        break
+      } catch {
+        // keep trying
+      }
+    }
+  }
+  return cachedScp ?? 'scp'
+}
+
 export class SshProjectManager {
   private conns = new Map<string, Conn>()
   private remoteHooks: RemoteHooks
+  /** Per-manager counter mixed into each upload token so concurrent drops never collide. */
+  private uploadSeq = 0
   constructor(private r: Runners) {
     this.remoteHooks = new RemoteHooks({ run: r.run })
   }
@@ -158,6 +189,29 @@ export class SshProjectManager {
     if (!c) return false
     const { code } = await this.r.run(mkDirArgs(c.conn, c.controlPath, dir))
     return code === 0
+  }
+
+  /** Upload a local file to the remote over the master; returns the ABSOLUTE remote path, or null. */
+  async uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null> {
+    const c = this.conns.get(projectId)
+    if (!c) return null
+    try {
+      let home = c.remoteHome
+      if (!home) {
+        const r = await this.r.run(childArgs(c.conn, c.controlPath, 'printf %s "$HOME"'))
+        if (r.code === 0 && r.stdout.trim()) home = r.stdout.trim()
+      }
+      if (!home) return null
+      const token = `${Date.now().toString(36)}${(this.uploadSeq++).toString(36)}`
+      const dir = `${home}/.nodeterm/uploads/${token}`
+      const mk = await this.r.run(childArgs(c.conn, c.controlPath, `mkdir -p ${posixQuote(dir)}`))
+      if (mk.code !== 0) return null
+      const remotePath = `${dir}/${fileName}`
+      const up = await this.r.runScp(scpArgs(c.conn, c.controlPath, localPath, remotePath))
+      return up.code === 0 ? remotePath : null
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -260,6 +314,7 @@ export class SshProjectManager {
 
 export function initSshProject(win: BrowserWindow): SshProjectManager {
   const ssh = sshBin()
+  const scp = scpBin()
   const mgr = new SshProjectManager({
     userDataDir: app.getPath('userData'),
     spawnMaster: (args) => spawn(ssh, args, { stdio: 'ignore' }),
@@ -277,6 +332,10 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
           child.stdin?.end(stdin)
         }
       }),
+    runScp: (args) =>
+      new Promise((resolve) => {
+        execFile(scp, args, { maxBuffer: 1024 * 1024 }, (err) => resolve({ code: err ? 1 : 0 }))
+      }),
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
     onStatus: (e) => {
       if (!win.isDestroyed()) win.webContents.send(IPC.sshProjectStatus, e)
@@ -291,5 +350,8 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
   )
   ipcMain.handle(IPC.sshListDir, (_e, projectId: string, dir: string) => mgr.listDir(projectId, dir))
   ipcMain.handle(IPC.sshMkdir, (_e, projectId: string, dir: string) => mgr.makeDir(projectId, dir))
+  ipcMain.handle(IPC.sshUploadFile, (_e, projectId: string, localPath: string, fileName: string) =>
+    mgr.uploadFile(projectId, localPath, fileName)
+  )
   return mgr
 }

@@ -13,7 +13,8 @@ import {
   hookForwardArgs,
   hookForwardCancelArgs,
   remoteHookEnvArgs,
-  remoteEndpointFileContents
+  remoteEndpointFileContents,
+  scpArgs
 } from './control-master'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
@@ -138,6 +139,17 @@ describe('hook forwarding', () => {
     expect(remoteEndpointFileContents('/r.sock', 'tok', '1')).toBe(
       'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=1\n'
     )
+  })
+})
+
+describe('scpArgs', () => {
+  it('reuses the master socket, uses scp -P for the port, and quotes the absolute remote path', () => {
+    const j = scpArgs(conn, '/s.sock', '/local/i m.png', '/home/u/.nodeterm/uploads/t/i m.png').join(' ')
+    expect(j).toContain('-o ControlPath=/s.sock')
+    expect(j).toContain('-P 2222')          // scp uses uppercase -P
+    expect(j).toContain('-i /k/id')          // identityFile
+    // local path raw; remote spec is user@host:<posixQuote(remotePath)>
+    expect(j).toContain(`/local/i m.png deploy@h.example.com:'/home/u/.nodeterm/uploads/t/i m.png'`)
   })
 })
 
