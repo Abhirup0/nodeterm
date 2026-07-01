@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useEntitlement } from '../state/entitlement'
+import { useRemoteHosting } from '../state/remoteHosting'
 import { Button } from '@renderer/ui/Button'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
@@ -42,6 +43,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
     try {
       const { offer } = await window.nodeTerminal.remoteHost.start()
       setHostOffer(offer)
+      useRemoteHosting.getState().setHosting(true) // Canvas starts mirroring the canvas to main
     } catch (err) {
       setError((err as Error).message)
       setHostBusy(false)
@@ -49,6 +51,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
   }
   const stopHosting = async () => {
     await window.nodeTerminal.remoteHost.stop()
+    useRemoteHosting.getState().setHosting(false)
     setHostOffer('')
     setHostBusy(false)
   }

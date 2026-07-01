@@ -13,6 +13,7 @@ import { sep } from 'path'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import type { DirEntry } from '../shared/types'
+import { FS_READ_MAX_BYTES, FS_READ_BINARY_MAX_BYTES, tooLargeSentinel } from '../shared/fsLimits'
 import {
   buildRgArgsForQuickOpen,
   buildGitLsFilesArgs,
@@ -64,18 +65,23 @@ export async function listDir(dirPath: string): Promise<DirEntry[]> {
   }
 }
 
-/** Read a file's UTF-8 text. Returns `''` on any error. */
+/** Read a file's UTF-8 text. Returns `''` on any error, a too-large sentinel above the cap. */
 export async function readText(filePath: string): Promise<string> {
   try {
+    const { size } = await fs.stat(filePath)
+    if (size > FS_READ_MAX_BYTES) return tooLargeSentinel(size)
     return await fs.readFile(filePath, 'utf-8')
   } catch {
     return ''
   }
 }
 
-/** Read a file as base64 (for image/binary previews). Returns `''` on any error. */
+/** Read a file as base64 (for image/binary previews). Returns `''` on any error, a too-large
+ *  sentinel above the cap (base64 inflates the payload a further 1.33×). */
 export async function readBinary(filePath: string): Promise<string> {
   try {
+    const { size } = await fs.stat(filePath)
+    if (size > FS_READ_BINARY_MAX_BYTES) return tooLargeSentinel(size)
     const buf = await fs.readFile(filePath)
     return buf.toString('base64')
   } catch {

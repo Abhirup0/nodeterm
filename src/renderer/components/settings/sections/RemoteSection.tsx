@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useEntitlement } from '../../../state/entitlement'
+import { useRemoteHosting } from '../../../state/remoteHosting'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -35,6 +36,7 @@ export function RemoteSection({
     try {
       const { offer } = await window.nodeTerminal.remoteHost.start()
       setHostOffer(offer)
+      useRemoteHosting.getState().setHosting(true) // Canvas starts mirroring the canvas to main
     } catch (err) {
       setRemoteError((err as Error).message)
       setHostBusy(false)
@@ -42,6 +44,7 @@ export function RemoteSection({
   }
   const stopHosting = async () => {
     await window.nodeTerminal.remoteHost.stop()
+    useRemoteHosting.getState().setHosting(false)
     setHostOffer('')
     setHostBusy(false)
   }

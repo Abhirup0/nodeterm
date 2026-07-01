@@ -124,6 +124,33 @@ export function SourceControlPanel({
     refreshRef.current = refresh
   }, [refresh])
 
+  // Coalesce refreshes: every stage/unstage/discard click triggers one, and each status()
+  // fans out ~9 concurrent git subprocesses (history adds one more). The first call runs
+  // immediately (instant feedback for a single click); calls landing while one is in flight
+  // fold into exactly ONE follow-up run, so rapid-clicking N files costs 2 refreshes, not N.
+  const refreshingRef = useRef(false)
+  const refreshQueuedRef = useRef(false)
+  const refreshHistoryRef = useRef(refreshHistory)
+  useEffect(() => {
+    refreshHistoryRef.current = refreshHistory
+  }, [refreshHistory])
+  const requestRefreshAll = useCallback(async () => {
+    if (refreshingRef.current) {
+      refreshQueuedRef.current = true
+      return
+    }
+    refreshingRef.current = true
+    try {
+      do {
+        refreshQueuedRef.current = false
+        await refreshRef.current()
+        await refreshHistoryRef.current()
+      } while (refreshQueuedRef.current)
+    } finally {
+      refreshingRef.current = false
+    }
+  }, [])
+
   // Auto-fetch while the panel is open so ahead/behind ("Synced") stays accurate — git's ahead/
   // behind is computed against the local remote-tracking ref, which only updates on `git fetch`.
   // SSH-project repos fetch on the remote via the Phase-4 chokepoint. Silent + fail-open: a failed
@@ -156,8 +183,7 @@ export function SourceControlPanel({
     const r = await fn()
     setError(r.ok ? '' : r.message)
     setBusy(false)
-    await refresh()
-    void refreshHistory()
+    await requestRefreshAll()
   }
 
   const discard = (f: GitFileChange) => {
@@ -674,8 +700,7 @@ export function SourceControlPanel({
             setBusy(false)
             if (r.ok) {
               setError('')
-              await refresh()
-              await refreshHistory()
+              await requestRefreshAll()
               return
             }
             if (r.needsAuth) {

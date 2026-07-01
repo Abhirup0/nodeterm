@@ -7,6 +7,7 @@ import { remoteFs } from '../terminal/remote-fs'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
 import type { CanvasNode } from '../state/workspace'
+import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
 const IMAGE_MIME: Record<string, string> = {
@@ -38,6 +39,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [imageSrc, setImageSrc] = useState('')
   const [imageDims, setImageDims] = useState('')
   const [imageError, setImageError] = useState('')
+  const [loadError, setLoadError] = useState('')
   const filePath = (data.filePath as string) ?? ''
   // Backend pick (the `FsApi` shape is identical across all three, so the rest of the component is
   // unchanged): a relay session operates on the HOST's filesystem via the relay; an SSH-project
@@ -93,7 +95,9 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       readBinary(filePath)
         .then((b64) => {
           if (disposed) return
-          if (b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
+          const tooBig = b64 ? tooLargeSize(b64) : null
+          if (tooBig != null) setImageError(`Image too large to preview (${formatBytes(tooBig)}).`)
+          else if (b64) setImageSrc(`data:${IMAGE_MIME[ext]};base64,${b64}`)
           else setImageError('Couldn’t read this image.')
         })
         .catch(() => {
@@ -112,6 +116,13 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
     fs.read(filePath).then((content) => {
       if (disposed) return
+      const tooBig = tooLargeSize(content)
+      if (tooBig != null) {
+        // Refuse to open rather than showing an empty buffer: ⌘S on a placeholder would
+        // overwrite the real (large) file with nothing.
+        setLoadError(`File too large to open here (${formatBytes(tooBig)}).`)
+        return
+      }
       const s = useSettings.getState().settings
       // Unique model per node (fragment), language still inferred from the path extension.
       const uri = monaco.Uri.file(filePath).with({ fragment: id })
@@ -215,6 +226,10 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             ) : (
               <span className="editor-node__loading">{imageError || 'Loading…'}</span>
             )}
+          </div>
+        ) : loadError ? (
+          <div className="editor-node__image nodrag">
+            <span className="editor-node__loading">{loadError}</span>
           </div>
         ) : (
           <>

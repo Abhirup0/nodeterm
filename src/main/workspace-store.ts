@@ -37,8 +37,11 @@ export class WorkspaceStore {
     // Atomic write: a crash/kill mid-write to the real file would truncate it, and a
     // corrupt workspace.json silently loads as empty (total layout loss). Write to a
     // temp file then rename (atomic on the same filesystem).
+    // Compact stringify (no pretty-print): the save runs on an 800ms debounce and serializes
+    // EVERY project's nodes — indentation roughly doubled both the string-build cost and the
+    // bytes written, for a file nobody reads by hand.
     const tmp = `${this.filePath}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(workspace, null, 2), 'utf-8')
+    await fs.writeFile(tmp, JSON.stringify(workspace), 'utf-8')
     await fs.rename(tmp, this.filePath)
   }
 }

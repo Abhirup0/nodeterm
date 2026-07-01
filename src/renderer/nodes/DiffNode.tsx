@@ -1,10 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { sshFs } from '../terminal/ssh-fs'
 import type { CanvasNode } from '../state/workspace'
+import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 
 /**
  * A Monaco diff editor node for a changed file. Staged diff = HEAD vs index;
@@ -13,6 +14,7 @@ import type { CanvasNode } from '../state/workspace'
 export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements } = useReactFlow()
   const bodyRef = useRef<HTMLDivElement>(null)
+  const [loadError, setLoadError] = useState('')
   const cwd = (data.cwd as string) ?? ''
   const rel = (data.filePath as string) ?? ''
   const staged = !!data.diffStaged
@@ -50,6 +52,13 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
     Promise.all([origP, modP]).then(([orig, mod]) => {
       if (disposed) return
+      // The working-tree side goes through fs:read, which refuses very large files with a
+      // sentinel — surface that instead of diffing the sentinel text as file content.
+      const tooBig = tooLargeSize(orig) ?? tooLargeSize(mod)
+      if (tooBig != null) {
+        setLoadError(`File too large to diff here (${formatBytes(tooBig)}).`)
+        return
+      }
       const base = monaco.Uri.file(abs)
       const s = useSettings.getState().settings
       original = monaco.editor.createModel(orig, undefined, base.with({ fragment: `${id}-o` }))
@@ -99,7 +108,15 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
       </div>
 
-      <div className="editor-node__body nodrag nowheel" ref={bodyRef} />
+      {loadError ? (
+        <div className="editor-node__body nodrag">
+          <div className="editor-node__image">
+            <span className="editor-node__loading">{loadError}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="editor-node__body nodrag nowheel" ref={bodyRef} />
+      )}
     </div>
   )
 }

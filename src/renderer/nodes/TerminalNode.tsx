@@ -434,12 +434,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // fit can throw when the size is 0 (e.g. collapsed); ignore.
       }
     }
-    const observer = new ResizeObserver(resize)
+    // Coalesce observer bursts: dragging the NodeResizer fires per animation frame, and every
+    // call is a full cell-geometry measure + a resize IPC → node-pty → tmux (which redraws the
+    // whole pane). One trailing fit per settle is enough — the canvas node frame itself still
+    // tracks the drag live; only the terminal reflow waits for the pause.
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    const observer = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(resize, 80)
+    })
     observer.observe(container)
 
     return () => {
       disposed = true
       observer.disconnect()
+      if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       cleanups.forEach((fn) => fn())
       useAgentStatus.getState().setActive(id, false)

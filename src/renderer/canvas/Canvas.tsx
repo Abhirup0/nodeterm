@@ -97,6 +97,7 @@ import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSettings } from '../state/settings'
+import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
@@ -291,7 +292,7 @@ export function Canvas() {
     let sig = ''
     for (const [id, st] of Object.entries(s.byId)) {
       if (!st.loop) continue
-      sig += `${id} ${st.loop.kind ?? ''} ${st.loop.count} ${st.loop.items?.length ?? 0} ${st.loop.task ?? ''} ${st.loop.schedule ?? ''} ${st.state === 'working' ? 1 : 0}`
+      sig += `${id}|${st.loop.kind ?? ''}|${st.loop.count}|${st.loop.items?.length ?? 0}|${st.loop.task ?? ''}|${st.loop.schedule ?? ''}|${st.state === 'working' ? 1 : 0}|`
     }
     return sig
   })
@@ -499,25 +500,29 @@ export function Canvas() {
 
   // Serialized inputs for the active project's terminal/agent nodes (the sidebar reads the
   // serialized nodes of *inactive* projects directly from the store, but the active project's
-  // live state lives in React Flow — pass it through here).
-  const liveActiveNodes = useMemo<SessionNodeInput[]>(
+  // live state lives in React Flow — pass it through here). Skipped entirely while the sidebar
+  // is closed (the common case): this memo recomputes on every `nodes` change, i.e. every drag
+  // frame, and the filter+map over all nodes would be pure waste with nobody consuming it.
+  const liveActiveNodes = useMemo<SessionNodeInput[] | null>(
     () =>
-      nodes
-        .filter((n) => {
-          const k = n.type ?? 'terminal'
-          return k === 'terminal' || k === 'group'
-        })
-        .map((n) => ({
-          id: n.id,
-          kind: (n.type ?? 'terminal') as SessionNodeInput['kind'],
-          title: n.data.title ?? n.id,
-          color: n.data.color ?? '#888',
-          agentId: n.data.agentId,
-          cwd: n.data.cwd,
-          ssh: n.data.ssh,
-          parentId: n.parentId
-        })),
-    [nodes]
+      sessionsOpen
+        ? nodes
+            .filter((n) => {
+              const k = n.type ?? 'terminal'
+              return k === 'terminal' || k === 'group'
+            })
+            .map((n) => ({
+              id: n.id,
+              kind: (n.type ?? 'terminal') as SessionNodeInput['kind'],
+              title: n.data.title ?? n.id,
+              color: n.data.color ?? '#888',
+              agentId: n.data.agentId,
+              cwd: n.data.cwd,
+              ssh: n.data.ssh,
+              parentId: n.parentId
+            }))
+        : null,
+    [nodes, sessionsOpen]
   )
 
   // 1) Load the whole workspace once and hydrate the projects store.
@@ -647,17 +652,19 @@ export function Canvas() {
 
   // ---- remote canvas mirror (host side) ----
   // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
-  // change, so a connected client mirrors the layout. Main holds the latest snapshot regardless
-  // of whether a client is connected and only broadcasts when one is — so this is safe to send
-  // unconditionally (no host-mode flag in the renderer). Skips programmatic loads to avoid a
-  // redundant push on project switch (the post-load value is captured by the next real change).
+  // change, so a connected client mirrors the layout. Gated on the hosting flag: without it every
+  // canvas edit paid a full flowToNodeStates serialize + IPC even with no client ever connecting.
+  // When hosting flips on, the effect fires once immediately, so main's snapshot is fresh before
+  // a client joins. Skips programmatic loads to avoid a redundant push on project switch (the
+  // post-load value is captured by the next real change).
+  const hosting = useRemoteHosting((s) => s.hosting)
   useEffect(() => {
-    if (loadingRef.current) return
+    if (!hosting || loadingRef.current) return
     const t = setTimeout(() => {
       window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
     }, 120)
     return () => clearTimeout(t)
-  }, [nodes])
+  }, [nodes, hosting])
 
   // Apply a client's mutation to React Flow — the host's single writer. Serialize the live nodes,
   // apply the mutation, and convert back. A direct `setNodes(...)` bypasses `handleNodesChange`,
@@ -1909,23 +1916,38 @@ export function Canvas() {
   )
 
   // Title/color/text edits go through updateNodeData; watch them so they persist too.
-  // Computed only when the `nodes` array changes (not on every Canvas render — e.g. zoom
-  // readout, hover, menu — which would otherwise rebuild this whole string each frame).
-  const dataSignature = useMemo(
-    () =>
-      nodes
-        .map(
-          (n) =>
-            `${n.id}:${n.data.title}:${n.data.color}:${n.data.text ?? ''}:${
-              n.data.collapsed ? 1 : 0
-            }:${((n.data.tags as string[]) ?? []).join(',')}`
-        )
-        .join('|'),
-    [nodes]
-  )
+  // Signatures are cached per data-object reference: a drag/resize creates new node objects but
+  // keeps each node's `data` ref, so drag frames do pointer lookups + compares only — the old
+  // version rebuilt one string per node (plus a big join) on every frame of a drag.
+  const dataSigCacheRef = useRef(new WeakMap<object, string>())
+  const lastDataSigsRef = useRef<string[] | null>(null)
   useEffect(() => {
-    markDirty()
-  }, [dataSignature, markDirty])
+    const cache = dataSigCacheRef.current
+    const sigs = new Array<string>(nodes.length)
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i]
+      let sig = cache.get(n.data)
+      if (sig === undefined) {
+        sig = `${n.id}:${n.data.title}:${n.data.color}:${n.data.text ?? ''}:${
+          n.data.collapsed ? 1 : 0
+        }:${((n.data.tags as string[]) ?? []).join(',')}`
+        cache.set(n.data, sig)
+      }
+      sigs[i] = sig
+    }
+    const last = lastDataSigsRef.current
+    lastDataSigsRef.current = sigs
+    if (!last || last.length !== sigs.length) {
+      markDirty() // mount/load runs are suppressed inside markDirty via loadingRef
+      return
+    }
+    for (let i = 0; i < sigs.length; i++) {
+      if (sigs[i] !== last[i]) {
+        markDirty()
+        return
+      }
+    }
+  }, [nodes, markDirty])
 
   const zoomRafRef = useRef<number | null>(null)
   const onMove = useCallback(

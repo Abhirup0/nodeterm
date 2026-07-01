@@ -424,25 +424,41 @@ body,
 
 /* Unread (agent finished while unfocused): a blue glow around the whole node so it's
    obvious at a glance, not just the small header badge. Pulses gently to draw the eye.
-   Selecting the node clears unread, so this never fights the selection ring. */
+   Selecting the node clears unread, so this never fights the selection ring.
+   The pulse animates OPACITY on a pseudo-element, never box-shadow: shadow animation forces
+   a repaint of every glowing node each frame, which adds up with several unread agents. The
+   pseudo lives on the React Flow wrapper (via :has) because .term-node is overflow:hidden
+   and would clip its own ::after. */
 .term-node.unread {
   border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px rgba(10, 132, 255, 0.5),
+    0 0 16px 1px rgba(10, 132, 255, 0.35),
+    0 8px 28px rgba(0, 0, 0, 0.4);
+}
+
+.react-flow__node:has(.term-node.unread)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: -1;
+  box-shadow:
+    0 0 0 1px rgba(10, 132, 255, 0.8),
+    0 0 26px 4px rgba(10, 132, 255, 0.6);
+  opacity: 0;
   animation: nt-unread-glow 2s ease-in-out infinite;
+  will-change: opacity;
 }
 
 @keyframes nt-unread-glow {
   0%,
   100% {
-    box-shadow:
-      0 0 0 1px rgba(10, 132, 255, 0.5),
-      0 0 16px 1px rgba(10, 132, 255, 0.35),
-      0 8px 28px rgba(0, 0, 0, 0.4);
+    opacity: 0;
   }
   50% {
-    box-shadow:
-      0 0 0 1px rgba(10, 132, 255, 0.8),
-      0 0 26px 4px rgba(10, 132, 255, 0.6),
-      0 8px 28px rgba(0, 0, 0, 0.4);
+    opacity: 1;
   }
 }
 

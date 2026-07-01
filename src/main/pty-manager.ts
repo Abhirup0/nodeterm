@@ -166,8 +166,8 @@ interface Session {
   persistKey?: string
   /** When set, the session runs on a remote host via ssh; kill/capture target the REMOTE tmux. */
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
-  /** Periodic scrollback-to-disk snapshot timer (tmux-backed sessions only). */
-  snapshotTimer: ReturnType<typeof setInterval> | null
+  /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
+  outputSinceSnapshot: boolean
 }
 
 /** Sinks for a detached session whose output is served somewhere other than the renderer
@@ -198,6 +198,29 @@ export class PtyManager {
   private tmuxPath: string | null = null
   private confPath = ''
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
+  /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
+   *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
+  private snapshotTimer: ReturnType<typeof setInterval> | null = null
+
+  private ensureSnapshotTimer(): void {
+    if (this.snapshotTimer) return
+    this.snapshotTimer = setInterval(() => this.snapshotTick(), SCROLLBACK_SNAPSHOT_MS)
+  }
+
+  private snapshotTick(): void {
+    let anyPersisted = false
+    for (const session of this.sessions.values()) {
+      if (!session.persistKey) continue
+      anyPersisted = true
+      if (!session.outputSinceSnapshot) continue // idle since the last capture — skip the spawn
+      session.outputSinceSnapshot = false
+      void this.snapshotScrollback(session.persistKey, session.sshRemote)
+    }
+    if (!anyPersisted && this.snapshotTimer) {
+      clearInterval(this.snapshotTimer)
+      this.snapshotTimer = null
+    }
+  }
 
   /** Must run after app is ready (needs userData path). */
   init(getSettings: () => Settings): void {
@@ -571,20 +594,14 @@ export class PtyManager {
       flushTimer: null,
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
-      snapshotTimer: null
+      outputSinceSnapshot: true // capture the initial screen on the first tick
     }
-    if (persisted && options.persistKey) {
-      const key = options.persistKey
-      session.snapshotTimer = setInterval(() => {
-        void this.snapshotScrollback(key, remote)
-      }, SCROLLBACK_SNAPSHOT_MS)
-    }
+    if (persisted) this.ensureSnapshotTimer()
     this.sessions.set(sessionId, session)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
-      if (session.snapshotTimer) clearInterval(session.snapshotTimer)
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
       if (session.onExit) {
         session.onExit(exitCode)
@@ -599,6 +616,7 @@ export class PtyManager {
 
   /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
   private queueData(sessionId: string, session: Session, data: string): void {
+    session.outputSinceSnapshot = true
     session.buf.push(data)
     session.bufBytes += data.length
     if (session.bufBytes >= MAX_BUF_BYTES) {
@@ -661,10 +679,11 @@ export class PtyManager {
     const session = this.sessions.get(sessionId)
     if (!session) return
     if (session.flushTimer) clearTimeout(session.flushTimer)
-    if (session.snapshotTimer) clearInterval(session.snapshotTimer)
     // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
     // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
-    if (session.persistKey) void this.snapshotScrollback(session.persistKey, session.sshRemote)
+    // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
+    if (session.persistKey && session.outputSinceSnapshot)
+      void this.snapshotScrollback(session.persistKey, session.sshRemote)
     session.proc.kill()
     this.sessions.delete(sessionId)
   }
@@ -790,12 +809,17 @@ export class PtyManager {
    * of persistence). The tmux server keeps the sessions alive for next launch.
    */
   killAll(): void {
+    if (this.snapshotTimer) {
+      clearInterval(this.snapshotTimer)
+      this.snapshotTimer = null
+    }
     for (const session of this.sessions.values()) {
       if (session.flushTimer) clearTimeout(session.flushTimer)
-      if (session.snapshotTimer) clearInterval(session.snapshotTimer)
       // Best-effort final scrollback snapshot on quit so a reboot can replay it. Fire-and-forget:
-      // the tmux server (and the snapshot capture against it) outlives this process.
-      if (session.persistKey) void this.snapshotScrollback(session.persistKey, session.sshRemote)
+      // the tmux server (and the snapshot capture against it) outlives this process. Skipped for
+      // sessions with no output since the last periodic capture (unchanged pane content).
+      if (session.persistKey && session.outputSinceSnapshot)
+        void this.snapshotScrollback(session.persistKey, session.sshRemote)
       session.proc.kill()
     }
     this.sessions.clear()
