@@ -2126,6 +2126,15 @@ export function Canvas() {
             reply({ ok: true, message: `showing web ${id}`, result: { id } })
             return
           }
+          case 'open-browser': {
+            if (!args.url) {
+              reply({ ok: false, error: 'open-browser requires --url' })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, args.url, placeBelow()))
+            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            return
+          }
           case 'write': {
             if (!args.node) {
               reply({ ok: false, error: 'write requires --node' })

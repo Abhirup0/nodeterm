@@ -9,6 +9,7 @@ export type ControlVerb =
   | 'show-image'
   | 'show-video'
   | 'show-web'
+  | 'open-browser'
   | 'write'
   | 'close'
 
@@ -24,6 +25,7 @@ const VERBS: ControlVerb[] = [
   'show-image',
   'show-video',
   'show-web',
+  'open-browser',
   'write',
   'close'
 ]
@@ -50,6 +52,7 @@ export function parseControlRequest(
   if (v === 'show-web' && !args.url && !args.file && !args.html) {
     return { error: 'show-web requires --url, --file or --html' }
   }
+  if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
   return { verb: v, args }
 }
 

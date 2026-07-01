@@ -30,6 +30,17 @@ describe('parseControlRequest', () => {
     })
   })
 
+  it('open-browser requires --url', () => {
+    expect(parseControlRequest('open-browser', {})).toEqual({ error: 'open-browser requires --url' })
+    expect(parseControlRequest('open-browser', { url: 'https://x.dev' })).toEqual({
+      verb: 'open-browser',
+      args: { url: 'https://x.dev' }
+    })
+  })
+  it('open-browser is not destructive', () => {
+    expect(isDestructiveVerb('open-browser')).toBe(false)
+  })
+
   it('classifies destructive verbs', () => {
     expect(isDestructiveVerb('write')).toBe(true)
     expect(isDestructiveVerb('close')).toBe(true)
