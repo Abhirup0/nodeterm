@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 
 /**
@@ -37,6 +37,14 @@ export default function VideoNode({ id, data, selected }: NodeProps<CanvasNode>)
       style={{ borderTopColor: data.color }}
     >
       <NodeResizer minWidth={320} minHeight={200} isVisible={selected} color={data.color} />
+      {/* Invisible target handle so a rope from the agent node that opened this can attach. */}
+      <Handle
+        id="flow-in"
+        type="target"
+        position={Position.Top}
+        isConnectable={false}
+        style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
+      />
 
       <div className="term-node__header">
         <span className="term-node__title-text" title={filePath}>
