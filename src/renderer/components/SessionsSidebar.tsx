@@ -62,6 +62,8 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   // Drag-to-group: the session being dragged, and the current drop target for highlighting.
   const [drag, setDrag] = useState<{ projectId: string; nodeId: string } | null>(null)
   const [dropKey, setDropKey] = useState<string | null>(null)
+  // Inline group rename: the group node id being edited + its draft title.
+  const [editGroup, setEditGroup] = useState<{ id: string; draft: string } | null>(null)
 
   // Look up the current git branch for each project cwd (best-effort, cached).
   useEffect(() => {
@@ -244,7 +246,32 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                         {...dropProps(g.projectId, bucket.id)}
                       >
                         <span className="ss-subgroup__dot" style={{ background: bucket.color }} />
-                        <span className="ss-subgroup__name">{bucket.title}</span>
+                        {editGroup?.id === bucket.id ? (
+                          <input
+                            className="ss-title-input"
+                            style={{ flex: 1, minWidth: 0 }}
+                            autoFocus
+                            value={editGroup.draft}
+                            onChange={(e) => setEditGroup({ id: bucket.id, draft: e.target.value })}
+                            onBlur={() => {
+                              const t = editGroup.draft.trim()
+                              if (t && t !== bucket.title) props.onRenameSession(g.projectId, bucket.id, t)
+                              setEditGroup(null)
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') e.currentTarget.blur()
+                              if (e.key === 'Escape') setEditGroup(null)
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className="ss-subgroup__name"
+                            title="Double-click to rename group"
+                            onDoubleClick={() => setEditGroup({ id: bucket.id, draft: bucket.title })}
+                          >
+                            {bucket.title}
+                          </span>
+                        )}
                         <span className="ss-group__count">{bucket.sessions.length}</span>
                         {bucket.sessions.length > 0 && (
                           <button
