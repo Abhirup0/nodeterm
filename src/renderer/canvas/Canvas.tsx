@@ -21,6 +21,7 @@ import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { DinoNode } from '../nodes/DinoNode'
+import BrowserNode from '../nodes/BrowserNode'
 import VideoNode from '../nodes/VideoNode'
 import WebNode from '../nodes/WebNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -108,6 +109,7 @@ import {
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   createAgentNode,
+  createBrowserNode,
   createDinoNode,
   createDiffNode,
   createEditorNode,
@@ -265,7 +267,8 @@ export function Canvas() {
       loop: withNodeBoundary(LoopNode),
       dino: withNodeBoundary(DinoNode),
       video: withNodeBoundary(VideoNode),
-      web: withNodeBoundary(WebNode)
+      web: withNodeBoundary(WebNode),
+      browser: withNodeBoundary(BrowserNode)
     }),
     []
   )
