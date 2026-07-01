@@ -38,7 +38,7 @@ export interface PtyCreateResult {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'subagent' | 'loop' | 'dino'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -324,7 +324,9 @@ export const DEFAULT_SETTINGS: Settings = {
   gitAutoFetch: true,
   notifyConsentAsked: false,
   customAgents: [],
-  disabledAgents: [],
+  // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
+  // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
+  disabledAgents: ['codex', 'gemini'],
   defaultAgent: 'claude',
   telemetryEnabled: false
 }
