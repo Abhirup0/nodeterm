@@ -1999,11 +1999,27 @@ export function Canvas() {
       }
       const srcTitle = (src.data.title as string) || sourceNodeId
       const srcCwd = src.data.cwd as string | undefined
-      const center = { x: src.position.x + 360, y: src.position.y }
+      // Place opened nodes BELOW the source and rope them to it (source flow-out → target
+      // flow-in), mirroring how subagent/loop nodes attach — so they read as "hanging off" the
+      // conversation instead of landing on top of unrelated nodes. `placeBelow` returns a node
+      // centerpoint; `i` fans multiple nodes out horizontally so they don't stack.
+      const srcW = src.measured?.width ?? (src.width as number) ?? 600
+      const srcH = src.measured?.height ?? (src.height as number) ?? 400
+      const belowY = src.position.y + srcH + 80
+      const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
+      const placeBelow = (i = 0) => ({ x: src.position.x + srcW / 2 + i * 460, y: belowY + 210 })
       const connect = (newId: string) =>
         setControlEdges((es) => [
           ...es,
-          { id: `ctrl-${sourceNodeId}-${newId}`, source: sourceNodeId, target: newId, type: 'default' }
+          {
+            id: `ctrl-${sourceNodeId}-${newId}`,
+            source: sourceNodeId,
+            sourceHandle: 'flow-out',
+            target: newId,
+            targetHandle: 'flow-in',
+            style: { stroke: edgeColor, strokeWidth: 1.5 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor, width: 14, height: 14 }
+          }
         ])
       // Append a freshly-created node, draw its connecting edge, and mark the canvas dirty so it
       // persists. Returns the new node id.
@@ -2031,7 +2047,7 @@ export function Canvas() {
           }
           case 'open-terminal': {
             const id = addAndConnect(
-              createTerminalNode(nodesRef.current.length, args.cwd || srcCwd, center, args.cmd)
+              createTerminalNode(nodesRef.current.length, args.cwd || srcCwd, placeBelow(), args.cmd)
             )
             reply({ ok: true, message: `opened terminal ${id}`, result: { id } })
             return
@@ -2046,7 +2062,7 @@ export function Canvas() {
                     'claude',
                     nodesRef.current.length + i,
                     args.cwd || srcCwd,
-                    { x: center.x, y: center.y + i * 80 },
+                    placeBelow(i),
                     args.prompt
                   )
                 )
@@ -2066,7 +2082,7 @@ export function Canvas() {
             }
             // EditorNode renders images via fs:read-binary → base64 data URL (not nt-media://),
             // so no media allowlist entry is needed here.
-            const id = addAndConnect(createEditorNode(nodesRef.current.length, args.path, center))
+            const id = addAndConnect(createEditorNode(nodesRef.current.length, args.path, placeBelow()))
             reply({ ok: true, message: `showing image ${id}`, result: { id } })
             return
           }
@@ -2076,7 +2092,7 @@ export function Canvas() {
               return
             }
             await window.nodeTerminal.media.allow(args.path)
-            const id = addAndConnect(createVideoNode(nodesRef.current.length, args.path, center))
+            const id = addAndConnect(createVideoNode(nodesRef.current.length, args.path, placeBelow()))
             reply({ ok: true, message: `showing video ${id}`, result: { id } })
             return
           }
@@ -2094,7 +2110,7 @@ export function Canvas() {
             }
             // For an agent-provided --file (not html we just wrote), allowlist it first.
             if (webSrc.filePath && args.file) await window.nodeTerminal.media.allow(webSrc.filePath)
-            const id = addAndConnect(createWebNode(nodesRef.current.length, webSrc, center))
+            const id = addAndConnect(createWebNode(nodesRef.current.length, webSrc, placeBelow()))
             reply({ ok: true, message: `showing web ${id}`, result: { id } })
             return
           }

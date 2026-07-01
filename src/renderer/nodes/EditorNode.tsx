@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
 import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
@@ -155,6 +155,14 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       onMouseLeave={() => (hoveredRef.current = false)}
     >
       <NodeResizer minWidth={320} minHeight={200} isVisible={selected} color={data.color} />
+      {/* Invisible target handle so a rope from an agent node that opened this can attach. */}
+      <Handle
+        id="flow-in"
+        type="target"
+        position={Position.Top}
+        isConnectable={false}
+        style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
+      />
 
       <div className="term-node__header">
         <span className="term-node__title-text" title={filePath}>

@@ -686,6 +686,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
       />
+      {/* Invisible target handle so a rope from an agent node that opened this can attach. */}
+      <Handle
+        id="flow-in"
+        type="target"
+        position={Position.Top}
+        isConnectable={false}
+        style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
+      />
       {/* Context-link handles (context-link-capable nodes only): drag right→left to link two
           sessions. Vertically centered on the side edges; raised above the body so they're never buried. */}
       {showLink && (
