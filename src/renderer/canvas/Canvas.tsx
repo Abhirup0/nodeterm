@@ -557,17 +557,20 @@ export function Canvas() {
     // terminal nodes can run over it. Idempotent in main (a live master is reused), so a tab
     // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
     if (project.ssh) {
-      window.nodeTerminal.sshProject
-        .connect(project.id, project.ssh.server, project.ssh.remoteCwd)
-        .then(async ({ controlPath, hookEndpointPath, tmuxConfPath }) => {
-          // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
-          // Source Control panel's re-fetch (which keys off that entry) already hits the master.
-          await window.nodeTerminal.git.setActiveRemote(project.id)
-          useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath })
-        })
-        .catch(() => {
-          /* status surfaced via onStatus → the connection banner */
-        })
+      const ssh = project.ssh
+      requireProOr('SSH Remote Projects', () => {
+        window.nodeTerminal.sshProject
+          .connect(project.id, ssh.server, ssh.remoteCwd)
+          .then(async ({ controlPath, hookEndpointPath, tmuxConfPath }) => {
+            // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
+            // Source Control panel's re-fetch (which keys off that entry) already hits the master.
+            await window.nodeTerminal.git.setActiveRemote(project.id)
+            useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath })
+          })
+          .catch(() => {
+            /* status surfaced via onStatus → the connection banner */
+          })
+      })
     } else {
       // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
       void window.nodeTerminal.git.setActiveRemote(null)

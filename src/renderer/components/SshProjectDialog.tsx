@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSshServers } from '../state/sshServers'
+import { useEntitlement } from '../state/entitlement'
+import { useUpgradeGate } from '../state/upgradeGate'
 import type { SshServer } from '@shared/ssh'
 
 interface SshProjectDialogProps {
@@ -116,6 +118,10 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
 
   const connect = useCallback(
     async (srv: SshServer) => {
+      if (!useEntitlement.getState().isPremium) {
+        useUpgradeGate.getState().show('SSH Remote Projects')
+        return
+      }
       setServer(srv)
       setError('')
       setStep('connecting')
