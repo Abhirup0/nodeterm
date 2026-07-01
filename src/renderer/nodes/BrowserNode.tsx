@@ -25,7 +25,9 @@ type WebviewEl = HTMLElement & {
 export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements, updateNodeData } = useReactFlow()
   const ref = useRef<WebviewEl | null>(null)
-  const startUrl = (data.url as string) ?? ''
+  // Seed the initial webview src ONCE at mount; navigations persist via updateNodeData but must
+  // not re-push `src` into a webview that already navigated there (would cause a reload loop).
+  const [startUrl] = useState(() => (data.url as string) ?? '')
   const [address, setAddress] = useState(startUrl)
   const [loading, setLoading] = useState(false)
   const [canBack, setCanBack] = useState(false)
