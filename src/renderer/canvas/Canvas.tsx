@@ -1106,6 +1106,15 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter]
   )
 
+  const addBrowser = useCallback(
+    (center?: { x: number; y: number }) => {
+      const input = window.prompt('Open browser — enter a URL (blank for a blank tab):') ?? ''
+      setNodes((ns) => [...ns, createBrowserNode(ns.length, input.trim(), center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
@@ -2670,6 +2679,7 @@ export function Canvas() {
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
+      { id: 'open-browser', label: 'Open browser…', icon: <IconRemote />, run: () => addBrowser() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
           id: `new-remote-${srv.id}`,
@@ -2742,6 +2752,7 @@ export function Canvas() {
     addSticky,
     addDino,
     addWebView,
+    addBrowser,
     openFileDialog,
     addProject,
     fitView,
