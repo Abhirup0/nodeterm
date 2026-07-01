@@ -22,6 +22,7 @@ import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { DinoNode } from '../nodes/DinoNode'
 import BrowserNode from '../nodes/BrowserNode'
+import { normalizeAddress } from '../nodes/browserUrl'
 import VideoNode from '../nodes/VideoNode'
 import WebNode from '../nodes/WebNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -230,6 +231,9 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
+  // Rolling record of popup-spawned browser nodes (url + source + timestamp) so the deps-[]
+  // onBrowserNewWindow effect can dedup repeat opens and rate-cap a flood of window.open calls.
+  const browserPopupSpawnsRef = useRef<{ url: string; source: string; t: number }[]>([])
   const loadingRef = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
   // Undo/redo history (snapshots of the nodes array; arrays are immutable per change).
@@ -1108,8 +1112,17 @@ export function Canvas() {
 
   const addBrowser = useCallback(
     (center?: { x: number; y: number }) => {
-      const input = window.prompt('Open browser — enter a URL (blank for a blank tab):') ?? ''
-      setNodes((ns) => [...ns, createBrowserNode(ns.length, input.trim(), center ?? viewCenter())])
+      const input = (window.prompt('Open browser — enter a URL (blank for a blank tab):') ?? '').trim()
+      let url = ''
+      if (input) {
+        const normalized = normalizeAddress(input)
+        if (!normalized) {
+          window.alert('Enter a valid http(s) URL')
+          return
+        }
+        url = normalized
+      }
+      setNodes((ns) => [...ns, createBrowserNode(ns.length, url, center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -1999,6 +2012,18 @@ export function Canvas() {
     return window.nodeTerminal.browser.onBrowserNewWindow(({ url, sourceNodeId }) => {
       const src = nodesRef.current.find((n) => n.id === sourceNodeId)
       if (!src) return
+      // Guard against a hostile/careless page flooding the canvas with real Chromium nodes
+      // (ad loops, setInterval(window.open)). Prune old records, then dedup + rate-cap.
+      const now = Date.now()
+      const recent = browserPopupSpawnsRef.current.filter((r) => now - r.t < 10000)
+      const isDup = recent.some((r) => r.url === url && r.source === sourceNodeId && now - r.t < 2000)
+      if (isDup || recent.length >= 8) {
+        browserPopupSpawnsRef.current = recent
+        console.warn('[browser] popup spawn blocked (dedup/rate cap):', url)
+        return
+      }
+      recent.push({ url, source: sourceNodeId, t: now })
+      browserPopupSpawnsRef.current = recent
       const srcW = src.measured?.width ?? (src.width as number) ?? 800
       const srcH = src.measured?.height ?? (src.height as number) ?? 560
       const node = createBrowserNode(nodesRef.current.length, url, {
@@ -2162,7 +2187,12 @@ export function Canvas() {
               reply({ ok: false, error: 'open-browser requires --url' })
               return
             }
-            const id = addAndConnect(createBrowserNode(nodesRef.current.length, args.url, placeBelow()))
+            const browserUrl = normalizeAddress(args.url)
+            if (!browserUrl) {
+              reply({ ok: false, error: 'open-browser requires a valid http(s) --url' })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
             reply({ ok: true, message: `opened browser ${id}`, result: { id } })
             return
           }
