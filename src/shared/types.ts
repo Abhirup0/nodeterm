@@ -188,9 +188,10 @@ export interface PtyApi {
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
-  /** The agent session's display name (`/rename` name, else auto name) read from its transcript;
-   *  null if none. Used to keep a node title in sync with the `/resume` name (e.g. after resume). */
-  readSessionName(sessionId: string, cwd: string): Promise<string | null>
+  /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
+   *  resolved strictly by sessionId; null if unknown. Keeps a node title in sync with the
+   *  `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions. */
+  readSessionName(sessionId: string): Promise<string | null>
   /** Listens for PTY output. Returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */

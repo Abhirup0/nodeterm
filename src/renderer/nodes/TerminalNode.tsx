@@ -590,17 +590,18 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // Keep the node title in sync with the agent session's display name — the name shown in
   // `/resume`, read from the transcript (`/rename` name, else auto name). This is the authoritative
   // source: `/rename` doesn't update the OSC terminal title, so reading the transcript is the only
-  // way the name shows up after a resume. Polls only while the title still auto-tracks the session
-  // (titleAuto) and stops once the user renames by hand. Claude-only via canRenameNode.
+  // way the name shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT
+  // sync until it's known, otherwise same-folder nodes would adopt whichever session wrote last.
+  // Polls only while the title still auto-tracks the session (titleAuto) and stops once the user
+  // renames by hand. Claude-only via canRenameNode.
   useEffect(() => {
     if (!canRenameNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
-    const cwd = (data.cwd as string) ?? ''
-    if (!sid && !cwd) return
+    if (!sid) return
     let cancelled = false
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await window.nodeTerminal.pty.readSessionName(sid, cwd)
+      const name = await window.nodeTerminal.pty.readSessionName(sid)
       if (
         !cancelled &&
         name &&
@@ -617,7 +618,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       cancelled = true
       clearInterval(timer)
     }
-  }, [id, canRenameNode, status?.sessionId, data.cwd, data.titleAuto, updateNodeData])
+  }, [id, canRenameNode, status?.sessionId, data.titleAuto, updateNodeData])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {

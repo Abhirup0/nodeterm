@@ -223,8 +223,8 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
-  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string, cwd: string) =>
-    readSessionName(sessionId ?? '', cwd ?? '')
+  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string) =>
+    readSessionName(sessionId ?? '')
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())

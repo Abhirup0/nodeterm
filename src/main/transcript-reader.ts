@@ -248,11 +248,13 @@ export function pickSessionName(text: string): string | null {
 
 // The current display name of a Claude session, read from its transcript. This is the name shown
 // in `/resume` — the authoritative source, since `/rename` does NOT push to the OSC terminal
-// title. Resolved by sessionId when known, else by cwd. Returns null if none found.
+// title. Resolved STRICTLY by sessionId: the cwd is intentionally not a fallback here, because
+// multiple Claude nodes in one folder would all resolve to the same newest transcript and adopt
+// each other's names. Returns null until the node's own sessionId is known.
 const TITLE_TAIL_BYTES = 128 * 1024
-export async function readSessionName(sessionId: string, cwd: string): Promise<string | null> {
-  let p = sessionId ? await resolveTranscriptPath(sessionId) : undefined
-  if (!p && cwd) p = await transcriptPathForCwd(cwd)
+export async function readSessionName(sessionId: string): Promise<string | null> {
+  if (!sessionId) return null
+  const p = await resolveTranscriptPath(sessionId)
   if (!p) return null
   const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
   if (!tail) return null
