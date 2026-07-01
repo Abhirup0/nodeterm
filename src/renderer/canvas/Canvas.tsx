@@ -1992,6 +1992,37 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
+  // A browser guest's new-window (target=_blank / window.open) request → open another browser node
+  // (never a real popup; main denies the real one) roped below/right of the source. Reads the
+  // latest nodes via nodesRef so the deps stay []. Rope is display-only (controlEdges, not persisted).
+  useEffect(() => {
+    return window.nodeTerminal.browser.onBrowserNewWindow(({ url, sourceNodeId }) => {
+      const src = nodesRef.current.find((n) => n.id === sourceNodeId)
+      if (!src) return
+      const srcW = src.measured?.width ?? (src.width as number) ?? 800
+      const srcH = src.measured?.height ?? (src.height as number) ?? 560
+      const node = createBrowserNode(nodesRef.current.length, url, {
+        x: src.position.x + srcW / 2 + 40,
+        y: src.position.y + srcH + 80 + 280
+      })
+      setNodes((ns) => [...ns, node])
+      setControlEdges((es) => [
+        ...es,
+        {
+          id: `ctrl-${sourceNodeId}-${node.id}`,
+          source: sourceNodeId,
+          sourceHandle: 'flow-out',
+          target: node.id,
+          targetHandle: 'flow-in',
+          style: { stroke: '#0a84ff', strokeWidth: 1.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#0a84ff', width: 14, height: 14 }
+        }
+      ])
+      markDirty()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Apply canvas-control commands issued by a control-capable agent's `nodeterm` CLI. Reads the
   // LATEST nodes via nodesRef (so the effect deps stay []), validates the source as the real
   // authorization boundary, then applies the verb. Non-destructive verbs (list/open-*/show-*)

@@ -253,6 +253,14 @@ export interface MediaApi {
   writeHtml(html: string): Promise<string>
 }
 
+export interface BrowserApi {
+  /** Map a browser node's <webview> guest to its node id (for new-window capture). */
+  register(webContentsId: number, nodeId: string): void
+  unregister(webContentsId: number): void
+  /** Fires when a browser guest requested a new window; the renderer opens another browser node. */
+  onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
+}
+
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
  * terminal-title + process status (no hooks/branch/loop/bridge). */
 export interface CustomAgent {
@@ -829,6 +837,7 @@ export interface NodeTerminalApi {
   shell: ShellApi
   fs: FsApi
   media: MediaApi
+  browser: BrowserApi
   files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi

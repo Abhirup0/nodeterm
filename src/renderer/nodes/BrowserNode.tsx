@@ -73,6 +73,23 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
     }
   }, [id, updateNodeData])
 
+  // Register the guest's webContents id → node id so main can turn its new-window (target=_blank
+  // / window.open) requests into another connected browser node. Paired unregister on unmount.
+  useEffect(() => {
+    const wv = ref.current
+    if (!wv) return
+    let wcId = 0
+    const onReady = (): void => {
+      wcId = wv.getWebContentsId()
+      window.nodeTerminal.browser.register(wcId, id)
+    }
+    wv.addEventListener('dom-ready', onReady)
+    return () => {
+      wv.removeEventListener('dom-ready', onReady)
+      if (wcId) window.nodeTerminal.browser.unregister(wcId)
+    }
+  }, [id])
+
   const go = (): void => {
     const safe = normalizeAddress(address)
     if (!safe) {
@@ -97,6 +114,14 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         position={Position.Top}
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
+      />
+      {/* Invisible source handle so a rope to a browser node this one spawned (new-window) attaches. */}
+      <Handle
+        id="flow-out"
+        type="source"
+        position={Position.Bottom}
+        isConnectable={false}
+        style={{ opacity: 0, pointerEvents: 'none', bottom: 0 }}
       />
 
       <div className="term-node__header">

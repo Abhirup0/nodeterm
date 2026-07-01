@@ -87,6 +87,9 @@ let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 // can check focus and route clicks back to the renderer.
 let mainWin: BrowserWindow | null = null
 
+// Browser <webview> guest webContents id → its browser node id (for new-window capture).
+const browserGuests = new Map<number, string>()
+
 // Node → live tail bookkeeping, so closing a node (× → pty:destroy) releases its file tailers.
 // Without this, a node closed mid-run never emits SessionEnd/PostToolUse, so context-tail (1s
 // poll) and subagent-tail (400ms poll) would keep stat/read-ing forever. Keyed by node id.
@@ -191,8 +194,16 @@ app.whenReady().then(async () => {
     contents.on('will-navigate', (e, url) => {
       if (!/^https?:\/\//i.test(url) && !/^nt-media:\/\//i.test(url)) e.preventDefault()
     })
-    // Deny popups / window.open from guest pages (defense-in-depth; allowpopups is already unset).
-    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // A browser node's guest requested a new window → open it as another browser node
+    // (never a real popup). Only http(s); other schemes are dropped. The map is consulted
+    // live at call time, so a guest registered later (on dom-ready) is seen when a popup fires.
+    contents.setWindowOpenHandler(({ url }) => {
+      const sourceNodeId = browserGuests.get(contents.id)
+      if (sourceNodeId && /^https?:\/\//i.test(url) && mainWin && !mainWin.isDestroyed()) {
+        mainWin.webContents.send(IPC.browserNewWindow, { url, sourceNodeId })
+      }
+      return { action: 'deny' }
+    })
   })
 
   settingsStore.init()
@@ -209,6 +220,13 @@ app.whenReady().then(async () => {
 
   ipcMain.handle(IPC.mediaAllow, (_e, absPath: string) => allowMediaPath(absPath))
   ipcMain.handle(IPC.mediaWriteHtml, (_e, html: string) => writeAgentHtml(html))
+
+  ipcMain.on(IPC.browserRegister, (_e, webContentsId: number, nodeId: string) => {
+    browserGuests.set(webContentsId, nodeId)
+  })
+  ipcMain.on(IPC.browserUnregister, (_e, webContentsId: number) => {
+    browserGuests.delete(webContentsId)
+  })
 
   ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
     generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
