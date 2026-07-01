@@ -38,7 +38,7 @@ export interface PtyCreateResult {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'subagent' | 'loop' | 'dino'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -251,6 +251,14 @@ export interface MediaApi {
   allow(absPath: string): Promise<string>
   /** Persist raw HTML to <userData>/agent-web/<id>.html, allowlist it, return its absolute path. */
   writeHtml(html: string): Promise<string>
+}
+
+export interface BrowserApi {
+  /** Map a browser node's <webview> guest to its node id (for new-window capture). */
+  register(webContentsId: number, nodeId: string): void
+  unregister(webContentsId: number): void
+  /** Fires when a browser guest requested a new window; the renderer opens another browser node. */
+  onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
 }
 
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
@@ -827,6 +835,7 @@ export interface NodeTerminalApi {
   shell: ShellApi
   fs: FsApi
   media: MediaApi
+  browser: BrowserApi
   files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi

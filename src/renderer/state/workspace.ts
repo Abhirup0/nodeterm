@@ -23,6 +23,7 @@ const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
+const BROWSER_SIZE = { width: 800, height: 560 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -361,6 +362,29 @@ export function createWebNode(
       group: null,
       ...(src.url ? { url: src.url } : {}),
       ...(src.filePath ? { filePath: src.filePath } : {})
+    }
+  }
+}
+
+/** Creates a navigable browser node (Electron <webview>) starting at `url` ('' = blank). */
+export function createBrowserNode(
+  index: number,
+  url: string,
+  center?: { x: number; y: number }
+): CanvasNode {
+  const title = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Browser'
+  return {
+    id: nextId('browser'),
+    type: 'browser',
+    position: placeAt(center, index, BROWSER_SIZE.width, BROWSER_SIZE.height),
+    width: BROWSER_SIZE.width,
+    height: BROWSER_SIZE.height,
+    style: { width: BROWSER_SIZE.width, height: BROWSER_SIZE.height },
+    data: {
+      title,
+      color: '#0a84ff',
+      group: null,
+      ...(url ? { url } : {})
     }
   }
 }
@@ -712,11 +736,13 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
             ? DIFF_SIZE
             : kind === 'video'
               ? VIDEO_SIZE
-              : kind === 'web'
-                ? WEB_SIZE
-                : kind === 'dino'
-                  ? DINO_SIZE
-                  : TERMINAL_SIZE
+              : kind === 'browser'
+                ? BROWSER_SIZE
+                : kind === 'web'
+                  ? WEB_SIZE
+                  : kind === 'dino'
+                    ? DINO_SIZE
+                    : TERMINAL_SIZE
   return nodes
     // Remote terminals are transient to a live relay connection — never persist them (their
     // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).

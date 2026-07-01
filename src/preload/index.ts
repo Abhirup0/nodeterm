@@ -171,6 +171,16 @@ const api: NodeTerminalApi = {
     allow: (absPath: string) => ipcRenderer.invoke(IPC.mediaAllow, absPath),
     writeHtml: (html: string) => ipcRenderer.invoke(IPC.mediaWriteHtml, html)
   },
+  browser: {
+    register: (webContentsId: number, nodeId: string) =>
+      ipcRenderer.send(IPC.browserRegister, webContentsId, nodeId),
+    unregister: (webContentsId: number) => ipcRenderer.send(IPC.browserUnregister, webContentsId),
+    onBrowserNewWindow: (listener) => {
+      const handler = (_e: unknown, ev: { url: string; sourceNodeId: string }) => listener(ev)
+      ipcRenderer.on(IPC.browserNewWindow, handler)
+      return () => ipcRenderer.removeListener(IPC.browserNewWindow, handler)
+    }
+  },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
   },

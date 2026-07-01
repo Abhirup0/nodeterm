@@ -120,6 +120,9 @@ export const IPC = {
   commitGenerate: 'commit:generate',
   mediaAllow: 'media:allow',
   mediaWriteHtml: 'media:write-html',
+  browserRegister: 'browser:register',
+  browserUnregister: 'browser:unregister',
+  browserNewWindow: 'browser:new-window',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
   // Connection approval gate: main → renderer when a client finishes the handshake (carries the

@@ -21,6 +21,8 @@ import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { EditorNode } from '../nodes/EditorNode'
 import { DiffNode } from '../nodes/DiffNode'
 import { DinoNode } from '../nodes/DinoNode'
+import BrowserNode from '../nodes/BrowserNode'
+import { normalizeAddress } from '../nodes/browserUrl'
 import VideoNode from '../nodes/VideoNode'
 import WebNode from '../nodes/WebNode'
 import { withNodeBoundary } from '../components/NodeBoundary'
@@ -108,6 +110,7 @@ import {
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   createAgentNode,
+  createBrowserNode,
   createDinoNode,
   createDiffNode,
   createEditorNode,
@@ -228,6 +231,9 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
+  // Rolling record of popup-spawned browser nodes (url + source + timestamp) so the deps-[]
+  // onBrowserNewWindow effect can dedup repeat opens and rate-cap a flood of window.open calls.
+  const browserPopupSpawnsRef = useRef<{ url: string; source: string; t: number }[]>([])
   const loadingRef = useRef(false)
   const flowWrapRef = useRef<HTMLDivElement>(null)
   // Undo/redo history (snapshots of the nodes array; arrays are immutable per change).
@@ -265,7 +271,8 @@ export function Canvas() {
       loop: withNodeBoundary(LoopNode),
       dino: withNodeBoundary(DinoNode),
       video: withNodeBoundary(VideoNode),
-      web: withNodeBoundary(WebNode)
+      web: withNodeBoundary(WebNode),
+      browser: withNodeBoundary(BrowserNode)
     }),
     []
   )
@@ -1099,6 +1106,24 @@ export function Canvas() {
       const url = input?.trim()
       if (!url) return
       setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
+  )
+
+  const addBrowser = useCallback(
+    (center?: { x: number; y: number }) => {
+      const input = (window.prompt('Open browser — enter a URL (blank for a blank tab):') ?? '').trim()
+      let url = ''
+      if (input) {
+        const normalized = normalizeAddress(input)
+        if (!normalized) {
+          window.alert('Enter a valid http(s) URL')
+          return
+        }
+        url = normalized
+      }
+      setNodes((ns) => [...ns, createBrowserNode(ns.length, url, center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -1984,6 +2009,49 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
+  // A browser guest's new-window (target=_blank / window.open) request → open another browser node
+  // (never a real popup; main denies the real one) roped below/right of the source. Reads the
+  // latest nodes via nodesRef so the deps stay []. Rope is display-only (controlEdges, not persisted).
+  useEffect(() => {
+    return window.nodeTerminal.browser.onBrowserNewWindow(({ url, sourceNodeId }) => {
+      const src = nodesRef.current.find((n) => n.id === sourceNodeId)
+      if (!src) return
+      // Guard against a hostile/careless page flooding the canvas with real Chromium nodes
+      // (ad loops, setInterval(window.open)). Prune old records, then dedup + rate-cap.
+      const now = Date.now()
+      const recent = browserPopupSpawnsRef.current.filter((r) => now - r.t < 10000)
+      const isDup = recent.some((r) => r.url === url && r.source === sourceNodeId && now - r.t < 2000)
+      if (isDup || recent.length >= 8) {
+        browserPopupSpawnsRef.current = recent
+        console.warn('[browser] popup spawn blocked (dedup/rate cap):', url)
+        return
+      }
+      recent.push({ url, source: sourceNodeId, t: now })
+      browserPopupSpawnsRef.current = recent
+      const srcW = src.measured?.width ?? (src.width as number) ?? 800
+      const srcH = src.measured?.height ?? (src.height as number) ?? 560
+      const node = createBrowserNode(nodesRef.current.length, url, {
+        x: src.position.x + srcW / 2 + 40,
+        y: src.position.y + srcH + 80 + 280
+      })
+      setNodes((ns) => [...ns, node])
+      setControlEdges((es) => [
+        ...es,
+        {
+          id: `ctrl-${sourceNodeId}-${node.id}`,
+          source: sourceNodeId,
+          sourceHandle: 'flow-out',
+          target: node.id,
+          targetHandle: 'flow-in',
+          style: { stroke: '#0a84ff', strokeWidth: 1.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#0a84ff', width: 14, height: 14 }
+        }
+      ])
+      markDirty()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Apply canvas-control commands issued by a control-capable agent's `nodeterm` CLI. Reads the
   // LATEST nodes via nodesRef (so the effect deps stay []), validates the source as the real
   // authorization boundary, then applies the verb. Non-destructive verbs (list/open-*/show-*)
@@ -2116,6 +2184,20 @@ export function Canvas() {
             if (webSrc.filePath && args.file) await window.nodeTerminal.media.allow(webSrc.filePath)
             const id = addAndConnect(createWebNode(nodesRef.current.length, webSrc, placeBelow()))
             reply({ ok: true, message: `showing web ${id}`, result: { id } })
+            return
+          }
+          case 'open-browser': {
+            if (!args.url) {
+              reply({ ok: false, error: 'open-browser requires --url' })
+              return
+            }
+            const browserUrl = normalizeAddress(args.url)
+            if (!browserUrl) {
+              reply({ ok: false, error: 'open-browser requires a valid http(s) --url' })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
+            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
             return
           }
           case 'write': {
@@ -2671,6 +2753,7 @@ export function Canvas() {
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
+      { id: 'open-browser', label: 'Open browser…', icon: <IconRemote />, run: () => addBrowser() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
           id: `new-remote-${srv.id}`,
@@ -2743,6 +2826,7 @@ export function Canvas() {
     addSticky,
     addDino,
     addWebView,
+    addBrowser,
     openFileDialog,
     addProject,
     fitView,
