@@ -1844,6 +1844,7 @@ export function Canvas() {
                 onClick: () => addAgentNode(c.id, at)
               })
             ),
+          { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
@@ -1864,6 +1865,7 @@ export function Canvas() {
       addAgentNode,
       addSticky,
       addDino,
+      addBrowser,
       openFileDialog,
       openRemotePicker,
       selectAll,
