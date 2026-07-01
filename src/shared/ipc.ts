@@ -24,6 +24,8 @@ export const IPC = {
   appSetBadge: 'app:set-badge',
   agentStatus: 'agent:status',
   agentSubagentActivity: 'agent:subagent-activity',
+  agentControl: 'agent:control',
+  agentControlResult: 'agent:control-result',
   contextLinkSetLinks: 'context-link:set-links',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
@@ -116,6 +118,8 @@ export const IPC = {
   gitSetActiveRemote: 'git:set-active-remote',
   shellOpenExternal: 'shell:open-external',
   commitGenerate: 'commit:generate',
+  mediaAllow: 'media:allow',
+  mediaWriteHtml: 'media:write-html',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
   // Connection approval gate: main → renderer when a client finishes the handshake (carries the

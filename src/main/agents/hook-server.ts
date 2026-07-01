@@ -3,7 +3,7 @@ import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { app } from 'electron'
-import type { AgentId } from '../../shared/agents/config'
+import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 
 export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
@@ -38,6 +38,14 @@ class HookServer {
   private token = ''
   private listener: ((e: NormalizedAgentEvent) => void) | null = null
   private rawListener: ((agentId: string, nodeId: string, payload: Record<string, unknown>) => void) | null = null
+  private controlHandler:
+    | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
+        ok: boolean
+        message?: string
+        result?: unknown
+        error?: string
+      }>)
+    | null = null
   private endpointPath = ''
 
   endpointFilePath(): string {
@@ -65,6 +73,10 @@ class HookServer {
     this.rawListener = cb
   }
 
+  setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
+    this.controlHandler = cb
+  }
+
   async start(): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
@@ -82,7 +94,27 @@ class HookServer {
           return
         }
         req.setTimeout(SLOWLORIS_MS, () => req.destroy())
-        const agentId = decodeURIComponent(new URL(req.url ?? '/', 'http://127.0.0.1').pathname.replace(/^\/hook\//, ''))
+        const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+        if (reqUrl.pathname.startsWith('/control/')) {
+          const verb = decodeURIComponent(reqUrl.pathname.replace(/^\/control\//, ''))
+          let parsed: { nodeId?: string; args?: Record<string, string> } = {}
+          try {
+            parsed = JSON.parse(await readBody(req))
+          } catch {
+            parsed = {}
+          }
+          const result = this.controlHandler
+            ? await this.controlHandler({
+                verb,
+                nodeId: parsed.nodeId ?? '',
+                args: parsed.args ?? {}
+              })
+            : { ok: false, error: 'control unavailable' }
+          res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(result))
+          return
+        }
+        const agentId = decodeURIComponent(reqUrl.pathname.replace(/^\/hook\//, ''))
         const form = parseForm(await readBody(req))
         const nodeId = form.nodeId ?? ''
         if (agentId && nodeId && form.payload) {
@@ -157,7 +189,8 @@ class HookServer {
       NODETERM_HOOK_VERSION: NODETERM_HOOK_PROTOCOL_VERSION,
       NODETERM_HOOK_ENDPOINT: this.endpointFilePath(),
       NODETERM_NODE_ID: nodeId,
-      NODETERM_AGENT_ID: agentId
+      NODETERM_AGENT_ID: agentId,
+      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
     }
   }
 

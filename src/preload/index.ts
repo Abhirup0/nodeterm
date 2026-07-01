@@ -168,6 +168,10 @@ const api: NodeTerminalApi = {
     readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
     write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
   },
+  media: {
+    allow: (absPath: string) => ipcRenderer.invoke(IPC.mediaAllow, absPath),
+    writeHtml: (html: string) => ipcRenderer.invoke(IPC.mediaWriteHtml, html)
+  },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
   },
@@ -334,7 +338,13 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentSubagentActivity, handler)
     return () => ipcRenderer.removeListener(IPC.agentSubagentActivity, handler)
-  }
+  },
+  onAgentControl: (listener) => {
+    const handler = (_e: unknown, cmd: unknown) => listener(cmd as never)
+    ipcRenderer.on(IPC.agentControl, handler)
+    return () => ipcRenderer.removeListener(IPC.agentControl, handler)
+  },
+  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload)
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)

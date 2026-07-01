@@ -1,5 +1,6 @@
 import { join, resolve, sep, posix } from 'path'
 import { homedir } from 'os'
+import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
 import * as fsOps from './fs-ops'
@@ -32,6 +33,7 @@ import { childArgs } from './remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { initContextLink, setNodeTranscript } from './context-link'
+import { initCanvasControl } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -41,6 +43,12 @@ import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
+import {
+  registerMediaScheme,
+  initMediaProtocol,
+  allowMediaPath,
+  writeAgentHtml
+} from './media-protocol'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
@@ -101,6 +109,10 @@ if (!gotSingleInstanceLock) {
   })
 }
 
+// Declare the nt-media:// scheme privileged BEFORE the app is ready (required by Electron).
+// The actual request handler is installed post-ready via initMediaProtocol().
+registerMediaScheme()
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
@@ -115,7 +127,10 @@ function createWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Enables the <webview> tag used by WebNode (embedded content stays locked down —
+      // no nodeintegration is set on the webview element itself).
+      webviewTag: true
     }
   })
 
@@ -165,6 +180,21 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return // losing second instance — quitting; don't touch tmux
+
+  // Harden every <webview> guest (WebNode runs its page in its own webContents, so the main
+  // window's setWindowOpenHandler / will-navigate above don't cover it). Registered once at
+  // startup for all current and future guests.
+  app.on('web-contents-created', (_e, contents) => {
+    if (contents.getType() !== 'webview') return
+    // Web nodes may only show http(s) pages or local content we serve via the jailed
+    // nt-media:// scheme.
+    contents.on('will-navigate', (e, url) => {
+      if (!/^https?:\/\//i.test(url) && !/^nt-media:\/\//i.test(url)) e.preventDefault()
+    })
+    // Deny popups / window.open from guest pages (defense-in-depth; allowpopups is already unset).
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  })
+
   settingsStore.init()
   settingsStore.registerIpc()
   sshStore.registerIpc()
@@ -176,6 +206,9 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())
   )
+
+  ipcMain.handle(IPC.mediaAllow, (_e, absPath: string) => allowMediaPath(absPath))
+  ipcMain.handle(IPC.mediaWriteHtml, (_e, html: string) => writeAgentHtml(html))
 
   ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
     generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
@@ -540,9 +573,46 @@ app.whenReady().then(async () => {
       nodeSubagents.delete(nodeId)
     }
   })
+  // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
+  // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
+  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
+  const pendingControl = new Map<
+    string,
+    {
+      resolve: (r: { ok: boolean; message?: string; result?: unknown; error?: string }) => void
+      timer: NodeJS.Timeout
+    }
+  >()
+  ipcMain.on(
+    IPC.agentControlResult,
+    (
+      _e,
+      payload: { requestId: string; ok: boolean; message?: string; result?: unknown; error?: string }
+    ) => {
+      const pending = pendingControl.get(payload.requestId)
+      if (!pending) return
+      clearTimeout(pending.timer)
+      pendingControl.delete(payload.requestId)
+      pending.resolve(payload)
+    }
+  )
+  hookServer.setControlHandler(async ({ verb, nodeId, args }) => {
+    if (!mainWin || mainWin.isDestroyed()) return { ok: false, error: 'window unavailable' }
+    const requestId = randomUUID()
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingControl.delete(requestId)
+        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
+      }, 120_000)
+      pendingControl.set(requestId, { resolve, timer })
+      mainWin!.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
+    })
+  })
   await hookServer.start()
+  initMediaProtocol()
 
   initContextLink(win, ptyManager)
+  initCanvasControl()
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)

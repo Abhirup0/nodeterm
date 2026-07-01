@@ -38,7 +38,7 @@ export interface PtyCreateResult {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'subagent' | 'loop' | 'dino'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -78,6 +78,8 @@ export interface CanvasNodeState {
   highScore?: number
   // editor / diff
   filePath?: string
+  /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
+  url?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
@@ -241,6 +243,13 @@ export interface FsApi {
 export interface FilesApi {
   /** Fuzzy-open file index for a project root: root-relative `/`-paths ([] on failure). */
   quickOpen(cwd: string): Promise<string[]>
+}
+
+export interface MediaApi {
+  /** Allow an absolute local path to be served, and return its nt-media:// URL. */
+  allow(absPath: string): Promise<string>
+  /** Persist raw HTML to <userData>/agent-web/<id>.html, allowlist it, return its absolute path. */
+  writeHtml(html: string): Promise<string>
 }
 
 /** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
@@ -816,6 +825,7 @@ export interface NodeTerminalApi {
   clipboard: ClipboardApi
   shell: ShellApi
   fs: FsApi
+  media: MediaApi
   files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi
@@ -849,4 +859,21 @@ export interface NodeTerminalApi {
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
+  /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */
+  onAgentControl(
+    listener: (cmd: {
+      requestId: string
+      sourceNodeId: string
+      verb: string
+      args: Record<string, string>
+    }) => void
+  ): () => void
+  /** Reply to an agent control request (resolves the awaiting CLI call in main). */
+  sendAgentControlResult(payload: {
+    requestId: string
+    ok: boolean
+    message?: string
+    result?: unknown
+    error?: string
+  }): void
 }
