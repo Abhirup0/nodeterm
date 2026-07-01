@@ -576,6 +576,7 @@ export function Canvas() {
         if (node) {
           setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
           goToNode(node)
+          useAgentStatus.getState().setActive(pending, true)
           useAgentStatus.getState().clearUnread(pending)
         }
       }
@@ -1917,6 +1918,9 @@ export function Canvas() {
       if (node) {
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
         goToNode(node)
+        // Mark this node as the one being watched, so an agent still producing output does not
+        // immediately re-flag it unread after we clear it (unread edges gate on activeId).
+        useAgentStatus.getState().setActive(nodeId, true)
         useAgentStatus.getState().clearUnread(nodeId)
         return
       }
