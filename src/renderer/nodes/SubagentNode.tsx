@@ -25,7 +25,9 @@ export function SubagentNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const tokens = data.subagentTokens as number | undefined
   const toolUses = data.subagentToolUses as number | undefined
   const result = (data.subagentResult as string) || ''
-  const activity = (data.subagentActivity as string) || ''
+  // Live transcript: subscribed here per-id (not passed through Canvas's ephemeral node data)
+  // so streaming chunks re-render only this card, never the whole canvas.
+  const activity = useAgentNodes((s) => s.activityById[id]) || ''
   const body = activity || result
   const expanded = !!data.ephExpanded
   const bodyRef = useRef<HTMLDivElement>(null)

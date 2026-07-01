@@ -34,30 +34,37 @@ function trailing(data: string): Buffer {
   return bytes.subarray(start)
 }
 
-export function writeScrollback(persistKey: string, data: string): void {
+// All async (fs.promises): snapshots fire per session on a 15s timer and in bursts when many
+// nodes detach at once (project switch / quit) — sync writes here blocked the main event loop,
+// which stalls PTY streaming and all IPC.
+let writeSeq = 0
+export async function writeScrollback(persistKey: string, data: string): Promise<void> {
   if (!data) return
+  const file = snapshotPath(persistKey)
+  // Unique tmp per call: overlapping writes for the same key (timer tick + detach snapshot)
+  // must not interleave into one tmp file and rename a torn write into place.
+  const tmp = `${file}.${++writeSeq}.tmp`
   try {
-    fs.mkdirSync(dir(), { recursive: true })
-    const file = snapshotPath(persistKey)
-    const tmp = `${file}.tmp`
-    fs.writeFileSync(tmp, trailing(data))
-    fs.renameSync(tmp, file)
+    await fs.promises.mkdir(dir(), { recursive: true })
+    await fs.promises.writeFile(tmp, trailing(data))
+    await fs.promises.rename(tmp, file)
   } catch {
     // best-effort: a failed snapshot just means no cold-restore replay for this node
+    await fs.promises.rm(tmp, { force: true }).catch(() => {})
   }
 }
 
-export function readScrollback(persistKey: string): string {
+export async function readScrollback(persistKey: string): Promise<string> {
   try {
-    return fs.readFileSync(snapshotPath(persistKey), 'utf-8')
+    return await fs.promises.readFile(snapshotPath(persistKey), 'utf-8')
   } catch {
     return ''
   }
 }
 
-export function deleteScrollback(persistKey: string): void {
+export async function deleteScrollback(persistKey: string): Promise<void> {
   try {
-    fs.rmSync(snapshotPath(persistKey), { force: true })
+    await fs.promises.rm(snapshotPath(persistKey), { force: true })
   } catch {
     // ignore
   }

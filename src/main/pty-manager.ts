@@ -106,6 +106,51 @@ function findSsh(): string | null {
   return cachedSsh ?? null
 }
 
+/**
+ * Resolve the user's REAL login-shell PATH once, and cache it.
+ *
+ * A GUI app launched from Finder/Dock inherits only a minimal PATH
+ * (`/usr/bin:/bin:/usr/sbin:/sbin`) — it never sees `/usr/local/bin`, Homebrew
+ * (`/opt/homebrew/bin`), `~/.local/bin`, nvm, bun, etc. So terminals we spawn would report
+ * `command not found: claude` even though the tool is installed. We run the user's login +
+ * interactive shell (so BOTH profile files and `.zshrc`/`.bashrc` PATH additions are seen) and
+ * read back `$PATH`, printed between sentinels to survive any dotfile noise. Bounded by a timeout;
+ * on any failure (hang, dotfile error, non-POSIX shell, Windows) we fall back to the inherited PATH.
+ */
+let cachedShellPath: string | null | undefined
+let shellPathPromise: Promise<string | null> | null = null
+function resolveShellPath(): Promise<string | null> {
+  if (cachedShellPath !== undefined) return Promise.resolve(cachedShellPath)
+  if (shellPathPromise) return shellPathPromise
+  if (os.platform() === 'win32') {
+    cachedShellPath = null
+    return Promise.resolve(null)
+  }
+  const shell = process.env.SHELL || '/bin/bash'
+  const START = '__NT_PATH_START__'
+  const END = '__NT_PATH_END__'
+  // `-ilc` = login + interactive (matches VS Code's shell-env resolution): sources the profile
+  // files AND the interactive rc (`.zshrc`/`.bashrc`) where users commonly add nvm/bun/etc.
+  // Dotfiles routinely take hundreds of ms (nvm/conda init) and can hang, so this MUST be
+  // async — a synchronous probe here froze every window and all IPC for up to the 5s timeout.
+  // Prewarmed from init(); create() awaits it, so terminals still always get the real PATH.
+  // stderr is captured separately by execFile, so prompt/compinit noise can't pollute stdout.
+  shellPathPromise = runAsync(shell, ['-ilc', `command printf '${START}%s${END}' "$PATH"`], {
+    encoding: 'utf-8',
+    timeout: 5000
+  })
+    .then(({ stdout }) => {
+      const m = stdout.match(new RegExp(`${START}([\\s\\S]*?)${END}`))
+      return m?.[1]?.trim() || null
+    })
+    .catch(() => null) // login shell hung / errored / isn't POSIX — inherited-PATH fallback
+    .then((resolved) => {
+      cachedShellPath = resolved
+      return resolved
+    })
+  return shellPathPromise
+}
+
 interface Session {
   proc: pty.IPty
   /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
@@ -157,6 +202,8 @@ export class PtyManager {
   /** Must run after app is ready (needs userData path). */
   init(getSettings: () => Settings): void {
     this.getSettings = getSettings
+    // Prewarm the login-shell PATH probe now so the first terminal spawn doesn't wait on it.
+    void resolveShellPath()
     this.tmuxPath = findTmux()
     if (!this.tmuxPath) return
     this.confPath = path.join(app.getPath('userData'), 'tmux.conf')
@@ -222,16 +269,19 @@ export class PtyManager {
     // For an SSH-project node, "fresh" is decided by the REMOTE tmux server (over the project's
     // ControlMaster), not the local one. The remote `has-session` is a full network round-trip,
     // so it MUST be async (`runAsync`) — a synchronous probe here would freeze every window/IPC
-    // for its duration. Falls through to the local tmux/plain logic otherwise (a local socket
-    // probe is cheap and stays synchronous).
+    // for its duration. Falls through to the local tmux/plain logic otherwise (also async: a
+    // bulk project load fires one create() per node, and even cheap probes add up serialized).
     const fresh = options.sshRemote
       ? !(await this.remoteSessionExists(
           options.sshRemote,
           sessionName(options.persistKey as string)
         ))
       : tmuxBacked
-        ? !this.tmuxSessionExists(options.persistKey as string)
+        ? !(await this.tmuxSessionExists(options.persistKey as string))
         : true
+    // Ensure the login-shell PATH is resolved (prewarmed in init(); usually already settled)
+    // so the session env below picks it up — awaiting keeps the event loop free either way.
+    await resolveShellPath()
     const sessionId = this.spawnSession(options, webContentsId, undefined)
     return { sessionId, fresh }
   }
@@ -273,13 +323,13 @@ export class PtyManager {
     return { controlPath: s.sshRemote.controlPath, conn: s.sshRemote.conn }
   }
 
-  /** Whether a tmux session for this node id currently exists (server alive + session present). */
-  private tmuxSessionExists(persistKey: string): boolean {
+  /** Whether a tmux session for this node id currently exists (server alive + session present).
+   *  Async like the remote probe: a bulk project load fires one `create()` per terminal node,
+   *  and a synchronous subprocess per probe would serialize on the main event loop. */
+  private async tmuxSessionExists(persistKey: string): Promise<boolean> {
     if (!this.tmuxPath) return false
     try {
-      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)], {
-        stdio: 'ignore'
-      })
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)])
       return true
     } catch {
       return false
@@ -342,13 +392,32 @@ export class PtyManager {
     // For a remote (ssh-project) node the local PTY just holds the ssh client, so its local cwd
     // must be a real LOCAL directory (options.cwd is a REMOTE path that wouldn't exist locally and
     // would make pty.spawn throw). The remote working dir is passed to tmux via sshRemote.remoteCwd.
-    const cwd = options.sshRemote ? os.homedir() : options.cwd || os.homedir()
+    let cwd = options.sshRemote ? os.homedir() : options.cwd || os.homedir()
+    // `|| os.homedir()` only catches an EMPTY cwd. A cwd that is set but STALE — a project folder
+    // the user deleted/unmounted — still reaches pty.spawn and makes posix_spawn fail. Verify the
+    // directory actually exists and fall back to home if not, so a dead folder never kills the node.
+    if (!options.sshRemote) {
+      try {
+        if (!fs.statSync(cwd).isDirectory()) cwd = os.homedir()
+      } catch {
+        cwd = os.homedir()
+      }
+    }
 
     // Strip TMUX so tmux doesn't refuse to nest if the app itself was launched
     // from inside a tmux session.
     const env = { ...process.env, TERM: 'xterm-256color' } as Record<string, string>
     delete env.TMUX
     delete env.TMUX_PANE
+
+    // A GUI app launched from Finder/Dock inherits only a minimal PATH, so spawned terminals
+    // couldn't find tools in /usr/local/bin, Homebrew, ~/.local/bin, nvm, bun, etc. (the classic
+    // `command not found: claude`). Replace PATH with the user's real login-shell PATH so every
+    // terminal — and any agent CLI it launches — resolves exactly what a normal terminal would.
+    // Reads the cache filled by the async probe: create() awaits it, and the detached/host
+    // paths spawn late enough that the init()-time prewarm has long since settled.
+    const shellPath = cachedShellPath ?? null
+    if (shellPath) env.PATH = shellPath
 
     // Agent hooks: each session carries the hook-server coordinates + its node/agent id.
     // Our managed hook (installed globally in each agent's config, but a no-op without these
@@ -423,6 +492,10 @@ export class PtyManager {
       // The hook-server env (port/token/node id/agent id) is passed explicitly via `-e`
       // (one `-e KEY=VALUE` per key) since the shared tmux server can't rely on inherited env.
       const hookEnvArgs = Object.entries(hookEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+      // Set the session PATH explicitly too: the tmux server is shared and long-lived (it outlives
+      // the app), so a session created after an app update must NOT inherit a stale minimal PATH
+      // baked into the server env at first launch — `-e` overrides it per new session at creation.
+      const pathEnvArgs = env.PATH ? ['-e', `PATH=${env.PATH}`] : []
       const attachFlags = sinks ? ['-A'] : ['-A', '-D']
       args = [
         '-L',
@@ -432,6 +505,7 @@ export class PtyManager {
         'new-session',
         ...attachFlags,
         ...hookEnvArgs,
+        ...pathEnvArgs,
         '-c',
         cwd,
         '-s',
@@ -452,13 +526,30 @@ export class PtyManager {
       args = program ? programArgs : []
     }
 
-    const proc = pty.spawn(file, args, {
-      name: 'xterm-256color',
-      cols: options.cols,
-      rows: options.rows,
-      cwd,
-      env
-    })
+    let proc: pty.IPty
+    try {
+      proc = pty.spawn(file, args, {
+        name: 'xterm-256color',
+        cols: options.cols,
+        rows: options.rows,
+        cwd,
+        env
+      })
+    } catch (err) {
+      // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno,
+      // so we can't tell EAGAIN/ENFILE apart here. The dominant cause is running out of PTYs/fds
+      // (macOS caps system-wide PTYs at kern.tty.ptmx_max, and this app keeps tmux sessions — and
+      // thus their PTYs — alive across restarts, so they accumulate). Re-throw with the resolved
+      // program + cwd + open-PTY count so the renderer surfaces an actionable message instead of
+      // an opaque stack, and the caller (create) rejects cleanly rather than leaving a blank node.
+      const openPtys = this.sessions.size
+      const reason = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, live PTYs: ${openPtys}. ` +
+          `On macOS the system PTY limit (kern.tty.ptmx_max) may be exhausted — close unused ` +
+          `terminals or run \`tmux -L ${TMUX_SOCKET} kill-server\` to reclaim leaked sessions.`
+      )
+    }
 
     // tmux-backed sessions snapshot their scrollback to disk periodically so a machine reboot
     // (which kills the tmux server) can still replay recent output on cold restart. A remote
@@ -631,7 +722,7 @@ export class PtyManager {
           remoteCapturePaneArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), false),
           { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
         )
-        if (stdout) writeScrollback(persistKey, stdout)
+        if (stdout) await writeScrollback(persistKey, stdout)
       } catch {
         // remote session gone / master down — keep the last good snapshot
       }
@@ -644,7 +735,7 @@ export class PtyManager {
         ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', '-1500'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
-      if (stdout) writeScrollback(persistKey, stdout)
+      if (stdout) await writeScrollback(persistKey, stdout)
     } catch {
       // session gone / tmux unavailable — keep the last good snapshot
     }
@@ -670,11 +761,11 @@ export class PtyManager {
 
   /** Permanently end a node's persistent tmux session (called when the user closes it). */
   async destroySession(persistKey: string): Promise<void> {
-    // The node is gone for good — drop its cold-restore snapshot too.
-    deleteScrollback(persistKey)
     // destroy() is called (close button) while the session is still live, so its sshRemote is
     // known. Capture it synchronously before any await.
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    // The node is gone for good — drop its cold-restore snapshot too.
+    await deleteScrollback(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: there is no local tmux session — end the REMOTE one.
       const ssh = findSsh()

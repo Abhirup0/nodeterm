@@ -21,8 +21,6 @@ export interface SubagentViz {
   toolUses?: number
   /** What the subagent produced (shown when the node is expanded). */
   result?: string
-  /** Live transcript text streamed while the subagent runs (shown when expanded). */
-  activity?: string
 }
 
 export interface SubagentResult {
@@ -34,6 +32,13 @@ export interface SubagentResult {
 
 interface AgentNodesState {
   byId: Record<string, SubagentViz>
+  /**
+   * Live transcript text per subagent, streamed while it runs — kept OUT of `byId` on purpose:
+   * Canvas subscribes to `byId` to lay out the ephemeral nodes, and chunks arrive several times
+   * a second, so routing them through `byId` re-rendered the whole canvas per chunk. Only the
+   * expanded SubagentNode subscribes here, per id.
+   */
+  activityById: Record<string, string>
   /** Per-ephemeral-node UI overrides (keyed by node id: subagent ids + `loop-<parentId>`). */
   positions: Record<string, { x: number; y: number }>
   sizes: Record<string, { width: number; height: number }>
@@ -51,6 +56,7 @@ interface AgentNodesState {
 
 export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
+  activityById: {},
   positions: {},
   sizes: {},
   expanded: {},
@@ -73,26 +79,29 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
 
   appendActivity: (toolUseId, chunk) =>
     set((s) => {
-      const prev = s.byId[toolUseId]
-      if (!prev) return s
-      const activity = ((prev.activity ?? '') + chunk).slice(-12000) // keep the tail bounded
-      return { byId: { ...s.byId, [toolUseId]: { ...prev, activity } } }
+      if (!s.byId[toolUseId]) return s
+      const activity = ((s.activityById[toolUseId] ?? '') + chunk).slice(-12000) // bounded tail
+      return { activityById: { ...s.activityById, [toolUseId]: activity } }
     }),
 
   clearForParent: (parentNodeId) =>
     set((s) => {
       const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
       const byId = { ...s.byId }
+      const activityById = { ...s.activityById }
       const positions = { ...s.positions }
       const sizes = { ...s.sizes }
       const expanded = { ...s.expanded }
       const drop = [...ids, `loop-${parentNodeId}`]
-      for (const id of ids) delete byId[id]
+      for (const id of ids) {
+        delete byId[id]
+        delete activityById[id]
+      }
       for (const id of drop) {
         delete positions[id]
         delete sizes[id]
         delete expanded[id]
       }
-      return { byId, positions, sizes, expanded }
+      return { byId, activityById, positions, sizes, expanded }
     })
 }))

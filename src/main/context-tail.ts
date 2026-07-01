@@ -51,6 +51,8 @@ interface Tracked {
   lastUsed: number
   lastModel: string | null
   lastWindow: number
+  /** An async read is in flight — the next tick skips this session instead of double-reading. */
+  reading: boolean
 }
 
 export interface ContextTail {
@@ -80,56 +82,67 @@ export function createContextTail(win: BrowserWindow): ContextTail {
 
   // Read newly-appended transcript bytes (if any), reconcile the window from the model
   // resolver, and push when the used tokens / model / window changed since the last push.
-  const read = (sessionId: string, t: Tracked): void => {
-    let size = -1
+  // Async fs throughout: this runs every second per tracked session, and sync syscalls here
+  // sat on the same main thread that services all PTY streaming and IPC.
+  const read = async (sessionId: string, t: Tracked): Promise<void> => {
+    if (t.reading) return
+    t.reading = true
     try {
-      size = fs.statSync(t.path).size
-    } catch {
-      // file not created yet / unreadable — skip the byte read, still reconcile below
-    }
-    if (size >= 0) {
-      if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
-      // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
-      if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
-      if (size > t.offset) {
-        let chunk = ''
-        try {
-          const fd = fs.openSync(t.path, 'r')
-          const buf = Buffer.alloc(size - t.offset)
-          fs.readSync(fd, buf, 0, buf.length, t.offset)
-          fs.closeSync(fd)
-          chunk = buf.toString('utf-8')
-          t.offset = size
-        } catch {
-          return
-        }
-        const latest = parseLatestUsage(chunk)
-        if (latest) {
-          t.used = latest.used
-          t.model = latest.model ?? t.model
+      let size = -1
+      try {
+        size = (await fs.promises.stat(t.path)).size
+      } catch {
+        // file not created yet / unreadable — skip the byte read, still reconcile below
+      }
+      if (size >= 0) {
+        if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
+        // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
+        if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
+        if (size > t.offset) {
+          let chunk = ''
+          try {
+            const fd = await fs.promises.open(t.path, 'r')
+            try {
+              const buf = Buffer.alloc(size - t.offset)
+              await fd.read(buf, 0, buf.length, t.offset)
+              chunk = buf.toString('utf-8')
+              t.offset = size
+            } finally {
+              await fd.close()
+            }
+          } catch {
+            return
+          }
+          const latest = parseLatestUsage(chunk)
+          if (latest) {
+            t.used = latest.used
+            t.model = latest.model ?? t.model
+          }
         }
       }
-    }
 
-    // Reconcile the window every tick: kick off async API resolution once per model
-    // (self-gating), and use the best cached/static value now.
-    if (t.model) void resolveModelWindow(t.model)
-    const win = cachedWindowFor(t.model)
+      // Reconcile the window every tick: kick off async API resolution once per model
+      // (self-gating), and use the best cached/static value now.
+      if (t.model) void resolveModelWindow(t.model)
+      const win = cachedWindowFor(t.model)
 
-    if (
-      t.used > 0 &&
-      (t.used !== t.lastUsed || t.model !== t.lastModel || win !== t.lastWindow)
-    ) {
-      t.window = win
-      push(sessionId, t)
-      t.lastUsed = t.used
-      t.lastModel = t.model
-      t.lastWindow = win
+      if (
+        t.used > 0 &&
+        (t.used !== t.lastUsed || t.model !== t.lastModel || win !== t.lastWindow)
+      ) {
+        t.window = win
+        push(sessionId, t)
+        t.lastUsed = t.used
+        t.lastModel = t.model
+        t.lastWindow = win
+      }
+    } finally {
+      t.reading = false
     }
   }
 
   const tick = (): void => {
-    for (const [sessionId, t] of sessions) read(sessionId, t)
+    for (const [sessionId, t] of sessions) void read(sessionId, t)
     if (!sessions.size && timer) {
       clearInterval(timer)
       timer = null
@@ -155,10 +168,11 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         model: null,
         lastUsed: 0,
         lastModel: null,
-        lastWindow: 0
+        lastWindow: 0,
+        reading: false
       }
       sessions.set(sessionId, t)
-      read(sessionId, t) // immediate first value (resumed sessions already have content)
+      void read(sessionId, t) // immediate first value (resumed sessions already have content)
       if (!timer) timer = setInterval(tick, POLL_MS)
     },
     untrack(sessionId) {

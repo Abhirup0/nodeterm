@@ -14,8 +14,7 @@ import type { CanvasMutation, CanvasNodeState } from '@shared/types'
 import { TerminalNode } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode } from '../nodes/GroupNode'
-import { EditorNode } from '../nodes/EditorNode'
-import { DiffNode } from '../nodes/DiffNode'
+import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { withNodeBoundary } from '../components/NodeBoundary'
 import { flowToNodeStates, nodeStatesToFlow, type CanvasNode } from '../state/workspace'
 
@@ -96,8 +95,8 @@ function RemoteSessionCanvas({
       terminal: withNodeBoundary(TerminalNode),
       sticky: withNodeBoundary(StickyNode),
       group: withNodeBoundary(GroupNode),
-      editor: withNodeBoundary(EditorNode),
-      diff: withNodeBoundary(DiffNode)
+      editor: withNodeBoundary(LazyEditorNode),
+      diff: withNodeBoundary(LazyDiffNode)
     }),
     []
   )

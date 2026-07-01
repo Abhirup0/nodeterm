@@ -10,6 +10,7 @@ import {
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
 import { transport as localTransport } from '../terminal/local-transport'
@@ -258,6 +259,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     searchAddonRef.current = searchAddon
     term.loadAddon(searchAddon)
     term.open(container)
+    // GPU renderer: xterm's default DOM renderer doesn't scale to many terminals streaming
+    // at once. Must load after open(). Browsers cap live WebGL contexts (~16), so with many
+    // mounted terminals the oldest context gets evicted — onContextLoss disposes the addon
+    // and that terminal falls back to the DOM renderer instead of going blank.
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => webgl.dispose())
+      term.loadAddon(webgl)
+    } catch {
+      // WebGL2 unavailable — DOM renderer remains active.
+    }
     fit.fit()
     patchTerminalScale(term, getZoom)
 
@@ -599,11 +611,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const sid = status?.sessionId ?? ''
     if (!sid) return
     let cancelled = false
+    // Poll fast (4s) only until the session's name is first seen — a session is named once
+    // early and rarely renamed after, so back off to 15s then. Each poll is an IPC + a small
+    // transcript tail read in main, so N agent nodes each shave 3/4 of that steady load.
+    let delayMs = 4000
+    let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
       const name = await window.nodeTerminal.pty.readSessionName(sid)
+      if (cancelled) return
+      if (name) delayMs = 15000
       if (
-        !cancelled &&
         name &&
         titleAutoRef.current &&
         !editingTitleRef.current &&
@@ -612,11 +630,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         updateNodeData(id, { title: name })
       }
     }
-    void sync()
-    const timer = setInterval(() => void sync(), 4000)
+    const tick = async () => {
+      await sync()
+      if (!cancelled) timer = setTimeout(() => void tick(), delayMs)
+    }
+    void tick()
     return () => {
       cancelled = true
-      clearInterval(timer)
+      if (timer) clearTimeout(timer)
     }
   }, [id, canRenameNode, status?.sessionId, data.titleAuto, updateNodeData])
 

@@ -181,8 +181,16 @@ export const SESSION_ID_RE = /^[0-9a-fA-F-]{8,64}$/
 
 // Fallback when context-tail isn't tracking the session (e.g. resumed after restart):
 // find <sessionId>.jsonl anywhere under ~/.claude/projects/*.
+//
+// The hit is cached: session ids are immutable and a transcript never moves once created,
+// and the renderer polls readSessionName every few seconds PER agent node — without the
+// cache each poll re-scanned every project dir under ~/.claude/projects (heavy Claude users
+// have hundreds). readSessionName drops the entry if the cached path stops being readable.
+const transcriptPathCache = new Map<string, string>()
 export async function resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
   if (!SESSION_ID_RE.test(sessionId)) return undefined
+  const cached = transcriptPathCache.get(sessionId)
+  if (cached) return cached
   const root = path.join(os.homedir(), '.claude', 'projects')
   let dirs: string[]
   try {
@@ -194,6 +202,7 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
     const p = path.join(root, d, `${sessionId}.jsonl`)
     try {
       await fs.promises.access(p)
+      transcriptPathCache.set(sessionId, p)
       return p
     } catch {
       /* keep looking */
@@ -256,7 +265,14 @@ export async function readSessionName(sessionId: string): Promise<string | null>
   if (!sessionId) return null
   const p = await resolveTranscriptPath(sessionId)
   if (!p) return null
-  const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
+  let tail = await readSmallTail(p, TITLE_TAIL_BYTES)
+  if (tail === undefined && transcriptPathCache.get(sessionId) === p) {
+    // The cached path went stale (transcript deleted/moved) — rescan once, don't poll a corpse.
+    transcriptPathCache.delete(sessionId)
+    const fresh = await resolveTranscriptPath(sessionId)
+    if (!fresh) return null
+    tail = await readSmallTail(fresh, TITLE_TAIL_BYTES)
+  }
   if (!tail) return null
   return pickSessionName(tail)
 }

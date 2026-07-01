@@ -18,8 +18,7 @@ import type { Edge, Node } from '@xyflow/react'
 import { TerminalNode, setMoveIntoWorktreeHandler } from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
-import { EditorNode } from '../nodes/EditorNode'
-import { DiffNode } from '../nodes/DiffNode'
+import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { DinoNode } from '../nodes/DinoNode'
 import BrowserNode from '../nodes/BrowserNode'
 import { normalizeAddress } from '../nodes/browserUrl'
@@ -265,8 +264,8 @@ export function Canvas() {
       terminal: withNodeBoundary(TerminalNode),
       sticky: withNodeBoundary(StickyNode),
       group: withNodeBoundary(GroupNode),
-      editor: withNodeBoundary(EditorNode),
-      diff: withNodeBoundary(DiffNode),
+      editor: withNodeBoundary(LazyEditorNode),
+      diff: withNodeBoundary(LazyDiffNode),
       subagent: withNodeBoundary(SubagentNode),
       loop: withNodeBoundary(LoopNode),
       dino: withNodeBoundary(DinoNode),
@@ -283,14 +282,27 @@ export function Canvas() {
   const ephemeralPos = useAgentNodes((s) => s.positions)
   const ephSizes = useAgentNodes((s) => s.sizes)
   const ephExpanded = useAgentNodes((s) => s.expanded)
-  const claudeById = useAgentStatus((s) => s.byId)
+  // Deliberately NOT `useAgentStatus((s) => s.byId)`: that map's identity changes on every
+  // working/waiting flip of any agent node, which re-rendered the whole canvas per hook event.
+  // Canvas only needs the /loop entries (for the ephemeral LoopNodes), so subscribe to a
+  // primitive signature that changes only when a loop's visible fields do; the memo below
+  // reads the actual entries via getState().
+  const loopSig = useAgentStatus((s) => {
+    let sig = ''
+    for (const [id, st] of Object.entries(s.byId)) {
+      if (!st.loop) continue
+      sig += `${id} ${st.loop.kind ?? ''} ${st.loop.count} ${st.loop.items?.length ?? 0} ${st.loop.task ?? ''} ${st.loop.schedule ?? ''} ${st.state === 'working' ? 1 : 0}`
+    }
+    return sig
+  })
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
   const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     // Common case: no /loop running and no subagents → return a stable empty result so
     // this memo (which depends on `nodes`, i.e. recomputes every drag frame) stays cheap
     // and doesn't churn array identity downstream.
-    const hasLoops = Object.values(claudeById).some((s) => s.loop)
+    const claudeById = useAgentStatus.getState().byId // re-read on loopSig change (see above)
+    const hasLoops = loopSig !== ''
     const hasAgents = Object.keys(agentById).length > 0
     if (!hasLoops && !hasAgents) return NO_EPHEMERAL
     // Explicit width/height for an ephemeral node (so it resizes like any other node).
@@ -376,7 +388,6 @@ export function Canvas() {
             subagentTokens: v.tokens,
             subagentToolUses: v.toolUses,
             subagentResult: v.result,
-            subagentActivity: v.activity,
             ephExpanded: !!ephExpanded[cid]
           }
         } as CanvasNode)
@@ -391,7 +402,8 @@ export function Canvas() {
       })
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
-  }, [agentById, claudeById, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
 
   // Merge the persisted nodes with the ephemeral ones once per change (not per render),
   // so React Flow's array-identity short-circuit holds while panning/zooming.
@@ -838,10 +850,16 @@ export function Canvas() {
   }, [linkEdges, nodes, setLinkEdges])
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
+  // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
+  // loopSig above — state flips must not re-render the canvas.
+  const unreadCount = useAgentStatus((s) => {
+    let count = 0
+    for (const st of Object.values(s.byId)) if (st?.unread) count++
+    return count
+  })
   useEffect(() => {
-    const count = Object.values(claudeById).filter((s) => s?.unread).length
-    window.nodeTerminal.setBadgeCount(count)
-  }, [claudeById])
+    window.nodeTerminal.setBadgeCount(unreadCount)
+  }, [unreadCount])
 
   // Feed per-session context-window fill from main into the transient store.
   useEffect(() => {
