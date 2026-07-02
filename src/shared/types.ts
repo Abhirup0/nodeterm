@@ -283,6 +283,9 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). Trades away scroll-to-pan,
+   *  so it's opt-in — best for mouse users; trackpads keep two-finger pan when off. */
+  wheelZoom: boolean
   accent: string
   tmuxEnabled: boolean
   tmuxScrollback: number
@@ -321,6 +324,7 @@ export const DEFAULT_SETTINGS: Settings = {
   snapToGrid: false,
   panHoverDelay: 600,
   doubleClickFocus: true,
+  wheelZoom: false,
   accent: '#0a84ff',
   tmuxEnabled: true,
   tmuxScrollback: 50000,

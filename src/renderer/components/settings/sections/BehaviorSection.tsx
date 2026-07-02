@@ -9,7 +9,8 @@ const ROWS = {
   gridSize: { title: 'Grid size', keywords: ['grid', 'size', 'snap'] },
   snap: { title: 'Snap to grid', keywords: ['snap', 'grid', 'align'] },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
-  doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] }
+  doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
+  wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] }
 }
 const ENTRIES = Object.values(ROWS)
 
@@ -65,6 +66,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.doubleClickFocus}
               onChange={(v) => update({ doubleClickFocus: v })}
               ariaLabel="Double-click to focus"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.wheelZoom}>
+        <FieldRow
+          label="Scroll wheel zooms"
+          description="Zoom with a plain mouse wheel (no ⌘). Turns off scroll-to-pan — pan by dragging."
+          control={
+            <Switch
+              checked={settings.wheelZoom}
+              onChange={(v) => update({ wheelZoom: v })}
+              ariaLabel="Scroll wheel zooms"
             />
           }
         />

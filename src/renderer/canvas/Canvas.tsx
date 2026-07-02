@@ -932,11 +932,21 @@ export function Canvas() {
   // scrollback). We intercept (preventDefault + stopPropagation) before xterm sees it, then
   // zoom to the cursor. React Flow's own zoomOnPinch / zoomActivationKeyCode are disabled so
   // this is the single source of zoom (no double-zoom on the open canvas).
+  //
+  // With settings.wheelZoom on, a PLAIN wheel zooms too (mouse-first workflow; scroll-to-pan
+  // is disabled on <ReactFlow> in that mode) — except inside a `nowheel` node body (focused
+  // xterm scrollback, Monaco, markdown/chat panes), which keeps its own scrolling. The hover
+  // guard overlay is NOT nowheel, so an unfocused terminal still zooms under the cursor.
+  const wheelZoom = settings.wheelZoom
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return // pinch (ctrl+wheel) or Cmd/Ctrl+scroll = zoom
+      if (!e.ctrlKey && !e.metaKey) {
+        // pinch (ctrl+wheel) / Cmd/Ctrl+scroll always zoom; plain wheel only when opted in
+        if (!wheelZoom) return
+        if ((e.target as HTMLElement | null)?.closest('.nowheel')) return
+      }
       e.preventDefault()
       e.stopPropagation()
       const { x, y, zoom } = getViewport()
@@ -952,7 +962,7 @@ export function Canvas() {
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport])
+  }, [getViewport, setViewport, wheelZoom])
 
   /** Flow-space point at the center of the visible canvas (for dock-added nodes). */
   const viewCenter = useCallback(() => {
@@ -3056,7 +3066,7 @@ export function Canvas() {
           selectionOnDrag
           selectionMode={SelectionMode.Partial}
           panOnDrag={[1]}
-          panOnScroll
+          panOnScroll={!wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
           zoomActivationKeyCode={null}
