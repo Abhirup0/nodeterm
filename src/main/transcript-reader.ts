@@ -190,7 +190,17 @@ const transcriptPathCache = new Map<string, string>()
 export async function resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
   if (!SESSION_ID_RE.test(sessionId)) return undefined
   const cached = transcriptPathCache.get(sessionId)
-  if (cached) return cached
+  if (cached) {
+    // One cheap access() per hit (vs the O(project-dirs) scan below): heals a stale entry for
+    // EVERY caller (chat/search/context-ensure too, not just the title poll) if the transcript
+    // was deleted — otherwise they'd keep getting a dead path and skip their cwd fallbacks.
+    try {
+      await fs.promises.access(cached)
+      return cached
+    } catch {
+      transcriptPathCache.delete(sessionId)
+    }
+  }
   const root = path.join(os.homedir(), '.claude', 'projects')
   let dirs: string[]
   try {
@@ -263,16 +273,10 @@ export function pickSessionName(text: string): string | null {
 const TITLE_TAIL_BYTES = 128 * 1024
 export async function readSessionName(sessionId: string): Promise<string | null> {
   if (!sessionId) return null
+  // Stale cache entries are healed inside resolveTranscriptPath (access-checked per hit).
   const p = await resolveTranscriptPath(sessionId)
   if (!p) return null
-  let tail = await readSmallTail(p, TITLE_TAIL_BYTES)
-  if (tail === undefined && transcriptPathCache.get(sessionId) === p) {
-    // The cached path went stale (transcript deleted/moved) — rescan once, don't poll a corpse.
-    transcriptPathCache.delete(sessionId)
-    const fresh = await resolveTranscriptPath(sessionId)
-    if (!fresh) return null
-    tail = await readSmallTail(fresh, TITLE_TAIL_BYTES)
-  }
+  const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
   if (!tail) return null
   return pickSessionName(tail)
 }

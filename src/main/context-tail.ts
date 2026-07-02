@@ -98,6 +98,9 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
         // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
         if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
+        // Cap deltas too: a huge append burst (resume/compact rewriting MBs between ticks)
+        // shouldn't allocate it all — only the LATEST usage matters, so jump to the tail.
+        if (size - t.offset > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
         if (size > t.offset) {
           let chunk = ''
           try {
@@ -126,6 +129,7 @@ export function createContextTail(win: BrowserWindow): ContextTail {
       if (t.model) void resolveModelWindow(t.model)
       const win = cachedWindowFor(t.model)
 
+      if (!sessions.has(sessionId)) return // untracked while this async read was in flight
       if (
         t.used > 0 &&
         (t.used !== t.lastUsed || t.model !== t.lastModel || win !== t.lastWindow)

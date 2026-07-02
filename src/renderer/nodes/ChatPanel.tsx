@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { renderMarkdown } from '../lib/markdown'
 import { useAgentStatus } from '../state/agentStatus'
 import type { ChatMessage } from '@shared/types'
+
+// Memoized bubble: marked+DOMPurify re-ran for EVERY message on each ChatPanel render (each
+// turn-finish reload, each keystroke re-render). Text is stable per message, so cache per text.
+const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
+  const html = useMemo(() => renderMarkdown(text), [text])
+  return <div className="term-chat__text" dangerouslySetInnerHTML={{ __html: html }} />
+})
 
 interface ChatPanelProps {
   nodeId: string
@@ -78,11 +85,7 @@ export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
           <div key={i} className={`term-chat__msg term-chat__msg--${m.role}`}>
             {m.parts.map((p, j) =>
               p.kind === 'text' ? (
-                <div
-                  key={j}
-                  className="term-chat__text"
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(p.text) }}
-                />
+                <MarkdownText key={j} text={p.text} />
               ) : (
                 <details key={j} className="term-chat__tool">
                   <summary>

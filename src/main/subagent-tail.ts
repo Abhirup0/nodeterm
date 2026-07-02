@@ -14,6 +14,10 @@ interface Tracked {
   dir: string
   file: string | null
   offset: number
+  /** An async read is in flight — the next tick skips this entry instead of double-reading. */
+  reading?: boolean
+  /** Meta files already parsed and rejected — don't re-read them on every 400ms tick. */
+  seenMetas?: Set<string>
 }
 
 function textOf(content: unknown): string {
@@ -117,45 +121,56 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
     if (chunk && !win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
   }
 
-  const readOne = (toolUseId: string, e: Tracked) => {
+  // Async fs throughout: this ticks every 400ms per active subagent, and the sync version's
+  // readdir + per-meta reads sat on the main event loop alongside all PTY/IPC traffic.
+  const readOne = async (toolUseId: string, e: Tracked): Promise<void> => {
+    if (e.reading) return
+    e.reading = true
     try {
       if (!e.file) {
         let metas: string[]
         try {
-          metas = fs.readdirSync(e.dir)
+          metas = await fs.promises.readdir(e.dir)
         } catch {
           return // dir not created yet
         }
+        const seen = (e.seenMetas ??= new Set())
         for (const m of metas) {
-          if (!m.endsWith('.meta.json')) continue
+          if (!m.endsWith('.meta.json') || seen.has(m)) continue
           try {
-            const meta = JSON.parse(fs.readFileSync(path.join(e.dir, m), 'utf-8'))
+            const meta = JSON.parse(await fs.promises.readFile(path.join(e.dir, m), 'utf-8'))
             if (meta.toolUseId === toolUseId) {
               e.file = path.join(e.dir, m.replace(/\.meta\.json$/, '.jsonl'))
               break
             }
+            seen.add(m) // belongs to another subagent — skip it on future ticks
           } catch {
-            // ignore unparseable meta
+            // unparseable (possibly still being written) — retry next tick, don't blacklist
           }
         }
         if (!e.file) return
       }
-      const size = fs.statSync(e.file).size
+      const size = (await fs.promises.stat(e.file)).size
       if (size <= e.offset) return
       const buf = Buffer.alloc(size - e.offset)
-      const fd = fs.openSync(e.file, 'r')
-      fs.readSync(fd, buf, 0, buf.length, e.offset)
-      fs.closeSync(fd)
+      const fd = await fs.promises.open(e.file, 'r')
+      try {
+        await fd.read(buf, 0, buf.length, e.offset)
+      } finally {
+        await fd.close()
+      }
       e.offset = size
       const out = formatSubagentChunk(buf.toString('utf-8'))
       if (out) send(toolUseId, out + '\n')
     } catch {
       // file may not exist yet / transient read error
+    } finally {
+      e.reading = false
     }
   }
 
   const tick = () => {
-    for (const [toolUseId, e] of tracked) readOne(toolUseId, e)
+    for (const [toolUseId, e] of tracked) void readOne(toolUseId, e)
     if (!tracked.size && timer) {
       clearInterval(timer)
       timer = null
@@ -171,7 +186,7 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
     },
     finish(toolUseId) {
       const e = tracked.get(toolUseId)
-      if (e) readOne(toolUseId, e) // final flush
+      if (e) void readOne(toolUseId, e) // final flush (completes well within the grace delay)
       setTimeout(() => tracked.delete(toolUseId), 1500)
     }
   }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
@@ -29,10 +29,20 @@ export function TabBar({
   onCloseProject,
   onRemoteAccess
 }: TabBarProps) {
+  // Select the raw array and filter in a memo — a `.filter()` inside the selector returns a
+  // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
+  const allProjects = useProjects((s) => s.projects)
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
-  const projects = useProjects((s) => s.projects.filter((p) => !p.closed))
+  const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
-  const statusById = useAgentStatus((s) => s.byId)
+  // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
+  // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
+  const unreadIds = useAgentStatus((s) => {
+    let ids = ''
+    for (const [id, st] of Object.entries(s.byId)) if (st?.unread) ids += `${id}|`
+    return ids
+  })
+  const unreadSet = useMemo(() => new Set(unreadIds.split('|').filter(Boolean)), [unreadIds])
   const [menuId, setMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -105,7 +115,7 @@ export function TabBar({
         <div className="tabbar__tabs">
           {projects.map((p) => {
             const active = p.id === activeId
-            const unreadCount = p.nodes.filter((n) => statusById[n.id]?.unread).length
+            const unreadCount = p.nodes.filter((n) => unreadSet.has(n.id)).length
             return (
               <div
                 key={p.id}

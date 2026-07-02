@@ -192,9 +192,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const t = termRef.current
     if (!t) return ''
     const b = t.buffer.active
-    let s = ''
-    for (let i = 0; i < b.length; i++) s += (b.getLine(i)?.translateToString() ?? '') + '\n'
-    return s
+    // Array + join, not `s +=`: repeated concat over up to 50k lines churns O(n²) string bytes.
+    const lines = new Array<string>(b.length)
+    for (let i = 0; i < b.length; i++) lines[i] = b.getLine(i)?.translateToString() ?? ''
+    return lines.join('\n')
   }, [])
 
   const search = useTerminalSearch({

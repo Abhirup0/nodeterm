@@ -89,13 +89,14 @@ to read — do not retry.
 let pty: PtyManager | undefined
 
 // Write one enriched link file per node id present in the map. Removed links should not
-// linger, so we clear stale per-node files first.
-function writeLinkFiles(map: ContextLinkMap): void {
+// linger, so we clear stale per-node files first. Async fs throughout — this runs on edge
+// changes and scales with node/link count, and sync I/O here sits on the main event loop.
+async function writeLinkFiles(map: ContextLinkMap): Promise<void> {
   const d = contextLinkDir()
   const bin = pty?.getTmuxBin() ?? null
   try {
-    for (const f of fs.readdirSync(d)) {
-      if (f.endsWith('.json')) fs.rmSync(path.join(d, f), { force: true })
+    for (const f of await fs.promises.readdir(d)) {
+      if (f.endsWith('.json')) await fs.promises.rm(path.join(d, f), { force: true })
     }
   } catch {
     /* dir may not exist yet */
@@ -107,7 +108,7 @@ function writeLinkFiles(map: ContextLinkMap): void {
       tmuxSocket: TMUX_SOCKET
     })
     try {
-      fs.writeFileSync(path.join(d, `${nodeId}.json`), JSON.stringify(doc, null, 2))
+      await fs.promises.writeFile(path.join(d, `${nodeId}.json`), JSON.stringify(doc, null, 2))
     } catch (e) {
       console.warn('[context-link] write link file failed', e)
     }
@@ -128,8 +129,13 @@ export function initContextLink(win: BrowserWindow, ptyManager: PtyManager): voi
     console.error('[context-link] setup failed', e)
     return
   }
+  // Serialize writes: writeLinkFiles is a multi-step async clear-then-write; two overlapping
+  // calls could interleave (B's clear runs before A's writes land) and leave a just-removed
+  // link file behind — which is a read-authorization leak, not just a perf nit.
+  let writeChain: Promise<void> = Promise.resolve()
   ipcMain.handle(IPC.contextLinkSetLinks, (_e, map: ContextLinkMap) => {
-    writeLinkFiles(map && typeof map === 'object' ? map : {})
+    writeChain = writeChain.then(() => writeLinkFiles(map && typeof map === 'object' ? map : {}))
+    return writeChain
   })
   // win is reserved for future link-activity events; referenced to satisfy noUnusedParameters.
   void win

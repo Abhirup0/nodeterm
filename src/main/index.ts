@@ -657,12 +657,24 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  ptyManager.killAll()
-  sshProjectManager?.disconnectAll()
-  if (process.platform !== 'darwin') app.quit()
+  // On macOS the app stays alive, so the async final snapshots inside killAll can complete
+  // in the background; on other platforms quitting goes through before-quit below.
+  if (process.platform !== 'darwin') {
+    app.quit()
+  } else {
+    void ptyManager.killAll()
+    sshProjectManager?.disconnectAll()
+  }
 })
 
-app.on('before-quit', () => {
-  ptyManager.killAll()
+// The final scrollback snapshots are async (capture subprocess + fs.promises write) — hold
+// the quit just long enough for them to land, capped so a hung tmux can never block quit.
+let quitFlushed = false
+app.on('before-quit', (e) => {
   sshProjectManager?.disconnectAll()
+  if (quitFlushed) return
+  quitFlushed = true
+  e.preventDefault()
+  const flush = ptyManager.killAll()
+  void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit())
 })

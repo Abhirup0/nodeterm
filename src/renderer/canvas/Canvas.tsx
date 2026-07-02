@@ -139,6 +139,39 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
   ephemeralEdges: []
 }
 
+const minimapNodeColor = (n: Node): string =>
+  (n.data as { color?: string })?.color ?? '#0a84ff'
+
+// The minimap subscribes to agent status HERE, in its own tiny component — not in Canvas.
+// Canvas must not subscribe to the whole status map (every working/waiting flip would re-render
+// the entire canvas), but the minimap's working/attention/unread strokes DO need to track those
+// flips live; a fresh `nodeStrokeColor` identity per status change is what busts React Flow's
+// internal MiniMap memo so it repaints. Re-render cost is confined to this component.
+function StatusAwareMiniMap() {
+  const statusById = useAgentStatus((s) => s.byId)
+  const nodeStrokeColor = useCallback(
+    (n: Node): string => {
+      const st = statusById[n.id]
+      if (st?.state === 'working') return '#30d158'
+      if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
+      if (st?.unread) return '#0a84ff'
+      return (n.data as { color?: string })?.color ?? '#0a84ff'
+    },
+    [statusById]
+  )
+  return (
+    <MiniMap
+      className="minimap"
+      position="bottom-right"
+      pannable
+      zoomable
+      maskColor="rgba(10,12,18,0.6)"
+      nodeColor={minimapNodeColor}
+      nodeStrokeColor={nodeStrokeColor}
+    />
+  )
+}
+
 export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
@@ -592,9 +625,11 @@ export function Canvas() {
       loadingRef.current = false
       // The broadcast effect early-returns while `loadingRef` is set and isn't re-triggered by the
       // reset, so push the freshly-loaded project's canvas once now — otherwise a connected client
-      // keeps mirroring the previous project until the host's next edit. Benign with no client
-      // attached (main only forwards to a live client).
-      window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
+      // keeps mirroring the previous project until the host's next edit. Gated like the effect:
+      // when not hosting, the serialize itself is the waste (main would drop the payload anyway).
+      if (useRemoteHosting.getState().hosting) {
+        window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
+      }
       // Consume a cross-project focus request (notification click on a background node).
       const pending = pendingFocusRef.current
       if (pending) {
@@ -2883,6 +2918,16 @@ export function Canvas() {
     addSshTerminal
   ])
 
+  // Build the palette's command list only when its inputs change — the inline `buildCommands()`
+  // at the call site rebuilt the whole list (JSX icons for every node + project) on every Canvas
+  // render while the palette was open. `nodes` is a dep because the list reads nodesRef.current;
+  // capture-cache refreshes arrive via buildCommands' own identity (bufferCache is its dep).
+  const paletteCommands = useMemo(
+    () => (paletteOpen ? buildCommands() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nodes stands in for nodesRef.current
+    [paletteOpen, buildCommands, nodes]
+  )
+
   return (
     <div className="canvas-root">
       <TabBar
@@ -3026,21 +3071,7 @@ export function Canvas() {
           />
           <Controls showInteractive={false} position="bottom-left" />
           <UsageIndicator />
-          <MiniMap
-            className="minimap"
-            position="bottom-right"
-            pannable
-            zoomable
-            maskColor="rgba(10,12,18,0.6)"
-            nodeColor={(n) => (n.data as { color?: string })?.color ?? '#0a84ff'}
-            nodeStrokeColor={(n) => {
-              const st = useAgentStatus.getState().byId[n.id]
-              if (st?.state === 'working') return '#30d158'
-              if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
-              if (st?.unread) return '#0a84ff'
-              return (n.data as { color?: string })?.color ?? '#0a84ff'
-            }}
-          />
+          <StatusAwareMiniMap />
         </ReactFlow>
 
         {(!hasProjects || welcomeOpen) && (
@@ -3094,7 +3125,7 @@ export function Canvas() {
 
       {paletteOpen && (
         <CommandPalette
-          commands={buildCommands()}
+          commands={paletteCommands}
           fileIndex={fileIndex}
           onOpenFile={openProjectFile}
           onRevealFile={revealProjectFile}

@@ -214,7 +214,11 @@ export class PtyManager {
       anyPersisted = true
       if (!session.outputSinceSnapshot) continue // idle since the last capture — skip the spawn
       session.outputSinceSnapshot = false
-      void this.snapshotScrollback(session.persistKey, session.sshRemote)
+      void this.snapshotScrollback(session.persistKey, session.sshRemote).then((ok) => {
+        // Transient capture failure (ssh blip, tmux busy): put the dirty bit back so the next
+        // tick retries — otherwise a quiet session would never be snapshotted again.
+        if (!ok) session.outputSinceSnapshot = true
+      })
     }
     if (!anyPersisted && this.snapshotTimer) {
       clearInterval(this.snapshotTimer)
@@ -726,15 +730,17 @@ export class PtyManager {
   /**
    * Snapshot a node's recent scrollback (with colors, `-e`) to disk for cold-restart replay.
    * Best-effort: a missing session / unavailable tmux just leaves the prior snapshot in place.
+   * Returns false when the capture failed, so the periodic tick can re-mark the session dirty
+   * and retry (the dirty bit is cleared optimistically before the capture starts).
    */
   private async snapshotScrollback(
     persistKey: string,
     sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (sshRemote) {
       // Remote (ssh-project) node: capture from the REMOTE tmux over the project's ControlMaster.
       const ssh = findSsh()
-      if (!ssh) return
+      if (!ssh) return false
       try {
         const { stdout } = await runAsync(
           ssh,
@@ -742,12 +748,13 @@ export class PtyManager {
           { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
         )
         if (stdout) await writeScrollback(persistKey, stdout)
+        return true
       } catch {
         // remote session gone / master down — keep the last good snapshot
+        return false
       }
-      return
     }
-    if (!this.tmuxPath) return
+    if (!this.tmuxPath) return false
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
@@ -755,8 +762,10 @@ export class PtyManager {
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       if (stdout) await writeScrollback(persistKey, stdout)
+      return true
     } catch {
       // session gone / tmux unavailable — keep the last good snapshot
+      return false
     }
   }
 
@@ -808,21 +817,25 @@ export class PtyManager {
    * On quit, detach all clients (do NOT kill tmux sessions — that's the whole point
    * of persistence). The tmux server keeps the sessions alive for next launch.
    */
-  killAll(): void {
+  /** Returns a promise of the final scrollback snapshots: the capture + write are async, so
+   *  the quit path must hold `before-quit` briefly (see index.ts) or the process exits before
+   *  they land and the last ≤15s of output is missing from a post-reboot cold restore. */
+  killAll(): Promise<void> {
     if (this.snapshotTimer) {
       clearInterval(this.snapshotTimer)
       this.snapshotTimer = null
     }
+    const finals: Promise<unknown>[] = []
     for (const session of this.sessions.values()) {
       if (session.flushTimer) clearTimeout(session.flushTimer)
-      // Best-effort final scrollback snapshot on quit so a reboot can replay it. Fire-and-forget:
-      // the tmux server (and the snapshot capture against it) outlives this process. Skipped for
-      // sessions with no output since the last periodic capture (unchanged pane content).
+      // Final scrollback snapshot on quit so a reboot can replay it. Skipped for sessions with
+      // no output since the last periodic capture (unchanged pane content).
       if (session.persistKey && session.outputSinceSnapshot)
-        void this.snapshotScrollback(session.persistKey, session.sshRemote)
+        finals.push(this.snapshotScrollback(session.persistKey, session.sshRemote))
       session.proc.kill()
     }
     this.sessions.clear()
+    return Promise.all(finals).then(() => undefined)
   }
 
   private send(webContentsId: number, channel: string, payload: unknown): void {

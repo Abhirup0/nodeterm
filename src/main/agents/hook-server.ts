@@ -11,12 +11,17 @@ const SLOWLORIS_MS = 2000
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
-    let data = ''
-    req.on('data', (c) => {
-      data += c
-      if (data.length > 5_000_000) req.destroy() // cap absurd bodies
+    // Collect Buffers and decode ONCE at the end: `data += chunk` coerced every chunk through
+    // a string concat (quadratic churn on big bodies) and could split a multibyte UTF-8
+    // sequence at a chunk boundary, corrupting the decoded text.
+    const chunks: Buffer[] = []
+    let bytes = 0
+    req.on('data', (c: Buffer) => {
+      chunks.push(c)
+      bytes += c.length
+      if (bytes > 5_000_000) req.destroy() // cap absurd bodies
     })
-    req.on('end', () => resolve(data))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
     req.on('error', () => resolve(''))
   })
 }

@@ -65,28 +65,36 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   // Inline group rename: the group node id being edited + its draft title.
   const [editGroup, setEditGroup] = useState<{ id: string; draft: string } | null>(null)
 
-  // Look up the current git branch for each project cwd (best-effort, cached).
+  // Look up the current git branch for each project cwd (best-effort, cached). Gated on `open`
+  // and caches a NEGATIVE result too — without the '' fallback a non-git cwd re-fired a git
+  // subprocess on every projects-store change, forever.
   useEffect(() => {
+    if (!open) return
     let cancelled = false
     projects.forEach((p) => {
       if (!p.cwd || branches[p.id] !== undefined) return
       window.nodeTerminal.git
         .status(p.cwd)
         .then((st) => {
-          if (!cancelled && st && typeof st.branch === 'string') {
-            setBranches((b) => ({ ...b, [p.id]: st.branch }))
-          }
+          if (cancelled) return
+          const branch = st && typeof st.branch === 'string' ? st.branch : ''
+          setBranches((b) => ({ ...b, [p.id]: branch }))
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!cancelled) setBranches((b) => ({ ...b, [p.id]: '' }))
+        })
     })
     return () => {
       cancelled = true
     }
-  }, [projects, branches])
+  }, [open, projects, branches])
 
+  // Gated on `open`: this component stays mounted while the sidebar is closed (the common
+  // case), and the O(projects × nodes) rebuild re-ran on every agent hook event otherwise.
   const groups = useMemo(
-    () => buildSessionList(projects, liveActiveNodes, activeProjectId, statusById, filter),
-    [projects, liveActiveNodes, activeProjectId, statusById, filter]
+    () =>
+      open ? buildSessionList(projects, liveActiveNodes, activeProjectId, statusById, filter) : [],
+    [open, projects, liveActiveNodes, activeProjectId, statusById, filter]
   )
 
   const projectCount = (g: (typeof groups)[number]): number =>

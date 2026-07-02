@@ -1,7 +1,7 @@
 // nt-media:// — a privileged streaming protocol for local media (video) + large images.
 // Files are served ONLY if they are on the per-session allowlist (path jail), so the
 // renderer/agent can never read an arbitrary local file. Supports HTTP Range so <video> seeks.
-import { createReadStream, statSync, lstatSync, mkdirSync, writeFileSync } from 'fs'
+import { createReadStream, mkdirSync, writeFileSync, promises as fsp } from 'fs'
 import { normalize } from 'path'
 import { app, protocol } from 'electron'
 
@@ -62,6 +62,10 @@ const AGENT_HTML_CSP =
   "default-src 'none'; img-src nt-media: data:; media-src nt-media:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:"
 
 let htmlSeq = 0
+// Bounded: each call wrote a new timestamped file that was never deleted — permanent disk
+// growth under <userData>/agent-web. Keep the most recent N; prune allowlist entries too.
+const AGENT_HTML_KEEP = 20
+const agentHtmlPaths: string[] = []
 /** Write raw HTML to a per-session file under userData, allowlist it, return its abs path. */
 export function writeAgentHtml(html: string): string {
   const d = agentWebDir()
@@ -69,7 +73,26 @@ export function writeAgentHtml(html: string): string {
   const p = `${d}/${Date.now().toString(36)}-${++htmlSeq}.html`
   writeFileSync(p, html, { encoding: 'utf8', mode: 0o600 })
   allowMediaPath(p)
+  agentHtmlPaths.push(p)
+  while (agentHtmlPaths.length > AGENT_HTML_KEEP) {
+    const old = agentHtmlPaths.shift()!
+    allowed.delete(old)
+    void fsp.rm(old, { force: true })
+  }
   return p
+}
+
+/** Best-effort startup sweep: agent-HTML files from PRIOR sessions are unreachable (the
+ *  allowlist is in-memory), so they're pure disk litter — delete them. */
+async function pruneStaleAgentHtml(): Promise<void> {
+  const d = agentWebDir()
+  try {
+    for (const f of await fsp.readdir(d)) {
+      if (f.endsWith('.html')) await fsp.rm(`${d}/${f}`, { force: true })
+    }
+  } catch {
+    // dir may not exist yet
+  }
 }
 
 /** Call BEFORE app.whenReady(): declares the scheme privileged (secure + streamable). */
@@ -84,6 +107,7 @@ export function registerMediaScheme(): void {
 
 /** Call AFTER app is ready: serve allowed files with Range support. */
 export function initMediaProtocol(): void {
+  void pruneStaleAgentHtml()
   protocol.handle(MEDIA_SCHEME, async (req) => {
     const url = new URL(req.url)
     const abs = resolveMediaPath(url.pathname, allowed)
@@ -91,15 +115,15 @@ export function initMediaProtocol(): void {
     // Symlink jail: reject a final-component symlink so an allowlisted entry can't be
     // turned into an arbitrary-file read. lstat does NOT follow the final link (it follows
     // intermediate dir symlinks like macOS /tmp→/private/tmp, which is fine and avoids the
-    // realpath-equality pitfalls with those system dirs).
-    try {
-      if (lstatSync(abs).isSymbolicLink()) return new Response('Not found', { status: 404 })
-    } catch {
-      return new Response('Not found', { status: 404 })
-    }
+    // realpath-equality pitfalls with those system dirs). One async lstat covers the jail
+    // check AND the size (final component isn't a link, so lstat size == stat size) — the
+    // previous sync lstat+stat pair blocked the main thread per request, and <video> seeking
+    // issues many Range requests.
     let size: number
     try {
-      size = statSync(abs).size
+      const st = await fsp.lstat(abs)
+      if (st.isSymbolicLink()) return new Response('Not found', { status: 404 })
+      size = st.size
     } catch {
       return new Response('Not found', { status: 404 })
     }

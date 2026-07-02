@@ -83,15 +83,19 @@ export function useTerminalSearch({
     // readBuffer must be stable (useCallback in the caller) to avoid rebuilds.
   }, [open, nodeId, sessionId, cwd, searchTranscript, readBuffer])
 
+  // Lowercase once per snapshot, not per keystroke — the snapshot can be tens of thousands of
+  // lines (full scrollback + transcript), and re-lowercasing all of it on every typed character
+  // made find-as-you-type O(lines × keystrokes).
+  const lowerSource = useMemo(() => source.map((s) => s.text.toLowerCase()), [source])
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return [] as number[]
     const out: number[] = []
-    for (let i = 0; i < source.length; i++) {
-      if (source[i].text.toLowerCase().includes(q)) out.push(i)
+    for (let i = 0; i < lowerSource.length; i++) {
+      if (lowerSource[i].includes(q)) out.push(i)
     }
     return out
-  }, [query, source])
+  }, [query, lowerSource])
 
   // Reset the cursor to the first match whenever the result set changes.
   // `matches` is a fresh array on every query/source change (useMemo), so this
