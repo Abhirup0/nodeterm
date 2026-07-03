@@ -59,6 +59,7 @@ import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
 import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
@@ -1030,7 +1031,7 @@ export function Canvas() {
   // and open the live mirror over the local canvas. This is the primary remote entry (it replaces
   // B4's lone remote-terminal-on-connect flow).
   const connectRemote = useCallback(async () => {
-    const offer = window.prompt("Paste the host's pairing code:")?.trim()
+    const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
     if (!offer) return
     try {
       const connectionId = await window.nodeTerminal.remoteClient.connect(offer)
@@ -1141,7 +1142,7 @@ export function Canvas() {
   )
 
   const cloneRepo = useCallback(async () => {
-    const url = window.prompt('Repository URL (https:// or git@):')
+    const url = await promptDialog({ message: 'Repository URL (https:// or git@):' })
     if (!url) return
     const parent = await window.nodeTerminal.dialog.selectFolder()
     if (!parent) return
@@ -1174,8 +1175,8 @@ export function Canvas() {
   )
 
   const addWebView = useCallback(
-    (center?: { x: number; y: number }) => {
-      const input = window.prompt('Open web view — enter a URL:')
+    async (center?: { x: number; y: number }) => {
+      const input = await promptDialog({ message: 'Open web view — enter a URL:' })
       const url = input?.trim()
       if (!url) return
       setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? viewCenter())])
@@ -2495,8 +2496,9 @@ export function Canvas() {
             label: 'Rename',
             icon: <IconEditor />,
             onClick: () => {
-              const t = window.prompt('Rename session', '')
-              if (t && t.trim()) renameSession(projectId, id, t.trim())
+              void promptDialog({ message: 'Rename session' }).then((t) => {
+                if (t && t.trim()) renameSession(projectId, id, t.trim())
+              })
             }
           },
           {

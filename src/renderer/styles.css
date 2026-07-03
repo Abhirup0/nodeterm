@@ -2954,6 +2954,23 @@ body,
   color: var(--text);
 }
 
+.confirm__input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+.confirm__input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .confirm__actions {
   display: flex;
   justify-content: flex-end;

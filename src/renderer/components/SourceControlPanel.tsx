@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
 import type { GitHistoryItem, GitHistoryResult } from '@shared/git-history'
+import { promptDialog } from './promptDialog'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useSshConn } from '../state/sshConn'
@@ -602,8 +603,9 @@ export function SourceControlPanel({
               void act(() => git.revert(cwd!, item.id))
             },
             branchFrom: (item) => {
-              const name = window.prompt('New branch name (from this commit):')
-              if (name && name.trim()) void act(() => git.branchAt(cwd!, name.trim(), item.id))
+              void promptDialog({ message: 'New branch name (from this commit):' }).then((name) => {
+                if (name && name.trim()) void act(() => git.branchAt(cwd!, name.trim(), item.id))
+              })
             },
             checkout: (item) => {
               if (!window.confirm(`Check out ${item.displayId || item.id}? This detaches HEAD (you won't be on a branch).`)) return
@@ -651,8 +653,11 @@ export function SourceControlPanel({
             {
               label: 'Rename Branch…',
               onClick: () => {
-                const name = window.prompt('Rename current branch to:', status.branch)
-                if (name && name.trim()) void act(() => git.renameBranch(cwd!, name.trim()))
+                void promptDialog({ message: 'Rename current branch to:', initialValue: status.branch }).then(
+                  (name) => {
+                    if (name && name.trim()) void act(() => git.renameBranch(cwd!, name.trim()))
+                  }
+                )
               }
             },
             {
