@@ -13,6 +13,7 @@ import { generateCommitMessage, generateGroupName, generateTerminalName } from '
 import { initUpdater } from './updater'
 import { fetchCheck } from './check'
 import { hookServer } from './agents/hook-server'
+import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail } from './context-tail'
@@ -83,9 +84,11 @@ let sshProjectManager: ReturnType<typeof initSshProject> | undefined
 // project switch: the active SSH project's ref, or null for a local project (→ all git runs local).
 let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 
-// The single app window — kept at module scope so IPC handlers (e.g. notifications)
-// can check focus and route clicks back to the renderer.
-let mainWin: BrowserWindow | null = null
+// The single app window is tracked in ./main-window (setMainWindow/getMainWindow) and
+// resolved AT SEND TIME everywhere — a closure-captured window goes stale after the
+// macOS close→dock-reopen cycle and silently swallows every send.
+// True from the first before-quit on: lets window close-events through (see hide-on-close).
+let quitting = false
 
 // Browser <webview> guest webContents id → its browser node id (for new-window capture).
 const browserGuests = new Map<number, string>()
@@ -105,10 +108,11 @@ if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (!mainWin) return
-    if (mainWin.isMinimized()) mainWin.restore()
-    mainWin.show()
-    mainWin.focus()
+    const win = getMainWindow()
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
   })
 }
 
@@ -137,7 +141,21 @@ function createWindow(): BrowserWindow {
     }
   })
 
+  // Register as the live main window (send-time resolution via getMainWindow/sendToMain).
+  setMainWindow(win)
+
   win.on('ready-to-show', () => win.show())
+
+  // macOS: closing the window hides it instead of destroying it. The app deliberately
+  // outlives its window (tmux sessions, hook server, updater); destroying the window
+  // would leave every window-bound subsystem (agent-status forwarding, tails, updater,
+  // license events) pointing at a dead webContents after a dock-reopen.
+  win.on('close', (e) => {
+    if (shouldHideOnClose(process.platform, quitting)) {
+      e.preventDefault()
+      win.hide()
+    }
+  })
 
   // Intercept Cmd/Ctrl+M (default = minimize) and route it to the renderer for the
   // markdown-view toggle instead.
@@ -199,8 +217,8 @@ app.whenReady().then(async () => {
     // live at call time, so a guest registered later (on dom-ready) is seen when a popup fires.
     contents.setWindowOpenHandler(({ url }) => {
       const sourceNodeId = browserGuests.get(contents.id)
-      if (sourceNodeId && /^https?:\/\//i.test(url) && mainWin && !mainWin.isDestroyed()) {
-        mainWin.webContents.send(IPC.browserNewWindow, { url, sourceNodeId })
+      if (sourceNodeId && /^https?:\/\//i.test(url)) {
+        sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
       }
       return { action: 'deny' }
     })
@@ -258,17 +276,20 @@ app.whenReady().then(async () => {
   ipcMain.handle(
     IPC.appNotify,
     (_e, payload: { title: string; body: string; nodeId: string; force?: boolean }) => {
-      if (!mainWin || !Notification.isSupported()) return false
+      const win = getMainWindow()
+      if (!win || !Notification.isSupported()) return false
       // `force` (permission request / confirmation) shows even when focused; normal
       // completion notifications only show when the window is in the background.
-      if (!payload.force && mainWin.isFocused()) return false
+      if (!payload.force && win.isFocused()) return false
       const n = new Notification({ title: payload.title, body: payload.body })
       n.on('click', () => {
-        if (!mainWin) return
-        if (mainWin.isMinimized()) mainWin.restore()
-        mainWin.show()
-        mainWin.focus()
-        if (payload.nodeId) mainWin.webContents.send(IPC.appFocusNode, payload.nodeId)
+        // Re-resolve at click time — the window may have been hidden/recreated since.
+        const w = getMainWindow()
+        if (!w) return
+        if (w.isMinimized()) w.restore()
+        w.show()
+        w.focus()
+        if (payload.nodeId) w.webContents.send(IPC.appFocusNode, payload.nodeId)
       })
       n.show()
       return true
@@ -340,7 +361,6 @@ app.whenReady().then(async () => {
   })
 
   const win = createWindow()
-  mainWin = win
   initUpdater(win)
 
   // Agent hooks: install the managed hook script into each agent's config, then start the
@@ -459,9 +479,7 @@ app.whenReady().then(async () => {
       buildHandoff({ sessionId, agentId, sourceNodeId, cwd })
   )
   installManagedAgentHooks()
-  hookServer.setListener((e) => {
-    if (!win.isDestroyed()) win.webContents.send(IPC.agentStatus, e)
-  })
+  hookServer.setListener((e) => sendToMain(IPC.agentStatus, e))
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
   // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts
@@ -615,7 +633,8 @@ app.whenReady().then(async () => {
     }
   )
   hookServer.setControlHandler(async ({ verb, nodeId, args }) => {
-    if (!mainWin || mainWin.isDestroyed()) return { ok: false, error: 'window unavailable' }
+    const target = getMainWindow()
+    if (!target) return { ok: false, error: 'window unavailable' }
     const requestId = randomUUID()
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -623,7 +642,7 @@ app.whenReady().then(async () => {
         resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
       }, 120_000)
       pendingControl.set(requestId, { resolve, timer })
-      mainWin!.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
+      target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })
   })
   await hookServer.start()
@@ -652,7 +671,16 @@ app.whenReady().then(async () => {
   })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    // With hide-on-close the window usually still exists — just re-show it. Only a truly
+    // gone window (e.g. renderer crash) is recreated; createWindow re-registers it as the
+    // main window, so send-time resolution keeps agent-status forwarding alive.
+    const existing = getMainWindow()
+    if (existing) {
+      existing.show()
+      existing.focus()
+    } else if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
   })
 })
 
@@ -671,6 +699,7 @@ app.on('window-all-closed', () => {
 // the quit just long enough for them to land, capped so a hung tmux can never block quit.
 let quitFlushed = false
 app.on('before-quit', (e) => {
+  quitting = true // from here on, window close-events must NOT be turned into hide
   sshProjectManager?.disconnectAll()
   if (quitFlushed) return
   quitFlushed = true
