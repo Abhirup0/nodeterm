@@ -21,7 +21,7 @@
 
 import { promises as fs } from 'fs'
 import path from 'path'
-import { app, ipcMain, type BrowserWindow } from 'electron'
+import { app, ipcMain, safeStorage, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
@@ -457,35 +457,54 @@ function keyFile(): string {
   return path.join(app.getPath('userData'), 'remote-host-key.json')
 }
 
+// R4: the secret key is encrypted at rest with Electron safeStorage (macOS: key held in the
+// user's Keychain), so `remote-host-key.json` alone no longer yields the host's E2EE identity.
+// Fallback when OS encryption is unavailable (e.g. Linux without a keyring): plaintext at
+// 0o600, as before — availability is re-checked on every load, so a machine that gains a
+// keyring migrates on the next start.
+async function persistKeyPair(keys: KeyPair): Promise<void> {
+  const publicKey = Buffer.from(keys.publicKey).toString('base64')
+  const secretB64 = Buffer.from(keys.secretKey).toString('base64')
+  const body = safeStorage.isEncryptionAvailable()
+    ? { publicKey, secretKeyEnc: safeStorage.encryptString(secretB64).toString('base64') }
+    : { publicKey, secretKey: secretB64 }
+  // 0o600 either way: the file still binds the pinned public identity.
+  await fs.writeFile(keyFile(), JSON.stringify(body), { encoding: 'utf-8', mode: 0o600 })
+}
+
 // Load the long-lived host NaCl keypair, generating + persisting it on first use. The public
-// key is pinned in every offer, so it must be stable across runs.
+// key is pinned in every offer, so it must be stable across runs. Legacy plaintext files are
+// migrated to the encrypted form in place, KEEPING the identity (never regenerate on migrate);
+// an undecryptable blob (OS keychain reset) falls through to a fresh identity — old offers are
+// single-use pairing tokens, so new offers simply carry the new key.
 async function loadOrCreateKeyPair(): Promise<KeyPair> {
   try {
     const raw = JSON.parse(await fs.readFile(keyFile(), 'utf-8')) as {
       publicKey?: string
       secretKey?: string
+      secretKeyEnc?: string
+    }
+    if (raw.publicKey && raw.secretKeyEnc && safeStorage.isEncryptionAvailable()) {
+      const secretB64 = safeStorage.decryptString(Buffer.from(raw.secretKeyEnc, 'base64'))
+      return {
+        publicKey: Uint8Array.from(Buffer.from(raw.publicKey, 'base64')),
+        secretKey: Uint8Array.from(Buffer.from(secretB64, 'base64'))
+      }
     }
     if (raw.publicKey && raw.secretKey) {
-      return {
+      const keys: KeyPair = {
         publicKey: Uint8Array.from(Buffer.from(raw.publicKey, 'base64')),
         secretKey: Uint8Array.from(Buffer.from(raw.secretKey, 'base64'))
       }
+      // Legacy plaintext on disk → re-persist encrypted (same identity).
+      if (safeStorage.isEncryptionAvailable()) await persistKeyPair(keys).catch(() => {})
+      return keys
     }
   } catch {
-    // No (valid) stored key — generate a fresh one below.
+    // No (valid/decryptable) stored key — generate a fresh one below.
   }
   const keys = genKeyPair()
-  await fs
-    .writeFile(
-      keyFile(),
-      JSON.stringify({
-        publicKey: Buffer.from(keys.publicKey).toString('base64'),
-        secretKey: Buffer.from(keys.secretKey).toString('base64')
-      }),
-      // 0o600: the host's NaCl secret key is its E2EE identity — owner read/write only.
-      { encoding: 'utf-8', mode: 0o600 }
-    )
-    .catch(() => {})
+  await persistKeyPair(keys).catch(() => {})
   return keys
 }
 
