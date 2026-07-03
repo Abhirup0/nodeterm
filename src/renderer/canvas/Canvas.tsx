@@ -1186,17 +1186,10 @@ export function Canvas() {
 
   const addBrowser = useCallback(
     (center?: { x: number; y: number }) => {
-      const input = (window.prompt('Open browser — enter a URL (blank for a blank tab):') ?? '').trim()
-      let url = ''
-      if (input) {
-        const normalized = normalizeAddress(input)
-        if (!normalized) {
-          window.alert('Enter a valid http(s) URL')
-          return
-        }
-        url = normalized
-      }
-      setNodes((ns) => [...ns, createBrowserNode(ns.length, url, center ?? viewCenter())])
+      // Open a blank browser node — the user types the URL in the node's own address bar (like a
+      // browser's new tab). We deliberately don't use window.prompt: Electron doesn't support it
+      // (it throws "prompt() is and will not be supported"), and a browser node doesn't need it.
+      setNodes((ns) => [...ns, createBrowserNode(ns.length, '', center ?? viewCenter())])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -2843,7 +2836,7 @@ export function Canvas() {
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
-      { id: 'open-browser', label: 'Open browser…', icon: <IconRemote />, run: () => addBrowser() },
+      { id: 'open-browser', label: 'New browser', icon: <IconRemote />, run: () => addBrowser() },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
           id: `new-remote-${srv.id}`,
