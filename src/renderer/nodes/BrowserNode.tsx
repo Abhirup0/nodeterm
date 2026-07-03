@@ -28,6 +28,11 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
   // Seed the initial webview src ONCE at mount; navigations persist via updateNodeData but must
   // not re-push `src` into a webview that already navigated there (would cause a reload loop).
   const [startUrl] = useState(() => (data.url as string) ?? '')
+  // Navigation is driven by the `src` attribute, NOT webview.loadURL(): a src-less <webview>
+  // (a blank "New browser" node) doesn't emit dom-ready, so imperative loadURL() before then is a
+  // no-op — typing a URL "didn't go". Setting `src` is how you give a webview its first (and next)
+  // page. did-navigate only updates `address`, never `src`, so in-page navigation can't loop.
+  const [src, setSrc] = useState(startUrl)
   const [address, setAddress] = useState(startUrl)
   const [loading, setLoading] = useState(false)
   const [canBack, setCanBack] = useState(false)
@@ -98,7 +103,10 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
     }
     setAddress(safe)
     setFailed('')
-    ref.current?.loadURL(safe)
+    // Navigate by (re)setting the src attribute. If the same URL is entered twice the attribute
+    // doesn't change, so force a reload through the element in that case.
+    if (safe === src) ref.current?.reload()
+    else setSrc(safe)
   }
 
   return (
@@ -179,7 +187,7 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
           {/* eslint-disable-next-line react/no-unknown-property */}
           <webview
             ref={ref as unknown as React.Ref<HTMLElement>}
-            src={startUrl || undefined}
+            src={src || undefined}
             // React types `allowpopups` as a boolean (@types/react WebViewHTMLAttributes);
             // rendered as the `allowpopups` attribute Electron reads. No `nodeintegration`.
             allowpopups={true}
