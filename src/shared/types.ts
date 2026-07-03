@@ -336,7 +336,9 @@ export const DEFAULT_SETTINGS: Settings = {
   gitAutoFetch: true,
   notifyConsentAsked: false,
   customAgents: [],
-  disabledAgents: [],
+  // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
+  // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
+  disabledAgents: ['codex', 'gemini'],
   defaultAgent: 'claude',
   telemetryEnabled: false
 }
