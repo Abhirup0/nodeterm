@@ -4239,3 +4239,126 @@ body,
   font-size: 12px;
   padding: 4px 8px;
 }
+
+/* ── Browser start page (new-tab) ─────────────────────────────── */
+.startpage {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: var(--bg);
+  display: flex;
+  justify-content: center;
+}
+.startpage__inner {
+  width: 100%;
+  max-width: 560px;
+  padding: 48px 24px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+}
+.startpage__searchbar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 10px 16px;
+}
+.startpage__searchbar:focus-within {
+  border-color: var(--accent);
+}
+.startpage__search-icon {
+  color: var(--muted);
+  font-size: 16px;
+}
+.startpage__search {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 14px;
+}
+.startpage__grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.startpage__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 8px 4px;
+  border-radius: 10px;
+}
+.startpage__tile:hover {
+  background: var(--panel-header);
+}
+.site-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  overflow: hidden;
+  flex: none;
+}
+.site-icon__letter {
+  color: #fff;
+  font-weight: 600;
+  font-size: 18px;
+}
+.startpage__tile-label {
+  color: var(--text);
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.startpage__recent {
+  width: 100%;
+}
+.startpage__recent-title {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.startpage__recent-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 7px 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+.startpage__recent-item:hover {
+  background: var(--panel-header);
+}
+.startpage__recent-name {
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.startpage__recent-host {
+  color: var(--muted);
+  font-size: 12px;
+  flex: none;
+}

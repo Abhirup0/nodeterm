@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
-import { normalizeAddress } from './browserUrl'
+import { searchOrUrl } from './browserUrl'
+import { BrowserStartPage } from './BrowserStartPage'
+import { useBrowserHistory } from '../state/browserHistory'
 
 // Minimal typing for the Electron <webview> element methods/events we use.
 type WebviewEl = HTMLElement & {
@@ -25,6 +27,7 @@ type WebviewEl = HTMLElement & {
 export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements, updateNodeData } = useReactFlow()
   const ref = useRef<WebviewEl | null>(null)
+  const lastUrlRef = useRef('')
   // Seed the initial webview src ONCE at mount; navigations persist via updateNodeData but must
   // not re-push `src` into a webview that already navigated there (would cause a reload loop).
   const [startUrl] = useState(() => (data.url as string) ?? '')
@@ -53,10 +56,15 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
       setAddress(u)
       setFailed('')
       updateNodeData(id, { url: u }) // persist last top-level URL
+      lastUrlRef.current = u
+      useBrowserHistory.getState().record(u, u)
     }
     const onNavInPage = (e: Event): void => setAddress((e as unknown as { url: string }).url)
-    const onTitle = (e: Event): void =>
-      updateNodeData(id, { title: (e as unknown as { title: string }).title })
+    const onTitle = (e: Event): void => {
+      const title = (e as unknown as { title: string }).title
+      updateNodeData(id, { title })
+      if (lastUrlRef.current) useBrowserHistory.getState().record(lastUrlRef.current, title)
+    }
     const onFail = (e: Event): void => {
       const ev = e as unknown as { isMainFrame: boolean; errorCode: number; errorDescription: string }
       // -3 (ABORTED) fires on user-initiated stop / redirect races — ignore it.
@@ -96,9 +104,9 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
   }, [id])
 
   const go = (): void => {
-    const safe = normalizeAddress(address)
+    const safe = searchOrUrl(address)
     if (!safe) {
-      setFailed('Enter a valid http(s) URL')
+      setFailed('Enter a URL or search term')
       return
     }
     setAddress(safe)
@@ -193,6 +201,15 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
             allowpopups={true}
             style={{ width: '100%', height: '100%' }}
           />
+          {!src && (
+            <BrowserStartPage
+              onNavigate={(u) => {
+                setSrc(u)
+                setAddress(u)
+                setFailed('')
+              }}
+            />
+          )}
           {failed && <div className="browser-node__error">{failed}</div>}
         </div>
       </div>
