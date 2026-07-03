@@ -26,7 +26,6 @@ export function BrowserStartPage({ onNavigate }: { onNavigate: (url: string) => 
           <span className="startpage__search-icon">⌕</span>
           <input
             className="startpage__search"
-            autoFocus
             spellCheck={false}
             value={q}
             placeholder="Search Google or type a URL"
