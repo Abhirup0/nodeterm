@@ -1,7 +1,8 @@
 // License/premium client. Runs in the main process: stores the key + last entitlement token,
 // activates/refreshes against our API, and verifies the token OFFLINE with the embedded
 // Ed25519 public key. Offline grace: a still-unexpired stored token keeps premium alive when
-// a refresh can't reach the server.
+// a refresh can't reach the server. The offline check also binds the token to this machine's
+// device id and anchors expiry to the largest observed timestamp (clock-rollback guard).
 import { promises as fs, readFileSync } from 'fs'
 import path from 'path'
 import crypto from 'node:crypto'
@@ -34,6 +35,8 @@ function allowed(): boolean {
 interface Stored {
   key?: string
   token?: string
+  /** Largest unix-seconds timestamp this install has observed — the clock-rollback anchor. */
+  lastSeen?: number
 }
 
 function file(): string {
@@ -58,6 +61,10 @@ interface Payload {
 }
 
 // Offline verification of our compact Ed25519 token: base64url(payload).base64url(sig).
+// Beyond the signature, the token must be minted for THIS machine (a copied license.json
+// from another install must not validate), and its expiry is checked against the largest
+// timestamp we've ever observed — not just Date.now() — so rolling the system clock back
+// can't revive an expired token (see lastSeen).
 function verify(token: string | undefined): Payload | null {
   if (!token || !ENTITLEMENT_PUBLIC_KEY) return null
   const dot = token.indexOf('.')
@@ -68,7 +75,9 @@ function verify(token: string | undefined): Payload | null {
     const key = crypto.createPublicKey(ENTITLEMENT_PUBLIC_KEY)
     if (!crypto.verify(null, Buffer.from(p), key, Buffer.from(s, 'base64url'))) return null
     const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf-8')) as Payload
-    if (typeof payload.exp !== 'number' || payload.exp * 1000 <= Date.now()) return null
+    if (payload.deviceId !== getDeviceId()) return null
+    const now = Math.max(Date.now(), (load().lastSeen ?? 0) * 1000)
+    if (typeof payload.exp !== 'number' || payload.exp * 1000 <= now) return null
     return payload
   } catch {
     return null
@@ -155,7 +164,7 @@ export function initLicense(win: BrowserWindow): void {
         }
         const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
         if (r.active && r.token) {
-          await save({ key: load().key, token: r.token })
+          await save({ ...load(), token: r.token })
           broadcast(statusFrom(r.token))
           polling = false
           return
@@ -169,7 +178,7 @@ export function initLicense(win: BrowserWindow): void {
 
   ipcMain.handle(IPC.licenseActivate, async (_e, key: string) => {
     const r = await call('/v1/license/activate', { key: String(key).trim(), deviceId })
-    if (r.token) await save({ key: String(key).trim(), token: r.token })
+    if (r.token) await save({ ...load(), key: String(key).trim(), token: r.token })
     const status = statusFrom(r.token, r.error ?? null)
     broadcast(status)
     return status
@@ -178,11 +187,19 @@ export function initLicense(win: BrowserWindow): void {
   ipcMain.handle(IPC.licenseDeactivate, async () => {
     const stored = load()
     if (stored.key) await call('/v1/license/deactivate', { key: stored.key, deviceId })
-    await save({})
+    await save({ lastSeen: stored.lastSeen }) // keep the clock anchor across deactivations
     const status = statusFrom(undefined)
     broadcast(status)
     return status
   })
+
+  // Advance the clock-rollback anchor (see verify()): record the largest timestamp we've
+  // observed, so setting the system clock back can't revive an expired token.
+  const bumpLastSeen = async (): Promise<void> => {
+    const stored = load()
+    const now = Math.floor(Date.now() / 1000)
+    if (now > (stored.lastSeen ?? 0)) await save({ ...stored, lastSeen: now })
+  }
 
   // Re-establish entitlement, keeping the last valid token on failure (offline grace).
   const refresh = async (): Promise<void> => {
@@ -191,7 +208,7 @@ export function initLicense(win: BrowserWindow): void {
       // Key-paste flow: refresh against the stored key.
       const r = await call('/v1/license/refresh', { key: stored.key, deviceId })
       if (r.token) {
-        await save({ key: stored.key, token: r.token })
+        await save({ ...stored, token: r.token })
         broadcast(statusFrom(r.token))
       } else {
         broadcast(statusFrom(stored.token, r.error ?? null)) // offline grace
@@ -201,7 +218,7 @@ export function initLicense(win: BrowserWindow): void {
       // after the in-app Upgrade poll window, and every later relaunch.
       const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
       if (r.active && r.token) {
-        await save({ key: stored.key, token: r.token })
+        await save({ ...stored, token: r.token })
         broadcast(statusFrom(r.token))
       } else if (r.error === 'offline' || r.error === 'network' || r.error === 'disabled') {
         // Couldn't reach the server → offline grace: keep the last valid token.
@@ -209,13 +226,13 @@ export function initLicense(win: BrowserWindow): void {
       } else {
         // Server responded: this device is no longer entitled (canceled / suspended / expired)
         // → drop Pro and clear the cached token, even though it hasn't expired yet.
-        if (stored.token) await save({ key: stored.key })
+        if (stored.token) await save({ ...stored, token: undefined })
         broadcast(statusFrom(undefined))
       }
     }
   }
 
   // On launch + every 6h while the app stays open (see REFRESH_INTERVAL_MS).
-  void refresh()
-  setInterval(() => void refresh(), REFRESH_INTERVAL_MS).unref()
+  void bumpLastSeen().then(refresh)
+  setInterval(() => void bumpLastSeen().then(refresh), REFRESH_INTERVAL_MS).unref()
 }

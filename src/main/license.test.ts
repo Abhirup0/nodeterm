@@ -1,17 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import crypto from 'node:crypto'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 import type { LicenseStatus } from '../shared/types'
 
 // One temp userData dir per run; hoisted so the electron mock factory can see it.
-const h = vi.hoisted(() => ({ userData: '', publicKeyPem: '' }))
+const h = vi.hoisted(() => ({
+  userData: '',
+  publicKeyPem: '',
+  handlers: {} as Record<string, (...args: unknown[]) => unknown>
+}))
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userData, isPackaged: false },
-  ipcMain: { handle: vi.fn() },
+  ipcMain: {
+    handle: (channel: string, fn: (...args: unknown[]) => unknown) => {
+      h.handlers[channel] = fn
+    }
+  },
   shell: { openExternal: vi.fn() }
 }))
 
@@ -25,10 +33,10 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
 h.publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
 
 /** Mint a token the same way the server does: base64url(payload).base64url(sig). */
-function mint(ttlSeconds: number): string {
+function mint(ttlSeconds: number, deviceId = 'test-device'): string {
   const payload = Buffer.from(
     JSON.stringify({
-      deviceId: 'test-device',
+      deviceId,
       tier: 'pro',
       licenseId: 'lic_test',
       iat: Math.floor(Date.now() / 1000),
@@ -71,6 +79,9 @@ describe('license entitlement refresh', () => {
     // 8s abort timers stay on the real event loop so awaits actually settle.
     vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
     h.userData = mkdtempSync(path.join(tmpdir(), 'nt-license-test-'))
+    h.handlers = {}
+    // Pin this "machine"'s device id so minted tokens match it (device-bound verification).
+    writeFileSync(path.join(h.userData, 'device-id'), 'test-device')
     delete process.env.DO_NOT_TRACK
     delete process.env.NODETERM_TELEMETRY_DISABLED
     process.env.NODETERM_API_BASE = 'http://127.0.0.1:1'
@@ -135,5 +146,41 @@ describe('license entitlement refresh', () => {
     await vi.advanceTimersByTimeAsync(24 * HOUR)
     await flush()
     expect(sent[sent.length - 1].active).toBe(false)
+  })
+
+  it('rejects a token minted for a different device (copied license.json)', async () => {
+    // Simulates copying license.json + a foreign token onto this machine.
+    fetchMock.mockResolvedValue(
+      jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60, 'other-device') })
+    )
+    const { initLicense } = await import('./license')
+    const { win, sent } = fakeWindow()
+    initLicense(win)
+    await flush()
+
+    expect(sent.length).toBeGreaterThan(0)
+    expect(sent[sent.length - 1].active).toBe(false)
+  })
+
+  it('does not revive an expired token when the system clock is rolled back', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
+    )
+    const { initLicense } = await import('./license')
+    const { win, sent } = fakeWindow()
+    initLicense(win)
+    await flush()
+    expect(sent[sent.length - 1].active).toBe(true)
+
+    // Server unreachable from now on (offline grace path), and the token expires in-session.
+    fetchMock.mockRejectedValue(new Error('offline'))
+    await vi.advanceTimersByTimeAsync(7 * 24 * HOUR + 12 * HOUR)
+    await flush()
+
+    // Attacker rolls the clock back before the expiry: exp is "in the future" again,
+    // but the app has already observed a later time — the token must stay dead.
+    vi.setSystemTime(Date.now() - 9 * 24 * HOUR)
+    const status = (await h.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.active).toBe(false)
   })
 })
