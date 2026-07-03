@@ -60,26 +60,91 @@ describe('createHostCanvasSync', () => {
     ])
   })
 
-  it('routes a canvas:mutate RPC to onMutation and returns the parsed mutation', () => {
+  it('routes a canvas:mutate RPC to onMutation for a node the host already has', () => {
     const { socket } = fakeNotifySocket()
     const received: CanvasMutation[] = []
     const sync = createHostCanvasSync(socket, (m) => received.push(m))
+    sync.setState(state([node('x')]))
 
-    const mutation: CanvasMutation = { op: 'upsert', node: node('x') }
-    const result = sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: mutation })
+    const moved = { ...node('x'), position: { x: 100, y: 50 } }
+    const result = sync.handleRpc({
+      id: '',
+      method: CANVAS_MUTATE_METHOD,
+      params: { op: 'upsert', node: moved } satisfies CanvasMutation
+    })
 
-    expect(result).toEqual(mutation)
-    expect(received).toEqual([mutation])
+    expect(result).not.toBeNull()
+    expect(received).toHaveLength(1)
+    const applied = received[0] as Extract<CanvasMutation, { op: 'upsert' }>
+    expect(applied.node.position).toEqual({ x: 100, y: 50 })
+  })
+
+  it('R7: rejects upserts for node ids the host does not have (no client-created nodes)', () => {
+    const { socket } = fakeNotifySocket()
+    const received: CanvasMutation[] = []
+    const sync = createHostCanvasSync(socket, (m) => received.push(m))
+    sync.setState(state([node('a')]))
+
+    const injected = { op: 'upsert', node: node('evil') } satisfies CanvasMutation
+    expect(sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: injected })).toBeNull()
+    // And with NO state known yet, everything is rejected (deny-by-default).
+    const empty = createHostCanvasSync(socket, (m) => received.push(m))
+    expect(
+      empty.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: { op: 'upsert', node: node('a') } })
+    ).toBeNull()
+    expect(received).toHaveLength(0)
+  })
+
+  it('R7: strips host-authoritative fields (shell/cwd/ssh/filePath/url/kind) from client upserts', () => {
+    const { socket } = fakeNotifySocket()
+    const received: CanvasMutation[] = []
+    const sync = createHostCanvasSync(socket, (m) => received.push(m))
+    const hostNode: CanvasNodeState = { ...node('t'), shell: '/bin/zsh', cwd: '/safe/project' }
+    sync.setState(state([hostNode]))
+
+    const malicious = {
+      ...node('t'),
+      kind: 'terminal' as const,
+      shell: '/bin/sh',
+      cwd: '/', // would widen the remote fs jail to the whole disk
+      ssh: { host: 'attacker.example' } as never,
+      filePath: '/Users/victim/.ssh/id_rsa',
+      url: 'https://attacker.example',
+      position: { x: 5, y: 5 }
+    }
+    const result = sync.handleRpc({
+      id: '',
+      method: CANVAS_MUTATE_METHOD,
+      params: { op: 'upsert', node: malicious } satisfies CanvasMutation
+    })
+
+    expect(result).not.toBeNull()
+    const applied = received[0] as Extract<CanvasMutation, { op: 'upsert' }>
+    expect(applied.node.shell).toBe('/bin/zsh')
+    expect(applied.node.cwd).toBe('/safe/project')
+    expect(applied.node.ssh).toBeUndefined()
+    expect(applied.node.filePath).toBeUndefined()
+    expect(applied.node.url).toBeUndefined()
+    expect(applied.node.position).toEqual({ x: 5, y: 5 }) // layout still applies
   })
 
   it('ignores non-canvas RPC methods and malformed mutations (returns null, no callback)', () => {
     const { socket } = fakeNotifySocket()
     const received: CanvasMutation[] = []
     const sync = createHostCanvasSync(socket, (m) => received.push(m))
+    sync.setState(state([node('a')]))
 
     expect(sync.handleRpc({ id: 'r1', method: 'pty.create', params: {} })).toBeNull()
     expect(sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: null })).toBeNull()
     expect(sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: { foo: 1 } })).toBeNull()
+    // Malformed layout payloads on a known node are rejected too.
+    expect(
+      sync.handleRpc({
+        id: '',
+        method: CANVAS_MUTATE_METHOD,
+        params: { op: 'upsert', node: { ...node('a'), position: { x: 'NaN' } } }
+      })
+    ).toBeNull()
     expect(received).toHaveLength(0)
   })
 })

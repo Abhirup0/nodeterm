@@ -65,6 +65,25 @@ function extractCode(input: string): string | null {
   return input
 }
 
+// R5: the client connects to `relayEndpoint` verbatim, so an attacker-crafted offer must not
+// be able to point it at a plaintext (or non-WebSocket) endpoint. TLS is required; plaintext
+// `ws://` is allowed ONLY to loopback, for the local relay in dev and the e2e tests — a
+// loopback endpoint never crosses a network.
+function isAllowedRelayEndpoint(endpoint: string): boolean {
+  let url: URL
+  try {
+    url = new URL(endpoint)
+  } catch {
+    return false
+  }
+  if (url.protocol === 'wss:') return true
+  if (url.protocol === 'ws:') {
+    const h = url.hostname
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]'
+  }
+  return false
+}
+
 function isPairingOffer(value: unknown): value is PairingOffer {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -72,7 +91,7 @@ function isPairingOffer(value: unknown): value is PairingOffer {
   const o = value as Record<string, unknown>
   return (
     typeof o.relayEndpoint === 'string' &&
-    o.relayEndpoint.length > 0 &&
+    isAllowedRelayEndpoint(o.relayEndpoint) &&
     typeof o.pairingToken === 'string' &&
     o.pairingToken.length > 0 &&
     typeof o.hostPublicKeyB64 === 'string' &&

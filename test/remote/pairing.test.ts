@@ -34,4 +34,24 @@ describe('pairing', () => {
     const code = Buffer.from(json, 'utf-8').toString('base64url')
     expect(decodeOffer(`nodeterm://pair?code=${code}`)).toBeNull()
   })
+
+  // R5: the client connects to relayEndpoint verbatim — a crafted offer must not be able to
+  // point it at a plaintext or non-WebSocket endpoint. ws:// is allowed only to loopback.
+  it('R5: rejects non-wss relay endpoints (plaintext ws to a real host, http, garbage)', () => {
+    const withEndpoint = (relayEndpoint: string) =>
+      encodeOffer({ ...sample, relayEndpoint })
+    expect(decodeOffer(withEndpoint('ws://attacker.example'))).toBeNull()
+    expect(decodeOffer(withEndpoint('ws://192.168.1.10:8080'))).toBeNull()
+    expect(decodeOffer(withEndpoint('http://relay.nodeterm.dev'))).toBeNull()
+    expect(decodeOffer(withEndpoint('https://relay.nodeterm.dev'))).toBeNull()
+    expect(decodeOffer(withEndpoint('not a url'))).toBeNull()
+  })
+
+  it('R5: accepts wss:// anywhere and plain ws:// on loopback only (dev/tests)', () => {
+    const withEndpoint = (relayEndpoint: string) =>
+      decodeOffer(encodeOffer({ ...sample, relayEndpoint }))
+    expect(withEndpoint('wss://relay.nodeterm.dev')).not.toBeNull()
+    expect(withEndpoint('ws://127.0.0.1:8137')).not.toBeNull()
+    expect(withEndpoint('ws://localhost:8137')).not.toBeNull()
+  })
 })

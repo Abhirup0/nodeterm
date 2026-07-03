@@ -31,6 +31,7 @@ import { getStoredEntitlement, isPremium } from '../license'
 import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
 import { encodeOffer } from './pairing'
+import { sanitizeClientMutation } from './canvas-sync'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
 
 // Default relay endpoint; `NODETERM_RELAY_URL` overrides it (mirrors license.ts's API_BASE /
@@ -398,8 +399,12 @@ export function createHostCanvasSync(
       if (!mutation || typeof mutation !== 'object' || typeof (mutation as { op?: unknown }).op !== 'string') {
         return null
       }
-      onMutation(mutation)
-      return mutation
+      // R7: the wire mutation is CLIENT input — reduce it to layout/cosmetic changes on nodes
+      // the host already has before it reaches the renderer (see sanitizeClientMutation).
+      const safe = sanitizeClientMutation(mutation, current)
+      if (!safe) return null
+      onMutation(safe)
+      return safe
     }
   }
 }
