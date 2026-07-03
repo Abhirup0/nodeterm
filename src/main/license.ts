@@ -18,6 +18,11 @@ const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 // NODETERM_CHECKOUT_URL overrides it for testing (e.g. the test-mode link).
 const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/9B65kFeraflH9ora4A7EQ00'
 
+// Tokens are short-lived (the server mints 7-day entitlements) and the app is designed to
+// stay open for days, so a launch-only refresh would let the token expire mid-session and
+// silently drop Pro. Re-refresh on the same 6h cadence as the check/update polls.
+const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
+
 // Same gate as telemetry/check: never hit the prod API from a dev/unsigned build unless a
 // local server is targeted explicitly, and honor DO_NOT_TRACK / the kill switch.
 function allowed(): boolean {
@@ -179,8 +184,8 @@ export function initLicense(win: BrowserWindow): void {
     return status
   })
 
-  // On launch: re-establish entitlement, keeping the last valid token on failure (offline grace).
-  void (async () => {
+  // Re-establish entitlement, keeping the last valid token on failure (offline grace).
+  const refresh = async (): Promise<void> => {
     const stored = load()
     if (stored.key) {
       // Key-paste flow: refresh against the stored key.
@@ -208,5 +213,9 @@ export function initLicense(win: BrowserWindow): void {
         broadcast(statusFrom(undefined))
       }
     }
-  })()
+  }
+
+  // On launch + every 6h while the app stays open (see REFRESH_INTERVAL_MS).
+  void refresh()
+  setInterval(() => void refresh(), REFRESH_INTERVAL_MS).unref()
 }

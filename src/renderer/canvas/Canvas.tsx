@@ -104,6 +104,7 @@ import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
 import { requireProOr } from '../state/upgradeGate'
+import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import type { SshProjectStatus, TranscriptHit } from '@shared/types'
 import {
@@ -562,6 +563,10 @@ export function Canvas() {
   // 1) Load the whole workspace once and hydrate the projects store.
   useEffect(() => {
     let cancelled = false
+    // Pull the current license status: the main process broadcasts it on launch, but that
+    // broadcast races renderer load and is dropped if it fires first — without this pull a
+    // Pro user can start (and stay) gated as free until the next restart.
+    void useEntitlement.getState().hydrate()
     useSettings
       .getState()
       .hydrate()
