@@ -32,6 +32,20 @@ const ROW_STYLE: React.CSSProperties = {
   cursor: 'pointer'
 }
 
+/** "PRO" pill shown on server rows while unlicensed — connecting is gated behind Pro. */
+const PRO_BADGE_STYLE: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  letterSpacing: 0.5,
+  lineHeight: '14px',
+  padding: '1px 6px',
+  borderRadius: 999,
+  color: 'var(--accent)',
+  border: '1px solid var(--accent)',
+  opacity: 0.9,
+  flexShrink: 0
+}
+
 /** Basename of an absolute remote path (for the project label). */
 function baseName(p: string): string {
   const trimmed = p.replace(/\/+$/, '')
@@ -57,6 +71,8 @@ function parentDir(p: string): string {
  */
 export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDialogProps) {
   const servers = useSshServers((s) => s.servers)
+  // Reactive so the badges disappear the moment an upgrade lands while the dialog is open.
+  const isPremium = useEntitlement((s) => s.isPremium)
   const [step, setStep] = useState<Step>('pick')
   const [server, setServer] = useState<SshServer | null>(null)
   const [path, setPath] = useState('~')
@@ -152,7 +168,10 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
           <p className="confirm__msg" style={{ fontWeight: 600 }}>
             Connect over SSH
           </p>
-          <p className="confirm__msg">Pick a saved server to host this project's terminals.</p>
+          <p className="confirm__msg">
+            Pick a saved server to host this project's terminals.
+            {!isPremium && ' Connecting requires nodeterm Pro.'}
+          </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '6px 0 14px' }}>
             {servers.length === 0 ? (
               <p className="confirm__msg" style={{ opacity: 0.7 }}>
@@ -166,7 +185,18 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
                   title={`${s.user}@${s.host}`}
                   onClick={() => void connect(s)}
                 >
-                  <span style={{ fontWeight: 600 }}>{s.label}</span>
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      width: '100%'
+                    }}
+                  >
+                    <span style={{ fontWeight: 600 }}>{s.label}</span>
+                    {!isPremium && <span style={PRO_BADGE_STYLE}>PRO</span>}
+                  </span>
                   <span style={{ opacity: 0.6, fontSize: 12 }}>
                     {s.user}@{s.host}
                   </span>
