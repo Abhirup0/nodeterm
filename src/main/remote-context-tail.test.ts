@@ -52,11 +52,39 @@ describe('createRemoteContextTail', () => {
     tail.untrack('sess2')
   })
 
+  it('fires onTaskNotification for a <task-notification> line in the remote transcript', async () => {
+    const { win } = fakeWin()
+    const notif = JSON.stringify({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      content: '<task-notification>\n<tool-use-id>tu-remote</tool-use-id>\n<status>completed</status>\n<result>remote done</result>\n</task-notification>'
+    })
+    let served = false
+    const remoteFile = {
+      readTail: vi.fn(async () => line(10, 'claude-opus-4-8') + '\n'),
+      readFrom: vi.fn(async (_r: RemoteFileRef, o: number) => {
+        if (served) return { text: '', newOffset: o }
+        served = true
+        return { text: notif + '\n', newOffset: o + Buffer.byteLength(notif + '\n') }
+      })
+    }
+    const onTaskNotification = vi.fn()
+    const tail = createRemoteContextTail(win, remoteFile as never, { onTaskNotification })
+    tail.track('sess4', ref)
+    await new Promise((r) => setTimeout(r, 1200)) // first read + one poll tick
+    expect(onTaskNotification).toHaveBeenCalledTimes(1)
+    expect(onTaskNotification.mock.calls[0][0]).toBe('sess4')
+    expect(onTaskNotification.mock.calls[0][1]).toMatchObject({ toolUseId: 'tu-remote', result: 'remote done' })
+    tail.untrack('sess4')
+  }, 5000)
+
   it('only pushes again when the usage changes', async () => {
     const { win, send } = fakeWin()
-    let nextFrom = line(200, 'claude-opus-4-8')
+    // Realistic JSONL: records are newline-terminated (the tail carries a torn trailing
+    // line into the next read, so un-delimited records would garble on purpose).
+    let nextFrom = line(200, 'claude-opus-4-8') + '\n'
     const remoteFile = {
-      readTail: vi.fn(async () => line(100, 'claude-opus-4-8')),
+      readTail: vi.fn(async () => line(100, 'claude-opus-4-8') + '\n'),
       readFrom: vi.fn(async (_r: RemoteFileRef, o: number) => {
         const text = nextFrom
         nextFrom = ''

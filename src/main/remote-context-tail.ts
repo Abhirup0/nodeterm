@@ -8,7 +8,8 @@ import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
 import { cachedWindowFor, resolveModelWindow } from './model-window'
-import { parseLatestUsage } from './context-tail'
+import { parseLatestUsage, parseTaskNotifications, type ContextTailOptions } from './context-tail'
+import { splitCompleteLines } from './subagent-tail'
 import type { RemoteFile, RemoteFileRef } from './remote-ssh/remote-file'
 
 const POLL_MS = 1000
@@ -29,6 +30,8 @@ interface Tracked {
   lastUsed: number
   lastModel: string | null
   lastWindow: number
+  /** Partial trailing line held back until the next read completes it (see subagent-tail.ts). */
+  carry: Buffer | null
 }
 
 export interface RemoteContextTail {
@@ -38,9 +41,32 @@ export interface RemoteContextTail {
   pathFor(sessionId: string | undefined): string | undefined
 }
 
-export function createRemoteContextTail(win: BrowserWindow, remoteFile: RemoteFile): RemoteContextTail {
+export function createRemoteContextTail(
+  win: BrowserWindow,
+  remoteFile: RemoteFile,
+  opts?: ContextTailOptions
+): RemoteContextTail {
   const sessions = new Map<string, Tracked>()
   let timer: ReturnType<typeof setInterval> | null = null
+
+  // Usage parses the whole read (carry included) — it tolerates torn lines and the latest
+  // value wins, so it must not wait for a newline. Notifications scan COMPLETE lines only,
+  // with the torn tail carried into the next read (see subagent-tail.ts), so a torn
+  // <task-notification> is completed later instead of being lost.
+  const scan = (sessionId: string, t: Tracked, read: string): void => {
+    const buf = Buffer.from(read)
+    const combined = t.carry?.length ? Buffer.concat([t.carry, buf]) : buf
+    const { text: complete, carry } = splitCompleteLines(combined)
+    t.carry = carry
+    const latest = parseLatestUsage(combined.toString('utf-8'))
+    if (latest) {
+      t.used = latest.used
+      t.model = latest.model ?? t.model
+    }
+    if (opts?.onTaskNotification) {
+      for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
+    }
+  }
 
   const push = (sessionId: string, t: Tracked): void => {
     if (win.isDestroyed()) return
@@ -67,21 +93,11 @@ export function createRemoteContextTail(win: BrowserWindow, remoteFile: RemoteFi
         // remote size, so advance the offset by the bytes we actually received.
         const text = await remoteFile.readTail(t.ref, INITIAL_READ_CAP)
         t.offset = Buffer.byteLength(text)
-        const latest = parseLatestUsage(text)
-        if (latest) {
-          t.used = latest.used
-          t.model = latest.model ?? t.model
-        }
+        scan(sessionId, t, text)
       } else {
         const { text, newOffset } = await remoteFile.readFrom(t.ref, t.offset)
         t.offset = newOffset
-        if (text) {
-          const latest = parseLatestUsage(text)
-          if (latest) {
-            t.used = latest.used
-            t.model = latest.model ?? t.model
-          }
-        }
+        if (text) scan(sessionId, t, text)
       }
     } finally {
       t.reading = false
@@ -116,6 +132,7 @@ export function createRemoteContextTail(win: BrowserWindow, remoteFile: RemoteFi
         if (existing.ref.path !== ref.path) {
           existing.ref = ref
           existing.offset = 0
+          existing.carry = null
         }
         return
       }
@@ -128,7 +145,8 @@ export function createRemoteContextTail(win: BrowserWindow, remoteFile: RemoteFi
         reading: false,
         lastUsed: 0,
         lastModel: null,
-        lastWindow: 0
+        lastWindow: 0,
+        carry: null
       }
       sessions.set(sessionId, t)
       void read(sessionId, t) // immediate first value (resumed sessions already have content)

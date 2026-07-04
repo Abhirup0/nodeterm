@@ -64,11 +64,22 @@ interface ClaudePayload {
   }
   tool_response?: {
     status?: string
+    isAsync?: boolean
     content?: { type?: string; text?: string }[]
     totalDurationMs?: number
     totalTokens?: number
     totalToolUseCount?: number
   }
+}
+
+/**
+ * Claude Code launches subagents async by default: the Task/Agent PostToolUse fires
+ * ~immediately with a launch acknowledgment, not the finished result. Treating that as the
+ * subagent's end flips the card to done seconds after it starts, with no output. The real
+ * end arrives later as a <task-notification> in the parent transcript.
+ */
+export function isAsyncSubagentLaunch(r: { status?: string; isAsync?: boolean } | undefined): boolean {
+  return r?.status === 'async_launched' || r?.isAsync === true
 }
 
 export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | null {
@@ -88,6 +99,8 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
           taskLabel: p.tool_input?.description ?? p.tool_input?.prompt
         }
       }
+      // Async launch acknowledgment — the subagent just started, it didn't finish.
+      if (isAsyncSubagentLaunch(p.tool_response)) return { ...base, kind: 'state', state: 'working' }
       return {
         ...base,
         kind: 'subagent-end',
@@ -123,6 +136,12 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
   }
 
   if (ev === 'UserPromptSubmit') {
+    // A completed async subagent is delivered back as a queued <task-notification> prompt.
+    // That's not a genuine user turn — flagging it newTurn would clear the subagent fan-out
+    // at the exact moment one of the cards completes.
+    if ((p.prompt ?? '').trimStart().startsWith('<task-notification>')) {
+      return { ...base, kind: 'state', state: 'working' }
+    }
     return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
   }
   if (ev === 'Stop') {

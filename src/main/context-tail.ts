@@ -7,6 +7,7 @@ import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
 import { cachedWindowFor, resolveModelWindow } from './model-window'
+import { splitCompleteLines } from './subagent-tail'
 
 const POLL_MS = 1000
 // Cap the initial read: a resumed Claude transcript can be many MB, and reading the whole file
@@ -41,6 +42,57 @@ export function parseLatestUsage(text: string): { used: number; model: string | 
   return found ? { used: usedTokens, model } : null
 }
 
+/**
+ * A completed async subagent, announced back to the parent session as a queued
+ * `<task-notification>` prompt (a `queue-operation` transcript line). Carries the spawning
+ * tool_use_id, so it's the end signal the async launch's PostToolUse never was.
+ */
+export interface TaskNotification {
+  toolUseId: string
+  status?: string
+  summary?: string
+  result?: string
+}
+
+const tag = (content: string, name: string): string | undefined => {
+  const m = content.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))
+  return m ? m[1].trim() : undefined
+}
+
+/** Scan transcript lines for queued <task-notification>s. Pure. */
+export function parseTaskNotifications(text: string): TaskNotification[] {
+  const out: TaskNotification[] = []
+  for (const line of text.split('\n')) {
+    const s = line.trim()
+    // Cheap pre-filter; the attachment echo of the same notification is skipped by the
+    // type check below so each completion fires exactly once.
+    if (!s || !s.includes('task-notification') || !s.includes('queue-operation')) continue
+    let o: { type?: string; content?: unknown }
+    try {
+      o = JSON.parse(s)
+    } catch {
+      continue
+    }
+    if (o.type !== 'queue-operation' || typeof o.content !== 'string') continue
+    if (!o.content.includes('<task-notification>')) continue
+    const toolUseId = tag(o.content, 'tool-use-id')
+    if (!toolUseId) continue
+    out.push({
+      toolUseId,
+      status: tag(o.content, 'status'),
+      summary: tag(o.content, 'summary'),
+      // <result> holds the agent's full final text — match greedily to its LAST closing tag.
+      result: o.content.match(/<result>([\s\S]*)<\/result>/)?.[1]?.trim()
+    })
+  }
+  return out
+}
+
+export interface ContextTailOptions {
+  /** Fired when a tracked session's transcript announces a completed async subagent. */
+  onTaskNotification?: (sessionId: string, n: TaskNotification) => void
+}
+
 interface Tracked {
   path: string
   offset: number
@@ -53,6 +105,12 @@ interface Tracked {
   lastWindow: number
   /** An async read is in flight — the next tick skips this session instead of double-reading. */
   reading: boolean
+  /**
+   * Bytes past the last newline of the previous read — a line caught mid-write, held back and
+   * prepended to the next read (see subagent-tail.ts). Without it a torn <task-notification>
+   * line would be lost and its subagent card stuck on working forever. Reset on offset jumps.
+   */
+  carry: Buffer | null
 }
 
 export interface ContextTail {
@@ -62,7 +120,7 @@ export interface ContextTail {
   pathFor(sessionId: string | undefined): string | undefined
 }
 
-export function createContextTail(win: BrowserWindow): ContextTail {
+export function createContextTail(win: BrowserWindow, opts?: ContextTailOptions): ContextTail {
   const sessions = new Map<string, Tracked>()
   let timer: ReturnType<typeof setInterval> | null = null
 
@@ -95,20 +153,21 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         // file not created yet / unreadable — skip the byte read, still reconcile below
       }
       if (size >= 0) {
+        const before = t.offset
         if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
         // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
         if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
         // Cap deltas too: a huge append burst (resume/compact rewriting MBs between ticks)
         // shouldn't allocate it all — only the LATEST usage matters, so jump to the tail.
         if (size - t.offset > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
+        if (t.offset !== before) t.carry = null // offset jumped — the held bytes don't precede it
         if (size > t.offset) {
-          let chunk = ''
+          let buf: Buffer
           try {
             const fd = await fs.promises.open(t.path, 'r')
             try {
-              const buf = Buffer.alloc(size - t.offset)
+              buf = Buffer.alloc(size - t.offset)
               await fd.read(buf, 0, buf.length, t.offset)
-              chunk = buf.toString('utf-8')
               t.offset = size
             } finally {
               await fd.close()
@@ -116,10 +175,20 @@ export function createContextTail(win: BrowserWindow): ContextTail {
           } catch {
             return
           }
-          const latest = parseLatestUsage(chunk)
+          // Usage parses the whole read (carry included) — it tolerates torn lines and the
+          // latest value wins, so it must not wait for a newline. Notifications scan
+          // COMPLETE lines only, with the torn tail carried into the next read, so a torn
+          // <task-notification> is completed later instead of being lost.
+          const combined = t.carry?.length ? Buffer.concat([t.carry, buf]) : buf
+          const { text: complete, carry } = splitCompleteLines(combined)
+          t.carry = carry
+          const latest = parseLatestUsage(combined.toString('utf-8'))
           if (latest) {
             t.used = latest.used
             t.model = latest.model ?? t.model
+          }
+          if (opts?.onTaskNotification) {
+            for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
           }
         }
       }
@@ -161,6 +230,7 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         if (existing.path !== transcriptPath) {
           existing.path = transcriptPath
           existing.offset = 0
+          existing.carry = null
         }
         return
       }
@@ -173,7 +243,8 @@ export function createContextTail(win: BrowserWindow): ContextTail {
         lastUsed: 0,
         lastModel: null,
         lastWindow: 0,
-        reading: false
+        reading: false,
+        carry: null
       }
       sessions.set(sessionId, t)
       void read(sessionId, t) // immediate first value (resumed sessions already have content)

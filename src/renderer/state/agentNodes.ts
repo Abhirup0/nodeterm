@@ -74,7 +74,10 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
     set((s) => {
       const prev = s.byId[toolUseId]
       if (!prev || prev.state === 'done') return s
-      return { byId: { ...s.byId, [toolUseId]: { ...prev, state: 'done', ...result } } }
+      // Async subagents end via a <task-notification> that carries no timing stats — fall
+      // back to the card's own elapsed time so the duration doesn't vanish on completion.
+      const durationMs = result.durationMs ?? Date.now() - prev.startedAt
+      return { byId: { ...s.byId, [toolUseId]: { ...prev, state: 'done', ...result, durationMs } } }
     }),
 
   appendActivity: (toolUseId, chunk) =>

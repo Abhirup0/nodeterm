@@ -16,7 +16,8 @@ import { hookServer } from './agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
-import { createContextTail } from './context-tail'
+import { createContextTail, type TaskNotification } from './context-tail'
+import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import {
   readTranscriptLines,
   readChatMessages,
@@ -368,7 +369,27 @@ app.whenReady().then(async () => {
   // A raw listener drives the transcript-tailing features (context meter + subagent transcript),
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
   const subagentTail = createSubagentTail(win)
-  const contextTail = createContextTail(win)
+  // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
+  // transcript — their PostToolUse is only a launch ack (see the raw listener below). The
+  // context tails already read that transcript, so they surface the notification here and we
+  // emit the synthetic subagent-end the hooks never send, then release the transcript tail.
+  const onTaskNotification = (sessionId: string, n: TaskNotification): void => {
+    let nodeId: string | undefined
+    for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
+    if (!nodeId) return
+    sendToMain(IPC.agentStatus, {
+      nodeId,
+      agentId: 'claude',
+      sessionId,
+      kind: 'subagent-end',
+      toolUseId: n.toolUseId,
+      result: n.result
+    } satisfies NormalizedAgentEvent)
+    subagentTail.finish(n.toolUseId)
+    remoteSubagentTail.untrack(n.toolUseId)
+    nodeSubagents.get(nodeId)?.delete(n.toolUseId)
+  }
+  const contextTail = createContextTail(win, { onTaskNotification })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -378,7 +399,7 @@ app.whenReady().then(async () => {
   const remoteFile = new RemoteFile((args) =>
     sshProjectManager ? sshProjectManager.sshRun(args) : Promise.resolve({ code: 1, stdout: '' })
   )
-  const remoteContextTail = createRemoteContextTail(win, remoteFile)
+  const remoteContextTail = createRemoteContextTail(win, remoteFile, { onTaskNotification })
   const remoteSubagentTail = createRemoteSubagentTail(win, remoteFile)
   // Remote transcript ref learned from the hook raw-listener, keyed by sessionId — lets the
   // search/chat read handlers (which receive only sessionId + cwd) read remotely without a
@@ -514,7 +535,11 @@ app.whenReady().then(async () => {
       transcript_path?: string
       tool_name?: string
       tool_use_id?: string
+      tool_response?: { status?: string; isAsync?: boolean }
     }
+    // An async subagent's PostToolUse is only the launch ack — keep tailing its transcript;
+    // the real end (task-notification via the context tails) releases it.
+    const asyncLaunch = p.hook_event_name === 'PostToolUse' && isAsyncSubagentLaunch(p.tool_response)
     // REMOTE node: route to the remote tails/search, jailing the path under the project's remote
     // ~/.claude/projects. Diverges from the local path ONLY when the node has a live ssh remote.
     const rt = nodeId ? ptyManager.sshRemoteForNode(nodeId) : undefined
@@ -553,12 +578,20 @@ app.whenReady().then(async () => {
             set.add(toolUseId)
             nodeSubagents.set(nodeId, set)
           }
-        } else if (p.hook_event_name === 'PostToolUse') {
+        } else if (p.hook_event_name === 'PostToolUse' && !asyncLaunch) {
           // Only cancel an in-flight resolve; if it already settled, adding here would leak.
           if (remoteSubagentResolving.has(toolUseId)) remoteSubagentCancel.add(toolUseId)
           remoteSubagentTail.untrack(toolUseId)
           if (nodeId) nodeSubagents.get(nodeId)?.delete(toolUseId)
         }
+      }
+      // Session over → release any still-tracked async subagent tails for this node.
+      if (p.hook_event_name === 'SessionEnd' && nodeId) {
+        for (const toolUseId of nodeSubagents.get(nodeId) ?? []) {
+          if (remoteSubagentResolving.has(toolUseId)) remoteSubagentCancel.add(toolUseId)
+          remoteSubagentTail.untrack(toolUseId)
+        }
+        nodeSubagents.delete(nodeId)
       }
       return
     }
@@ -577,10 +610,16 @@ app.whenReady().then(async () => {
           set.add(p.tool_use_id)
           nodeSubagents.set(nodeId, set)
         }
-      } else if (p.hook_event_name === 'PostToolUse') {
+      } else if (p.hook_event_name === 'PostToolUse' && !asyncLaunch) {
         subagentTail.finish(p.tool_use_id)
         if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
       }
+    }
+    // Session over → release any still-tracked async subagent tails for this node (their
+    // task-notifications will never arrive once the session is gone).
+    if (p.hook_event_name === 'SessionEnd' && nodeId) {
+      for (const toolUseId of nodeSubagents.get(nodeId) ?? []) subagentTail.finish(toolUseId)
+      nodeSubagents.delete(nodeId)
     }
   })
 
