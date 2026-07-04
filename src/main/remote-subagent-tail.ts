@@ -9,7 +9,7 @@
 // listener already learned it), so each entry is tracked directly by its RemoteFileRef.
 import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
-import { formatSubagentChunk } from './subagent-tail'
+import { formatSubagentChunk, splitCompleteLines } from './subagent-tail'
 import type { RemoteFile, RemoteFileRef } from './remote-ssh/remote-file'
 
 const POLL_MS = 1000
@@ -18,6 +18,8 @@ interface Tracked {
   ref: RemoteFileRef
   offset: number
   reading: boolean
+  /** Partial trailing line held back until the next read completes it (see subagent-tail.ts). */
+  carry: Buffer | null
 }
 
 export interface RemoteSubagentTail {
@@ -42,7 +44,10 @@ export function createRemoteSubagentTail(win: BrowserWindow, remoteFile: RemoteF
       const { text, newOffset } = await remoteFile.readFrom(e.ref, e.offset)
       e.offset = newOffset
       if (text) {
-        const out = formatSubagentChunk(text)
+        const read = Buffer.from(text)
+        const { text: complete, carry } = splitCompleteLines(e.carry?.length ? Buffer.concat([e.carry, read]) : read)
+        e.carry = carry
+        const out = formatSubagentChunk(complete)
         if (out) send(toolUseId, out + '\n')
       }
     } finally {
@@ -61,12 +66,20 @@ export function createRemoteSubagentTail(win: BrowserWindow, remoteFile: RemoteF
   return {
     track(toolUseId, ref) {
       if (!ref || tracked.has(toolUseId)) return
-      tracked.set(toolUseId, { ref, offset: 0, reading: false })
+      tracked.set(toolUseId, { ref, offset: 0, reading: false, carry: null })
       void readOne(toolUseId, tracked.get(toolUseId)!) // immediate first read
       if (!timer) timer = setInterval(tick, POLL_MS)
     },
     untrack(toolUseId) {
+      const e = tracked.get(toolUseId)
       tracked.delete(toolUseId)
+      // The transcript is complete on untrack — a held-back carry is a final line missing
+      // only its trailing newline; flush instead of dropping it.
+      if (e?.carry?.length) {
+        const out = formatSubagentChunk(e.carry.toString('utf-8'))
+        e.carry = null
+        if (out) send(toolUseId, out + '\n')
+      }
       if (!tracked.size && timer) {
         clearInterval(timer)
         timer = null

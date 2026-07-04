@@ -38,6 +38,27 @@ describe('createRemoteSubagentTail', () => {
     tail.untrack('tool-1')
   })
 
+  it('does not drop a line served torn across two reads', async () => {
+    const { win, send } = fakeWin()
+    const raw = assistant('remote torn line')
+    // The remote `tail -c +N` can return a line mid-write; the second read completes it.
+    const parts = [raw.slice(0, 15), raw.slice(15) + '\n']
+    let i = 0
+    const remoteFile = {
+      readFrom: vi.fn(async (_r: RemoteFileRef, o: number) => {
+        const text = parts[i] ?? ''
+        i++
+        return { text, newOffset: o + Buffer.byteLength(text) }
+      })
+    }
+    const tail = createRemoteSubagentTail(win, remoteFile as never)
+    tail.track('tool-3', ref) // immediate first read gets the partial line
+    await new Promise((r) => setTimeout(r, 1100)) // next poll (1s) reads the rest
+    const streamed = send.mock.calls.map((c) => (c[1] as { chunk: string }).chunk).join('')
+    expect(streamed).toContain('remote torn line')
+    tail.untrack('tool-3')
+  }, 5000)
+
   it('does not send when the chunk is empty', async () => {
     const { win, send } = fakeWin()
     const remoteFile = {

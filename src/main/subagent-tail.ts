@@ -18,6 +18,12 @@ interface Tracked {
   reading?: boolean
   /** Meta files already parsed and rejected — don't re-read them on every 400ms tick. */
   seenMetas?: Set<string>
+  /**
+   * Bytes past the last newline of the previous read — a line caught mid-write. Held back
+   * (as raw bytes, so a torn multibyte char survives) and prepended to the next read; without
+   * this the torn line's halves each fail JSON.parse and the whole line is silently lost.
+   */
+  carry?: Buffer | null
 }
 
 function textOf(content: unknown): string {
@@ -108,6 +114,20 @@ export function formatSubagentChunk(text: string): string {
     .join('\n')
 }
 
+// Split accumulated transcript bytes at the last newline: everything up to it decodes to
+// complete lines, the rest is carried (still raw bytes) into the next read. Splitting at the
+// byte level is what makes a mid-multibyte tear safe — '\n' (0x0a) never occurs inside a
+// UTF-8 continuation, so the carry always rejoins into valid UTF-8.
+export function splitCompleteLines(data: Buffer): { text: string; carry: Buffer | null } {
+  const nl = data.lastIndexOf(0x0a)
+  if (nl === -1) return { text: '', carry: data.length ? data : null }
+  return {
+    text: data.subarray(0, nl + 1).toString('utf-8'),
+    // Copy the tail so the (possibly large) read buffer isn't retained by the slice.
+    carry: nl + 1 < data.length ? Buffer.from(data.subarray(nl + 1)) : null
+  }
+}
+
 export interface SubagentTail {
   track(toolUseId: string, transcriptPath: string | undefined): void
   finish(toolUseId: string): void
@@ -143,7 +163,10 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
               e.file = path.join(e.dir, m.replace(/\.meta\.json$/, '.jsonl'))
               break
             }
-            seen.add(m) // belongs to another subagent — skip it on future ticks
+            // Only blacklist a meta that positively names another subagent. A parseable file
+            // whose toolUseId hasn't landed yet (caught mid-write) must be re-read next tick,
+            // or this subagent's own meta gets skipped forever and its transcript never streams.
+            if (meta.toolUseId) seen.add(m)
           } catch {
             // unparseable (possibly still being written) — retry next tick, don't blacklist
           }
@@ -160,7 +183,10 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
         await fd.close()
       }
       e.offset = size
-      const out = formatSubagentChunk(buf.toString('utf-8'))
+      const data = e.carry?.length ? Buffer.concat([e.carry, buf]) : buf
+      const { text, carry } = splitCompleteLines(data)
+      e.carry = carry
+      const out = formatSubagentChunk(text)
       if (out) send(toolUseId, out + '\n')
     } catch {
       // file may not exist yet / transient read error
@@ -185,9 +211,21 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
       if (!timer) timer = setInterval(tick, 400) // only runs while subagents are active
     },
     finish(toolUseId) {
+      // The file is complete now, so a held-back carry is a real final line that just lacks
+      // its trailing newline — flush it after the final read instead of dropping it.
+      const flushCarry = (e: Tracked): void => {
+        if (!e.carry?.length) return
+        const out = formatSubagentChunk(e.carry.toString('utf-8'))
+        e.carry = null
+        if (out) send(toolUseId, out + '\n')
+      }
       const e = tracked.get(toolUseId)
-      if (e) void readOne(toolUseId, e) // final flush (completes well within the grace delay)
-      setTimeout(() => tracked.delete(toolUseId), 1500)
+      if (e) void readOne(toolUseId, e).then(() => flushCarry(e)) // final flush (completes well within the grace delay)
+      setTimeout(() => {
+        const late = tracked.get(toolUseId)
+        tracked.delete(toolUseId)
+        if (late) flushCarry(late) // ticks during the grace window may have re-filled the carry
+      }, 1500)
     }
   }
 }
