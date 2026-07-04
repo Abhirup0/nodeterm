@@ -2860,6 +2860,59 @@ body,
   cursor: not-allowed;
 }
 
+/* ---- Clone repo dialog (reuses the .confirm shell) ---- */
+.clone-dialog {
+  width: 420px;
+}
+.clone-dialog__label {
+  display: block;
+  margin: 10px 2px 4px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.clone-dialog__row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.clone-dialog__row .confirm__input {
+  flex: 1;
+}
+.clone-dialog__preview {
+  margin: 4px 2px 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clone-dialog__error {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #ff6b6b;
+  word-break: break-word;
+}
+.clone-dialog__progress {
+  margin-top: 10px;
+}
+.clone-dialog__progress-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 4px;
+}
+.clone-dialog__progress-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.clone-dialog__progress-bar {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+
 /* ---- Notification consent dialog (polished, icon + title + actions) ---- */
 .consent-overlay {
   position: fixed;
