@@ -52,7 +52,9 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
     return window.nodeTerminal.git.onCloneProgress(setProgress)
   }, [open])
 
-  // Unmount/close while cloning = abort (main deletes the claimed dir).
+  // Closing the dialog (open → false) while a clone is in flight aborts it (main
+  // deletes the claimed dir). The dialog is mounted unconditionally by Canvas, so this
+  // fires on close, not unmount.
   useEffect(() => {
     cloningRef.current = cloning
   }, [cloning])
@@ -68,8 +70,15 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
     setCloning(true)
     setError('')
     setProgress(null)
-    const r = await window.nodeTerminal.git.clone(parent.trim(), expanded)
-    setCloning(false)
+    let r: Awaited<ReturnType<typeof window.nodeTerminal.git.clone>>
+    try {
+      r = await window.nodeTerminal.git.clone(parent.trim(), expanded)
+    } catch (err) {
+      setError(String(err))
+      return
+    } finally {
+      setCloning(false)
+    }
     if (!r.ok) {
       // Abort resolves message:'aborted' — the dialog is already closing; stay silent.
       if (r.message !== 'aborted') setError(r.message)

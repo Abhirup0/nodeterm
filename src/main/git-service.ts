@@ -1,7 +1,6 @@
 import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import os from 'os'
-import { homedir } from 'os'
 import path from 'path'
 import { promisify } from 'util'
 import { ipcMain } from 'electron'
@@ -48,11 +47,12 @@ const GIT_ENV: NodeJS.ProcessEnv = {
 
 // Single-flight registry for the one clone the app runs at a time. Module-scoped so a
 // macOS window re-creation can't orphan it.
-let activeClone: {
-  child: import('child_process').ChildProcess
+type ActiveClone = {
+  child: import('child_process').ChildProcess | null
   clonePath: string
   aborted: boolean
-} | null = null
+}
+let activeClone: ActiveClone | null = null
 
 // `gh auth status` is a network-touching CLI call but auth state changes rarely, so cache
 // it briefly — otherwise every status refresh pays a process spawn (and possible round-trip).
@@ -525,9 +525,15 @@ export class GitService {
     const dirName = deriveRepoDirName(url)
     if (!dirName) return { ok: false, message: 'Could not derive a folder name from that URL.' }
     const clonePath = path.join(parentDir, dirName)
+    // Reserve the single-flight slot synchronously, BEFORE the mkdir await, so a
+    // concurrent clone() can't slip past the guard during the await. child is filled
+    // in once spawned; cloneAbort() guards against the null window.
+    const rec: ActiveClone = { child: null, clonePath, aborted: false }
+    activeClone = rec
     try {
       await fs.promises.mkdir(clonePath) // non-recursive claim; also validates parent exists
     } catch (e) {
+      activeClone = null
       const err = e as NodeJS.ErrnoException
       if (err.code === 'EEXIST') {
         return {
@@ -543,8 +549,7 @@ export class GitService {
         env: GIT_ENV,
         stdio: ['ignore', 'ignore', 'pipe']
       })
-      const rec = { child, clonePath, aborted: false }
-      activeClone = rec
+      rec.child = child
       let tail = '' // last 4 KB of stderr for the error message
       child.stderr?.on('data', (d: Buffer) => {
         const text = d.toString('utf-8')
@@ -578,18 +583,20 @@ export class GitService {
   cloneAbort(): void {
     if (!activeClone) return
     activeClone.aborted = true
-    activeClone.child.kill('SIGTERM')
+    // child may be null during the reservation→spawn window; the close handler still
+    // honors `aborted` once the process starts.
+    activeClone.child?.kill('SIGTERM')
   }
 
   /** ~/projects when present, else the home dir. */
   cloneDefaultParent(): string {
-    const p = path.join(homedir(), 'projects')
+    const p = path.join(os.homedir(), 'projects')
     try {
       if (fs.statSync(p).isDirectory()) return p
     } catch {
       /* fall through */
     }
-    return homedir()
+    return os.homedir()
   }
 
   async init(cwd: string): Promise<GitResult> {
