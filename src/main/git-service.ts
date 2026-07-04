@@ -10,6 +10,7 @@ import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
+import { isValidCloneUrl } from '../shared/clone-url'
 
 const run = promisify(execFile)
 
@@ -94,17 +95,6 @@ function isValidRef(name: string): boolean {
   const n = name.trim()
   if (!n || n.startsWith('-')) return false
   return !/[\s~^:?*[\\]|\.\.|^\/|\/$|@\{/.test(n)
-}
-
-/**
- * Validate a clone URL: must use a known scheme (or scp-style git@host:path) and
- * must not begin with `-`, so it can't be parsed by git as an option flag
- * (e.g. `--upload-pack=…`, which is a remote-code-execution vector).
- */
-function isValidCloneUrl(url: string): boolean {
-  const u = url.trim()
-  if (!u || u.startsWith('-')) return false
-  return /^(https?:\/\/|ssh:\/\/|git:\/\/|git@[^/]+:)/.test(u)
 }
 
 /** path -> {added, deleted} from `git diff --numstat` output. */
