@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import os from 'os'
+import { homedir } from 'os'
 import path from 'path'
 import { promisify } from 'util'
 import { ipcMain } from 'electron'
@@ -10,7 +11,14 @@ import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
-import { isValidCloneUrl } from '../shared/clone-url'
+import { sendToMain } from './main-window'
+import {
+  isValidCloneUrl,
+  expandCloneUrl,
+  deriveRepoDirName,
+  parseCloneProgress,
+  stripAnsiCodes
+} from '../shared/clone-url'
 
 const run = promisify(execFile)
 
@@ -37,6 +45,14 @@ const GIT_ENV: NodeJS.ProcessEnv = {
   PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin${process.env.PATH ? `:${process.env.PATH}` : ''}`,
   GIT_TERMINAL_PROMPT: '0'
 }
+
+// Single-flight registry for the one clone the app runs at a time. Module-scoped so a
+// macOS window re-creation can't orphan it.
+let activeClone: {
+  child: import('child_process').ChildProcess
+  clonePath: string
+  aborted: boolean
+} | null = null
 
 // `gh auth status` is a network-touching CLI call but auth state changes rarely, so cache
 // it briefly — otherwise every status refresh pays a process spawn (and possible round-trip).
@@ -147,6 +163,8 @@ export class GitService {
     ipcMain.handle(IPC.gitStatus, (_e, cwd: string) => this.status(cwd))
     ipcMain.handle(IPC.gitInit, (_e, cwd: string) => this.init(cwd))
     ipcMain.handle(IPC.gitClone, (_e, parentDir: string, url: string) => this.clone(parentDir, url))
+    ipcMain.handle(IPC.gitCloneAbort, () => this.cloneAbort())
+    ipcMain.handle(IPC.gitCloneDefaultParent, () => this.cloneDefaultParent())
     ipcMain.handle(IPC.gitCommit, (_e, cwd: string, message: string) => this.commit(cwd, message))
     ipcMain.handle(IPC.gitPush, (_e, cwd: string) => this.push(cwd))
     ipcMain.handle(IPC.gitPull, (_e, cwd: string) => this.pull(cwd))
@@ -493,14 +511,85 @@ export class GitService {
     return r.ok ? { ok: true, message: `Checked out ${oid.slice(0, 7)} (detached).` } : fail(r)
   }
 
-  /** Clone a repo into parentDir; returns the cloned folder path in `message` on success. */
-  async clone(parentDir: string, url: string): Promise<GitResult> {
-    if (!parentDir || !url.trim()) return { ok: false, message: 'Folder and URL are required.' }
+  /**
+   * Clone a repo into parentDir with live progress (IPC.gitCloneProgress) and abort
+   * support. Resolves at the END of the clone; success message = the cloned path.
+   * The target dir is claimed with a non-recursive mkdir: EEXIST is a friendly error,
+   * and on failure/abort we only ever delete the directory WE created this run.
+   */
+  async clone(parentDir: string, rawUrl: string): Promise<GitResult> {
+    if (activeClone) return { ok: false, message: 'A clone is already running.' }
+    const url = expandCloneUrl(rawUrl ?? '')
+    if (!parentDir || !url) return { ok: false, message: 'Folder and URL are required.' }
     if (!isValidCloneUrl(url)) return { ok: false, message: 'Invalid repository URL.' }
-    const r = await git(parentDir, ['clone', '--', url.trim()])
-    if (!r.ok) return fail(r)
-    const name = (url.trim().split('/').pop() || 'repo').replace(/\.git$/, '')
-    return { ok: true, message: path.join(parentDir, name) }
+    const dirName = deriveRepoDirName(url)
+    if (!dirName) return { ok: false, message: 'Could not derive a folder name from that URL.' }
+    const clonePath = path.join(parentDir, dirName)
+    try {
+      await fs.promises.mkdir(clonePath) // non-recursive claim; also validates parent exists
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      if (err.code === 'EEXIST') {
+        return {
+          ok: false,
+          message: `Destination already exists: ${clonePath}. Pick another folder or open it directly.`
+        }
+      }
+      return { ok: false, message: `Cannot create ${clonePath}: ${err.message}` }
+    }
+    return await new Promise<GitResult>((resolve) => {
+      const child = spawn('git', ['clone', '--progress', '--', url, clonePath], {
+        cwd: parentDir,
+        env: GIT_ENV,
+        stdio: ['ignore', 'ignore', 'pipe']
+      })
+      const rec = { child, clonePath, aborted: false }
+      activeClone = rec
+      let tail = '' // last 4 KB of stderr for the error message
+      child.stderr?.on('data', (d: Buffer) => {
+        const text = d.toString('utf-8')
+        tail = (tail + text).slice(-4096)
+        const p = parseCloneProgress(text)
+        if (p) sendToMain(IPC.gitCloneProgress, p)
+      })
+      // Failure/abort: remove the dir we claimed (never anything pre-existing).
+      const finishFail = (message: string): void => {
+        activeClone = null
+        void fs.promises.rm(clonePath, { recursive: true, force: true })
+        resolve({ ok: false, message })
+      }
+      child.on('error', (e) => finishFail(`git could not start: ${e.message}`))
+      child.on('close', (code) => {
+        if (rec.aborted) return finishFail('aborted')
+        if (code === 0) {
+          activeClone = null
+          resolve({ ok: true, message: clonePath })
+          return
+        }
+        const clean = stripAnsiCodes(tail)
+        const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean)
+        const fatal = [...lines].reverse().find((l) => /^(fatal|error):/i.test(l))
+        finishFail(fatal ?? lines.pop() ?? 'Clone failed.')
+      })
+    })
+  }
+
+  /** Abort the in-flight clone (no-op when idle). */
+  cloneAbort(): void {
+    if (!activeClone) return
+    activeClone.aborted = true
+    activeClone.child.kill('SIGTERM')
+  }
+
+  /** ~/projects when present, else the home dir. */
+  cloneDefaultParent(): string {
+    const p = path.join(homedir(), 'projects')
+    try {
+      if (fs.statSync(p).isDirectory()) return p
+    } catch {
+      /* fall through */
+    }
+    return homedir()
   }
 
   async init(cwd: string): Promise<GitResult> {

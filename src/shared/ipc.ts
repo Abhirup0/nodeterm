@@ -82,6 +82,10 @@ export const IPC = {
   gitStatus: 'git:status',
   gitInit: 'git:init',
   gitClone: 'git:clone',
+  gitCloneAbort: 'git:clone-abort',
+  gitCloneDefaultParent: 'git:clone-default-parent',
+  /** main → renderer event: { phase, percent } while a clone runs. */
+  gitCloneProgress: 'git:clone-progress',
   gitCommit: 'git:commit',
   gitPush: 'git:push',
   gitPull: 'git:pull',
