@@ -8,7 +8,12 @@ const CLAUDE_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'Stop',
+  // Fires INSTEAD of Stop when the turn ends on an API/model error — without it the
+  // status badge sticks on "working" after any errored turn.
+  'StopFailure',
   'Notification',
+  // Dedicated permission-prompt signal (→ blocked), more direct than Notification.
+  'PermissionRequest',
   'SessionEnd',
   'PreToolUse',
   'PostToolUse'
@@ -32,6 +37,7 @@ export function installClaudeHooks(): void {
 export function removeClaudeHooks(): void {
   removeHooksFrom({
     configPath: configPath(),
-    events: CLAUDE_EVENTS
+    events: CLAUDE_EVENTS,
+    scriptFileName: SCRIPT_FILE_NAME
   })
 }

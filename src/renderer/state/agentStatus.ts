@@ -10,6 +10,12 @@ import type { AgentState } from '@shared/agents/normalize'
 export interface AgentNodeStatus {
   /** Live activity; undefined = idle/unknown. */
   state?: AgentState
+  /**
+   * When the LAST hook event asserted the current state (freshness, not transition time).
+   * Never rendered — drives the done-holdoff guard, the stale-working sweeper, and the
+   * interrupt-inference baseline. Same-state events refresh it in place (no re-render).
+   */
+  stateAt?: number
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
   /** A turn finished / needs attention while the user wasn't looking. */
@@ -36,7 +42,10 @@ interface AgentStatusStore {
   /** The terminal node the user is currently focused in (for unread decisions). */
   activeId: string | null
   setActive(id: string, active: boolean): void
-  setState(id: string, state: AgentState | undefined, agentId?: AgentId): void
+  /** `newTurn` marks a genuine UserPromptSubmit — the only working that may follow a fresh done. */
+  setState(id: string, state: AgentState | undefined, agentId?: AgentId, newTurn?: boolean): void
+  /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
+  sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
@@ -55,6 +64,18 @@ interface AgentStatusStore {
 
 const EMPTY: AgentNodeStatus = { unread: false }
 const KEY = 'nodeterm.agentStatus'
+
+// Claude Code runs hooks in PARALLEL, so the last PostToolUse's POST can arrive after the
+// Stop's POST — hold done against any non-newTurn working for this long.
+export const DONE_HOLDOFF_MS = 3000
+// Last-resort net for a lost Stop POST / crashed CLI: a working entry that saw no event at
+// all for this long decays to idle. Long on purpose (mirrors REF's 30 min freshness TTL):
+// a single silent tool run (e.g. a long build) fires no hooks between Pre- and PostToolUse,
+// so anything shorter would flip genuinely-running turns to idle.
+export const STALE_WORKING_MS = 30 * 60_000
+// Esc/Ctrl-C interrupt inference: how long to wait for a hook event before concluding the
+// turn was cancelled without a final Stop.
+export const INTERRUPT_SETTLE_MS = 1500
 
 // One-time localStorage migration from the old key. Runs before the store hydrates.
 const LEGACY_KEY = 'nodeterm.claudeStatus'
@@ -107,13 +128,44 @@ export const useAgentStatus = create<AgentStatusStore>((set) => ({
       return s.activeId === id ? { activeId: null } : s
     }),
 
-  setState: (id, state, agentId) =>
+  setState: (id, state, agentId, newTurn) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (prev.state === state && (agentId === undefined || prev.agentId === agentId)) return s
-      const next = { ...prev, state }
+      const now = Date.now()
+      // Done-holdoff: a late working event (parallel hook curls arrive out of order, or a
+      // tool POST that was in flight when the user interrupted) must not resurrect a turn
+      // that just finished. Only a genuine new turn (UserPromptSubmit) may.
+      if (
+        state === 'working' &&
+        !newTurn &&
+        prev.state === 'done' &&
+        now - (prev.stateAt ?? 0) < DONE_HOLDOFF_MS
+      ) {
+        return s
+      }
+      if (prev.state === state && (agentId === undefined || prev.agentId === agentId)) {
+        // Same-state event: refresh freshness in place — stateAt is never rendered, and a
+        // new object here would re-render every node header on each tool event.
+        if (s.byId[id]) s.byId[id].stateAt = now
+        return s
+      }
+      const next = { ...prev, state, stateAt: now }
       if (agentId !== undefined) next.agentId = agentId
       return { byId: { ...s.byId, [id]: next } }
+    }),
+
+  sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>
+    set((s) => {
+      const now = Date.now()
+      let changed = false
+      const byId = { ...s.byId }
+      for (const [id, v] of Object.entries(byId)) {
+        if (v.state === 'working' && now - (v.stateAt ?? 0) > staleMs) {
+          byId[id] = { ...v, state: undefined, stateAt: now }
+          changed = true
+        }
+      }
+      return changed ? { byId } : s
     }),
 
   setSession: (id, session) =>
@@ -189,3 +241,24 @@ export const useAgentStatus = create<AgentStatusStore>((set) => ({
       return { byId }
     })
 }))
+
+/**
+ * Esc/Ctrl-C interrupt inference (REF-style): Claude Code fires NO hook when the user
+ * cancels a turn, so a node interrupted mid-work would sit on "working" forever. Called
+ * from the terminal's input path on a lone Esc / Ctrl-C: wait one settle window; if the
+ * node is still `working` and NOT ONE hook event arrived since the keystroke (stateAt
+ * unchanged), conclude the turn was cancelled and flip it to done. A wrong guess
+ * self-corrects: the next real hook event sets working again (it's past the holdoff).
+ */
+export function inferInterruptAfterSettle(id: string, settleMs = INTERRUPT_SETTLE_MS): void {
+  const st = useAgentStatus.getState().byId[id]
+  if (st?.state !== 'working') return
+  const baseline = st.stateAt
+  setTimeout(() => {
+    const cur = useAgentStatus.getState()
+    const now = cur.byId[id]
+    if (now?.state === 'working' && now.stateAt === baseline) {
+      cur.setState(id, 'done', now.agentId)
+    }
+  }, settleMs)
+}

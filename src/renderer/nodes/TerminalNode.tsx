@@ -26,7 +26,7 @@ import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
-import { useAgentStatus } from '../state/agentStatus'
+import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
@@ -410,7 +410,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
           })
         )
-        cleanups.push(term.onData((input) => transport.write(sid, input)).dispose)
+        cleanups.push(
+          term.onData((input) => {
+            // Lone Esc / Ctrl-C while the agent works: Claude Code fires NO hook on a user
+            // interrupt, so probe the cancelled turn (still-silent working → done). Exact
+            // match — arrow keys etc. arrive as multi-byte \x1b[… sequences.
+            if (showStatus && (input === '\x1b' || input === '\x03')) inferInterruptAfterSettle(id)
+            transport.write(sid, input)
+          }).dispose
+        )
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
         if (data.initialCommand) {

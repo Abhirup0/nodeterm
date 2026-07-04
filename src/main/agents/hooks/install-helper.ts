@@ -24,18 +24,28 @@ function scriptPathFor(scriptFileName: string): string {
   return path.join(app.getPath('userData'), 'agent-hooks', scriptFileName)
 }
 
-/** A managed entry: matches the live `agent-hooks/` path or the legacy `claude-signals` marker. */
-function isManaged(d: HookDef): boolean {
+// The marker identifying OUR entry: the `agent-hooks/<scriptFile>` tail of the managed
+// command. A bare "agent-hooks" substring is NOT enough — other tools use the same dir
+// name (REF's `~/.REF/agent-hooks/claude-hook.sh`), and matching them would delete a
+// foreign app's hooks from any event we both subscribe to.
+function managedMarkerFor(command: string): string {
+  const m = command.match(/agent-hooks[\\/][^"'\s]+/)
+  return m ? m[0].replace(/\\/g, '/') : 'agent-hooks'
+}
+
+/** A managed entry: matches OUR script under `agent-hooks/` or the legacy `claude-signals` marker. */
+function isManaged(d: HookDef, marker: string): boolean {
   return !!d.hooks?.some(
-    (h) => h.command.includes('agent-hooks') || h.command.includes('claude-signals')
+    (h) => h.command.includes(marker) || h.command.includes('claude-signals')
   )
 }
 
 /** Pure: merge the managed `command` into each event, dropping any prior managed entry. */
 export function mergeManagedHook(config: HookSettings, command: string, events: readonly string[]): HookSettings {
+  const marker = managedMarkerFor(command)
   const next: HookSettings = { ...config, hooks: { ...(config.hooks ?? {}) } }
   for (const ev of events) {
-    const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d))
+    const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d, marker))
     existing.push({ hooks: [{ type: 'command', command }] })
     next.hooks![ev] = existing
   }
@@ -85,10 +95,13 @@ export function installHooksInto(opts: InstallHooksOptions): void {
 export interface RemoveHooksOptions {
   configPath: string
   events: readonly string[]
+  /** Our script's file name — narrows the match so foreign agent-hooks entries survive. */
+  scriptFileName: string
 }
 
 export function removeHooksFrom(opts: RemoveHooksOptions): void {
-  const { configPath, events } = opts
+  const { configPath, events, scriptFileName } = opts
+  const marker = `agent-hooks/${scriptFileName}`
   let config: Settings
   try {
     config = JSON.parse(readFileSync(configPath, 'utf8')) as Settings
@@ -98,7 +111,7 @@ export function removeHooksFrom(opts: RemoveHooksOptions): void {
   if (!config.hooks) return
   for (const ev of events) {
     if (!config.hooks[ev]) continue
-    config.hooks[ev] = config.hooks[ev].filter((d) => !d.hooks?.some((h) => h.command.includes('agent-hooks')))
+    config.hooks[ev] = config.hooks[ev].filter((d) => !d.hooks?.some((h) => h.command.includes(marker)))
     if (config.hooks[ev].length === 0) delete config.hooks[ev]
   }
   try {

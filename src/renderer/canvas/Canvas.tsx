@@ -2584,7 +2584,7 @@ export function Canvas() {
       const an = useAgentNodes.getState()
       switch (e.kind) {
         case 'state':
-          if (e.state) cs.setState(e.nodeId, e.state, e.agentId)
+          if (e.state) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn)
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
@@ -2592,7 +2592,9 @@ export function Canvas() {
             const m = e.task.match(/^\s*\/(loop|schedule|cron)\b/)
             if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.task })
           }
-          if (e.state === 'done') {
+          if (e.state === 'done' && !e.interrupted) {
+            // Interrupted turns (Esc/Ctrl-C) alert nobody: the user did it themselves, and
+            // the turn didn't complete, so it isn't a loop iteration either.
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
             alert('finished', `${agentLabel} finished its turn.`)
           }
@@ -2632,6 +2634,13 @@ export function Canvas() {
           break
       }
     })
+  }, [])
+
+  // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
+  // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).
+  useEffect(() => {
+    const t = setInterval(() => useAgentStatus.getState().sweepStaleWorking(), 60_000)
+    return () => clearInterval(t)
   }, [])
 
   // When the palette opens, capture each terminal's visible buffer (cached ~3s) so the

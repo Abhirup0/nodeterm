@@ -9,6 +9,9 @@ export interface NormalizedAgentEvent {
   agentId: AgentId
   kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session'
   state?: AgentState
+  // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
+  // skips the completion alert/unread for these (the user was right there).
+  interrupted?: boolean
   // true only for a genuine new turn (Claude UserPromptSubmit), so the renderer can
   // clear per-turn fan-out without clearing on every mid-turn tool event.
   newTurn?: boolean
@@ -47,6 +50,7 @@ interface ClaudePayload {
   hook_event_name?: string
   session_id?: string
   notification_type?: string
+  is_interrupt?: boolean
   last_assistant_message?: string
   prompt?: string
   tool_name?: string
@@ -122,7 +126,22 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
   }
   if (ev === 'Stop') {
+    return {
+      ...base,
+      kind: 'state',
+      state: 'done',
+      interrupted: p.is_interrupt === true,
+      lastMessage: p.last_assistant_message
+    }
+  }
+  // The turn died on an API/model error — Claude Code skips the normal Stop hook here,
+  // so without this the node would sit on "working" forever.
+  if (ev === 'StopFailure') {
     return { ...base, kind: 'state', state: 'done', lastMessage: p.last_assistant_message }
+  }
+  // The dedicated permission hook (more direct than Notification's permission_prompt).
+  if (ev === 'PermissionRequest') {
+    return { ...base, kind: 'state', state: 'blocked', lastMessage: p.last_assistant_message }
   }
   if (ev === 'Notification') {
     const state: AgentState = p.notification_type === 'permission_prompt' ? 'blocked' : 'waiting'
