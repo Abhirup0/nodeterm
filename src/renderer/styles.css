@@ -4120,8 +4120,11 @@ body,
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .ss-dot--idle { background: rgba(160, 160, 160, 0.4); }
-.ss-dot--done { background: #30d158; }
-.ss-dot--attention { background: #ffd60a; }
+/* waiting/blocked = needs the user NOW: red, mirroring REF's attention color. */
+.ss-dot--attention { background: #ff453a; }
+/* done renders as a check icon (ss-check), not a dot — see SessionRow. */
+.ss-check { color: #30d158; margin-top: 2px; flex: 0 0 auto; line-height: 0; }
+.ss-check svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
   border: 2px solid #ffd60a;

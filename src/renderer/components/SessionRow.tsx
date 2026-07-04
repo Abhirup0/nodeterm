@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { IconCircleCheck } from './icons'
 import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -69,7 +70,14 @@ export function SessionRow({
       }}
       onDragEnd={onDragEnd}
     >
-      <span className={`ss-dot ss-dot--${row.statusKind}`} title={row.stateLabel} />
+      {row.statusKind === 'done' ? (
+        // REF-style completion glyph: a check icon scans better than one more dot.
+        <span className="ss-check" title={row.stateLabel}>
+          <IconCircleCheck />
+        </span>
+      ) : (
+        <span className={`ss-dot ss-dot--${row.statusKind}`} title={row.stateLabel} />
+      )}
       <div className="ss-row__body">
         <div className="ss-row__titleline">
           <span className="ss-mark" style={{ background: row.color }} />

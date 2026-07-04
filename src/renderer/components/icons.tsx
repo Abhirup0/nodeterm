@@ -188,3 +188,10 @@ export const IconPin = () => (
     <line x1="12" y1="14" x2="12" y2="21" />
   </svg>
 )
+
+export const IconCircleCheck = () => (
+  <svg {...S}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M9 12.5l2.2 2.2L15.5 10" />
+  </svg>
+)
