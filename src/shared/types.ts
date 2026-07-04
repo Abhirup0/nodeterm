@@ -1,5 +1,6 @@
 // Types shared across the main, preload, and renderer processes.
 
+import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
@@ -441,6 +442,12 @@ export interface GitApi {
   init(cwd: string): Promise<GitResult>
   /** Clone a repo into parentDir; returns the cloned folder path in message on success. */
   clone(parentDir: string, url: string): Promise<GitResult>
+  /** Abort the in-flight clone, if any (its clone() promise resolves message:'aborted'). */
+  cloneAbort(): Promise<void>
+  /** Suggested parent dir for clones: ~/projects if it exists, else the home dir. */
+  cloneDefaultParent(): Promise<string>
+  /** Subscribe to live clone progress; returns unsubscribe. */
+  onCloneProgress(listener: (p: CloneProgress) => void): () => void
   /** Commits the staged changes (no implicit add). */
   commit(cwd: string, message: string): Promise<GitResult>
   push(cwd: string): Promise<GitResult>

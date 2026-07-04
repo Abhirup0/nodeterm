@@ -10,6 +10,14 @@ import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
+import { sendToMain } from './main-window'
+import {
+  isValidCloneUrl,
+  expandCloneUrl,
+  deriveRepoDirName,
+  parseCloneProgress,
+  stripAnsiCodes
+} from '../shared/clone-url'
 
 const run = promisify(execFile)
 
@@ -36,6 +44,15 @@ const GIT_ENV: NodeJS.ProcessEnv = {
   PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin${process.env.PATH ? `:${process.env.PATH}` : ''}`,
   GIT_TERMINAL_PROMPT: '0'
 }
+
+// Single-flight registry for the one clone the app runs at a time. Module-scoped so a
+// macOS window re-creation can't orphan it.
+type ActiveClone = {
+  child: import('child_process').ChildProcess | null
+  clonePath: string
+  aborted: boolean
+}
+let activeClone: ActiveClone | null = null
 
 // `gh auth status` is a network-touching CLI call but auth state changes rarely, so cache
 // it briefly — otherwise every status refresh pays a process spawn (and possible round-trip).
@@ -96,17 +113,6 @@ function isValidRef(name: string): boolean {
   return !/[\s~^:?*[\\]|\.\.|^\/|\/$|@\{/.test(n)
 }
 
-/**
- * Validate a clone URL: must use a known scheme (or scp-style git@host:path) and
- * must not begin with `-`, so it can't be parsed by git as an option flag
- * (e.g. `--upload-pack=…`, which is a remote-code-execution vector).
- */
-function isValidCloneUrl(url: string): boolean {
-  const u = url.trim()
-  if (!u || u.startsWith('-')) return false
-  return /^(https?:\/\/|ssh:\/\/|git:\/\/|git@[^/]+:)/.test(u)
-}
-
 /** path -> {added, deleted} from `git diff --numstat` output. */
 function parseNumstat(out: string): Map<string, { added: number; deleted: number }> {
   const map = new Map<string, { added: number; deleted: number }>()
@@ -157,6 +163,8 @@ export class GitService {
     ipcMain.handle(IPC.gitStatus, (_e, cwd: string) => this.status(cwd))
     ipcMain.handle(IPC.gitInit, (_e, cwd: string) => this.init(cwd))
     ipcMain.handle(IPC.gitClone, (_e, parentDir: string, url: string) => this.clone(parentDir, url))
+    ipcMain.handle(IPC.gitCloneAbort, () => this.cloneAbort())
+    ipcMain.handle(IPC.gitCloneDefaultParent, () => this.cloneDefaultParent())
     ipcMain.handle(IPC.gitCommit, (_e, cwd: string, message: string) => this.commit(cwd, message))
     ipcMain.handle(IPC.gitPush, (_e, cwd: string) => this.push(cwd))
     ipcMain.handle(IPC.gitPull, (_e, cwd: string) => this.pull(cwd))
@@ -503,14 +511,92 @@ export class GitService {
     return r.ok ? { ok: true, message: `Checked out ${oid.slice(0, 7)} (detached).` } : fail(r)
   }
 
-  /** Clone a repo into parentDir; returns the cloned folder path in `message` on success. */
-  async clone(parentDir: string, url: string): Promise<GitResult> {
-    if (!parentDir || !url.trim()) return { ok: false, message: 'Folder and URL are required.' }
+  /**
+   * Clone a repo into parentDir with live progress (IPC.gitCloneProgress) and abort
+   * support. Resolves at the END of the clone; success message = the cloned path.
+   * The target dir is claimed with a non-recursive mkdir: EEXIST is a friendly error,
+   * and on failure/abort we only ever delete the directory WE created this run.
+   */
+  async clone(parentDir: string, rawUrl: string): Promise<GitResult> {
+    if (activeClone) return { ok: false, message: 'A clone is already running.' }
+    const url = expandCloneUrl(rawUrl ?? '')
+    if (!parentDir || !url) return { ok: false, message: 'Folder and URL are required.' }
     if (!isValidCloneUrl(url)) return { ok: false, message: 'Invalid repository URL.' }
-    const r = await git(parentDir, ['clone', '--', url.trim()])
-    if (!r.ok) return fail(r)
-    const name = (url.trim().split('/').pop() || 'repo').replace(/\.git$/, '')
-    return { ok: true, message: path.join(parentDir, name) }
+    const dirName = deriveRepoDirName(url)
+    if (!dirName) return { ok: false, message: 'Could not derive a folder name from that URL.' }
+    const clonePath = path.join(parentDir, dirName)
+    // Reserve the single-flight slot synchronously, BEFORE the mkdir await, so a
+    // concurrent clone() can't slip past the guard during the await. child is filled
+    // in once spawned; cloneAbort() guards against the null window.
+    const rec: ActiveClone = { child: null, clonePath, aborted: false }
+    activeClone = rec
+    try {
+      await fs.promises.mkdir(clonePath) // non-recursive claim; also validates parent exists
+    } catch (e) {
+      activeClone = null
+      const err = e as NodeJS.ErrnoException
+      if (err.code === 'EEXIST') {
+        return {
+          ok: false,
+          message: `Destination already exists: ${clonePath}. Pick another folder or open it directly.`
+        }
+      }
+      return { ok: false, message: `Cannot create ${clonePath}: ${err.message}` }
+    }
+    return await new Promise<GitResult>((resolve) => {
+      const child = spawn('git', ['clone', '--progress', '--', url, clonePath], {
+        cwd: parentDir,
+        env: GIT_ENV,
+        stdio: ['ignore', 'ignore', 'pipe']
+      })
+      rec.child = child
+      let tail = '' // last 4 KB of stderr for the error message
+      child.stderr?.on('data', (d: Buffer) => {
+        const text = d.toString('utf-8')
+        tail = (tail + text).slice(-4096)
+        const p = parseCloneProgress(text)
+        if (p) sendToMain(IPC.gitCloneProgress, p)
+      })
+      // Failure/abort: remove the dir we claimed (never anything pre-existing).
+      const finishFail = (message: string): void => {
+        activeClone = null
+        void fs.promises.rm(clonePath, { recursive: true, force: true })
+        resolve({ ok: false, message })
+      }
+      child.on('error', (e) => finishFail(`git could not start: ${e.message}`))
+      child.on('close', (code) => {
+        if (rec.aborted) return finishFail('aborted')
+        if (code === 0) {
+          activeClone = null
+          resolve({ ok: true, message: clonePath })
+          return
+        }
+        const clean = stripAnsiCodes(tail)
+        const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean)
+        const fatal = [...lines].reverse().find((l) => /^(fatal|error):/i.test(l))
+        finishFail(fatal ?? lines.pop() ?? 'Clone failed.')
+      })
+    })
+  }
+
+  /** Abort the in-flight clone (no-op when idle). */
+  cloneAbort(): void {
+    if (!activeClone) return
+    activeClone.aborted = true
+    // child may be null during the reservation→spawn window; the close handler still
+    // honors `aborted` once the process starts.
+    activeClone.child?.kill('SIGTERM')
+  }
+
+  /** ~/projects when present, else the home dir. */
+  cloneDefaultParent(): string {
+    const p = path.join(os.homedir(), 'projects')
+    try {
+      if (fs.statSync(p).isDirectory()) return p
+    } catch {
+      /* fall through */
+    }
+    return os.homedir()
   }
 
   async init(cwd: string): Promise<GitResult> {

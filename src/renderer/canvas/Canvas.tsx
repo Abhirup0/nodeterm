@@ -55,6 +55,7 @@ import { SettingsPage } from '../components/settings/SettingsPage'
 import type { SettingsSectionId } from '../components/settings/nav'
 import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
+import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
@@ -233,6 +234,8 @@ export function Canvas() {
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
   const [sshDialogOpen, setSshDialogOpen] = useState(false)
+  // "Clone repository…" dialog (from the Welcome screen + command palette).
+  const [cloneDialogOpen, setCloneDialogOpen] = useState(false)
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
   const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
@@ -1190,22 +1193,18 @@ export function Canvas() {
     [openFile]
   )
 
-  const cloneRepo = useCallback(async () => {
-    const url = await promptDialog({ message: 'Repository URL (https:// or git@):' })
-    if (!url) return
-    const parent = await window.nodeTerminal.dialog.selectFolder()
-    if (!parent) return
-    const r = await window.nodeTerminal.git.clone(parent, url)
-    if (!r.ok) {
-      window.alert(`Clone failed: ${r.message}`)
-      return
-    }
-    const name = url.split('/').pop()?.replace(/\.git$/, '') || 'repo'
-    commitActiveToStore()
-    const project = useProjects.getState().addProject(name, r.message)
-    useProjects.getState().setActive(project.id)
-    void writeDisk()
-  }, [commitActiveToStore, writeDisk])
+  /** Open the clone dialog; project creation happens in onRepoCloned below. */
+  const cloneRepo = useCallback(() => setCloneDialogOpen(true), [])
+
+  const onRepoCloned = useCallback(
+    (clonedPath: string, name: string) => {
+      commitActiveToStore()
+      const project = useProjects.getState().addProject(name, clonedPath)
+      useProjects.getState().setActive(project.id)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
 
   const addSticky = useCallback(
     (center?: { x: number; y: number }) => {
@@ -2909,6 +2908,7 @@ export function Canvas() {
         })
       ),
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
+      { id: 'clone-repo', label: 'Clone repository…', icon: <IconProject />, run: () => setCloneDialogOpen(true) },
       {
         id: 'new-remote',
         label: 'New Remote Connection',
@@ -3149,7 +3149,7 @@ export function Canvas() {
             }}
             onCloneRepo={() => {
               setWelcomeOpen(false)
-              void cloneRepo()
+              cloneRepo()
             }}
             onConnectSsh={() => {
               setWelcomeOpen(false)
@@ -3161,6 +3161,12 @@ export function Canvas() {
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
           />
         )}
+
+        <CloneRepoDialog
+          open={cloneDialogOpen}
+          onClose={() => setCloneDialogOpen(false)}
+          onCloned={onRepoCloned}
+        />
 
         {remoteConnId && (
           <div className="remote-session-overlay">

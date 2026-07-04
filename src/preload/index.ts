@@ -113,6 +113,13 @@ const api: NodeTerminalApi = {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
     init: (cwd) => ipcRenderer.invoke(IPC.gitInit, cwd),
     clone: (parentDir, url) => ipcRenderer.invoke(IPC.gitClone, parentDir, url),
+    cloneAbort: () => ipcRenderer.invoke(IPC.gitCloneAbort),
+    cloneDefaultParent: () => ipcRenderer.invoke(IPC.gitCloneDefaultParent),
+    onCloneProgress: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.gitCloneProgress, handler)
+      return () => ipcRenderer.removeListener(IPC.gitCloneProgress, handler)
+    },
     commit: (cwd, message) => ipcRenderer.invoke(IPC.gitCommit, cwd, message),
     push: (cwd) => ipcRenderer.invoke(IPC.gitPush, cwd),
     pull: (cwd) => ipcRenderer.invoke(IPC.gitPull, cwd),
