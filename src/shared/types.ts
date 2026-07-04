@@ -582,6 +582,8 @@ export interface ContextLinkInfo {
   title: string
   /** The linked node's working dir — lets the CLI resolve a transcript when the path isn't known yet. */
   cwd?: string
+  /** Set when the linked node is a sticky note: its current text. Note entries have no transcript/terminal. */
+  note?: string
 }
 
 /** Map of node id → the nodes it is context-linked to. Sent to main so it can write link files. */
