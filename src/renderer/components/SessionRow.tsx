@@ -106,6 +106,9 @@ export function SessionRow({
               {row.title}
             </span>
           )}
+          {row.unread && (
+            <span className="ss-unread-dot" title="Unread — finished while you weren't looking" />
+          )}
           {row.session && <span className="ss-chip">{row.session}</span>}
           {row.loop && (
             <span className="ss-loop">

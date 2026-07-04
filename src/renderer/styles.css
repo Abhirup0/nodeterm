@@ -4137,6 +4137,9 @@ body,
 .ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
 .ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-title.is-unread { font-weight: 600; }
+/* Unread bullet next to the title (semibold alone is invisible at 12.5px). Accent blue —
+   deliberately NOT a status color (green/red/yellow), it means "new for you", not a state. */
+.ss-unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
 .ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
 .ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
 .ss-loop { font-size: 9.5px; color: #ffd60a; border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
