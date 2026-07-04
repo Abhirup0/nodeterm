@@ -97,6 +97,7 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
+import { buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
@@ -450,28 +451,45 @@ export function Canvas() {
 
   // Context-link edges, statically styled (no per-message activity in the pull model).
   const accent = settings.accent
+  // Sticky-node id signature: lets displayEdges tell note edges (source is a sticky) apart
+  // without depending on the whole nodes array identity (which changes every drag).
+  const stickySig = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.type === 'sticky')
+        .map((n) => n.id)
+        .sort()
+        .join('|'),
+    [nodes]
+  )
   const displayEdges = useMemo(() => {
+    const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
     const decorated = linkEdges.map((e) => {
       const sel = !!e.selected
+      const isNote = stickyIds.has(e.source)
       const stroke = sel ? '#ffffff' : accent
+      const baseLabel = isNote ? '🗒 note' : '⇄ context'
       return {
         ...e,
         type: 'default',
         sourceHandle: 'link-out',
         targetHandle: 'link-in',
-        label: sel ? '⇄ context — ⌫ to remove' : '⇄ context',
+        label: sel ? `${baseLabel} — ⌫ to remove` : baseLabel,
         labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
         labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
         labelBgPadding: [6, 3] as [number, number],
         labelBgBorderRadius: 5,
         style: { stroke, strokeWidth: sel ? 3.5 : 2 },
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 },
-        markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 }
+        // Context links are bidirectional (arrowheads both ends); note links flow one way.
+        ...(isNote
+          ? {}
+          : { markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } })
       }
     })
     const extra = ephemeralEdges.length || controlEdges.length ? [...ephemeralEdges, ...controlEdges] : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -822,50 +840,73 @@ export function Canvas() {
     )
   }, [])
 
-  // Context links connect two context-link-capable agent sessions (currently Claude only).
-  const canLinkNode = useCallback(
-    (id: string) => {
+  // Endpoint descriptor for classifyLink: node kind + whether it's a context-link-capable
+  // agent session (currently Claude only). Null when the node doesn't exist.
+  const linkEndpointOf = useCallback(
+    (id: string): LinkEndpoint | null => {
+      const n = nodesRef.current.find((x) => x.id === id)
+      if (!n) return null
       const a = agentIdOf(id)
-      return !!a && canContextLink(a)
+      return { kind: n.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
     },
     [agentIdOf]
   )
 
-  // Draw a context link between two context-link-capable nodes.
+  // Draw a link: context (two Claude nodes read each other) or note (sticky text becomes
+  // the terminal's context).
   const onConnect = useCallback(
     (c: Connection) => {
       if (!c.source || !c.target || c.source === c.target) return
-      if (!canLinkNode(c.source) || !canLinkNode(c.target)) return
+      const se = linkEndpointOf(c.source)
+      const te = linkEndpointOf(c.target)
+      if (!se || !te) return
+      const kind = classifyLink(se, te)
+      if (!kind) return
+      // Note edges are stored sticky→terminal regardless of drag direction, so styling and
+      // the link map can key off "source is sticky".
+      const source = kind === 'note' && te.kind === 'sticky' ? c.target : c.source
+      const target = source === c.source ? c.target : c.source
       // No duplicate link (in either direction).
       const exists = linkEdgesRef.current.some(
         (e) =>
-          (e.source === c.source && e.target === c.target) ||
-          (e.source === c.target && e.target === c.source)
+          (e.source === source && e.target === target) ||
+          (e.source === target && e.target === source)
       )
       if (exists) return
       setLinkEdges((es) =>
-        addEdge(
-          { id: `bridge-${c.source}-${c.target}`, source: c.source!, target: c.target!, type: 'default' },
-          es
-        )
+        addEdge({ id: `bridge-${source}-${target}`, source, target, type: 'default' }, es)
       )
       markDirty()
-      // Discovery: tell each idle endpoint it is now linked (skip a node mid-turn so we don't
-      // interrupt it — the skill stays discoverable on its next relevant need).
       const status = useAgentStatus.getState().byId
       const titleOf = (id: string) =>
         (nodes.find((n) => n.id === id)?.data.title as string) || 'a linked node'
-      const note = (selfId: string, otherId: string) => {
-        if (status[selfId]?.state === 'working') return
-        void window.nodeTerminal.pty.sendText(
-          selfId,
-          `[nodeterm] You are now linked to "${titleOf(otherId)}". Use the get-linked-context skill to read its context when you need it.`
-        )
+      if (kind === 'context') {
+        // Discovery: tell each idle endpoint it is now linked (skip a node mid-turn so we
+        // don't interrupt it — the skill stays discoverable on its next relevant need).
+        const note = (selfId: string, otherId: string) => {
+          if (status[selfId]?.state === 'working') return
+          void window.nodeTerminal.pty.sendText(
+            selfId,
+            `[nodeterm] You are now linked to "${titleOf(otherId)}". Use the get-linked-context skill to read its context when you need it.`
+          )
+        }
+        note(source, target)
+        note(target, source)
+        return
       }
-      note(c.source, c.target)
-      note(c.target, c.source)
+      // Note link: push the note text once into the terminal — agent sessions only.
+      // pty.sendText appends Enter, so pushing into a plain shell would EXECUTE the text
+      // as a command; plain terminals get the link file but no injection.
+      if (!agentIdOf(target)) return
+      if (status[target]?.state === 'working') return
+      const sticky = nodes.find((n) => n.id === source)
+      const msg = buildNotePushMessage(
+        (sticky?.data.title as string) || 'Note',
+        (sticky?.data.text as string) ?? ''
+      )
+      if (msg) void window.nodeTerminal.pty.sendText(target, msg)
     },
-    [canLinkNode, setLinkEdges, markDirty, nodes]
+    [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
   )
 
   // Double-click a context link to remove it (ephemeral subagent/loop edges are left alone).
@@ -889,13 +930,16 @@ export function Canvas() {
     }
     const infoOf = (id: string) => {
       const n = nodes.find((nn) => nn.id === id)
-      return { id, title: (n?.data.title as string) || id, cwd: (n?.data.cwd as string) || '' }
+      const sticky = n?.type === 'sticky'
+      return {
+        id,
+        title: (n?.data.title as string) || id,
+        cwd: (n?.data.cwd as string) || '',
+        note: sticky ? ((n?.data.text as string) ?? '') : undefined,
+        sticky
+      }
     }
-    const map: Record<string, { id: string; title: string; cwd: string }[]> = {}
-    for (const e of valid) {
-      ;(map[e.source] ??= []).push(infoOf(e.target))
-      ;(map[e.target] ??= []).push(infoOf(e.source))
-    }
+    const map = buildLinkMap(valid, infoOf)
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
   }, [linkEdges, nodes, setLinkEdges])
