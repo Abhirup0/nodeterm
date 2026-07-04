@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 
 /**
@@ -34,6 +34,22 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
       style={{ background: `${data.color}22`, borderColor: data.color }}
     >
       <NodeResizer minWidth={160} minHeight={120} isVisible={selected && !collapsed} color={data.color} />
+
+      {/* Note-link handles: drag to/from a terminal node to attach this note as context. */}
+      <Handle
+        id="link-out"
+        type="source"
+        position={Position.Right}
+        className="bridge-handle bridge-handle--out"
+        data-tip="Link out — drag to a terminal to attach this note as context"
+      />
+      <Handle
+        id="link-in"
+        type="target"
+        position={Position.Left}
+        className="bridge-handle bridge-handle--in"
+        data-tip="Link in — drop a link here to attach this note as context"
+      />
 
       <div className="sticky-node__header" style={{ background: `${data.color}33` }}>
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>
