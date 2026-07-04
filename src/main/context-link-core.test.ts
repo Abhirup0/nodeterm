@@ -24,6 +24,17 @@ describe('buildLinkDoc', () => {
     ])
   })
 
+  it('carries a sticky note through with empty transcript/tmux', () => {
+    const doc = buildLinkDoc('node-A', [{ id: 'note-1', title: 'Deploy notes', note: 'use staging' }], {
+      transcriptOf: () => '/should/not/be/used.jsonl',
+      tmuxBin: '/usr/bin/tmux',
+      tmuxSocket: 'node-terminal'
+    })
+    expect(doc.links).toEqual([
+      { id: 'note-1', title: 'Deploy notes', cwd: '', transcriptPath: '', tmux: '', note: 'use staging' }
+    ])
+  })
+
   it('sanitizes the tmux session name like the pty manager', () => {
     const doc = buildLinkDoc('x', [{ id: 'a b/c.d', title: 'T' }], {
       transcriptOf: () => '',

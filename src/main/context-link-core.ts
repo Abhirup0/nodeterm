@@ -19,6 +19,8 @@ export interface LinkDocEntry {
   cwd: string
   transcriptPath: string
   tmux: string
+  /** Present when this entry is a sticky note: its text. Note entries have no transcript/terminal. */
+  note?: string
 }
 export interface LinkDoc {
   self: { id: string }
@@ -35,13 +37,18 @@ export function buildLinkDoc(
 ): LinkDoc {
   return {
     self: { id: nodeId },
-    links: links.map((n) => ({
-      id: n.id,
-      title: n.title,
-      cwd: n.cwd ?? '',
-      transcriptPath: ctx.transcriptOf(n.id),
-      tmux: sessionName(n.id)
-    })),
+    links: links.map((n) => {
+      const isNote = n.note != null
+      const entry: LinkDocEntry = {
+        id: n.id,
+        title: n.title,
+        cwd: n.cwd ?? '',
+        transcriptPath: isNote ? '' : ctx.transcriptOf(n.id),
+        tmux: isNote ? '' : sessionName(n.id)
+      }
+      if (isNote) entry.note = n.note
+      return entry
+    }),
     tmuxBin: ctx.tmuxBin,
     tmuxSocket: ctx.tmuxSocket
   }
@@ -80,7 +87,7 @@ function pickNode(doc, want) {
   }
   if (links.length === 1) return links[0]
   out('Several linked nodes — re-run with --node <id|title>:')
-  links.forEach(function (n) { out('- ' + n.title + ' (id: ' + n.id + ')') })
+  links.forEach(function (n) { out('- ' + n.title + (n.note != null ? ' (note)' : '') + ' (id: ' + n.id + ')') })
   process.exit(0)
 }
 
@@ -161,10 +168,20 @@ var doc = loadLinks()
 if (cmd === 'list') {
   if (!doc.links.length) { out('No linked nodes.'); process.exit(0) }
   out('Linked nodes:')
-  doc.links.forEach(function (n) { out('- ' + n.title + ' (id: ' + n.id + ')') })
+  doc.links.forEach(function (n) { out('- ' + n.title + (n.note != null ? ' (note)' : '') + ' (id: ' + n.id + ')') })
   process.exit(0)
 }
 var node = pickNode(doc, flag('--node'))
+// Sticky notes carry their text in the link file — every command just prints it.
+if (node.note != null) {
+  if (cmd === 'terminal') {
+    out('"' + node.title + '" is a sticky note — it has no terminal.')
+  } else {
+    out('=== ' + node.title + ' — note ===')
+    out(node.note || '(empty note)')
+  }
+  process.exit(0)
+}
 if (cmd === 'summary') {
   var n = parseInt(flag('-n') || '15', 10) || 15
   var ls = readTranscript(node)
