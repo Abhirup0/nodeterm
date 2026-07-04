@@ -154,7 +154,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // Gate each former `isClaude` site by the capability it actually represents.
   const showStatus = !!agentId && hasHooks(agentId) // status badge + session-title capture
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
-  const showLink = !!agentId && canContextLink(agentId) // context-link handles
+  const contextLinkCapable = !!agentId && canContextLink(agentId) // context-link tip wording only; handles render on all terminals
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
   const canRenameNode = !!agentId && canRename(agentId) // title ⇄ session-name two-way sync
@@ -230,11 +230,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     if (search.query.trim()) searchAddonRef.current?.findPrevious(search.query, findOpts)
   }, [search])
 
-  // The link handles are added/positioned dynamically for context-link-capable nodes; make
-  // React Flow re-measure them so edges anchor to the (centered) handle, not a stale position.
+  // The link handles are added/positioned dynamically; make React Flow re-measure them so edges
+  // anchor to the (centered) handle, not a stale position. Rendered on all terminal nodes now.
   useEffect(() => {
-    if (showLink) updateNodeInternals(id)
-  }, [showLink, id, updateNodeInternals])
+    updateNodeInternals(id)
+  }, [id, updateNodeInternals])
 
   // Terminal lifecycle — set up once on mount, and again whenever `respawnNonce` is bumped
   // (e.g. moving this terminal into a worktree). Bumping the nonce runs the cleanup below
@@ -734,26 +734,31 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
       />
-      {/* Context-link handles (context-link-capable nodes only): drag right→left to link two
-          sessions. Vertically centered on the side edges; raised above the body so they're never buried. */}
-      {showLink && (
-        <>
-          <Handle
-            id="link-out"
-            type="source"
-            position={Position.Right}
-            className="bridge-handle bridge-handle--out"
-            data-tip="Link out — drag to another Claude node so they can read each other's context"
-          />
-          <Handle
-            id="link-in"
-            type="target"
-            position={Position.Left}
-            className="bridge-handle bridge-handle--in"
-            data-tip="Link in — drop a link here to share context with this Claude session"
-          />
-        </>
-      )}
+      {/* Link handles (all terminal nodes): drag right→left to link. Between two context-capable
+          (Claude) nodes this shares context; from a sticky note it attaches the note as context.
+          Vertically centered on the side edges; raised above the body so they're never buried. */}
+      <Handle
+        id="link-out"
+        type="source"
+        position={Position.Right}
+        className="bridge-handle bridge-handle--out"
+        data-tip={
+          contextLinkCapable
+            ? "Link out — drag to another Claude node so they can read each other's context"
+            : 'Link out — drag to a sticky note to attach it as context'
+        }
+      />
+      <Handle
+        id="link-in"
+        type="target"
+        position={Position.Left}
+        className="bridge-handle bridge-handle--in"
+        data-tip={
+          contextLinkCapable
+            ? 'Link in — drop a link here to share context with this Claude session'
+            : 'Link in — drop a sticky note link here to attach it as context'
+        }
+      />
 
       <div className="term-node__header">
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>

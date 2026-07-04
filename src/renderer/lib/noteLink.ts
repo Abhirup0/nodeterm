@@ -34,7 +34,6 @@ const NOTE_PUSH_MAX = 2000
 export function buildNotePushMessage(title: string, text: string): string | null {
   if (!text.trim()) return null
   const flat = text.replace(/\s*\r?\n\s*/g, ' ⏎ ').trim()
-  if (!flat) return null
   const body =
     flat.length > NOTE_PUSH_MAX
       ? flat.slice(0, NOTE_PUSH_MAX) +
