@@ -7,6 +7,7 @@
 import { app, BrowserWindow, ipcMain, Notification } from 'electron'
 import electronUpdater from 'electron-updater'
 import { IPC } from '../shared/ipc'
+import { retainUntilDismissed } from './notifications'
 
 const { autoUpdater } = electronUpdater
 
@@ -58,6 +59,8 @@ export function initUpdater(win: BrowserWindow): void {
         win.show()
         win.focus()
       })
+      // Keep a reference or GC silently kills the click handler (electron/electron#16922).
+      retainUntilDismissed(n)
       n.show()
     }
   })

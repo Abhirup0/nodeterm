@@ -14,6 +14,7 @@ import { initUpdater } from './updater'
 import { fetchCheck } from './check'
 import { hookServer } from './agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
+import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
 import { createContextTail, type TaskNotification } from './context-tail'
@@ -292,6 +293,9 @@ app.whenReady().then(async () => {
         w.focus()
         if (payload.nodeId) w.webContents.send(IPC.appFocusNode, payload.nodeId)
       })
+      // Without a retained reference the wrapper gets GC'd and the click handler dies —
+      // clicking would then only activate the app, never focus the originating node.
+      retainUntilDismissed(n)
       n.show()
       return true
     }
