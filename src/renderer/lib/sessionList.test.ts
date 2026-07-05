@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildSessionList, sessionStatusKind, isGroupCollapsed, type ProjectInput } from './sessionList'
+import {
+  buildSessionList,
+  sessionStatusKind,
+  isGroupCollapsed,
+  projectSignalCounts,
+  type ProjectInput
+} from './sessionList'
 import type { AgentNodeStatus } from '../state/agentStatus'
 
 const node = (id: string, over: Partial<ProjectInput['nodes'][number]> = {}) => ({
@@ -124,5 +130,46 @@ describe('buildSessionList', () => {
 
     const unfiltered = buildSessionList(projects(), null, 'p1', {}, '')
     expect(unfiltered.length).toBe(2) // both projects kept when no filter
+  })
+})
+
+describe('projectSignalCounts', () => {
+  it('counts attention and unread across ungrouped and grouped sessions', () => {
+    const proj: ProjectInput[] = [
+      {
+        id: 'p1',
+        name: 'P1',
+        color: '#123',
+        nodes: [
+          node('g1', { kind: 'group', title: 'G', color: '#abc' }),
+          node('a'), // waiting → attention
+          node('b', { parentId: 'g1' }), // blocked → attention
+          node('c'), // done + unread → unread
+          node('d'), // idle + unread → unread (state lost, unread persisted)
+          node('e'), // working + unread → NOT counted (mirrors the row glyph precedence)
+          node('f') // plain idle → neither
+        ]
+      }
+    ]
+    const status: Record<string, AgentNodeStatus> = {
+      a: { unread: false, state: 'waiting' },
+      b: { unread: true, state: 'blocked' }, // attention wins over unread
+      c: { unread: true, state: 'done' },
+      d: { unread: true },
+      e: { unread: true, state: 'working' }
+    }
+    const [g] = buildSessionList(proj, null, 'p1', status, '')
+    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2 })
+  })
+
+  it('returns zeros for a quiet project', () => {
+    const [g] = buildSessionList(
+      [{ id: 'p1', name: 'P1', color: '#123', nodes: [node('x')] }],
+      null,
+      'p1',
+      {},
+      ''
+    )
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0 })
   })
 })

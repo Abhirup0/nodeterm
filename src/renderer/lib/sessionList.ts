@@ -47,6 +47,22 @@ export function isGroupCollapsed(
   return projectId in overrides ? overrides[projectId] : !isActive
 }
 
+/**
+ * Header badges for a project group: how many sessions need the user right now
+ * (waiting/blocked) and how many finished unseen. Mirrors the row glyph's precedence —
+ * an attention session is never double-counted as unread, and a working one isn't
+ * unread yet (a new turn is running; the old mark resurfaces when it ends).
+ */
+export function projectSignalCounts(group: SessionGroup): { attention: number; unread: number } {
+  let attention = 0
+  let unread = 0
+  for (const s of [...group.ungrouped, ...group.groups.flatMap((b) => b.sessions)]) {
+    if (s.statusKind === 'attention') attention++
+    else if (s.unread && s.statusKind !== 'working') unread++
+  }
+  return { attention, unread }
+}
+
 export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
   switch (state) {
     case 'working':

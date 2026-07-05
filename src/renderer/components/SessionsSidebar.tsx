@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { buildSessionList, isGroupCollapsed, type SessionNodeInput } from '../lib/sessionList'
+import {
+  buildSessionList,
+  isGroupCollapsed,
+  projectSignalCounts,
+  type SessionNodeInput
+} from '../lib/sessionList'
 import { SessionRow } from './SessionRow'
-import { IconPin } from './icons'
+import { IconBellFilled, IconCircleCheck, IconPin } from './icons'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -201,6 +206,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         {groups.length === 0 && <div className="sessions-sidebar__empty">No sessions yet.</div>}
         {groups.map((g) => {
           const isCollapsed = isGroupCollapsed(overrides, g.projectId, g.isActive)
+          const signals = projectSignalCounts(g)
           return (
             <div key={g.projectId} className={`ss-group${g.isActive ? ' is-active' : ''}`}>
               <div
@@ -214,6 +220,18 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                 <span className="ss-group__name">{g.projectName}</span>
                 {branches[g.projectId] && (
                   <span className="ss-group__branch">⎇ {branches[g.projectId]}</span>
+                )}
+                {signals.attention > 0 && (
+                  <span className="ss-group__sig ss-group__sig--attention" title="Sessions that need you">
+                    <IconBellFilled />
+                    {signals.attention}
+                  </span>
+                )}
+                {signals.unread > 0 && (
+                  <span className="ss-group__sig ss-group__sig--unread" title="Finished — new for you">
+                    <IconCircleCheck />
+                    {signals.unread}
+                  </span>
                 )}
                 <span className="ss-group__count">{projectCount(g)}</span>
                 <button
