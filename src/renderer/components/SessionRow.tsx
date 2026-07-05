@@ -70,15 +70,22 @@ export function SessionRow({
       }}
       onDragEnd={onDragEnd}
     >
-      {row.statusKind === 'done' ? (
-        // REF-style completion glyph: a check icon scans better than one more dot.
-        <span className="ss-check" title={row.stateLabel}>
-          <IconCircleCheck />
-        </span>
-      ) : row.statusKind === 'attention' ? (
+      {row.statusKind === 'attention' ? (
         // Needs-you rings a bell — louder than one more colored dot.
         <span className="ss-bell" title={row.stateLabel}>
           <IconBellFilled />
+        </span>
+      ) : row.statusKind !== 'working' && row.unread ? (
+        // Finished (or reset to idle) while the user wasn't looking: the SAME check glyph,
+        // but accent-blue and pulsing until they visit the node. Working/attention win —
+        // a new turn or a permission prompt is more urgent than an old unread mark.
+        <span className="ss-check ss-check--unread" title="Finished — new for you">
+          <IconCircleCheck />
+        </span>
+      ) : row.statusKind === 'done' ? (
+        // REF-style completion glyph: a check icon scans better than one more dot.
+        <span className="ss-check" title={row.stateLabel}>
+          <IconCircleCheck />
         </span>
       ) : (
         <span className={`ss-dot ss-dot--${row.statusKind}`} title={row.stateLabel} />
@@ -110,9 +117,6 @@ export function SessionRow({
             >
               {row.title}
             </span>
-          )}
-          {row.unread && (
-            <span className="ss-unread-dot" title="Unread — finished while you weren't looking" />
           )}
           {row.session && <span className="ss-chip">{row.session}</span>}
           {row.loop && (

@@ -4165,6 +4165,8 @@ body,
 .ss-dot--idle { background: rgba(160, 160, 160, 0.4); }
 /* done renders as a check icon (ss-check), not a dot — see SessionRow. */
 .ss-check { color: #30d158; margin-top: 2px; flex: 0 0 auto; line-height: 0; }
+/* Unread: the same check, accent-blue and pulsing until the user visits the node. */
+.ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; }
 .ss-check svg { width: 13px; height: 13px; }
 /* attention renders as a red bell (ss-bell) — "it's ringing for you". Gentle pulse,
    same cadence as the header badge dot. */
@@ -4182,9 +4184,6 @@ body,
 .ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
 .ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-title.is-unread { font-weight: 600; }
-/* Unread bullet next to the title (semibold alone is invisible at 12.5px). Accent blue —
-   deliberately NOT a status color (green/red/yellow), it means "new for you", not a state. */
-.ss-unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
 .ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
 .ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
 .ss-loop { font-size: 9.5px; color: #ffd60a; border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
