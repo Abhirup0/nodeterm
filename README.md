@@ -12,7 +12,7 @@ a stack of hidden tabs.
 
 [![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)-black)](https://nodeterm.dev)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
-[![License](https://img.shields.io/badge/license-source--available-blue)](./LICENSE)
+[![License](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
 
@@ -112,16 +112,26 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. Note that nodeterm is **source-available, not open
-source** — you may fork to prepare a contribution, but the [License](#-license) governs
-all other use.
+Issues and pull requests are welcome. nodeterm is licensed under the
+[Functional Source License](https://fsl.software) — you can use, modify, and
+redistribute it freely for any purpose except building a competing product
+(see [License](#-license)).
+
+By submitting a contribution (pull request, patch, or code snippet), you agree
+that it is licensed under the same [FSL-1.1-MIT](./LICENSE) terms as the rest of
+the project, and that the project may continue to relicense future versions
+(including your contribution) as part of its normal licensing model.
 
 ## 📜 License
 
-**Source-available, proprietary — all rights reserved.** You may view and study the code,
-but not use, modify, redistribute, or sell it without permission. See [`LICENSE`](./LICENSE)
-for the full terms and [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) for the bundled
-open-source components.
+**[FSL-1.1-MIT](./LICENSE)** ([Functional Source License](https://fsl.software)): you may
+use, copy, modify, and redistribute nodeterm for any purpose except a **Competing Use** —
+offering it (or a substitute for it) as a commercial product or service. Each release
+automatically becomes plain **MIT** two years after it is published. See
+[`LICENSE`](./LICENSE) for the full terms and
+[`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) for the bundled open-source
+components. For a commercial license beyond the FSL grant, contact
+eneskirca@gmail.com.
 
 > "Claude" and "Claude Code" are trademarks of Anthropic; nodeterm is not affiliated with
 > or endorsed by Anthropic.

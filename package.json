@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": "enes",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "FSL-1.1-MIT",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
