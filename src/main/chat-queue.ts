@@ -2,13 +2,16 @@
 // prompt input) and the driver-side FIFO of messages typed while a turn is running.
 import type { ChatQueueItem } from '../shared/types'
 
+// Single-consumer only: one shared buffer + one notify slot. A second concurrent
+// consumer would clobber the parked waiter (the last one to await wins the notify),
+// so only ever drive one `for await` loop over the returned iterable.
 export function createPushIterable<T>(): { iterable: AsyncIterable<T>; push(item: T): void; end(): void } {
   const buffer: T[] = []
   let notify: (() => void) | null = null
   let ended = false
   const wake = () => { notify?.(); notify = null }
   return {
-    push(item: T) { buffer.push(item); wake() },
+    push(item: T) { if (ended) return; buffer.push(item); wake() },
     end() { ended = true; wake() },
     iterable: {
       async *[Symbol.asyncIterator]() {
