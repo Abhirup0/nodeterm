@@ -3736,6 +3736,12 @@ body,
   align-items: center;
   gap: 4px;
 }
+/* While the popover is open, rise above the sessions sidebar (z-index 12) — a tall
+   sidebar reaches the bottom-left corner and would cover the panel. Closed pill keeps
+   its low layer so it never draws over the sidebar itself. */
+.usage-indicator:has(.usage-popover) {
+  z-index: 13;
+}
 .usage-pill {
   display: inline-flex;
   align-items: center;
