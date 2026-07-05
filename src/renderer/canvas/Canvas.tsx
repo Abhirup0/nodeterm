@@ -1294,6 +1294,33 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter]
   )
 
+  // Terminal → chat fork (Task 10): a Claude terminal node dispatches 'nodeterm:open-chat'
+  // with its own session id; open a chat node beside it that resumes+forks that session so
+  // the conversation continues in the chat UI while the original terminal keeps working.
+  useEffect(() => {
+    const onOpenChat = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { nodeId: string; sessionId?: string; cwd?: string }
+        | undefined
+      if (!detail?.sessionId) return
+      const source = nodesRef.current.find((n) => n.id === detail.nodeId)
+      const node = createChatNode(nodesRef.current.length, detail.cwd, undefined, {
+        forkFrom: detail.sessionId
+      })
+      if (source) {
+        node.position = {
+          x: source.position.x + ((source.width as number) ?? 600) + 40,
+          y: source.position.y
+        }
+      }
+      node.selected = true
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
+      markDirty()
+    }
+    window.addEventListener('nodeterm:open-chat', onOpenChat)
+    return () => window.removeEventListener('nodeterm:open-chat', onOpenChat)
+  }, [setNodes, markDirty])
+
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)

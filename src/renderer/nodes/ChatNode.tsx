@@ -25,6 +25,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   const apply = useChatSessions((s) => s.apply)
   const seed = useChatSessions((s) => s.seed)
   const addLocalUser = useChatSessions((s) => s.addLocalUser)
+  const clearError = useChatSessions((s) => s.clearError)
   const status = useAgentStatus((s) => s.byId[id])
   const { setNodes, addNodes } = useReactFlow()
   const [input, setInput] = useState('')
@@ -255,7 +256,14 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
           )
         })}
         {chat?.streamText && <div className="term-chat__msg term-chat__msg--assistant"><MarkdownText text={chat.streamText} /></div>}
-        {chat?.error && <div className="chat-node__error">{chat.error.message}</div>}
+        {/* Non-fatal errors: a dismissible inline line. Fatal errors get the reconnect bar
+            in place of the compose box (below). */}
+        {chat?.error && !chat.error.fatal && (
+          <div className="chat-node__error">
+            <span>{chat.error.message}</span>
+            <button className="chat-node__error-dismiss" title="Dismiss" onClick={() => clearError(id)}>×</button>
+          </div>
+        )}
         {perm && (
           <div className="chat-node__permission">
             <div className="chat-node__permission-title">Allow {perm.toolName}?</div>
@@ -289,6 +297,23 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
           {attachNote && <div className="chat-node__attach-note">{attachNote}</div>}
         </div>
       )}
+      {chat?.error?.fatal ? (
+        <div className="chat-node__errorbar nodrag">
+          <span className="chat-node__errorbar-msg">{chat.error.message || 'Chat session ended.'}</span>
+          <button
+            className="chat-node__errorbar-reconnect"
+            onClick={() => {
+              clearError(id)
+              void window.nodeTerminal.chat.ensure(id, {
+                cwd: data.cwd as string | undefined,
+                sessionId: data.chatSessionId as string | undefined
+              })
+            }}
+          >
+            Reconnect
+          </button>
+        </div>
+      ) : (
       <div className="chat-node__compose nodrag">
         {slashOpen && (
           <div className="chat-node__slash">
@@ -321,6 +346,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
         {/* Stop = interrupt: the driver's turn-done then auto-flushes the next queued item (Task 5). */}
         {working && <button className="chat-node__stop" onClick={() => window.nodeTerminal.chat.interrupt(id)}>Stop</button>}
       </div>
+      )}
     </div>
   )
 }

@@ -809,6 +809,24 @@ body,
   color: #6cb0ff;
 }
 
+.term-node__chat {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.term-node__chat:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: #6cb0ff;
+}
+
 .term-node__find {
   display: flex;
   flex-direction: column;
@@ -4633,12 +4651,61 @@ body,
   list-style: none;
 }
 .chat-node__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 10px;
   border-radius: 8px;
   font-size: 12px;
   color: #ff453a;
   background: rgba(255, 69, 58, 0.12);
   border: 1px solid rgba(255, 69, 58, 0.35);
+}
+.chat-node__error span {
+  flex: 1 1 auto;
+}
+.chat-node__error-dismiss {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.7;
+}
+.chat-node__error-dismiss:hover {
+  opacity: 1;
+}
+/* Fatal-error bar: replaces the compose box until the user reconnects. */
+.chat-node__errorbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid rgba(255, 69, 58, 0.35);
+  background: rgba(255, 69, 58, 0.1);
+}
+.chat-node__errorbar-msg {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: #ff453a;
+}
+.chat-node__errorbar-reconnect {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 69, 58, 0.5);
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff453a;
+  cursor: pointer;
+}
+.chat-node__errorbar-reconnect:hover {
+  background: rgba(255, 69, 58, 0.25);
 }
 .chat-node__permission {
   padding: 10px;
