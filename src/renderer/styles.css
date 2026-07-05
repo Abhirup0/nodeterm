@@ -660,12 +660,18 @@ body,
   background: currentColor;
 }
 
+/* RUNNING matches the working spinner + node glow (amber), not the base green. */
+.term-node__status--busy {
+  color: #ffd60a;
+}
+
 .term-node__status--busy .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
 }
 
+/* NEEDS YOU is red everywhere (same as the sidebar attention dot). */
 .term-node__status--attention {
-  color: #ff9f0a;
+  color: #ff453a;
 }
 
 .term-node__status--loop {
