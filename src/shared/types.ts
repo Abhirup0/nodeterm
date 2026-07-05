@@ -666,11 +666,13 @@ export interface TranscriptLine {
   text: string
 }
 
-/** One ordered piece of a chat message: prose, or a tool call with an optional result. */
+/** One ordered piece of a chat message: prose, or a tool call with an optional result.
+ *  `summary` (present only on live-turn tools folded into history) carries the diff-preview
+ *  metadata so committed tool cards keep the same summary/diff-click treatment as live ones. */
 export type ChatPart =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; text: string }
-  | { kind: 'tool'; name: string; arg: string; result?: string }
+  | { kind: 'tool'; name: string; arg: string; result?: string; summary?: ChatToolSummary }
 
 /** A structured chat message reconstructed from a Claude session transcript. */
 export interface ChatMessage {

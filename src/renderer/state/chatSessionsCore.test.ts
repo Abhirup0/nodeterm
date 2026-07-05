@@ -28,11 +28,37 @@ describe('applyChatEvent', () => {
   })
 
   it('turn-done accumulates cost, clears working + per-turn tool order', () => {
-    let s = { ...s0, working: true, toolOrder: ['t1'] }
+    let s = { ...s0, working: true }
     s = applyChatEvent(s, { kind: 'turn-done', costUsd: 0.1 })
     s = applyChatEvent(s, { kind: 'turn-done', costUsd: 0.05 })
     expect(s.costUsd).toBeCloseTo(0.15)
     expect(s.working).toBe(false)
+    expect(s.toolOrder).toEqual([])
+  })
+
+  it('turn-done folds the turn tools into a committed assistant message, then clears toolOrder', () => {
+    let s = applyChatEvent(s0, { kind: 'tool', toolUseId: 't1', name: 'Bash', arg: 'ls', summary: undefined })
+    s = applyChatEvent(s, { kind: 'tool', toolUseId: 't2', name: 'Write', arg: '/f.ts', summary: { filePath: '/f.ts', added: 3, removed: 0 } })
+    s = applyChatEvent(s, { kind: 'tool-result', toolUseId: 't1', result: 'out' })
+    s = applyChatEvent(s, { kind: 'turn-done', costUsd: 0.02 })
+    expect(s.toolOrder).toEqual([])
+    // A single synthetic assistant message carries both tools in order, preserving result + summary.
+    expect(s.messages).toEqual([
+      {
+        role: 'assistant',
+        parts: [
+          { kind: 'tool', name: 'Bash', arg: 'ls', result: 'out', summary: undefined },
+          { kind: 'tool', name: 'Write', arg: '/f.ts', result: undefined, summary: { filePath: '/f.ts', added: 3, removed: 0 } }
+        ]
+      }
+    ])
+  })
+
+  it('turn-done with no tools appends no message', () => {
+    let s = applyChatEvent(s0, { kind: 'message', msg: { role: 'assistant', parts: [{ kind: 'text', text: 'hi' }] } })
+    const before = s.messages
+    s = applyChatEvent(s, { kind: 'turn-done', costUsd: 0.01 })
+    expect(s.messages).toBe(before)
     expect(s.toolOrder).toEqual([])
   })
 

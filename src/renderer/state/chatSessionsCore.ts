@@ -49,11 +49,30 @@ export function applyChatEvent(s: ChatNodeState, e: ChatEvent): ChatNodeState {
       return { ...s, permission: { requestId: e.requestId, toolName: e.toolName, input: e.input } }
     case 'permission-done':
       return s.permission?.requestId === e.requestId ? { ...s, permission: undefined } : s
-    case 'turn-done':
+    case 'turn-done': {
+      // Tool calls stream as live cards (toolOrder) but the completed 'message' event carries
+      // only text/thinking. Before clearing toolOrder at turn end, fold this turn's tools into
+      // committed history as a synthetic assistant message so the cards (incl. diff-preview
+      // links) survive the turn instead of vanishing until a transcript reload.
+      const committed: ChatMessage[] =
+        s.toolOrder.length > 0
+          ? [
+              {
+                role: 'assistant',
+                parts: s.toolOrder.map((id) => {
+                  const t = s.tools[id]
+                  return { kind: 'tool', name: t.name, arg: t.arg, result: t.result, summary: t.summary }
+                })
+              }
+            ]
+          : []
       return {
-        ...s, working: false, toolOrder: [], streamText: '', streamThinking: '',
+        ...s,
+        messages: committed.length ? [...s.messages, ...committed] : s.messages,
+        working: false, toolOrder: [], streamText: '', streamThinking: '',
         costUsd: s.costUsd + (e.costUsd ?? 0)
       }
+    }
     case 'queue':
       return { ...s, queue: e.items }
     case 'error':

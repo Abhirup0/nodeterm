@@ -21,6 +21,10 @@ interface ChatSession {
   pending: Map<string, PendingPermission>
   allowedForSession: Set<string>
   interrupt?: () => Promise<void>
+  // Set by interrupt() before it fires the SDK interrupt, so the resulting turn-done is treated
+  // as a user Stop: it must NOT auto-flush the queue and its done status carries interrupted:true
+  // (so Canvas skips the completion notification). Cleared when that turn-done is handled.
+  interruptedByUser: boolean
   disposed: boolean
 }
 
@@ -43,10 +47,15 @@ export class ChatDriver {
     this.getWindow()?.webContents.send(IPC.chatEvent(nodeId), event)
   }
 
-  private status(s: ChatSession, state: 'working' | 'blocked' | 'done', newTurn = false): void {
+  private status(
+    s: ChatSession,
+    state: 'working' | 'blocked' | 'done',
+    newTurn = false,
+    interrupted = false
+  ): void {
     const ev: NormalizedAgentEvent = {
       nodeId: s.nodeId, agentId: 'claude', kind: 'state', state, newTurn,
-      sessionId: s.sessionId
+      sessionId: s.sessionId, ...(interrupted ? { interrupted: true } : {})
     }
     this.sendToMain(IPC.agentStatus, ev)
   }
@@ -66,11 +75,15 @@ export class ChatDriver {
     const s: ChatSession = {
       nodeId, cwd: opts.cwd, sessionId: resume, working: false,
       input: createPushIterable<unknown>(), queue: new ChatInputQueue(),
-      pending: new Map(), allowedForSession: new Set(), disposed: false
+      pending: new Map(), allowedForSession: new Set(),
+      interruptedByUser: false, disposed: false
     }
     this.sessions.set(nodeId, s)
     void this.run(s, resume, opts.fork === true).catch((err) => {
       this.emit(nodeId, { kind: 'error', message: String(err?.message ?? err), fatal: true })
+      // Tear down like dispose(): resolve/clear any pending permission cards and end input, so a
+      // fatal crash doesn't leave a stale permission prompt or "working" badge before Reconnect.
+      this.teardown(s)
       this.sessions.delete(nodeId)
     })
     return { ok: true }
@@ -115,8 +128,12 @@ export class ChatDriver {
         this.emit(s.nodeId, event)
         if (event.kind === 'turn-done') {
           s.working = false
-          this.status(s, 'done')
-          this.flushQueue(s)
+          // A user Stop (interrupt) ends the turn too — but the queue must stay put (items are
+          // individually deletable) and Canvas must skip the "finished" notification.
+          const interrupted = s.interruptedByUser
+          s.interruptedByUser = false
+          this.status(s, 'done', false, interrupted)
+          if (!interrupted) this.flushQueue(s)
         }
       }
     }
@@ -153,7 +170,11 @@ export class ChatDriver {
 
   interrupt(nodeId: string): void {
     const s = this.sessions.get(nodeId)
-    void s?.interrupt?.().catch(() => {})
+    if (!s) return
+    // Flag the turn as user-stopped BEFORE firing the SDK interrupt, so the turn-done it
+    // triggers is handled as a Stop (no auto-flush, interrupted status).
+    s.interruptedByUser = true
+    void s.interrupt?.().catch(() => {})
   }
 
   permissionReply(nodeId: string, requestId: string, decision: ChatPermissionDecision): void {
@@ -167,12 +188,23 @@ export class ChatDriver {
     this.emit(nodeId, { kind: 'queue', items: s.queue.items() })
   }
 
+  // Shared teardown for both dispose() and the fatal catch path: deny + clear every pending
+  // permission (resolving the awaiting canUseTool promise AND clearing its renderer card via
+  // permission-done), then end the input stream so the SDK query settles.
+  private teardown(s: ChatSession): void {
+    for (const [requestId, p] of s.pending) {
+      p.resolve({ behavior: 'deny' })
+      this.emit(s.nodeId, { kind: 'permission-done', requestId })
+    }
+    s.pending.clear()
+    s.input.end()
+  }
+
   dispose(nodeId: string): void {
     const s = this.sessions.get(nodeId)
     if (!s) return
     s.disposed = true
-    for (const p of s.pending.values()) p.resolve({ behavior: 'deny' })
-    s.input.end()
+    this.teardown(s)
     void s.interrupt?.().catch(() => {})
     this.sessions.delete(nodeId)
   }

@@ -8,14 +8,15 @@ import {
   useState,
   type ClipboardEvent,
   type DragEvent,
-  type KeyboardEvent
+  type KeyboardEvent,
+  type Key
 } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { MarkdownText } from './ChatPanel'
 import { useChatSessions } from '../state/chatSessions'
 import { useAgentStatus } from '../state/agentStatus'
 import { createDiffNode, type CanvasNode } from '../state/workspace'
-import type { ChatImageAttachment } from '@shared/types'
+import type { ChatImageAttachment, ChatToolSummary } from '@shared/types'
 
 const MAX_IMAGES = 5
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024 // 2 MB per image
@@ -197,6 +198,40 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   const working = !!chat?.working || status?.state === 'working'
   const cwd = data.cwd as string | undefined
 
+  // Shared tool-card renderer for both live (toolOrder) and committed (folded into history at
+  // turn-done) tools, so both get the same summary label + diff-preview click treatment.
+  const renderTool = (
+    t: { name: string; arg: string; result?: string; summary?: ChatToolSummary },
+    key: Key,
+    open: boolean
+  ) => {
+    const diffPath = t.summary?.filePath
+    const canDiff = !!diffPath && !!cwd && diffPath.startsWith(cwd)
+    return (
+      <details key={key} className="term-chat__tool" open={open}>
+        <summary>
+          <span className="term-chat__tool-name">{t.name}</span>
+          <span
+            className={`term-chat__tool-arg${canDiff ? ' term-chat__tool-arg--link' : ''}`}
+            title={canDiff ? 'Open diff' : undefined}
+            onClick={
+              canDiff
+                ? (e) => {
+                    e.preventDefault() // don't toggle the <details>
+                    e.stopPropagation()
+                    openDiff(diffPath)
+                  }
+                : undefined
+            }
+          >
+            {t.summary ? `${t.summary.filePath} +${t.summary.added} −${t.summary.removed}` : t.arg}
+          </span>
+        </summary>
+        {t.result && <pre className="term-chat__tool-result">{t.result}</pre>}
+      </details>
+    )
+  }
+
   return (
     <div className={`chat-node${selected ? ' selected' : ''}`} style={{ borderTopColor: data.color }}>
       <NodeResizer isVisible={selected} minWidth={360} minHeight={280} />
@@ -215,10 +250,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
               ) : p.kind === 'thinking' ? (
                 <details key={j} className="chat-node__thinking"><summary>Thinking</summary><MarkdownText text={p.text} /></details>
               ) : (
-                <details key={j} className="term-chat__tool">
-                  <summary><span className="term-chat__tool-name">{p.name}</span><span className="term-chat__tool-arg">{p.arg}</span></summary>
-                  {p.result && <pre className="term-chat__tool-result">{p.result}</pre>}
-                </details>
+                renderTool(p, j, false)
               )
             )}
           </div>
@@ -227,34 +259,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
         {chat?.streamThinking && (
           <details className="chat-node__thinking"><summary>Thinking…</summary><MarkdownText text={chat.streamThinking} /></details>
         )}
-        {chat?.toolOrder.map((tid) => {
-          const t = chat.tools[tid]
-          const diffPath = t.summary?.filePath
-          const canDiff = !!diffPath && !!cwd && diffPath.startsWith(cwd)
-          return (
-            <details key={tid} className="term-chat__tool" open={!t.result}>
-              <summary>
-                <span className="term-chat__tool-name">{t.name}</span>
-                <span
-                  className={`term-chat__tool-arg${canDiff ? ' term-chat__tool-arg--link' : ''}`}
-                  title={canDiff ? 'Open diff' : undefined}
-                  onClick={
-                    canDiff
-                      ? (e) => {
-                          e.preventDefault() // don't toggle the <details>
-                          e.stopPropagation()
-                          openDiff(diffPath)
-                        }
-                      : undefined
-                  }
-                >
-                  {t.summary ? `${t.summary.filePath} +${t.summary.added} −${t.summary.removed}` : t.arg}
-                </span>
-              </summary>
-              {t.result && <pre className="term-chat__tool-result">{t.result}</pre>}
-            </details>
-          )
-        })}
+        {chat?.toolOrder.map((tid) => renderTool(chat.tools[tid], tid, !chat.tools[tid].result))}
         {chat?.streamText && <div className="term-chat__msg term-chat__msg--assistant"><MarkdownText text={chat.streamText} /></div>}
         {/* Non-fatal errors: a dismissible inline line. Fatal errors get the reconnect bar
             in place of the compose box (below). */}

@@ -36,7 +36,10 @@ export const useChatSessions = create<ChatSessionsStore>((set) => ({
     set((st) => {
       const s = st.byId[nodeId]
       if (!s) return {}
-      return { byId: { ...st.byId, [nodeId]: { ...s, error: undefined } } }
+      // Clearing the error (Dismiss / Reconnect) must also drop a stale "working" badge and any
+      // orphaned permission card left behind by a fatal crash mid-turn — otherwise they survive
+      // the reconnect with no live driver behind them.
+      return { byId: { ...st.byId, [nodeId]: { ...s, error: undefined, working: false, permission: undefined } } }
     }),
   drop: (nodeId) =>
     set((st) => {
