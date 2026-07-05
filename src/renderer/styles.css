@@ -4551,3 +4551,186 @@ body,
   font-size: 12px;
   flex: none;
 }
+
+/* Chat node — SDK-driven conversation node (reuses the .term-chat vocabulary). */
+.chat-node {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top-width: 3px;
+  border-top-style: solid;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+}
+.chat-node.selected {
+  border-color: var(--accent);
+}
+.chat-node__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.chat-node__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label, rgba(255, 255, 255, 0.92));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+.chat-node__badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+/* RUNNING matches the working spinner + node glow (clay #d97757). */
+.chat-node__badge--working {
+  color: #d97757;
+  background: rgba(217, 119, 87, 0.15);
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+/* NEEDS YOU is red everywhere (same as the terminal attention badge). */
+.chat-node__badge--needs {
+  color: #ff453a;
+  background: rgba(255, 69, 58, 0.15);
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+.chat-node__cost {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-secondary, rgba(255, 255, 255, 0.55));
+}
+.chat-node__msgs {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Allow text selection / Cmd+C (React Flow nodes are non-selectable by default). */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+.chat-node__thinking {
+  font-size: 12px;
+  opacity: 0.6;
+}
+.chat-node__thinking summary {
+  cursor: pointer;
+  list-style: none;
+}
+.chat-node__error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #ff453a;
+  background: rgba(255, 69, 58, 0.12);
+  border: 1px solid rgba(255, 69, 58, 0.35);
+}
+.chat-node__permission {
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--accent, #0a84ff);
+}
+.chat-node__permission-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label, rgba(255, 255, 255, 0.92));
+  margin-bottom: 6px;
+}
+.chat-node__permission-input {
+  margin: 0 0 8px;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  opacity: 0.85;
+}
+.chat-node__permission-actions {
+  display: flex;
+  gap: 6px;
+}
+.chat-node__permission-actions button {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--label, #fff);
+  cursor: pointer;
+}
+.chat-node__permission-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.chat-node__queue {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.chat-node__queue-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--label-secondary, rgba(255, 255, 255, 0.7));
+}
+.chat-node__queue-item button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.7;
+}
+.chat-node__queue-item button:hover {
+  opacity: 1;
+}
+.chat-node__compose {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.chat-node__compose .term-chat__input {
+  flex: 1 1 auto;
+}
+.chat-node__stop {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 69, 58, 0.5);
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff453a;
+  cursor: pointer;
+}
+.chat-node__stop:hover {
+  background: rgba(255, 69, 58, 0.25);
+}
