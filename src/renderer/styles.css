@@ -3742,6 +3742,46 @@ body,
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
 }
 
+/* Minimap-scale status glow: same language as the node glows (amber working / red
+   needs-you / accent unread). A static drop-shadow provides the halo; only
+   stroke-opacity animates (cheap on tiny svg rects), cadence matching each canvas glow. */
+.minimap .mm-working,
+.minimap .mm-attention,
+.minimap .mm-unread {
+  stroke-width: 4px;
+}
+.minimap .mm-working {
+  filter: drop-shadow(0 0 3px rgba(255, 214, 10, 0.8));
+  animation: mm-pulse-soft 2.6s ease-in-out infinite;
+}
+.minimap .mm-attention {
+  filter: drop-shadow(0 0 3px rgba(255, 69, 58, 0.9));
+  animation: mm-pulse 1.8s ease-in-out infinite;
+}
+.minimap .mm-unread {
+  filter: drop-shadow(0 0 3px rgba(10, 132, 255, 0.9));
+  animation: mm-pulse 2s ease-in-out infinite;
+}
+@keyframes mm-pulse {
+  0%,
+  100% {
+    stroke-opacity: 0.25;
+  }
+  50% {
+    stroke-opacity: 1;
+  }
+}
+/* Working never blinks off — it breathes, mirroring the canvas glow. */
+@keyframes mm-pulse-soft {
+  0%,
+  100% {
+    stroke-opacity: 0.45;
+  }
+  50% {
+    stroke-opacity: 1;
+  }
+}
+
 /* React Flow controls dark theme */
 .react-flow__controls {
   border-radius: 10px;

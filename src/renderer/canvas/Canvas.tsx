@@ -174,13 +174,25 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
     },
     [onNodeDoubleClick]
   )
+  // Status language matches the canvas glows/badges: amber = working, red = needs you,
+  // accent blue = unread. The classes below add the minimap-scale glow/pulse (styles.css).
   const nodeStrokeColor = useCallback(
     (n: Node): string => {
       const st = statusById[n.id]
-      if (st?.state === 'working') return '#d97757'
-      if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
+      if (st?.state === 'working') return '#ffd60a'
+      if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff453a'
       if (st?.unread) return '#0a84ff'
       return (n.data as { color?: string })?.color ?? '#0a84ff'
+    },
+    [statusById]
+  )
+  const nodeClassName = useCallback(
+    (n: Node): string => {
+      const st = statusById[n.id]
+      if (st?.state === 'working') return 'mm-working'
+      if (st?.state === 'waiting' || st?.state === 'blocked') return 'mm-attention'
+      if (st?.unread) return 'mm-unread'
+      return ''
     },
     [statusById]
   )
@@ -195,6 +207,7 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
       maskColor="rgba(10,12,18,0.6)"
       nodeColor={minimapNodeColor}
       nodeStrokeColor={nodeStrokeColor}
+      nodeClassName={nodeClassName}
     />
   )
 }
@@ -1031,7 +1044,7 @@ export function Canvas() {
       const py = e.clientY - rect.top
       // Cap a single event's influence so a chunky mouse-wheel tick doesn't jump zoom levels.
       const d = Math.max(-50, Math.min(50, e.deltaY))
-      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-d * 0.01)))
+      const next = Math.min(2, Math.max(0.01, zoom * Math.exp(-d * 0.01)))
       if (next === zoom) return
       const k = next / zoom
       setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
@@ -3135,7 +3148,7 @@ export function Canvas() {
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
           onNodeDoubleClick={onNodeDoubleClick}
-          minZoom={0.2}
+          minZoom={0.01}
           maxZoom={2}
           proOptions={{ hideAttribution: true }}
           deleteKeyCode={null}
