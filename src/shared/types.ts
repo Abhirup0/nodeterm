@@ -87,6 +87,8 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /** chat-only: SDK session id of this chat node's conversation, persisted so a relaunch resumes it. */
+  chatSessionId?: string
 }
 
 /**

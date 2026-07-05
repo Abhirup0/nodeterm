@@ -21,6 +21,7 @@ import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { DinoNode } from '../nodes/DinoNode'
 import BrowserNode from '../nodes/BrowserNode'
+import ChatNode from '../nodes/ChatNode'
 import { normalizeAddress } from '../nodes/browserUrl'
 import VideoNode from '../nodes/VideoNode'
 import WebNode from '../nodes/WebNode'
@@ -37,6 +38,7 @@ import {
   IconFit,
   IconGrid,
   IconGroup,
+  IconChat,
   IconDino,
   IconJump,
   IconMarkdown,
@@ -77,6 +79,7 @@ import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOp
 import { opensInEditor } from '../lib/openTarget'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useChatSessions } from '../state/chatSessions'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
@@ -115,6 +118,7 @@ import {
   COLLAPSED_HEIGHT,
   createAgentNode,
   createBrowserNode,
+  createChatNode,
   createDinoNode,
   createDiffNode,
   createEditorNode,
@@ -347,7 +351,8 @@ export function Canvas() {
       dino: withNodeBoundary(DinoNode),
       video: withNodeBoundary(VideoNode),
       web: withNodeBoundary(WebNode),
-      browser: withNodeBoundary(BrowserNode)
+      browser: withNodeBoundary(BrowserNode),
+      chat: withNodeBoundary(ChatNode)
     }),
     []
   )
@@ -1280,6 +1285,15 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter]
   )
 
+  const addChatNode = useCallback(
+    (center?: { x: number; y: number }) => {
+      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
+      setNodes((ns) => [...ns, createChatNode(ns.length, cwd, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId, viewCenter]
+  )
+
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
@@ -1360,6 +1374,13 @@ export function Canvas() {
         if (!set.has(n.id)) return
         // Remote terminals have no local persistent session — only destroy local ones.
         if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
+        // lives across project switches (only permanent delete kills it), so this belongs here,
+        // not in node unmount.
+        if (n.type === 'chat') {
+          window.nodeTerminal.chat.dispose(n.id)
+          useChatSessions.getState().drop(n.id)
+        }
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
         // unread). Node unmount no longer does this, so deletion must.
         useAgentStatus.getState().remove(n.id)
@@ -1993,6 +2014,7 @@ export function Canvas() {
                 onClick: () => addAgentNode(c.id, at)
               })
             ),
+          { label: 'New chat', icon: <IconChat />, onClick: () => addChatNode(at) },
           { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
@@ -2012,6 +2034,7 @@ export function Canvas() {
       screenToFlowPosition,
       addTerminal,
       addAgentNode,
+      addChatNode,
       addSticky,
       addDino,
       addBrowser,
@@ -2451,6 +2474,10 @@ export function Canvas() {
             deleteNodes([id])
           } else {
             transport.destroy(id)
+            // Chat nodes in an inactive project keep their driver running across the switch;
+            // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
+            window.nodeTerminal.chat.dispose(id)
+            useChatSessions.getState().drop(id)
             useAgentStatus.getState().remove(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
@@ -2925,6 +2952,7 @@ export function Canvas() {
             run: () => addAgentNode(c.id)
           })
         ),
+      { id: 'new-chat', label: 'New chat', icon: <IconChat />, run: () => addChatNode() },
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
@@ -3000,6 +3028,7 @@ export function Canvas() {
   }, [
     addTerminal,
     addAgentNode,
+    addChatNode,
     addSticky,
     addDino,
     addWebView,
@@ -3406,6 +3435,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddDino={addDino}
         onAddAgent={(aid) => addAgentNode(aid)}
+        onAddChat={() => addChatNode()}
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
