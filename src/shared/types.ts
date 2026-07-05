@@ -876,8 +876,11 @@ export interface NodeTerminalApi {
   getPathForFile(file: File): string
   /** Absolute writable base dir (Electron userData) for app-managed files like default worktrees. */
   userDataDir(): Promise<string>
-  /** Show an OS notification (main suppresses it if the window is focused). Returns whether shown. */
-  notify(payload: NotifyPayload): Promise<boolean>
+  /** Show an OS notification (main suppresses it if the window is focused). 'failed' =
+   *  the OS rejected it (e.g. macOS permission denied) — surface it, don't ignore it. */
+  notify(payload: NotifyPayload): Promise<'shown' | 'failed' | 'skipped'>
+  /** Open the OS notification settings pane (macOS; no-op elsewhere) to re-grant permission. */
+  openNotificationSettings(): Promise<void>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */

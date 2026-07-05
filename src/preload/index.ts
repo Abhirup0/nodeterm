@@ -340,6 +340,7 @@ const api: NodeTerminalApi = {
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   userDataDir: () => ipcRenderer.invoke(IPC.appUserDataDir),
   notify: (payload) => ipcRenderer.invoke(IPC.appNotify, payload),
+  openNotificationSettings: () => ipcRenderer.invoke(IPC.appOpenNotificationSettings),
   onFocusNode: (listener) => {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)
     ipcRenderer.on(IPC.appFocusNode, handler)

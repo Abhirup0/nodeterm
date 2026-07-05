@@ -275,14 +275,17 @@ app.whenReady().then(async () => {
 
   // Show an OS notification — but only when the window is in the background. Clicking it
   // brings the app forward and asks the renderer to focus the originating node.
+  // Resolves 'shown' | 'failed' | 'skipped' so the renderer can SEE a macOS permission
+  // denial (UNErrorCodeNotificationsNotAllowed) instead of it dying silently — that broke
+  // once already after an Electron upgrade invalidated the ncprefs signature record.
   ipcMain.handle(
     IPC.appNotify,
-    (_e, payload: { title: string; body: string; nodeId: string; force?: boolean }) => {
+    async (_e, payload: { title: string; body: string; nodeId: string; force?: boolean }) => {
       const win = getMainWindow()
-      if (!win || !Notification.isSupported()) return false
+      if (!win || !Notification.isSupported()) return 'skipped'
       // `force` (permission request / confirmation) shows even when focused; normal
       // completion notifications only show when the window is in the background.
-      if (!payload.force && win.isFocused()) return false
+      if (!payload.force && win.isFocused()) return 'skipped'
       const n = new Notification({ title: payload.title, body: payload.body })
       n.on('click', () => {
         // Re-resolve at click time — the window may have been hidden/recreated since.
@@ -296,10 +299,32 @@ app.whenReady().then(async () => {
       // Without a retained reference the wrapper gets GC'd and the click handler dies —
       // clicking would then only activate the app, never focus the originating node.
       retainUntilDismissed(n)
-      n.show()
-      return true
+      return await new Promise<'shown' | 'failed'>((resolve) => {
+        // macOS reports delivery async; if neither event lands quickly, assume shown
+        // (Windows/Linux never emit 'failed').
+        const timer = setTimeout(() => resolve('shown'), 1500)
+        n.on('show', () => {
+          clearTimeout(timer)
+          resolve('shown')
+        })
+        n.on('failed', (_ev, error) => {
+          clearTimeout(timer)
+          console.warn('[notify] OS rejected the notification:', error)
+          resolve('failed')
+        })
+        n.show()
+      })
     }
   )
+
+  // Deep-link to the OS notification settings so the user can re-grant a denied
+  // permission (macOS never re-prompts once the app's record exists). The URL is a
+  // main-side constant — deliberately NOT routed through shellOpenExternal's
+  // http(s)-only allowlist, which must stay closed to renderer-supplied strings.
+  ipcMain.handle(IPC.appOpenNotificationSettings, () => {
+    if (process.platform !== 'darwin') return
+    void shell.openExternal('x-apple.systempreferences:com.apple.Notifications-Settings.extension')
+  })
 
   ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
   ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)

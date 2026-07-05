@@ -20,6 +20,7 @@ export const IPC = {
   appCloseNode: 'app:close-node',
   appCloseWindow: 'app:close-window',
   appNotify: 'app:notify',
+  appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',
   appSetBadge: 'app:set-badge',
   agentStatus: 'agent:status',
