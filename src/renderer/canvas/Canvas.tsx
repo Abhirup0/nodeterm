@@ -2891,6 +2891,10 @@ export function Canvas() {
       const project = store.getProject(id)
       project?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
+        if ((n.kind ?? 'terminal') === 'chat') {
+          window.nodeTerminal.chat.dispose(n.id)
+          useChatSessions.getState().drop(n.id)
+        }
         useAgentStatus.getState().remove(n.id)
       })
       // SSH project: the per-node `transport.destroy` above only ends the REMOTE session for

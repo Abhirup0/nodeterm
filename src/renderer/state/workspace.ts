@@ -820,7 +820,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
-        chatSessionId: n.data.chatSessionId as string | undefined
+        chatSessionId: n.data.chatSessionId
       }
     })
 }
