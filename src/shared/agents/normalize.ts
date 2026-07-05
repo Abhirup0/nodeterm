@@ -163,8 +163,18 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     return { ...base, kind: 'state', state: 'blocked', lastMessage: p.last_assistant_message }
   }
   if (ev === 'Notification') {
-    const state: AgentState = p.notification_type === 'permission_prompt' ? 'blocked' : 'waiting'
-    return { ...base, kind: 'state', state, lastMessage: p.last_assistant_message }
+    // Only the types that genuinely need the user flip the state. Everything else —
+    // idle_prompt fires AFTER Stop on a normally-finished turn (mapping it to waiting
+    // stuck NEEDS YOU on done nodes), and auth_success / elicitation_complete /
+    // elicitation_response / agent_completed are informational — must not touch state,
+    // so unknown future types default to no-op rather than a sticky badge.
+    if (p.notification_type === 'permission_prompt') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.last_assistant_message }
+    }
+    if (p.notification_type === 'elicitation_dialog' || p.notification_type === 'agent_needs_input') {
+      return { ...base, kind: 'state', state: 'waiting', lastMessage: p.last_assistant_message }
+    }
+    return null
   }
   if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start' }
   if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
