@@ -151,12 +151,33 @@ const minimapNodeColor = (n: Node): string =>
 // the entire canvas), but the minimap's working/attention/unread strokes DO need to track those
 // flips live; a fresh `nodeStrokeColor` identity per status change is what busts React Flow's
 // internal MiniMap memo so it repaints. Re-render cost is confined to this component.
-function StatusAwareMiniMap() {
+function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: Node) => void }) {
   const statusById = useAgentStatus((s) => s.byId)
+  const { setCenter, getZoom } = useReactFlow()
+  // React Flow's MiniMap only pans on drag (`pannable`) — a plain click is a no-op unless
+  // wired up. `position` arrives already converted to flow coordinates.
+  const onMinimapClick = useCallback(
+    (_e: React.MouseEvent, position: { x: number; y: number }) => {
+      setCenter(position.x, position.y, { zoom: getZoom(), duration: 300 })
+    },
+    [setCenter, getZoom]
+  )
+  // The MiniMap has no double-click prop; `detail === 2` is the second click of a
+  // double-click. stopPropagation keeps the svg-level click handler above from
+  // re-centering at the raw pointer right after the zoom-to-node.
+  const onMinimapNodeClick = useCallback(
+    (e: React.MouseEvent, node: Node) => {
+      if (e.detail >= 2) {
+        e.stopPropagation()
+        onNodeDoubleClick(node)
+      }
+    },
+    [onNodeDoubleClick]
+  )
   const nodeStrokeColor = useCallback(
     (n: Node): string => {
       const st = statusById[n.id]
-      if (st?.state === 'working') return '#30d158'
+      if (st?.state === 'working') return '#d97757'
       if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff9f0a'
       if (st?.unread) return '#0a84ff'
       return (n.data as { color?: string })?.color ?? '#0a84ff'
@@ -169,6 +190,8 @@ function StatusAwareMiniMap() {
       position="bottom-right"
       pannable
       zoomable
+      onClick={onMinimapClick}
+      onNodeClick={onMinimapNodeClick}
       maskColor="rgba(10,12,18,0.6)"
       nodeColor={minimapNodeColor}
       nodeStrokeColor={nodeStrokeColor}
@@ -3134,7 +3157,7 @@ export function Canvas() {
           />
           <Controls showInteractive={false} position="bottom-left" />
           <UsageIndicator />
-          <StatusAwareMiniMap />
+          <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
 
         {(!hasProjects || welcomeOpen) && (

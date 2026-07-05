@@ -462,15 +462,15 @@ body,
   }
 }
 
-/* Working (agent mid-turn): a soft amber glow — the spinner's #ffd60a — behind the node.
+/* Working (agent mid-turn): a soft clay glow — the spinner's #d97757 — behind the node.
    Same opacity-pulse-on-wrapper-pseudo technique as the unread glow above (never animate
    box-shadow), but calmer: lower intensity, slower cycle, and it never fully disappears so
    the node reads "alive" rather than "blinking". Mutually exclusive with .unread (isUnread
    is false while working). Shadows only — the top border keeps the node's own color. */
 .term-node.working {
   box-shadow:
-    0 0 0 1px rgba(255, 214, 10, 0.35),
-    0 0 14px 1px rgba(255, 214, 10, 0.22),
+    0 0 0 1px rgba(217, 119, 87, 0.35),
+    0 0 14px 1px rgba(217, 119, 87, 0.22),
     0 8px 28px rgba(0, 0, 0, 0.4);
 }
 
@@ -482,8 +482,8 @@ body,
   pointer-events: none;
   z-index: -1;
   box-shadow:
-    0 0 0 1px rgba(255, 214, 10, 0.45),
-    0 0 22px 3px rgba(255, 214, 10, 0.35);
+    0 0 0 1px rgba(217, 119, 87, 0.45),
+    0 0 22px 3px rgba(217, 119, 87, 0.35);
   opacity: 0.25;
   animation: nt-working-glow 2.6s ease-in-out infinite;
   will-change: opacity;
@@ -660,9 +660,9 @@ body,
   background: currentColor;
 }
 
-/* RUNNING matches the working spinner + node glow (amber), not the base green. */
+/* RUNNING matches the working spinner + node glow (clay #d97757), not the base green. */
 .term-node__status--busy {
-  color: #ffd60a;
+  color: #d97757;
 }
 
 .term-node__status--busy .term-node__status-dot {
@@ -4174,7 +4174,7 @@ body,
 .ss-bell svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
-  border: 2px solid #ffd60a;
+  border: 2px solid #d97757;
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
 }
