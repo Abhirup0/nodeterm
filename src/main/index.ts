@@ -35,6 +35,7 @@ import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 import { childArgs } from './remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
+import { ChatDriver } from './chat-driver'
 import { initContextLink, setNodeTranscript } from './context-link'
 import { initCanvasControl } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from './transcript-index'
@@ -77,6 +78,9 @@ const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
 const gitService = new GitService()
+// One driver for all chat nodes. Resolves the live window at send time (getMainWindow) so
+// pushes survive a macOS close→dock-reopen; disposed on quit next to ptyManager.killAll().
+const chatDriver = new ChatDriver(getMainWindow, sendToMain)
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
 
@@ -528,6 +532,15 @@ app.whenReady().then(async () => {
     (_e, sessionId: string, agentId: string, sourceNodeId: string, cwd: string | undefined) =>
       buildHandoff({ sessionId, agentId, sourceNodeId, cwd })
   )
+  // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC.
+  ipcMain.handle(IPC.chatEnsure, (_e, nodeId: string, opts) => chatDriver.ensure(nodeId, opts))
+  ipcMain.on(IPC.chatSend, (_e, nodeId: string, text: string, images) => chatDriver.send(nodeId, text, images))
+  ipcMain.on(IPC.chatInterrupt, (_e, nodeId: string) => chatDriver.interrupt(nodeId))
+  ipcMain.on(IPC.chatPermissionReply, (_e, nodeId: string, requestId: string, decision) =>
+    chatDriver.permissionReply(nodeId, requestId, decision))
+  ipcMain.on(IPC.chatRemoveQueued, (_e, nodeId: string, queueId: string) => chatDriver.removeQueued(nodeId, queueId))
+  ipcMain.on(IPC.chatDispose, (_e, nodeId: string) => chatDriver.dispose(nodeId))
+
   installManagedAgentHooks()
   hookServer.setListener((e) => sendToMain(IPC.agentStatus, e))
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
@@ -769,6 +782,7 @@ let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
   sshProjectManager?.disconnectAll()
+  chatDriver.disposeAll() // tear down every chat node's SDK query (resume-based, so this is safe)
   if (quitFlushed) return
   quitFlushed = true
   e.preventDefault()

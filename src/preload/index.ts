@@ -259,7 +259,20 @@ const api: NodeTerminalApi = {
   },
   chat: {
     readTranscript: (sessionId, cwd) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd)
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd),
+    ensure: (nodeId, opts) => ipcRenderer.invoke(IPC.chatEnsure, nodeId, opts),
+    send: (nodeId, text, images) => ipcRenderer.send(IPC.chatSend, nodeId, text, images),
+    interrupt: (nodeId) => ipcRenderer.send(IPC.chatInterrupt, nodeId),
+    permissionReply: (nodeId, requestId, decision) =>
+      ipcRenderer.send(IPC.chatPermissionReply, nodeId, requestId, decision),
+    removeQueued: (nodeId, queueId) => ipcRenderer.send(IPC.chatRemoveQueued, nodeId, queueId),
+    dispose: (nodeId) => ipcRenderer.send(IPC.chatDispose, nodeId),
+    onEvent: (nodeId, listener) => {
+      const ch = IPC.chatEvent(nodeId)
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(ch, handler)
+      return () => ipcRenderer.removeListener(ch, handler)
+    }
   },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)

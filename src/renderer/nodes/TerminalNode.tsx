@@ -19,7 +19,7 @@ import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
 import { FindBar } from '../components/FindBar'
-import { IconSearch } from '../components/icons'
+import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
@@ -899,6 +899,27 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             {naming ? '…' : '✦'}
           </button>
         </Tooltip>
+        {showChat && !!status?.sessionId && (
+          <Tooltip label="Open chat node (experimental — forks this session)">
+            <button
+              className="term-node__chat nodrag"
+              title="Open chat node (experimental — forks this session)"
+              onClick={() =>
+                window.dispatchEvent(
+                  new CustomEvent('nodeterm:open-chat', {
+                    detail: {
+                      nodeId: id,
+                      sessionId: status!.sessionId,
+                      cwd: data.cwd as string | undefined
+                    }
+                  })
+                )
+              }
+            >
+              <IconChat />
+            </button>
+          </Tooltip>
+        )}
         <button
           className="term-node__close"
           title="Close (ends the session)"

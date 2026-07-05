@@ -24,6 +24,7 @@ const DINO_SIZE = { width: 600, height: 200 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
+const CHAT_SIZE = { width: 420, height: 380 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -87,6 +88,16 @@ export interface NodeData {
    * SSH-project editor still routes to the remote fs after reopen.
    */
   sshFs?: boolean
+  /**
+   * chat-only: the SDK session id of this chat node's conversation. Persisted so a relaunch
+   * resumes the on-disk transcript (the SDK process dies with the app).
+   */
+  chatSessionId?: string
+  /**
+   * chat-only: source session id to fork from on first boot (Task 10). One-shot bootstrap —
+   * NOT persisted (like initialCommand); once the node's own chatSessionId arrives it's ignored.
+   */
+  forkFrom?: string
   [key: string]: unknown
 }
 
@@ -385,6 +396,31 @@ export function createBrowserNode(
       color: '#0a84ff',
       group: null,
       ...(url ? { url } : {})
+    }
+  }
+}
+
+/** Creates an SDK-driven chat node (Claude conversation without a terminal). */
+export function createChatNode(
+  index: number,
+  cwd?: string,
+  center?: { x: number; y: number },
+  init?: { chatSessionId?: string; forkFrom?: string }
+): CanvasNode {
+  return {
+    id: nextId('chat'),
+    type: 'chat',
+    position: placeAt(center, index, CHAT_SIZE.width, CHAT_SIZE.height),
+    width: CHAT_SIZE.width,
+    height: CHAT_SIZE.height,
+    style: { width: CHAT_SIZE.width, height: CHAT_SIZE.height },
+    data: {
+      title: 'Chat',
+      color: '#d97757', // clay, matches agent nodes
+      group: null,
+      ...(cwd ? { cwd } : {}),
+      ...(init?.chatSessionId ? { chatSessionId: init.chatSessionId } : {}),
+      ...(init?.forkFrom ? { forkFrom: init.forkFrom } : {})
     }
   }
 }
@@ -717,7 +753,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
-        worktree: n.worktree
+        worktree: n.worktree,
+        chatSessionId: n.chatSessionId
       }
     }
   })
@@ -742,7 +779,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                   ? WEB_SIZE
                   : kind === 'dino'
                     ? DINO_SIZE
-                    : TERMINAL_SIZE
+                    : kind === 'chat'
+                      ? CHAT_SIZE
+                      : TERMINAL_SIZE
   return nodes
     // Remote terminals are transient to a live relay connection — never persist them (their
     // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).
@@ -780,7 +819,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
-        worktree: n.data.worktree
+        worktree: n.data.worktree,
+        chatSessionId: n.data.chatSessionId
       }
     })
 }
