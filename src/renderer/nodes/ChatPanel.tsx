@@ -84,7 +84,7 @@ export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
         {messages.map((m, i) => (
           <div key={i} className={`term-chat__msg term-chat__msg--${m.role}`}>
             {m.parts.map((p, j) =>
-              p.kind === 'text' ? (
+              p.kind === 'text' || p.kind === 'thinking' ? (
                 <MarkdownText key={j} text={p.text} />
               ) : (
                 <details key={j} className="term-chat__tool">
