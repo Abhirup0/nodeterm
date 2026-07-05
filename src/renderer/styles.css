@@ -499,6 +499,40 @@ body,
   }
 }
 
+/* Needs-you (waiting/blocked): the red twin of the glows above — same badge/bell red,
+   a touch more insistent than working (deeper pulse, faster cycle): it's asking for you. */
+.term-node.attention {
+  box-shadow:
+    0 0 0 1px rgba(255, 69, 58, 0.4),
+    0 0 14px 1px rgba(255, 69, 58, 0.25),
+    0 8px 28px rgba(0, 0, 0, 0.4);
+}
+
+.react-flow__node:has(.term-node.attention)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: -1;
+  box-shadow:
+    0 0 0 1px rgba(255, 69, 58, 0.55),
+    0 0 22px 3px rgba(255, 69, 58, 0.4);
+  opacity: 0.15;
+  animation: nt-attention-glow 1.8s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes nt-attention-glow {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent. */
 .react-flow__handle.bridge-handle {
