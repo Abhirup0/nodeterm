@@ -68,7 +68,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   useEffect(() => {
     const el = msgsRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [chat?.messages, chat?.streamText, chat?.streamThinking])
+  }, [chat?.messages, chat?.streamText, chat?.streamThinking, chat?.working])
 
   const send = useCallback(() => {
     const text = input.trim()
@@ -257,6 +257,16 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
             )}
           </div>
         ))}
+        {/* Pre-stream gap: Enter → first SDK event has a noticeable latency (process/network).
+            Show a pulsing typing indicator until anything from the turn arrives. */}
+        {working &&
+          !chat?.streamText &&
+          !chat?.streamThinking &&
+          (chat?.toolOrder.length ?? 0) === 0 && (
+            <div className="chat-node__typing" aria-label="Claude is thinking">
+              <span /><span /><span />
+            </div>
+          )}
         {/* Live turn: streaming thinking + text + tool cards */}
         {chat?.streamThinking && (
           <details className="chat-node__thinking"><summary>Thinking…</summary><MarkdownText text={chat.streamThinking} /></details>

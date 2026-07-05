@@ -4642,6 +4642,38 @@ body,
   -webkit-user-select: text;
   cursor: auto;
 }
+/* Pre-stream typing indicator: three pulsing dots while waiting for the first SDK event. */
+.chat-node__typing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 2px;
+}
+.chat-node__typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--label-secondary, rgba(255, 255, 255, 0.55));
+  animation: chat-typing 1.2s ease-in-out infinite;
+}
+.chat-node__typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.chat-node__typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes chat-typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
 .chat-node__thinking {
   font-size: 12px;
   opacity: 0.6;
