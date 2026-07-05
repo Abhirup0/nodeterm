@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { IconCircleCheck } from './icons'
+import { IconBellFilled, IconCircleCheck } from './icons'
 import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -74,6 +74,11 @@ export function SessionRow({
         // REF-style completion glyph: a check icon scans better than one more dot.
         <span className="ss-check" title={row.stateLabel}>
           <IconCircleCheck />
+        </span>
+      ) : row.statusKind === 'attention' ? (
+        // Needs-you rings a bell — louder than one more colored dot.
+        <span className="ss-bell" title={row.stateLabel}>
+          <IconBellFilled />
         </span>
       ) : (
         <span className={`ss-dot ss-dot--${row.statusKind}`} title={row.stateLabel} />

@@ -4163,11 +4163,13 @@ body,
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .ss-dot--idle { background: rgba(160, 160, 160, 0.4); }
-/* waiting/blocked = needs the user NOW: red, mirroring REF's attention color. */
-.ss-dot--attention { background: #ff453a; }
 /* done renders as a check icon (ss-check), not a dot — see SessionRow. */
 .ss-check { color: #30d158; margin-top: 2px; flex: 0 0 auto; line-height: 0; }
 .ss-check svg { width: 13px; height: 13px; }
+/* attention renders as a red bell (ss-bell) — "it's ringing for you". Gentle pulse,
+   same cadence as the header badge dot. */
+.ss-bell { color: #ff453a; margin-top: 2px; flex: 0 0 auto; line-height: 0; animation: nt-pulse 1.1s ease-in-out infinite; }
+.ss-bell svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
   border: 2px solid #ffd60a;

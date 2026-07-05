@@ -195,3 +195,12 @@ export const IconCircleCheck = () => (
     <path d="M9 12.5l2.2 2.2L15.5 10" />
   </svg>
 )
+
+/* Filled bell (attention/needs-you) — filled on purpose, so it reads at 12px where a
+   stroked bell would collapse into noise. */
+export const IconBellFilled = () => (
+  <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 2a6.5 6.5 0 0 0-6.5 6.5v3.6l-1.6 3.2a1 1 0 0 0 .9 1.45h14.4a1 1 0 0 0 .9-1.45l-1.6-3.2V8.5A6.5 6.5 0 0 0 12 2z" />
+    <path d="M9.7 18.7a2.4 2.4 0 0 0 4.6 0z" />
+  </svg>
+)
