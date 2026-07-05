@@ -28,6 +28,9 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   const addLocalUser = useChatSessions((s) => s.addLocalUser)
   const clearError = useChatSessions((s) => s.clearError)
   const status = useAgentStatus((s) => s.byId[id])
+  // The driver's agent-status event lands (IPC) before the store's first delta flips
+  // chat.working, so OR both — this drives the badge, Stop button and typing indicator.
+  const working = !!chat?.working || status?.state === 'working'
   const { setNodes, addNodes } = useReactFlow()
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
@@ -68,7 +71,10 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   useEffect(() => {
     const el = msgsRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [chat?.messages, chat?.streamText, chat?.streamThinking, chat?.working])
+    // `working` (not chat.working): the typing indicator is shown off the agent-status event,
+    // which arrives before any delta touches the store — scroll must follow it too. toolOrder/
+    // permission keep new tool cards and the permission card in view.
+  }, [chat?.messages, chat?.streamText, chat?.streamThinking, working, chat?.toolOrder, chat?.permission])
 
   const send = useCallback(() => {
     const text = input.trim()
@@ -195,7 +201,6 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   }
 
   const perm = chat?.permission
-  const working = !!chat?.working || status?.state === 'working'
   const cwd = data.cwd as string | undefined
 
   // Shared tool-card renderer for both live (toolOrder) and committed (folded into history at
