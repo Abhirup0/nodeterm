@@ -6,27 +6,6 @@ import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
 
-const COLLAPSE_KEY = 'nodeterm.sessionsCollapsed'
-
-// Explicit per-project collapse choices (true = collapsed, false = expanded). Absent = follow
-// the default (active project expanded, others collapsed — see isGroupCollapsed).
-function loadOverrides(): Record<string, boolean> {
-  try {
-    const raw = localStorage.getItem(COLLAPSE_KEY)
-    if (!raw) return {}
-    const data = JSON.parse(raw)
-    if (Array.isArray(data)) {
-      // Legacy format: a flat list of collapsed project ids.
-      const out: Record<string, boolean> = {}
-      for (const id of data as string[]) out[id] = true
-      return out
-    }
-    return data && typeof data === 'object' ? (data as Record<string, boolean>) : {}
-  } catch {
-    return {}
-  }
-}
-
 export interface SessionsSidebarProps {
   open: boolean
   pinned: boolean
@@ -57,13 +36,24 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const namingById = useSessionNaming((s) => s.byId)
 
   const [filter, setFilter] = useState('')
-  const [overrides, setOverrides] = useState<Record<string, boolean>>(loadOverrides)
+  // Explicit per-project collapse choices (true = collapsed, false = expanded). Absent =
+  // follow the default (active project expanded, others collapsed — see isGroupCollapsed).
+  // Deliberately transient: reset on every project switch, so the toggles are "for now",
+  // not forever — switching projects always re-focuses the list on the active one.
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const [branches, setBranches] = useState<Record<string, string>>({})
   // Drag-to-group: the session being dragged, and the current drop target for highlighting.
   const [drag, setDrag] = useState<{ projectId: string; nodeId: string } | null>(null)
   const [dropKey, setDropKey] = useState<string | null>(null)
   // Inline group rename: the group node id being edited + its draft title.
   const [editGroup, setEditGroup] = useState<{ id: string; draft: string } | null>(null)
+
+  // Switching the active project resets the manual collapse choices, so the default takes
+  // over again: the newly active project expands, everything else collapses. Without this,
+  // one manual toggle stuck forever and project switches stopped re-focusing the list.
+  useEffect(() => {
+    setOverrides((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+  }, [activeProjectId])
 
   // Look up the current git branch for each project cwd (best-effort, cached). Gated on `open`
   // and caches a NEGATIVE result too — without the '' fallback a non-git cwd re-fired a git
@@ -102,15 +92,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const total = groups.reduce((n, g) => n + projectCount(g), 0)
 
   const toggleCollapse = (id: string, currentlyCollapsed: boolean): void => {
-    setOverrides((prev) => {
-      const next = { ...prev, [id]: !currentlyCollapsed }
-      try {
-        localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next))
-      } catch {
-        // ignore
-      }
-      return next
-    })
+    setOverrides((prev) => ({ ...prev, [id]: !currentlyCollapsed }))
   }
 
   // Drop-target wiring shared by the project header (ungroup) and group sub-headers (add).
