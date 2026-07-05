@@ -712,7 +712,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
         isUnread ? ' unread' : ''
-      }`}
+      }${status?.state === 'working' ? ' working' : ''}`}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}

@@ -462,6 +462,43 @@ body,
   }
 }
 
+/* Working (agent mid-turn): a soft amber glow — the spinner's #ffd60a — behind the node.
+   Same opacity-pulse-on-wrapper-pseudo technique as the unread glow above (never animate
+   box-shadow), but calmer: lower intensity, slower cycle, and it never fully disappears so
+   the node reads "alive" rather than "blinking". Mutually exclusive with .unread (isUnread
+   is false while working). Shadows only — the top border keeps the node's own color. */
+.term-node.working {
+  box-shadow:
+    0 0 0 1px rgba(255, 214, 10, 0.35),
+    0 0 14px 1px rgba(255, 214, 10, 0.22),
+    0 8px 28px rgba(0, 0, 0, 0.4);
+}
+
+.react-flow__node:has(.term-node.working)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: -1;
+  box-shadow:
+    0 0 0 1px rgba(255, 214, 10, 0.45),
+    0 0 22px 3px rgba(255, 214, 10, 0.35);
+  opacity: 0.25;
+  animation: nt-working-glow 2.6s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes nt-working-glow {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent. */
 .react-flow__handle.bridge-handle {
