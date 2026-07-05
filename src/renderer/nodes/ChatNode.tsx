@@ -239,7 +239,9 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
         <span className="chat-node__title">{(data.title as string) || 'Chat'}</span>
         {working && <span className="chat-node__badge chat-node__badge--working">RUNNING</span>}
         {perm && <span className="chat-node__badge chat-node__badge--needs">NEEDS YOU</span>}
-        {chat && chat.costUsd > 0 && <span className="chat-node__cost">${chat.costUsd.toFixed(2)}</span>}
+        {/* Cost chip intentionally hidden: the SDK reports an API-equivalent estimate even on
+            subscription auth, which reads as a real charge. costUsd still accumulates in the
+            store — re-enable here once auth-aware display (or a settings toggle) exists. */}
       </div>
       <div className="chat-node__msgs nodrag nowheel" ref={msgsRef}>
         {chat?.messages.map((m, i) => (
