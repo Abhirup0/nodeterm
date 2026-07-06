@@ -351,6 +351,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
     const scrollbackPromise = window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    // Paint the persisted snapshot the moment it's read (a file read resolves well before the
+    // tmux attach round-trip), so a project switch shows each terminal's last content instantly
+    // instead of a blank body. On a warm reattach the live tmux redraw REPLACES it (term.reset()
+    // on the first data chunk below); on a cold restore the replay logic reuses it as-is.
+    let previewShown = false
+    let liveStarted = false
+    void scrollbackPromise.then((snapshot) => {
+      if (disposed || liveStarted || !snapshot) return
+      term.write(snapshot)
+      previewShown = true
+    })
     void (async () => {
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
@@ -380,6 +391,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           return
         }
         sessionId = sid
+        liveStarted = true // a late-resolving preview must not write over live output
         if (fellBack) setAccountFallback(true)
         // Cold restart: the tmux session (and anything that was running in it) is gone — replay
         // the last persisted scrollback so the user sees where they left off. Warm reattach
@@ -392,7 +404,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             return
           }
           if (snapshot) {
-            term.write(snapshot)
+            // The instant preview above may have painted this snapshot already — keep it.
+            if (!previewShown) term.write(snapshot)
+            previewShown = false
             term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
           }
         }
@@ -405,6 +419,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const LOW_WATER = 1 << 18 //  256 KB
         cleanups.push(
           transport.onData(sid, (chunk) => {
+            // Warm reattach: the first live chunk is tmux's own full redraw — drop the static
+            // snapshot preview so the two don't stack (reset clears buffer + scrollback, which
+            // matches the pre-preview behavior of starting the attach from a blank terminal).
+            if (previewShown) {
+              previewShown = false
+              term.reset()
+            }
             pending += chunk.length
             if (!paused && pending > HIGH_WATER) {
               paused = true

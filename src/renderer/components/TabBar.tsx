@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
@@ -87,6 +87,15 @@ export function TabBar({
     setEditingId(null)
   }
 
+  // The strip scrolls without a visible scrollbar (see .tabbar__tabs), so keep it navigable:
+  // a plain mouse wheel scrolls it horizontally, and the active tab is brought into view.
+  const tabsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    tabsRef.current
+      ?.querySelector('.tab.active')
+      ?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
+  }, [activeId, projects.length])
+
   return (
     <>
       {(menuId || editingId) && (
@@ -124,7 +133,15 @@ export function TabBar({
           <span className="brand__name">nodeterm</span>
         </div>
 
-        <div className="tabbar__tabs">
+        <div
+          className="tabbar__tabs"
+          ref={tabsRef}
+          onWheel={(e) => {
+            // Translate a vertical mouse wheel into horizontal strip scrolling (trackpads
+            // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
+          }}
+        >
           {projects.map((p) => {
             const active = p.id === activeId
             const unreadCount = p.nodes.filter((n) => unreadSet.has(n.id)).length

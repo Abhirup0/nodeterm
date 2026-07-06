@@ -110,6 +110,13 @@ body,
   border: 1px solid var(--border);
   border-radius: 17px;
   overflow-x: auto;
+  /* Scrollable but without the native scrollbar (foreign-looking in a title-bar tab strip);
+     trackpad swipe / wheel still scroll, and the active tab is scrolled into view. */
+  scrollbar-width: none;
+}
+
+.tabbar__tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {
