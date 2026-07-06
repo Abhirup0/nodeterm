@@ -146,6 +146,17 @@ import {
 
 const GRID = 24
 
+// Group labels counter-scale when zoomed OUT so they stay readable/clickable from afar
+// (like map labels): full inverse of the zoom, capped so far-out labels don't get huge,
+// and never below 1 (zooming IN doesn't shrink them). Written as a CSS var once per
+// viewport frame (see onMove) — CSS does the scaling, no per-node re-render.
+const setGroupLabelBoost = (zoom: number): void => {
+  // Cap 4 = constant on-screen size down to 25% zoom; beyond that it shrinks again so
+  // pills can't blanket the canvas at extreme zoom-out (minZoom goes to 0.01).
+  const boost = Math.min(4, Math.max(1, 1 / (zoom || 1)))
+  document.documentElement.style.setProperty('--group-label-boost', boost.toFixed(3))
+}
+
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
 // memo doesn't allocate fresh arrays on every node change (e.g. each drag frame).
 const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
@@ -694,6 +705,7 @@ export function Canvas() {
     viewportRef.current = project.viewport
     setViewport(project.viewport)
     setZoomPct(Math.round(project.viewport.zoom * 100))
+    setGroupLabelBoost(project.viewport.zoom)
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
       loadingRef.current = false
@@ -2284,6 +2296,7 @@ export function Canvas() {
         zoomRafRef.current = requestAnimationFrame(() => {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
+          setGroupLabelBoost(viewportRef.current.zoom)
         })
       }
     },
