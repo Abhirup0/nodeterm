@@ -274,6 +274,12 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(ch, handler)
     }
   },
+  claudeAccounts: {
+    add: () => ipcRenderer.invoke(IPC.claudeAccountsAdd),
+    waitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id),
+    cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
+    remove: (id) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id)
+  },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)
   },

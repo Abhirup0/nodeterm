@@ -34,6 +34,16 @@ export function installClaudeHooks(): void {
   })
 }
 
+/** Install the managed hook into a specific Claude config dir (managed accounts). */
+export function installClaudeHooksInto(configDir: string): void {
+  installHooksInto({
+    agentId: 'claude',
+    scriptFileName: SCRIPT_FILE_NAME,
+    configPath: path.join(configDir, 'settings.json'),
+    events: CLAUDE_EVENTS
+  })
+}
+
 export function removeClaudeHooks(): void {
   removeHooksFrom({
     configPath: configPath(),

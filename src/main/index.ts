@@ -42,6 +42,7 @@ import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
+import { initClaudeAccounts } from './claude-accounts'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
@@ -734,6 +735,7 @@ app.whenReady().then(async () => {
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
+  initClaudeAccounts()
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)

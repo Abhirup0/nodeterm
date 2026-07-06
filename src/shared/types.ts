@@ -770,6 +770,17 @@ export interface ChatApi {
   onEvent(nodeId: string, listener: (e: ChatEvent) => void): () => void
 }
 
+export interface ClaudeAccountsApi {
+  /** Mint a new managed account: create its config dir, install the hook, check the CLI version. */
+  add(): Promise<{ id: string; configDir: string; versionSupported: boolean }>
+  /** Poll the account's `.claude.json` for a completed login; null on timeout/cancel. */
+  waitLogin(id: string): Promise<{ email: string } | null>
+  /** Cancel an in-flight `waitLogin` for this account. */
+  cancelWaitLogin(id: string): Promise<void>
+  /** Delete a managed account's config dir (recursive). */
+  remove(id: string): Promise<void>
+}
+
 /** One ranked search hit across all on-disk Claude session transcripts. */
 export interface TranscriptHit {
   sessionId: string
@@ -943,6 +954,7 @@ export interface NodeTerminalApi {
   context: ContextApi
   claude: ClaudeApi
   chat: ChatApi
+  claudeAccounts: ClaudeAccountsApi
   transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi

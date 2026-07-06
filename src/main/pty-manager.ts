@@ -151,6 +151,27 @@ function resolveShellPath(): Promise<string | null> {
   return shellPathPromise
 }
 
+/**
+ * Resolve an executable against the user's real login-shell PATH (reusing the cached probe),
+ * returning its absolute path or null. GUI apps inherit only a minimal PATH, so a bare
+ * `execFile('claude', …)` would fail even when the tool is installed — this walks the resolved
+ * PATH entries and returns the first `bin` that exists and is accessible.
+ */
+export async function findInLoginPath(bin: string): Promise<string | null> {
+  const shellPath = (await resolveShellPath()) ?? process.env.PATH ?? ''
+  for (const dir of shellPath.split(path.delimiter)) {
+    if (!dir) continue
+    const candidate = path.join(dir, bin)
+    try {
+      await fs.promises.access(candidate, fs.constants.X_OK)
+      return candidate
+    } catch {
+      // not here — keep looking
+    }
+  }
+  return null
+}
+
 interface Session {
   proc: pty.IPty
   /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
