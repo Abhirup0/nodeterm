@@ -443,6 +443,11 @@ export function Canvas() {
       eNodes.push({
         id: lid,
         type: 'loop',
+        // parent.position is group-relative when the agent sits in a group frame; giving the
+        // card the same parentId keeps this math in one coordinate space (and the card moves
+        // with the group). Deliberately no extent:'parent' — the fan-out may hang below the
+        // frame border without being clamped into it.
+        ...(parent.parentId ? { parentId: parent.parentId } : {}),
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
         draggable: true,
         selected: !!ephSel[lid],
@@ -486,6 +491,8 @@ export function Canvas() {
         eNodes.push({
           id: cid,
           type: 'subagent',
+          // Same coordinate-space rule as the loop card above: inherit the agent's group.
+          ...(parent.parentId ? { parentId: parent.parentId } : {}),
           position: ephemeralPos[cid] ?? {
             x: parent.position.x + (i % COLS) * COL_W,
             y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
@@ -2531,12 +2538,17 @@ export function Canvas() {
       browserPopupSpawnsRef.current = recent
       const srcW = src.measured?.width ?? (src.width as number) ?? 800
       const srcH = src.measured?.height ?? (src.height as number) ?? 560
+      // src.position is group-relative when the opener sits in a group frame: place in absolute
+      // coords, then join the opener's group (parentInto converts back) so the popup node stays
+      // inside the frame and moves with it.
+      const srcGroup = src.parentId ? nodesRef.current.find((n) => n.id === src.parentId) : undefined
       const node = createBrowserNode(nodesRef.current.length, url, {
-        x: src.position.x + srcW / 2 + 40,
-        y: src.position.y + srcH + 80 + 280
+        x: src.position.x + (srcGroup?.position.x ?? 0) + srcW / 2 + 40,
+        y: src.position.y + (srcGroup?.position.y ?? 0) + srcH + 80 + 280
       })
-      setNodes((ns) => [...ns, node])
-      setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${node.id}`, sourceNodeId, node.id, '#0a84ff')])
+      const placed = src.parentId ? parentInto(node, src.parentId) : node
+      setNodes((ns) => [...ns, placed])
+      setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${placed.id}`, sourceNodeId, placed.id, '#0a84ff')])
       markDirty()
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2567,18 +2579,28 @@ export function Canvas() {
       // centerpoint; `i` fans multiple nodes out horizontally so they don't stack.
       const srcW = src.measured?.width ?? (src.width as number) ?? 600
       const srcH = src.measured?.height ?? (src.height as number) ?? 400
-      const belowY = src.position.y + srcH + 80
+      // src.position is group-relative when the agent sits inside a group frame — resolve the
+      // absolute position first so placements land below the agent regardless of grouping.
+      const srcGroup = src.parentId ? nodesRef.current.find((n) => n.id === src.parentId) : undefined
+      const srcAbs = {
+        x: src.position.x + (srcGroup?.position.x ?? 0),
+        y: src.position.y + (srcGroup?.position.y ?? 0)
+      }
+      const belowY = srcAbs.y + srcH + 80
       const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
-      const placeBelow = (i = 0) => ({ x: src.position.x + srcW / 2 + i * 460, y: belowY + 210 })
+      const placeBelow = (i = 0) => ({ x: srcAbs.x + srcW / 2 + i * 460, y: belowY + 210 })
       const connect = (newId: string) =>
         setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId, edgeColor)])
       // Append a freshly-created node, draw its connecting edge, and mark the canvas dirty so it
-      // persists. Returns the new node id.
+      // persists. Returns the new node id. A node opened by a grouped agent joins that group
+      // (parentInto converts back to group-relative coords), so the control fan-out stays inside
+      // the frame and moves with it.
       const addAndConnect = (node: CanvasNode) => {
-        setNodes((ns) => [...ns, node])
-        connect(node.id)
+        const placed = src.parentId ? parentInto(node, src.parentId) : node
+        setNodes((ns) => [...ns, placed])
+        connect(placed.id)
         markDirty()
-        return node.id
+        return placed.id
       }
 
       try {
