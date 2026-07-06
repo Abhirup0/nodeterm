@@ -21,6 +21,7 @@ import {
   remoteCapturePaneArgs
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
+import { releasePty, type ReleasablePty } from './pty-release'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -564,17 +565,18 @@ export class PtyManager {
       })
     } catch (err) {
       // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno,
-      // so we can't tell EAGAIN/ENFILE apart here. The dominant cause is running out of PTYs/fds
-      // (macOS caps system-wide PTYs at kern.tty.ptmx_max, and this app keeps tmux sessions — and
-      // thus their PTYs — alive across restarts, so they accumulate). Re-throw with the resolved
-      // program + cwd + open-PTY count so the renderer surfaces an actionable message instead of
-      // an opaque stack, and the caller (create) rejects cleanly rather than leaving a blank node.
+      // so we can't tell EMFILE/EAGAIN/ENOMEM apart here. In practice the dominant cause is THIS
+      // process running out of file descriptors (macOS gives GUI apps a soft limit of only 256;
+      // a field incident showed 253 fds used while the system PTY cap sat at 149/511). Re-throw
+      // with the resolved program + cwd + live-PTY count so the renderer surfaces an actionable
+      // message, and the caller (create) rejects cleanly rather than leaving a blank node.
       const openPtys = this.sessions.size
       const reason = err instanceof Error ? err.message : String(err)
       throw new Error(
         `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, live PTYs: ${openPtys}. ` +
-          `On macOS the system PTY limit (kern.tty.ptmx_max) may be exhausted — close unused ` +
-          `terminals or run \`tmux -L ${TMUX_SOCKET} kill-server\` to reclaim leaked sessions.`
+          `The app process is likely out of file descriptors — restart the app to reclaim them ` +
+          `(tmux sessions survive an app restart). If it recurs, reduce the number of open ` +
+          `terminals in the active project.`
       )
     }
 
@@ -688,7 +690,9 @@ export class PtyManager {
     // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
     if (session.persistKey && session.outputSinceSnapshot)
       void this.snapshotScrollback(session.persistKey, session.sshRemote)
-    session.proc.kill()
+    // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone leaks the
+    // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
+    releasePty(session.proc as ReleasablePty)
     this.sessions.delete(sessionId)
   }
 
@@ -832,7 +836,7 @@ export class PtyManager {
       // no output since the last periodic capture (unchanged pane content).
       if (session.persistKey && session.outputSinceSnapshot)
         finals.push(this.snapshotScrollback(session.persistKey, session.sshRemote))
-      session.proc.kill()
+      releasePty(session.proc as ReleasablePty)
     }
     this.sessions.clear()
     return Promise.all(finals).then(() => undefined)

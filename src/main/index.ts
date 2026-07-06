@@ -126,6 +126,18 @@ if (!gotSingleInstanceLock) {
 // The actual request handler is installed post-ready via initMediaProtocol().
 registerMediaScheme()
 
+// Raise the soft file-descriptor limit (macOS/Linux; no-op elsewhere). macOS launches GUI apps
+// with a soft limit of 256, which a canvas full of terminals genuinely needs to exceed: every
+// attached PTY holds a master fd here, plus hook-server sockets and transcript tails. 256 was
+// hit in the field (posix_spawnp failures with ~34 terminals in one project).
+if (process.platform !== 'win32' && typeof process.setFdLimit === 'function') {
+  try {
+    process.setFdLimit(8192)
+  } catch (e) {
+    console.warn('[main] could not raise fd limit', e)
+  }
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
