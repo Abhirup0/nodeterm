@@ -4,6 +4,7 @@ export type SettingsSectionId =
   | 'behavior'
   | 'appearance'
   | 'agents'
+  | 'accounts'
   | 'custom-agents'
   | 'notifications'
   | 'commit'
@@ -36,6 +37,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     title: 'Agents',
     sections: [
       { id: 'agents', title: 'Agents' },
+      { id: 'accounts', title: 'Accounts' },
       { id: 'custom-agents', title: 'Custom agents' },
       { id: 'notifications', title: 'Notifications' },
       { id: 'commit', title: 'Commit messages' }

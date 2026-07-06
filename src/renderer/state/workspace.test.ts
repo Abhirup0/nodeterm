@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  createAccountLoginNode,
   createAgentNode,
   createChatNode,
   createDinoNode,
@@ -199,6 +200,16 @@ describe('accountId serialization', () => {
       data: { title: 'T', color: '#888', group: null }
     } as unknown as CanvasNode
     expect(flowToNodeStates([node])[0].accountId).toBeUndefined()
+  })
+})
+
+describe('createAccountLoginNode', () => {
+  it('produces a terminal node that logs the given account in', () => {
+    const node = createAccountLoginNode('acct-1', 0)
+    expect(node.type).toBe('terminal')
+    expect(node.data.title).toBe('Claude login')
+    expect(node.data.accountId).toBe('acct-1')
+    expect(node.data.initialCommand).toBe('claude /login')
   })
 })
 

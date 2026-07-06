@@ -310,6 +310,27 @@ export function createClaudeNode(
 }
 
 /**
+ * Terminal node used to log a new managed account in: the session runs under the account's
+ * CLAUDE_CONFIG_DIR (Task-3 env injection keyed off `data.accountId`), so `claude /login`
+ * writes credentials + `.claude.json` into the account dir, where the main process captures
+ * the email. A plain terminal (not an agent node) so no session-name tracking kicks in.
+ */
+export function createAccountLoginNode(
+  accountId: string,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Claude login',
+    accountId,
+    initialCommand: 'claude /login'
+  }
+  return node
+}
+
+/**
  * Creates a code editor node for a file. When `sshFs` is true, `data.sshFs` is stamped so EditorNode
  * reads/writes over the project's remote fs (`sshFs`) and `filePath` is the remote path — mirroring
  * how `createTerminalNode` stamps `data.sshRemoteTmux`. The SSH-ness is passed EXPLICITLY by the

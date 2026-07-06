@@ -116,6 +116,7 @@ import {
   applyCanvasMutation,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
+  createAccountLoginNode,
   createAgentNode,
   createBrowserNode,
   createChatNode,
@@ -1326,6 +1327,43 @@ export function Canvas() {
     window.addEventListener('nodeterm:open-chat', onOpenChat)
     return () => window.removeEventListener('nodeterm:open-chat', onOpenChat)
   }, [setNodes, markDirty])
+
+  // Task 6: the Settings → Accounts "Add account" flow dispatches 'nodeterm:add-account-login'
+  // to open a terminal node running `claude /login` under the new account's config dir.
+  useEffect(() => {
+    const onAddAccountLogin = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
+      if (!accountId) return
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
+      ])
+      markDirty()
+    }
+    window.addEventListener('nodeterm:add-account-login', onAddAccountLogin)
+    return () => window.removeEventListener('nodeterm:add-account-login', onAddAccountLogin)
+  }, [setNodes, markDirty, viewCenter])
+
+  // When an account is removed in Settings, clear it off the ACTIVE project's live nodes (the
+  // projects store only holds the other projects' serialized copies). Referencing nodes fall
+  // back to the system account; the missing-dir spawn fallback (Task 3) is safe either way.
+  useEffect(() => {
+    const onAccountRemoved = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
+      if (!accountId) return
+      setNodes((ns) =>
+        ns.some((n) => n.data.accountId === accountId)
+          ? ns.map((n) =>
+              n.data.accountId === accountId
+                ? { ...n, data: { ...n.data, accountId: undefined } }
+                : n
+            )
+          : ns
+      )
+    }
+    window.addEventListener('nodeterm:account-removed', onAccountRemoved)
+    return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
+  }, [setNodes])
 
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {

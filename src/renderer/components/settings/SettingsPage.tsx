@@ -9,6 +9,7 @@ import { ShellSection } from './sections/ShellSection'
 import { BehaviorSection } from './sections/BehaviorSection'
 import { AppearanceSection } from './sections/AppearanceSection'
 import { AgentsSection } from './sections/AgentsSection'
+import { AccountsSection } from './sections/AccountsSection'
 import { CustomAgentsSection } from './sections/CustomAgentsSection'
 import { NotificationsSection } from './sections/NotificationsSection'
 import { CommitSection } from './sections/CommitSection'
@@ -65,6 +66,7 @@ export function SettingsPage({
             <BehaviorSection isActive={active === 'behavior'} />
             <AppearanceSection isActive={active === 'appearance'} />
             <AgentsSection isActive={active === 'agents'} />
+            <AccountsSection isActive={active === 'accounts'} />
             <CustomAgentsSection isActive={active === 'custom-agents'} />
             <NotificationsSection isActive={active === 'notifications'} />
             <CommitSection isActive={active === 'commit'} />
