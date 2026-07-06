@@ -23,6 +23,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
+  accountId?: string
   /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
   sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string }
 }
@@ -67,6 +69,12 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * Claude-only: managed account this node runs on (CLAUDE_CONFIG_DIR injection).
+   * Resolved once at node creation (explicit pick → project default → system default)
+   * and immutable for the node's lifetime. Undefined = system default (~/.claude).
+   */
+  accountId?: string
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
@@ -132,6 +140,8 @@ export interface Project {
   ssh?: { server: import('./ssh').SshConnection; remoteCwd: string }
   viewport: Viewport
   nodes: CanvasNodeState[]
+  /** Default managed Claude account for new Claude/chat nodes in this project. */
+  defaultAccountId?: string
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
@@ -274,6 +284,24 @@ export interface CustomAgent {
   promptInjectionMode: PromptInjectionMode
 }
 
+/**
+ * A managed Claude account. Its credentials/config live in a private config dir
+ * ({userData}/claude-accounts/<id>, or `~/.nodeterm/claude-accounts/<id>` on `host` for
+ * remote accounts) injected as CLAUDE_CONFIG_DIR at spawn. The claude CLI owns login,
+ * credential storage, and token refresh inside that dir — we never write credentials.
+ */
+export interface ClaudeAccount {
+  id: string
+  /** Display label; defaults to the captured email. */
+  label: string
+  email?: string
+  /** Set only for remote (SSH) accounts: the ssh host this account's config dir lives on. */
+  host?: string
+  /** True until `claude /login` completes in the account dir and the email is captured. */
+  pending?: boolean
+  createdAt: number
+}
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -309,6 +337,8 @@ export interface Settings {
   notifyConsentAsked: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
+  claudeAccounts: ClaudeAccount[]
   /** Agent ids hidden from the Add menus. */
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
@@ -339,6 +369,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gitAutoFetch: true,
   notifyConsentAsked: false,
   customAgents: [],
+  claudeAccounts: [],
   // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
