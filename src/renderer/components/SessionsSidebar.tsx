@@ -251,6 +251,8 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                     <div key={bucket.id} className="ss-subgroup">
                       <div
                         className={`ss-subgroup__head${dropClass(g.projectId, bucket.id)}`}
+                        title="Click to show the group on the canvas"
+                        onClick={() => props.onFocusNode(bucket.id)}
                         {...dropProps(g.projectId, bucket.id)}
                       >
                         <span className="ss-subgroup__dot" style={{ background: bucket.color }} />
@@ -260,6 +262,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                             style={{ flex: 1, minWidth: 0 }}
                             autoFocus
                             value={editGroup.draft}
+                            onClick={(e) => e.stopPropagation()}
                             onChange={(e) => setEditGroup({ id: bucket.id, draft: e.target.value })}
                             onBlur={() => {
                               const t = editGroup.draft.trim()
@@ -275,7 +278,10 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                           <span
                             className="ss-subgroup__name"
                             title="Double-click to rename group"
-                            onDoubleClick={() => setEditGroup({ id: bucket.id, draft: bucket.title })}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation()
+                              setEditGroup({ id: bucket.id, draft: bucket.title })
+                            }}
                           >
                             {bucket.title}
                           </span>
