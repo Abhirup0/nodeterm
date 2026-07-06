@@ -22,6 +22,7 @@ import {
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
+import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-accounts'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
@@ -84,6 +85,39 @@ function findTmux(): string | null {
 
 /** Resolve an absolute ssh path (GUI apps don't inherit the shell PATH). */
 let cachedSsh: string | null | undefined
+/**
+ * macOS-only diagnostic for the recurring release-clobber incident: `electron-builder --x64`
+ * rebuilds node-pty IN PLACE in node_modules, leaving an x86_64 spawn-helper that an arm64 app
+ * cannot posix_spawn — every terminal then fails with an opaque "posix_spawnp failed.". Returns
+ * the precise message (with the `npm run rebuild` remedy) when the helper's arch mismatches this
+ * process, else null. Fail-open: any read/parse problem returns null (diagnostics only).
+ */
+function spawnHelperArchMismatch(): string | null {
+  if (os.platform() !== 'darwin') return null
+  try {
+    const helper = path.join(
+      path.dirname(require.resolve('node-pty/package.json')),
+      'build',
+      'Release',
+      'spawn-helper'
+    )
+    const fd = fs.openSync(helper, 'r')
+    const buf = Buffer.alloc(8)
+    fs.readSync(fd, buf, 0, 8, 0)
+    fs.closeSync(fd)
+    const arch = machOArch(buf)
+    if (archMismatch(arch, process.arch)) {
+      return (
+        `node-pty's spawn-helper is ${arch} but this app is ${process.arch} — a cross-arch ` +
+        `release build clobbered node_modules. Fix: run \`npm run rebuild\`, then restart the app.`
+      )
+    }
+  } catch {
+    /* diagnostics only — never mask the real spawn error */
+  }
+  return null
+}
+
 function findSsh(): string | null {
   if (cachedSsh !== undefined) return cachedSsh
   try {
@@ -652,19 +686,19 @@ export class PtyManager {
         env
       })
     } catch (err) {
-      // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno,
-      // so we can't tell EMFILE/EAGAIN/ENOMEM apart here. In practice the dominant cause is THIS
-      // process running out of file descriptors (macOS gives GUI apps a soft limit of only 256;
-      // a field incident showed 253 fds used while the system PTY cap sat at 149/511). Re-throw
-      // with the resolved program + cwd + live-PTY count so the renderer surfaces an actionable
-      // message, and the caller (create) rejects cleanly rather than leaving a blank node.
+      // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno.
+      // The recurring field cause is a cross-arch `electron-builder --x64` run clobbering
+      // node-pty's spawn-helper in node_modules (arm64 app can't exec an x86_64 helper), so
+      // check the helper's Mach-O arch first and name the exact remedy when it mismatches.
       const openPtys = this.sessions.size
       const reason = err instanceof Error ? err.message : String(err)
+      const archNote = spawnHelperArchMismatch()
       throw new Error(
         `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, live PTYs: ${openPtys}. ` +
-          `The app process is likely out of file descriptors — restart the app to reclaim them ` +
-          `(tmux sessions survive an app restart). If it recurs, reduce the number of open ` +
-          `terminals in the active project.`
+          (archNote ??
+            `If this persists, restart the app (tmux sessions survive a restart) or run ` +
+              `\`npm run rebuild\` in the repo — a release build may have rebuilt node-pty ` +
+              `for the wrong architecture.`)
       )
     }
 
