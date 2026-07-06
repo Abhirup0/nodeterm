@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   accountConfigDir,
   claudeKeychainService,
+  usageCredsPaths,
   AUTH_ENV_STRIP,
   accountTmuxEnvArgs,
   parseLoginCapture,
@@ -32,6 +33,27 @@ describe('claudeKeychainService', () => {
   it('is deterministic per dir and differs across dirs', () => {
     expect(claudeKeychainService('/a')).toBe(claudeKeychainService('/a'))
     expect(claudeKeychainService('/a')).not.toBe(claudeKeychainService('/b'))
+  })
+})
+
+describe('usageCredsPaths', () => {
+  it('without a config dir uses the legacy unscoped services + ~/.claude paths', () => {
+    expect(usageCredsPaths('/Users/x')).toEqual({
+      services: ['Claude Code-credentials', 'claudeAiOauth'],
+      credsFile: '/Users/x/.claude/.credentials.json',
+      identityFile: '/Users/x/.claude.json'
+    })
+  })
+  it('with a config dir puts the scoped service first + reads that dir', () => {
+    const configDir = '/ud/claude-accounts/a1'
+    const p = usageCredsPaths('/Users/x', configDir)
+    expect(p.services).toEqual([
+      claudeKeychainService(configDir),
+      'Claude Code-credentials',
+      'claudeAiOauth'
+    ])
+    expect(p.credsFile).toBe('/ud/claude-accounts/a1/.credentials.json')
+    expect(p.identityFile).toBe('/ud/claude-accounts/a1/.claude.json')
   })
 })
 

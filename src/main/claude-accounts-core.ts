@@ -37,6 +37,32 @@ export function claudeKeychainService(configDir: string): string {
   return `Claude Code-credentials-${suffix}`
 }
 
+/**
+ * Where the usage indicator looks for a Claude OAuth token + identity, per account. With a
+ * `configDir` (managed account) the scoped Keychain service comes first — Claude Code ≥ 2.1
+ * writes there — with the legacy unscoped services as fallback for older CLIs; the file +
+ * identity live under that config dir. Without a `configDir` (system account) it's exactly the
+ * legacy layout: unscoped services + `~/.claude`. Pure so it's unit-tested; the impure keychain
+ * / fs reads live in claude-usage.ts.
+ */
+export function usageCredsPaths(
+  homeDir: string,
+  configDir?: string
+): { services: string[]; credsFile: string; identityFile: string } {
+  if (configDir) {
+    return {
+      services: [claudeKeychainService(configDir), 'Claude Code-credentials', 'claudeAiOauth'],
+      credsFile: path.join(configDir, '.credentials.json'),
+      identityFile: path.join(configDir, '.claude.json')
+    }
+  }
+  return {
+    services: ['Claude Code-credentials', 'claudeAiOauth'],
+    credsFile: path.join(homeDir, '.claude', '.credentials.json'),
+    identityFile: path.join(homeDir, '.claude.json')
+  }
+}
+
 /** Env vars that would silently shadow the selected account's OAuth login. Stripped at spawn. */
 export const AUTH_ENV_STRIP = [
   'ANTHROPIC_API_KEY',

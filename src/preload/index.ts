@@ -238,8 +238,8 @@ const api: NodeTerminalApi = {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },
   usage: {
-    fetch: () => ipcRenderer.invoke(IPC.usageFetch),
-    refresh: () => ipcRenderer.invoke(IPC.usageRefresh),
+    fetch: (accountId?: string) => ipcRenderer.invoke(IPC.usageFetch, accountId),
+    refresh: (accountId?: string) => ipcRenderer.invoke(IPC.usageRefresh, accountId),
     onUpdate: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
       ipcRenderer.on(IPC.usageUpdate, handler)

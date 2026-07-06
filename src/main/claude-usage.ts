@@ -9,6 +9,8 @@ import { promisify } from 'util'
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ClaudeUsage, ClaudeUsageWindow } from '../shared/types'
+import { usageCredsPaths } from './claude-accounts-core'
+import { claudeConfigDirFor } from './claude-accounts'
 
 const execFileP = promisify(execFile)
 
@@ -44,12 +46,19 @@ export async function resolveClaudeAccessToken(): Promise<string | null> {
   return (await resolveCreds()).accessToken
 }
 
-/** macOS Keychain → ~/.claude/.credentials.json → email backfill from ~/.claude.json. */
-async function resolveCreds(): Promise<OAuthCreds> {
+/**
+ * macOS Keychain → {config}/.credentials.json → email backfill from {config}/.claude.json.
+ * With an `accountId` the config dir is the managed account's isolated dir (scoped Keychain
+ * service first); without, it's exactly the system default (`~/.claude`, unscoped services).
+ */
+async function resolveCreds(accountId?: string): Promise<OAuthCreds> {
+  const configDir = accountId ? claudeConfigDirFor(accountId) : undefined
+  const { services, credsFile, identityFile } = usageCredsPaths(os.homedir(), configDir)
+
   let creds: OAuthCreds = { accessToken: null, email: null }
 
   if (process.platform === 'darwin') {
-    for (const service of ['Claude Code-credentials', 'claudeAiOauth']) {
+    for (const service of services) {
       try {
         const { stdout } = await execFileP('security', [
           'find-generic-password',
@@ -70,7 +79,7 @@ async function resolveCreds(): Promise<OAuthCreds> {
 
   if (!creds.accessToken) {
     try {
-      const raw = await fs.readFile(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf-8')
+      const raw = await fs.readFile(credsFile, 'utf-8')
       creds = parseCreds(raw)
     } catch {
       // no file — leave creds empty
@@ -79,7 +88,7 @@ async function resolveCreds(): Promise<OAuthCreds> {
 
   if (creds.accessToken && !creds.email) {
     try {
-      const raw = await fs.readFile(path.join(os.homedir(), '.claude.json'), 'utf-8')
+      const raw = await fs.readFile(identityFile, 'utf-8')
       const j = JSON.parse(raw) as Record<string, any>
       const acct = j.oauthAccount as Record<string, any> | undefined
       const email =
@@ -102,9 +111,9 @@ function mapWindow(raw: any): ClaudeUsageWindow | null {
   return { leftPercent, resetsAt }
 }
 
-async function fetchUsage(): Promise<ClaudeUsage> {
+async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
   const now = Date.now()
-  const { accessToken, email } = await resolveCreds()
+  const { accessToken, email } = await resolveCreds(accountId)
   if (!accessToken) {
     return { session: null, weekly: null, email, updatedAt: now, status: 'unavailable' }
   }
@@ -135,33 +144,42 @@ async function fetchUsage(): Promise<ClaudeUsage> {
 }
 
 export function initClaudeUsage(win: BrowserWindow): void {
-  let last: ClaudeUsage | null = null
-  let lastFetchAt = 0
-  let inFlight: Promise<ClaudeUsage> | null = null
+  // Per-account caches keyed by `accountId ?? ''`. The empty key is the system account, the
+  // only one that's proactively polled + pushed; managed-account rows fetch on demand from the
+  // popover.
+  const last = new Map<string, ClaudeUsage>()
+  const lastFetchAt = new Map<string, number>()
+  const inFlight = new Map<string, Promise<ClaudeUsage>>()
 
-  const push = (u: ClaudeUsage): void => {
-    last = u
-    lastFetchAt = u.updatedAt
-    if (!win.isDestroyed()) win.webContents.send(IPC.usageUpdate, u)
+  const push = (key: string, u: ClaudeUsage): void => {
+    last.set(key, u)
+    lastFetchAt.set(key, u.updatedAt)
+    // Only the system account feeds the push channel — the collapsed chip tracks it.
+    if (key === '' && !win.isDestroyed()) win.webContents.send(IPC.usageUpdate, u)
   }
 
-  const run = async (): Promise<ClaudeUsage> => {
-    if (inFlight) return inFlight
-    inFlight = fetchUsage()
+  const run = async (accountId?: string): Promise<ClaudeUsage> => {
+    const key = accountId ?? ''
+    const pending = inFlight.get(key)
+    if (pending) return pending
+    const p = fetchUsage(accountId)
+    inFlight.set(key, p)
     try {
-      const u = await inFlight
-      push(u)
+      const u = await p
+      push(key, u)
       return u
     } finally {
-      inFlight = null
+      inFlight.delete(key)
     }
   }
 
-  ipcMain.handle(IPC.usageFetch, async () => {
-    if (last && Date.now() - lastFetchAt < FOCUS_DEBOUNCE_MS) return last
-    return run()
+  ipcMain.handle(IPC.usageFetch, async (_e, accountId?: string) => {
+    const key = accountId ?? ''
+    const cached = last.get(key)
+    if (cached && Date.now() - (lastFetchAt.get(key) ?? 0) < FOCUS_DEBOUNCE_MS) return cached
+    return run(accountId)
   })
-  ipcMain.handle(IPC.usageRefresh, () => run())
+  ipcMain.handle(IPC.usageRefresh, (_e, accountId?: string) => run(accountId))
 
   void run()
   const interval = setInterval(() => {
@@ -169,7 +187,7 @@ export function initClaudeUsage(win: BrowserWindow): void {
   }, POLL_MS)
 
   const onFocus = (): void => {
-    if (Date.now() - lastFetchAt >= FOCUS_DEBOUNCE_MS) void run()
+    if (Date.now() - (lastFetchAt.get('') ?? 0) >= FOCUS_DEBOUNCE_MS) void run()
   }
   win.on('focus', onFocus)
   win.on('closed', () => clearInterval(interval))

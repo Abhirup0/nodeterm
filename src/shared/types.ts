@@ -659,10 +659,11 @@ export interface ClaudeUsage {
 }
 
 export interface UsageApi {
-  /** Returns the latest snapshot (cached if fresh, else a fresh fetch). */
-  fetch(): Promise<ClaudeUsage>
-  /** Forces a fresh fetch, bypassing the focus debounce. */
-  refresh(): Promise<ClaudeUsage>
+  /** Returns the latest snapshot (cached if fresh, else a fresh fetch). Optional account id
+   *  targets a managed account; omitted = the system account (also the pushed one). */
+  fetch(accountId?: string): Promise<ClaudeUsage>
+  /** Forces a fresh fetch, bypassing the focus debounce. Optional account id as `fetch`. */
+  refresh(accountId?: string): Promise<ClaudeUsage>
   /** Fires whenever main pushes a new snapshot (poll/refresh). Returns unsubscribe. */
   onUpdate(listener: (usage: ClaudeUsage) => void): () => void
 }
