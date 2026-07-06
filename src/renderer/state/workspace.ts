@@ -310,6 +310,26 @@ export function createClaudeNode(
 }
 
 /**
+ * Chip text for an account-bound node header. Given a node's `accountId` and the known
+ * accounts, returns the short chip label (the part of the account label before `@`, capped
+ * at ~10 chars with an ellipsis) plus a tooltip (`label (email)`, or just the label when no
+ * email). Returns `null` when there's no `accountId` (render no chip). An `accountId` that no
+ * longer resolves to a known account (removed) yields `Unknown account` for both.
+ */
+export function accountChipLabel(
+  accountId: string | undefined,
+  accounts: ClaudeAccount[]
+): { short: string; tooltip: string } | null {
+  if (!accountId) return null
+  const acct = accounts.find((a) => a.id === accountId)
+  if (!acct) return { short: 'Unknown account', tooltip: 'Unknown account' }
+  const base = acct.label.split('@')[0]
+  const short = base.length > 10 ? `${base.slice(0, 10)}…` : base
+  const tooltip = acct.email ? `${acct.label} (${acct.email})` : acct.label
+  return { short, tooltip }
+}
+
+/**
  * Terminal node used to log a new managed account in: the session runs under the account's
  * CLAUDE_CONFIG_DIR (Task-3 env injection keyed off `data.accountId`), so `claude /login`
  * writes credentials + `.claude.json` into the account dir, where the main process captures

@@ -15,7 +15,8 @@ import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { MarkdownText } from './ChatPanel'
 import { useChatSessions } from '../state/chatSessions'
 import { useAgentStatus } from '../state/agentStatus'
-import { createDiffNode, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, createDiffNode, type CanvasNode } from '../state/workspace'
+import { useSettings } from '../state/settings'
 import type { ChatImageAttachment, ChatToolSummary } from '@shared/types'
 
 const MAX_IMAGES = 5
@@ -32,6 +33,8 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   // chat.working, so OR both — this drives the badge, Stop button and typing indicator.
   const working = !!chat?.working || status?.state === 'working'
   const { setNodes, addNodes } = useReactFlow()
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const accountChip = accountChipLabel(data.accountId as string | undefined, claudeAccounts)
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
   const [attachNote, setAttachNote] = useState<string | null>(null)
@@ -244,6 +247,11 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
       <NodeResizer isVisible={selected} minWidth={360} minHeight={280} />
       <div className="chat-node__header">
         <span className="chat-node__title">{(data.title as string) || 'Chat'}</span>
+        {accountChip && (
+          <span className="node-account-chip" title={accountChip.tooltip}>
+            {accountChip.short}
+          </span>
+        )}
         {working && <span className="chat-node__badge chat-node__badge--working">RUNNING</span>}
         {perm && <span className="chat-node__badge chat-node__badge--needs">NEEDS YOU</span>}
         {/* Cost chip intentionally hidden: the SDK reports an API-equivalent estimate even on

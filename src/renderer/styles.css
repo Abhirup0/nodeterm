@@ -700,6 +700,22 @@ body,
   border-radius: 6px;
 }
 
+/* Account-bound node: which managed Claude account this node runs under. Mirrors the session
+   chip with a distinct accent-tinted background so it reads apart from the plain session chip. */
+.node-account-chip {
+  margin-left: 8px;
+  max-width: 120px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(10, 132, 255, 0.14);
+  border-radius: 6px;
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;

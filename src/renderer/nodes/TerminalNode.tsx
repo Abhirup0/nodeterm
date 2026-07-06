@@ -30,7 +30,7 @@ import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
-import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, agentConfig, type AgentId } from '@shared/agents/config'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
@@ -123,6 +123,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const fontSize = useSettings((s) => s.settings.fontSize)
   const fontFamily = useSettings((s) => s.settings.fontFamily)
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -832,6 +834,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             {status.session}
           </span>
         )}
+        {accountChip && (
+          <span className="node-account-chip" title={accountChip.tooltip}>
+            {accountChip.short}
+          </span>
+        )}
         {data.ssh ? (
           <span
             className="term-ssh-chip"
@@ -977,7 +984,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         )}
         {mdMode &&
           (useChat ? (
-            <ChatPanel nodeId={id} sessionId={status?.sessionId} cwd={data.cwd as string | undefined} />
+            <ChatPanel
+              nodeId={id}
+              sessionId={status?.sessionId}
+              cwd={data.cwd as string | undefined}
+              accountId={data.accountId}
+            />
           ) : (
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">

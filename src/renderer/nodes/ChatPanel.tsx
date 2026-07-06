@@ -14,6 +14,8 @@ interface ChatPanelProps {
   nodeId: string
   sessionId?: string
   cwd?: string
+  /** Managed Claude account this node runs under; resolves the transcript in the right root. */
+  accountId?: string
 }
 
 /**
@@ -22,7 +24,7 @@ interface ChatPanelProps {
  * session via pty.sendText. Phase 1 reloads the transcript whenever a turn finishes
  * (working -> idle); live streaming is a later phase. Replaces the markdown-of-output overlay.
  */
-export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
+export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [readonly, setReadonly] = useState(false)
@@ -31,8 +33,8 @@ export function ChatPanel({ nodeId, sessionId, cwd }: ChatPanelProps) {
   const prevState = useRef(state)
 
   const load = useCallback(() => {
-    void window.nodeTerminal.chat.readTranscript(sessionId, cwd).then(setMessages)
-  }, [sessionId, cwd])
+    void window.nodeTerminal.chat.readTranscript(sessionId, cwd, accountId).then(setMessages)
+  }, [sessionId, cwd, accountId])
 
   // Initial load.
   useEffect(() => {
