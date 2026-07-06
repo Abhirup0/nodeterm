@@ -267,8 +267,8 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
-  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string) =>
-    readSessionName(sessionId ?? '')
+  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string, accountId?: string) =>
+    readSessionName(sessionId ?? '', accountId)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -531,8 +531,14 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle(
     IPC.handoffBuild,
-    (_e, sessionId: string, agentId: string, sourceNodeId: string, cwd: string | undefined) =>
-      buildHandoff({ sessionId, agentId, sourceNodeId, cwd })
+    (
+      _e,
+      sessionId: string,
+      agentId: string,
+      sourceNodeId: string,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId })
   )
   // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC.
   ipcMain.handle(IPC.chatEnsure, (_e, nodeId: string, opts) => chatDriver.ensure(nodeId, opts))

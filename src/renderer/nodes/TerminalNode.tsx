@@ -637,7 +637,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await window.nodeTerminal.pty.readSessionName(sid)
+      const name = await window.nodeTerminal.pty.readSessionName(sid, data.accountId)
       if (cancelled) return
       if (name) delayMs = 15000
       if (

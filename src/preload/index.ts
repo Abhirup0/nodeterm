@@ -53,7 +53,8 @@ const api: NodeTerminalApi = {
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
     sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
-    readSessionName: (sessionId) => ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId),
+    readSessionName: (sessionId, accountId) =>
+      ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId),
     onData: (sessionId, listener) => {
       const channel = IPC.ptyData(sessionId)
       const handler = (_e: unknown, data: string) => listener(data)
@@ -343,8 +344,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.remoteClientFsWrite, connectionId, path, content)
   },
   handoff: {
-    build: (sessionId, agentId, sourceNodeId, cwd) =>
-      ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd)
+    build: (sessionId, agentId, sourceNodeId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd, accountId)
   },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)

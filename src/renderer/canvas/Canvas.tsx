@@ -1840,7 +1840,8 @@ export function Canvas() {
         sessionId,
         sourceAgentId,
         sourceNodeId,
-        source.data.cwd
+        source.data.cwd,
+        source.data.accountId
       )
       if ('error' in res) {
         setConfirm({ message: res.error, onConfirm: () => setConfirm(null) })

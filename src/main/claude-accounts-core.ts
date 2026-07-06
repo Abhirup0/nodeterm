@@ -12,6 +12,22 @@ export function accountConfigDir(userDataPath: string, accountId: string): strin
 }
 
 /**
+ * Transcript root for a session lookup: an account's `projects` dir under its config dir, or
+ * the system default `~/.claude/projects` when no account. Pure path math (no fs) — the impure
+ * wrapper in transcript-reader.ts feeds `os.homedir()` / `app.getPath('userData')`. Reuses
+ * `accountConfigDir`'s id validation so a bad account id can never escape the accounts root.
+ */
+export function transcriptRootFor(
+  homeDir: string,
+  userDataPath: string | null,
+  accountId?: string
+): string {
+  return accountId
+    ? path.join(accountConfigDir(userDataPath ?? '', accountId), 'projects')
+    : path.join(homeDir, '.claude', 'projects')
+}
+
+/**
  * Claude Code ≥ 2.1 scopes its macOS Keychain service name per config dir:
  * 'Claude Code-credentials-' + first 8 hex chars of sha256(CLAUDE_CONFIG_DIR).
  * (Learned from REF's claude-accounts/keychain.ts — undocumented CLI behavior.)

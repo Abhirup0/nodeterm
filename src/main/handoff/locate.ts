@@ -6,13 +6,15 @@ import path from 'path'
 import { resolveTranscriptPath } from '../transcript-reader'
 
 // claude: ~/.claude/projects/<proj>/<sessionId>.jsonl — already implemented (searches all
-// project dirs for the exact <sessionId>.jsonl).
-export function locateClaude(sessionId: string): Promise<string | undefined> {
-  return resolveTranscriptPath(sessionId)
+// project dirs for the exact <sessionId>.jsonl). `accountId` scopes to a managed account's
+// transcript root (default `~/.claude`).
+export function locateClaude(sessionId: string, accountId?: string): Promise<string | undefined> {
+  return resolveTranscriptPath(sessionId, accountId)
 }
 
 // codex: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sessionId>.jsonl — walk the tree and
-// match a .jsonl filename containing the sessionId.
+// match a .jsonl filename containing the sessionId. Managed accounts are Claude-only, so the
+// codex/gemini locators ignore accountId (present only to satisfy the shared Locator type).
 export async function locateCodex(sessionId: string): Promise<string | undefined> {
   const root = path.join(os.homedir(), '.codex', 'sessions')
   const stack = [root]

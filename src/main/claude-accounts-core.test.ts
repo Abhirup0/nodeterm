@@ -5,7 +5,8 @@ import {
   AUTH_ENV_STRIP,
   accountTmuxEnvArgs,
   parseLoginCapture,
-  isSupportedClaudeVersion
+  isSupportedClaudeVersion,
+  transcriptRootFor
 } from './claude-accounts-core'
 
 describe('accountConfigDir', () => {
@@ -64,6 +65,19 @@ describe('parseLoginCapture', () => {
     expect(parseLoginCapture('{}')).toBeNull()
     expect(parseLoginCapture('not json')).toBeNull()
     expect(parseLoginCapture(JSON.stringify({ oauthAccount: {} }))).toBeNull()
+  })
+})
+
+describe('transcriptRootFor', () => {
+  it('defaults to the system ~/.claude/projects when no account', () => {
+    expect(transcriptRootFor('/Users/x', null)).toBe('/Users/x/.claude/projects')
+    expect(transcriptRootFor('/Users/x', '/ud', undefined)).toBe('/Users/x/.claude/projects')
+  })
+  it('uses the account config dir + projects when an account id is given', () => {
+    expect(transcriptRootFor('/Users/x', '/ud', 'a1')).toBe('/ud/claude-accounts/a1/projects')
+  })
+  it('rejects account ids that could traverse out of the root', () => {
+    expect(() => transcriptRootFor('/Users/x', '/ud', '../evil')).toThrow()
   })
 })
 
