@@ -312,6 +312,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
     let sessionId: string | null = null
     let disposed = false
+    // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
+    // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
+    // mount) must not send one — on a bulk project load that redraw doubles per node.
+    let sentCols = 0
+    let sentRows = 0
     const cleanups: Array<() => void> = []
 
     // Remote nodes: surface a dropped relay connection (host gone / socket closed) so the
@@ -351,17 +356,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
     const scrollbackPromise = window.nodeTerminal.pty.readScrollback(id).catch(() => '')
-    // Paint the persisted snapshot the moment it's read (a file read resolves well before the
-    // tmux attach round-trip), so a project switch shows each terminal's last content instantly
-    // instead of a blank body. On a warm reattach the live tmux redraw REPLACES it (term.reset()
-    // on the first data chunk below); on a cold restore the replay logic reuses it as-is.
-    let previewShown = false
-    let liveStarted = false
-    void scrollbackPromise.then((snapshot) => {
-      if (disposed || liveStarted || !snapshot) return
-      term.write(snapshot)
-      previewShown = true
-    })
     void (async () => {
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
@@ -372,6 +366,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           ? await resolveSshRemote(ssh, data.cwd as string | undefined)
           : undefined
       if (disposed) return
+      sentCols = term.cols
+      sentRows = term.rows
       transport
         .create({
           cols: term.cols,
@@ -391,8 +387,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           return
         }
         sessionId = sid
-        liveStarted = true // a late-resolving preview must not write over live output
         if (fellBack) setAccountFallback(true)
+        // Catch up a size change that landed while the spawn was in flight (resize() skips the
+        // IPC until sessionId is set, and the observer won't re-fire without another change).
+        if (term.cols !== sentCols || term.rows !== sentRows) {
+          sentCols = term.cols
+          sentRows = term.rows
+          transport.resize(sid, term.cols, term.rows)
+        }
         // Cold restart: the tmux session (and anything that was running in it) is gone — replay
         // the last persisted scrollback so the user sees where they left off. Warm reattach
         // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
@@ -404,9 +406,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             return
           }
           if (snapshot) {
-            // The instant preview above may have painted this snapshot already — keep it.
-            if (!previewShown) term.write(snapshot)
-            previewShown = false
+            term.write(snapshot)
             term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
           }
         }
@@ -419,13 +419,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const LOW_WATER = 1 << 18 //  256 KB
         cleanups.push(
           transport.onData(sid, (chunk) => {
-            // Warm reattach: the first live chunk is tmux's own full redraw — drop the static
-            // snapshot preview so the two don't stack (reset clears buffer + scrollback, which
-            // matches the pre-preview behavior of starting the attach from a blank terminal).
-            if (previewShown) {
-              previewShown = false
-              term.reset()
-            }
             pending += chunk.length
             if (!paused && pending > HIGH_WATER) {
               paused = true
@@ -473,7 +466,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const resize = () => {
       try {
         fit.fit()
-        if (sessionId) transport.resize(sessionId, term.cols, term.rows)
+        if (sessionId && (term.cols !== sentCols || term.rows !== sentRows)) {
+          sentCols = term.cols
+          sentRows = term.rows
+          transport.resize(sessionId, term.cols, term.rows)
+        }
       } catch {
         // fit can throw when the size is 0 (e.g. collapsed); ignore.
       }

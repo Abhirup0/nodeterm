@@ -244,6 +244,11 @@ interface Session {
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
+  /** Parked: the renderer detached (node unmount / project switch) but the client process is kept
+   *  attached for PARK_KEEP_MS so a quick remount reuses it — no respawn, no attach round-trip.
+   *  Output is discarded while parked; `parkTimer` fires the real detach. */
+  parked?: boolean
+  parkTimer?: ReturnType<typeof setTimeout> | null
 }
 
 /** Sinks for a detached session whose output is served somewhere other than the renderer
@@ -258,6 +263,13 @@ export interface DetachedSinks {
 // IPC messages + N xterm writes into one, which is the single hottest path in the app.
 const FLUSH_MS = 8
 const MAX_BUF_BYTES = 256 * 1024
+
+// Keep-warm window after the renderer detaches (project switch / node unmount): the tmux client
+// process stays attached and is reused if the node remounts within it, so reattach becomes a
+// resize + `refresh-client` (tmux's own pixel-perfect full redraw) instead of a process spawn +
+// attach round-trip per node. After the window the client is truly detached, bounding the idle
+// cost (one ~1 MB tmux client + a drained pty fd per parked node).
+const PARK_KEEP_MS = 5 * 60 * 1000
 
 /**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
@@ -363,6 +375,19 @@ export class PtyManager {
     webContentsId: number,
     options: PtyCreateOptions
   ): Promise<PtyCreateResult> {
+    // Keep-warm reuse: if this node detached moments ago (project switch), its client process is
+    // still attached (parked). Rebind it to the new renderer, match the size, and have tmux
+    // repaint the full screen — no spawn, no attach round-trip, no session-exists probe.
+    if (options.persistKey) {
+      for (const [sid, s] of this.sessions) {
+        if (s.persistKey === options.persistKey && s.parked && !s.sshRemote) {
+          this.unpark(s, webContentsId, options)
+          return s.accountFallback
+            ? { sessionId: sid, fresh: false, accountFallback: true }
+            : { sessionId: sid, fresh: false }
+        }
+      }
+    }
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -731,6 +756,7 @@ export class PtyManager {
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
+      if (session.parkTimer) clearTimeout(session.parkTimer) // died while parked (e.g. destroy)
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
       if (session.onExit) {
         session.onExit(exitCode)
@@ -746,6 +772,10 @@ export class PtyManager {
   /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
   private queueData(sessionId: string, session: Session, data: string): void {
     session.outputSinceSnapshot = true
+    // Parked (renderer detached, kept warm): nobody is listening — drop the chunk. The pty must
+    // keep draining so the tmux client isn't backpressured; the periodic scrollback snapshot
+    // still captures the pane from the tmux server directly.
+    if (session.parked) return
     session.buf.push(data)
     session.bufBytes += data.length
     if (session.bufBytes >= MAX_BUF_BYTES) {
@@ -813,10 +843,74 @@ export class PtyManager {
     // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
     if (session.persistKey && session.outputSinceSnapshot)
       void this.snapshotScrollback(session.persistKey, session.sshRemote)
+    // Keep-warm: a local tmux-backed renderer session parks (client kept attached, reused by a
+    // remount within PARK_KEEP_MS — see create()) instead of detaching immediately. Remote (ssh),
+    // detached-sink (relay host), and non-persistent sessions keep the immediate detach.
+    if (session.persistKey && !session.sshRemote && !session.onData && this.tmuxPath) {
+      this.park(sessionId, session)
+      return
+    }
     // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone leaks the
     // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
     releasePty(session.proc as ReleasablePty)
     this.sessions.delete(sessionId)
+  }
+
+  /** Park a detaching session: keep the tmux client attached for PARK_KEEP_MS, drop output on
+   *  the floor meanwhile, then truly detach if no remount reclaimed it. */
+  private park(sessionId: string, session: Session): void {
+    session.parked = true
+    session.webContentsId = null
+    // Drop anything buffered for the departed renderer, and make sure the pty keeps draining:
+    // the renderer may have left flow paused at a high watermark, and a paused parked pty
+    // would backpressure the tmux client forever.
+    session.buf = []
+    session.bufBytes = 0
+    try {
+      session.proc.resume()
+    } catch {
+      // already exited; onExit cleans up
+    }
+    session.parkTimer = setTimeout(() => {
+      session.parkTimer = null
+      if (!session.parked) return
+      releasePty(session.proc as ReleasablePty)
+      this.sessions.delete(sessionId)
+    }, PARK_KEEP_MS)
+  }
+
+  /** Rebind a parked session to a (re)mounting renderer: cancel the detach timer, restore IPC
+   *  forwarding, match the requested size, and have tmux repaint the whole screen. */
+  private unpark(session: Session, webContentsId: number, options: PtyCreateOptions): void {
+    if (session.parkTimer) clearTimeout(session.parkTimer)
+    session.parkTimer = null
+    session.parked = false
+    session.webContentsId = webContentsId
+    if (session.proc.cols !== options.cols || session.proc.rows !== options.rows)
+      session.proc.resize(Math.max(1, options.cols), Math.max(1, options.rows))
+    // The new xterm is empty: ask tmux for a full client repaint (the same redraw an attach
+    // would stream — pixel-perfect, unlike replaying a captured snapshot).
+    if (session.persistKey) void this.refreshClient(session.persistKey)
+  }
+
+  /** Force a full tmux redraw of the (single, `-D`) client attached to a node's session. */
+  private async refreshClient(persistKey: string): Promise<void> {
+    if (!this.tmuxPath) return
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'list-clients',
+        '-t',
+        sessionName(persistKey),
+        '-F',
+        '#{client_tty}'
+      ])
+      const tty = stdout.trim().split('\n')[0]
+      if (tty) await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'refresh-client', '-t', tty])
+    } catch {
+      // session/client gone — the next create() spawns a fresh attach instead.
+    }
   }
 
   /**
@@ -955,6 +1049,7 @@ export class PtyManager {
     const finals: Promise<unknown>[] = []
     for (const session of this.sessions.values()) {
       if (session.flushTimer) clearTimeout(session.flushTimer)
+      if (session.parkTimer) clearTimeout(session.parkTimer)
       // Final scrollback snapshot on quit so a reboot can replay it. Skipped for sessions with
       // no output since the last periodic capture (unchanged pane content).
       if (session.persistKey && session.outputSinceSnapshot)
