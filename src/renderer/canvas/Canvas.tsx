@@ -116,6 +116,8 @@ import {
   applyCanvasMutation,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
+  alignNodes,
+  arrangeNodes,
   createAgentNode,
   createBrowserNode,
   createChatNode,
@@ -2414,6 +2416,100 @@ export function Canvas() {
             }
             const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
             reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            return
+          }
+          case 'group': {
+            const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+            const live = nodesRef.current as CanvasNode[]
+            const resolvable = ids.filter((gid) => live.some((nd) => nd.id === gid && !nd.parentId && nd.type !== 'group'))
+            if (resolvable.length === 0) {
+              reply({ ok: false, error: 'group: none of the given node ids are groupable (top-level, non-group)' })
+              return
+            }
+            const groupCount = live.filter((nd) => nd.type === 'group').length
+            let grouped = groupSelectedNodes(live, resolvable, groupCount)
+            const groupNode = grouped[0] // groupSelectedNodes returns the new group first
+            if (args.label) {
+              grouped = grouped.map((nd) =>
+                nd.id === groupNode.id ? { ...nd, data: { ...nd.data, title: args.label } } : nd
+              )
+            }
+            setNodes(grouped)
+            markDirty()
+            reply({ ok: true, message: `grouped ${resolvable.length} node(s) into ${groupNode.id}`, result: { groupId: groupNode.id } })
+            return
+          }
+          case 'arrange': {
+            const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+            const live = nodesRef.current as CanvasNode[]
+            const layout = (['grid', 'row', 'column'] as const).find((l) => l === args.layout) ?? 'grid'
+            const cols = args.cols ? parseInt(args.cols, 10) || undefined : undefined
+            const next = arrangeNodes(live, ids, { layout, cols })
+            if (next === live) {
+              reply({ ok: false, error: 'arrange: none of the given node ids are top-level nodes' })
+              return
+            }
+            setNodes(next)
+            markDirty()
+            reply({ ok: true, message: `arranged ${ids.length} node(s) as ${layout}`, result: { count: ids.length } })
+            return
+          }
+          case 'align': {
+            const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+            const edge = (['left', 'right', 'top', 'bottom', 'hcenter', 'vcenter'] as const).find((e2) => e2 === args.edge)
+            if (!edge) {
+              reply({ ok: false, error: 'align requires --edge left|right|top|bottom|hcenter|vcenter' })
+              return
+            }
+            const live = nodesRef.current as CanvasNode[]
+            const next = alignNodes(live, ids, edge)
+            if (next === live) {
+              reply({ ok: false, error: 'align: none of the given node ids are top-level nodes' })
+              return
+            }
+            setNodes(next)
+            markDirty()
+            reply({ ok: true, message: `aligned ${ids.length} node(s) to ${edge}`, result: { count: ids.length } })
+            return
+          }
+          case 'spawn-team': {
+            let roles: { title?: string; prompt?: string; agent?: string }[]
+            try {
+              const parsed = JSON.parse(args.team ?? '')
+              roles = Array.isArray(parsed) ? parsed : []
+            } catch {
+              reply({ ok: false, error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?}' })
+              return
+            }
+            roles = roles.filter((r) => r && typeof r.prompt === 'string' && r.prompt.trim()).slice(0, 8)
+            if (roles.length === 0) {
+              reply({ ok: false, error: 'spawn-team: --team needs at least one role with a prompt' })
+              return
+            }
+            const live = nodesRef.current as CanvasNode[]
+            // Build members; fixed role titles pin the node name (titleAuto off).
+            const members = roles.map((r, i) => {
+              const node = createAgentNode(r.agent ?? 'claude', live.length + i, srcCwd, placeBelow(i), r.prompt)
+              return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
+            })
+            const memberIds = members.map((m) => m.id)
+            // One computed array: append → arrange in a grid below the conductor → wrap in a group.
+            let next: CanvasNode[] = [...live, ...members]
+            next = arrangeNodes(next, memberIds, { layout: 'grid', origin: placeBelow(0) })
+            const groupCount = next.filter((nd) => nd.type === 'group').length
+            next = groupSelectedNodes(next, memberIds, groupCount)
+            const teamGroup = next[0]
+            next = next.map((nd) =>
+              nd.id === teamGroup.id ? { ...nd, data: { ...nd.data, title: args.label || 'Team' } } : nd
+            )
+            setNodes(next)
+            memberIds.forEach((mid) => connect(mid))
+            markDirty()
+            reply({
+              ok: true,
+              message: `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}`,
+              result: { groupId: teamGroup.id, memberIds }
+            })
             return
           }
           case 'write': {
