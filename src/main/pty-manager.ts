@@ -155,6 +155,21 @@ function resolveShellPath(): Promise<string | null> {
 }
 
 /**
+ * A UTF-8 locale for spawned terminals, or null to leave the inherited locale untouched.
+ *
+ * A GUI app launched from Finder/Dock inherits NO locale env (no LANG/LC_*), so `locale` falls
+ * back to "C" (non-UTF-8). TUIs that probe for UTF-8 support (Claude Code and other Ink/ncurses
+ * apps) then render ASCII box-drawing — rounded borders come out as `_`/`|`. Same root cause as
+ * the missing-PATH problem: the GUI process never sourced the shell environment. If the inherited
+ * env already declares a UTF-8 locale (e.g. the app was launched from a terminal), keep it;
+ * otherwise force `en_US.UTF-8`, which is always installed on macOS and guarantees UTF-8 handling.
+ */
+function resolveLocaleLang(): string | null {
+  const cur = process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || ''
+  return /utf-?8/i.test(cur) ? null : 'en_US.UTF-8'
+}
+
+/**
  * Resolve an executable against the user's real login-shell PATH (reusing the cached probe),
  * returning its absolute path or null. GUI apps inherit only a minimal PATH, so a bare
  * `execFile('claude', …)` would fail even when the tool is installed — this walks the resolved
@@ -475,6 +490,12 @@ export class PtyManager {
     const shellPath = cachedShellPath ?? null
     if (shellPath) env.PATH = shellPath
 
+    // Same GUI-launch gap for the locale: with no LANG/LC_* the shell's `locale` is "C" (non-UTF-8),
+    // so Claude Code and other TUIs fall back to ASCII box-drawing (rounded borders render as `_`/`|`).
+    // Force a UTF-8 locale when the inherited env doesn't already declare one.
+    const localeLang = resolveLocaleLang()
+    if (localeLang) env.LANG = localeLang
+
     // Agent hooks: each session carries the hook-server coordinates + its node/agent id.
     // Our managed hook (installed globally in each agent's config, but a no-op without these
     // vars) then posts state back to us for any agent run in this session.
@@ -583,6 +604,9 @@ export class PtyManager {
       // the app), so a session created after an app update must NOT inherit a stale minimal PATH
       // baked into the server env at first launch — `-e` overrides it per new session at creation.
       const pathEnvArgs = env.PATH ? ['-e', `PATH=${env.PATH}`] : []
+      // Same reasoning for LANG: force the UTF-8 locale per new session so a session created on a
+      // shared/stale tmux server (started before this fix) still gets UTF-8 box-drawing.
+      const langEnvArgs = env.LANG ? ['-e', `LANG=${env.LANG}`] : []
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
@@ -596,6 +620,7 @@ export class PtyManager {
         ...attachFlags,
         ...hookEnvArgs,
         ...pathEnvArgs,
+        ...langEnvArgs,
         ...accountEnvArgs,
         '-c',
         cwd,
