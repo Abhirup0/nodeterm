@@ -74,6 +74,32 @@ describe('normalizeClaude — async subagents', () => {
   })
 })
 
+describe('normalizeClaude — recurring (cron/schedule/loop)', () => {
+  it('CronCreate PreToolUse → recurring cron with schedule + task', () => {
+    const e = normalizeClaude(
+      env({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'CronCreate',
+        tool_input: { cron: '0 9 * * *', prompt: 'daily report' }
+      })
+    )
+    expect(e).toMatchObject({
+      kind: 'recurring',
+      recurringKind: 'cron',
+      schedule: '0 9 * * *',
+      task: 'daily report'
+    })
+    expect(e?.recurringEnd).toBeFalsy()
+  })
+
+  // A cron outlives turns and sessions — its card should only leave the canvas when the
+  // cron itself is removed. CronDelete is that signal.
+  it('CronDelete PreToolUse → recurring END (clears the cron card)', () => {
+    const e = normalizeClaude(env({ hook_event_name: 'PreToolUse', tool_name: 'CronDelete' }))
+    expect(e).toMatchObject({ kind: 'recurring', recurringEnd: true })
+  })
+})
+
 describe('normalizeClaude — permission signals', () => {
   it('PermissionRequest → blocked', () => {
     const e = normalizeClaude(env({ hook_event_name: 'PermissionRequest' }))

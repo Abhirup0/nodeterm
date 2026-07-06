@@ -96,6 +96,17 @@ function load(): Record<string, AgentNodeStatus> {
     const out: Record<string, AgentNodeStatus> = {}
     for (const [id, v] of Object.entries(data)) {
       out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId }
+      // A recurring job (cron/schedule — and tmux keeps in-session loops alive too) outlives
+      // the app: restore its card. Minimal shape check so a corrupt entry can't break load.
+      if (v.loop && typeof v.loop === 'object' && v.loop.kind) {
+        out[id].loop = {
+          count: v.loop.count ?? 0,
+          kind: v.loop.kind,
+          schedule: v.loop.schedule,
+          task: v.loop.task,
+          items: Array.isArray(v.loop.items) ? v.loop.items : []
+        }
+      }
     }
     return out
   } catch {
@@ -108,8 +119,8 @@ function save(byId: Record<string, AgentNodeStatus>): void {
   try {
     const out: Record<string, Partial<AgentNodeStatus>> = {}
     for (const [id, v] of Object.entries(byId)) {
-      if (v.unread || v.session || v.sessionId) {
-        out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId }
+      if (v.unread || v.session || v.sessionId || v.loop) {
+        out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId, loop: v.loop }
       }
     }
     localStorage.setItem(KEY, JSON.stringify(out))
@@ -207,16 +218,19 @@ export const useAgentStatus = create<AgentStatusStore>((set) => ({
   setLoop: (id, active, kind = 'loop', opts) =>
     set((s) => {
       const prev = s.byId[id] ?? EMPTY
-      if (active)
-        return {
-          byId: {
-            ...s.byId,
-            [id]: { ...prev, loop: { count: 0, kind, schedule: opts?.schedule, task: opts?.task, items: [] } }
-          }
+      if (active) {
+        const byId = {
+          ...s.byId,
+          [id]: { ...prev, loop: { count: 0, kind, schedule: opts?.schedule, task: opts?.task, items: [] } }
         }
+        save(byId)
+        return { byId }
+      }
       if (!prev.loop) return s
       const { loop: _drop, ...rest } = prev
-      return { byId: { ...s.byId, [id]: rest } }
+      const byId = { ...s.byId, [id]: rest }
+      save(byId)
+      return { byId }
     }),
 
   bumpLoop: (id, message) =>
@@ -227,9 +241,12 @@ export const useAgentStatus = create<AgentStatusStore>((set) => ({
       const items = message
         ? [...prev.loop.items, message.trim().slice(0, 4000)].slice(-100)
         : prev.loop.items
-      return {
-        byId: { ...s.byId, [id]: { ...prev, loop: { ...prev.loop, count: prev.loop.count + 1, items } } }
+      const byId = {
+        ...s.byId,
+        [id]: { ...prev, loop: { ...prev.loop, count: prev.loop.count + 1, items } }
       }
+      save(byId)
+      return { byId }
     }),
 
   remove: (id) =>

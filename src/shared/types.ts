@@ -150,6 +150,12 @@ export interface Project {
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
+   * Visual "spawned by" ropes (control-capable agent → node it opened via the `nodeterm` CLI,
+   * or browser popup → its opener). Display-only — never context links — but persisted so the
+   * lineage survives restarts; deletable like any selected edge.
+   */
+  ropes?: BridgeLink[]
+  /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
    * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.

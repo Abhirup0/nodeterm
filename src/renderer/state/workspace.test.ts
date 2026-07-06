@@ -5,10 +5,12 @@ import {
   createChatNode,
   createDinoNode,
   flowToNodeStates,
+  groupSelectedNodes,
   nodeStatesToFlow,
   reorderNodeBefore,
   reparentNode,
-  resolveNewNodeAccount
+  resolveNewNodeAccount,
+  ungroupNodes
 } from './workspace'
 import type { CanvasNode } from './workspace'
 
@@ -67,6 +69,60 @@ describe('reparentNode', () => {
     const nodes = [grp('g1', { x: 50, y: 50 }), term('t1', { x: 10, y: 10 })]
     expect(reparentNode(nodes, 'nope', 'g1')).toBe(nodes)
     expect(reparentNode(nodes, 't1', 't1')).toBe(nodes) // target is a terminal, not a group
+  })
+})
+
+describe('groupSelectedNodes', () => {
+  it('wraps the selection in a group frame with group-relative child positions', () => {
+    const nodes = [term('t1', { x: 100, y: 100 }), term('t2', { x: 500, y: 300 })]
+    const out = groupSelectedNodes(nodes, ['t1', 't2'], 0)
+    const group = out[0]
+    expect(group.type).toBe('group') // parent placed first (React Flow requirement)
+    const t1 = out.find((n) => n.id === 't1')!
+    expect(t1.parentId).toBe(group.id)
+    expect(t1.extent).toBe('parent')
+    // absolute position preserved: group position + relative child position
+    expect(group.position.x + t1.position.x).toBe(100)
+    expect(group.position.y + t1.position.y).toBe(100)
+    // frame encloses both members (t2 spans to x=820, y=540)
+    expect(group.position.x + (group.width as number)).toBeGreaterThanOrEqual(820)
+    expect(group.position.y + (group.height as number)).toBeGreaterThanOrEqual(540)
+  })
+
+  it('groups a single node', () => {
+    const out = groupSelectedNodes([term('t1', { x: 100, y: 100 })], ['t1'], 0)
+    expect(out[0].type).toBe('group')
+    expect(out.find((n) => n.id === 't1')!.parentId).toBe(out[0].id)
+  })
+
+  it('skips already-grouped children and group frames; all-skipped is a no-op', () => {
+    const nodes = [grp('g1', { x: 0, y: 0 }), term('t1', { x: 10, y: 10 }, 'g1')]
+    expect(groupSelectedNodes(nodes, ['g1', 't1'], 1)).toBe(nodes)
+  })
+})
+
+describe('ungroupNodes', () => {
+  it('removes the frame and restores children to absolute positions', () => {
+    const nodes = [grp('g1', { x: 50, y: 50 }), term('t1', { x: 10, y: 10 }, 'g1')]
+    const out = ungroupNodes(nodes, 'g1')
+    expect(out.find((n) => n.id === 'g1')).toBeUndefined()
+    const t1 = out.find((n) => n.id === 't1')!
+    expect(t1.parentId).toBeUndefined()
+    expect(t1.extent).toBeUndefined()
+    expect(t1.position).toEqual({ x: 60, y: 60 })
+  })
+
+  it('round-trips with groupSelectedNodes', () => {
+    const nodes = [term('t1', { x: 100, y: 100 }), term('t2', { x: 500, y: 300 })]
+    const grouped = groupSelectedNodes(nodes, ['t1', 't2'], 0)
+    const out = ungroupNodes(grouped, grouped[0].id)
+    expect(out.find((n) => n.id === 't1')!.position).toEqual({ x: 100, y: 100 })
+    expect(out.find((n) => n.id === 't2')!.position).toEqual({ x: 500, y: 300 })
+  })
+
+  it('is a no-op when the group is missing', () => {
+    const nodes = [term('t1', { x: 0, y: 0 })]
+    expect(ungroupNodes(nodes, 'nope')).toBe(nodes)
   })
 })
 

@@ -155,3 +155,23 @@ describe('reorderNode', () => {
     expect(useProjects.getState().getProject('p1')!.nodes).toBe(before)
   })
 })
+
+describe('control ropes persistence', () => {
+  // Visual "spawned by" ropes (agent CLI → new node) persist like bridges: committed with
+  // the canvas and carried into the workspace written to disk.
+  it('commitCanvas stores ropes and toWorkspace carries them', () => {
+    useProjects
+      .getState()
+      .commitCanvas(
+        'p1',
+        [mkNode('n1')],
+        { x: 0, y: 0, zoom: 1 },
+        [{ id: 'b1', source: 'n1', target: 'n2' }],
+        [{ id: 'ctrl-n1-n2', source: 'n1', target: 'n2' }]
+      )
+    const p = useProjects.getState().projects[0]
+    expect(p.bridges).toEqual([{ id: 'b1', source: 'n1', target: 'n2' }])
+    expect(p.ropes).toEqual([{ id: 'ctrl-n1-n2', source: 'n1', target: 'n2' }])
+    expect(useProjects.getState().toWorkspace().projects[0].ropes).toHaveLength(1)
+  })
+})

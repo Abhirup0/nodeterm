@@ -3775,6 +3775,33 @@ body,
   background: rgba(191, 122, 240, 0.32);
 }
 
+/* Dismiss the card (job itself is untouched). Sits at the right edge; when Play is present
+   it follows Play with a small gap instead of both auto-margins splitting the space. */
+.loop-node__close {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.loop-node__play + .loop-node__close {
+  margin-left: 6px;
+}
+
+.loop-node__close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
 .loop-node__task {
   margin-top: 6px;
   color: var(--muted);

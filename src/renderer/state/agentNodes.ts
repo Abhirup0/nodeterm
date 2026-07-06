@@ -52,6 +52,12 @@ interface AgentNodesState {
   appendActivity(toolUseId: string, chunk: string): void
   /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
   clearForParent(parentNodeId: string): void
+  /**
+   * Drop the loop card's UI overrides (position/size/expanded) for a parent. Separate from
+   * clearForParent on purpose: a loop/cron card outlives turns, so the per-turn fan-out
+   * clear must not reset where the user dragged it — this runs only when the loop ends.
+   */
+  clearLoop(parentNodeId: string): void
 }
 
 export const useAgentNodes = create<AgentNodesState>((set) => ({
@@ -95,16 +101,28 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       const positions = { ...s.positions }
       const sizes = { ...s.sizes }
       const expanded = { ...s.expanded }
-      const drop = [...ids, `loop-${parentNodeId}`]
+      // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card
+      // outlives turns; its overrides go via clearLoop when the loop itself ends.
       for (const id of ids) {
         delete byId[id]
         delete activityById[id]
-      }
-      for (const id of drop) {
         delete positions[id]
         delete sizes[id]
         delete expanded[id]
       }
       return { byId, activityById, positions, sizes, expanded }
+    }),
+
+  clearLoop: (parentNodeId) =>
+    set((s) => {
+      const id = `loop-${parentNodeId}`
+      if (!(id in s.positions) && !(id in s.sizes) && !(id in s.expanded)) return s
+      const positions = { ...s.positions }
+      const sizes = { ...s.sizes }
+      const expanded = { ...s.expanded }
+      delete positions[id]
+      delete sizes[id]
+      delete expanded[id]
+      return { positions, sizes, expanded }
     })
 }))

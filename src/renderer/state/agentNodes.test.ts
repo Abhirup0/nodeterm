@@ -1,6 +1,38 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useAgentNodes } from './agentNodes'
 
+describe('loop node overrides vs per-turn fan-out', () => {
+  beforeEach(() => {
+    useAgentNodes.setState({ byId: {}, activityById: {}, positions: {}, sizes: {}, expanded: {} })
+  })
+
+  // A loop/cron card outlives turns: a new prompt clears the subagent fan-out but must NOT
+  // reset where the user dragged the loop card.
+  it('clearForParent drops subagent overrides but keeps the loop card position', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.setPosition('tu1', { x: 1, y: 2 })
+    s.setPosition('loop-n1', { x: 5, y: 6 })
+    s.clearForParent('n1')
+    expect(useAgentNodes.getState().positions['tu1']).toBeUndefined()
+    expect(useAgentNodes.getState().positions['loop-n1']).toEqual({ x: 5, y: 6 })
+  })
+
+  it('clearLoop drops only the loop card overrides', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.setPosition('tu1', { x: 1, y: 2 })
+    s.setPosition('loop-n1', { x: 5, y: 6 })
+    s.setSize('loop-n1', { width: 300, height: 200 })
+    s.clearLoop('n1')
+    const st = useAgentNodes.getState()
+    expect(st.positions['loop-n1']).toBeUndefined()
+    expect(st.sizes['loop-n1']).toBeUndefined()
+    expect(st.positions['tu1']).toEqual({ x: 1, y: 2 })
+    expect(st.byId['tu1']).toBeDefined()
+  })
+})
+
 describe('useAgentNodes.finish', () => {
   beforeEach(() => {
     useAgentNodes.setState({ byId: {}, activityById: {}, positions: {}, sizes: {}, expanded: {} })

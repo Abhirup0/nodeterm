@@ -31,6 +31,8 @@ export interface NormalizedAgentEvent {
   result?: string
   // recurring
   recurringKind?: 'loop' | 'schedule' | 'cron'
+  /** The recurring job was REMOVED (e.g. CronDelete) — take the card down. */
+  recurringEnd?: boolean
   task?: string
   schedule?: string
 }
@@ -113,6 +115,11 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
           .map((c) => c.text)
           .join('\n')
       }
+    }
+    // A cron outlives turns and sessions — its card leaves the canvas only when the cron
+    // itself is removed.
+    if (ev === 'PreToolUse' && tool === 'CronDelete') {
+      return { ...base, kind: 'recurring', recurringKind: 'cron', recurringEnd: true }
     }
     if (ev === 'PreToolUse' && RECURRING_TOOLS.has(tool)) {
       let recurringKind: NormalizedAgentEvent['recurringKind']

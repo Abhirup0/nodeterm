@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 import { useAgentNodes } from '../state/agentNodes'
+import { useAgentStatus } from '../state/agentStatus'
 
 /**
  * Loop/schedule/cron node — first-class (select/drag/resize). Shows the kind, schedule, full
@@ -29,6 +30,16 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (task) void window.nodeTerminal.pty.sendText(id.replace(/^loop-/, ''), task)
   }
 
+  // Manual dismiss: cron/schedule cards persist across turns/sessions/restarts, so a job
+  // removed while the app wasn't watching (or one the user just wants gone) needs an ×.
+  // Dismissing only drops the CARD — it does not touch the cron job itself.
+  const dismiss = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    const parentId = id.replace(/^loop-/, '')
+    useAgentStatus.getState().setLoop(parentId, false)
+    useAgentNodes.getState().clearLoop(parentId)
+  }
+
   return (
     <div className={`loop-node${active ? ' working' : ''}`}>
       <NodeResizer isVisible={selected} minWidth={180} minHeight={84} color="#bf7af0" />
@@ -53,6 +64,13 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
             ▶
           </button>
         )}
+        <button
+          className="loop-node__close"
+          title="Dismiss card (does not remove the job)"
+          onClick={dismiss}
+        >
+          ×
+        </button>
       </div>
       {(task || schedule) && !expanded && <div className="loop-node__task">{task || schedule}</div>}
       {expanded && (

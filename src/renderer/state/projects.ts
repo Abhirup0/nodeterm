@@ -16,8 +16,14 @@ interface ProjectsState {
   setProjectCwd(id: string, cwd: string): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
-  /** Writes the serialized canvas (nodes + viewport + bridge links) back into a project. */
-  commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport, bridges?: BridgeLink[]): void
+  /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
+  commitCanvas(
+    id: string,
+    nodes: CanvasNodeState[],
+    viewport: Viewport,
+    bridges?: BridgeLink[],
+    ropes?: BridgeLink[]
+  ): void
   /** Renames a node within a project (source of truth for inactive projects). */
   renameNode(projectId: string, nodeId: string, title: string): void
   /** Recolors a node within a project. */
@@ -115,10 +121,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }))
   },
 
-  commitCanvas(id, nodes, viewport, bridges) {
+  commitCanvas(id, nodes, viewport, bridges, ropes) {
     set((s) => ({
       projects: s.projects.map((p) =>
-        p.id === id ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}) } : p
+        p.id === id
+          ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}), ...(ropes ? { ropes } : {}) }
+          : p
       )
     }))
   },

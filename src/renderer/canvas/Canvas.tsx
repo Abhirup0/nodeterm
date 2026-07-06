@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   addEdge,
+  applyEdgeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -12,6 +13,7 @@ import {
   useNodesState,
   useReactFlow,
   type Connection,
+  type EdgeChange,
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
@@ -164,6 +166,19 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
   ephemeralEdges: []
 }
 
+// A "spawned by" rope: control-capable agent → node it opened (or browser popup → opener).
+// Display-only (never a context link) but persisted per project as `ropes`, so the lineage
+// survives restarts. Selectable; removed with ⌫ / double-click like a context link.
+const ropeEdge = (id: string, source: string, target: string, color: string): Edge => ({
+  id,
+  source,
+  sourceHandle: 'flow-out',
+  target,
+  targetHandle: 'flow-in',
+  style: { stroke: color, strokeWidth: 1.5 },
+  markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 }
+})
+
 const minimapNodeColor = (n: Node): string =>
   (n.data as { color?: string })?.color ?? '#0a84ff'
 
@@ -239,10 +254,13 @@ export function Canvas() {
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
   const linkEdgesRef = useRef<Edge[]>([])
   linkEdgesRef.current = linkEdges
-  // Display-only edges drawn from a control-capable agent to the nodes it spawns via the
-  // `nodeterm` CLI (see the onAgentControl effect). Like ephemeralEdges, these are merged only at
-  // the <ReactFlow> prop: never persisted (not bridges) and never turned into context links.
+  // "Spawned by" ropes drawn from a control-capable agent to the nodes it opens via the
+  // `nodeterm` CLI (see the onAgentControl effect) and from browser popups to their opener.
+  // Merged only at the <ReactFlow> prop and never turned into context links, but PERSISTED
+  // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
+  const controlEdgesRef = useRef<Edge[]>([])
+  controlEdgesRef.current = controlEdges
   const [dirty, setDirty] = useState(false)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
@@ -548,7 +566,22 @@ export function Canvas() {
           : { markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } })
       }
     })
-    const extra = ephemeralEdges.length || controlEdges.length ? [...ephemeralEdges, ...controlEdges] : []
+    // Control ropes: white + a removal hint while selected (mirrors the context-link look).
+    const ropes = controlEdges.map((e) =>
+      e.selected
+        ? {
+            ...e,
+            label: '⌫ to remove',
+            labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
+            labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+            labelBgPadding: [6, 3] as [number, number],
+            labelBgBorderRadius: 5,
+            style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
+          }
+        : e
+    )
+    const extra = ephemeralEdges.length || ropes.length ? [...ephemeralEdges, ...ropes] : []
     return extra.length ? [...decorated, ...extra] : decorated
   }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig])
 
@@ -697,6 +730,14 @@ export function Canvas() {
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
+    // Restore control ropes with the source agent's color (falls back to the browser blue).
+    setControlEdges(
+      (project.ropes ?? []).map((r) => {
+        const srcState = project.nodes.find((n) => n.id === r.source)
+        const color = agentConfig((srcState?.agentId as AgentId) ?? '')?.color ?? '#0a84ff'
+        return ropeEdge(r.id, r.source, r.target, color)
+      })
+    )
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -753,7 +794,8 @@ export function Canvas() {
           id,
           flowToNodeStates(nodesRef.current),
           viewportRef.current,
-          linkEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+          linkEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+          controlEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
         )
   }, [])
 
@@ -974,12 +1016,41 @@ export function Canvas() {
   // Double-click a context link to remove it (ephemeral subagent/loop edges are left alone).
   const onEdgeDoubleClick = useCallback(
     (_e: React.MouseEvent, edge: Edge) => {
+      // Control ropes are removable the same way as context links (ephemeral edges are not).
+      if (controlEdgesRef.current.some((b) => b.id === edge.id)) {
+        setControlEdges((es) => es.filter((b) => b.id !== edge.id))
+        markDirty()
+        return
+      }
       if (!linkEdgesRef.current.some((b) => b.id === edge.id)) return
       setLinkEdges((es) => es.filter((b) => b.id !== edge.id))
       markDirty()
     },
     [setLinkEdges, markDirty]
   )
+
+  // Route edge changes (selection) to the right store: `ctrl-` ids are control ropes (local
+  // state), everything else is a context link. Ephemeral subagent/loop edges emit no changes
+  // worth applying — applyEdgeChanges on unknown ids is a no-op either way.
+  const handleEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      const rope: EdgeChange[] = []
+      const link: EdgeChange[] = []
+      for (const c of changes) ('id' in c && String(c.id).startsWith('ctrl-') ? rope : link).push(c)
+      if (rope.length) setControlEdges((es) => applyEdgeChanges(rope, es))
+      if (link.length) onLinkEdgesChange(link)
+    },
+    [onLinkEdgesChange]
+  )
+
+  // Prune ropes whose endpoints were deleted (mirrors the context-link pruning below).
+  useEffect(() => {
+    const ids = new Set(nodes.map((n) => n.id))
+    setControlEdges((es) => {
+      const valid = es.filter((e) => ids.has(e.source) && ids.has(e.target))
+      return valid.length === es.length ? es : valid
+    })
+  }, [nodes])
 
   // Prune links whose endpoints were deleted, then push the link map to main (debounced) so
   // it can rewrite the per-node link files the context CLI reads.
@@ -1274,11 +1345,14 @@ export function Canvas() {
   )
 
   const addSticky = useCallback(
-    (center?: { x: number; y: number }) => {
-      setNodes((ns) => [...ns, createStickyNode(ns.length, center ?? viewCenter())])
+    (center?: { x: number; y: number }, groupId?: string) => {
+      setNodes((ns) => {
+        const node = createStickyNode(ns.length, center ?? viewCenter())
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, viewCenter]
+    [setNodes, markDirty, viewCenter, parentInto]
   )
 
   const addDino = useCallback(
@@ -1312,20 +1386,21 @@ export function Canvas() {
   )
 
   const addChatNode = useCallback(
-    (center?: { x: number; y: number }, accountId?: string) => {
+    (center?: { x: number; y: number }, accountId?: string, groupId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
+      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
       const account = resolveNewNodeAccount(
         accountId,
         project,
         useSettings.getState().settings.claudeAccounts
       )
-      setNodes((ns) => [
-        ...ns,
-        createChatNode(ns.length, project?.cwd, center ?? viewCenter(), undefined, account)
-      ])
+      setNodes((ns) => {
+        const node = createChatNode(ns.length, cwd, center ?? viewCenter(), undefined, account)
+        return [...ns, groupId ? parentInto(node, groupId) : node]
+      })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
   // Terminal → chat fork (Task 10): a Claude terminal node dispatches 'nodeterm:open-chat'
@@ -1526,8 +1601,10 @@ export function Canvas() {
           useChatSessions.getState().drop(n.id)
         }
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
-        // unread). Node unmount no longer does this, so deletion must.
+        // unread/loop). Node unmount no longer does this, so deletion must. The loop card's
+        // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
+        useAgentNodes.getState().clearLoop(n.id)
       })
       // Tear down relay connections owned solely by the deleted remote node(s). The model is
       // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
@@ -1577,12 +1654,19 @@ export function Canvas() {
       if (tag === 'input' || tag === 'textarea') return
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
       if (!ids.length) {
-        // No node selected → remove any selected context link(s).
+        // No node selected → remove any selected context link(s) / control rope(s).
         const edgeIds = linkEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
-        if (edgeIds.length) {
+        const ropeIds = controlEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
+        if (edgeIds.length || ropeIds.length) {
           e.preventDefault()
-          const drop = new Set(edgeIds)
-          setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
+          if (edgeIds.length) {
+            const drop = new Set(edgeIds)
+            setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
+          }
+          if (ropeIds.length) {
+            const drop = new Set(ropeIds)
+            setControlEdges((es) => es.filter((b) => !drop.has(b.id)))
+          }
           markDirty()
         }
         return
@@ -2037,9 +2121,18 @@ export function Canvas() {
   const selectionItems = useCallback(
     (ids: string[]): MenuItem[] => [
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
-      ...(ids.length > 1
+      // Shown only when something is actually groupable: top-level and not itself a group
+      // (groupSelectedNodes silently skips the rest, so the item would otherwise no-op).
+      ...(ids.some((nid) => {
+        const n = nodesRef.current.find((nd) => nd.id === nid)
+        return !!n && !n.parentId && n.type !== 'group'
+      })
         ? ([
-            { label: 'Group selection', icon: <IconGroup />, onClick: () => groupSelection(ids) },
+            {
+              label: ids.length > 1 ? 'Group selection' : 'Group node',
+              icon: <IconGroup />,
+              onClick: () => groupSelection(ids)
+            },
             { type: 'separator' }
           ] as MenuItem[])
         : []),
@@ -2111,14 +2204,89 @@ export function Canvas() {
     ]
   )
 
+  /** "New <agent>" / "New chat" creation entries shared by the pane and group context menus.
+   *  `at` is the flow position to create at; with `groupId` the node is parented into that group. */
+  const agentCreationItems = useCallback(
+    (at?: { x: number; y: number }, groupId?: string): MenuItem[] => {
+      const disabled = useSettings.getState().settings.disabledAgents
+      // Accounts selectable in the active project: local accounts for a local project, or this
+      // host's accounts for an SSH project (pending logins always excluded).
+      const accounts = accountsForProject(
+        useSettings.getState().settings.claudeAccounts,
+        useProjects.getState().getProject(activeProjectId)
+      )
+      return [
+        ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
+          // Claude gets an account picker submenu when ≥1 account exists; System = project
+          // default (resolved). Other agents stay flat (accounts are Claude-only).
+          if (aid === 'claude' && accounts.length > 0) {
+            return {
+              type: 'submenu',
+              label: `New ${AGENT_CONFIG[aid].label}`,
+              icon: <AgentIcon agentId={aid} />,
+              children: [
+                { label: 'System account', onClick: () => addAgentNode('claude', at, groupId) },
+                ...accounts.map(
+                  (a): MenuItem => ({
+                    label: a.label,
+                    onClick: () => addAgentNode('claude', at, groupId, a.id)
+                  })
+                )
+              ]
+            }
+          }
+          return {
+            label: `New ${AGENT_CONFIG[aid].label}`,
+            icon: <AgentIcon agentId={aid} />,
+            onClick: () => addAgentNode(aid, at, groupId)
+          }
+        }),
+        ...useSettings
+          .getState()
+          .settings.customAgents.filter((c) => !disabled.includes(c.id))
+          .map(
+            (c): MenuItem => ({
+              label: `New ${c.label}`,
+              icon: <AgentIcon agentId={c.id} />,
+              onClick: () => addAgentNode(c.id, at, groupId)
+            })
+          ),
+        accounts.length > 0
+          ? {
+              type: 'submenu',
+              label: 'New chat',
+              icon: <IconChat />,
+              children: [
+                { label: 'System account', onClick: () => addChatNode(at, undefined, groupId) },
+                ...accounts.map(
+                  (a): MenuItem => ({
+                    label: a.label,
+                    onClick: () => addChatNode(at, a.id, groupId)
+                  })
+                )
+              ]
+            }
+          : {
+              label: 'New chat',
+              icon: <IconChat />,
+              onClick: () => addChatNode(at, undefined, groupId)
+            }
+      ]
+    },
+    [activeProjectId, addAgentNode, addChatNode]
+  )
+
   const groupItems = useCallback(
-    (groupId: string): MenuItem[] => [
+    (groupId: string, at?: { x: number; y: number }): MenuItem[] => [
       { type: 'label', label: 'Group' },
       {
-        label: 'New terminal in group',
+        label: 'New terminal',
         icon: <IconTerminal />,
-        onClick: () => addTerminal(undefined, undefined, groupId)
+        onClick: () => addTerminal(at, undefined, groupId)
       },
+      ...agentCreationItems(at, groupId),
+      { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at, groupId) },
+      { type: 'separator' },
       { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
       { type: 'separator' },
       ...(groupHasWorktree(groupId)
@@ -2133,76 +2301,27 @@ export function Canvas() {
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
       { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
     ],
-    [setNodesColor, ungroup, groupHasWorktree, bindGroupToWorktree, addTerminal]
+    [
+      setNodesColor,
+      ungroup,
+      groupHasWorktree,
+      bindGroupToWorktree,
+      addTerminal,
+      agentCreationItems,
+      addSticky
+    ]
   )
 
   const onPaneContextMenu = useCallback(
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
-      const disabled = useSettings.getState().settings.disabledAgents
-      // Accounts selectable in the active project: local accounts for a local project, or this
-      // host's accounts for an SSH project (pending logins always excluded).
-      const accounts = accountsForProject(
-        useSettings.getState().settings.claudeAccounts,
-        useProjects.getState().getProject(activeProjectId)
-      )
       setMenu({
         x: e.clientX,
         y: e.clientY,
         items: [
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
-          ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
-            // Claude gets an account picker submenu when ≥1 account exists; System = project
-            // default (resolved). Other agents stay flat (accounts are Claude-only).
-            if (aid === 'claude' && accounts.length > 0) {
-              return {
-                type: 'submenu',
-                label: `New ${AGENT_CONFIG[aid].label}`,
-                icon: <AgentIcon agentId={aid} />,
-                children: [
-                  { label: 'System account', onClick: () => addAgentNode('claude', at) },
-                  ...accounts.map(
-                    (a): MenuItem => ({
-                      label: a.label,
-                      onClick: () => addAgentNode('claude', at, undefined, a.id)
-                    })
-                  )
-                ]
-              }
-            }
-            return {
-              label: `New ${AGENT_CONFIG[aid].label}`,
-              icon: <AgentIcon agentId={aid} />,
-              onClick: () => addAgentNode(aid, at)
-            }
-          }),
-          ...useSettings
-            .getState()
-            .settings.customAgents.filter((c) => !disabled.includes(c.id))
-            .map(
-              (c): MenuItem => ({
-                label: `New ${c.label}`,
-                icon: <AgentIcon agentId={c.id} />,
-                onClick: () => addAgentNode(c.id, at)
-              })
-            ),
-          accounts.length > 0
-            ? {
-                type: 'submenu',
-                label: 'New chat',
-                icon: <IconChat />,
-                children: [
-                  { label: 'System account', onClick: () => addChatNode(at) },
-                  ...accounts.map(
-                    (a): MenuItem => ({
-                      label: a.label,
-                      onClick: () => addChatNode(at, a.id)
-                    })
-                  )
-                ]
-              }
-            : { label: 'New chat', icon: <IconChat />, onClick: () => addChatNode(at) },
+          ...agentCreationItems(at),
           { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
@@ -2221,26 +2340,29 @@ export function Canvas() {
     [
       screenToFlowPosition,
       addTerminal,
-      addAgentNode,
-      addChatNode,
+      agentCreationItems,
       addSticky,
       addDino,
       addBrowser,
       openFileDialog,
       openRemotePicker,
       selectAll,
-      fitView,
-      activeProjectId
+      fitView
     ]
   )
 
   const onNodeContextMenu = useCallback(
     (e: React.MouseEvent, node: Node) => {
       e.preventDefault()
-      const items = node.type === 'group' ? groupItems(node.id) : selectionItems(targetIds(node))
+      // For a group frame, remember WHERE inside it the user right-clicked so "New …" creation
+      // entries can place the node at the cursor (parentInto converts to group-relative).
+      const items =
+        node.type === 'group'
+          ? groupItems(node.id, screenToFlowPosition({ x: e.clientX, y: e.clientY }))
+          : selectionItems(targetIds(node))
       setMenu({ x: e.clientX, y: e.clientY, items })
     },
-    [groupItems, selectionItems, targetIds]
+    [groupItems, selectionItems, targetIds, screenToFlowPosition]
   )
 
   const onSelectionContextMenu = useCallback(
@@ -2414,18 +2536,7 @@ export function Canvas() {
         y: src.position.y + srcH + 80 + 280
       })
       setNodes((ns) => [...ns, node])
-      setControlEdges((es) => [
-        ...es,
-        {
-          id: `ctrl-${sourceNodeId}-${node.id}`,
-          source: sourceNodeId,
-          sourceHandle: 'flow-out',
-          target: node.id,
-          targetHandle: 'flow-in',
-          style: { stroke: '#0a84ff', strokeWidth: 1.5 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#0a84ff', width: 14, height: 14 }
-        }
-      ])
+      setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${node.id}`, sourceNodeId, node.id, '#0a84ff')])
       markDirty()
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2460,18 +2571,7 @@ export function Canvas() {
       const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const placeBelow = (i = 0) => ({ x: src.position.x + srcW / 2 + i * 460, y: belowY + 210 })
       const connect = (newId: string) =>
-        setControlEdges((es) => [
-          ...es,
-          {
-            id: `ctrl-${sourceNodeId}-${newId}`,
-            source: sourceNodeId,
-            sourceHandle: 'flow-out',
-            target: newId,
-            targetHandle: 'flow-in',
-            style: { stroke: edgeColor, strokeWidth: 1.5 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor, width: 14, height: 14 }
-          }
-        ])
+        setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId, edgeColor)])
       // Append a freshly-created node, draw its connecting edge, and mark the canvas dirty so it
       // persists. Returns the new node id.
       const addAndConnect = (node: CanvasNode) => {
@@ -3008,15 +3108,26 @@ export function Canvas() {
             })
           break
         case 'recurring':
-          if (e.recurringKind)
+          if (e.recurringEnd) {
+            // The recurring job itself was removed (CronDelete) — take the card down.
+            cs.setLoop(e.nodeId, false)
+            an.clearLoop(e.nodeId)
+          } else if (e.recurringKind) {
             cs.setLoop(e.nodeId, true, e.recurringKind, { schedule: e.schedule, task: e.task })
+          }
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
           if (e.sessionPhase === 'start') cs.setState(e.nodeId, undefined, e.agentId)
           if (e.sessionPhase === 'end') {
             cs.setState(e.nodeId, undefined, e.agentId)
-            cs.setLoop(e.nodeId, false)
+            // In-session /loop dies with its session; cron (and scheduled cloud routines)
+            // keep running after it — their cards stay until CronDelete / manual dismiss.
+            const kind = cs.byId[e.nodeId]?.loop?.kind
+            if (kind === 'loop') {
+              cs.setLoop(e.nodeId, false)
+              an.clearLoop(e.nodeId)
+            }
             an.clearForParent(e.nodeId)
           }
           break
@@ -3468,7 +3579,7 @@ export function Canvas() {
           edges={displayEdges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
-          onEdgesChange={onLinkEdgesChange}
+          onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
           onEdgeDoubleClick={onEdgeDoubleClick}
           onMove={onMove}
