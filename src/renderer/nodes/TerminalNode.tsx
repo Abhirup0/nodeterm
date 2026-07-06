@@ -359,6 +359,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           cwd: sshRemoteTmux && !sshRemote ? undefined : data.cwd,
           persistKey: id,
           agentId: data.agentId,
+          accountId: data.accountId as string | undefined,
           sshRemote
         })
         .then(async ({ sessionId: sid, fresh }) => {

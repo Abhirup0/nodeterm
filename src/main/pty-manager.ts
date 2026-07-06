@@ -22,6 +22,8 @@ import {
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
+import { claudeConfigDirFor } from './claude-accounts'
+import { AUTH_ENV_STRIP, accountTmuxEnvArgs } from './claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -480,6 +482,25 @@ export class PtyManager {
         : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
+    // Managed Claude account: the whole session runs under the account's private config
+    // dir. The claude CLI then reads/writes credentials + transcripts there. Also strip
+    // env auth vars that would silently shadow the account's OAuth login (an inherited
+    // ANTHROPIC_API_KEY wins over CLAUDE_CONFIG_DIR credentials). System-default nodes
+    // (no accountId) are untouched. Remote (ssh) sessions get their account env via the
+    // remote tmux `-e` list instead (the local ssh client process doesn't need it).
+    let accountDir =
+      options.accountId && !options.sshRemote ? claudeConfigDirFor(options.accountId) : null
+    // Missing/deleted account dir (spec: error handling) → fall back to system default
+    // instead of pointing claude at a dead dir; the node then behaves like an unbound one.
+    if (accountDir && !fs.existsSync(accountDir)) {
+      console.warn(`[accounts] config dir missing for ${options.accountId}, using system default`)
+      accountDir = null
+    }
+    if (accountDir) {
+      env.CLAUDE_CONFIG_DIR = accountDir
+      for (const k of AUTH_ENV_STRIP) delete env[k]
+    }
+
     const settings = this.getSettings()
     let file: string
     let args: string[]
@@ -544,6 +565,9 @@ export class PtyManager {
       // the app), so a session created after an app update must NOT inherit a stale minimal PATH
       // baked into the server env at first launch — `-e` overrides it per new session at creation.
       const pathEnvArgs = env.PATH ? ['-e', `PATH=${env.PATH}`] : []
+      // The account config dir must ride `-e` like the hook env: the tmux server is shared
+      // and long-lived, so session env comes from creation args, not client inheritance.
+      const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
       const attachFlags = sinks ? ['-A'] : ['-A', '-D']
       args = [
         '-L',
@@ -554,6 +578,7 @@ export class PtyManager {
         ...attachFlags,
         ...hookEnvArgs,
         ...pathEnvArgs,
+        ...accountEnvArgs,
         '-c',
         cwd,
         '-s',
