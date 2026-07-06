@@ -3,6 +3,7 @@ import type { ClaudeAccount } from '@shared/types'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useProjects } from '../../../state/projects'
+import { useSshConn } from '../../../state/sshConn'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
@@ -43,6 +44,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   // The active project's SSH host key (`user@host`), when it's a connected SSH project. Present →
   // the "Add account" control also offers adding an account ON that host.
   const activeHostKey = activeProject?.ssh ? sshHostKey(activeProject.ssh.server) : undefined
+  // Subscribe to live SSH connections so a remote account's Retry button enables/disables as its
+  // host connects/disconnects while this panel is open.
+  const sshByProject = useSshConn((s) => s.byProject)
   const [versionWarning, setVersionWarning] = useState(false)
   const [pendingRemove, setPendingRemove] = useState<ClaudeAccount | null>(null)
 
@@ -56,6 +60,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     return useProjects.getState().projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host)?.id
   }
 
+  // A remote account can only log in on a CONNECTED matching-host project (live ControlMaster in
+  // useSshConn). Undefined when the account is remote but no such project is currently connected —
+  // Retry is then disabled so `claude /login` never runs against the local system account.
+  const connectedProjectIdForHost = (host?: string): string | undefined => {
+    const id = projectIdForHost(host)
+    return id && sshByProject[id] ? id : undefined
+  }
+
   // Open a login terminal for an account and wait (up to ~5 min) for the CLI to write its
   // credentials; on success flip the row out of `pending` and adopt the captured email. A remote
   // account (`host` set) logs in on its host: the login node runs in remote tmux and waitLogin polls
@@ -63,8 +75,12 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const runLogin = async (account: Pick<ClaudeAccount, 'id' | 'host'>): Promise<void> => {
     const remote = !!account.host
     const projectId = remote ? projectIdForHost(account.host) : undefined
+    // Carry `host` so Canvas resolves the ssh binding BY HOST (among connected projects), not from
+    // whatever project happens to be active when Retry fires.
     window.dispatchEvent(
-      new CustomEvent('nodeterm:add-account-login', { detail: { accountId: account.id, remote } })
+      new CustomEvent('nodeterm:add-account-login', {
+        detail: { accountId: account.id, remote, host: account.host }
+      })
     )
     const captured = await window.nodeTerminal.claudeAccounts.waitLogin(
       account.id,
@@ -198,9 +214,27 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {account.pending ? (
-                    <Button onClick={() => void runLogin(account)}>Retry login</Button>
-                  ) : null}
+                  {account.pending
+                    ? (() => {
+                        // A remote account can only retry login on a connected matching-host
+                        // project; without one, disable Retry (a local spawn would log into the
+                        // system account instead of the remote host).
+                        const blocked = !!account.host && !connectedProjectIdForHost(account.host)
+                        return (
+                          <Button
+                            disabled={blocked}
+                            title={
+                              blocked
+                                ? `Connect to ${account.host} to finish logging in`
+                                : undefined
+                            }
+                            onClick={() => void runLogin(account)}
+                          >
+                            Retry login
+                          </Button>
+                        )
+                      })()
+                    : null}
                   <Button
                     variant="ghost"
                     aria-label="Remove account"

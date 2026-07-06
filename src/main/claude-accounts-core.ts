@@ -57,6 +57,32 @@ export function transcriptRootFor(
 }
 
 /**
+ * Jail predicate for a hook-reported LOCAL `transcript_path`: hook POSTs can arrive over the
+ * remote reverse tunnel, so a forged POST must not make the app read an arbitrary local file.
+ * Legitimate local transcripts live under exactly two roots:
+ *   - the system default `~/.claude/projects`, and
+ *   - a managed account's `{userData}/claude-accounts/<accountId>/projects`.
+ * For the account root the `<accountId>` segment is validated with `ACCOUNT_ID_RE` (dots barred,
+ * so `..` can never sneak in) and the very next segment must be `projects` — a prefix match on
+ * `{userData}/claude-accounts` alone is NOT enough (it would accept `…/claude-accounts/x/.ssh`).
+ * `abs` must already be resolved/normalized by the caller (e.g. `path.resolve(tp)`).
+ */
+export function isSafeLocalTranscriptPath(
+  abs: string,
+  homeDir: string,
+  userDataPath: string
+): boolean {
+  const legacyRoot = path.join(homeDir, '.claude', 'projects')
+  if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
+  const accountsRoot = path.join(userDataPath, 'claude-accounts')
+  if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) return false
+  // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized
+  // and confirmed under `accountsRoot`, `path.relative` yields no leading `..`.
+  const segs = path.relative(accountsRoot, abs).split(path.sep)
+  return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+}
+
+/**
  * Claude Code ≥ 2.1 scopes its macOS Keychain service name per config dir:
  * 'Claude Code-credentials-' + first 8 hex chars of sha256(CLAUDE_CONFIG_DIR).
  * (Learned from REF's claude-accounts/keychain.ts — undocumented CLI behavior.)

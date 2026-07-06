@@ -40,6 +40,9 @@ export interface PtyCreateOptions {
 export interface PtyCreateResult {
   sessionId: string
   fresh: boolean
+  /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
+   *  system account. The renderer flags the account chip (folder-missing warning) when true. */
+  accountFallback?: boolean
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -691,8 +694,9 @@ export interface ContextApi {
    * Ask main to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
+   * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
    */
-  ensure(sessionId: string, cwd?: string): void
+  ensure(sessionId: string, cwd?: string, accountId?: string): void
 }
 
 /** One searchable line extracted from a Claude session transcript. */
@@ -813,10 +817,12 @@ export interface ClaudeApi {
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
    * the newest transcript under that project dir, no live hook event required).
+   * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
    */
   readTranscript(
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<TranscriptLine[]>
 }
 

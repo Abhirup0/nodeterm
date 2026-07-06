@@ -252,11 +252,12 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.contextUpdate, handler)
       return () => ipcRenderer.removeListener(IPC.contextUpdate, handler)
     },
-    ensure: (sessionId, cwd) => ipcRenderer.send(IPC.contextEnsure, sessionId, cwd)
+    ensure: (sessionId, cwd, accountId) =>
+      ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
   claude: {
-    readTranscript: (sessionId, cwd) =>
-      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
+    readTranscript: (sessionId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
   },
   chat: {
     readTranscript: (sessionId, cwd, accountId) =>

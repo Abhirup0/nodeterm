@@ -188,11 +188,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
   useEffect(() => {
     const sid = status?.sessionId
-    if (showUsage && sid) window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined)
-  }, [showUsage, status?.sessionId, data.cwd])
+    if (showUsage && sid)
+      window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, data.accountId)
+  }, [showUsage, status?.sessionId, data.cwd, data.accountId])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
+  // Set when the session fell back to the system account because this node's account folder was
+  // missing at spawn (Task 3 fallback) — flags the account chip with a warning tint + tooltip.
+  const [accountFallback, setAccountFallback] = useState(false)
 
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
   const readBuffer = useCallback(() => {
@@ -209,6 +213,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     nodeId: id,
     sessionId: status?.sessionId,
     cwd: data.cwd as string | undefined,
+    accountId: data.accountId,
     searchTranscript: showUsage,
     open: searchOpen,
     readBuffer
@@ -369,12 +374,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
         if (disposed) {
           transport.kill(sid)
           return
         }
         sessionId = sid
+        if (fellBack) setAccountFallback(true)
         // Cold restart: the tmux session (and anything that was running in it) is gone — replay
         // the last persisted scrollback so the user sees where they left off. Warm reattach
         // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
@@ -840,7 +846,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           </span>
         )}
         {accountChip && (
-          <span className="node-account-chip" title={accountChip.tooltip}>
+          <span
+            className={`node-account-chip${accountFallback ? ' node-account-chip--warning' : ''}`}
+            title={
+              accountFallback
+                ? 'Account folder missing — running on system account'
+                : accountChip.tooltip
+            }
+          >
             {accountChip.short}
           </span>
         )}

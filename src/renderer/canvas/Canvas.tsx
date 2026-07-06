@@ -111,6 +111,7 @@ import { useSshConn } from '../state/sshConn'
 import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
+import { sshHostKey } from '@shared/ssh'
 import type { SshProjectStatus, TranscriptHit } from '@shared/types'
 import {
   applyCanvasMutation,
@@ -1350,14 +1351,27 @@ export function Canvas() {
   // to open a terminal node running `claude /login` under the new account's config dir.
   useEffect(() => {
     const onAddAccountLogin = (ev: Event): void => {
-      const detail = (ev as CustomEvent<{ accountId: string; remote?: boolean }>).detail
+      const detail = (ev as CustomEvent<{ accountId: string; remote?: boolean; host?: string }>)
+        .detail
       const accountId = detail?.accountId
       if (!accountId) return
-      // A REMOTE account (added inside an SSH project) logs in ON THE HOST: stamp the login node
-      // with the active project's ssh binding so `claude /login` runs in remote tmux under the
-      // remote account dir. Local accounts omit it (login runs locally).
-      const project = useProjects.getState().getProject(activeProjectId)
-      const ssh = detail?.remote ? project?.ssh : undefined
+      // A REMOTE account logs in ON ITS HOST: resolve the ssh binding BY HOST (from the event),
+      // NOT from the active project — Retry can fire from any project, so the active one may be
+      // local or a different host. Match against CONNECTED projects only (live ControlMaster in
+      // useSshConn). If none matches, do NOT spawn a node: a local `claude /login` would mutate the
+      // user's SYSTEM ~/.claude login while waitLogin polls the remote host forever.
+      let ssh: ReturnType<typeof useProjects.getState>['projects'][number]['ssh']
+      if (detail?.remote) {
+        const host = detail.host
+        const conn = useSshConn.getState().byProject
+        const project = host
+          ? useProjects
+              .getState()
+              .projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host && conn[p.id])
+          : undefined
+        if (!project) return // defensive: mismatched/disconnected remote login — never spawn locally
+        ssh = project.ssh
+      }
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
         { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh), selected: true }
@@ -1366,7 +1380,8 @@ export function Canvas() {
     }
     window.addEventListener('nodeterm:add-account-login', onAddAccountLogin)
     return () => window.removeEventListener('nodeterm:add-account-login', onAddAccountLogin)
-  }, [setNodes, markDirty, viewCenter, activeProjectId])
+    // Resolves the ssh binding by host at fire time (reads stores directly), so no project dep.
+  }, [setNodes, markDirty, viewCenter])
 
   // When an account is removed in Settings, clear it off the ACTIVE project's live nodes (the
   // projects store only holds the other projects' serialized copies). Referencing nodes fall

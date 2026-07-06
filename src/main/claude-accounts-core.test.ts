@@ -9,7 +9,8 @@ import {
   accountTmuxEnvArgs,
   parseLoginCapture,
   isSupportedClaudeVersion,
-  transcriptRootFor
+  transcriptRootFor,
+  isSafeLocalTranscriptPath
 } from './claude-accounts-core'
 
 describe('accountConfigDir', () => {
@@ -140,5 +141,40 @@ describe('isSupportedClaudeVersion', () => {
     expect(isSupportedClaudeVersion('2.0.14 (Claude Code)')).toBe(false)
     expect(isSupportedClaudeVersion('1.0.44')).toBe(false)
     expect(isSupportedClaudeVersion('garbage')).toBe(false) // unparseable → unsupported (warn)
+  })
+})
+
+describe('isSafeLocalTranscriptPath', () => {
+  const home = '/Users/x'
+  const ud = '/Users/x/Library/Application Support/nodeterm'
+  const legacy = '/Users/x/.claude/projects'
+  const acctRoot = `${ud}/claude-accounts`
+
+  it('accepts the legacy system root and paths under it', () => {
+    expect(isSafeLocalTranscriptPath(legacy, home, ud)).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${legacy}/-repo/abc.jsonl`, home, ud)).toBe(true)
+  })
+  it('accepts a valid account transcript root and paths under it', () => {
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects`, home, ud)).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects/-repo/s.jsonl`, home, ud)).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/A1_b-2/projects/x.jsonl`, home, ud)).toBe(true)
+  })
+  it('rejects a `..` escape out of the accounts root', () => {
+    // Callers pass an already-resolved path; a resolved traversal lands elsewhere entirely.
+    expect(isSafeLocalTranscriptPath('/Users/x/.ssh/id_rsa', home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${ud}/hook-endpoint.env`, home, ud)).toBe(false)
+  })
+  it('rejects an invalid account-id segment', () => {
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/../evil/projects/x`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a.b/projects/x`, home, ud)).toBe(false)
+  })
+  it('rejects a non-projects subpath under a valid account', () => {
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/.credentials.json`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a1`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(acctRoot, home, ud)).toBe(false)
+  })
+  it('rejects a sibling-prefix root (…/projects-evil)', () => {
+    expect(isSafeLocalTranscriptPath(`${legacy}-evil/x.jsonl`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects-evil/x`, home, ud)).toBe(false)
   })
 })

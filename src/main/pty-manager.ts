@@ -191,6 +191,9 @@ interface Session {
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
+  /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
+   *  to the system account. `create()` surfaces it to the renderer (warning chip). */
+  accountFallback?: boolean
 }
 
 /** Sinks for a detached session whose output is served somewhere other than the renderer
@@ -333,7 +336,9 @@ export class PtyManager {
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
     const sessionId = this.spawnSession(options, webContentsId, undefined)
-    return { sessionId, fresh }
+    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
+    const accountFallback = this.sessions.get(sessionId)?.accountFallback
+    return accountFallback ? { sessionId, fresh, accountFallback } : { sessionId, fresh }
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
@@ -492,9 +497,12 @@ export class PtyManager {
       options.accountId && !options.sshRemote ? claudeConfigDirFor(options.accountId) : null
     // Missing/deleted account dir (spec: error handling) → fall back to system default
     // instead of pointing claude at a dead dir; the node then behaves like an unbound one.
+    // `accountFallback` is surfaced to the renderer (warning chip) via the create() result.
+    let accountFallback = false
     if (accountDir && !fs.existsSync(accountDir)) {
       console.warn(`[accounts] config dir missing for ${options.accountId}, using system default`)
       accountDir = null
+      accountFallback = true
     }
     if (accountDir) {
       env.CLAUDE_CONFIG_DIR = accountDir
@@ -653,7 +661,8 @@ export class PtyManager {
       flushTimer: null,
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
-      outputSinceSnapshot: true // capture the initial screen on the first tick
+      outputSinceSnapshot: true, // capture the initial screen on the first tick
+      accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
     this.sessions.set(sessionId, session)

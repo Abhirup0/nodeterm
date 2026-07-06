@@ -12,6 +12,8 @@ interface Args {
   sessionId: string | undefined
   /** The node's working directory — durable fallback for resolving the transcript. */
   cwd: string | undefined
+  /** Managed Claude account whose transcript root the search resolves against (default system). */
+  accountId: string | undefined
   /** Whether this node has a readable Claude transcript (gated on hasUsage capability). */
   searchTranscript: boolean
   open: boolean
@@ -33,6 +35,7 @@ export function useTerminalSearch({
   nodeId,
   sessionId,
   cwd,
+  accountId,
   searchTranscript,
   open,
   readBuffer
@@ -66,7 +69,8 @@ export function useTerminalSearch({
         try {
           const tr: TranscriptLine[] = await window.nodeTerminal.claude.readTranscript(
             sessionId,
-            cwd
+            cwd,
+            accountId
           )
           for (const l of tr) {
             for (const t of l.text.split('\n')) lines.push({ source: 'claude', role: l.role, text: t })
@@ -81,7 +85,7 @@ export function useTerminalSearch({
       cancelled = true
     }
     // readBuffer must be stable (useCallback in the caller) to avoid rebuilds.
-  }, [open, nodeId, sessionId, cwd, searchTranscript, readBuffer])
+  }, [open, nodeId, sessionId, cwd, accountId, searchTranscript, readBuffer])
 
   // Lowercase once per snapshot, not per keystroke — the snapshot can be tens of thousands of
   // lines (full scrollback + transcript), and re-lowercasing all of it on every typed character

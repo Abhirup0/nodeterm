@@ -716,6 +716,12 @@ body,
   border-radius: 6px;
 }
 
+/* Account folder missing at spawn → session fell back to the system account (orange warning). */
+.node-account-chip--warning {
+  color: #ff9f0a;
+  background: rgba(255, 159, 10, 0.16);
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;

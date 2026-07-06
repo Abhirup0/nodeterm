@@ -1,4 +1,4 @@
-import { join, resolve, sep, posix } from 'path'
+import { join, resolve, posix } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
@@ -43,6 +43,7 @@ import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
 import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
+import { isSafeLocalTranscriptPath } from './claude-accounts-core'
 import { installClaudeHooksInto } from './agents/hooks/claude'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
@@ -494,13 +495,18 @@ app.whenReady().then(async () => {
   const REMOTE_TRANSCRIPT_CAP = 5 * 1024 * 1024
   ipcMain.handle(
     IPC.claudeReadTranscript,
-    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+    async (
+      _e,
+      sessionId: string | undefined,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => {
       const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
       if (ref) {
         const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
         return parseTranscriptLines(text)
       }
-      const p = await resolveTranscript(sessionId, cwd)
+      const p = await resolveTranscript(sessionId, cwd, accountId)
       return p ? readTranscriptLines(p) : []
     }
   )
@@ -523,18 +529,21 @@ app.whenReady().then(async () => {
     }
   )
 
-  initTranscriptIndex()
+  initTranscriptIndex(() => settingsStore.get().claudeAccounts ?? [])
   ipcMain.handle(IPC.transcriptSearch, (_e, query: string) => searchTranscripts(query))
   // Populate the context meter without a live hook event: the renderer calls this on mount
   // (the continuing session may be idle after a restart). Track under the sessionId (the key
   // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
   // the 1s interval keeps it fresh while tracked.
-  ipcMain.on(IPC.contextEnsure, async (_e, sessionId?: string, cwd?: string) => {
-    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
-    let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
-    if (!p && cwd) p = await transcriptPathForCwd(cwd)
-    if (p) contextTail.track(sessionId, p)
-  })
+  ipcMain.on(
+    IPC.contextEnsure,
+    async (_e, sessionId?: string, cwd?: string, accountId?: string) => {
+      if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
+      let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
+      if (!p && cwd) p = await transcriptPathForCwd(cwd)
+      if (p) contextTail.track(sessionId, p)
+    }
+  )
   ipcMain.handle(
     IPC.handoffBuild,
     (
@@ -571,14 +580,15 @@ app.whenReady().then(async () => {
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
   // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts
-  // always live under ~/.claude/projects. Phase 2a does NOT tail remote transcripts (that's 2b),
-  // so we jail transcript_path to that root and skip the read otherwise. Returns the path only
-  // when it resolves under the projects root.
-  const TRANSCRIPT_ROOT = join(homedir(), '.claude', 'projects')
+  // live under the system default `~/.claude/projects` OR a managed account's
+  // `{userData}/claude-accounts/<id>/projects` (id-validated so a forged POST can't traverse out
+  // — see isSafeLocalTranscriptPath). Phase 2a does NOT tail remote transcripts (that's 2b), so we
+  // jail transcript_path to those roots and skip the read otherwise. Returns the path only when it
+  // resolves under an allowed root.
   const safeTranscriptPath = (tp: string | undefined): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
-    return abs === TRANSCRIPT_ROOT || abs.startsWith(TRANSCRIPT_ROOT + sep) ? abs : undefined
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData')) ? abs : undefined
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
