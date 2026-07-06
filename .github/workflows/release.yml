@@ -26,15 +26,19 @@ jobs:
         run: npm ci
 
       - name: Build, sign & notarize
-        run: npm run release
+        run: |
+          printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
+          export APPLE_API_KEY="$RUNNER_TEMP/notary-key.p8"
+          npm run release
         env:
           # Developer ID Application cert, base64-encoded .p12 + its password.
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          # Apple notarization credentials.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Apple notarization via App Store Connect API key: the .p8 is stored base64-encoded in
+          # a secret, decoded to a file at runtime, and its path handed to electron-builder.
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
