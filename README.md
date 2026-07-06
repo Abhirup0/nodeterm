@@ -77,7 +77,8 @@ npm install        # deps + rebuilds node-pty against Electron's ABI (postinstal
 npm run dev        # dev mode with renderer HMR
 npm run build      # production build into out/
 npm start          # preview the production build
-npm run typecheck  # fastest correctness gate (no test runner yet)
+npm run typecheck  # fastest correctness gate
+npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
 ```
 

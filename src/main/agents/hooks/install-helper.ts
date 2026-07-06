@@ -26,7 +26,7 @@ function scriptPathFor(scriptFileName: string): string {
 
 // The marker identifying OUR entry: the `agent-hooks/<scriptFile>` tail of the managed
 // command. A bare "agent-hooks" substring is NOT enough — other tools use the same dir
-// name (REF's `~/.REF/agent-hooks/claude-hook.sh`), and matching them would delete a
+// name (e.g. `~/.someapp/agent-hooks/claude-hook.sh`), and matching them would delete a
 // foreign app's hooks from any event we both subscribe to.
 function managedMarkerFor(command: string): string {
   const m = command.match(/agent-hooks[\\/][^"'\s]+/)

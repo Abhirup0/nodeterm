@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { promises as fsp } from 'node:fs'
+import { existsSync, promises as fsp } from 'node:fs'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { WebSocket } from 'ws'
@@ -48,6 +48,8 @@ import type {
 } from '../../src/shared/types'
 import type { DetachedSinks } from '../../src/main/pty-manager'
 
+// Companion server repo holding the REAL relay (not part of this repo) — the suite below is
+// skipped when it isn't checked out alongside as ./nodebaseserver.
 const SERVER_DIR =
   process.env.NODETERM_SERVER_DIR || path.resolve('nodebaseserver')
 const RELAY_ENTRY = path.join(SERVER_DIR, 'src/relay/index.ts')
@@ -206,7 +208,7 @@ function node(id: string, x: number, y: number): CanvasNodeState {
 
 // --- test --------------------------------------------------------------------
 
-describe('B5 remote project mirror end-to-end (real relay + real handlers + fake pty)', () => {
+describe.skipIf(!existsSync(RELAY_ENTRY))('B5 remote project mirror end-to-end (real relay + real handlers + fake pty)', () => {
   let relay: ChildProcess | null = null
   let baseUrl = ''
   let token = ''

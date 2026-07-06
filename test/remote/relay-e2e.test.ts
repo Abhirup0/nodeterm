@@ -4,7 +4,8 @@
 // WebSockets, and asserts a terminal stream works and stays E2EE.
 //
 // What it exercises:
-//   - the REAL relay (`nodebaseserver/src/relay/index.ts`) spawned as a child process on an
+//   - the REAL relay server (from the companion server repo — see SERVER_DIR below; the whole
+//     suite is skipped when it isn't checked out) spawned as a child process on an
 //     ephemeral port via `tsx`, trusting a test Ed25519 public key;
 //   - a single-use pairing token minted INLINE in the same compact format the relay verifies
 //     (`base64url(payloadJSON).base64url(ed25519 sig over the base64url-payload bytes)`);
@@ -41,6 +42,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { WebSocket } from 'ws'
 
@@ -52,8 +54,8 @@ import { OP, type Frame } from '../../src/main/remote/framing'
 import type { PtyCreateOptions } from '../../src/shared/types'
 import type { DetachedSinks } from '../../src/main/pty-manager'
 
-// Absolute path to the (private) nodeterm-server repo holding the REAL relay. It lives at the
-// main checkout root, NOT inside this git worktree, so resolve from there explicitly. Allow an
+// Absolute path to the companion server repo holding the REAL relay (not part of this repo —
+// the suite below is skipped when it isn't checked out alongside as ./nodebaseserver). Allow an
 // env override for unusual layouts / CI.
 const SERVER_DIR =
   process.env.NODETERM_SERVER_DIR || path.resolve('nodebaseserver')
@@ -95,7 +97,7 @@ function getEphemeralPort(): Promise<number> {
 }
 
 // Mint a pairing token in the exact compact format the relay verifies
-// (mirrors nodebaseserver/src/lib/pairing-token.ts):
+// (mirrors the relay server's pairing-token module):
 //   base64url(JSON {pairingId, licenseId, iat, exp}).base64url(ed25519 sig over the b64url bytes)
 function mintToken(privateKey: crypto.KeyObject, pairingId: string): string {
   const now = Math.floor(Date.now() / 1000)
@@ -213,7 +215,7 @@ function makeEchoPty(): HostPtyManager {
 
 // --- test --------------------------------------------------------------------
 
-describe('B4 relay end-to-end (real relay + real protocol + fake pty)', () => {
+describe.skipIf(!existsSync(RELAY_ENTRY))('B4 relay end-to-end (real relay + real protocol + fake pty)', () => {
   let relay: ChildProcess | null = null
   let baseUrl = ''
   let token = ''

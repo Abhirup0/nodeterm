@@ -69,7 +69,7 @@ const KEY = 'nodeterm.agentStatus'
 // Stop's POST — hold done against any non-newTurn working for this long.
 export const DONE_HOLDOFF_MS = 3000
 // Last-resort net for a lost Stop POST / crashed CLI: a working entry that saw no event at
-// all for this long decays to idle. Long on purpose (mirrors REF's 30 min freshness TTL):
+// all for this long decays to idle. Long on purpose:
 // a single silent tool run (e.g. a long build) fires no hooks between Pre- and PostToolUse,
 // so anything shorter would flip genuinely-running turns to idle.
 export const STALE_WORKING_MS = 30 * 60_000
@@ -243,7 +243,7 @@ export const useAgentStatus = create<AgentStatusStore>((set) => ({
 }))
 
 /**
- * Esc/Ctrl-C interrupt inference (REF-style): Claude Code fires NO hook when the user
+ * Esc/Ctrl-C interrupt inference: Claude Code fires NO hook when the user
  * cancels a turn, so a node interrupted mid-work would sit on "working" forever. Called
  * from the terminal's input path on a lone Esc / Ctrl-C: wait one settle window; if the
  * node is still `working` and NOT ONE hook event arrived since the keystroke (stateAt

@@ -83,7 +83,7 @@ export function SessionRow({
           <IconCircleCheck />
         </span>
       ) : row.statusKind === 'done' ? (
-        // REF-style completion glyph: a check icon scans better than one more dot.
+        // Completion glyph: a check icon scans better than one more dot.
         <span className="ss-check" title={row.stateLabel}>
           <IconCircleCheck />
         </span>

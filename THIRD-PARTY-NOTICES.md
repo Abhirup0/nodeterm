@@ -17,6 +17,9 @@ nodeterm's license.
 | DOMPurify | Apache-2.0 OR MPL-2.0 |
 | zustand | MIT |
 | electron-updater, electron-builder | MIT |
+| @anthropic-ai/claude-agent-sdk | © Anthropic PBC, proprietary (see the package's LICENSE.md) |
+| ws | MIT |
+| tweetnacl | Unlicense (public domain) |
 
 Full license texts are available in each package's directory under
 `node_modules/`, and from the projects' upstream repositories.

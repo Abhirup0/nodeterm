@@ -1,13 +1,13 @@
 // Relay socket + E2EE handshake + RPC/frame state machine (main process).
 //
-// A single connection to the dumb relay (`nodebaseserver/src/relay`). The relay
+// A single connection to the dumb relay server (a separate repo). The relay
 // forwards opaque bytes between a host and a client matched by a pairing token;
 // it never decrypts. So the end-to-end-encrypted handshake and all traffic run
 // HOST<->CLIENT *through* the relay — the relay is not a handshake participant.
 //
 // The handshake/RPC state machine, in brief:
 //   - The token gates entry at the relay via a `?token=<token>` QUERY PARAM on
-//     the wss URL (cross-task decision; matches the relay's index.ts). It is NOT
+//     the wss URL (matching what the relay expects). It is NOT
 //     interleaved as a data frame — every frame on the wire is opaque peer
 //     traffic.
 //   - Handshake `e2ee_hello -> e2ee_ready -> e2ee_auth -> e2ee_authenticated`:
@@ -144,7 +144,7 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
 
   function buildUrl(): string {
     // Append `?token=` so the relay can read the pairing token from the query
-    // string (cross-task decision). Preserve any existing query.
+    // string. Preserve any existing query.
     const sep = opts.url.includes('?') ? '&' : '?'
     return `${opts.url}${sep}token=${encodeURIComponent(opts.token)}`
   }

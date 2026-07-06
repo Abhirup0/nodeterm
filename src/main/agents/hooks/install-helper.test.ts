@@ -16,20 +16,20 @@ describe('mergeManagedHook', () => {
     const twice = mergeManagedHook(once, cmd, ['Stop'])
     expect(twice.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: cmd }] }])
   })
-  it("leaves another app's agent-hooks entry alone (e.g. REF's claude-hook.sh)", () => {
-    // REF's hook command also contains "agent-hooks" — a substring match would delete a
-    // foreign tool's hooks the moment we install into an event it also uses (StopFailure).
-    const REF = {
+  it("leaves another app's agent-hooks entry alone", () => {
+    // A foreign hook command can also contain "agent-hooks" — a substring match would delete
+    // that tool's hooks the moment we install into an event it also uses (StopFailure).
+    const foreign = {
       hooks: [
         {
           type: 'command',
           command:
-            "if [ -x '/Users/x/.REF/agent-hooks/claude-hook.sh' ]; then /bin/sh '/Users/x/.REF/agent-hooks/claude-hook.sh'; fi"
+            "if [ -x '/Users/x/.someapp/agent-hooks/claude-hook.sh' ]; then /bin/sh '/Users/x/.someapp/agent-hooks/claude-hook.sh'; fi"
         }
       ]
     }
-    const out = mergeManagedHook({ hooks: { StopFailure: [REF] } }, cmd, ['StopFailure'])
-    expect(out.hooks!.StopFailure).toEqual([REF, { hooks: [{ type: 'command', command: cmd }] }])
+    const out = mergeManagedHook({ hooks: { StopFailure: [foreign] } }, cmd, ['StopFailure'])
+    expect(out.hooks!.StopFailure).toEqual([foreign, { hooks: [{ type: 'command', command: cmd }] }])
   })
   it('drops a legacy claude-signals managed entry too', () => {
     const out = mergeManagedHook(

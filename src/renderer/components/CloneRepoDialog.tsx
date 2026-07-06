@@ -17,7 +17,7 @@ interface CloneRepoDialogProps {
 }
 
 /**
- * REF-style clone dialog: URL (with owner/repo GitHub shorthand preview) + parent
+ * Clone dialog: URL (with owner/repo GitHub shorthand preview) + parent
  * folder (native picker, last-used remembered) + live progress + inline error.
  * Cancel — or closing the dialog — aborts the in-flight clone; main cleans up the
  * half-cloned directory it claimed.

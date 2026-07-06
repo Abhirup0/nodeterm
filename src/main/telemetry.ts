@@ -1,4 +1,4 @@
-// Anonymous, opt-out telemetry. Runs in the main process (like check.ts) so the
+// Anonymous, opt-in telemetry (default off; Settings → Privacy). Runs in the main process (like check.ts) so the
 // renderer CSP stays 'self'. Sends version/OS on launch and once a day; nothing personal,
 // and the client IP is never stored server-side.
 import { promises as fs, readFileSync } from 'fs'
