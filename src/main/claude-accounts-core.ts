@@ -3,12 +3,41 @@
 import { createHash } from 'crypto'
 import path from 'path'
 
-/** Root-relative config dir for a managed account. Rejects ids that could escape the root. */
-export function accountConfigDir(userDataPath: string, accountId: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(accountId)) {
+/** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
+ *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
+const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
+function assertAccountId(accountId: string): void {
+  if (!ACCOUNT_ID_RE.test(accountId)) {
     throw new Error(`invalid account id: ${JSON.stringify(accountId)}`)
   }
+}
+
+/** Root-relative config dir for a managed account. Rejects ids that could escape the root. */
+export function accountConfigDir(userDataPath: string, accountId: string): string {
+  assertAccountId(accountId)
   return path.join(userDataPath, 'claude-accounts', accountId)
+}
+
+/**
+ * Remote (SSH) config dir for a managed account, relative to the remote `$HOME` as a `~`-prefixed
+ * path (`~/.nodeterm/claude-accounts/<id>`). Used for ssh EXEC args (mkdir / cat / rm), where
+ * `quoteRemotePath` leaves the leading `~` unquoted so the remote shell expands it. NOT for tmux
+ * `-e` (tmux does not shell-expand values — use `remoteAccountConfigDirAbs` there). Id-validated so
+ * a hostile id can never escape `~/.nodeterm/claude-accounts/` on the remote host.
+ */
+export function remoteAccountConfigDir(accountId: string): string {
+  assertAccountId(accountId)
+  return `~/.nodeterm/claude-accounts/${accountId}`
+}
+
+/**
+ * Absolute remote config dir for a managed account, given the resolved remote `$HOME`. Needed for
+ * the tmux `-e CLAUDE_CONFIG_DIR=…` env: tmux copies the value literally (no `$HOME`/`~` expansion),
+ * so the path must already be absolute. `remoteHome` is the connection's cached `$HOME`.
+ */
+export function remoteAccountConfigDirAbs(remoteHome: string, accountId: string): string {
+  assertAccountId(accountId)
+  return `${remoteHome.replace(/\/+$/, '')}/.nodeterm/claude-accounts/${accountId}`
 }
 
 /**

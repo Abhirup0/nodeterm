@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
+import { useProjects } from '../state/projects'
+import { accountsForProject } from '../state/workspace'
 
 interface DockProps {
   dirty: boolean
@@ -52,9 +54,12 @@ export function Dock({
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
-  // Local, logged-in accounts only. The flat dock menu can't nest, so Claude gets one
-  // "New Claude — <label>" entry per account (plus the base "Claude" = project default).
-  const localAccounts = claudeAccounts.filter((a) => !a.pending && !a.host)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
+  // Accounts usable in the active project (local for a local project, this host's for an SSH
+  // project). The flat dock menu can't nest, so Claude gets one "New Claude — <label>" entry per
+  // account (plus the base "Claude" = project default).
+  const localAccounts = accountsForProject(claudeAccounts, activeProject)
 
   const pick = (fn: () => void) => () => {
     fn()

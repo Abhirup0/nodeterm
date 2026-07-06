@@ -2,6 +2,7 @@ import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
+import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -245,6 +246,21 @@ function resolveAgent(agentId: AgentId): { label: string; color: string; launchC
   return { label: agentId, color: FALLBACK_AGENT_COLOR, launchCmd: agentId }
 }
 
+/**
+ * The managed accounts selectable in a given project, host-scoped. A LOCAL project shows only
+ * local accounts (no `host`); an SSH project shows only accounts whose `host` matches that
+ * project's connection identity (`sshHostKey` = `user@host`). Pending (not-yet-logged-in) accounts
+ * are always excluded. Keeps a project's add-menus / default-account picker from offering an
+ * account that can't run there (a remote account's credentials live on its host's filesystem).
+ */
+export function accountsForProject(
+  accounts: ClaudeAccount[],
+  project: { ssh?: { server: { host: string; user: string } } } | undefined
+): ClaudeAccount[] {
+  const hostKey = project?.ssh ? sshHostKey(project.ssh.server) : undefined
+  return accounts.filter((a) => !a.pending && (hostKey ? a.host === hostKey : !a.host))
+}
+
 /** Account for a NEW Claude node: explicit pick, else the project default, else system. */
 export function resolveNewNodeAccount(
   explicit: string | undefined,
@@ -334,13 +350,18 @@ export function accountChipLabel(
  * CLAUDE_CONFIG_DIR (Task-3 env injection keyed off `data.accountId`), so `claude /login`
  * writes credentials + `.claude.json` into the account dir, where the main process captures
  * the email. A plain terminal (not an agent node) so no session-name tracking kicks in.
+ *
+ * In an SSH project, pass the project's `ssh` binding: the node then runs in REMOTE tmux (Task 12),
+ * so `CLAUDE_CONFIG_DIR` resolves to the account dir ON THE HOST and `claude /login` writes the
+ * remote `.claude.json` (the main process polls it over ssh). For a local account, omit `ssh`.
  */
 export function createAccountLoginNode(
   accountId: string,
   index: number,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  ssh?: Project['ssh']
 ): CanvasNode {
-  const node = createTerminalNode(index, undefined, center)
+  const node = createTerminalNode(index, undefined, center, undefined, ssh)
   node.data = {
     ...node.data,
     title: 'Claude login',

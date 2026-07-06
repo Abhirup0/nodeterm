@@ -136,6 +136,7 @@ import {
   reorderNodeBefore,
   reparentNode,
   resolveNewNodeAccount,
+  accountsForProject,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -664,11 +665,11 @@ export function Canvas() {
       requireProOr('SSH Remote Projects', () => {
         window.nodeTerminal.sshProject
           .connect(project.id, ssh.server, ssh.remoteCwd)
-          .then(async ({ controlPath, hookEndpointPath, tmuxConfPath }) => {
+          .then(async ({ controlPath, hookEndpointPath, tmuxConfPath, remoteHome }) => {
             // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
             // Source Control panel's re-fetch (which keys off that entry) already hits the master.
             await window.nodeTerminal.git.setActiveRemote(project.id)
-            useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath })
+            useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath, remoteHome })
           })
           .catch(() => {
             /* status surfaced via onStatus → the connection banner */
@@ -1349,17 +1350,23 @@ export function Canvas() {
   // to open a terminal node running `claude /login` under the new account's config dir.
   useEffect(() => {
     const onAddAccountLogin = (ev: Event): void => {
-      const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
+      const detail = (ev as CustomEvent<{ accountId: string; remote?: boolean }>).detail
+      const accountId = detail?.accountId
       if (!accountId) return
+      // A REMOTE account (added inside an SSH project) logs in ON THE HOST: stamp the login node
+      // with the active project's ssh binding so `claude /login` runs in remote tmux under the
+      // remote account dir. Local accounts omit it (login runs locally).
+      const project = useProjects.getState().getProject(activeProjectId)
+      const ssh = detail?.remote ? project?.ssh : undefined
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
+        { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh), selected: true }
       ])
       markDirty()
     }
     window.addEventListener('nodeterm:add-account-login', onAddAccountLogin)
     return () => window.removeEventListener('nodeterm:add-account-login', onAddAccountLogin)
-  }, [setNodes, markDirty, viewCenter])
+  }, [setNodes, markDirty, viewCenter, activeProjectId])
 
   // When an account is removed in Settings, clear it off the ACTIVE project's live nodes (the
   // projects store only holds the other projects' serialized copies). Referencing nodes fall
@@ -2105,10 +2112,12 @@ export function Canvas() {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       const disabled = useSettings.getState().settings.disabledAgents
-      // Local, logged-in accounts only (pending logins + remote/host accounts are excluded).
-      const accounts = useSettings
-        .getState()
-        .settings.claudeAccounts.filter((a) => !a.pending && !a.host)
+      // Accounts selectable in the active project: local accounts for a local project, or this
+      // host's accounts for an SSH project (pending logins always excluded).
+      const accounts = accountsForProject(
+        useSettings.getState().settings.claudeAccounts,
+        useProjects.getState().getProject(activeProjectId)
+      )
       setMenu({
         x: e.clientX,
         y: e.clientY,
@@ -2191,7 +2200,8 @@ export function Canvas() {
       openFileDialog,
       openRemotePicker,
       selectAll,
-      fitView
+      fitView,
+      activeProjectId
     ]
   )
 
@@ -3114,11 +3124,13 @@ export function Canvas() {
             run: () => addAgentNode(c.id)
           })
         ),
-      // One "New Claude — <label>" per logged-in local account. Plain "New Claude" above uses
-      // the resolved project default; these pin a specific account.
-      ...useSettings
-        .getState()
-        .settings.claudeAccounts.filter((a) => !a.pending && !a.host)
+      // One "New Claude — <label>" per account usable in the active project (local accounts for a
+      // local project, this host's accounts for an SSH project). Plain "New Claude" above uses the
+      // resolved project default; these pin a specific account.
+      ...accountsForProject(
+        useSettings.getState().settings.claudeAccounts,
+        useProjects.getState().getProject(activeProjectId)
+      )
         .map(
           (a): Command => ({
             id: `new-claude-${a.id}`,

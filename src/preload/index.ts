@@ -276,10 +276,10 @@ const api: NodeTerminalApi = {
     }
   },
   claudeAccounts: {
-    add: () => ipcRenderer.invoke(IPC.claudeAccountsAdd),
-    waitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id),
+    add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
+    waitLogin: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id, ctx),
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
-    remove: (id) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id)
+    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
   },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)

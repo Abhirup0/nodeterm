@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { ClaudeAccount } from '@shared/types'
+import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useProjects } from '../../../state/projects'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -37,21 +38,42 @@ function countNodesUsing(accountId: string): number {
 
 export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const accounts = useSettings((s) => s.settings.claudeAccounts)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
+  // The active project's SSH host key (`user@host`), when it's a connected SSH project. Present →
+  // the "Add account" control also offers adding an account ON that host.
+  const activeHostKey = activeProject?.ssh ? sshHostKey(activeProject.ssh.server) : undefined
   const [versionWarning, setVersionWarning] = useState(false)
   const [pendingRemove, setPendingRemove] = useState<ClaudeAccount | null>(null)
 
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
 
+  // The open project whose SSH host matches a remote account (needed for the ssh context of
+  // waitLogin / remove). Undefined for local accounts, or when no such project is open.
+  const projectIdForHost = (host?: string): string | undefined => {
+    if (!host) return undefined
+    return useProjects.getState().projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host)?.id
+  }
+
   // Open a login terminal for an account and wait (up to ~5 min) for the CLI to write its
-  // credentials; on success flip the row out of `pending` and adopt the captured email.
-  const runLogin = async (id: string): Promise<void> => {
-    window.dispatchEvent(new CustomEvent('nodeterm:add-account-login', { detail: { accountId: id } }))
-    const captured = await window.nodeTerminal.claudeAccounts.waitLogin(id)
+  // credentials; on success flip the row out of `pending` and adopt the captured email. A remote
+  // account (`host` set) logs in on its host: the login node runs in remote tmux and waitLogin polls
+  // the remote `.claude.json` over ssh (via the ctx `projectId`).
+  const runLogin = async (account: Pick<ClaudeAccount, 'id' | 'host'>): Promise<void> => {
+    const remote = !!account.host
+    const projectId = remote ? projectIdForHost(account.host) : undefined
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:add-account-login', { detail: { accountId: account.id, remote } })
+    )
+    const captured = await window.nodeTerminal.claudeAccounts.waitLogin(
+      account.id,
+      projectId ? { projectId } : undefined
+    )
     if (!captured) return // timeout / cancel: row stays pending, offers Retry
     applyAccounts((accs) =>
       accs.map((a) =>
-        a.id === id
+        a.id === account.id
           ? {
               ...a,
               label: a.label === 'New account' ? captured.email : a.label,
@@ -63,8 +85,13 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     )
   }
 
-  const onAddAccount = async (): Promise<void> => {
-    const { id, versionSupported } = await window.nodeTerminal.claudeAccounts.add()
+  // `host` set → create the account dir + hook ON that SSH host (via the ctx projectId); the row
+  // then carries the host chip and only appears in that host's projects.
+  const onAddAccount = async (host?: string): Promise<void> => {
+    const projectId = host ? projectIdForHost(host) : undefined
+    const { id, versionSupported } = await window.nodeTerminal.claudeAccounts.add(
+      projectId ? { projectId } : undefined
+    )
     // Non-blocking: the account still isolates config, but an old CLI's unscoped macOS keychain
     // service would collide across accounts — surface a dismissable warning.
     if (!versionSupported) setVersionWarning(true)
@@ -72,17 +99,22 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       id,
       label: 'New account',
       pending: true,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      ...(host ? { host } : {})
     }
     applyAccounts((accs) => [...accs, account])
-    await runLogin(id)
+    await runLogin(account)
   }
 
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
     setPendingRemove(null)
     // Removing a pending account: stop the 5-minute waitLogin poll loop first.
     if (account.pending) await window.nodeTerminal.claudeAccounts.cancelWaitLogin(account.id)
-    await window.nodeTerminal.claudeAccounts.remove(account.id)
+    const projectId = projectIdForHost(account.host)
+    await window.nodeTerminal.claudeAccounts.remove(
+      account.id,
+      projectId ? { projectId } : undefined
+    )
     applyAccounts((accs) => accs.filter((a) => a.id !== account.id))
     // Clear the account off serialized nodes (all projects) + any project default...
     useProjects.setState((s) => ({
@@ -152,6 +184,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         pending
                       </span>
                     ) : null}
+                    {account.host ? (
+                      <span
+                        className="rounded-full bg-[#0a84ff]/15 px-2 py-0.5 text-[11px] font-medium text-[#0a84ff]"
+                        title={`Remote account on ${account.host}`}
+                      >
+                        {account.host}
+                      </span>
+                    ) : null}
                   </div>
                   {account.email && !account.pending ? (
                     <p className="text-[12px] text-muted">{account.email}</p>
@@ -159,7 +199,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {account.pending ? (
-                    <Button onClick={() => void runLogin(account.id)}>Retry login</Button>
+                    <Button onClick={() => void runLogin(account)}>Retry login</Button>
                   ) : null}
                   <Button
                     variant="ghost"
@@ -173,13 +213,27 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             ))
           )}
 
-          <Button variant="primary" onClick={() => void onAddAccount()}>
-            Add account
-          </Button>
+          {activeHostKey ? (
+            // Inside an SSH project: choose where the new account lives. "On this Mac" is a normal
+            // local account; "On <host>" creates it on the remote host (usable only there).
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="primary" onClick={() => void onAddAccount()}>
+                Add account — On this Mac
+              </Button>
+              <Button variant="primary" onClick={() => void onAddAccount(activeHostKey)}>
+                Add account — On {activeHostKey}
+              </Button>
+            </div>
+          ) : (
+            <Button variant="primary" onClick={() => void onAddAccount()}>
+              Add account
+            </Button>
+          )}
 
           <p className="text-[12px] leading-relaxed text-muted">
             Accounts are isolated Claude logins. New Claude nodes pick an account from the add
-            menus; each node keeps its account for life.
+            menus; each node keeps its account for life. Remote accounts live on an SSH host and are
+            only offered in that host&apos;s projects.
           </p>
         </div>
       </SearchableRow>

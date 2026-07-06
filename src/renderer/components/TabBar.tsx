@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
+import { accountsForProject } from '../state/workspace'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -53,14 +54,12 @@ export function TabBar({
   const [draft, setDraft] = useState('')
   // Whether the caret menu's "Default Claude account" group is expanded (inline, in-place).
   const [acctOpen, setAcctOpen] = useState(false)
-  // Local, logged-in accounts only (pending logins + remote/host accounts excluded).
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
-  const localAccounts = useMemo(
-    () => claudeAccounts.filter((a) => !a.pending && !a.host),
-    [claudeAccounts]
-  )
 
   const menuProject = projects.find((p) => p.id === menuId)
+  // Accounts eligible as the caret-menu project's default: local accounts for a local project, this
+  // host's accounts for an SSH project (pending logins always excluded).
+  const menuAccounts = accountsForProject(claudeAccounts, menuProject)
 
   const closeMenu = () => {
     setMenuId(null)
@@ -214,7 +213,7 @@ export function TabBar({
             >
               Remote access…
             </button>
-            {localAccounts.length > 0 && (
+            {menuAccounts.length > 0 && (
               <>
                 <button
                   className={`tab-menu__group${acctOpen ? ' open' : ''}`}
@@ -236,7 +235,7 @@ export function TabBar({
                       </span>
                       System account
                     </button>
-                    {localAccounts.map((a) => (
+                    {menuAccounts.map((a) => (
                       <button
                         key={a.id}
                         onClick={() => {

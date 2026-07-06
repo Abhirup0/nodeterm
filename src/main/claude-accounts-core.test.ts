@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountConfigDir,
+  remoteAccountConfigDir,
+  remoteAccountConfigDirAbs,
   claudeKeychainService,
   usageCredsPaths,
   AUTH_ENV_STRIP,
@@ -20,6 +22,33 @@ describe('accountConfigDir', () => {
     expect(() => accountConfigDir('/ud', '../evil')).toThrow()
     expect(() => accountConfigDir('/ud', 'a/b')).toThrow()
     expect(() => accountConfigDir('/ud', '')).toThrow()
+  })
+})
+
+describe('remoteAccountConfigDir', () => {
+  it('is a ~-relative path under .nodeterm/claude-accounts (leading ~ for ssh expansion)', () => {
+    expect(remoteAccountConfigDir('a1')).toBe('~/.nodeterm/claude-accounts/a1')
+  })
+  it('rejects ids that could traverse out of the remote root', () => {
+    expect(() => remoteAccountConfigDir('../evil')).toThrow()
+    expect(() => remoteAccountConfigDir('a/b')).toThrow()
+    expect(() => remoteAccountConfigDir('')).toThrow()
+  })
+})
+
+describe('remoteAccountConfigDirAbs', () => {
+  it('joins the resolved remote $HOME with the account dir (absolute for tmux -e)', () => {
+    expect(remoteAccountConfigDirAbs('/home/bob', 'a1')).toBe(
+      '/home/bob/.nodeterm/claude-accounts/a1'
+    )
+  })
+  it('tolerates a trailing slash on the remote home', () => {
+    expect(remoteAccountConfigDirAbs('/home/bob/', 'a1')).toBe(
+      '/home/bob/.nodeterm/claude-accounts/a1'
+    )
+  })
+  it('rejects traversing ids', () => {
+    expect(() => remoteAccountConfigDirAbs('/home/bob', '../evil')).toThrow()
   })
 })
 

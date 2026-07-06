@@ -23,7 +23,7 @@ import {
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-accounts'
-import { AUTH_ENV_STRIP, accountTmuxEnvArgs } from './claude-accounts-core'
+import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -534,6 +534,15 @@ export class PtyManager {
             hookServer.getVersion()
           )
         : []
+      // Managed REMOTE Claude account (Task 12): inject CLAUDE_CONFIG_DIR into the remote tmux
+      // session via `-e`, pointing at the account's config dir on the remote host. The path must be
+      // ABSOLUTE — tmux copies `-e` values verbatim (no `$HOME`/`~` expansion) — so we build it from
+      // the connection's resolved remote $HOME. Fail-open: an unknown remoteHome (home resolution
+      // failed on connect) skips the account env and the session runs under the remote `~/.claude`.
+      const remoteAccountEnv =
+        options.accountId && options.sshRemote.remoteHome
+          ? accountTmuxEnvArgs(remoteAccountConfigDirAbs(options.sshRemote.remoteHome, options.accountId))
+          : []
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -542,7 +551,7 @@ export class PtyManager {
         // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
         options.shell,
         options.shellArgs,
-        hookExtraEnv,
+        [...hookExtraEnv, ...remoteAccountEnv],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
         // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
         options.sshRemote.tmuxConfPath

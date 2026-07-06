@@ -759,7 +759,9 @@ app.whenReady().then(async () => {
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
-  initClaudeAccounts()
+  // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
+  // after the user has connected an SSH project) always sees the live manager.
+  initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)

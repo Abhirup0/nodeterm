@@ -3,8 +3,9 @@ import path from 'path'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { parseLsDirs, posixQuote, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
+import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatus } from '../../shared/types'
+import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../claude-accounts-core'
 import {
   controlPathFor,
   masterArgs,
@@ -120,7 +121,7 @@ export class SshProjectManager {
     projectId: string,
     conn: SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string }> {
+  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }> {
     const existing = this.conns.get(projectId)
     if (existing) {
       // Verify the cached master is still alive before reusing it — a dropped/timed-out master
@@ -131,7 +132,7 @@ export class SshProjectManager {
         // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
         // Guard against a later connect without remoteCwd clearing a known cwd.
         existing.remoteCwd = remoteCwd ?? existing.remoteCwd
-        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath, tmuxConfPath: existing.tmuxConfPath }
+        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath, tmuxConfPath: existing.tmuxConfPath, remoteHome: existing.remoteHome }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
@@ -198,7 +199,7 @@ export class SshProjectManager {
           entry.tmuxConfPath = tmuxConfPath
         }
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath, hookEndpointPath, tmuxConfPath }
+        return { controlPath, hookEndpointPath, tmuxConfPath, remoteHome }
       }
       await new Promise((res) => setTimeout(res, 100))
     }
@@ -321,6 +322,63 @@ export class SshProjectManager {
   remoteHomeForControlPath(controlPath: string): string | undefined {
     for (const c of this.conns.values()) if (c.controlPath === controlPath) return c.remoteHome
     return undefined
+  }
+
+  // ── Managed REMOTE Claude accounts (Task 12) ──────────────────────────────────────────────
+  // These run over the project's live master. Every op no-ops (null / silently) when the project
+  // isn't connected, so the renderer's account list stays authoritative and fails open.
+
+  /**
+   * Create a managed remote account's config dir on the host and merge the status hook into its
+   * `settings.json`. Returns the remote dir (`~/.nodeterm/claude-accounts/<id>`) + whether the
+   * remote claude CLI is new enough to scope credentials per config dir, or null when not connected.
+   */
+  async remoteAccountAdd(
+    projectId: string,
+    accountId: string
+  ): Promise<{ configDir: string; versionSupported: boolean } | null> {
+    const c = this.conns.get(projectId)
+    if (!c) return null
+    const dir = remoteAccountConfigDir(accountId) // id-validated ~-relative path
+    const mk = await this.r.run(mkDirArgs(c.conn, c.controlPath, dir))
+    if (mk.code !== 0) return null
+    // Install the managed hook into the account dir's settings.json (needs the absolute $HOME so the
+    // merged `sh "…"` command has no unexpanded ~). Fail-open when the home never resolved.
+    if (c.remoteHome) await this.remoteHooks.installIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
+    return { configDir: dir, versionSupported: await this.remoteClaudeVersionOk(c) }
+  }
+
+  /** Read a managed remote account's `.claude.json` (login capture); null when not connected or the
+   *  file isn't written yet. The renderer's waitLogin loop parses it with `parseLoginCapture`. */
+  async remoteAccountReadLogin(projectId: string, accountId: string): Promise<string | null> {
+    const c = this.conns.get(projectId)
+    if (!c) return null
+    const file = `${remoteAccountConfigDir(accountId)}/.claude.json`
+    const { code, stdout } = await this.r.run(
+      childArgs(c.conn, c.controlPath, `cat ${quoteRemotePath(file)} 2>/dev/null`)
+    )
+    return code === 0 && stdout ? stdout : null
+  }
+
+  /** Delete a managed remote account's config dir (`rm -rf`). No-op when not connected. The id is
+   *  regex-validated and the prefix (`~/.nodeterm/claude-accounts/`) fixed, so no traversal. */
+  async remoteAccountRemove(projectId: string, accountId: string): Promise<void> {
+    const c = this.conns.get(projectId)
+    if (!c) return
+    const dir = remoteAccountConfigDir(accountId)
+    await this.r.run(childArgs(c.conn, c.controlPath, `rm -rf ${quoteRemotePath(dir)}`))
+  }
+
+  /** Best-effort remote `claude --version` check. Returns true when it can't be determined (a
+   *  non-login ssh shell may lack claude on PATH) so remote add is never blocked on detection. */
+  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
+    try {
+      const { code, stdout } = await this.r.run(childArgs(c.conn, c.controlPath, 'claude --version'))
+      if (code !== 0) return true
+      return isSupportedClaudeVersion(stdout.trim())
+    } catch {
+      return true
+    }
   }
 
   async disconnect(projectId: string): Promise<void> {

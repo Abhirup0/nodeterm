@@ -25,8 +25,10 @@ export interface PtyCreateOptions {
   agentId?: AgentId
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
-  /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
-  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string }
+  /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux.
+   * `remoteHome` is the connection's resolved `$HOME`, used to build an ABSOLUTE remote
+   * `CLAUDE_CONFIG_DIR` for a managed remote account (tmux `-e` values are not shell-expanded). */
+  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }
 }
 
 /**
@@ -399,7 +401,7 @@ export interface SshProjectApi {
     projectId: string,
     server: import('./ssh').SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string }>
+  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**
@@ -773,15 +775,22 @@ export interface ChatApi {
   onEvent(nodeId: string, listener: (e: ChatEvent) => void): () => void
 }
 
+/** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
+ *  account lives on that host (config dir + login + removal happen over ssh). Omit it for local. */
+export interface AccountSshCtx {
+  projectId?: string
+}
 export interface ClaudeAccountsApi {
-  /** Mint a new managed account: create its config dir, install the hook, check the CLI version. */
-  add(): Promise<{ id: string; configDir: string; versionSupported: boolean }>
-  /** Poll the account's `.claude.json` for a completed login; null on timeout/cancel. */
-  waitLogin(id: string): Promise<{ email: string } | null>
+  /** Mint a new managed account: create its config dir, install the hook, check the CLI version.
+   *  With an SSH `ctx` the dir + hook are created on the remote host instead of locally. */
+  add(ctx?: AccountSshCtx): Promise<{ id: string; configDir: string; versionSupported: boolean }>
+  /** Poll the account's `.claude.json` for a completed login; null on timeout/cancel. With an SSH
+   *  `ctx` the poll reads the remote host's copy over ssh. */
+  waitLogin(id: string, ctx?: AccountSshCtx): Promise<{ email: string } | null>
   /** Cancel an in-flight `waitLogin` for this account. */
   cancelWaitLogin(id: string): Promise<void>
-  /** Delete a managed account's config dir (recursive). */
-  remove(id: string): Promise<void>
+  /** Delete a managed account's config dir (recursive). With an SSH `ctx`, `rm -rf` on the host. */
+  remove(id: string, ctx?: AccountSshCtx): Promise<void>
 }
 
 /** One ranked search hit across all on-disk Claude session transcripts. */

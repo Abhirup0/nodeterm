@@ -57,6 +57,7 @@ async function resolveSshRemote(
       remoteCwd: string
       hookEndpointPath?: string
       tmuxConfPath?: string
+      remoteHome?: string
     }
   | undefined
 > {
@@ -86,7 +87,11 @@ async function resolveSshRemote(
   // The remote tmux config (mouse on → scroll; set-clipboard on → OSC 52) is written + sourced
   // alongside the master; pass its path so a fresh remote session launches with `-f`. Optional.
   const tmuxConfPath = useSshConn.getState().getTmuxConfPath(projectId)
-  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath, tmuxConfPath }
+  // The connection's resolved remote $HOME, used to build an ABSOLUTE remote CLAUDE_CONFIG_DIR for a
+  // managed remote account (Task 12). Optional (fail-open): absent → the remote account env is
+  // skipped and the session runs under the remote system default `~/.claude`.
+  const remoteHome = useSshConn.getState().getRemoteHome(projectId)
+  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath, tmuxConfPath, remoteHome }
 }
 
 /**
