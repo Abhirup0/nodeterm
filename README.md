@@ -12,7 +12,7 @@ a stack of hidden tabs.
 
 [![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)-black)](https://nodeterm.dev)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
-[![License](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](./LICENSE)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
 
@@ -113,25 +113,25 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas.
 ## 🤝 Contributing
 
 Issues and pull requests are welcome. nodeterm is licensed under the
-[Functional Source License](https://fsl.software) — you can use, modify, and
-redistribute it freely for any purpose except building a competing product
-(see [License](#-license)).
+[Business Source License 1.1](https://mariadb.com/bsl11/) — you can use, modify,
+and redistribute it freely, including in production, except offering it as a
+competing product or service (see [License](#-license)).
 
 By submitting a contribution (pull request, patch, or code snippet), you agree
-that it is licensed under the same [FSL-1.1-MIT](./LICENSE) terms as the rest of
+that it is licensed under the same [BUSL-1.1](./LICENSE) terms as the rest of
 the project, and that the project may continue to relicense future versions
 (including your contribution) as part of its normal licensing model.
 
 ## 📜 License
 
-**[FSL-1.1-MIT](./LICENSE)** ([Functional Source License](https://fsl.software)): you may
-use, copy, modify, and redistribute nodeterm for any purpose except a **Competing Use** —
-offering it (or a substitute for it) as a commercial product or service. Each release
-automatically becomes plain **MIT** two years after it is published. See
-[`LICENSE`](./LICENSE) for the full terms and
+**[BUSL-1.1](./LICENSE)** ([Business Source License](https://mariadb.com/bsl11/)): you may
+copy, modify, redistribute, and — under the Additional Use Grant — make **production
+use** of nodeterm; the one thing you may not do is offer it (hosted, embedded, or as a
+standalone product/service) in a way that **competes** with nodeterm or with the
+Licensor's products built on it. Each release automatically becomes plain **MIT** four
+years after it is published. See [`LICENSE`](./LICENSE) for the full terms and
 [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) for the bundled open-source
-components. For a commercial license beyond the FSL grant, contact
-eneskirca@gmail.com.
+components. For a commercial license beyond the grant, contact eneskirca@gmail.com.
 
 > "Claude" and "Claude Code" are trademarks of Anthropic; nodeterm is not affiliated with
 > or endorsed by Anthropic.

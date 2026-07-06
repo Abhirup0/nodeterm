@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-nodeterm is licensed under FSL-1.1-MIT (see `LICENSE`), and it is built on and bundles the
+nodeterm is licensed under BUSL-1.1 (see `LICENSE`), and it is built on and bundles the
 following open-source components. Each is the property of its respective authors
 and is used under its own license. Their license terms are not affected by
 nodeterm's license.
