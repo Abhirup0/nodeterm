@@ -80,6 +80,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
     setPendingRemove(null)
+    // Removing a pending account: stop the 5-minute waitLogin poll loop first.
+    if (account.pending) await window.nodeTerminal.claudeAccounts.cancelWaitLogin(account.id)
     await window.nodeTerminal.claudeAccounts.remove(account.id)
     applyAccounts((accs) => accs.filter((a) => a.id !== account.id))
     // Clear the account off serialized nodes (all projects) + any project default...

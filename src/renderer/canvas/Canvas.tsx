@@ -1360,10 +1360,15 @@ export function Canvas() {
             )
           : ns
       )
+      // Schedule a workspace write: persist() re-serializes the cleared live nodes and writes
+      // the whole projects store to disk, also covering AccountsSection's setState on the other
+      // projects' serialized nodes + defaultAccountId. Without this, quitting right after a
+      // removal would leave the dead accountId in workspace.json.
+      markDirty()
     }
     window.addEventListener('nodeterm:account-removed', onAccountRemoved)
     return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
-  }, [setNodes])
+  }, [setNodes, markDirty])
 
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
