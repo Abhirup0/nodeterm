@@ -42,7 +42,8 @@ import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
-import { initClaudeAccounts } from './claude-accounts'
+import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
+import { installClaudeHooksInto } from './agents/hooks/claude'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
@@ -543,6 +544,17 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.chatDispose, (_e, nodeId: string) => chatDriver.dispose(nodeId))
 
   installManagedAgentHooks()
+  // Managed accounts each carry their own settings.json — re-install the hook there too
+  // (idempotent), so an app update's new hook script reaches every account dir. Best-effort:
+  // one failing account must never block launch (match installManagedAgentHooks' fail-open).
+  for (const acct of settingsStore.get().claudeAccounts ?? []) {
+    if (acct.host) continue // remote accounts live on another host; nothing to install locally
+    try {
+      installClaudeHooksInto(claudeConfigDirFor(acct.id))
+    } catch (e) {
+      console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
+    }
+  }
   hookServer.setListener((e) => sendToMain(IPC.agentStatus, e))
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
