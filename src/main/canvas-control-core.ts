@@ -10,6 +10,10 @@ export type ControlVerb =
   | 'show-video'
   | 'show-web'
   | 'open-browser'
+  | 'group'
+  | 'arrange'
+  | 'align'
+  | 'spawn-team'
   | 'write'
   | 'close'
 
@@ -26,6 +30,10 @@ const VERBS: ControlVerb[] = [
   'show-video',
   'show-web',
   'open-browser',
+  'group',
+  'arrange',
+  'align',
+  'spawn-team',
   'write',
   'close'
 ]
@@ -53,6 +61,10 @@ export function parseControlRequest(
     return { error: 'show-web requires --url, --file or --html' }
   }
   if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
+  if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
+  if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
+  if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
+  if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
   return { verb: v, args }
 }
 

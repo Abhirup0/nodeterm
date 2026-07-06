@@ -62,12 +62,21 @@ Verbs:
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).
 - \`open-browser --url U\` — open a navigable browser (back/forward/address bar) at a URL.
+- \`group --nodes <id,id> [--label "Frontend Team"]\` — wrap nodes in a labeled group frame.
+- \`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]\` — tidy layout, no overlap.
+- \`align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter\` — align edges/centers.
+- \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
+  open one agent per role (each prompt starts that member working), arrange them in a grid,
+  wrap them in a labeled group, and connect each to you. Max 8 roles per call.
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
 - \`close --node <id>\` — close a node. (Asks the user to confirm.)
 
 Notes:
 - \`write\` and \`close\` require the user to approve a confirmation dialog; they may be denied.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
+
+To orchestrate a team: decide the roles + a concrete starting prompt for each, then one
+\`spawn-team\` call (or \`open-claude\` per role followed by \`group\` + \`arrange\`).
 `
   try {
     fs.mkdirSync(path.dirname(skillPath()), { recursive: true })

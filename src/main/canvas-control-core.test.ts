@@ -47,4 +47,22 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('open-claude')).toBe(false)
     expect(isDestructiveVerb('show-image')).toBe(false)
   })
+
+  it('group/arrange require --nodes; align also requires --edge', () => {
+    expect(parseControlRequest('group', {})).toEqual({ error: 'group requires --nodes <id,id>' })
+    expect(parseControlRequest('group', { nodes: 'a,b' })).toEqual({ verb: 'group', args: { nodes: 'a,b' } })
+    expect(parseControlRequest('arrange', {})).toEqual({ error: 'arrange requires --nodes <id,id>' })
+    expect(parseControlRequest('align', { nodes: 'a' })).toEqual({ error: 'align requires --edge' })
+    expect(parseControlRequest('align', { nodes: 'a', edge: 'left' })).toEqual({
+      verb: 'align',
+      args: { nodes: 'a', edge: 'left' }
+    })
+  })
+  it('spawn-team requires --team and none of the layout verbs are destructive', () => {
+    expect(parseControlRequest('spawn-team', {})).toEqual({ error: 'spawn-team requires --team <json>' })
+    expect(parseControlRequest('spawn-team', { team: '[]' })).toEqual({ verb: 'spawn-team', args: { team: '[]' } })
+    for (const v of ['group', 'arrange', 'align', 'spawn-team'] as const) {
+      expect(isDestructiveVerb(v)).toBe(false)
+    }
+  })
 })
