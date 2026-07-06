@@ -534,6 +534,86 @@ const GROUP_HEADER = 34
 const nodeW = (n: CanvasNode) => n.measured?.width ?? (n.width as number) ?? 0
 const nodeH = (n: CanvasNode) => n.measured?.height ?? (n.height as number) ?? 0
 
+export type ArrangeLayout = 'grid' | 'row' | 'column'
+
+/**
+ * Repositions the given top-level ids into a non-overlapping layout starting at `origin`
+ * (default: the bounding-box top-left of their current positions). 'row' packs left-to-right,
+ * 'column' top-to-bottom, 'grid' wraps at `cols` (default ~square) with each row advancing by
+ * its tallest member. Unknown ids and parented (grouped) nodes are skipped; returns the input
+ * array unchanged when nothing resolves. Pure and deterministic.
+ */
+export function arrangeNodes(
+  nodes: CanvasNode[],
+  ids: string[],
+  opts?: { layout?: ArrangeLayout; cols?: number; gap?: number; origin?: { x: number; y: number } }
+): CanvasNode[] {
+  const set = new Set(ids)
+  const members = nodes.filter((nd) => set.has(nd.id) && !nd.parentId)
+  if (members.length === 0) return nodes
+  const layout = opts?.layout ?? 'grid'
+  const gap = opts?.gap ?? 40
+  const origin = opts?.origin ?? {
+    x: Math.min(...members.map((m) => m.position.x)),
+    y: Math.min(...members.map((m) => m.position.y))
+  }
+  const cols =
+    layout === 'row' ? members.length : layout === 'column' ? 1 : Math.max(1, opts?.cols ?? Math.ceil(Math.sqrt(members.length)))
+
+  const pos = new Map<string, { x: number; y: number }>()
+  let x = origin.x
+  let y = origin.y
+  let rowH = 0
+  members.forEach((m, i) => {
+    if (i > 0 && i % cols === 0) {
+      x = origin.x
+      y += rowH + gap
+      rowH = 0
+    }
+    pos.set(m.id, { x, y })
+    x += nodeW(m) + gap
+    rowH = Math.max(rowH, nodeH(m))
+  })
+  return nodes.map((nd) => (pos.has(nd.id) ? { ...nd, position: pos.get(nd.id)! } : nd))
+}
+
+export type AlignEdge = 'left' | 'right' | 'top' | 'bottom' | 'hcenter' | 'vcenter'
+
+/**
+ * Snaps the given top-level ids to a shared edge/center computed from their joint bounding box.
+ * left/right/hcenter move x; top/bottom/vcenter move y. Unknown/parented ids are skipped;
+ * returns the input array unchanged when nothing resolves. Pure.
+ */
+export function alignNodes(nodes: CanvasNode[], ids: string[], edge: AlignEdge): CanvasNode[] {
+  const set = new Set(ids)
+  const members = nodes.filter((nd) => set.has(nd.id) && !nd.parentId)
+  if (members.length === 0) return nodes
+  const minX = Math.min(...members.map((m) => m.position.x))
+  const maxR = Math.max(...members.map((m) => m.position.x + nodeW(m)))
+  const minY = Math.min(...members.map((m) => m.position.y))
+  const maxB = Math.max(...members.map((m) => m.position.y + nodeH(m)))
+  const cx = (minX + maxR) / 2
+  const cy = (minY + maxB) / 2
+  const move = (m: CanvasNode): { x: number; y: number } => {
+    switch (edge) {
+      case 'left':
+        return { x: minX, y: m.position.y }
+      case 'right':
+        return { x: maxR - nodeW(m), y: m.position.y }
+      case 'hcenter':
+        return { x: cx - nodeW(m) / 2, y: m.position.y }
+      case 'top':
+        return { x: m.position.x, y: minY }
+      case 'bottom':
+        return { x: m.position.x, y: maxB - nodeH(m) }
+      case 'vcenter':
+        return { x: m.position.x, y: cy - nodeH(m) / 2 }
+    }
+  }
+  const set2 = new Set(members.map((m) => m.id))
+  return nodes.map((nd) => (set2.has(nd.id) ? { ...nd, position: move(nd) } : nd))
+}
+
 /**
  * Wraps the given top-level node ids in a new group frame: creates the group sized to
  * enclose them and reparents the children (positions become relative to the group).
