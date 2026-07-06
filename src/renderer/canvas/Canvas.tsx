@@ -17,7 +17,11 @@ import {
   type Viewport
 } from '@xyflow/react'
 import type { Edge, Node } from '@xyflow/react'
-import { TerminalNode, setMoveIntoWorktreeHandler } from '../nodes/TerminalNode'
+import {
+  TerminalNode,
+  setMoveIntoWorktreeHandler,
+  disposeTerminalOnUnmount
+} from '../nodes/TerminalNode'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -1598,6 +1602,9 @@ export function Canvas() {
       const set = new Set(ids)
       nodesRef.current.forEach((n) => {
         if (!set.has(n.id)) return
+        // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
+        // session is being destroyed right here). Also drops an already-parked entry.
+        if (n.type === 'terminal') disposeTerminalOnUnmount(n.id)
         // Remote terminals have no local persistent session — only destroy local ones.
         if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
         // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
@@ -2879,6 +2886,7 @@ export function Canvas() {
           if (projectId === activeProjectId) {
             deleteNodes([id])
           } else {
+            disposeTerminalOnUnmount(id) // node may be parked from the project switch
             transport.destroy(id)
             // Chat nodes in an inactive project keep their driver running across the switch;
             // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
@@ -3315,7 +3323,10 @@ export function Canvas() {
       // persisted agent status (node unmount no longer removes it).
       const project = store.getProject(id)
       project?.nodes.forEach((n) => {
-        if ((n.kind ?? 'terminal') === 'terminal') transport.destroy(n.id)
+        if ((n.kind ?? 'terminal') === 'terminal') {
+          disposeTerminalOnUnmount(n.id) // may be parked from a recent switch away
+          transport.destroy(n.id)
+        }
         if ((n.kind ?? 'terminal') === 'chat') {
           window.nodeTerminal.chat.dispose(n.id)
           useChatSessions.getState().drop(n.id)

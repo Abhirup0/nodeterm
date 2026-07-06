@@ -105,6 +105,57 @@ export function setMoveIntoWorktreeHandler(fn: ((nodeId: string) => void) | null
 }
 
 /**
+ * Parked terminals: when a node unmounts (project switch), its xterm instance and live PTY
+ * session are kept — the `.xterm` element is detached from the DOM and held here — so a remount
+ * within TERM_PARK_MS re-adopts them instead of respawning. This makes switching back to a
+ * project instant AND exact: the tmux client never detaches, so the full terminal state
+ * (alternate screen, mouse-tracking modes, scrollback, cursor) carries over with no redraw and
+ * no mode re-negotiation to get wrong. After the window the entry is disposed for real (the
+ * PTY client detaches; the tmux session itself keeps running, as always).
+ */
+interface ParkedTerminal {
+  term: Terminal
+  fit: FitAddon
+  search: SearchAddon
+  transport: TerminalTransport
+  sessionId: string
+  sentCols: number
+  sentRows: number
+  /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
+  cleanups: Array<() => void>
+  timer: ReturnType<typeof setTimeout>
+}
+const parkedTerminals = new Map<string, ParkedTerminal>()
+const TERM_PARK_MS = 5 * 60 * 1000
+
+function disposeParked(p: ParkedTerminal): void {
+  clearTimeout(p.timer)
+  p.cleanups.forEach((fn) => fn())
+  p.transport.kill(p.sessionId)
+  p.term.dispose()
+}
+
+/** Drop a node's parked terminal (if any), detaching its PTY client. Canvas calls this on
+ *  permanent deletion — the node may be unmounted (parked) when it is deleted. */
+export function disposeParkedTerminal(id: string): void {
+  const p = parkedTerminals.get(id)
+  if (!p) return
+  parkedTerminals.delete(id)
+  disposeParked(p)
+}
+
+/** Nodes whose next unmount must dispose (not park) — set on permanent deletion, where the
+ *  unmount runs AFTER the session was already destroyed, so parking would keep a dead xterm. */
+const noParkIds = new Set<string>()
+
+/** Canvas calls this when permanently deleting a terminal node: drops an already-parked entry
+ *  AND makes the upcoming unmount (if the node is currently mounted) dispose instead of park. */
+export function disposeTerminalOnUnmount(id: string): void {
+  noParkIds.add(id)
+  disposeParkedTerminal(id)
+}
+
+/**
  * A single terminal node: header (collapse + color + title + close), optional tag chips,
  * and a real xterm.js terminal. A hover guard delays entering the terminal so the canvas
  * can be panned across terminals without grabbing focus. Cmd/Ctrl+M (while hovered)
@@ -142,6 +193,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
+  // Render-fresh respawnNonce for the lifecycle cleanup: React updates this ref (render) before
+  // running the old effect's cleanup, so the cleanup can tell a respawn (nonce changed → dispose,
+  // spawn fresh) from a plain unmount (nonce unchanged → park for quick re-adoption).
+  const respawnNonceRef = useRef(data.respawnNonce)
+  respawnNonceRef.current = data.respawnNonce
   // Live mirrors for the once-mounted onTitleChange listener (its `[]`-deps closure can't see
   // fresh props/state): whether the title still auto-tracks the session, whether the rename box
   // is open (don't clobber mid-edit), and the current title (skip no-op updates).
@@ -256,47 +312,79 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const container = bodyRef.current
     if (!container) return
 
+    // Adopt-or-create: a parked terminal (this node unmounted less than TERM_PARK_MS ago) is
+    // re-adopted with its live PTY session and full xterm state intact; otherwise a fresh
+    // xterm + session are built. `myNonce` vs the render-updated ref tells the cleanup below
+    // whether it runs for a respawn (worktree move — must NOT park) or a plain unmount.
+    const myNonce = data.respawnNonce
+    const parked = parkedTerminals.get(id)
+    if (parked) {
+      parkedTerminals.delete(id)
+      clearTimeout(parked.timer)
+    }
+
     const s = useSettings.getState().settings
-    const term = new Terminal({
-      fontFamily: s.fontFamily,
-      fontSize: s.fontSize,
-      cursorBlink: s.cursorBlink,
-      theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
-      allowProposedApi: true
-    })
+    const term =
+      parked?.term ??
+      new Terminal({
+        fontFamily: s.fontFamily,
+        fontSize: s.fontSize,
+        cursorBlink: s.cursorBlink,
+        theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
+        allowProposedApi: true
+      })
+    const fit = parked ? parked.fit : new FitAddon()
+    const searchAddon = parked ? parked.search : new SearchAddon()
     termRef.current = term
-    const fit = new FitAddon()
     fitRef.current = fit
-    term.loadAddon(fit)
-    const searchAddon = new SearchAddon()
     searchAddonRef.current = searchAddon
-    term.loadAddon(searchAddon)
-    term.open(container)
+
     // GPU renderer: xterm's default DOM renderer doesn't scale to many terminals streaming
     // at once. Must load after open(). Browsers cap live WebGL contexts (~16), so with many
     // mounted terminals the oldest context gets evicted — onContextLoss disposes the addon
-    // and that terminal falls back to the DOM renderer instead of going blank.
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => webgl.dispose())
-      term.loadAddon(webgl)
-    } catch {
-      // WebGL2 unavailable — DOM renderer remains active.
+    // and that terminal falls back to the DOM renderer instead of going blank. A parked
+    // terminal gave its context up on park, so both paths (re)acquire one here.
+    let webgl: WebglAddon | null = null
+    const loadWebgl = () => {
+      try {
+        const addon = new WebglAddon()
+        addon.onContextLoss(() => addon.dispose())
+        term.loadAddon(addon)
+        webgl = addon
+      } catch {
+        // WebGL2 unavailable — DOM renderer remains active.
+      }
     }
-    fit.fit()
-    patchTerminalScale(term, getZoom)
 
-    // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
-    // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
-    // query so a remote program can never read the local clipboard. Returning true swallows the
-    // sequence (also the read query). This is additive: the local tmux conf also has set-clipboard
-    // on, so local tmux DOES emit OSC 52 and this handler fires too — a harmless redundant write of
-    // the same selection (pbcopy already wrote it), NOT a no-op.
-    term.parser.registerOscHandler(52, (data) => {
-      const text = parseOsc52(data)
-      if (text !== null) window.nodeTerminal.clipboard.writeText(text)
-      return true
-    })
+    if (parked) {
+      // Reattach the parked xterm's DOM element: the PTY never detached, so the screen is
+      // already current — no spawn, no tmux redraw, no terminal-mode re-negotiation.
+      if (term.element) container.appendChild(term.element)
+      loadWebgl()
+      try {
+        fit.fit()
+      } catch {
+        // zero-size (collapsed) — the ResizeObserver below refits when it grows
+      }
+    } else {
+      term.loadAddon(fit)
+      term.loadAddon(searchAddon)
+      term.open(container)
+      loadWebgl()
+      fit.fit()
+      patchTerminalScale(term, getZoom)
+      // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
+      // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
+      // query so a remote program can never read the local clipboard. Returning true swallows the
+      // sequence (also the read query). This is additive: the local tmux conf also has set-clipboard
+      // on, so local tmux DOES emit OSC 52 and this handler fires too — a harmless redundant write of
+      // the same selection (pbcopy already wrote it), NOT a no-op.
+      term.parser.registerOscHandler(52, (data) => {
+        const text = parseOsc52(data)
+        if (text !== null) window.nodeTerminal.clipboard.writeText(text)
+        return true
+      })
+    }
 
     // Cmd+C copies the terminal selection (xterm renders to canvas, so the DOM-selection
     // copy used elsewhere can't see it). Ctrl+C is left alone so it still sends SIGINT.
@@ -310,20 +398,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       return true
     })
 
-    let sessionId: string | null = null
+    let sessionId: string | null = parked ? parked.sessionId : null
     let disposed = false
     // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
     // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
     // mount) must not send one — on a bulk project load that redraw doubles per node.
-    let sentCols = 0
-    let sentRows = 0
-    const cleanups: Array<() => void> = []
+    let sentCols = parked ? parked.sentCols : 0
+    let sentRows = parked ? parked.sentRows : 0
+    // Session-scoped teardown. An adopted terminal carries its listeners over (they were wired
+    // to the still-live session on first mount); everything below that pushes here is gated on
+    // `!parked` so nothing is wired twice.
+    const cleanups: Array<() => void> = parked ? parked.cleanups : []
 
     // Remote nodes: surface a dropped relay connection (host gone / socket closed) so the
     // terminal isn't silently frozen. The actual relay teardown on node *deletion* happens
     // in Canvas.deleteNodes (which can dedupe a connectionId shared by sibling nodes).
     const remoteConn = (data.remote as { connectionId: string } | undefined)?.connectionId
-    if (remoteConn) {
+    if (!parked && remoteConn) {
       cleanups.push(
         window.nodeTerminal.remoteClient.onClosed(remoteConn, () => {
           term.write('\r\n\x1b[31m[remote disconnected]\x1b[0m\r\n')
@@ -334,7 +425,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Agent state (busy/idle/attention) comes from the agent's own hooks via the
     // agent:status IPC (handled centrally in Canvas) — not from parsing the output here.
     // We only surface the conversation topic from the terminal title, when the agent sets one.
-    if (showStatus) {
+    if (!parked && showStatus) {
       cleanups.push(
         term.onTitleChange((t) => {
           const title = t.trim()
@@ -355,8 +446,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const scrollbackPromise = window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    const scrollbackPromise = parked
+      ? Promise.resolve('')
+      : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
     void (async () => {
+      if (parked) return // adopted a live session — nothing to spawn or replay
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
@@ -491,7 +585,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       observer.disconnect()
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
-      cleanups.forEach((fn) => fn())
       useAgentStatus.getState().setActive(id, false)
       // Unmount happens on a project switch (a detach — the tmux session keeps running) as
       // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
@@ -500,11 +593,44 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // deletion drops the entry in Canvas.deleteNodes.
       useAgentStatus.getState().setState(id, undefined)
       useAgentNodes.getState().clearForParent(id)
-      if (sessionId) transport.kill(sessionId)
-      term.dispose()
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
+      // Free the GPU context while hidden either way (live WebGL contexts are capped ~16).
+      try {
+        webgl?.dispose()
+      } catch {
+        // already disposed via context loss
+      }
+      // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
+      // session in the new cwd — never park it. A plain unmount with a live session parks:
+      // the xterm (element detached) and its PTY stay alive so a remount re-adopts them.
+      const isRespawn = respawnNonceRef.current !== myNonce
+      if (sessionId && !isRespawn && !noParkIds.delete(id)) {
+        term.element?.remove()
+        const entry: ParkedTerminal = {
+          term,
+          fit,
+          search: searchAddon,
+          transport,
+          sessionId,
+          sentCols,
+          sentRows,
+          cleanups,
+          timer: setTimeout(() => {
+            if (parkedTerminals.get(id) === entry) {
+              parkedTerminals.delete(id)
+              disposeParked(entry)
+            }
+          }, TERM_PARK_MS)
+        }
+        disposeParkedTerminal(id) // defensive: never stack two entries for one node
+        parkedTerminals.set(id, entry)
+        return
+      }
+      cleanups.forEach((fn) => fn())
+      if (sessionId) transport.kill(sessionId)
+      term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
