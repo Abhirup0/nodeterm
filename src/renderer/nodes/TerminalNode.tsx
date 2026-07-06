@@ -30,7 +30,7 @@ import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
-import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, agentConfig, type AgentId } from '@shared/agents/config'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
@@ -57,6 +57,7 @@ async function resolveSshRemote(
       remoteCwd: string
       hookEndpointPath?: string
       tmuxConfPath?: string
+      remoteHome?: string
     }
   | undefined
 > {
@@ -86,7 +87,11 @@ async function resolveSshRemote(
   // The remote tmux config (mouse on → scroll; set-clipboard on → OSC 52) is written + sourced
   // alongside the master; pass its path so a fresh remote session launches with `-f`. Optional.
   const tmuxConfPath = useSshConn.getState().getTmuxConfPath(projectId)
-  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath, tmuxConfPath }
+  // The connection's resolved remote $HOME, used to build an ABSOLUTE remote CLAUDE_CONFIG_DIR for a
+  // managed remote account (Task 12). Optional (fail-open): absent → the remote account env is
+  // skipped and the session runs under the remote system default `~/.claude`.
+  const remoteHome = useSshConn.getState().getRemoteHome(projectId)
+  return { controlPath, conn, remoteCwd: cwd || '~', hookEndpointPath, tmuxConfPath, remoteHome }
 }
 
 /**
@@ -123,6 +128,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const fontSize = useSettings((s) => s.settings.fontSize)
   const fontFamily = useSettings((s) => s.settings.fontFamily)
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -181,11 +188,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
   useEffect(() => {
     const sid = status?.sessionId
-    if (showUsage && sid) window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined)
-  }, [showUsage, status?.sessionId, data.cwd])
+    if (showUsage && sid)
+      window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, data.accountId)
+  }, [showUsage, status?.sessionId, data.cwd, data.accountId])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
+  // Set when the session fell back to the system account because this node's account folder was
+  // missing at spawn (Task 3 fallback) — flags the account chip with a warning tint + tooltip.
+  const [accountFallback, setAccountFallback] = useState(false)
 
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
   const readBuffer = useCallback(() => {
@@ -202,6 +213,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     nodeId: id,
     sessionId: status?.sessionId,
     cwd: data.cwd as string | undefined,
+    accountId: data.accountId,
     searchTranscript: showUsage,
     open: searchOpen,
     readBuffer
@@ -359,14 +371,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           cwd: sshRemoteTmux && !sshRemote ? undefined : data.cwd,
           persistKey: id,
           agentId: data.agentId,
+          accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
         if (disposed) {
           transport.kill(sid)
           return
         }
         sessionId = sid
+        if (fellBack) setAccountFallback(true)
         // Cold restart: the tmux session (and anything that was running in it) is gone — replay
         // the last persisted scrollback so the user sees where they left off. Warm reattach
         // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
@@ -636,7 +650,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await window.nodeTerminal.pty.readSessionName(sid)
+      const name = await window.nodeTerminal.pty.readSessionName(sid, data.accountId)
       if (cancelled) return
       if (name) delayMs = 15000
       if (
@@ -831,6 +845,18 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             {status.session}
           </span>
         )}
+        {accountChip && (
+          <span
+            className={`node-account-chip${accountFallback ? ' node-account-chip--warning' : ''}`}
+            title={
+              accountFallback
+                ? 'Account folder missing — running on system account'
+                : accountChip.tooltip
+            }
+          >
+            {accountChip.short}
+          </span>
+        )}
         {data.ssh ? (
           <span
             className="term-ssh-chip"
@@ -976,7 +1002,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         )}
         {mdMode &&
           (useChat ? (
-            <ChatPanel nodeId={id} sessionId={status?.sessionId} cwd={data.cwd as string | undefined} />
+            <ChatPanel
+              nodeId={id}
+              sessionId={status?.sessionId}
+              cwd={data.cwd as string | undefined}
+              accountId={data.accountId}
+            />
           ) : (
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">

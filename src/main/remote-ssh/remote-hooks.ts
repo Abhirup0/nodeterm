@@ -7,7 +7,7 @@
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from './control-master'
 import { buildManagedScript } from '../agents/hooks/managed-script'
 import { mergeManagedHook, type HookSettings } from '../agents/hooks/install-helper'
-import type { SshConnection } from '../../shared/ssh'
+import { posixQuote, type SshConnection } from '../../shared/ssh'
 
 export interface RemoteRunner {
   /** Run one ssh child command (over the master); optional stdin written to the child. */
@@ -86,6 +86,52 @@ export class RemoteHooks {
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
+    }
+  }
+
+  /**
+   * Merge the managed claude hook into a REMOTE managed-account config dir's `settings.json`, so an
+   * agent that runs under `CLAUDE_CONFIG_DIR=<accountDir>` reports status like the default
+   * `~/.claude` does (badges / notifications / subagent viz). The claude CLI reads its hooks from
+   * `$CLAUDE_CONFIG_DIR/settings.json`, so `setup()`'s merge into `~/.claude/settings.json` does NOT
+   * cover account sessions — this fills the gap. Reuses the same hook SCRIPT `setup()` wrote (writing
+   * it idempotently in case setup didn't run) + the shared merge helper, preserving any hooks the
+   * account dir already has. `remoteHome` is the resolved remote `$HOME`; every path is absolute
+   * (a literal `~` inside the merged `sh "…"` command would not expand). Fail-open.
+   */
+  async installIntoAccountDir(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string,
+    accountId: string
+  ): Promise<void> {
+    try {
+      const remoteDir = `${remoteHome}/.nodeterm`
+      const script = `${remoteDir}/agent-hooks/claude.sh`
+      const accountDir = `${remoteHome}/.nodeterm/claude-accounts/${accountId}`
+      const config = `${accountDir}/settings.json`
+      const events = AGENT_TARGETS.find((t) => t.agentId === 'claude')?.events ?? []
+      // Idempotently (re)write the shared hook script — setup() may not have run (fail-open) yet.
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`),
+        buildManagedScript('claude')
+      )
+      const { stdout: cfgRaw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
+      )
+      let cfg: HookSettings = {}
+      try {
+        cfg = JSON.parse(cfgRaw || '{}') as HookSettings
+      } catch {
+        cfg = {}
+      }
+      const merged = mergeManagedHook(cfg, `sh "${script}"`, events)
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p ${posixQuote(accountDir)} && cat > ${posixQuote(config)}`),
+        JSON.stringify(merged, null, 2)
+      )
+    } catch {
+      /* fail-open: the account session simply runs without status hooks */
     }
   }
 

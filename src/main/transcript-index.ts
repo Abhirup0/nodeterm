@@ -1,10 +1,13 @@
-// Background index of all Claude session transcripts under ~/.claude/projects. Built on
-// launch + refreshed every 5 min, incrementally by mtime, and persisted to userData so a
-// relaunch doesn't cold re-scan. Search runs in-memory over the index. Read-only and local.
+// Background index of all Claude session transcripts under ~/.claude/projects AND every managed
+// LOCAL account's {userData}/claude-accounts/<id>/projects. Built on launch + refreshed every 5
+// min, incrementally by mtime, and persisted to userData so a relaunch doesn't cold re-scan.
+// Search runs in-memory over the index. Read-only and local.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { app } from 'electron'
+import type { ClaudeAccount } from '../shared/types'
+import { accountConfigDir } from './claude-accounts-core'
 import { SESSION_ID_RE } from './transcript-reader'
 import {
   extractEntryFields,
@@ -20,42 +23,57 @@ const READ_CAP_BYTES = 5 * 1024 * 1024 // mirror transcript-reader: never read m
 
 let entries: TranscriptIndexEntry[] = []
 let timer: NodeJS.Timeout | undefined
+let accountsGetter: (() => ClaudeAccount[]) | undefined
 
 function indexFilePath(): string {
   return path.join(app.getPath('userData'), 'transcript-index.json')
 }
 
-function projectsRoot(): string {
-  return path.join(os.homedir(), '.claude', 'projects')
+// Every LOCAL transcript root to index: the system default plus each managed LOCAL account's
+// projects dir. Remote accounts (a `host` set) live on another host's fs → not scanned here.
+function projectsRoots(): string[] {
+  const roots = [path.join(os.homedir(), '.claude', 'projects')]
+  const userData = app.getPath('userData')
+  for (const acct of accountsGetter?.() ?? []) {
+    if (acct.host || acct.pending) continue
+    try {
+      roots.push(path.join(accountConfigDir(userData, acct.id), 'projects'))
+    } catch {
+      /* invalid account id → skip that root (fail-open) */
+    }
+  }
+  return roots
 }
 
-// Walk ~/.claude/projects/*/ for <sessionId>.jsonl, returning {sessionId, path, mtime}.
+// Walk each root's <projectDir>/<sessionId>.jsonl, returning {sessionId, path, mtime}. Fail-open
+// per root (a missing/unreadable account dir just contributes nothing).
 async function scanTranscripts(): Promise<ScanFile[]> {
-  const root = projectsRoot()
   const out: ScanFile[] = []
-  let dirs: string[]
-  try {
-    dirs = await fs.promises.readdir(root)
-  } catch {
-    return out
-  }
-  for (const d of dirs) {
-    let files: string[]
+  for (const root of projectsRoots()) {
+    let dirs: string[]
     try {
-      files = await fs.promises.readdir(path.join(root, d))
+      dirs = await fs.promises.readdir(root)
     } catch {
       continue
     }
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue
-      const sessionId = f.slice(0, -'.jsonl'.length)
-      if (!SESSION_ID_RE.test(sessionId)) continue
-      const p = path.join(root, d, f)
+    for (const d of dirs) {
+      let files: string[]
       try {
-        const st = await fs.promises.stat(p)
-        out.push({ sessionId, transcriptPath: p, mtime: Math.floor(st.mtimeMs) })
+        files = await fs.promises.readdir(path.join(root, d))
       } catch {
-        /* skip */
+        continue
+      }
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue
+        const sessionId = f.slice(0, -'.jsonl'.length)
+        if (!SESSION_ID_RE.test(sessionId)) continue
+        const p = path.join(root, d, f)
+        try {
+          const st = await fs.promises.stat(p)
+          out.push({ sessionId, transcriptPath: p, mtime: Math.floor(st.mtimeMs) })
+        } catch {
+          /* skip */
+        }
       }
     }
   }
@@ -130,7 +148,8 @@ export function searchTranscripts(query: string): TranscriptHit[] {
   return searchEntries(entries, query)
 }
 
-export function initTranscriptIndex(): void {
+export function initTranscriptIndex(getAccounts?: () => ClaudeAccount[]): void {
+  accountsGetter = getAccounts
   entries = loadPersisted()
   void refresh()
   timer = setInterval(() => void refresh(), TRANSCRIPT_INDEX_REFRESH_MS)

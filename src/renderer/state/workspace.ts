@@ -1,7 +1,8 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasMutation, CanvasNodeState, NodeKind, Project } from '@shared/types'
+import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
+import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -64,6 +65,11 @@ export interface NodeData {
   highScore?: number
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * Claude nodes only: the managed Claude account (config-dir isolated) this node runs under.
+   * Persisted so cold-restore resume reads the transcript from the right account dir.
+   */
+  accountId?: string
   /** group-only: the git worktree this group is bound to (single source of truth). */
   worktree?: import('@shared/worktree').GroupWorktree
   /**
@@ -241,6 +247,32 @@ function resolveAgent(agentId: AgentId): { label: string; color: string; launchC
 }
 
 /**
+ * The managed accounts selectable in a given project, host-scoped. A LOCAL project shows only
+ * local accounts (no `host`); an SSH project shows only accounts whose `host` matches that
+ * project's connection identity (`sshHostKey` = `user@host`). Pending (not-yet-logged-in) accounts
+ * are always excluded. Keeps a project's add-menus / default-account picker from offering an
+ * account that can't run there (a remote account's credentials live on its host's filesystem).
+ */
+export function accountsForProject(
+  accounts: ClaudeAccount[],
+  project: { ssh?: { server: { host: string; user: string } } } | undefined
+): ClaudeAccount[] {
+  const hostKey = project?.ssh ? sshHostKey(project.ssh.server) : undefined
+  return accounts.filter((a) => !a.pending && (hostKey ? a.host === hostKey : !a.host))
+}
+
+/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+export function resolveNewNodeAccount(
+  explicit: string | undefined,
+  project: { defaultAccountId?: string } | undefined,
+  accounts: ClaudeAccount[]
+): string | undefined {
+  const id = explicit ?? project?.defaultAccountId
+  // A stale default (account since removed) must not stamp dead ids onto new nodes.
+  return id && accounts.some((a) => a.id === id) ? id : undefined
+}
+
+/**
  * Creates a terminal node that launches the given agent on open. Title, color, and the
  * launch command come from the resolved agent config (builtin or custom); the node carries
  * `agentId` so the rest of the app (hooks, capabilities, UI) can branch on it. For `claude`
@@ -252,7 +284,8 @@ export function createAgentNode(
   cwd?: string,
   center?: { x: number; y: number },
   initialPrompt?: string,
-  ssh?: Project['ssh']
+  ssh?: Project['ssh'],
+  accountId?: string
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
@@ -274,6 +307,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
+      // Accounts are inherently Claude-only — never stamp one onto another agent's node.
+      ...(accountId && agentId === 'claude' ? { accountId } : {}),
       cwd: ssh ? ssh.remoteCwd : cwd,
       initialCommand,
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
@@ -288,6 +323,52 @@ export function createClaudeNode(
   center?: { x: number; y: number }
 ): CanvasNode {
   return createAgentNode('claude', index, cwd, center)
+}
+
+/**
+ * Chip text for an account-bound node header. Given a node's `accountId` and the known
+ * accounts, returns the short chip label (the part of the account label before `@`, capped
+ * at ~10 chars with an ellipsis) plus a tooltip (`label (email)`, or just the label when no
+ * email). Returns `null` when there's no `accountId` (render no chip). An `accountId` that no
+ * longer resolves to a known account (removed) yields `Unknown account` for both.
+ */
+export function accountChipLabel(
+  accountId: string | undefined,
+  accounts: ClaudeAccount[]
+): { short: string; tooltip: string } | null {
+  if (!accountId) return null
+  const acct = accounts.find((a) => a.id === accountId)
+  if (!acct) return { short: 'Unknown account', tooltip: 'Unknown account' }
+  const base = acct.label.split('@')[0]
+  const short = base.length > 10 ? `${base.slice(0, 10)}…` : base
+  const tooltip = acct.email ? `${acct.label} (${acct.email})` : acct.label
+  return { short, tooltip }
+}
+
+/**
+ * Terminal node used to log a new managed account in: the session runs under the account's
+ * CLAUDE_CONFIG_DIR (Task-3 env injection keyed off `data.accountId`), so `claude /login`
+ * writes credentials + `.claude.json` into the account dir, where the main process captures
+ * the email. A plain terminal (not an agent node) so no session-name tracking kicks in.
+ *
+ * In an SSH project, pass the project's `ssh` binding: the node then runs in REMOTE tmux (Task 12),
+ * so `CLAUDE_CONFIG_DIR` resolves to the account dir ON THE HOST and `claude /login` writes the
+ * remote `.claude.json` (the main process polls it over ssh). For a local account, omit `ssh`.
+ */
+export function createAccountLoginNode(
+  accountId: string,
+  index: number,
+  center?: { x: number; y: number },
+  ssh?: Project['ssh']
+): CanvasNode {
+  const node = createTerminalNode(index, undefined, center, undefined, ssh)
+  node.data = {
+    ...node.data,
+    title: 'Claude login',
+    accountId,
+    initialCommand: 'claude /login'
+  }
+  return node
 }
 
 /**
@@ -405,7 +486,8 @@ export function createChatNode(
   index: number,
   cwd?: string,
   center?: { x: number; y: number },
-  init?: { chatSessionId?: string; forkFrom?: string }
+  init?: { chatSessionId?: string; forkFrom?: string },
+  accountId?: string
 ): CanvasNode {
   return {
     id: nextId('chat'),
@@ -418,6 +500,8 @@ export function createChatNode(
       title: 'Chat',
       color: '#d97757', // clay, matches agent nodes
       group: null,
+      // Chat nodes are always Claude — stamp the account when one was resolved/inherited.
+      ...(accountId ? { accountId } : {}),
       ...(cwd ? { cwd } : {}),
       ...(init?.chatSessionId ? { chatSessionId: init.chatSessionId } : {}),
       ...(init?.forkFrom ? { forkFrom: init.forkFrom } : {})
@@ -830,6 +914,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         commitOid: n.commitOid,
         highScore: n.highScore,
         agentId,
+        accountId: n.accountId,
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
@@ -896,6 +981,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
         agentId: n.data.agentId,
+        accountId: n.data.accountId,
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,

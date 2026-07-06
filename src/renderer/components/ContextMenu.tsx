@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { NODE_COLORS } from '../state/workspace'
 
@@ -14,6 +14,7 @@ export type MenuItem =
   | { type: 'separator' }
   | { type: 'label'; label: string }
   | { type: 'colors'; onPick: (color: string) => void }
+  | { type: 'submenu'; label: string; icon?: ReactNode; children: MenuItem[] }
 
 interface ContextMenuProps {
   x: number
@@ -36,6 +37,8 @@ export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) 
   // Keep the menu one above its backdrop (matches the default 46/45 CSS ordering).
   const backdropStyle = zIndex != null ? { zIndex } : undefined
   const menuStyle = zIndex != null ? { top: y, left: x, zIndex: zIndex + 1 } : { top: y, left: x }
+  // Index of the row whose submenu flyout is currently open (hover-driven).
+  const [openSub, setOpenSub] = useState<number | null>(null)
   return createPortal(
     <>
       <div
@@ -61,6 +64,43 @@ export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) 
                     }}
                   />
                 ))}
+              </div>
+            )
+          }
+          if (item.type === 'submenu') {
+            return (
+              <div
+                key={i}
+                className="ctx-item ctx-item--submenu"
+                onMouseEnter={() => setOpenSub(i)}
+                onMouseLeave={() => setOpenSub((cur) => (cur === i ? null : cur))}
+              >
+                <span className="ctx-icon">{item.icon}</span>
+                {item.label}
+                {openSub === i && (
+                  <div className="ctx-menu ctx-submenu" onClick={(e) => e.stopPropagation()}>
+                    {item.children.map((child, j) => {
+                      if (child.type === 'separator') return <div key={j} className="ctx-sep" />
+                      if (child.type === 'label')
+                        return <div key={j} className="ctx-label">{child.label}</div>
+                      if (child.type === 'colors' || child.type === 'submenu') return null
+                      return (
+                        <button
+                          key={j}
+                          className={`ctx-item${child.danger ? ' danger' : ''}`}
+                          disabled={child.disabled}
+                          onClick={() => {
+                            child.onClick()
+                            onClose()
+                          }}
+                        >
+                          <span className="ctx-icon">{child.icon}</span>
+                          {child.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             )
           }

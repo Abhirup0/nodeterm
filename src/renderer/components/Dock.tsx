@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
+import { useProjects } from '../state/projects'
+import { accountsForProject } from '../state/workspace'
 
 interface DockProps {
   dirty: boolean
@@ -11,7 +13,7 @@ interface DockProps {
   onAddTerminal: () => void
   onAddSticky: () => void
   onAddDino: () => void
-  onAddAgent: (agentId: AgentId) => void
+  onAddAgent: (agentId: AgentId, accountId?: string) => void
   onAddChat: () => void
   onOpenFile: () => void
   onAddRemote: () => void
@@ -51,6 +53,13 @@ export function Dock({
   const [menuOpen, setMenuOpen] = useState(false)
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
+  // Accounts usable in the active project (local for a local project, this host's for an SSH
+  // project). The flat dock menu can't nest, so Claude gets one "New Claude — <label>" entry per
+  // account (plus the base "Claude" = project default).
+  const localAccounts = accountsForProject(claudeAccounts, activeProject)
 
   const pick = (fn: () => void) => () => {
     fn()
@@ -72,12 +81,25 @@ export function Dock({
               <TerminalIcon />
               <span>Remote…</span>
             </button>
-            {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).map((aid) => (
-              <button key={aid} onClick={pick(() => onAddAgent(aid))}>
-                <AgentIcon agentId={aid} size={18} />
-                <span>{AGENT_CONFIG[aid].label}</span>
-              </button>
-            ))}
+            {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).flatMap((aid) => {
+              const base = (
+                <button key={aid} onClick={pick(() => onAddAgent(aid))}>
+                  <AgentIcon agentId={aid} size={18} />
+                  <span>{AGENT_CONFIG[aid].label}</span>
+                </button>
+              )
+              // Claude picks up one flat entry per logged-in local account (dock can't nest).
+              if (aid !== 'claude' || localAccounts.length === 0) return [base]
+              return [
+                base,
+                ...localAccounts.map((a) => (
+                  <button key={`${aid}-${a.id}`} onClick={pick(() => onAddAgent(aid, a.id))}>
+                    <AgentIcon agentId={aid} size={18} />
+                    <span>Claude — {a.label}</span>
+                  </button>
+                ))
+              ]
+            })}
             {customAgents
               .filter((c) => !disabledAgents.includes(c.id))
               .map((c) => (

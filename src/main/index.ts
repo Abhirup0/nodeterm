@@ -1,4 +1,4 @@
-import { join, resolve, sep, posix } from 'path'
+import { join, resolve, posix } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
@@ -42,6 +42,9 @@ import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense } from './license'
+import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
+import { isSafeLocalTranscriptPath } from './claude-accounts-core'
+import { installClaudeHooksInto } from './agents/hooks/claude'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
@@ -277,8 +280,8 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
-  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string) =>
-    readSessionName(sessionId ?? '')
+  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string, accountId?: string) =>
+    readSessionName(sessionId ?? '', accountId)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -487,11 +490,12 @@ app.whenReady().then(async () => {
   // need a live hook event.
   const resolveTranscript = async (
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<string | undefined> => {
     let p: string | undefined
     if (sessionId && SESSION_ID_RE.test(sessionId)) {
-      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
     }
     if (!p && cwd) p = await transcriptPathForCwd(cwd)
     return p
@@ -503,46 +507,65 @@ app.whenReady().then(async () => {
   const REMOTE_TRANSCRIPT_CAP = 5 * 1024 * 1024
   ipcMain.handle(
     IPC.claudeReadTranscript,
-    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+    async (
+      _e,
+      sessionId: string | undefined,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => {
       const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
       if (ref) {
         const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
         return parseTranscriptLines(text)
       }
-      const p = await resolveTranscript(sessionId, cwd)
+      const p = await resolveTranscript(sessionId, cwd, accountId)
       return p ? readTranscriptLines(p) : []
     }
   )
 
   ipcMain.handle(
     IPC.chatReadTranscript,
-    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+    async (
+      _e,
+      sessionId: string | undefined,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => {
       const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
       if (ref) {
         const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
         return parseChatMessages(text.split('\n'))
       }
-      const p = await resolveTranscript(sessionId, cwd)
+      const p = await resolveTranscript(sessionId, cwd, accountId)
       return p ? readChatMessages(p) : []
     }
   )
 
-  initTranscriptIndex()
+  initTranscriptIndex(() => settingsStore.get().claudeAccounts ?? [])
   ipcMain.handle(IPC.transcriptSearch, (_e, query: string) => searchTranscripts(query))
   // Populate the context meter without a live hook event: the renderer calls this on mount
   // (the continuing session may be idle after a restart). Track under the sessionId (the key
   // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
   // the 1s interval keeps it fresh while tracked.
-  ipcMain.on(IPC.contextEnsure, async (_e, sessionId?: string, cwd?: string) => {
-    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
-    let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
-    if (!p && cwd) p = await transcriptPathForCwd(cwd)
-    if (p) contextTail.track(sessionId, p)
-  })
+  ipcMain.on(
+    IPC.contextEnsure,
+    async (_e, sessionId?: string, cwd?: string, accountId?: string) => {
+      if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
+      let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
+      if (!p && cwd) p = await transcriptPathForCwd(cwd)
+      if (p) contextTail.track(sessionId, p)
+    }
+  )
   ipcMain.handle(
     IPC.handoffBuild,
-    (_e, sessionId: string, agentId: string, sourceNodeId: string, cwd: string | undefined) =>
-      buildHandoff({ sessionId, agentId, sourceNodeId, cwd })
+    (
+      _e,
+      sessionId: string,
+      agentId: string,
+      sourceNodeId: string,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId })
   )
   // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC.
   ipcMain.handle(IPC.chatEnsure, (_e, nodeId: string, opts) => chatDriver.ensure(nodeId, opts))
@@ -554,18 +577,30 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.chatDispose, (_e, nodeId: string) => chatDriver.dispose(nodeId))
 
   installManagedAgentHooks()
+  // Managed accounts each carry their own settings.json — re-install the hook there too
+  // (idempotent), so an app update's new hook script reaches every account dir. Best-effort:
+  // one failing account must never block launch (match installManagedAgentHooks' fail-open).
+  for (const acct of settingsStore.get().claudeAccounts ?? []) {
+    if (acct.host) continue // remote accounts live on another host; nothing to install locally
+    try {
+      installClaudeHooksInto(claudeConfigDirFor(acct.id))
+    } catch (e) {
+      console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
+    }
+  }
   hookServer.setListener((e) => sendToMain(IPC.agentStatus, e))
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
   // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts
-  // always live under ~/.claude/projects. Phase 2a does NOT tail remote transcripts (that's 2b),
-  // so we jail transcript_path to that root and skip the read otherwise. Returns the path only
-  // when it resolves under the projects root.
-  const TRANSCRIPT_ROOT = join(homedir(), '.claude', 'projects')
+  // live under the system default `~/.claude/projects` OR a managed account's
+  // `{userData}/claude-accounts/<id>/projects` (id-validated so a forged POST can't traverse out
+  // — see isSafeLocalTranscriptPath). Phase 2a does NOT tail remote transcripts (that's 2b), so we
+  // jail transcript_path to those roots and skip the read otherwise. Returns the path only when it
+  // resolves under an allowed root.
   const safeTranscriptPath = (tp: string | undefined): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
-    return abs === TRANSCRIPT_ROOT || abs.startsWith(TRANSCRIPT_ROOT + sep) ? abs : undefined
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData')) ? abs : undefined
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
@@ -746,6 +781,9 @@ app.whenReady().then(async () => {
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
   initLicense(win)
+  // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
+  // after the user has connected an SSH project) always sees the live manager.
+  initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager)
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)

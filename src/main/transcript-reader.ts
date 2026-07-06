@@ -5,6 +5,18 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { TranscriptLine, ChatMessage, ChatPart } from '../shared/types'
+import { transcriptRootFor } from './claude-accounts-core'
+
+// Transcript root for a managed account (its `projects` dir) or the system default
+// (`~/.claude/projects` when accountId is undefined — bit-for-bit the old behavior). Impure
+// wrapper over the pure `transcriptRootFor`: `electron.app` is required lazily (and only for the
+// account branch) so this module — and its vitest test — stays electron-free.
+function transcriptRoot(accountId?: string): string {
+  const userData = accountId
+    ? (require('electron') as typeof import('electron')).app.getPath('userData')
+    : null
+  return transcriptRootFor(os.homedir(), userData, accountId)
+}
 
 // Only read the last ~5 MB of a transcript so a very large session can't block the main
 // process. The older head is dropped silently (search is most useful on recent context).
@@ -186,10 +198,17 @@ export const SESSION_ID_RE = /^[0-9a-fA-F-]{8,64}$/
 // and the renderer polls readSessionName every few seconds PER agent node — without the
 // cache each poll re-scanned every project dir under ~/.claude/projects (heavy Claude users
 // have hundreds). readSessionName drops the entry if the cached path stops being readable.
+// Cache key includes the account: a session id is globally unique in practice, but keying by
+// id alone would let a wrong-account hit return a still-existing path and silently read the
+// wrong root after an account remove/re-add. Undefined account → `:` prefix (system default).
 const transcriptPathCache = new Map<string, string>()
-export async function resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
+export async function resolveTranscriptPath(
+  sessionId: string,
+  accountId?: string
+): Promise<string | undefined> {
   if (!SESSION_ID_RE.test(sessionId)) return undefined
-  const cached = transcriptPathCache.get(sessionId)
+  const cacheKey = `${accountId ?? ''}:${sessionId}`
+  const cached = transcriptPathCache.get(cacheKey)
   if (cached) {
     // One cheap access() per hit (vs the O(project-dirs) scan below): heals a stale entry for
     // EVERY caller (chat/search/context-ensure too, not just the title poll) if the transcript
@@ -198,10 +217,10 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
       await fs.promises.access(cached)
       return cached
     } catch {
-      transcriptPathCache.delete(sessionId)
+      transcriptPathCache.delete(cacheKey)
     }
   }
-  const root = path.join(os.homedir(), '.claude', 'projects')
+  const root = transcriptRoot(accountId)
   let dirs: string[]
   try {
     dirs = await fs.promises.readdir(root)
@@ -212,7 +231,7 @@ export async function resolveTranscriptPath(sessionId: string): Promise<string |
     const p = path.join(root, d, `${sessionId}.jsonl`)
     try {
       await fs.promises.access(p)
-      transcriptPathCache.set(sessionId, p)
+      transcriptPathCache.set(cacheKey, p)
       return p
     } catch {
       /* keep looking */
@@ -271,10 +290,13 @@ export function pickSessionName(text: string): string | null {
 // multiple Claude nodes in one folder would all resolve to the same newest transcript and adopt
 // each other's names. Returns null until the node's own sessionId is known.
 const TITLE_TAIL_BYTES = 128 * 1024
-export async function readSessionName(sessionId: string): Promise<string | null> {
+export async function readSessionName(
+  sessionId: string,
+  accountId?: string
+): Promise<string | null> {
   if (!sessionId) return null
   // Stale cache entries are healed inside resolveTranscriptPath (access-checked per hit).
-  const p = await resolveTranscriptPath(sessionId)
+  const p = await resolveTranscriptPath(sessionId, accountId)
   if (!p) return null
   const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
   if (!tail) return null
@@ -288,10 +310,13 @@ export async function readSessionName(sessionId: string): Promise<string | null>
 // reattaching to a session this app instance didn't spawn. (Encoding leaves no '/', so it
 // can't traverse.) Limitation: multiple Claude nodes in the SAME cwd resolve to the same
 // newest transcript — the sessionId path above is preferred when known for that reason.
-export async function transcriptPathForCwd(cwd: string): Promise<string | undefined> {
+export async function transcriptPathForCwd(
+  cwd: string,
+  accountId?: string
+): Promise<string | undefined> {
   if (!cwd) return undefined
   const encoded = cwd.replace(/[/.]/g, '-')
-  const dir = path.join(os.homedir(), '.claude', 'projects', encoded)
+  const dir = path.join(transcriptRoot(accountId), encoded)
   let entries: string[]
   try {
     entries = await fs.promises.readdir(dir)

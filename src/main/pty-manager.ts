@@ -23,6 +23,8 @@ import {
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
+import { claudeConfigDirFor } from './claude-accounts'
+import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -152,6 +154,27 @@ function resolveShellPath(): Promise<string | null> {
   return shellPathPromise
 }
 
+/**
+ * Resolve an executable against the user's real login-shell PATH (reusing the cached probe),
+ * returning its absolute path or null. GUI apps inherit only a minimal PATH, so a bare
+ * `execFile('claude', …)` would fail even when the tool is installed — this walks the resolved
+ * PATH entries and returns the first `bin` that exists and is accessible.
+ */
+export async function findInLoginPath(bin: string): Promise<string | null> {
+  const shellPath = (await resolveShellPath()) ?? process.env.PATH ?? ''
+  for (const dir of shellPath.split(path.delimiter)) {
+    if (!dir) continue
+    const candidate = path.join(dir, bin)
+    try {
+      await fs.promises.access(candidate, fs.constants.X_OK)
+      return candidate
+    } catch {
+      // not here — keep looking
+    }
+  }
+  return null
+}
+
 interface Session {
   proc: pty.IPty
   /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
@@ -169,6 +192,9 @@ interface Session {
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
+  /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
+   *  to the system account. `create()` surfaces it to the renderer (warning chip). */
+  accountFallback?: boolean
 }
 
 /** Sinks for a detached session whose output is served somewhere other than the renderer
@@ -311,7 +337,9 @@ export class PtyManager {
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
     const sessionId = this.spawnSession(options, webContentsId, undefined)
-    return { sessionId, fresh }
+    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
+    const accountFallback = this.sessions.get(sessionId)?.accountFallback
+    return accountFallback ? { sessionId, fresh, accountFallback } : { sessionId, fresh }
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
@@ -460,6 +488,28 @@ export class PtyManager {
         : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
+    // Managed Claude account: the whole session runs under the account's private config
+    // dir. The claude CLI then reads/writes credentials + transcripts there. Also strip
+    // env auth vars that would silently shadow the account's OAuth login (an inherited
+    // ANTHROPIC_API_KEY wins over CLAUDE_CONFIG_DIR credentials). System-default nodes
+    // (no accountId) are untouched. Remote (ssh) sessions get their account env via the
+    // remote tmux `-e` list instead (the local ssh client process doesn't need it).
+    let accountDir =
+      options.accountId && !options.sshRemote ? claudeConfigDirFor(options.accountId) : null
+    // Missing/deleted account dir (spec: error handling) → fall back to system default
+    // instead of pointing claude at a dead dir; the node then behaves like an unbound one.
+    // `accountFallback` is surfaced to the renderer (warning chip) via the create() result.
+    let accountFallback = false
+    if (accountDir && !fs.existsSync(accountDir)) {
+      console.warn(`[accounts] config dir missing for ${options.accountId}, using system default`)
+      accountDir = null
+      accountFallback = true
+    }
+    if (accountDir) {
+      env.CLAUDE_CONFIG_DIR = accountDir
+      for (const k of AUTH_ENV_STRIP) delete env[k]
+    }
+
     const settings = this.getSettings()
     let file: string
     let args: string[]
@@ -493,6 +543,15 @@ export class PtyManager {
             hookServer.getVersion()
           )
         : []
+      // Managed REMOTE Claude account (Task 12): inject CLAUDE_CONFIG_DIR into the remote tmux
+      // session via `-e`, pointing at the account's config dir on the remote host. The path must be
+      // ABSOLUTE — tmux copies `-e` values verbatim (no `$HOME`/`~` expansion) — so we build it from
+      // the connection's resolved remote $HOME. Fail-open: an unknown remoteHome (home resolution
+      // failed on connect) skips the account env and the session runs under the remote `~/.claude`.
+      const remoteAccountEnv =
+        options.accountId && options.sshRemote.remoteHome
+          ? accountTmuxEnvArgs(remoteAccountConfigDirAbs(options.sshRemote.remoteHome, options.accountId))
+          : []
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -501,7 +560,7 @@ export class PtyManager {
         // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
         options.shell,
         options.shellArgs,
-        hookExtraEnv,
+        [...hookExtraEnv, ...remoteAccountEnv],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
         // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
         options.sshRemote.tmuxConfPath
@@ -524,6 +583,9 @@ export class PtyManager {
       // the app), so a session created after an app update must NOT inherit a stale minimal PATH
       // baked into the server env at first launch — `-e` overrides it per new session at creation.
       const pathEnvArgs = env.PATH ? ['-e', `PATH=${env.PATH}`] : []
+      // The account config dir must ride `-e` like the hook env: the tmux server is shared
+      // and long-lived, so session env comes from creation args, not client inheritance.
+      const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
       const attachFlags = sinks ? ['-A'] : ['-A', '-D']
       args = [
         '-L',
@@ -534,6 +596,7 @@ export class PtyManager {
         ...attachFlags,
         ...hookEnvArgs,
         ...pathEnvArgs,
+        ...accountEnvArgs,
         '-c',
         cwd,
         '-s',
@@ -600,7 +663,8 @@ export class PtyManager {
       flushTimer: null,
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
-      outputSinceSnapshot: true // capture the initial screen on the first tick
+      outputSinceSnapshot: true, // capture the initial screen on the first tick
+      accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
     this.sessions.set(sessionId, session)

@@ -10,6 +10,9 @@ export interface SshConnInfo {
   /** Remote path of the injected tmux config (`-f`), written + sourced on connect.
    *  Optional: absent when the conf write failed (fail-open → remote tmux defaults). */
   tmuxConfPath?: string
+  /** The connection's resolved remote `$HOME`. Used to build an ABSOLUTE remote
+   *  `CLAUDE_CONFIG_DIR` for a managed remote account. Optional: absent if it couldn't resolve. */
+  remoteHome?: string
 }
 
 /**
@@ -25,6 +28,7 @@ interface SshConnState {
   getControlPath(projectId: string): string | undefined
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
+  getRemoteHome(projectId: string): string | undefined
   clear(projectId: string): void
 }
 
@@ -41,6 +45,9 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   getTmuxConfPath(projectId) {
     return get().byProject[projectId]?.tmuxConfPath
+  },
+  getRemoteHome(projectId) {
+    return get().byProject[projectId]?.remoteHome
   },
   clear(projectId) {
     set((s) => {

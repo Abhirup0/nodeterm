@@ -53,6 +53,17 @@ export function parseExtraArgs(s: string | undefined): string[] {
   return tokens
 }
 
+/**
+ * Stable identity key for the host a connection targets, used to scope managed Claude accounts to
+ * an SSH project (`ClaudeAccount.host`). `${user}@${host}` — the same target string ssh itself
+ * builds. Port and identity file are intentionally excluded: a remote account is defined by which
+ * remote `$HOME` (i.e. which user on which host) its config dir lives under, and two projects that
+ * reach the same account over different ports still share that one remote dir.
+ */
+export function sshHostKey(conn: Pick<SshConnection, 'host' | 'user'>): string {
+  return `${conn.user}@${conn.host}`
+}
+
 /** Build the `ssh` argv: `-p <port> [-i <id>] [...extra] user@host`. */
 export function buildSshArgs(conn: SshConnection): string[] {
   const args = ['-p', String(conn.port ?? 22)]

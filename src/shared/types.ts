@@ -23,8 +23,12 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
-  /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux. */
-  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string }
+  /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
+  accountId?: string
+  /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux.
+   * `remoteHome` is the connection's resolved `$HOME`, used to build an ABSOLUTE remote
+   * `CLAUDE_CONFIG_DIR` for a managed remote account (tmux `-e` values are not shell-expanded). */
+  sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }
 }
 
 /**
@@ -36,6 +40,9 @@ export interface PtyCreateOptions {
 export interface PtyCreateResult {
   sessionId: string
   fresh: boolean
+  /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
+   *  system account. The renderer flags the account chip (folder-missing warning) when true. */
+  accountFallback?: boolean
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -67,6 +74,12 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * Claude-only: managed account this node runs on (CLAUDE_CONFIG_DIR injection).
+   * Resolved once at node creation (explicit pick → project default → system default)
+   * and immutable for the node's lifetime. Undefined = system default (~/.claude).
+   */
+  accountId?: string
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
@@ -132,6 +145,8 @@ export interface Project {
   ssh?: { server: import('./ssh').SshConnection; remoteCwd: string }
   viewport: Viewport
   nodes: CanvasNodeState[]
+  /** Default managed Claude account for new Claude/chat nodes in this project. */
+  defaultAccountId?: string
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
@@ -193,8 +208,9 @@ export interface PtyApi {
   sendText(persistKey: string, text: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
    *  resolved strictly by sessionId; null if unknown. Keeps a node title in sync with the
-   *  `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions. */
-  readSessionName(sessionId: string): Promise<string | null>
+   *  `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.
+   *  `accountId` scopes the lookup to a managed Claude account's transcript root (default `~/.claude`). */
+  readSessionName(sessionId: string, accountId?: string): Promise<string | null>
   /** Listens for PTY output. Returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
@@ -274,6 +290,24 @@ export interface CustomAgent {
   promptInjectionMode: PromptInjectionMode
 }
 
+/**
+ * A managed Claude account. Its credentials/config live in a private config dir
+ * ({userData}/claude-accounts/<id>, or `~/.nodeterm/claude-accounts/<id>` on `host` for
+ * remote accounts) injected as CLAUDE_CONFIG_DIR at spawn. The claude CLI owns login,
+ * credential storage, and token refresh inside that dir — we never write credentials.
+ */
+export interface ClaudeAccount {
+  id: string
+  /** Display label; defaults to the captured email. */
+  label: string
+  email?: string
+  /** Set only for remote (SSH) accounts: the ssh host this account's config dir lives on. */
+  host?: string
+  /** True until `claude /login` completes in the account dir and the email is captured. */
+  pending?: boolean
+  createdAt: number
+}
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -309,6 +343,8 @@ export interface Settings {
   notifyConsentAsked: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
+  claudeAccounts: ClaudeAccount[]
   /** Agent ids hidden from the Add menus. */
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
@@ -339,6 +375,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gitAutoFetch: true,
   notifyConsentAsked: false,
   customAgents: [],
+  claudeAccounts: [],
   // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
@@ -367,7 +404,7 @@ export interface SshProjectApi {
     projectId: string,
     server: import('./ssh').SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string }>
+  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**
@@ -627,10 +664,11 @@ export interface ClaudeUsage {
 }
 
 export interface UsageApi {
-  /** Returns the latest snapshot (cached if fresh, else a fresh fetch). */
-  fetch(): Promise<ClaudeUsage>
-  /** Forces a fresh fetch, bypassing the focus debounce. */
-  refresh(): Promise<ClaudeUsage>
+  /** Returns the latest snapshot (cached if fresh, else a fresh fetch). Optional account id
+   *  targets a managed account; omitted = the system account (also the pushed one). */
+  fetch(accountId?: string): Promise<ClaudeUsage>
+  /** Forces a fresh fetch, bypassing the focus debounce. Optional account id as `fetch`. */
+  refresh(accountId?: string): Promise<ClaudeUsage>
   /** Fires whenever main pushes a new snapshot (poll/refresh). Returns unsubscribe. */
   onUpdate(listener: (usage: ClaudeUsage) => void): () => void
 }
@@ -656,8 +694,9 @@ export interface ContextApi {
    * Ask main to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
+   * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
    */
-  ensure(sessionId: string, cwd?: string): void
+  ensure(sessionId: string, cwd?: string, accountId?: string): void
 }
 
 /** One searchable line extracted from a Claude session transcript. */
@@ -723,12 +762,13 @@ export interface ChatApi {
    */
   readTranscript(
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<ChatMessage[]>
   /** Start (or reattach) the driver for a node. fork=true resumes by forking (terminal takeover). */
   ensure(
     nodeId: string,
-    opts: { cwd?: string; sessionId?: string; fork?: boolean }
+    opts: { cwd?: string; sessionId?: string; fork?: boolean; accountId?: string }
   ): Promise<{ ok: boolean; error?: string }>
   send(nodeId: string, text: string, images?: ChatImageAttachment[]): void
   interrupt(nodeId: string): void
@@ -737,6 +777,24 @@ export interface ChatApi {
   /** Node closed for good: kill the driver process. */
   dispose(nodeId: string): void
   onEvent(nodeId: string, listener: (e: ChatEvent) => void): () => void
+}
+
+/** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
+ *  account lives on that host (config dir + login + removal happen over ssh). Omit it for local. */
+export interface AccountSshCtx {
+  projectId?: string
+}
+export interface ClaudeAccountsApi {
+  /** Mint a new managed account: create its config dir, install the hook, check the CLI version.
+   *  With an SSH `ctx` the dir + hook are created on the remote host instead of locally. */
+  add(ctx?: AccountSshCtx): Promise<{ id: string; configDir: string; versionSupported: boolean }>
+  /** Poll the account's `.claude.json` for a completed login; null on timeout/cancel. With an SSH
+   *  `ctx` the poll reads the remote host's copy over ssh. */
+  waitLogin(id: string, ctx?: AccountSshCtx): Promise<{ email: string } | null>
+  /** Cancel an in-flight `waitLogin` for this account. */
+  cancelWaitLogin(id: string): Promise<void>
+  /** Delete a managed account's config dir (recursive). With an SSH `ctx`, `rm -rf` on the host. */
+  remove(id: string, ctx?: AccountSshCtx): Promise<void>
 }
 
 /** One ranked search hit across all on-disk Claude session transcripts. */
@@ -759,10 +817,12 @@ export interface ClaudeApi {
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
    * the newest transcript under that project dir, no live hook event required).
+   * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
    */
   readTranscript(
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<TranscriptLine[]>
 }
 
@@ -778,7 +838,8 @@ export interface HandoffApi {
     sessionId: string,
     agentId: string,
     sourceNodeId: string,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<HandoffResult>
 }
 
@@ -912,6 +973,7 @@ export interface NodeTerminalApi {
   context: ContextApi
   claude: ClaudeApi
   chat: ChatApi
+  claudeAccounts: ClaudeAccountsApi
   transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi

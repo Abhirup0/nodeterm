@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClaudeUsage, ClaudeUsageWindow } from '@shared/types'
+import { useSettings } from '../state/settings'
 import { barColor, formatResetCountdown, formatTimeAgo } from '../lib/usageFormat'
 
 const SESSION_LABEL = '5h'
@@ -23,6 +24,23 @@ function WindowRow({ title, w }: { title: string; w: ClaudeUsageWindow }) {
 }
 
 /**
+ * One account's session/weekly bars under a label, for the multi-account popover. Reuses
+ * WindowRow's markup — `u` is null while its on-demand fetch is in flight.
+ */
+function AccountUsageBlock({ label, email, u }: { label: string; email?: string; u: ClaudeUsage | null }) {
+  return (
+    <div className="usage-account">
+      <div className="usage-account__label">{label}</div>
+      {(email ?? u?.email) && <div className="usage-account__email">{email ?? u?.email}</div>}
+      {u?.session && <WindowRow title="Session" w={u.session} />}
+      {u?.weekly && <WindowRow title="Weekly" w={u.weekly} />}
+      {u && !u.session && !u.weekly && <div className="usage-popover__empty">No usage data.</div>}
+      {!u && <div className="usage-popover__empty usage-pill__pulse">···</div>}
+    </div>
+  )
+}
+
+/**
  * Bottom-left Claude usage pill + popover. Renders to the right of the React Flow Controls.
  * States: hidden when 'unavailable'; '···' while first-fetching; '⚠' on error w/o data;
  * last-known data shown on stale/error. Compact pill = mini-bar + "62% 5h · 76% wk".
@@ -31,12 +49,34 @@ export function UsageIndicator(): JSX.Element | null {
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [acctUsage, setAcctUsage] = useState<Record<string, ClaudeUsage | null>>({})
   const popRef = useRef<HTMLDivElement>(null)
+
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  // Local logged-in accounts get their own popover row; skip pending logins + remote (host) ones.
+  const accounts = useMemo(
+    () => claudeAccounts.filter((a) => !a.pending && !a.host),
+    [claudeAccounts]
+  )
 
   useEffect(() => {
     void window.nodeTerminal.usage.fetch().then(setUsage)
     return window.nodeTerminal.usage.onUpdate(setUsage)
   }, [])
+
+  // Fetch each account's usage on demand when the popover opens (system row uses `usage`).
+  useEffect(() => {
+    if (!open || accounts.length === 0) return
+    let cancelled = false
+    for (const a of accounts) {
+      void window.nodeTerminal.usage.fetch(a.id).then((u) => {
+        if (!cancelled) setAcctUsage((m) => ({ ...m, [a.id]: u }))
+      })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [open, accounts])
 
   // Close the popover on an outside click.
   useEffect(() => {
@@ -106,14 +146,25 @@ export function UsageIndicator(): JSX.Element | null {
             <span className="usage-popover__title">✦ Claude</span>
             <span className="usage-popover__ago">Updated {formatTimeAgo(usage.updatedAt)}</span>
           </div>
-          {session && <WindowRow title="Session" w={session} />}
-          {weekly && <WindowRow title="Weekly" w={weekly} />}
-          {!hasData && <div className="usage-popover__empty">No usage data.</div>}
-          {usage.email && (
-            <div className="usage-account">
-              <div className="usage-account__label">Claude Account</div>
-              <div className="usage-account__email">{usage.email}</div>
-            </div>
+          {accounts.length > 0 ? (
+            <>
+              <AccountUsageBlock label="System" u={usage} />
+              {accounts.map((a) => (
+                <AccountUsageBlock key={a.id} label={a.label} email={a.email} u={acctUsage[a.id] ?? null} />
+              ))}
+            </>
+          ) : (
+            <>
+              {session && <WindowRow title="Session" w={session} />}
+              {weekly && <WindowRow title="Weekly" w={weekly} />}
+              {!hasData && <div className="usage-popover__empty">No usage data.</div>}
+              {usage.email && (
+                <div className="usage-account">
+                  <div className="usage-account__label">Claude Account</div>
+                  <div className="usage-account__email">{usage.email}</div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

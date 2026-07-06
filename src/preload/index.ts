@@ -53,7 +53,8 @@ const api: NodeTerminalApi = {
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
     sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
-    readSessionName: (sessionId) => ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId),
+    readSessionName: (sessionId, accountId) =>
+      ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId),
     onData: (sessionId, listener) => {
       const channel = IPC.ptyData(sessionId)
       const handler = (_e: unknown, data: string) => listener(data)
@@ -237,8 +238,8 @@ const api: NodeTerminalApi = {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },
   usage: {
-    fetch: () => ipcRenderer.invoke(IPC.usageFetch),
-    refresh: () => ipcRenderer.invoke(IPC.usageRefresh),
+    fetch: (accountId?: string) => ipcRenderer.invoke(IPC.usageFetch, accountId),
+    refresh: (accountId?: string) => ipcRenderer.invoke(IPC.usageRefresh, accountId),
     onUpdate: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
       ipcRenderer.on(IPC.usageUpdate, handler)
@@ -251,15 +252,16 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.contextUpdate, handler)
       return () => ipcRenderer.removeListener(IPC.contextUpdate, handler)
     },
-    ensure: (sessionId, cwd) => ipcRenderer.send(IPC.contextEnsure, sessionId, cwd)
+    ensure: (sessionId, cwd, accountId) =>
+      ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
   claude: {
-    readTranscript: (sessionId, cwd) =>
-      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
+    readTranscript: (sessionId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
   },
   chat: {
-    readTranscript: (sessionId, cwd) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd),
+    readTranscript: (sessionId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId),
     ensure: (nodeId, opts) => ipcRenderer.invoke(IPC.chatEnsure, nodeId, opts),
     send: (nodeId, text, images) => ipcRenderer.send(IPC.chatSend, nodeId, text, images),
     interrupt: (nodeId) => ipcRenderer.send(IPC.chatInterrupt, nodeId),
@@ -273,6 +275,12 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(ch, handler)
       return () => ipcRenderer.removeListener(ch, handler)
     }
+  },
+  claudeAccounts: {
+    add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
+    waitLogin: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id, ctx),
+    cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
+    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
   },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)
@@ -337,8 +345,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.remoteClientFsWrite, connectionId, path, content)
   },
   handoff: {
-    build: (sessionId, agentId, sourceNodeId, cwd) =>
-      ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd)
+    build: (sessionId, agentId, sourceNodeId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd, accountId)
   },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)

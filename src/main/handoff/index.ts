@@ -13,7 +13,7 @@ import { locateClaude, locateCodex, locateGemini } from './locate'
 export type HandoffResult = { filePath: string } | { error: string }
 
 type Renderer = (raw: string) => string
-type Locator = (sessionId: string) => Promise<string | undefined>
+type Locator = (sessionId: string, accountId?: string) => Promise<string | undefined>
 
 const RENDERERS: Record<string, Renderer> = {
   claude: renderClaudeTranscript,
@@ -40,14 +40,15 @@ export async function buildHandoff(opts: {
   agentId: string
   sourceNodeId: string
   cwd?: string
+  accountId?: string
 }): Promise<HandoffResult> {
-  const { sessionId, agentId, sourceNodeId, cwd } = opts
+  const { sessionId, agentId, sourceNodeId, cwd, accountId } = opts
   if (!sessionId || !SESSION_ID_RE.test(sessionId)) return { error: 'No valid session id to transfer.' }
   const render = RENDERERS[agentId]
   const locate = LOCATORS[agentId]
   if (!render || !locate) return { error: `Transfer is not supported from ${agentId}.` }
 
-  const src = await locate(sessionId)
+  const src = await locate(sessionId, accountId)
   if (!src) return { error: "Couldn't find the source conversation transcript." }
 
   let raw: string

@@ -7,8 +7,20 @@ import {
   quoteRemotePath,
   remoteTmuxCommand,
   remoteTmuxConf,
-  parseLsDirs
+  parseLsDirs,
+  sshHostKey
 } from './ssh'
+
+describe('sshHostKey', () => {
+  it('is user@host', () => {
+    expect(sshHostKey({ host: 'box.example.com', user: 'bob' })).toBe('bob@box.example.com')
+  })
+  it('ignores port + identity (same remote $HOME → same key)', () => {
+    expect(sshHostKey({ host: 'h', user: 'u', port: 22 } as never)).toBe(
+      sshHostKey({ host: 'h', user: 'u', port: 2222 } as never)
+    )
+  })
+})
 
 describe('parseSshConfig', () => {
   it('parses a named host with HostName/User/Port/IdentityFile', () => {
