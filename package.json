@@ -18,7 +18,7 @@
     "make-icon": "node scripts/make-icon.mjs",
     "make-social": "node scripts/make-social.mjs",
     "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.notarize=false",
-    "release": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --x64",
+    "release": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --x64 && npm run rebuild",
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "build": {
