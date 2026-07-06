@@ -269,6 +269,32 @@ body,
   background: rgba(247, 118, 142, 0.15);
 }
 
+/* "Default Claude account" inline expandable group inside the caret menu. */
+.tab-menu__group .tab-menu__caret {
+  margin-left: auto;
+  opacity: 0.5;
+  transition: transform 0.12s ease;
+}
+.tab-menu__group.open .tab-menu__caret {
+  transform: rotate(90deg);
+}
+.tab-menu__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tab-menu__sub button {
+  padding-left: 8px;
+}
+.tab-menu__check {
+  display: inline-flex;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+  margin-right: 6px;
+  color: var(--accent);
+}
+
 /* ---- Bottom-center dock ---- */
 .dock-backdrop {
   position: fixed;
@@ -1691,6 +1717,22 @@ body,
 
 .ctx-item.danger:hover:not(:disabled) {
   background: rgba(247, 118, 142, 0.15);
+}
+
+/* Submenu row + its flyout. The flyout nests inside the row so moving the cursor across
+   the overlap doesn't fire the row's mouseleave (hover bridge). */
+.ctx-item--submenu {
+  position: relative;
+}
+.ctx-item--submenu::after {
+  content: '▸';
+  margin-left: auto;
+  opacity: 0.5;
+}
+.ctx-submenu {
+  position: absolute;
+  left: calc(100% - 4px);
+  top: -6px;
 }
 
 .ctx-sep {

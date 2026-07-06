@@ -135,6 +135,7 @@ import {
   nodeStatesToFlow,
   reorderNodeBefore,
   reparentNode,
+  resolveNewNodeAccount,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -1219,8 +1220,16 @@ export function Canvas() {
   /** Open a Claude node seeded with a commit-explanation prompt. */
   const explainCommit = useCallback(
     (prompt: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createAgentNode('claude', ns.length, cwd, viewCenter(), prompt)])
+      const project = useProjects.getState().getProject(activeProjectId)
+      const account = resolveNewNodeAccount(
+        undefined,
+        project,
+        useSettings.getState().settings.claudeAccounts
+      )
+      setNodes((ns) => [
+        ...ns,
+        createAgentNode('claude', ns.length, project?.cwd, viewCenter(), prompt, undefined, account)
+      ])
       markDirty()
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
@@ -1287,9 +1296,17 @@ export function Canvas() {
   )
 
   const addChatNode = useCallback(
-    (center?: { x: number; y: number }) => {
-      const cwd = useProjects.getState().getProject(activeProjectId)?.cwd
-      setNodes((ns) => [...ns, createChatNode(ns.length, cwd, center ?? viewCenter())])
+    (center?: { x: number; y: number }, accountId?: string) => {
+      const project = useProjects.getState().getProject(activeProjectId)
+      const account = resolveNewNodeAccount(
+        accountId,
+        project,
+        useSettings.getState().settings.claudeAccounts
+      )
+      setNodes((ns) => [
+        ...ns,
+        createChatNode(ns.length, project?.cwd, center ?? viewCenter(), undefined, account)
+      ])
       markDirty()
     },
     [setNodes, markDirty, activeProjectId, viewCenter]
@@ -1371,11 +1388,26 @@ export function Canvas() {
   }, [setNodes, markDirty])
 
   const addAgentNode = useCallback(
-    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string) => {
+    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string, accountId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
+      // Funnel through resolveNewNodeAccount so the project default applies even without an
+      // explicit pick. The factory drops the account for non-claude agents.
+      const account = resolveNewNodeAccount(
+        accountId,
+        project,
+        useSettings.getState().settings.claudeAccounts
+      )
       setNodes((ns) => {
-        const node = createAgentNode(agentId, ns.length, cwd, center ?? viewCenter(), undefined, project?.ssh)
+        const node = createAgentNode(
+          agentId,
+          ns.length,
+          cwd,
+          center ?? viewCenter(),
+          undefined,
+          project?.ssh,
+          account
+        )
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
@@ -2072,18 +2104,40 @@ export function Canvas() {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       const disabled = useSettings.getState().settings.disabledAgents
+      // Local, logged-in accounts only (pending logins + remote/host accounts are excluded).
+      const accounts = useSettings
+        .getState()
+        .settings.claudeAccounts.filter((a) => !a.pending && !a.host)
       setMenu({
         x: e.clientX,
         y: e.clientY,
         items: [
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
-          ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
-            (aid): MenuItem => ({
+          ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
+            // Claude gets an account picker submenu when ≥1 account exists; System = project
+            // default (resolved). Other agents stay flat (accounts are Claude-only).
+            if (aid === 'claude' && accounts.length > 0) {
+              return {
+                type: 'submenu',
+                label: `New ${AGENT_CONFIG[aid].label}`,
+                icon: <AgentIcon agentId={aid} />,
+                children: [
+                  { label: 'System account', onClick: () => addAgentNode('claude', at) },
+                  ...accounts.map(
+                    (a): MenuItem => ({
+                      label: a.label,
+                      onClick: () => addAgentNode('claude', at, undefined, a.id)
+                    })
+                  )
+                ]
+              }
+            }
+            return {
               label: `New ${AGENT_CONFIG[aid].label}`,
               icon: <AgentIcon agentId={aid} />,
               onClick: () => addAgentNode(aid, at)
-            })
-          ),
+            }
+          }),
           ...useSettings
             .getState()
             .settings.customAgents.filter((c) => !disabled.includes(c.id))
@@ -2094,7 +2148,22 @@ export function Canvas() {
                 onClick: () => addAgentNode(c.id, at)
               })
             ),
-          { label: 'New chat', icon: <IconChat />, onClick: () => addChatNode(at) },
+          accounts.length > 0
+            ? {
+                type: 'submenu',
+                label: 'New chat',
+                icon: <IconChat />,
+                children: [
+                  { label: 'System account', onClick: () => addChatNode(at) },
+                  ...accounts.map(
+                    (a): MenuItem => ({
+                      label: a.label,
+                      onClick: () => addChatNode(at, a.id)
+                    })
+                  )
+                ]
+              }
+            : { label: 'New chat', icon: <IconChat />, onClick: () => addChatNode(at) },
           { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
@@ -2934,6 +3003,14 @@ export function Canvas() {
     [persist]
   )
 
+  const setProjectDefaultAccount = useCallback(
+    (id: string, accountId: string | undefined) => {
+      useProjects.getState().setProjectDefaultAccount(id, accountId)
+      void persist()
+    },
+    [persist]
+  )
+
   // Close a project: hide it from the tab bar but keep it (and its tmux/agent sessions) intact
   // so it can be reopened later from the start screen. Non-destructive — the inverse of the old
   // "Delete project". Switching away unmounts its nodes (a detach, not a kill); the sessions
@@ -3034,6 +3111,19 @@ export function Canvas() {
             label: `New ${c.label}`,
             icon: <AgentIcon agentId={c.id} />,
             run: () => addAgentNode(c.id)
+          })
+        ),
+      // One "New Claude — <label>" per logged-in local account. Plain "New Claude" above uses
+      // the resolved project default; these pin a specific account.
+      ...useSettings
+        .getState()
+        .settings.claudeAccounts.filter((a) => !a.pending && !a.host)
+        .map(
+          (a): Command => ({
+            id: `new-claude-${a.id}`,
+            label: `New Claude — ${a.label}`,
+            icon: <AgentIcon agentId="claude" />,
+            run: () => addAgentNode('claude', undefined, undefined, a.id)
           })
         ),
       { id: 'new-chat', label: 'New chat', icon: <IconChat />, run: () => addChatNode() },
@@ -3147,6 +3237,7 @@ export function Canvas() {
         onSetFolder={setProjectFolder}
         onCloseProject={closeProject}
         onRemoteAccess={() => setRemoteDialogOpen(true)}
+        onSetDefaultAccount={setProjectDefaultAccount}
       />
 
       <div className="top-banners">
@@ -3518,7 +3609,7 @@ export function Canvas() {
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
         onAddDino={addDino}
-        onAddAgent={(aid) => addAgentNode(aid)}
+        onAddAgent={(aid, accountId) => addAgentNode(aid, undefined, undefined, accountId)}
         onAddChat={() => addChatNode()}
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}

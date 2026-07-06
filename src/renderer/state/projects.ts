@@ -14,6 +14,8 @@ interface ProjectsState {
   addProject(name?: string, cwd?: string, ssh?: Project['ssh']): Project
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
+  /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
+  setProjectDefaultAccount(id: string, accountId: string | undefined): void
   /** Writes the serialized canvas (nodes + viewport + bridge links) back into a project. */
   commitCanvas(id: string, nodes: CanvasNodeState[], viewport: Viewport, bridges?: BridgeLink[]): void
   /** Renames a node within a project (source of truth for inactive projects). */
@@ -104,6 +106,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectCwd(id, cwd) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, cwd } : p))
+    }))
+  },
+
+  setProjectDefaultAccount(id, accountId) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, defaultAccountId: accountId } : p))
     }))
   },
 

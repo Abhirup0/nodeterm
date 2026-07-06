@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useSettings } from '../state/settings'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -13,6 +14,8 @@ interface TabBarProps {
   onCloseProject: (id: string) => void
   /** Open the Remote access dialog (host/share + connect). Shown for every project. */
   onRemoteAccess: () => void
+  /** Set (or clear, with undefined) the project's default Claude account for new nodes. */
+  onSetDefaultAccount: (id: string, accountId: string | undefined) => void
 }
 
 /**
@@ -27,7 +30,8 @@ export function TabBar({
   onRename,
   onSetFolder,
   onCloseProject,
-  onRemoteAccess
+  onRemoteAccess,
+  onSetDefaultAccount
 }: TabBarProps) {
   // Select the raw array and filter in a memo — a `.filter()` inside the selector returns a
   // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
@@ -47,12 +51,21 @@ export function TabBar({
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  // Whether the caret menu's "Default Claude account" group is expanded (inline, in-place).
+  const [acctOpen, setAcctOpen] = useState(false)
+  // Local, logged-in accounts only (pending logins + remote/host accounts excluded).
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const localAccounts = useMemo(
+    () => claudeAccounts.filter((a) => !a.pending && !a.host),
+    [claudeAccounts]
+  )
 
   const menuProject = projects.find((p) => p.id === menuId)
 
   const closeMenu = () => {
     setMenuId(null)
     setMenuPos(null)
+    setAcctOpen(false)
   }
 
   const openMenu = (id: string, anchor: HTMLElement) => {
@@ -201,6 +214,46 @@ export function TabBar({
             >
               Remote access…
             </button>
+            {localAccounts.length > 0 && (
+              <>
+                <button
+                  className={`tab-menu__group${acctOpen ? ' open' : ''}`}
+                  onClick={() => setAcctOpen((v) => !v)}
+                >
+                  Default Claude account
+                  <span className="tab-menu__caret">▸</span>
+                </button>
+                {acctOpen && (
+                  <div className="tab-menu__sub">
+                    <button
+                      onClick={() => {
+                        onSetDefaultAccount(menuProject.id, undefined)
+                        closeMenu()
+                      }}
+                    >
+                      <span className="tab-menu__check">
+                        {menuProject.defaultAccountId ? '' : '✓'}
+                      </span>
+                      System account
+                    </button>
+                    {localAccounts.map((a) => (
+                      <button
+                        key={a.id}
+                        onClick={() => {
+                          onSetDefaultAccount(menuProject.id, a.id)
+                          closeMenu()
+                        }}
+                      >
+                        <span className="tab-menu__check">
+                          {menuProject.defaultAccountId === a.id ? '✓' : ''}
+                        </span>
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
             <button
               onClick={() => {
                 onCloseProject(menuProject.id)
