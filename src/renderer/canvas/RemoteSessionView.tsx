@@ -138,7 +138,7 @@ function RemoteSessionCanvas({
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
       const d = Math.max(-50, Math.min(50, e.deltaY))
-      const next = Math.min(2, Math.max(0.2, zoom * Math.exp(-d * 0.01)))
+      const next = Math.min(2, Math.max(0.01, zoom * Math.exp(-d * 0.01)))
       if (next === zoom) return
       const k = next / zoom
       setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
@@ -203,7 +203,7 @@ function RemoteSessionCanvas({
           onNodeDragStart={() => (draggingRef.current = true)}
           onNodeDragStop={handleNodeDragStop}
           selectionMode={SelectionMode.Partial}
-          minZoom={0.2}
+          minZoom={0.01}
           maxZoom={2}
           panOnScroll
           zoomOnScroll={false}
