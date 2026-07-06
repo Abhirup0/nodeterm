@@ -477,11 +477,12 @@ app.whenReady().then(async () => {
   // need a live hook event.
   const resolveTranscript = async (
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<string | undefined> => {
     let p: string | undefined
     if (sessionId && SESSION_ID_RE.test(sessionId)) {
-      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId))
+      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
     }
     if (!p && cwd) p = await transcriptPathForCwd(cwd)
     return p
@@ -506,13 +507,18 @@ app.whenReady().then(async () => {
 
   ipcMain.handle(
     IPC.chatReadTranscript,
-    async (_e, sessionId: string | undefined, cwd: string | undefined) => {
+    async (
+      _e,
+      sessionId: string | undefined,
+      cwd: string | undefined,
+      accountId: string | undefined
+    ) => {
       const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
       if (ref) {
         const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
         return parseChatMessages(text.split('\n'))
       }
-      const p = await resolveTranscript(sessionId, cwd)
+      const p = await resolveTranscript(sessionId, cwd, accountId)
       return p ? readChatMessages(p) : []
     }
   )

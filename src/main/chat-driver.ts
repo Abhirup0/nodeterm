@@ -8,6 +8,8 @@ import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import { sdkMessageToEvents } from './chat-events'
 import { ChatInputQueue, createPushIterable } from './chat-queue'
 import { resolveTranscriptPath } from './transcript-reader'
+import { claudeConfigDirFor } from './claude-accounts'
+import { AUTH_ENV_STRIP } from './claude-accounts-core'
 
 interface PendingPermission { resolve: (d: ChatPermissionDecision) => void }
 
@@ -15,6 +17,8 @@ interface ChatSession {
   nodeId: string
   cwd?: string
   sessionId?: string
+  // Managed account this chat runs on (its CLAUDE_CONFIG_DIR); undefined = default login.
+  accountId?: string
   working: boolean
   input: ReturnType<typeof createPushIterable<unknown>>
   queue: ChatInputQueue
@@ -62,18 +66,18 @@ export class ChatDriver {
 
   async ensure(
     nodeId: string,
-    opts: { cwd?: string; sessionId?: string; fork?: boolean }
+    opts: { cwd?: string; sessionId?: string; fork?: boolean; accountId?: string }
   ): Promise<{ ok: boolean; error?: string }> {
     if (this.sessions.has(nodeId)) return { ok: true }
     // Resume validation: a sessionId whose transcript is gone would silently start a
-    // fresh session with mismatched history — surface it instead.
+    // fresh session with mismatched history — surface it instead. Look in the account dir.
     let resume = opts.sessionId
-    if (resume && !(await resolveTranscriptPath(resume))) {
+    if (resume && !(await resolveTranscriptPath(resume, opts.accountId))) {
       this.emit(nodeId, { kind: 'error', message: 'Previous session transcript not found — starting fresh.' })
       resume = undefined
     }
     const s: ChatSession = {
-      nodeId, cwd: opts.cwd, sessionId: resume, working: false,
+      nodeId, cwd: opts.cwd, sessionId: resume, accountId: opts.accountId, working: false,
       input: createPushIterable<unknown>(), queue: new ChatInputQueue(),
       pending: new Map(), allowedForSession: new Set(),
       interruptedByUser: false, disposed: false
@@ -99,6 +103,18 @@ export class ChatDriver {
         cwd: s.cwd,
         ...(resume ? { resume } : {}),
         ...(fork ? { forkSession: true } : {}),
+        // Managed account: the SDK's claude subprocess inherits this env, so credentials
+        // AND the transcript live in the account dir. AUTH_ENV_STRIP mirrors the PTY path.
+        // Account-less sessions get no env option at all (inherit the default login untouched).
+        ...(s.accountId
+          ? {
+              env: (() => {
+                const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: claudeConfigDirFor(s.accountId) }
+                for (const k of AUTH_ENV_STRIP) delete env[k]
+                return env as Record<string, string>
+              })()
+            }
+          : {}),
         includePartialMessages: true,
         permissionMode: 'default',
         canUseTool: async (toolName: string, input: Record<string, unknown>, { toolUseID }: { toolUseID: string }) => {

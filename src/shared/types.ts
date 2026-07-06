@@ -755,12 +755,13 @@ export interface ChatApi {
    */
   readTranscript(
     sessionId: string | undefined,
-    cwd: string | undefined
+    cwd: string | undefined,
+    accountId?: string
   ): Promise<ChatMessage[]>
   /** Start (or reattach) the driver for a node. fork=true resumes by forking (terminal takeover). */
   ensure(
     nodeId: string,
-    opts: { cwd?: string; sessionId?: string; fork?: boolean }
+    opts: { cwd?: string; sessionId?: string; fork?: boolean; accountId?: string }
   ): Promise<{ ok: boolean; error?: string }>
   send(nodeId: string, text: string, images?: ChatImageAttachment[]): void
   interrupt(nodeId: string): void

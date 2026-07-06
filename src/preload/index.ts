@@ -259,8 +259,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd)
   },
   chat: {
-    readTranscript: (sessionId, cwd) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd),
+    readTranscript: (sessionId, cwd, accountId) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId),
     ensure: (nodeId, opts) => ipcRenderer.invoke(IPC.chatEnsure, nodeId, opts),
     send: (nodeId, text, images) => ipcRenderer.send(IPC.chatSend, nodeId, text, images),
     interrupt: (nodeId) => ipcRenderer.send(IPC.chatInterrupt, nodeId),

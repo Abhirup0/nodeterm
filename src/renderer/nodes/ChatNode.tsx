@@ -55,11 +55,13 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
     // Fork path (Task 10): until our own session id arrives, resume the SOURCE session with
     // fork:true; once the driver's `session` event persists chatSessionId, forkFrom is ignored.
     const sessionId = own ?? forkFrom
-    if (sessionId) void window.nodeTerminal.chat.readTranscript(sessionId, data.cwd as string | undefined).then((m) => seed(id, m))
+    const accountId = data.accountId as string | undefined
+    if (sessionId) void window.nodeTerminal.chat.readTranscript(sessionId, data.cwd as string | undefined, accountId).then((m) => seed(id, m))
     void window.nodeTerminal.chat.ensure(id, {
       cwd: data.cwd as string | undefined,
       sessionId,
-      fork: !own && !!forkFrom ? true : undefined
+      fork: !own && !!forkFrom ? true : undefined,
+      accountId
     })
     return off
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -328,7 +330,8 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
               clearError(id)
               void window.nodeTerminal.chat.ensure(id, {
                 cwd: data.cwd as string | undefined,
-                sessionId: data.chatSessionId as string | undefined
+                sessionId: data.chatSessionId as string | undefined,
+                accountId: data.accountId as string | undefined
               })
             }}
           >
