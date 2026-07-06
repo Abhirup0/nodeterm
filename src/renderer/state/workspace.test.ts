@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
+  createAgentNode,
+  createChatNode,
   createDinoNode,
   flowToNodeStates,
   nodeStatesToFlow,
   reorderNodeBefore,
-  reparentNode
+  reparentNode,
+  resolveNewNodeAccount
 } from './workspace'
 import type { CanvasNode } from './workspace'
 
@@ -139,6 +142,63 @@ describe('group worktree serialization', () => {
       data: { title: 'G', color: '#fff', group: null }
     } as unknown as CanvasNode
     expect(flowToNodeStates([group])[0].worktree).toBeUndefined()
+  })
+})
+
+describe('resolveNewNodeAccount', () => {
+  const accounts = [{ id: 'a1', label: 'work', createdAt: 0 }]
+  it('prefers the explicit pick', () =>
+    expect(resolveNewNodeAccount('a1', { defaultAccountId: 'a2' }, accounts)).toBe('a1'))
+  it('falls back to the project default', () =>
+    expect(resolveNewNodeAccount(undefined, { defaultAccountId: 'a1' }, accounts)).toBe('a1'))
+  it('drops ids that no longer exist', () =>
+    expect(resolveNewNodeAccount('gone', { defaultAccountId: 'gone' }, accounts)).toBeUndefined())
+  it('undefined when nothing set', () =>
+    expect(resolveNewNodeAccount(undefined, {}, accounts)).toBeUndefined())
+  it('undefined when the project is undefined', () =>
+    expect(resolveNewNodeAccount(undefined, undefined, accounts)).toBeUndefined())
+})
+
+describe('accountId on Claude node factories', () => {
+  it('stamps accountId onto a Claude agent node', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(node.data.accountId).toBe('a1')
+  })
+  it('does not stamp accountId onto a non-Claude agent node', () => {
+    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(node.data.accountId).toBeUndefined()
+  })
+  it('omits accountId when none is given', () => {
+    const node = createAgentNode('claude', 0)
+    expect(node.data.accountId).toBeUndefined()
+  })
+  it('stamps accountId onto a chat node', () => {
+    const node = createChatNode(0, undefined, undefined, undefined, 'a1')
+    expect(node.data.accountId).toBe('a1')
+  })
+})
+
+describe('accountId serialization', () => {
+  it('round-trips data.accountId on a terminal node', () => {
+    const node = {
+      id: 'term-1',
+      type: 'terminal',
+      position: { x: 0, y: 0 },
+      width: 600,
+      height: 400,
+      data: { title: 'T', color: '#888', group: null, agentId: 'claude', accountId: 'a1' }
+    } as unknown as CanvasNode
+    const states = flowToNodeStates([node])
+    expect(states[0].accountId).toBe('a1')
+    const back = nodeStatesToFlow(states)
+    expect(back[0].data.accountId).toBe('a1')
+  })
+  it('leaves accountId undefined when unset', () => {
+    const node = {
+      id: 'term-2', type: 'terminal', position: { x: 0, y: 0 }, width: 1, height: 1,
+      data: { title: 'T', color: '#888', group: null }
+    } as unknown as CanvasNode
+    expect(flowToNodeStates([node])[0].accountId).toBeUndefined()
   })
 })
 

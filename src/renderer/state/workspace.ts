@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasMutation, CanvasNodeState, NodeKind, Project } from '@shared/types'
+import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
 import { useSettings } from './settings'
@@ -64,6 +64,11 @@ export interface NodeData {
   highScore?: number
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /**
+   * Claude nodes only: the managed Claude account (config-dir isolated) this node runs under.
+   * Persisted so cold-restore resume reads the transcript from the right account dir.
+   */
+  accountId?: string
   /** group-only: the git worktree this group is bound to (single source of truth). */
   worktree?: import('@shared/worktree').GroupWorktree
   /**
@@ -240,6 +245,17 @@ function resolveAgent(agentId: AgentId): { label: string; color: string; launchC
   return { label: agentId, color: FALLBACK_AGENT_COLOR, launchCmd: agentId }
 }
 
+/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+export function resolveNewNodeAccount(
+  explicit: string | undefined,
+  project: { defaultAccountId?: string } | undefined,
+  accounts: ClaudeAccount[]
+): string | undefined {
+  const id = explicit ?? project?.defaultAccountId
+  // A stale default (account since removed) must not stamp dead ids onto new nodes.
+  return id && accounts.some((a) => a.id === id) ? id : undefined
+}
+
 /**
  * Creates a terminal node that launches the given agent on open. Title, color, and the
  * launch command come from the resolved agent config (builtin or custom); the node carries
@@ -252,7 +268,8 @@ export function createAgentNode(
   cwd?: string,
   center?: { x: number; y: number },
   initialPrompt?: string,
-  ssh?: Project['ssh']
+  ssh?: Project['ssh'],
+  accountId?: string
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
@@ -274,6 +291,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
+      // Accounts are inherently Claude-only — never stamp one onto another agent's node.
+      ...(accountId && agentId === 'claude' ? { accountId } : {}),
       cwd: ssh ? ssh.remoteCwd : cwd,
       initialCommand,
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
@@ -405,7 +424,8 @@ export function createChatNode(
   index: number,
   cwd?: string,
   center?: { x: number; y: number },
-  init?: { chatSessionId?: string; forkFrom?: string }
+  init?: { chatSessionId?: string; forkFrom?: string },
+  accountId?: string
 ): CanvasNode {
   return {
     id: nextId('chat'),
@@ -418,6 +438,8 @@ export function createChatNode(
       title: 'Chat',
       color: '#d97757', // clay, matches agent nodes
       group: null,
+      // Chat nodes are always Claude — stamp the account when one was resolved/inherited.
+      ...(accountId ? { accountId } : {}),
       ...(cwd ? { cwd } : {}),
       ...(init?.chatSessionId ? { chatSessionId: init.chatSessionId } : {}),
       ...(init?.forkFrom ? { forkFrom: init.forkFrom } : {})
@@ -750,6 +772,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         commitOid: n.commitOid,
         highScore: n.highScore,
         agentId,
+        accountId: n.accountId,
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
@@ -816,6 +839,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
         agentId: n.data.agentId,
+        accountId: n.data.accountId,
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,

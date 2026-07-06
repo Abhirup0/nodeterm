@@ -1304,9 +1304,15 @@ export function Canvas() {
         | undefined
       if (!detail?.sessionId) return
       const source = nodesRef.current.find((n) => n.id === detail.nodeId)
-      const node = createChatNode(nodesRef.current.length, detail.cwd, undefined, {
-        forkFrom: detail.sessionId
-      })
+      // Inherit the source terminal's Claude account so the fork resumes its transcript,
+      // which lives in that account's config dir.
+      const node = createChatNode(
+        nodesRef.current.length,
+        detail.cwd,
+        undefined,
+        { forkFrom: detail.sessionId },
+        source?.data.accountId
+      )
       if (source) {
         node.position = {
           x: source.position.x + ((source.width as number) ?? 600) + 40,
@@ -1774,7 +1780,11 @@ export function Canvas() {
         nodesRef.current.length,
         source.data.cwd,
         undefined,
-        prompt
+        prompt,
+        undefined,
+        // Inherit the source's Claude account (dropped by the factory unless the target is claude),
+        // so a claude→claude transfer resumes the transcript from the right account dir.
+        source.data.accountId
       )
       node.position = {
         x: source.position.x + ((source.width as number) ?? 600) + 32,
