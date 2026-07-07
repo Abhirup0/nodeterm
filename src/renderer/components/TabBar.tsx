@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
-import { accountsForProject } from '../state/workspace'
+import { accountsForProject, systemAccountDisplay } from '../state/workspace'
+import { useSystemAccount } from '../state/systemAccount'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -55,6 +56,9 @@ export function TabBar({
   // Whether the caret menu's "Default Claude account" group is expanded (inline, in-place).
   const [acctOpen, setAcctOpen] = useState(false)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
+  const systemEmail = useSystemAccount((s) => s.email)
+  const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
 
   const menuProject = projects.find((p) => p.id === menuId)
   // Accounts eligible as the caret-menu project's default: local accounts for a local project, this
@@ -250,7 +254,7 @@ export function TabBar({
                       <span className="tab-menu__check">
                         {menuProject.defaultAccountId ? '' : '✓'}
                       </span>
-                      System account
+                      {systemLabel}
                     </button>
                     {menuAccounts.map((a) => (
                       <button

@@ -60,16 +60,60 @@ interface AgentNodesState {
   clearLoop(parentNodeId: string): void
 }
 
+// Loop-card overrides survive restarts: the loop itself is persisted (agentStatus), so its
+// dragged position/size must be too, or every launch teleports the card back to the default
+// spot. Only `loop-*` keys are stored — subagent cards are per-turn.
+const LOOP_CARDS_KEY = 'nodeterm.loopCards'
+
+type Overrides = Pick<AgentNodesState, 'positions' | 'sizes' | 'expanded'>
+
+function loadLoopOverrides(): Overrides {
+  try {
+    const raw = localStorage.getItem(LOOP_CARDS_KEY)
+    if (!raw) return { positions: {}, sizes: {}, expanded: {} }
+    const d = JSON.parse(raw) as Partial<Overrides>
+    return { positions: d.positions ?? {}, sizes: d.sizes ?? {}, expanded: d.expanded ?? {} }
+  } catch {
+    return { positions: {}, sizes: {}, expanded: {} }
+  }
+}
+
+function saveLoopOverrides(s: Overrides): void {
+  try {
+    const pick = <T>(m: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(m).filter(([k]) => k.startsWith('loop-')))
+    localStorage.setItem(
+      LOOP_CARDS_KEY,
+      JSON.stringify({ positions: pick(s.positions), sizes: pick(s.sizes), expanded: pick(s.expanded) })
+    )
+  } catch {
+    // ignore quota / serialization errors
+  }
+}
+
 export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
   activityById: {},
-  positions: {},
-  sizes: {},
-  expanded: {},
+  ...loadLoopOverrides(),
 
-  setPosition: (id, pos) => set((s) => ({ positions: { ...s.positions, [id]: pos } })),
-  setSize: (id, size) => set((s) => ({ sizes: { ...s.sizes, [id]: size } })),
-  toggleExpanded: (id) => set((s) => ({ expanded: { ...s.expanded, [id]: !s.expanded[id] } })),
+  setPosition: (id, pos) =>
+    set((s) => {
+      const next = { positions: { ...s.positions, [id]: pos } }
+      if (id.startsWith('loop-')) saveLoopOverrides({ ...s, ...next })
+      return next
+    }),
+  setSize: (id, size) =>
+    set((s) => {
+      const next = { sizes: { ...s.sizes, [id]: size } }
+      if (id.startsWith('loop-')) saveLoopOverrides({ ...s, ...next })
+      return next
+    }),
+  toggleExpanded: (id) =>
+    set((s) => {
+      const next = { expanded: { ...s.expanded, [id]: !s.expanded[id] } }
+      if (id.startsWith('loop-')) saveLoopOverrides({ ...s, ...next })
+      return next
+    }),
 
   start: (toolUseId, viz) =>
     set((s) => ({
@@ -123,6 +167,7 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       delete positions[id]
       delete sizes[id]
       delete expanded[id]
+      saveLoopOverrides({ positions, sizes, expanded })
       return { positions, sizes, expanded }
     })
 }))

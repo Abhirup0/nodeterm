@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClaudeUsage, ClaudeUsageWindow } from '@shared/types'
 import { useSettings } from '../state/settings'
 import { barColor, formatResetCountdown, formatTimeAgo } from '../lib/usageFormat'
+import { systemAccountDisplay } from '../state/workspace'
 
 const SESSION_LABEL = '5h'
 const WEEKLY_LABEL = 'wk'
@@ -53,6 +54,7 @@ export function UsageIndicator(): JSX.Element | null {
   const popRef = useRef<HTMLDivElement>(null)
 
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   // Local logged-in accounts get their own popover row; skip pending logins + remote (host) ones.
   const accounts = useMemo(
     () => claudeAccounts.filter((a) => !a.pending && !a.host),
@@ -148,7 +150,12 @@ export function UsageIndicator(): JSX.Element | null {
           </div>
           {accounts.length > 0 ? (
             <>
-              <AccountUsageBlock label="System" u={usage} />
+              <AccountUsageBlock
+                label={systemAccountDisplay(systemLabelSetting, usage.email)}
+                // Avoid printing the email twice when it's already the display label.
+                email={systemLabelSetting.trim() ? (usage.email ?? undefined) : undefined}
+                u={usage}
+              />
               {accounts.map((a) => (
                 <AccountUsageBlock key={a.id} label={a.label} email={a.email} u={acctUsage[a.id] ?? null} />
               ))}

@@ -58,3 +58,53 @@ describe('useAgentNodes.finish', () => {
     expect(v.durationMs).toBeLessThan(20000)
   })
 })
+
+describe('loop card override persistence', () => {
+  // Cron/schedule cards survive restarts (agentStatus.loop is persisted) — where the user
+  // dragged the card must survive with them, or every launch teleports it back to the
+  // default spot. Only loop-* overrides persist; subagent cards are per-turn anyway.
+  it('persists loop-* position/size and drops them via clearLoop', async () => {
+    const mem = new Map<string, string>()
+    const store = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k)
+    }
+    const { vi } = await import('vitest')
+    vi.stubGlobal('localStorage', store)
+    vi.resetModules()
+    const { useAgentNodes: fresh } = await import('./agentNodes')
+    fresh.getState().setPosition('loop-n1', { x: 42, y: 43 })
+    fresh.getState().setSize('loop-n1', { width: 300, height: 120 })
+    fresh.getState().setPosition('tu-sub', { x: 1, y: 2 }) // subagent — must NOT persist
+    const saved = JSON.parse(mem.get('nodeterm.loopCards')!)
+    expect(saved.positions['loop-n1']).toEqual({ x: 42, y: 43 })
+    expect(saved.sizes['loop-n1']).toEqual({ width: 300, height: 120 })
+    expect(saved.positions['tu-sub']).toBeUndefined()
+    fresh.getState().clearLoop('n1')
+    const after = JSON.parse(mem.get('nodeterm.loopCards') ?? '{}')
+    expect(after.positions?.['loop-n1']).toBeUndefined()
+    vi.unstubAllGlobals()
+  })
+
+  it('hydrates persisted loop-* overrides on load', async () => {
+    const mem = new Map<string, string>([
+      [
+        'nodeterm.loopCards',
+        JSON.stringify({ positions: { 'loop-n2': { x: 9, y: 8 } }, sizes: {}, expanded: { 'loop-n2': true } })
+      ]
+    ])
+    const store = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k)
+    }
+    const { vi } = await import('vitest')
+    vi.stubGlobal('localStorage', store)
+    vi.resetModules()
+    const { useAgentNodes: fresh } = await import('./agentNodes')
+    expect(fresh.getState().positions['loop-n2']).toEqual({ x: 9, y: 8 })
+    expect(fresh.getState().expanded['loop-n2']).toBe(true)
+    vi.unstubAllGlobals()
+  })
+})

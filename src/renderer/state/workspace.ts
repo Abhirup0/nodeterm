@@ -346,6 +346,16 @@ export function accountChipLabel(
 }
 
 /**
+ * Display name for the SYSTEM (default `~/.claude`) account in pickers, settings, and the
+ * usage popover: the user's custom label (settings.systemAccountLabel) wins, else the
+ * detected login email, else the generic "System account". Keeps the system entry
+ * distinguishable once managed accounts exist.
+ */
+export function systemAccountDisplay(label: string | undefined, email?: string | null): string {
+  return (label ?? '').trim() || email || 'System account'
+}
+
+/**
  * Terminal node used to log a new managed account in: the session runs under the account's
  * CLAUDE_CONFIG_DIR (Task-3 env injection keyed off `data.accountId`), so `claude /login`
  * writes credentials + `.claude.json` into the account dir, where the main process captures

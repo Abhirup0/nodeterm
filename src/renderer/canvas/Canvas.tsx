@@ -114,6 +114,7 @@ import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
+import { useSystemAccount } from '../state/systemAccount'
 import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
@@ -126,6 +127,7 @@ import {
   alignNodes,
   arrangeNodes,
   createAccountLoginNode,
+  systemAccountDisplay,
   createAgentNode,
   createBrowserNode,
   createChatNode,
@@ -1487,6 +1489,10 @@ export function Canvas() {
     // Resolves the ssh binding by host at fire time (reads stores directly), so no project dep.
   }, [setNodes, markDirty, viewCenter])
 
+  // Resolve the system account's email once, so context menus (built via getState) can label
+  // the "System account" entry with it.
+  useEffect(() => useSystemAccount.getState().ensure(), [])
+
   // When an account is removed in Settings, clear it off the ACTIVE project's live nodes (the
   // projects store only holds the other projects' serialized copies). Referencing nodes fall
   // back to the system account; the missing-dir spawn fallback (Task 3) is safe either way.
@@ -2233,6 +2239,12 @@ export function Canvas() {
         useSettings.getState().settings.claudeAccounts,
         useProjects.getState().getProject(activeProjectId)
       )
+      // The system entry shows the user's custom label / detected email so it stays
+      // distinguishable from managed accounts (falls back to "System account").
+      const systemLabel = systemAccountDisplay(
+        useSettings.getState().settings.systemAccountLabel,
+        useSystemAccount.getState().email
+      )
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
           // Claude gets an account picker submenu when ≥1 account exists; System = project
@@ -2243,7 +2255,7 @@ export function Canvas() {
               label: `New ${AGENT_CONFIG[aid].label}`,
               icon: <AgentIcon agentId={aid} />,
               children: [
-                { label: 'System account', onClick: () => addAgentNode('claude', at, groupId) },
+                { label: systemLabel, onClick: () => addAgentNode('claude', at, groupId) },
                 ...accounts.map(
                   (a): MenuItem => ({
                     label: a.label,
@@ -2275,7 +2287,7 @@ export function Canvas() {
               label: 'New chat',
               icon: <IconChat />,
               children: [
-                { label: 'System account', onClick: () => addChatNode(at, undefined, groupId) },
+                { label: systemLabel, onClick: () => addChatNode(at, undefined, groupId) },
                 ...accounts.map(
                   (a): MenuItem => ({
                     label: a.label,

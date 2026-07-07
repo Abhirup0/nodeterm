@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ClaudeAccount } from '@shared/types'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
+import { useSystemAccount } from '../../../state/systemAccount'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -39,6 +40,9 @@ function countNodesUsing(accountId: string): number {
 
 export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const accounts = useSettings((s) => s.settings.claudeAccounts)
+  const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
+  const systemEmail = useSystemAccount((s) => s.email)
+  useEffect(() => useSystemAccount.getState().ensure(), [])
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   // The active project's SSH host key (`user@host`), when it's a connected SSH project. Present →
@@ -179,9 +183,30 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             </div>
           ) : null}
 
-          {accounts.length === 0 ? (
-            <p className="text-[13px] text-muted">No accounts yet.</p>
-          ) : (
+          {/* The SYSTEM account (the machine's default ~/.claude login) is implicit — not a
+              ClaudeAccount record — but gets a fixed row so it can be told apart from managed
+              accounts: detected email as subtitle, renamable display label (empty = default). */}
+          <div className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex items-center gap-2">
+                <Input
+                  className="w-56"
+                  placeholder="System account"
+                  value={systemLabelSetting}
+                  onChange={(e) => useSettings.getState().update({ systemAccountLabel: e.target.value })}
+                />
+                <span
+                  className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-muted"
+                  title="The machine's default Claude login (~/.claude). Used when a node has no account."
+                >
+                  system
+                </span>
+              </div>
+              {systemEmail ? <p className="text-[12px] text-muted">{systemEmail}</p> : null}
+            </div>
+          </div>
+
+          {accounts.length === 0 ? null : (
             accounts.map((account) => (
               <div
                 key={account.id}

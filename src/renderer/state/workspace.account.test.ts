@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { accountChipLabel } from './workspace'
+import { accountChipLabel, systemAccountDisplay } from './workspace'
 import type { ClaudeAccount } from '@shared/types'
 
 const acct = (over: Partial<ClaudeAccount>): ClaudeAccount => ({
@@ -46,5 +46,22 @@ describe('accountChipLabel', () => {
       short: 'Unknown account',
       tooltip: 'Unknown account'
     })
+  })
+})
+
+describe('systemAccountDisplay', () => {
+  it('prefers the custom label', () => {
+    expect(systemAccountDisplay('Kişisel', 'me@example.com')).toBe('Kişisel')
+  })
+
+  it('falls back to the detected email when the label is empty/whitespace', () => {
+    expect(systemAccountDisplay('', 'me@example.com')).toBe('me@example.com')
+    expect(systemAccountDisplay('   ', 'me@example.com')).toBe('me@example.com')
+    expect(systemAccountDisplay(undefined, 'me@example.com')).toBe('me@example.com')
+  })
+
+  it('falls back to the generic name when nothing is known', () => {
+    expect(systemAccountDisplay('', null)).toBe('System account')
+    expect(systemAccountDisplay(undefined, undefined)).toBe('System account')
   })
 })

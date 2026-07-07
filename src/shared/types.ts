@@ -351,6 +351,9 @@ export interface Settings {
   customAgents: CustomAgent[]
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
+  /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
+   *  Empty = unset → fall back to the detected login email, else "System account". */
+  systemAccountLabel: string
   /** Agent ids hidden from the Add menus. */
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
@@ -382,6 +385,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyConsentAsked: false,
   customAgents: [],
   claudeAccounts: [],
+  systemAccountLabel: '',
   // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
