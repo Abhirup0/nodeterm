@@ -1477,6 +1477,10 @@ export function Canvas() {
         { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh), selected: true }
       ])
       markDirty()
+      // The event fires from the full-screen Settings overlay — close it so the user actually
+      // sees the login node (it spawns at viewCenter, selected). The defensive return above
+      // keeps Settings open when nothing was spawned (mismatched/disconnected remote login).
+      setSettingsOpen(false)
     }
     window.addEventListener('nodeterm:add-account-login', onAddAccountLogin)
     return () => window.removeEventListener('nodeterm:add-account-login', onAddAccountLogin)
