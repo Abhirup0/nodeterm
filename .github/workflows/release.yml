@@ -29,7 +29,20 @@ jobs:
         run: |
           printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary-key.p8"
           export APPLE_API_KEY="$RUNNER_TEMP/notary-key.p8"
-          npm run release
+          # Apple's notarization can take a long time, and @electron/notarize has no retry: a single
+          # transient network blip while polling appstoreconnect (NSURLError -1009) fails the whole
+          # build even though the submission gets Accepted. Retry the release up to 3 times so one
+          # blip during a long poll doesn't sink the release.
+          n=1
+          until npm run release; do
+            if [ "$n" -ge 3 ]; then
+              echo "::error::release failed after $n attempts"
+              exit 1
+            fi
+            echo "::warning::release attempt $n failed (likely transient notarization network error); retrying in 60s…"
+            n=$((n + 1))
+            sleep 60
+          done
         env:
           # Developer ID Application cert, base64-encoded .p12 + its password.
           CSC_LINK: ${{ secrets.CSC_LINK }}
