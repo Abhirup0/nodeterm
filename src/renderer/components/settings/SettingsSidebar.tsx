@@ -21,7 +21,7 @@ export function SettingsSidebar({
   return (
     <aside className="flex w-[256px] shrink-0 flex-col border-r border-border bg-panel">
       <div
-        className="flex items-center px-3 pb-2 pt-10"
+        className="flex items-center px-3 pb-2 pt-14"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
         <button
