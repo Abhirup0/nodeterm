@@ -22,6 +22,8 @@ export interface SessionsSidebarProps {
   onRenameSession(projectId: string, id: string, title: string): void
   onAiNameSession(projectId: string, id: string, cwd?: string): void | Promise<void>
   onRowContextMenu(e: React.MouseEvent, projectId: string, id: string): void
+  /** Right-click on a project header: the project actions menu (switch/rename/folder/close). */
+  onProjectContextMenu(e: React.MouseEvent, projectId: string): void
   onAddToProject(projectId: string): void
   /** Move a node into a canvas group (groupId) or out to the top level (null). */
   onMoveToGroup(projectId: string, nodeId: string, groupId: string | null): void
@@ -212,6 +214,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
               <div
                 className={`ss-group__head${dropClass(g.projectId, null)}`}
                 onClick={() => toggleCollapse(g.projectId, isCollapsed)}
+                onContextMenu={(e) => props.onProjectContextMenu(e, g.projectId)}
                 title={drag?.projectId === g.projectId ? 'Drop here to remove from group' : undefined}
                 {...dropProps(g.projectId, null)}
               >

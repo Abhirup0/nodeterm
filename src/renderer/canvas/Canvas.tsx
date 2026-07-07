@@ -3301,6 +3301,47 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  // Right-click on a sidebar project header: the same project actions as the tab caret menu,
+  // in the shared ContextMenu shell.
+  const onProjectContextMenu = useCallback(
+    (e: React.MouseEvent, projectId: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const project = useProjects.getState().projects.find((p) => p.id === projectId)
+      if (!project) return
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          {
+            label: 'Go to project',
+            icon: <IconSwitch />,
+            disabled: projectId === activeProjectId,
+            onClick: () => switchProject(projectId)
+          },
+          {
+            label: 'Rename',
+            icon: <IconEditor />,
+            onClick: () => {
+              void promptDialog({ message: 'Rename project', initialValue: project.name }).then((t) => {
+                if (t && t.trim()) renameProject(projectId, t.trim())
+              })
+            }
+          },
+          { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
+          { type: 'separator' },
+          {
+            label: 'Close project',
+            icon: <IconTrash />,
+            danger: true,
+            onClick: () => closeProject(projectId)
+          }
+        ]
+      })
+    },
+    [activeProjectId, switchProject, renameProject, setProjectFolder, closeProject]
+  )
+
   // Reopen a previously closed project and make it active — the active-project effect reloads its
   // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
   const reopenProject = useCallback(
@@ -3769,6 +3810,7 @@ export function Canvas() {
         onMoveToGroup={moveSessionToGroup}
         onReorder={reorderSession}
         onRowContextMenu={onRowContextMenu}
+        onProjectContextMenu={onProjectContextMenu}
         onAddToProject={addToProject}
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
