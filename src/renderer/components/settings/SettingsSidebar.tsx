@@ -21,20 +21,20 @@ export function SettingsSidebar({
   return (
     <aside className="flex w-[256px] shrink-0 flex-col border-r border-border bg-panel">
       <div
-        className="flex items-center justify-between px-4 pb-2 pt-10"
+        className="flex items-center px-3 pb-2 pt-10"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
-        <h1 className="text-sm font-semibold tracking-tight text-text">Settings</h1>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close settings"
+          aria-label="Back to app"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          className="flex size-6 items-center justify-center rounded-md border-0 bg-panel text-muted outline-none transition-colors hover:bg-white/10 hover:text-text"
+          className="flex items-center gap-1.5 rounded-md border-0 bg-transparent px-1.5 py-1 text-sm font-medium text-muted outline-none transition-colors hover:bg-white/10 hover:text-text"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8.5 3.5 5 7l3.5 3.5" />
           </svg>
+          Back to app
         </button>
       </div>
 
