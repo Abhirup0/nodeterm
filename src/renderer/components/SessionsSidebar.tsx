@@ -37,7 +37,9 @@ export interface SessionsSidebarProps {
 
 export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null {
   const { open, pinned, liveActiveNodes } = props
-  const projects = useProjects((s) => s.projects)
+  const allProjects = useProjects((s) => s.projects)
+  // Closed projects are hidden from the tab bar; hide them from the sidebar too.
+  const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
