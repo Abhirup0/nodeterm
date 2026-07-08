@@ -180,8 +180,11 @@ export const IPC = {
   remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
   handoffBuild: 'handoff:build',
   // Phone pairing (nodeterm iOS "scan a QR" flow): renderer starts/stops the one-shot LAN
-  // listener; main pushes the completion result back over `pairing:done`.
+  // listener; main pushes the completion result back over `pairing:done`. The per-device
+  // registry (list/revoke) lives in ~/.nodeterm/agent.json.
   pairingStart: 'pairing:start',
   pairingStop: 'pairing:stop',
-  pairingDone: 'pairing:done'
+  pairingDone: 'pairing:done',
+  pairingListDevices: 'pairing:listDevices',
+  pairingRevokeDevice: 'pairing:revokeDevice'
 } as const

@@ -12,6 +12,11 @@ interface ProjectsState {
   setActive(id: string): void
   /** Adds a new project and returns it (caller commits the current canvas first). */
   addProject(name?: string, cwd?: string, ssh?: Project['ssh']): Project
+  /** "Open folder…": a folder maps to one project. Reuses the existing project with that
+   *  cwd — reopening it if it was closed, so it shows in the tab bar again — or creates a
+   *  new one named after the folder. Activates and returns it (caller commits the current
+   *  canvas first). */
+  openFolderProject(folder: string): Project
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
@@ -100,6 +105,20 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   addProject(name, cwd, ssh) {
     const project = createProject(get().projects.length, name, cwd, ssh)
     set((s) => ({ projects: [...s.projects, project] }))
+    return project
+  },
+
+  openFolderProject(folder) {
+    const existing = get().projects.find((p) => p.cwd === folder)
+    if (existing) {
+      // reopenProject also clears `closed` — an "Open folder" on a previously closed
+      // project must bring its tab back, not activate an invisible project.
+      get().reopenProject(existing.id)
+      return existing
+    }
+    const name = folder.split('/').filter(Boolean).pop() || 'Project'
+    const project = get().addProject(name, folder)
+    set({ activeProjectId: project.id })
     return project
   },
 

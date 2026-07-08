@@ -1,16 +1,32 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toDataURL } from 'qrcode'
+import type { PairedDevice } from '@shared/types'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
+import { ConfirmDialog } from '../../ConfirmDialog'
 import { Button } from '@renderer/ui/Button'
 
 const ROWS = {
   pair: {
     title: 'Pair phone',
     keywords: ['phone', 'pair', 'qr', 'ios', 'mobile', 'ssh', 'scan', 'nodeterm']
+  },
+  devices: {
+    title: 'Paired devices',
+    keywords: ['phone', 'device', 'devices', 'paired', 'revoke', 'ios', 'iphone', 'remove']
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+/** Format an epoch-ms pairing time as a short local date. */
+function formatPairedAt(ms: number): string {
+  if (!ms) return ''
+  return new Date(ms).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
 
 type Phase = 'idle' | 'waiting' | 'paired' | 'timeout'
 
@@ -20,8 +36,18 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
   const [sshOpen, setSshOpen] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [devices, setDevices] = useState<PairedDevice[]>([])
+  const [pendingRevoke, setPendingRevoke] = useState<PairedDevice | null>(null)
   // Track whether a pairing listener is currently running so unmount can stop it.
   const runningRef = useRef(false)
+
+  const refreshDevices = useCallback(async (): Promise<void> => {
+    try {
+      setDevices(await window.nodeTerminal.pairing.listDevices())
+    } catch {
+      // leave the last-known list on a transient read error
+    }
+  }, [])
 
   const startPairing = async (): Promise<void> => {
     setError('')
@@ -55,9 +81,24 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
       runningRef.current = false
       setQr('')
       setPhase(result.ok ? 'paired' : 'timeout')
+      if (result.ok) void refreshDevices()
     })
     return off
-  }, [])
+  }, [refreshDevices])
+
+  // Load the paired-device list on mount.
+  useEffect(() => {
+    void refreshDevices()
+  }, [refreshDevices])
+
+  const revokeDevice = async (device: PairedDevice): Promise<void> => {
+    setPendingRevoke(null)
+    try {
+      await window.nodeTerminal.pairing.revokeDevice(device.id)
+    } finally {
+      void refreshDevices()
+    }
+  }
 
   // Stop any in-flight pairing when the section unmounts (settings closed / navigated away).
   useEffect(() => {
@@ -134,6 +175,43 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
           ) : null}
         </div>
       </SearchableRow>
+
+      <SearchableRow {...ROWS.devices}>
+        <div className="space-y-3">
+          <h4 className="text-[13px] font-medium text-text">Paired devices</h4>
+          {devices.length === 0 ? (
+            <p className="text-sm text-muted">No devices paired yet</p>
+          ) : (
+            <ul className="space-y-2">
+              {devices.map((device) => (
+                <li
+                  key={device.id}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-text">{device.name}</div>
+                    {device.pairedAt ? (
+                      <div className="text-[12px] text-muted">
+                        Paired {formatPairedAt(device.pairedAt)}
+                      </div>
+                    ) : null}
+                  </div>
+                  <Button onClick={() => setPendingRevoke(device)}>Revoke</Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </SearchableRow>
+
+      {pendingRevoke ? (
+        <ConfirmDialog
+          message={`Revoke “${pendingRevoke.name}”? Its key is removed from this machine and it will no longer be able to connect.`}
+          confirmLabel="Revoke"
+          onConfirm={() => void revokeDevice(pendingRevoke)}
+          onCancel={() => setPendingRevoke(null)}
+        />
+      ) : null}
     </SettingsSection>
   )
 }

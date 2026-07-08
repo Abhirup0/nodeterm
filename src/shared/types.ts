@@ -960,6 +960,16 @@ export interface RemoteClientApi {
   fsWrite(connectionId: string, path: string, content: string): Promise<boolean>
 }
 
+/** A paired device as exposed to the renderer — the bearer token is never included. */
+export interface PairedDevice {
+  id: string
+  name: string
+  /** epoch-ms the device was paired. */
+  pairedAt: number
+  /** epoch-ms the host agent last saw this device (0 = never). */
+  lastSeenAt: number
+}
+
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
@@ -968,6 +978,10 @@ export interface PairingApi {
   stop(): Promise<void>
   /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
   onDone(cb: (result: { ok: boolean }) => void): () => void
+  /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
+  listDevices(): Promise<PairedDevice[]>
+  /** Revoke a device: remove its registry entry and delete its authorized_keys line. */
+  revokeDevice(id: string): Promise<void>
 }
 
 export interface NodeTerminalApi {

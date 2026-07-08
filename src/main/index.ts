@@ -363,6 +363,8 @@ app.whenReady().then(async () => {
     })
   )
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
+  ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
+  ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)

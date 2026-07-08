@@ -1352,6 +1352,9 @@ export function Canvas() {
       commitActiveToStore()
       const project = useProjects.getState().addProject(name, clonedPath)
       useProjects.getState().setActive(project.id)
+      // The welcome screen stays up behind the clone dialog; dismiss it now that a
+      // project actually exists (no-op when the dialog was opened elsewhere).
+      setWelcomeOpen(false)
       void writeDisk()
     },
     [commitActiveToStore, writeDisk]
@@ -3285,6 +3288,9 @@ export function Canvas() {
         .getState()
         .addProject(input.label, undefined, { server: input.server, remoteCwd: input.remoteCwd })
       useProjects.getState().setActive(project.id)
+      // Same contract as onRepoCloned: the welcome screen waits behind the SSH dialog and
+      // dismisses only once the project is created (cancel returns to the welcome screen).
+      setWelcomeOpen(false)
       void writeDisk()
     },
     [commitActiveToStore, writeDisk]
@@ -3297,13 +3303,16 @@ export function Canvas() {
     void writeDisk()
   }, [commitActiveToStore, writeDisk])
 
-  const addProjectFromFolder = useCallback(async () => {
+  /** Returns true when a folder was picked (false on cancel), so callers like the welcome
+   *  screen can keep their overlay up until the picker actually resolves. */
+  const addProjectFromFolder = useCallback(async (): Promise<boolean> => {
     const folder = await window.nodeTerminal.dialog.selectFolder()
-    if (!folder) return
+    if (!folder) return false
     commitActiveToStore()
     // A folder maps to one project: reuse (and reopen, if closed) the existing one, or create.
     useProjects.getState().openFolderProject(folder)
     void writeDisk()
+    return true
   }, [commitActiveToStore, writeDisk])
 
   const renameProject = useCallback(
@@ -3749,17 +3758,14 @@ export function Canvas() {
               addProject()
             }}
             onOpenFolder={() => {
-              setWelcomeOpen(false)
-              void addProjectFromFolder()
+              // Keep the welcome screen up behind the native picker; dismiss it only once a
+              // folder was actually chosen (cancel returns to the welcome screen).
+              void addProjectFromFolder().then((opened) => {
+                if (opened) setWelcomeOpen(false)
+              })
             }}
-            onCloneRepo={() => {
-              setWelcomeOpen(false)
-              cloneRepo()
-            }}
-            onConnectSsh={() => {
-              setWelcomeOpen(false)
-              setSshDialogOpen(true)
-            }}
+            onCloneRepo={cloneRepo}
+            onConnectSsh={() => setSshDialogOpen(true)}
             closedProjects={closedProjects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd }))}
             onReopen={reopenProject}
             onDeleteClosed={deleteProject}

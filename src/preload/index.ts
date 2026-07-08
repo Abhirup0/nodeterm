@@ -355,7 +355,9 @@ const api: NodeTerminalApi = {
       const handler = (_e: unknown, result: { ok: boolean }) => cb(result)
       ipcRenderer.on(IPC.pairingDone, handler)
       return () => ipcRenderer.removeListener(IPC.pairingDone, handler)
-    }
+    },
+    listDevices: () => ipcRenderer.invoke(IPC.pairingListDevices),
+    revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
   },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)

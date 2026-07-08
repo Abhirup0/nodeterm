@@ -12,7 +12,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { connect as netConnect } from 'net'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -20,9 +20,18 @@ import os from 'os'
 import path from 'path'
 import {
   buildPairingPayload,
+  filterAuthorizedKeys,
   isValidEd25519PublicKey,
   normalizeAuthorizedKeysLine,
-  pickLanIPv4
+  normalizeDeviceName,
+  pickLanIPv4,
+  readDevices,
+  removeDevice,
+  rewriteKeyComment,
+  toPublicDevices,
+  upsertDevice,
+  type DeviceEntry,
+  type PublicDevice
 } from './pairing-core'
 
 const execFileAsync = promisify(execFile)
@@ -49,6 +58,43 @@ export interface PairingService {
   start(onDone: (result: PairingDone) => void): Promise<PairingStartResult>
   /** Cancel an in-flight pairing (idempotent). Does NOT fire onDone. */
   stop(): void
+  /** All paired devices (token stripped) from ~/.nodeterm/agent.json. */
+  listDevices(): Promise<PublicDevice[]>
+  /** Revoke a device: drop its agent.json entry AND delete its authorized_keys line. */
+  revokeDevice(id: string): Promise<void>
+}
+
+/** ~/.nodeterm holds the host-agent config (agent.json). Created 0700 if missing. */
+const AGENT_DIR = path.join(os.homedir(), '.nodeterm')
+const AGENT_JSON_PATH = path.join(AGENT_DIR, 'agent.json')
+const AUTH_KEYS_PATH = path.join(os.homedir(), '.ssh', 'authorized_keys')
+
+/** Read + parse ~/.nodeterm/agent.json; returns {} when absent or malformed. */
+async function readAgentJson(): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(AGENT_JSON_PATH, 'utf8'))
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Write agent.json atomically (0600), creating ~/.nodeterm (0700) if needed. */
+async function writeAgentJson(obj: Record<string, unknown>): Promise<void> {
+  await fs.mkdir(AGENT_DIR, { recursive: true, mode: 0o700 })
+  await fs.chmod(AGENT_DIR, 0o700).catch(() => {})
+  const tmp = `${AGENT_JSON_PATH}.tmp`
+  await fs.writeFile(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
+  await fs.chmod(tmp, 0o600).catch(() => {})
+  await fs.rename(tmp, AGENT_JSON_PATH)
+  await fs.chmod(AGENT_JSON_PATH, 0o600).catch(() => {})
+}
+
+/** Persist a device into agent.json, preserving all other fields the host agent wrote. */
+async function persistDevice(entry: DeviceEntry): Promise<void> {
+  const obj = await readAgentJson()
+  const devices = upsertDevice(readDevices(obj), entry)
+  await writeAgentJson({ ...obj, devices })
 }
 
 /** Detect the machine's display name (macOS ComputerName, else hostname). */
@@ -87,22 +133,42 @@ function probeSsh(): Promise<boolean> {
   })
 }
 
-/** Append a validated public-key line to ~/.ssh/authorized_keys with the right permissions. */
-async function appendAuthorizedKey(publicKey: string): Promise<void> {
+/**
+ * Append an already-normalized public-key line to ~/.ssh/authorized_keys with the right
+ * permissions. The caller stamps the attributable `nodeterm-ios-<deviceId>` comment via
+ * `rewriteKeyComment` before this point.
+ */
+async function appendAuthorizedKey(keyLine: string): Promise<void> {
   const sshDir = path.join(os.homedir(), '.ssh')
   await fs.mkdir(sshDir, { recursive: true, mode: 0o700 })
   await fs.chmod(sshDir, 0o700).catch(() => {})
-  const authPath = path.join(sshDir, 'authorized_keys')
   // Guard against a file that doesn't end in a newline (would concatenate onto the last key).
   let prefix = ''
   try {
-    const existing = await fs.readFile(authPath, 'utf8')
+    const existing = await fs.readFile(AUTH_KEYS_PATH, 'utf8')
     if (existing.length > 0 && !existing.endsWith('\n')) prefix = '\n'
   } catch {
     // no file yet — appendFile creates it
   }
-  await fs.appendFile(authPath, prefix + normalizeAuthorizedKeysLine(publicKey) + '\n')
-  await fs.chmod(authPath, 0o600)
+  await fs.appendFile(AUTH_KEYS_PATH, prefix + normalizeAuthorizedKeysLine(keyLine) + '\n')
+  await fs.chmod(AUTH_KEYS_PATH, 0o600)
+}
+
+/** Delete every authorized_keys line stamped for `deviceId`, rewriting the file atomically (0600). */
+async function removeAuthorizedKeysForDevice(deviceId: string): Promise<void> {
+  let content: string
+  try {
+    content = await fs.readFile(AUTH_KEYS_PATH, 'utf8')
+  } catch {
+    return // no file → nothing to revoke
+  }
+  const next = filterAuthorizedKeys(content, deviceId)
+  if (next === content) return
+  const tmp = `${AUTH_KEYS_PATH}.tmp`
+  await fs.writeFile(tmp, next, { mode: 0o600 })
+  await fs.chmod(tmp, 0o600).catch(() => {})
+  await fs.rename(tmp, AUTH_KEYS_PATH)
+  await fs.chmod(AUTH_KEYS_PATH, 0o600).catch(() => {})
 }
 
 /** Read the whole request body (capped), rejecting oversized payloads. */
@@ -192,7 +258,7 @@ export function createPairingService(): PairingService {
       }
       try {
         const raw = await readBody(req)
-        let body: { token?: unknown; publicKey?: unknown }
+        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown }
         try {
           body = JSON.parse(raw)
         } catch {
@@ -208,8 +274,22 @@ export function createPairingService(): PairingService {
           res.writeHead(400).end('unexpected key type')
           return
         }
-        await appendAuthorizedKey(publicKey)
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }))
+        // Mint a device identity: the deviceId stamps the key line (attributable + revocable);
+        // the agentToken is the phone's bearer for the host-agent WebSocket (stored in its Keychain).
+        const deviceId = randomUUID()
+        const agentToken = randomBytes(24).toString('base64url')
+        const name = normalizeDeviceName(body.deviceName)
+        await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
+        await persistDevice({
+          id: deviceId,
+          name,
+          token: agentToken,
+          pairedAt: Date.now(),
+          lastSeenAt: 0
+        })
+        res
+          .writeHead(200, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify({ ok: true, deviceId, agentToken }))
         finish({ ok: true })
       } catch (err) {
         res.writeHead(500).end('pairing failed')
@@ -225,5 +305,16 @@ export function createPairingService(): PairingService {
     cleanup()
   }
 
-  return { start, stop }
+  const listDevices = async (): Promise<PublicDevice[]> => {
+    return toPublicDevices(readDevices(await readAgentJson()))
+  }
+
+  const revokeDevice = async (id: string): Promise<void> => {
+    const obj = await readAgentJson()
+    const devices = removeDevice(readDevices(obj), id)
+    await writeAgentJson({ ...obj, devices })
+    await removeAuthorizedKeysForDevice(id)
+  }
+
+  return { start, stop, listDevices, revokeDevice }
 }

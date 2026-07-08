@@ -62,6 +62,90 @@ export function normalizeAuthorizedKeysLine(line: string): string {
   return line.trim().replace(/\s+/g, ' ')
 }
 
+/**
+ * The attributable comment we stamp onto each paired key. Keeping it a single deterministic
+ * token (`nodeterm-ios-<deviceId>`) is what lets revocation find & delete the exact line later.
+ */
+export function deviceCommentFor(deviceId: string): string {
+  return `nodeterm-ios-${deviceId}`
+}
+
+/**
+ * Rewrite an incoming public-key line so its comment is exactly `nodeterm-ios-<deviceId>`,
+ * replacing whatever comment the phone sent while keeping the key type + base64 blob intact.
+ * The result is already normalized (single-space separated), ready for authorized_keys.
+ */
+export function rewriteKeyComment(publicKey: string, deviceId: string): string {
+  const parts = normalizeAuthorizedKeysLine(publicKey).split(' ')
+  const type = parts[0] ?? ''
+  const blob = parts[1] ?? ''
+  return `${type} ${blob} ${deviceCommentFor(deviceId)}`
+}
+
+/**
+ * Remove every authorized_keys line whose comment is exactly `nodeterm-ios-<deviceId>`,
+ * preserving all other lines (including blanks, other keys' comments, and the trailing
+ * newline) byte-for-byte. The caller writes the result back atomically.
+ */
+export function filterAuthorizedKeys(content: string, deviceId: string): string {
+  const target = deviceCommentFor(deviceId)
+  return content
+    .split('\n')
+    .filter((line) => {
+      const parts = line.trim().split(/\s+/)
+      // comment = everything after the key type + base64 blob
+      return parts.slice(2).join(' ') !== target
+    })
+    .join('\n')
+}
+
+/** A device identity minted at pairing time and persisted into ~/.nodeterm/agent.json. */
+export interface DeviceEntry {
+  id: string
+  name: string
+  /** Bearer token the phone uses on the host-agent WebSocket. NEVER sent to the renderer. */
+  token: string
+  pairedAt: number
+  lastSeenAt: number
+}
+
+/** The device shape safe to expose to the renderer (no `token`). */
+export type PublicDevice = Omit<DeviceEntry, 'token'>
+
+/** Default device name when the phone didn't send one (or sent blank). */
+export function normalizeDeviceName(name: unknown): string {
+  if (typeof name === 'string') {
+    const trimmed = name.trim()
+    if (trimmed) return trimmed
+  }
+  return 'iPhone'
+}
+
+/**
+ * Extract the `devices` array from a parsed agent.json object. A missing / malformed
+ * `devices` is treated as empty (back-compat: the host agent writes only {v, port, token}).
+ */
+export function readDevices(agentJson: unknown): DeviceEntry[] {
+  if (!agentJson || typeof agentJson !== 'object') return []
+  const devices = (agentJson as { devices?: unknown }).devices
+  return Array.isArray(devices) ? (devices as DeviceEntry[]) : []
+}
+
+/** Append `entry`, or replace an existing device with the same id (idempotent by id). */
+export function upsertDevice(devices: DeviceEntry[], entry: DeviceEntry): DeviceEntry[] {
+  return [...devices.filter((d) => d.id !== entry.id), entry]
+}
+
+/** Drop the device with the given id (no-op if absent). */
+export function removeDevice(devices: DeviceEntry[], id: string): DeviceEntry[] {
+  return devices.filter((d) => d.id !== id)
+}
+
+/** Strip the secret `token` from each device before handing the list to the renderer. */
+export function toPublicDevices(devices: DeviceEntry[]): PublicDevice[] {
+  return devices.map(({ id, name, pairedAt, lastSeenAt }) => ({ id, name, pairedAt, lastSeenAt }))
+}
+
 /** Minimal shape of `os.networkInterfaces()` we need — kept structural so tests can fake it. */
 export interface NetInterfaceAddr {
   address: string

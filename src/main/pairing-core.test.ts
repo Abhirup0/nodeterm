@@ -1,9 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildPairingPayload,
+  deviceCommentFor,
+  filterAuthorizedKeys,
   isValidEd25519PublicKey,
   normalizeAuthorizedKeysLine,
-  pickLanIPv4
+  normalizeDeviceName,
+  pickLanIPv4,
+  readDevices,
+  removeDevice,
+  rewriteKeyComment,
+  toPublicDevices,
+  upsertDevice,
+  type DeviceEntry
 } from './pairing-core'
 
 // A real Ed25519 public key blob (32 zero bytes) wrapped in the OpenSSH wire format:
@@ -91,6 +100,108 @@ describe('normalizeAuthorizedKeysLine', () => {
     expect(normalizeAuthorizedKeysLine('  ssh-ed25519   AAAA   phone\n')).toBe(
       'ssh-ed25519 AAAA phone'
     )
+  })
+})
+
+describe('deviceCommentFor', () => {
+  it('builds the attributable comment token', () => {
+    expect(deviceCommentFor('abc-123')).toBe('nodeterm-ios-abc-123')
+  })
+})
+
+describe('rewriteKeyComment', () => {
+  it('replaces the phone-sent comment with nodeterm-ios-<deviceId>, keeping type+blob', () => {
+    expect(rewriteKeyComment('ssh-ed25519 AAAAB3 phone@my-iphone', 'dev1')).toBe(
+      'ssh-ed25519 AAAAB3 nodeterm-ios-dev1'
+    )
+  })
+
+  it('adds a comment when the key had none', () => {
+    expect(rewriteKeyComment('ssh-ed25519 AAAAB3', 'dev2')).toBe('ssh-ed25519 AAAAB3 nodeterm-ios-dev2')
+  })
+
+  it('collapses extra whitespace and multi-word comments', () => {
+    expect(rewriteKeyComment('  ssh-ed25519   AAAAB3   some long comment\n', 'd')).toBe(
+      'ssh-ed25519 AAAAB3 nodeterm-ios-d'
+    )
+  })
+})
+
+describe('filterAuthorizedKeys', () => {
+  it('removes only lines whose comment is exactly nodeterm-ios-<id>', () => {
+    const content = [
+      'ssh-ed25519 AAAAother laptop@work',
+      'ssh-ed25519 AAAAtarget nodeterm-ios-dev1',
+      'ssh-rsa AAAArsa other-key'
+    ].join('\n')
+    expect(filterAuthorizedKeys(content, 'dev1')).toBe(
+      'ssh-ed25519 AAAAother laptop@work\nssh-rsa AAAArsa other-key'
+    )
+  })
+
+  it('preserves blank lines and the trailing newline of untouched files', () => {
+    const content = 'ssh-ed25519 AAAAa keep-me\n\nssh-ed25519 AAAAb nodeterm-ios-x\n'
+    expect(filterAuthorizedKeys(content, 'x')).toBe('ssh-ed25519 AAAAa keep-me\n\n')
+  })
+
+  it('does not match a different device id or a substring', () => {
+    const content = 'ssh-ed25519 AAAAb nodeterm-ios-dev10'
+    expect(filterAuthorizedKeys(content, 'dev1')).toBe(content)
+  })
+
+  it('returns content unchanged when nothing matches', () => {
+    const content = 'ssh-ed25519 AAAAb some@comment\n'
+    expect(filterAuthorizedKeys(content, 'nope')).toBe(content)
+  })
+})
+
+describe('normalizeDeviceName', () => {
+  it('trims a provided name', () => {
+    expect(normalizeDeviceName("  Enes's iPhone  ")).toBe("Enes's iPhone")
+  })
+
+  it('defaults to iPhone for missing / blank / non-string names', () => {
+    expect(normalizeDeviceName(undefined)).toBe('iPhone')
+    expect(normalizeDeviceName('   ')).toBe('iPhone')
+    expect(normalizeDeviceName(42)).toBe('iPhone')
+  })
+})
+
+describe('device registry helpers', () => {
+  const dev = (id: string, name = id): DeviceEntry => ({
+    id,
+    name,
+    token: `tok-${id}`,
+    pairedAt: 1000,
+    lastSeenAt: 0
+  })
+
+  it('readDevices returns [] for missing / malformed devices (back-compat with {v,port,token})', () => {
+    expect(readDevices(undefined)).toEqual([])
+    expect(readDevices({ v: 1, port: 8080, token: 'abc' })).toEqual([])
+    expect(readDevices({ devices: 'nope' })).toEqual([])
+    expect(readDevices({ devices: [dev('a')] })).toEqual([dev('a')])
+  })
+
+  it('upsertDevice appends a new device', () => {
+    expect(upsertDevice([dev('a')], dev('b'))).toEqual([dev('a'), dev('b')])
+  })
+
+  it('upsertDevice replaces an existing device by id (keeps position at end)', () => {
+    const updated = { ...dev('a'), name: 'renamed' }
+    expect(upsertDevice([dev('a'), dev('b')], updated)).toEqual([dev('b'), updated])
+  })
+
+  it('removeDevice drops the matching id and is a no-op otherwise', () => {
+    expect(removeDevice([dev('a'), dev('b')], 'a')).toEqual([dev('b')])
+    expect(removeDevice([dev('a')], 'zzz')).toEqual([dev('a')])
+  })
+
+  it('toPublicDevices strips the token', () => {
+    expect(toPublicDevices([dev('a')])).toEqual([
+      { id: 'a', name: 'a', pairedAt: 1000, lastSeenAt: 0 }
+    ])
+    expect(toPublicDevices([dev('a')])[0]).not.toHaveProperty('token')
   })
 })
 
