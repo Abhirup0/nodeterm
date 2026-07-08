@@ -14,6 +14,7 @@ import { initUpdater } from './updater'
 import { fetchCheck } from './check'
 import { hookServer } from './agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
+import { initAgentStatusMirror, recordAgentEvent } from './agent-status-mirror'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from './agents/hooks'
 import { createSubagentTail } from './subagent-tail'
@@ -426,6 +427,8 @@ app.whenReady().then(async () => {
 
   const win = createWindow()
   initUpdater(win)
+  // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
+  initAgentStatusMirror()
 
   // Agent hooks: install the managed hook script into each agent's config, then start the
   // local HTTP server that receives hook posts and forwards normalized events to the renderer.
@@ -440,14 +443,16 @@ app.whenReady().then(async () => {
     let nodeId: string | undefined
     for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
     if (!nodeId) return
-    sendToMain(IPC.agentStatus, {
+    const taskDoneEvent = {
       nodeId,
       agentId: 'claude',
       sessionId,
       kind: 'subagent-end',
       toolUseId: n.toolUseId,
       result: n.result
-    } satisfies NormalizedAgentEvent)
+    } satisfies NormalizedAgentEvent
+    sendToMain(IPC.agentStatus, taskDoneEvent)
+    recordAgentEvent(taskDoneEvent)
     subagentTail.finish(n.toolUseId)
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
@@ -603,7 +608,10 @@ app.whenReady().then(async () => {
       console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
     }
   }
-  hookServer.setListener((e) => sendToMain(IPC.agentStatus, e))
+  hookServer.setListener((e) => {
+    sendToMain(IPC.agentStatus, e)
+    recordAgentEvent(e)
+  })
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
   // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts

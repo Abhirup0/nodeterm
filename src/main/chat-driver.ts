@@ -9,6 +9,7 @@ import { sdkMessageToEvents } from './chat-events'
 import { ChatInputQueue, createPushIterable } from './chat-queue'
 import { resolveTranscriptPath } from './transcript-reader'
 import { claudeConfigDirFor } from './claude-accounts'
+import { recordAgentEvent } from './agent-status-mirror'
 import { AUTH_ENV_STRIP } from './claude-accounts-core'
 
 interface PendingPermission { resolve: (d: ChatPermissionDecision) => void }
@@ -62,6 +63,7 @@ export class ChatDriver {
       sessionId: s.sessionId, ...(interrupted ? { interrupted: true } : {})
     }
     this.sendToMain(IPC.agentStatus, ev)
+    recordAgentEvent(ev)
   }
 
   async ensure(
