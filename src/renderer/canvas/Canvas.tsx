@@ -2235,16 +2235,21 @@ export function Canvas() {
       const disabled = useSettings.getState().settings.disabledAgents
       // Accounts selectable in the active project: local accounts for a local project, or this
       // host's accounts for an SSH project (pending logins always excluded).
-      const accounts = accountsForProject(
-        useSettings.getState().settings.claudeAccounts,
-        useProjects.getState().getProject(activeProjectId)
-      )
+      const project = useProjects.getState().getProject(activeProjectId)
+      const accounts = accountsForProject(useSettings.getState().settings.claudeAccounts, project)
       // The system entry shows the user's custom label / detected email so it stays
       // distinguishable from managed accounts (falls back to "System account").
       const systemLabel = systemAccountDisplay(
         useSettings.getState().settings.systemAccountLabel,
         useSystemAccount.getState().email
       )
+      // ✓ marks what a bare "New Claude" resolves to: the project default while it still
+      // exists, else the system account (mirrors resolveNewNodeAccount's stale-id guard).
+      const defaultAccountId = accounts.some((a) => a.id === project?.defaultAccountId)
+        ? project?.defaultAccountId
+        : undefined
+      const withDefaultMark = (label: string, id?: string): string =>
+        id === defaultAccountId ? `${label} ✓` : label
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
           // Claude gets an account picker submenu when ≥1 account exists; System = project
@@ -2255,10 +2260,15 @@ export function Canvas() {
               label: `New ${AGENT_CONFIG[aid].label}`,
               icon: <AgentIcon agentId={aid} />,
               children: [
-                { label: systemLabel, onClick: () => addAgentNode('claude', at, groupId) },
+                {
+                  label: withDefaultMark(systemLabel),
+                  icon: <AgentIcon agentId="claude" />,
+                  onClick: () => addAgentNode('claude', at, groupId)
+                },
                 ...accounts.map(
                   (a): MenuItem => ({
-                    label: a.label,
+                    label: withDefaultMark(a.label, a.id),
+                    icon: <AgentIcon agentId="claude" />,
                     onClick: () => addAgentNode('claude', at, groupId, a.id)
                   })
                 )
@@ -2287,10 +2297,15 @@ export function Canvas() {
               label: 'New chat',
               icon: <IconChat />,
               children: [
-                { label: systemLabel, onClick: () => addChatNode(at, undefined, groupId) },
+                {
+                  label: withDefaultMark(systemLabel),
+                  icon: <AgentIcon agentId="claude" />,
+                  onClick: () => addChatNode(at, undefined, groupId)
+                },
                 ...accounts.map(
                   (a): MenuItem => ({
-                    label: a.label,
+                    label: withDefaultMark(a.label, a.id),
+                    icon: <AgentIcon agentId="claude" />,
                     onClick: () => addChatNode(at, a.id, groupId)
                   })
                 )

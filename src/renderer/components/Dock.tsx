@@ -60,6 +60,10 @@ export function Dock({
   // project). The flat dock menu can't nest, so Claude gets one "New Claude — <label>" entry per
   // account (plus the base "Claude" = project default).
   const localAccounts = accountsForProject(claudeAccounts, activeProject)
+  // ✓ marks the project's default account entry (what the base "Claude" resolves to).
+  const defaultAccountId = localAccounts.some((a) => a.id === activeProject?.defaultAccountId)
+    ? activeProject?.defaultAccountId
+    : undefined
 
   const pick = (fn: () => void) => () => {
     fn()
@@ -95,7 +99,10 @@ export function Dock({
                 ...localAccounts.map((a) => (
                   <button key={`${aid}-${a.id}`} onClick={pick(() => onAddAgent(aid, a.id))}>
                     <AgentIcon agentId={aid} size={18} />
-                    <span>Claude — {a.label}</span>
+                    <span>
+                      Claude — {a.label}
+                      {a.id === defaultAccountId ? ' ✓' : ''}
+                    </span>
                   </button>
                 ))
               ]
