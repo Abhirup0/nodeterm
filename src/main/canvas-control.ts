@@ -68,6 +68,7 @@ Verbs:
 - \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
   open one agent per role (each prompt starts that member working), arrange them in a grid,
   wrap them in a labeled group, and connect each to you. Max 8 roles per call.
+- \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
 - \`close --node <id>\` — close a node. (Asks the user to confirm.)
 

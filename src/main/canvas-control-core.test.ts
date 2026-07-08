@@ -58,6 +58,16 @@ describe('parseControlRequest', () => {
       args: { nodes: 'a', edge: 'left' }
     })
   })
+  it('rename requires --node and --title, and is not destructive', () => {
+    expect(parseControlRequest('rename', {})).toEqual({ error: 'rename requires --node <id>' })
+    expect(parseControlRequest('rename', { node: 'n1' })).toEqual({ error: 'rename requires --title' })
+    expect(parseControlRequest('rename', { node: 'n1', title: 'Feature Development' })).toEqual({
+      verb: 'rename',
+      args: { node: 'n1', title: 'Feature Development' }
+    })
+    expect(isDestructiveVerb('rename')).toBe(false)
+  })
+
   it('spawn-team requires --team and none of the layout verbs are destructive', () => {
     expect(parseControlRequest('spawn-team', {})).toEqual({ error: 'spawn-team requires --team <json>' })
     expect(parseControlRequest('spawn-team', { team: '[]' })).toEqual({ verb: 'spawn-team', args: { team: '[]' } })

@@ -2818,6 +2818,27 @@ export function Canvas() {
             })
             return
           }
+          case 'rename': {
+            const id = args.node ?? ''
+            const title = (args.title ?? '').trim()
+            const target = nodesRef.current.find((nd) => nd.id === id)
+            if (!target) {
+              reply({ ok: false, error: `rename: no node with id ${id}` })
+              return
+            }
+            // Same semantics as renameSession: an explicit rename takes ownership of the
+            // name (titleAuto off) and mirrors it into a rename-capable agent's session.
+            setNodes((ns) =>
+              ns.map((nd) => (nd.id === id ? { ...nd, data: { ...nd.data, title, titleAuto: false } } : nd))
+            )
+            markDirty()
+            const agentId = target.data.agentId as AgentId | undefined
+            if (agentId && canRename(agentId)) {
+              void window.nodeTerminal.pty.sendText(id, `/rename ${title}`)
+            }
+            reply({ ok: true, message: `renamed ${id} to "${title}"` })
+            return
+          }
           case 'write': {
             if (!args.node) {
               reply({ ok: false, error: 'write requires --node' })
@@ -3265,15 +3286,8 @@ export function Canvas() {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return
     commitActiveToStore()
-    // A folder maps to one project: reuse the existing one (with its nodes) if present.
-    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
-    if (existing) {
-      useProjects.getState().setActive(existing.id)
-    } else {
-      const name = folder.split('/').filter(Boolean).pop() || 'Project'
-      const project = useProjects.getState().addProject(name, folder)
-      useProjects.getState().setActive(project.id)
-    }
+    // A folder maps to one project: reuse (and reopen, if closed) the existing one, or create.
+    useProjects.getState().openFolderProject(folder)
     void writeDisk()
   }, [commitActiveToStore, writeDisk])
 
