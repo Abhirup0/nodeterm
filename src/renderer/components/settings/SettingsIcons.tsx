@@ -23,6 +23,12 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M8 2.5a5.5 5.5 0 0 0 0 11z" fill="currentColor" stroke="none" />
     </>
   ),
+  phone: (
+    <>
+      <rect x="4.5" y="2" width="7" height="12" rx="1.6" />
+      <path d="M7 12h2" />
+    </>
+  ),
   agents: (
     <path d="M8 2.3 9.4 5.9 13 7.3 9.4 8.7 8 12.3 6.6 8.7 3 7.3 6.6 5.9z" />
   ),

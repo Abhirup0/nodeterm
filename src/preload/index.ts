@@ -348,6 +348,15 @@ const api: NodeTerminalApi = {
     build: (sessionId, agentId, sourceNodeId, cwd, accountId) =>
       ipcRenderer.invoke(IPC.handoffBuild, sessionId, agentId, sourceNodeId, cwd, accountId)
   },
+  pairing: {
+    start: () => ipcRenderer.invoke(IPC.pairingStart),
+    stop: () => ipcRenderer.invoke(IPC.pairingStop),
+    onDone: (cb) => {
+      const handler = (_e: unknown, result: { ok: boolean }) => cb(result)
+      ipcRenderer.on(IPC.pairingDone, handler)
+      return () => ipcRenderer.removeListener(IPC.pairingDone, handler)
+    }
+  },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)
   },

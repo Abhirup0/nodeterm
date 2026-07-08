@@ -960,6 +960,16 @@ export interface RemoteClientApi {
   fsWrite(connectionId: string, path: string, content: string): Promise<boolean>
 }
 
+/** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
+export interface PairingApi {
+  /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
+  start(): Promise<{ payload: string; sshOpen: boolean }>
+  /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
+  stop(): Promise<void>
+  /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
+  onDone(cb: (result: { ok: boolean }) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -988,6 +998,7 @@ export interface NodeTerminalApi {
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi
   handoff: HandoffApi
+  pairing: PairingApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

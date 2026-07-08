@@ -178,5 +178,10 @@ export const IPC = {
     `remote:client:exit:${connectionId}:${streamId}`,
   // Fired when a connection's relay socket drops (host/relay gone).
   remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
-  handoffBuild: 'handoff:build'
+  handoffBuild: 'handoff:build',
+  // Phone pairing (nodeterm iOS "scan a QR" flow): renderer starts/stops the one-shot LAN
+  // listener; main pushes the completion result back over `pairing:done`.
+  pairingStart: 'pairing:start',
+  pairingStop: 'pairing:stop',
+  pairingDone: 'pairing:done'
 } as const

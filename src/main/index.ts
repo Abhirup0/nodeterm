@@ -45,6 +45,7 @@ import { initLicense } from './license'
 import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
 import { isSafeLocalTranscriptPath } from './claude-accounts-core'
 import { installClaudeHooksInto } from './agents/hooks/claude'
+import { createPairingService } from './pairing-service'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
@@ -350,6 +351,18 @@ app.whenReady().then(async () => {
 
   // Writable base dir for app-managed files (e.g. default git worktree location).
   ipcMain.handle(IPC.appUserDataDir, () => app.getPath('userData'))
+
+  // Phone pairing (nodeterm iOS "scan a QR" flow): a one-shot LAN listener that installs the
+  // phone's Ed25519 key into ~/.ssh/authorized_keys. The completion result is forwarded to the
+  // window over `pairing:done` so the settings section can show the paired/timeout state.
+  const pairingService = createPairingService()
+  ipcMain.handle(IPC.pairingStart, () =>
+    pairingService.start((result) => {
+      const w = getMainWindow()
+      if (w && !w.isDestroyed()) w.webContents.send(IPC.pairingDone, result)
+    })
+  )
+  ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
