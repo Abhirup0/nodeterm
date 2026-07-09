@@ -138,6 +138,7 @@ function transcriptForCwd(cwd) {
 
 function resolveTranscript(node) {
   if (node.transcriptPath && fs.existsSync(node.transcriptPath)) return node.transcriptPath
+  if (node.agent && node.agent !== 'claude') return ''
   return transcriptForCwd(node.cwd)
 }
 
@@ -145,6 +146,60 @@ function textOf(content) {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) return content.map(function (c) { return c && c.type === 'text' ? (c.text || '') : '' }).filter(Boolean).join('\\n')
   return ''
+}
+
+// Flatten codex/gemini content: string, or array of parts carrying a .text field.
+function flatText(c) {
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) return c.map(function (x) { return x && typeof x.text === 'string' ? x.text : '' }).filter(Boolean).join('\\n')
+  return ''
+}
+
+// codex rollout line ({type:'response_item', payload}) -> 0..n display strings.
+function linesFromCodex(raw) {
+  var o
+  try { o = JSON.parse(raw) } catch (e) { return [] }
+  if (o.type !== 'response_item' || !o.payload) return []
+  var p = o.payload
+  var res = []
+  if (p.type === 'message') {
+    var role = p.role === 'user' ? 'user' : 'assistant'
+    var t = flatText(p.content)
+    if (t) res.push(role + ': ' + t)
+  } else if (p.type === 'function_call') {
+    var a = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || '')
+    res.push('  $ ' + (p.name || 'tool') + ' ' + String(a).slice(0, 200))
+  } else if (p.type === 'function_call_output') {
+    var s = flatText(p.output).split('\\n').slice(0, 3).join(' ').slice(0, 500)
+    if (s) res.push('  = ' + s)
+  }
+  return res
+}
+
+// gemini chat file is event-sourced: replay $set/$push/bare-message lines, then flatten.
+function linesFromGeminiFile(buf) {
+  var messages = []
+  buf.split('\\n').forEach(function (raw) {
+    var t = raw.trim()
+    if (!t) return
+    var o
+    try { o = JSON.parse(t) } catch (e) { return }
+    if (o.$set && typeof o.$set === 'object' && Array.isArray(o.$set.messages)) { messages = o.$set.messages; return }
+    if (o.$push && typeof o.$push === 'object') {
+      var m = o.$push.messages
+      if (Array.isArray(m)) messages = messages.concat(m)
+      else if (m && typeof m === 'object') messages.push(m)
+      return
+    }
+    if (o.content !== undefined && o.sessionId === undefined) messages.push(o)
+  })
+  var res = []
+  messages.forEach(function (m) {
+    var role = m.type === 'user' ? 'user' : (m.type === 'gemini' || m.type === 'model') ? 'assistant' : String(m.type || 'message')
+    var t = flatText(m.content)
+    if (t) res.push(role + ': ' + t)
+  })
+  return res
 }
 
 // Parse one transcript JSONL line into 0..n display strings.
@@ -177,8 +232,10 @@ function readTranscript(node) {
   if (!p) { out('"' + node.title + '" has no conversation transcript yet.'); return [] }
   var buf
   try { buf = fs.readFileSync(p, 'utf-8') } catch (e) { out('Could not read "' + node.title + '" transcript.'); return [] }
+  if (node.agent === 'gemini') return linesFromGeminiFile(buf)
+  var parse = node.agent === 'codex' ? linesFromCodex : linesFrom
   var lines = []
-  buf.split('\\n').forEach(function (raw) { if (raw.trim()) lines.push.apply(lines, linesFrom(raw)) })
+  buf.split('\\n').forEach(function (raw) { if (raw.trim()) lines.push.apply(lines, parse(raw)) })
   return lines
 }
 
