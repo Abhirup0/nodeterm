@@ -1762,6 +1762,16 @@ body,
   position: absolute;
   left: calc(100% - 4px);
   top: -6px;
+  /* Absolutely positioned inside a ~menu-width row, shrink-to-fit would clamp the flyout to
+     the row's remaining width — size it to its content so long account labels don't wrap. */
+  width: max-content;
+  max-width: 320px;
+}
+.ctx-submenu .ctx-item {
+  /* Keep the label and its default ✓ on one line (labels ellipsize past max-width). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ctx-sep {
