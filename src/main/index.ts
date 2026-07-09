@@ -426,7 +426,11 @@ app.whenReady().then(async () => {
   })
 
   const win = createWindow()
-  initUpdater(win)
+  // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
+  // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
+  initUpdater(win, () => {
+    quitting = true
+  })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
 

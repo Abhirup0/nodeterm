@@ -13,14 +13,23 @@ const { autoUpdater } = electronUpdater
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
 
-export function initUpdater(win: BrowserWindow): void {
+/**
+ * @param onBeforeRestart Run right before `quitAndInstall()`. Required so the caller can flip its
+ *   "quitting" flag: `quitAndInstall()` closes all windows and only then calls `app.quit()`, but
+ *   our `win.on('close')` hides the window (keeps the app alive) unless we're already quitting — so
+ *   without this the window just hides, `app.quit()` never fires, and the update never installs.
+ */
+export function initUpdater(win: BrowserWindow, onBeforeRestart?: () => void): void {
   const send = (channel: string, payload?: unknown) => {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
   }
 
   // Always available, even in dev: current version, manual check, restart.
   ipcMain.handle(IPC.appGetVersion, () => app.getVersion())
-  ipcMain.on(IPC.appRestartToUpdate, () => autoUpdater.quitAndInstall())
+  ipcMain.on(IPC.appRestartToUpdate, () => {
+    onBeforeRestart?.()
+    autoUpdater.quitAndInstall()
+  })
 
   if (!app.isPackaged) {
     // Dev: there is no update server. A manual check reports "up to date" so the Settings
