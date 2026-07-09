@@ -2672,6 +2672,14 @@ export function Canvas() {
             // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
+            // Inherit the source node's managed account, else the project default, else system —
+            // the same funnel as addAgentNode (the factory drops accounts on non-claude agents).
+            const projStore = useProjects.getState()
+            const account = resolveNewNodeAccount(
+              src.data.accountId as string | undefined,
+              projStore.getProject(projStore.activeProjectId ?? ''),
+              useSettings.getState().settings.claudeAccounts
+            )
             const ids: string[] = []
             for (let i = 0; i < count; i++) {
               ids.push(
@@ -2681,7 +2689,9 @@ export function Canvas() {
                     nodesRef.current.length + i,
                     args.cwd || srcCwd,
                     placeBelow(i),
-                    args.prompt
+                    args.prompt,
+                    undefined,
+                    account
                   )
                 )
               )
@@ -2815,9 +2825,25 @@ export function Canvas() {
               return
             }
             const live = nodesRef.current as CanvasNode[]
+            // Same account funnel as open-claude/open-agent above; per-role the factory
+            // drops the account for non-claude agents.
+            const teamStore = useProjects.getState()
+            const teamAccount = resolveNewNodeAccount(
+              src.data.accountId as string | undefined,
+              teamStore.getProject(teamStore.activeProjectId ?? ''),
+              useSettings.getState().settings.claudeAccounts
+            )
             // Build members; fixed role titles pin the node name (titleAuto off).
             const members = roles.map((r, i) => {
-              const node = createAgentNode(r.agent ?? 'claude', live.length + i, srcCwd, placeBelow(i), r.prompt)
+              const node = createAgentNode(
+                r.agent ?? 'claude',
+                live.length + i,
+                srcCwd,
+                placeBelow(i),
+                r.prompt,
+                undefined,
+                teamAccount
+              )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
             const memberIds = members.map((m) => m.id)
