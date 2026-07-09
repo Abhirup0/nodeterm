@@ -38,7 +38,7 @@ import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { ChatDriver } from './chat-driver'
 import { initContextLink, setNodeTranscript } from './context-link'
-import { initCanvasControl } from './canvas-control'
+import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -601,13 +601,15 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.chatDispose, (_e, nodeId: string) => chatDriver.dispose(nodeId))
 
   installManagedAgentHooks()
-  // Managed accounts each carry their own settings.json — re-install the hook there too
-  // (idempotent), so an app update's new hook script reaches every account dir. Best-effort:
-  // one failing account must never block launch (match installManagedAgentHooks' fail-open).
+  // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
+  // relative to CLAUDE_CONFIG_DIR) — re-install the hook + canvas skill there too (idempotent),
+  // so an app update's new versions reach every account dir. Best-effort: one failing account
+  // must never block launch (match installManagedAgentHooks' fail-open).
   for (const acct of settingsStore.get().claudeAccounts ?? []) {
     if (acct.host) continue // remote accounts live on another host; nothing to install locally
     try {
       installClaudeHooksInto(claudeConfigDirFor(acct.id))
+      installCanvasSkillInto(claudeConfigDirFor(acct.id))
     } catch (e) {
       console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
     }

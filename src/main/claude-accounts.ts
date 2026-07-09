@@ -10,6 +10,7 @@ import { app, ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import { accountConfigDir, isSupportedClaudeVersion, parseLoginCapture } from './claude-accounts-core'
 import { installClaudeHooksInto } from './agents/hooks/claude'
+import { installCanvasSkillInto } from './canvas-control'
 import { findInLoginPath } from './pty-manager'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 
@@ -69,9 +70,11 @@ export function initClaudeAccounts(getSshManager?: () => SshProjectManager | und
     }
     const configDir = claudeConfigDirFor(id)
     await fs.mkdir(configDir, { recursive: true })
-    // Install the managed hook up front so the very first session in this account
-    // already reports status (badges/notifications/subagent viz).
+    // Install the managed hook + canvas skill up front so the very first session in this
+    // account already reports status (badges/notifications/subagent viz) and can control
+    // the canvas (Claude resolves skills relative to CLAUDE_CONFIG_DIR, not ~/.claude).
     installClaudeHooksInto(configDir)
+    installCanvasSkillInto(configDir)
     const versionSupported = await checkClaudeVersion()
     return { id, configDir, versionSupported }
   })

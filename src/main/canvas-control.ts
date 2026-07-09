@@ -17,8 +17,8 @@ function cliScriptPath(): string {
 function shimPath(): string {
   return path.join(dir(), 'nodeterm.sh')
 }
-function skillPath(): string {
-  return path.join(os.homedir(), '.claude', 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
+function skillPathIn(configDir: string): string {
+  return path.join(configDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
 }
 
 function writeCliFiles(): void {
@@ -37,8 +37,8 @@ ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliScriptPath()}" "$@"
   }
 }
 
-function installSkill(): void {
-  const body = `---
+function skillBody(): string {
+  return `---
 name: manage-nodeterm-canvas
 description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, wrap nodes in labeled groups, arrange/align/rename them, show an image/video/web page, write to or close a terminal. Use whenever the user asks to create or open nodes/sessions, build something using multiple Claude (or other agent) sessions, split work across agents, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
 ---
@@ -89,18 +89,28 @@ Typical requests this skill covers:
 - "Tidy up / group my terminals" → \`list\`, then \`group\` + \`arrange\` + \`align\`.
 - "Rename this node/group" → \`rename\`.
 `
+}
+
+/**
+ * Install (or refresh) the canvas-control skill into a Claude config dir's `skills/`.
+ * Claude Code resolves user skills relative to CLAUDE_CONFIG_DIR, so managed accounts
+ * (config dir = {userData}/claude-accounts/<id>) need their own copy — mirroring how the
+ * managed status hook is merged into each account dir's settings.json. Best-effort.
+ */
+export function installCanvasSkillInto(configDir: string): void {
+  const p = skillPathIn(configDir)
   try {
-    fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    fs.writeFileSync(skillPath(), body, 'utf8')
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, skillBody(), 'utf8')
   } catch (e) {
-    console.warn('[canvas-control] skill install failed', e)
+    console.warn('[canvas-control] skill install failed', p, e)
   }
 }
 
 export function initCanvasControl(): void {
   try {
     writeCliFiles()
-    installSkill()
+    installCanvasSkillInto(path.join(os.homedir(), '.claude'))
   } catch (e) {
     console.error('[canvas-control] setup failed', e)
   }
