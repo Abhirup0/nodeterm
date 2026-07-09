@@ -58,12 +58,19 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
+import { initPlatform } from '../core/platform'
+import { electronPlatform } from './platform-electron'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
 // in packaged builds. Must run before the stores below resolve userData paths.
 const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
 if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
+
+// First thing in bootstrap: install the Electron CorePlatform so anything in src/core
+// (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI
+// userData override so userDataDir reads the final path; nothing consumes it yet.
+initPlatform(electronPlatform())
 
 // Only hand the OS a URL with a vetted scheme. Blocks file://, smb://, and custom
 // protocol-handler schemes that could be smuggled in via remote announcement feeds or
