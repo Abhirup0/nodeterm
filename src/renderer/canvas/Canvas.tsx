@@ -107,7 +107,7 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
-import { buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
+import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
@@ -959,7 +959,7 @@ export function Canvas() {
   }, [])
 
   // Endpoint descriptor for classifyLink: node kind + whether it's a context-link-capable
-  // agent session (currently Claude only). Null when the node doesn't exist.
+  // agent session (claude/codex/gemini). Null when the node doesn't exist.
   const linkEndpointOf = useCallback(
     (id: string): LinkEndpoint | null => {
       const n = nodesRef.current.find((x) => x.id === id)
@@ -970,7 +970,7 @@ export function Canvas() {
     [agentIdOf]
   )
 
-  // Draw a link: context (two Claude nodes read each other) or note (sticky text becomes
+  // Draw a link: context (two agent nodes read each other) or note (sticky text becomes
   // the terminal's context).
   const onConnect = useCallback(
     (c: Connection) => {
@@ -1000,16 +1000,17 @@ export function Canvas() {
         (nodes.find((n) => n.id === id)?.data.title as string) || 'a linked node'
       if (kind === 'context') {
         // Discovery: tell each idle endpoint it is now linked (skip a node mid-turn so we
-        // don't interrupt it — the skill stays discoverable on its next relevant need).
-        const note = (selfId: string, otherId: string) => {
+        // don't interrupt it). Claude gets the skill pointer; codex/gemini get the CLI inline.
+        const note = async (selfId: string, otherId: string) => {
           if (status[selfId]?.state === 'working') return
+          const { shimPath } = await window.nodeTerminal.contextLink.info()
           void window.nodeTerminal.pty.sendText(
             selfId,
-            `[nodeterm] You are now linked to "${titleOf(otherId)}". Use the get-linked-context skill to read its context when you need it.`
+            buildContextLinkNote(agentIdOf(selfId), titleOf(otherId), shimPath)
           )
         }
-        note(source, target)
-        note(target, source)
+        void note(source, target)
+        void note(target, source)
         return
       }
       // Note link: push the note text once into the terminal — agent sessions only.
@@ -1020,7 +1021,8 @@ export function Canvas() {
       const sticky = nodes.find((n) => n.id === source)
       const msg = buildNotePushMessage(
         (sticky?.data.title as string) || 'Note',
-        (sticky?.data.text as string) ?? ''
+        (sticky?.data.text as string) ?? '',
+        agentIdOf(target)
       )
       if (msg) void window.nodeTerminal.pty.sendText(target, msg)
     },
@@ -1066,6 +1068,17 @@ export function Canvas() {
     })
   }, [nodes])
 
+  // Rewrite link files when a linked node's session starts/changes: main resolves
+  // codex/gemini transcripts by sessionId, so a session that appears after the edge was
+  // drawn must trigger a rewrite. Primitive signature, not the byId map (see loopSig).
+  const linkSessionSig = useAgentStatus((s) => {
+    let sig = ''
+    for (const e of linkEdges) {
+      sig += (s.byId[e.source]?.sessionId ?? '') + '|' + (s.byId[e.target]?.sessionId ?? '') + '|'
+    }
+    return sig
+  })
+
   // Prune links whose endpoints were deleted, then push the link map to main (debounced) so
   // it can rewrite the per-node link files the context CLI reads.
   useEffect(() => {
@@ -1078,18 +1091,23 @@ export function Canvas() {
     const infoOf = (id: string) => {
       const n = nodes.find((nn) => nn.id === id)
       const sticky = n?.type === 'sticky'
+      const agentId = sticky ? undefined : agentIdOf(id)
       return {
         id,
         title: (n?.data.title as string) || id,
         cwd: (n?.data.cwd as string) || '',
         note: sticky ? ((n?.data.text as string) ?? '') : undefined,
-        sticky
+        sticky,
+        agentId,
+        sessionId: agentId ? useAgentStatus.getState().byId[id]?.sessionId : undefined,
+        accountId: sticky ? undefined : ((n?.data.accountId as string) || undefined)
       }
     }
     const map = buildLinkMap(valid, infoOf)
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
-  }, [linkEdges, nodes, setLinkEdges])
+    // linkSessionSig is read only as an effect trigger — infoOf re-reads sessionIds via getState().
+  }, [linkEdges, nodes, setLinkEdges, agentIdOf, linkSessionSig])
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
   // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
