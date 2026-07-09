@@ -185,6 +185,7 @@ export function initContextLink(win: BrowserWindow, ptyManager: PtyManager): voi
     writeChain = writeChain.then(() => writeLinkFiles(map && typeof map === 'object' ? map : {}))
     return writeChain
   })
+  ipcMain.handle(IPC.contextLinkInfo, () => ({ shimPath: cliShimPath() }))
   // win is reserved for future link-activity events; referenced to satisfy noUnusedParameters.
   void win
 }

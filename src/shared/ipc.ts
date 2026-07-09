@@ -39,6 +39,7 @@ export const IPC = {
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
   contextLinkSetLinks: 'context-link:set-links',
+  contextLinkInfo: 'context-link:info',
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appUpdateProgress: 'app:update-progress',
