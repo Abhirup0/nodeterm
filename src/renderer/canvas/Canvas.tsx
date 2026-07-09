@@ -127,6 +127,7 @@ import {
   alignNodes,
   arrangeNodes,
   createAccountLoginNode,
+  isAccountLoginNode,
   systemAccountDisplay,
   createAgentNode,
   createBrowserNode,
@@ -1496,32 +1497,6 @@ export function Canvas() {
   // the "System account" entry with it.
   useEffect(() => useSystemAccount.getState().ensure(), [])
 
-  // When an account is removed in Settings, clear it off the ACTIVE project's live nodes (the
-  // projects store only holds the other projects' serialized copies). Referencing nodes fall
-  // back to the system account; the missing-dir spawn fallback (Task 3) is safe either way.
-  useEffect(() => {
-    const onAccountRemoved = (ev: Event): void => {
-      const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
-      if (!accountId) return
-      setNodes((ns) =>
-        ns.some((n) => n.data.accountId === accountId)
-          ? ns.map((n) =>
-              n.data.accountId === accountId
-                ? { ...n, data: { ...n.data, accountId: undefined } }
-                : n
-            )
-          : ns
-      )
-      // Schedule a workspace write: persist() re-serializes the cleared live nodes and writes
-      // the whole projects store to disk, also covering AccountsSection's setState on the other
-      // projects' serialized nodes + defaultAccountId. Without this, quitting right after a
-      // removal would leave the dead accountId in workspace.json.
-      markDirty()
-    }
-    window.addEventListener('nodeterm:account-removed', onAccountRemoved)
-    return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
-  }, [setNodes, markDirty])
-
   const addAgentNode = useCallback(
     (agentId: AgentId, center?: { x: number; y: number }, groupId?: string, accountId?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
@@ -1672,6 +1647,40 @@ export function Canvas() {
     },
     [setNodes, markDirty]
   )
+
+  // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
+  // store only holds the other projects' serialized copies). The account's login node is
+  // permanently DELETED — left alive with its accountId cleared, a cold restart would respawn
+  // its `claude /login` under the SYSTEM env, where completing the OAuth silently overwrites the
+  // user's ~/.claude identity (observed in the wild). Ordinary nodes just drop the accountId and
+  // fall back to the system account (the missing-dir spawn fallback is safe either way).
+  // Declared after deleteNodes: the dep array would hit the const's TDZ above it.
+  useEffect(() => {
+    const onAccountRemoved = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
+      if (!accountId) return
+      const loginIds = nodesRef.current
+        .filter((n) => n.data.accountId === accountId && isAccountLoginNode(n.data))
+        .map((n) => n.id)
+      if (loginIds.length) deleteNodes(loginIds)
+      setNodes((ns) =>
+        ns.some((n) => n.data.accountId === accountId)
+          ? ns.map((n) =>
+              n.data.accountId === accountId
+                ? { ...n, data: { ...n.data, accountId: undefined } }
+                : n
+            )
+          : ns
+      )
+      // Schedule a workspace write: persist() re-serializes the cleared live nodes and writes
+      // the whole projects store to disk, also covering AccountsSection's setState on the other
+      // projects' serialized nodes + defaultAccountId. Without this, quitting right after a
+      // removal would leave the dead accountId in workspace.json.
+      markDirty()
+    }
+    window.addEventListener('nodeterm:account-removed', onAccountRemoved)
+    return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
+  }, [setNodes, markDirty, deleteNodes])
 
   // Delete / Backspace asks for confirmation, then deletes the selected nodes.
   useEffect(() => {

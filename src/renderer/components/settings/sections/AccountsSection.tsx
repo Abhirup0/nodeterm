@@ -3,6 +3,7 @@ import type { ClaudeAccount } from '@shared/types'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
+import { isAccountLoginNode } from '../../../state/workspace'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -141,9 +142,12 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       projects: s.projects.map((p) => ({
         ...p,
         ...(p.defaultAccountId === account.id ? { defaultAccountId: undefined } : {}),
-        nodes: p.nodes.map((n) =>
-          n.accountId === account.id ? { ...n, accountId: undefined } : n
-        )
+        // The account's serialized login node is DROPPED, not kept account-less: respawned
+        // without its env, its `claude /login` would run against the system ~/.claude and
+        // overwrite the user's identity on completion. Other nodes just lose the accountId.
+        nodes: p.nodes
+          .filter((n) => !(n.accountId === account.id && isAccountLoginNode(n)))
+          .map((n) => (n.accountId === account.id ? { ...n, accountId: undefined } : n))
       }))
     }))
     // ...and off the active project's LIVE nodes (Canvas listener patches React Flow).

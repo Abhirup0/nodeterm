@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { accountChipLabel, systemAccountDisplay } from './workspace'
+import { accountChipLabel, isAccountLoginNode, systemAccountDisplay } from './workspace'
 import type { ClaudeAccount } from '@shared/types'
 
 const acct = (over: Partial<ClaudeAccount>): ClaudeAccount => ({
@@ -63,5 +63,21 @@ describe('systemAccountDisplay', () => {
   it('falls back to the generic name when nothing is known', () => {
     expect(systemAccountDisplay('', null)).toBe('System account')
     expect(systemAccountDisplay(undefined, undefined)).toBe('System account')
+  })
+})
+
+describe('isAccountLoginNode', () => {
+  it('matches the factory title (the only persisted signature)', () => {
+    expect(isAccountLoginNode({ title: 'Claude login' })).toBe(true)
+  })
+
+  it('matches a live node by its one-shot initialCommand', () => {
+    expect(isAccountLoginNode({ title: 'renamed', initialCommand: 'claude /login' })).toBe(true)
+  })
+
+  it('does not match ordinary claude nodes', () => {
+    expect(isAccountLoginNode({ title: 'My session', initialCommand: 'claude' })).toBe(false)
+    expect(isAccountLoginNode({ title: 'Terminal' })).toBe(false)
+    expect(isAccountLoginNode({})).toBe(false)
   })
 })

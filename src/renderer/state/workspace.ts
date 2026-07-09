@@ -382,6 +382,17 @@ export function createAccountLoginNode(
 }
 
 /**
+ * True when node data is (or started as) an account-login terminal (`claude /login`).
+ * `initialCommand` is one-shot and never persisted, so the factory title is the only durable
+ * signature — serialized copies match on title alone. Used to DESTROY the login node together
+ * with its removed account: left alive, a cold restart would respawn its `claude /login` under
+ * the system env, where completing the OAuth overwrites the user's ~/.claude identity.
+ */
+export function isAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
+  return data.title === 'Claude login' || (data.initialCommand ?? '').startsWith('claude /login')
+}
+
+/**
  * Creates a code editor node for a file. When `sshFs` is true, `data.sshFs` is stamped so EditorNode
  * reads/writes over the project's remote fs (`sshFs`) and `filePath` is the remote path — mirroring
  * how `createTerminalNode` stamps `data.sshRemoteTmux`. The SSH-ness is passed EXPLICITLY by the
