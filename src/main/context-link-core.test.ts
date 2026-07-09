@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { buildLinkDoc, resolveLinkTranscript, setNodeTranscript, transcriptPathOf } from './context-link-core'
+import {
+  buildLinkDoc,
+  buildLinkedContextInstructions,
+  mergeInstructionsBlock,
+  resolveLinkTranscript,
+  setNodeTranscript,
+  transcriptPathOf
+} from './context-link-core'
 
 describe('buildLinkDoc', () => {
   it('enriches each link with tmux name, injected transcript path, and cwd', () => {
@@ -121,5 +128,38 @@ describe('setNodeTranscript / transcriptPathOf', () => {
   })
   it('returns empty string for an unknown node', () => {
     expect(transcriptPathOf('nope')).toBe('')
+  })
+})
+
+describe('mergeInstructionsBlock', () => {
+  const block = 'Use the CLI: sh "/x/context.sh" list'
+  it('appends the marker-delimited block to existing content', () => {
+    const out = mergeInstructionsBlock('# My rules\n\nBe nice.\n', block)
+    expect(out).toContain('# My rules')
+    expect(out).toContain('<!-- nodeterm:get-linked-context:start -->')
+    expect(out).toContain(block)
+    expect(out).toContain('<!-- nodeterm:get-linked-context:end -->')
+  })
+  it('is idempotent: re-merging replaces the block in place', () => {
+    const once = mergeInstructionsBlock('# My rules\n', block)
+    const twice = mergeInstructionsBlock(once, 'UPDATED body')
+    expect(twice.match(/nodeterm:get-linked-context:start/g)).toHaveLength(1)
+    expect(twice).toContain('UPDATED body')
+    expect(twice).not.toContain('sh "/x/context.sh" list')
+    expect(twice).toContain('# My rules')
+  })
+  it('works on an empty file', () => {
+    const out = mergeInstructionsBlock('', block)
+    expect(out.startsWith('<!-- nodeterm:get-linked-context:start -->')).toBe(true)
+  })
+})
+
+describe('buildLinkedContextInstructions', () => {
+  it('embeds the shim path and the four commands', () => {
+    const s = buildLinkedContextInstructions('/x/context.sh')
+    expect(s).toContain('sh "/x/context.sh" list')
+    expect(s).toContain('summary')
+    expect(s).toContain('transcript')
+    expect(s).toContain('terminal')
   })
 })

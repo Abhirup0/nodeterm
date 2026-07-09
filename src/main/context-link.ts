@@ -15,7 +15,14 @@ import { IPC } from '../shared/ipc'
 import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
 import { TMUX_SOCKET } from './tmux-naming'
-import { CLI_SCRIPT, buildLinkDoc, resolveLinkTranscript, transcriptPathOf } from './context-link-core'
+import {
+  CLI_SCRIPT,
+  buildLinkDoc,
+  buildLinkedContextInstructions,
+  mergeInstructionsBlock,
+  resolveLinkTranscript,
+  transcriptPathOf
+} from './context-link-core'
 import { locateClaude, locateCodex, locateGemini } from './handoff/locate'
 
 export { setNodeTranscript } from './context-link-core'
@@ -54,12 +61,12 @@ ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliScriptPath()}" "$@"
 function installSkill(): void {
   const body = `---
 name: get-linked-context
-description: Read the conversation/transcript, a recent summary, or the terminal output of another Claude node you are linked to on the nodeterm canvas. Use when you need to know what a connected node has been doing, hand off, or continue its work. Only meaningful inside a nodeterm session with a context-link edge. Also reads sticky notes linked to this node as context.
+description: Read the conversation/transcript, a recent summary, or the terminal output of another agent node (Claude, Codex or Gemini) you are linked to on the nodeterm canvas. Use when you need to know what a connected node has been doing, hand off, or continue its work. Only meaningful inside a nodeterm session with a context-link edge. Also reads sticky notes linked to this node as context.
 ---
 
 # Get linked context
 
-On the nodeterm canvas, this Claude session may be connected to other Claude nodes by a
+On the nodeterm canvas, this Claude session may be connected to other agent nodes (Claude, Codex or Gemini) by a
 context-link edge. When you are linked, you can READ the other node's context on demand by
 running the local CLI shim below. Nothing is pushed to you automatically — pull what you need.
 
@@ -88,6 +95,30 @@ to read — do not retry.
     fs.writeFileSync(skillPath(), body, 'utf8')
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
+  }
+}
+
+// Codex/Gemini have no skill system — merge an instructions block into their global
+// instruction files instead (marker-delimited, idempotent, other content preserved).
+function installAgentInstructions(): void {
+  const block = buildLinkedContextInstructions(cliShimPath())
+  const targets = [
+    path.join(os.homedir(), '.codex', 'AGENTS.md'),
+    path.join(os.homedir(), '.gemini', 'GEMINI.md')
+  ]
+  for (const p of targets) {
+    try {
+      let existing = ''
+      try {
+        existing = fs.readFileSync(p, 'utf8')
+      } catch {
+        /* new file */
+      }
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      fs.writeFileSync(p, mergeInstructionsBlock(existing, block), 'utf8')
+    } catch (e) {
+      console.warn('[context-link] instructions install failed', p, e)
+    }
   }
 }
 
@@ -141,6 +172,7 @@ export function initContextLink(win: BrowserWindow, ptyManager: PtyManager): voi
     }
     writeCliFiles()
     installSkill()
+    installAgentInstructions()
   } catch (e) {
     console.error('[context-link] setup failed', e)
     return

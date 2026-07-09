@@ -40,6 +40,43 @@ export async function resolveLinkTranscript(
   }
 }
 
+const INSTR_START = '<!-- nodeterm:get-linked-context:start -->'
+const INSTR_END = '<!-- nodeterm:get-linked-context:end -->'
+
+/** Idempotently merge our marker-delimited block into a global instructions file
+ *  (~/.codex/AGENTS.md, ~/.gemini/GEMINI.md). Everything outside the markers is preserved. */
+export function mergeInstructionsBlock(existing: string, block: string): string {
+  const full = `${INSTR_START}\n${block.trim()}\n${INSTR_END}`
+  const start = existing.indexOf(INSTR_START)
+  const end = existing.indexOf(INSTR_END)
+  if (start >= 0 && end > start) {
+    return existing.slice(0, start) + full + existing.slice(end + INSTR_END.length)
+  }
+  const sep = existing.trim() ? (existing.endsWith('\n') ? '\n' : '\n\n') : ''
+  return existing + sep + full + '\n'
+}
+
+/** The instructions body telling codex/gemini how to read linked-node context. */
+export function buildLinkedContextInstructions(shimPath: string): string {
+  return [
+    '# Reading linked nodeterm nodes (get-linked-context)',
+    '',
+    'When you run inside a nodeterm canvas session, this node may be linked to other agent',
+    'nodes (Claude, Codex or Gemini) or sticky notes by a context-link edge. You can READ a',
+    "linked node's context on demand — nothing is pushed automatically:",
+    '',
+    '```sh',
+    `sh "${shimPath}" list                        # nodes you are linked to (start here)`,
+    `sh "${shimPath}" summary --node <id|title>   # last lines of its conversation`,
+    `sh "${shimPath}" transcript --node <id|title>`,
+    `sh "${shimPath}" terminal --node <id|title>  # its recent terminal output`,
+    '```',
+    '',
+    'Only meaningful inside nodeterm (NODETERM_NODE_ID set) with a linked edge. If the CLI',
+    'says "Not a nodeterm session" or "No linked nodes", there is nothing to read — do not retry.'
+  ].join('\n')
+}
+
 export interface LinkDocEntry {
   id: string
   title: string
@@ -108,7 +145,7 @@ function loadLinks() {
 
 function pickNode(doc, want) {
   var links = doc.links
-  if (!links.length) { out('No linked nodes. Draw a context-link edge from this Claude node to another on the canvas.'); process.exit(0) }
+  if (!links.length) { out('No linked nodes. Draw a context-link edge from this node to another on the canvas.'); process.exit(0) }
   if (want) {
     var q = String(want).toLowerCase()
     var m = links.find(function (n) { return String(n.id).toLowerCase() === q || String(n.title || '').toLowerCase() === q })
