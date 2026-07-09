@@ -15,6 +15,7 @@ export type ControlVerb =
   | 'arrange'
   | 'align'
   | 'spawn-team'
+  | 'branch'
   | 'rename'
   | 'write'
   | 'close'
@@ -37,6 +38,7 @@ const VERBS: ControlVerb[] = [
   'arrange',
   'align',
   'spawn-team',
+  'branch',
   'rename',
   'write',
   'close'
@@ -70,6 +72,7 @@ export function parseControlRequest(
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
   if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
+  if (v === 'branch' && !args.node) return { error: 'branch requires --node <id>' }
   if (v === 'rename' && !args.node) return { error: 'rename requires --node <id>' }
   if (v === 'rename' && !args.title) return { error: 'rename requires --title' }
   return { verb: v, args }
@@ -113,7 +116,7 @@ var args = {}
 for (var i = 1; i < argv.length; i++) {
   if (argv[i].slice(0, 2) === '--') { args[argv[i].slice(2)] = argv[i + 1] || ''; i++ }
   else if (!args.path && (verb === 'show-image' || verb === 'show-video')) { args.path = argv[i] }
-  else if (!args.node && (verb === 'write' || verb === 'close' || verb === 'rename')) { args.node = argv[i] }
+  else if (!args.node && (verb === 'write' || verb === 'close' || verb === 'rename' || verb === 'branch')) { args.node = argv[i] }
 }
 
 var ep = endpoint()

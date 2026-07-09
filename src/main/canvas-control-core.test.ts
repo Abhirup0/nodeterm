@@ -67,6 +67,15 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('open-agent')).toBe(false)
   })
 
+  it('branch requires --node, and is not destructive', () => {
+    expect(parseControlRequest('branch', {})).toEqual({ error: 'branch requires --node <id>' })
+    expect(parseControlRequest('branch', { node: 'n1' })).toEqual({
+      verb: 'branch',
+      args: { node: 'n1' }
+    })
+    expect(isDestructiveVerb('branch')).toBe(false)
+  })
+
   it('rename requires --node and --title, and is not destructive', () => {
     expect(parseControlRequest('rename', {})).toEqual({ error: 'rename requires --node <id>' })
     expect(parseControlRequest('rename', { node: 'n1' })).toEqual({ error: 'rename requires --title' })

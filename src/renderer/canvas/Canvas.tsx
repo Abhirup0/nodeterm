@@ -1944,9 +1944,9 @@ export function Canvas() {
   // We already know the current session id from the hooks; only fall back to parsing the
   // terminal output if it's unknown.
   const branchClaude = useCallback(
-    async (nodeId: string) => {
+    async (nodeId: string, opts?: { interactive?: boolean }): Promise<{ ok: boolean; error?: string; newNodeId?: string }> => {
       const source = nodesRef.current.find((n) => n.id === nodeId) as CanvasNode | undefined
-      if (!source) return
+      if (!source) return { ok: false, error: `no node with id ${nodeId}` }
       const known = useAgentStatus.getState().byId[nodeId]?.sessionId
       let originalId = known
       if (known) {
@@ -1954,8 +1954,12 @@ export function Canvas() {
       } else {
         const res = await branchClaudeSession(nodeId)
         if (!res.ok || !res.originalId) {
-          setConfirm({ message: res.error ?? 'Branch failed.', onConfirm: () => setConfirm(null) })
-          return
+          const error = res.error ?? 'Branch failed.'
+          // The error dialog is for humans; agent-CLI calls get the error in the reply instead.
+          if (opts?.interactive !== false) {
+            setConfirm({ message: error, onConfirm: () => setConfirm(null) })
+          }
+          return { ok: false, error }
         }
         originalId = res.originalId
       }
@@ -1972,6 +1976,7 @@ export function Canvas() {
       copy.selected = true
       setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), copy])
       markDirty()
+      return { ok: true, newNodeId: copy.id }
     },
     [setNodes, markDirty]
   )
@@ -2873,6 +2878,26 @@ export function Canvas() {
               message: `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}`,
               result: { groupId: teamGroup.id, memberIds }
             })
+            return
+          }
+          case 'branch': {
+            const id = args.node ?? ''
+            const target = nodesRef.current.find((nd) => nd.id === id)
+            if (!target) {
+              reply({ ok: false, error: `branch: no node with id ${id}` })
+              return
+            }
+            const targetAgent = target.data.agentId as AgentId | undefined
+            if (!targetAgent || !canBranch(targetAgent)) {
+              reply({ ok: false, error: 'branch: node is not a branch-capable agent node' })
+              return
+            }
+            const res = await branchClaude(id, { interactive: false })
+            reply(
+              res.ok
+                ? { ok: true, message: `branched ${id}; original resumes in ${res.newNodeId}`, result: { newNodeId: res.newNodeId } }
+                : { ok: false, error: res.error }
+            )
             return
           }
           case 'rename': {
