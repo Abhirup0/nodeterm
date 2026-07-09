@@ -74,7 +74,7 @@ async function flush(): Promise<void> {
 describe('license entitlement refresh', () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Only the refresh interval and the clock are faked: fetch/fs promises and the
     // 8s abort timers stay on the real event loop so awaits actually settle.
     vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
@@ -88,11 +88,19 @@ describe('license entitlement refresh', () => {
     fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     vi.resetModules()
+    // device-id (imported transitively by license) reads userData through the core platform,
+    // so point the fake at this run's temp dir. Init on the post-reset module graph the
+    // dynamic `import('./license')` below will resolve against.
+    const { initPlatform } = await import('../core/platform')
+    const { fakePlatform } = await import('../core/platform-fake')
+    initPlatform(fakePlatform({ userDataDir: h.userData }))
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllGlobals()
     vi.useRealTimers()
+    const { resetPlatformForTests } = await import('../core/platform')
+    resetPlatformForTests()
     rmSync(h.userData, { recursive: true, force: true })
   })
 

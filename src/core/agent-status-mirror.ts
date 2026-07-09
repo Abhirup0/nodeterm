@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { app } from 'electron'
+import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
 
@@ -119,13 +119,13 @@ let writeSeq = 0
  * `<userData>/agent-status.json`. Tests pass an explicit path (and thus never touch electron).
  */
 export function initAgentStatusMirror(filePath?: string): void {
-  targetFile = filePath ?? path.join(app.getPath('userData'), 'agent-status.json')
+  targetFile = filePath ?? path.join(platform().userDataDir, 'agent-status.json')
 }
 
 function resolveFile(): string | null {
   if (targetFile) return targetFile
   try {
-    targetFile = path.join(app.getPath('userData'), 'agent-status.json')
+    targetFile = path.join(platform().userDataDir, 'agent-status.json')
     return targetFile
   } catch {
     return null

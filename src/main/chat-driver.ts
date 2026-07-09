@@ -9,7 +9,7 @@ import { sdkMessageToEvents } from '../core/chat-events'
 import { ChatInputQueue, createPushIterable } from '../core/chat-queue'
 import { resolveTranscriptPath } from '../core/transcript-reader'
 import { claudeConfigDirFor } from './claude-accounts'
-import { recordAgentEvent } from './agent-status-mirror'
+import { recordAgentEvent } from '../core/agent-status-mirror'
 import { AUTH_ENV_STRIP } from '../core/claude-accounts-core'
 
 interface PendingPermission { resolve: (d: ChatPermissionDecision) => void }

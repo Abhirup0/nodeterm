@@ -5,10 +5,10 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { app } from 'electron'
+import { platform } from './platform'
 import type { ClaudeAccount } from '../shared/types'
-import { accountConfigDir } from '../core/claude-accounts-core'
-import { SESSION_ID_RE } from '../core/transcript-reader'
+import { accountConfigDir } from './claude-accounts-core'
+import { SESSION_ID_RE } from './transcript-reader'
 import {
   extractEntryFields,
   planRefresh,
@@ -16,7 +16,7 @@ import {
   type ScanFile,
   type TranscriptIndexEntry,
   type TranscriptHit
-} from '../core/transcript-index-core'
+} from './transcript-index-core'
 
 export const TRANSCRIPT_INDEX_REFRESH_MS = 5 * 60 * 1000
 const READ_CAP_BYTES = 5 * 1024 * 1024 // mirror transcript-reader: never read more than the tail
@@ -26,14 +26,14 @@ let timer: NodeJS.Timeout | undefined
 let accountsGetter: (() => ClaudeAccount[]) | undefined
 
 function indexFilePath(): string {
-  return path.join(app.getPath('userData'), 'transcript-index.json')
+  return path.join(platform().userDataDir, 'transcript-index.json')
 }
 
 // Every LOCAL transcript root to index: the system default plus each managed LOCAL account's
 // projects dir. Remote accounts (a `host` set) live on another host's fs → not scanned here.
 function projectsRoots(): string[] {
   const roots = [path.join(os.homedir(), '.claude', 'projects')]
-  const userData = app.getPath('userData')
+  const userData = platform().userDataDir
   for (const acct of accountsGetter?.() ?? []) {
     if (acct.host || acct.pending) continue
     try {
