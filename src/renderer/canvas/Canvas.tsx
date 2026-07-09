@@ -2301,35 +2301,12 @@ export function Canvas() {
               icon: <AgentIcon agentId={c.id} />,
               onClick: () => addAgentNode(c.id, at, groupId)
             })
-          ),
-        accounts.length > 0
-          ? {
-              type: 'submenu',
-              label: 'New chat',
-              icon: <IconChat />,
-              children: [
-                {
-                  label: withDefaultMark(systemLabel),
-                  icon: <AgentIcon agentId="claude" />,
-                  onClick: () => addChatNode(at, undefined, groupId)
-                },
-                ...accounts.map(
-                  (a): MenuItem => ({
-                    label: withDefaultMark(a.label, a.id),
-                    icon: <AgentIcon agentId="claude" />,
-                    onClick: () => addChatNode(at, a.id, groupId)
-                  })
-                )
-              ]
-            }
-          : {
-              label: 'New chat',
-              icon: <IconChat />,
-              onClick: () => addChatNode(at, undefined, groupId)
-            }
+          )
+        // "New chat" is deliberately NOT here: the context menus stay session-focused; chat
+        // nodes are created from the Dock + menu and the command palette.
       ]
     },
-    [activeProjectId, addAgentNode, addChatNode]
+    [activeProjectId, addAgentNode]
   )
 
   const groupItems = useCallback(
@@ -2376,18 +2353,22 @@ export function Canvas() {
         x: e.clientX,
         y: e.clientY,
         items: [
+          // Sessions: local terminal, agent CLIs, remote host.
           { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
           ...agentCreationItems(at),
-          { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
-          { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
-          { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
-          { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           {
             label: 'New remote…',
             icon: <IconTerminal />,
             onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
           },
           { type: 'separator' },
+          // Content nodes.
+          { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
+          { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
+          { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
+          { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
+          { type: 'separator' },
+          // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
         ]
