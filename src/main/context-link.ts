@@ -14,10 +14,10 @@ import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
-import { TMUX_SOCKET } from './tmux-naming'
-import { CLI_SCRIPT, buildLinkDoc, transcriptPathOf } from './context-link-core'
+import { TMUX_SOCKET } from '../core/tmux-naming'
+import { CLI_SCRIPT, buildLinkDoc, transcriptPathOf } from '../core/context-link-core'
 
-export { setNodeTranscript } from './context-link-core'
+export { setNodeTranscript } from '../core/context-link-core'
 
 let dir = ''
 export function contextLinkDir(): string {

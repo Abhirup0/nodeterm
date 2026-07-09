@@ -37,7 +37,7 @@ import {
   createClientCanvasRouter
 } from '../../src/main/remote/client-service'
 import { applyMutation } from '../../src/main/remote/canvas-sync'
-import * as fsOps from '../../src/main/fs-ops'
+import * as fsOps from '../../src/core/fs-ops'
 import { genKeyPair, publicKeyToB64, type KeyPair } from '../../src/main/remote/e2ee'
 import { OP, type Frame } from '../../src/main/remote/framing'
 import type {

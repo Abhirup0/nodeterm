@@ -3,7 +3,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { resolveTranscriptPath } from '../transcript-reader'
+import { resolveTranscriptPath } from '../../core/transcript-reader'
 
 // claude: ~/.claude/projects/<proj>/<sessionId>.jsonl — already implemented (searches all
 // project dirs for the exact <sessionId>.jsonl). `accountId` scopes to a managed account's

@@ -7,8 +7,8 @@ import os from 'os'
 import path from 'path'
 import { app } from 'electron'
 import type { ClaudeAccount } from '../shared/types'
-import { accountConfigDir } from './claude-accounts-core'
-import { SESSION_ID_RE } from './transcript-reader'
+import { accountConfigDir } from '../core/claude-accounts-core'
+import { SESSION_ID_RE } from '../core/transcript-reader'
 import {
   extractEntryFields,
   planRefresh,
@@ -16,7 +16,7 @@ import {
   type ScanFile,
   type TranscriptIndexEntry,
   type TranscriptHit
-} from './transcript-index-core'
+} from '../core/transcript-index-core'
 
 export const TRANSCRIPT_INDEX_REFRESH_MS = 5 * 60 * 1000
 const READ_CAP_BYTES = 5 * 1024 * 1024 // mirror transcript-reader: never read more than the tail

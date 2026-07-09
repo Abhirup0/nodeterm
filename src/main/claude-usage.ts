@@ -9,7 +9,7 @@ import { promisify } from 'util'
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ClaudeUsage, ClaudeUsageWindow } from '../shared/types'
-import { usageCredsPaths } from './claude-accounts-core'
+import { usageCredsPaths } from '../core/claude-accounts-core'
 import { claudeConfigDirFor } from './claude-accounts'
 
 const execFileP = promisify(execFile)

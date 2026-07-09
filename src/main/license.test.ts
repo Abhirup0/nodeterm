@@ -23,7 +23,7 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() }
 }))
 
-vi.mock('./entitlement-key', () => ({
+vi.mock('../core/entitlement-key', () => ({
   get ENTITLEMENT_PUBLIC_KEY() {
     return h.publicKeyPem
   }

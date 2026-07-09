@@ -20,12 +20,12 @@ import {
   remoteTmuxPtyArgs,
   remoteCapturePaneArgs
 } from './remote-ssh/control-master'
-import { TMUX_SOCKET, sessionName } from './tmux-naming'
-import { releasePty, type ReleasablePty } from './pty-release'
-import { machOArch, archMismatch } from './macho-arch'
+import { TMUX_SOCKET, sessionName } from '../core/tmux-naming'
+import { releasePty, type ReleasablePty } from '../core/pty-release'
+import { machOArch, archMismatch } from '../core/macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-accounts'
-import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '../core/claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also

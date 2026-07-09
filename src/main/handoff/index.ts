@@ -4,7 +4,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { SESSION_ID_RE } from '../transcript-reader'
+import { SESSION_ID_RE } from '../../core/transcript-reader'
 import { renderClaudeTranscript } from './render-claude'
 import { renderCodexTranscript } from './render-codex'
 import { renderGeminiTranscript } from './render-gemini'

@@ -5,12 +5,12 @@
 import { IPC } from '../shared/ipc'
 import type { ChatEvent, ChatImageAttachment, ChatPermissionDecision } from '../shared/types'
 import type { NormalizedAgentEvent } from '../shared/agents/normalize'
-import { sdkMessageToEvents } from './chat-events'
-import { ChatInputQueue, createPushIterable } from './chat-queue'
-import { resolveTranscriptPath } from './transcript-reader'
+import { sdkMessageToEvents } from '../core/chat-events'
+import { ChatInputQueue, createPushIterable } from '../core/chat-queue'
+import { resolveTranscriptPath } from '../core/transcript-reader'
 import { claudeConfigDirFor } from './claude-accounts'
 import { recordAgentEvent } from './agent-status-mirror'
-import { AUTH_ENV_STRIP } from './claude-accounts-core'
+import { AUTH_ENV_STRIP } from '../core/claude-accounts-core'
 
 interface PendingPermission { resolve: (d: ChatPermissionDecision) => void }
 

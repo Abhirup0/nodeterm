@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CLI_SCRIPT } from './context-link-core'
+import { CLI_SCRIPT } from '../core/context-link-core'
 
 let dir: string
 

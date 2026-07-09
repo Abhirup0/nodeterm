@@ -10,7 +10,7 @@ import { app, ipcMain, shell, type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { LicenseStatus } from '../shared/types'
 import { getDeviceId } from './device-id'
-import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
+import { ENTITLEMENT_PUBLIC_KEY } from '../core/entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
