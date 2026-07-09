@@ -15,7 +15,8 @@ import { IPC } from '../shared/ipc'
 import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
 import { TMUX_SOCKET } from './tmux-naming'
-import { CLI_SCRIPT, buildLinkDoc, transcriptPathOf } from './context-link-core'
+import { CLI_SCRIPT, buildLinkDoc, resolveLinkTranscript, transcriptPathOf } from './context-link-core'
+import { locateClaude, locateCodex, locateGemini } from './handoff/locate'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -92,6 +93,8 @@ to read — do not retry.
 
 let pty: PtyManager | undefined
 
+const LINK_LOCATORS = { claude: locateClaude, codex: locateCodex, gemini: locateGemini }
+
 // Write one enriched link file per node id present in the map. Removed links should not
 // linger, so we clear stale per-node files first. Async fs throughout — this runs on edge
 // changes and scales with node/link count, and sync I/O here sits on the main event loop.
@@ -105,9 +108,18 @@ async function writeLinkFiles(map: ContextLinkMap): Promise<void> {
   } catch {
     /* dir may not exist yet */
   }
+  // Resolve each linked node's transcript once (hook-fed for claude, locator-by-sessionId
+  // for codex/gemini), so buildLinkDoc stays pure and sync.
+  const resolved = new Map<string, string>()
+  for (const links of Object.values(map)) {
+    for (const n of links) {
+      if (n.note != null || resolved.has(n.id)) continue
+      resolved.set(n.id, await resolveLinkTranscript(n, { hooked: transcriptPathOf, locators: LINK_LOCATORS }))
+    }
+  }
   for (const [nodeId, links] of Object.entries(map)) {
     const doc = buildLinkDoc(nodeId, links, {
-      transcriptOf: transcriptPathOf,
+      transcriptOf: (id) => resolved.get(id) ?? '',
       tmuxBin: bin,
       tmuxSocket: TMUX_SOCKET
     })

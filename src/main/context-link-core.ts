@@ -13,12 +13,41 @@ export function transcriptPathOf(nodeId: string): string {
   return nodeTranscript.get(nodeId) ?? ''
 }
 
+export type TranscriptLocator = (sessionId: string, accountId?: string) => Promise<string | undefined>
+
+/**
+ * Resolve one link entry's transcript path. Claude (and legacy entries without an
+ * agentId) prefer the hook-fed path; every agent falls back to its locator by
+ * sessionId. Notes, unknown agents, and locator errors resolve to '' (fail open —
+ * the CLI prints a clear "no transcript yet" message).
+ */
+export async function resolveLinkTranscript(
+  link: { id: string; title?: string; agentId?: string; sessionId?: string; accountId?: string; note?: string },
+  deps: { hooked: (id: string) => string; locators: Record<string, TranscriptLocator> }
+): Promise<string> {
+  if (link.note != null) return ''
+  const agent = link.agentId ?? 'claude'
+  if (agent === 'claude') {
+    const hooked = deps.hooked(link.id)
+    if (hooked) return hooked
+  }
+  const locate = deps.locators[agent]
+  if (!locate || !link.sessionId) return ''
+  try {
+    return (await locate(link.sessionId, link.accountId)) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export interface LinkDocEntry {
   id: string
   title: string
   cwd: string
   transcriptPath: string
   tmux: string
+  /** Which agent CLI produced the transcript ('claude' | 'codex' | 'gemini') — selects the parser. */
+  agent?: string
   /** Present when this entry is a sticky note: its text. Note entries have no transcript/terminal. */
   note?: string
 }
@@ -46,6 +75,7 @@ export function buildLinkDoc(
         transcriptPath: isNote ? '' : ctx.transcriptOf(n.id),
         tmux: isNote ? '' : sessionName(n.id)
       }
+      if (!isNote && n.agentId) entry.agent = n.agentId
       if (isNote) entry.note = n.note
       return entry
     }),
