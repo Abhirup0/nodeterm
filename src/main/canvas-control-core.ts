@@ -6,6 +6,7 @@ export type ControlVerb =
   | 'list'
   | 'open-terminal'
   | 'open-claude'
+  | 'open-agent'
   | 'show-image'
   | 'show-video'
   | 'show-web'
@@ -27,6 +28,7 @@ const VERBS: ControlVerb[] = [
   'list',
   'open-terminal',
   'open-claude',
+  'open-agent',
   'show-image',
   'show-video',
   'show-web',
@@ -63,6 +65,7 @@ export function parseControlRequest(
     return { error: 'show-web requires --url, --file or --html' }
   }
   if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
+  if (v === 'open-agent' && !args.agent) return { error: 'open-agent requires --agent <id>' }
   if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }

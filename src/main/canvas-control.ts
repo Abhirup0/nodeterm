@@ -58,6 +58,7 @@ Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
 - \`open-terminal [--cwd P] [--cmd C]\` — open a terminal node.
 - \`open-claude [--count N] [--cwd P] [--prompt T]\` — open N Claude sessions (default 1).
+- \`open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T]\` — open N sessions of any agent CLI.
 - \`show-image <path>\` — open an image file as a node.
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).

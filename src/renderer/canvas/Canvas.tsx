@@ -2666,14 +2666,18 @@ export function Canvas() {
             reply({ ok: true, message: `opened terminal ${id}`, result: { id } })
             return
           }
-          case 'open-claude': {
+          case 'open-claude':
+          case 'open-agent': {
+            // open-claude is the legacy fixed-agent form; open-agent takes any builtin
+            // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
+            const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
             const ids: string[] = []
             for (let i = 0; i < count; i++) {
               ids.push(
                 addAndConnect(
                   createAgentNode(
-                    'claude',
+                    agentId,
                     nodesRef.current.length + i,
                     args.cwd || srcCwd,
                     placeBelow(i),
@@ -2684,7 +2688,7 @@ export function Canvas() {
             }
             reply({
               ok: true,
-              message: `opened ${count} claude session(s): ${ids.join(', ')}`,
+              message: `opened ${count} ${agentId} session(s): ${ids.join(', ')}`,
               result: { ids }
             })
             return

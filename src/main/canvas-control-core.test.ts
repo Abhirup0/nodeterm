@@ -58,6 +58,15 @@ describe('parseControlRequest', () => {
       args: { nodes: 'a', edge: 'left' }
     })
   })
+  it('open-agent requires --agent, and is not destructive', () => {
+    expect(parseControlRequest('open-agent', {})).toEqual({ error: 'open-agent requires --agent <id>' })
+    expect(parseControlRequest('open-agent', { agent: 'codex' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'codex' }
+    })
+    expect(isDestructiveVerb('open-agent')).toBe(false)
+  })
+
   it('rename requires --node and --title, and is not destructive', () => {
     expect(parseControlRequest('rename', {})).toEqual({ error: 'rename requires --node <id>' })
     expect(parseControlRequest('rename', { node: 'n1' })).toEqual({ error: 'rename requires --title' })
