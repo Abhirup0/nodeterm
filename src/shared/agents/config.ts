@@ -49,7 +49,7 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const CONTEXT_LINK_CAPABLE = ['claude'] as const
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini'] as const
 export const USAGE_CAPABLE = ['claude'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 export const CHAT_CAPABLE = ['claude'] as const
