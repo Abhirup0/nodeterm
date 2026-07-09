@@ -88,9 +88,11 @@ export function createDinoGame(
   let H = 200
   let groundY = 0
   function layout() {
-    const rect = host.getBoundingClientRect()
-    W = Math.max(240, Math.round(rect.width))
-    H = Math.max(120, Math.round(rect.height))
+    // clientWidth/Height, NOT getBoundingClientRect: canvas zoom is a CSS transform, so the
+    // rect is the zoom-scaled size — a node mounted while zoomed out would lay out shrunken
+    // (and ResizeObserver never fires on transform changes to correct it).
+    W = Math.max(240, host.clientWidth)
+    H = Math.max(120, host.clientHeight)
     groundY = H - 26
     const dpr = window.devicePixelRatio || 1
     canvas.width = Math.round(W * dpr)
