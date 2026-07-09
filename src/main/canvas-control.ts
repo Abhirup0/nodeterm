@@ -40,7 +40,7 @@ ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliScriptPath()}" "$@"
 function installSkill(): void {
   const body = `---
 name: manage-nodeterm-canvas
-description: Open and control nodes on the nodeterm canvas — spawn Claude/terminal sessions, show an image/video/web page, write to or close a terminal. Use when the user asks you to open sessions, visualize something, or render the code/output you produced on the canvas. Only works inside a nodeterm Claude session.
+description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, wrap nodes in labeled groups, arrange/align/rename them, show an image/video/web page, write to or close a terminal. Use whenever the user asks to create or open nodes/sessions, build something using multiple Claude (or other agent) sessions, split work across agents, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
 ---
 
 # Manage the nodeterm canvas
@@ -79,6 +79,15 @@ Notes:
 
 To orchestrate a team: decide the roles + a concrete starting prompt for each, then one
 \`spawn-team\` call (or \`open-claude\` per role followed by \`group\` + \`arrange\`).
+
+Typical requests this skill covers:
+- "Create Claude Code nodes for X and organize them into groups by subject" → decide the
+  workstreams, then either one \`spawn-team\` per subject (each team is already a labeled
+  group), or \`open-claude\`/\`open-agent\` per node followed by \`group --nodes ... --label\`
+  per subject and \`arrange\` inside each.
+- "Open a codex/gemini session" → \`open-agent --agent codex|gemini\`.
+- "Tidy up / group my terminals" → \`list\`, then \`group\` + \`arrange\` + \`align\`.
+- "Rename this node/group" → \`rename\`.
 `
   try {
     fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
