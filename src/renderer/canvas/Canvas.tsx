@@ -1420,39 +1420,6 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
-  // Terminal → chat fork (Task 10): a Claude terminal node dispatches 'nodeterm:open-chat'
-  // with its own session id; open a chat node beside it that resumes+forks that session so
-  // the conversation continues in the chat UI while the original terminal keeps working.
-  useEffect(() => {
-    const onOpenChat = (ev: Event) => {
-      const detail = (ev as CustomEvent).detail as
-        | { nodeId: string; sessionId?: string; cwd?: string }
-        | undefined
-      if (!detail?.sessionId) return
-      const source = nodesRef.current.find((n) => n.id === detail.nodeId)
-      // Inherit the source terminal's Claude account so the fork resumes its transcript,
-      // which lives in that account's config dir.
-      const node = createChatNode(
-        nodesRef.current.length,
-        detail.cwd,
-        undefined,
-        { forkFrom: detail.sessionId },
-        source?.data.accountId
-      )
-      if (source) {
-        node.position = {
-          x: source.position.x + ((source.width as number) ?? 600) + 40,
-          y: source.position.y
-        }
-      }
-      node.selected = true
-      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
-      markDirty()
-    }
-    window.addEventListener('nodeterm:open-chat', onOpenChat)
-    return () => window.removeEventListener('nodeterm:open-chat', onOpenChat)
-  }, [setNodes, markDirty])
-
   // Task 6: the Settings → Accounts "Add account" flow dispatches 'nodeterm:add-account-login'
   // to open a terminal node running `claude /login` under the new account's config dir.
   useEffect(() => {
@@ -1734,6 +1701,20 @@ export function Canvas() {
     (ids: string[]) => {
       const groupCount = nodesRef.current.filter((n) => n.type === 'group').length
       setNodes((ns) => groupSelectedNodes(ns as CanvasNode[], ids, groupCount))
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
+  // Detach single nodes from their group frame (the frame and its other children stay).
+  // Counterpart of drag-into-group / `ungroup` (which dissolves the whole frame).
+  const removeFromGroup = useCallback(
+    (ids: string[]) => {
+      setNodes((ns) => {
+        let next = ns as CanvasNode[]
+        for (const nid of ids) next = reparentNode(next, nid, null)
+        return next
+      })
       markDirty()
     },
     [setNodes, markDirty]
@@ -2162,21 +2143,33 @@ export function Canvas() {
   const selectionItems = useCallback(
     (ids: string[]): MenuItem[] => [
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
-      // Shown only when something is actually groupable: top-level and not itself a group
-      // (groupSelectedNodes silently skips the rest, so the item would otherwise no-op).
-      ...(ids.some((nid) => {
-        const n = nodesRef.current.find((nd) => nd.id === nid)
-        return !!n && !n.parentId && n.type !== 'group'
-      })
-        ? ([
-            {
-              label: ids.length > 1 ? 'Group selection' : 'Group node',
-              icon: <IconGroup />,
-              onClick: () => groupSelection(ids)
-            },
-            { type: 'separator' }
-          ] as MenuItem[])
-        : []),
+      ...((): MenuItem[] => {
+        // "Group …" only when something is actually groupable (top-level, not itself a group —
+        // groupSelectedNodes silently skips the rest, so the item would otherwise no-op);
+        // "Remove from group" only when a target is inside a group frame (the frame stays).
+        const groupable = ids.some((nid) => {
+          const n = nodesRef.current.find((nd) => nd.id === nid)
+          return !!n && !n.parentId && n.type !== 'group'
+        })
+        const parented = ids.some(
+          (nid) => !!nodesRef.current.find((nd) => nd.id === nid)?.parentId
+        )
+        const items: MenuItem[] = []
+        if (groupable)
+          items.push({
+            label: ids.length > 1 ? 'Group selection' : 'Group node',
+            icon: <IconGroup />,
+            onClick: () => groupSelection(ids)
+          })
+        if (parented)
+          items.push({
+            label: 'Remove from group',
+            icon: <IconUngroup />,
+            onClick: () => removeFromGroup(ids)
+          })
+        if (items.length) items.push({ type: 'separator' })
+        return items
+      })(),
       { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
       { type: 'separator' },
       { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
@@ -2233,6 +2226,7 @@ export function Canvas() {
     ],
     [
       groupSelection,
+      removeFromGroup,
       setNodesColor,
       duplicateNodes,
       branchClaude,

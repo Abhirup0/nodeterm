@@ -1069,22 +1069,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             {naming ? '…' : '✦'}
           </button>
         </Tooltip>
-        {showChat && !!status?.sessionId && (
-          <Tooltip label="Open chat node (experimental — forks this session)">
+        {showChat && (
+          <Tooltip label="Chat / markdown view (⌘M)">
             <button
               className="term-node__chat nodrag"
-              title="Open chat node (experimental — forks this session)"
-              onClick={() =>
-                window.dispatchEvent(
-                  new CustomEvent('nodeterm:open-chat', {
-                    detail: {
-                      nodeId: id,
-                      sessionId: status!.sessionId,
-                      cwd: data.cwd as string | undefined
-                    }
-                  })
-                )
-              }
+              aria-pressed={!!data.mdMode}
+              onClick={() => updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))}
             >
               <IconChat />
             </button>
