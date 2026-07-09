@@ -640,6 +640,12 @@ export interface ContextLinkInfo {
   cwd?: string
   /** Set when the linked node is a sticky note: its current text. Note entries have no transcript/terminal. */
   note?: string
+  /** The linked node's agent CLI ('claude' | 'codex' | 'gemini') — selects the CLI transcript parser. */
+  agentId?: string
+  /** Latest known provider session id — lets main resolve the transcript via the per-agent locators. */
+  sessionId?: string
+  /** Managed Claude account of the linked node — scopes the claude locator fallback. */
+  accountId?: string
 }
 
 /** Map of node id → the nodes it is context-linked to. Sent to main so it can write link files. */

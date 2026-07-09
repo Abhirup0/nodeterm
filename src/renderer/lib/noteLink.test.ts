@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildLinkMap, buildNotePushMessage, classifyLink } from './noteLink'
+import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink } from './noteLink'
 
 const term = (contextCapable = false) => ({ kind: 'terminal', contextCapable })
 const sticky = () => ({ kind: 'sticky', contextCapable: false })
@@ -76,5 +76,49 @@ describe('buildLinkMap', () => {
       id === 'noteX' ? { id, title: 'N', sticky: true } : { id, title: 'T', cwd: '', sticky: false }
     )
     expect(map['t1']).toEqual([{ id: 'noteX', title: 'N', note: '' }])
+  })
+})
+
+describe('buildLinkMap agent identity', () => {
+  it('carries agentId/sessionId/accountId on context entries', () => {
+    const infoOf = (id: string) => ({
+      id,
+      title: `T ${id}`,
+      cwd: '',
+      sticky: false,
+      agentId: id === 'a' ? 'claude' : 'codex',
+      sessionId: `sess-${id}`,
+      accountId: id === 'a' ? 'acct-1' : undefined
+    })
+    const map = buildLinkMap([{ source: 'a', target: 'b' }], infoOf)
+    expect(map['a'][0]).toMatchObject({ id: 'b', agentId: 'codex', sessionId: 'sess-b' })
+    expect(map['a'][0].accountId).toBeUndefined()
+    expect(map['b'][0]).toMatchObject({ id: 'a', agentId: 'claude', sessionId: 'sess-a', accountId: 'acct-1' })
+  })
+})
+
+describe('buildContextLinkNote', () => {
+  it('claude gets the skill wording (unchanged legacy text)', () => {
+    expect(buildContextLinkNote('claude', 'Builder', '/x/context.sh')).toBe(
+      '[nodeterm] You are now linked to "Builder". Use the get-linked-context skill to read its context when you need it.'
+    )
+  })
+  it('codex/gemini get the inline CLI command, single line', () => {
+    const msg = buildContextLinkNote('codex', 'Builder', '/x/context.sh')
+    expect(msg).toContain('sh "/x/context.sh"')
+    expect(msg).toContain('Builder')
+    expect(msg).not.toContain('\n')
+  })
+})
+
+describe('buildNotePushMessage per-agent wording', () => {
+  it('keeps the skill pointer for claude and omitted agent', () => {
+    expect(buildNotePushMessage('T', 'x'.repeat(3000), 'claude')).toContain('get-linked-context skill')
+    expect(buildNotePushMessage('T', 'x'.repeat(3000))).toContain('get-linked-context skill')
+  })
+  it('points non-claude agents at the CLI instructions', () => {
+    const msg = buildNotePushMessage('T', 'x'.repeat(3000), 'codex')!
+    expect(msg).toContain('[truncated')
+    expect(msg).not.toContain('skill]')
   })
 })
