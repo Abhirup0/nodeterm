@@ -51,7 +51,7 @@ import { createPairingService } from './pairing-service'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
-import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
+import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
 import {
   registerMediaScheme,

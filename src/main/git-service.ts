@@ -9,7 +9,7 @@ import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
-import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
+import { resolveGitRemote, runRemoteGit } from '../core/remote-ssh/remote-git'
 import { sendToMain } from './main-window'
 import {
   isValidCloneUrl,

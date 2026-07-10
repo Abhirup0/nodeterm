@@ -5,7 +5,7 @@
 // git-service.ts and commit-message.ts route the same way without threading a ref through every op.
 import { execFile, execFileSync } from 'child_process'
 import { promisify } from 'util'
-import { childArgs } from '../../core/remote-ssh/control-master'
+import { childArgs } from './control-master'
 import { posixQuote, quoteRemotePath, type SshConnection } from '../../shared/ssh'
 
 const run = promisify(execFile)
