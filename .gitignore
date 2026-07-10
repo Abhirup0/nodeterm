@@ -20,9 +20,9 @@ build/icon.png
 # local session handoff transcripts / app state
 .nodeterm/
 
-# NOTE: internal dev docs (docs/superpowers/ SDD plans+specs, docs/RELEASING.md) are
-# TRACKED in this private repo so the full dev environment clones cleanly on a remote
-# server. They are stripped from the PUBLIC mirror by publish.sh (PRIVATE_PATHS), not here.
+# internal dev docs (SDD plans/specs, release runbook) — kept local, never tracked
+/docs/superpowers/
+/docs/RELEASING.md
 
 # local publish helper — never exported to the public repo
 /publish.sh
