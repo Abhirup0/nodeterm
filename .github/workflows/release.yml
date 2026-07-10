@@ -13,7 +13,11 @@ permissions:
 
 jobs:
   release-mac:
-    runs-on: macos-14
+    # Runs on a SELF-HOSTED Apple Silicon Mac (no GitHub macOS-runner minutes — those are billed
+    # 10× and a slow notarization poll can burn hundreds). Everything else is identical: the runner
+    # signs + notarizes + publishes the GitHub Release, which nodeterm.dev proxies for downloads and
+    # the update feed. The runner checks out into its own _work dir, so it never touches the dev repo.
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
 
