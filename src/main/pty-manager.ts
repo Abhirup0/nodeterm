@@ -24,7 +24,7 @@ import { TMUX_SOCKET, sessionName } from '../core/tmux-naming'
 import { releasePty, type ReleasablePty } from '../core/pty-release'
 import { machOArch, archMismatch } from '../core/macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from '../core/scrollback-store'
-import { claudeConfigDirFor } from './claude-accounts'
+import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '../core/claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
