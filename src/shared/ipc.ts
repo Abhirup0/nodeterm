@@ -66,6 +66,10 @@ export const IPC = {
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
+  workspaceProbeFolder: 'workspace:probe-folder',
+  // main → renderer events
+  workspaceMigrated: 'workspace:migrated',
+  workspaceExternalChange: 'workspace:external-change',
   dialogSelectFolder: 'dialog:select-folder',
   dialogSelectFile: 'dialog:select-file',
   shellReveal: 'shell:reveal',

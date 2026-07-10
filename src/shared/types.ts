@@ -163,6 +163,12 @@ export interface Project {
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
    */
   closed?: boolean
+  /**
+   * Set at load time when the project's .nodeterm/project.json could not be read
+   * (folder missing, server unreachable, corrupt file). Runtime-only — never persisted.
+   * Unavailable projects show a greyed tab and cannot be activated.
+   */
+  unavailable?: boolean
 }
 
 /** The full workspace written to / read from disk. */
@@ -228,6 +234,12 @@ export interface PtyApi {
 export interface WorkspaceApi {
   load(): Promise<Workspace>
   save(workspace: Workspace): Promise<void>
+  /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
+  probeFolder(folder: string): Promise<Project | null>
+  /** Fired once after a v2→v3 migration wrote .nodeterm/ dirs into project folders. */
+  onMigrated(cb: () => void): () => void
+  /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
+  onExternalChange(cb: (project: Project) => void): () => void
 }
 
 export interface DialogApi {
