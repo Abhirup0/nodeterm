@@ -31,10 +31,93 @@ import {
   toPublicDevices,
   upsertDevice,
   type DeviceEntry,
-  type PublicDevice
+  type PublicDevice,
+  type RelayPairingBlock
 } from './pairing-core'
+import type { Settings } from '../shared/types'
+import { publicKeyToB64, type KeyPair } from './remote/e2ee'
+import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * Optional relay dependencies injected into the pairing service. When present AND phone access is
+ * enabled + Pro, a successful LAN pair ALSO provisions the phone for the relay (a device token +
+ * the host's relay identity), so it can reach this Mac from anywhere. Injected (not imported) so
+ * `pairing-core` stays pure and this stays testable. Absent / any failure ⇒ LAN-only (the phone
+ * still pairs; it just won't get relay access).
+ */
+export interface PairingRelayDeps {
+  getSettings(): Settings
+  isPremium(): boolean
+  getEntitlement(): string | null
+  loadHostKeyPair(): Promise<KeyPair>
+  /** The relay WebSocket endpoint advertised to the phone. */
+  relayEndpoint: string
+  /** The API base for the /v1/relay/device mint. */
+  apiBase: string
+  /** Dev gate: never hit the prod relay/API from an unpackaged build (mirrors host-service). */
+  relayAllowed(): boolean
+}
+
+interface RelayDeviceResponse {
+  deviceToken: string
+  hostId: string
+  exp: number
+}
+
+/** Mint a relay device token so a freshly-paired phone can reach this host over the relay. */
+async function mintRelayDevice(
+  apiBase: string,
+  body: { entitlement: string; deviceId: string; hostPublicKeyB64: string; label?: string }
+): Promise<RelayDeviceResponse | null> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 8000)
+  try {
+    const res = await fetch(`${apiBase}/v1/relay/device`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    })
+    if (!res.ok) return null
+    const json = (await res.json().catch(() => ({}))) as Partial<RelayDeviceResponse>
+    if (!json.deviceToken) return null
+    return { deviceToken: json.deviceToken, hostId: json.hostId ?? '', exp: json.exp ?? 0 }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Compute this host's relay reachability block WITHOUT any network call (just the host key →
+ * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off, not Pro,
+ * blocked in dev, or no entitlement is stored.
+ */
+async function buildRelayContext(
+  deps: PairingRelayDeps | undefined
+): Promise<{ block: RelayPairingBlock; entitlement: string } | null> {
+  if (!deps || !deps.relayAllowed()) return null
+  if (!deps.getSettings().phoneAccessEnabled || !deps.isPremium()) return null
+  const entitlement = deps.getEntitlement()
+  if (!entitlement) return null
+  try {
+    const keys = await deps.loadHostKeyPair()
+    const hostPublicKeyB64 = publicKeyToB64(keys.publicKey)
+    return {
+      block: {
+        hostId: hostIdFromPublicKeyB64(hostPublicKeyB64),
+        hostPublicKeyB64,
+        relayEndpoint: deps.relayEndpoint
+      },
+      entitlement
+    }
+  } catch {
+    return null
+  }
+}
 
 /** How long the listener waits for the phone before giving up. */
 const PAIR_TIMEOUT_MS = 2 * 60 * 1000
@@ -190,7 +273,7 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
-export function createPairingService(): PairingService {
+export function createPairingService(relayDeps?: PairingRelayDeps): PairingService {
   let server: Server | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   let onDoneCb: ((result: PairingDone) => void) | null = null
@@ -245,7 +328,18 @@ export function createPairingService(): PairingService {
     const addr = srv.address()
     const pairPort = typeof addr === 'object' && addr ? addr.port : 0
     const [name, sshOpen] = await Promise.all([computerName(), probeSsh()])
-    const payload = buildPairingPayload({ host, port: 22, user, token, pairPort, name })
+    // Relay reachability (network-free) — embedded in the QR so the phone can reach us over the
+    // relay too. Also reused in handleRequest to mint the phone's device token. LAN-only when null.
+    const relayCtx = await buildRelayContext(relayDeps)
+    const payload = buildPairingPayload({
+      host,
+      port: 22,
+      user,
+      token,
+      pairPort,
+      name,
+      relay: relayCtx?.block
+    })
 
     // Give up after 2 minutes with a timeout result.
     timer = setTimeout(() => finish({ ok: false }), PAIR_TIMEOUT_MS)
@@ -258,7 +352,7 @@ export function createPairingService(): PairingService {
       }
       try {
         const raw = await readBody(req)
-        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown }
+        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown; deviceId?: unknown }
         try {
           body = JSON.parse(raw)
         } catch {
@@ -287,9 +381,30 @@ export function createPairingService(): PairingService {
           pairedAt: Date.now(),
           lastSeenAt: 0
         })
+        // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
+        // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
+        let relayFields: { relay?: RelayPairingBlock; relayDeviceToken?: string } = {}
+        if (relayCtx) {
+          const phoneDeviceId =
+            typeof body.deviceId === 'string' && body.deviceId.trim()
+              ? body.deviceId.trim()
+              : deviceId
+          const minted = await mintRelayDevice(relayDeps!.apiBase, {
+            entitlement: relayCtx.entitlement,
+            deviceId: phoneDeviceId,
+            hostPublicKeyB64: relayCtx.block.hostPublicKeyB64,
+            label: name
+          })
+          if (minted?.deviceToken) {
+            relayFields = {
+              relay: { ...relayCtx.block, hostId: minted.hostId || relayCtx.block.hostId },
+              relayDeviceToken: minted.deviceToken
+            }
+          }
+        }
         res
           .writeHead(200, { 'Content-Type': 'application/json' })
-          .end(JSON.stringify({ ok: true, deviceId, agentToken }))
+          .end(JSON.stringify({ ok: true, deviceId, agentToken, ...relayFields }))
         finish({ ok: true })
       } catch (err) {
         res.writeHead(500).end('pairing failed')

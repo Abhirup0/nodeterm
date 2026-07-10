@@ -3,6 +3,21 @@
 // The QR payload + the authorized_keys line validation are the two bits of the pairing flow
 // with a fixed on-the-wire contract shared with the nodeterm iOS app — keep them here, pure.
 
+/**
+ * The relay block optionally embedded in the QR payload (and the /pair HTTP response). Present
+ * only when this host has phone-access (standing relay host) enabled + Pro, so the phone can
+ * reach it over the relay from anywhere. Absent → the phone is LAN-only (pre-P3 behavior).
+ * Matches the iOS contract exactly.
+ */
+export interface RelayPairingBlock {
+  /** The relay broker room id: base64url(sha256(hostPublicKey)).slice(0,22). */
+  hostId: string
+  /** The host's NaCl box public key (standard base64), for the phone's E2EE handshake. */
+  hostPublicKeyB64: string
+  /** The relay WebSocket endpoint the phone connects to. */
+  relayEndpoint: string
+}
+
 /** Inputs for the QR payload the iOS app scans. `port` defaults to 22 (SSH). */
 export interface PairingPayloadInput {
   host: string
@@ -11,15 +26,19 @@ export interface PairingPayloadInput {
   token: string
   pairPort: number
   name: string
+  /** Optional relay reachability block (standing host). Omitted from the payload when absent. */
+  relay?: RelayPairingBlock
 }
 
 /**
  * Build the single-line JSON the QR encodes. The key order + compact separators match the
  * contract the phone parses:
  *   {"v":1,"host":"…","port":22,"user":"…","token":"…","pairPort":N,"nodeterm":true,"name":"…"}
+ * When a relay block is supplied it is appended as `"relay":{…}` after `name`; otherwise the
+ * payload is byte-for-byte the legacy LAN-only shape.
  */
 export function buildPairingPayload(input: PairingPayloadInput): string {
-  return JSON.stringify({
+  const base = {
     v: 1,
     host: input.host,
     port: input.port ?? 22,
@@ -28,7 +47,8 @@ export function buildPairingPayload(input: PairingPayloadInput): string {
     pairPort: input.pairPort,
     nodeterm: true,
     name: input.name
-  })
+  }
+  return JSON.stringify(input.relay ? { ...base, relay: input.relay } : base)
 }
 
 /**

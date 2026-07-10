@@ -61,6 +61,38 @@ describe('buildPairingPayload', () => {
     })
     expect(JSON.parse(json).port).toBe(2222)
   })
+
+  it('omits the relay block when absent (byte-for-byte legacy LAN-only shape)', () => {
+    const json = buildPairingPayload({
+      host: 'h',
+      user: 'u',
+      token: 't',
+      pairPort: 1,
+      name: 'n'
+    })
+    expect(json).not.toContain('relay')
+    expect(JSON.parse(json)).not.toHaveProperty('relay')
+  })
+
+  it('appends the relay block after name when supplied', () => {
+    const relay = {
+      hostId: 'abcABC012_-def012ghij',
+      hostPublicKeyB64: 'AAAA',
+      relayEndpoint: 'wss://relay.nodeterm.dev'
+    }
+    const json = buildPairingPayload({
+      host: '192.168.1.5',
+      user: 'enes',
+      token: 'tok',
+      pairPort: 5,
+      name: 'Mac',
+      relay
+    })
+    expect(json).toBe(
+      '{"v":1,"host":"192.168.1.5","port":22,"user":"enes","token":"tok","pairPort":5,"nodeterm":true,"name":"Mac","relay":{"hostId":"abcABC012_-def012ghij","hostPublicKeyB64":"AAAA","relayEndpoint":"wss://relay.nodeterm.dev"}}'
+    )
+    expect(JSON.parse(json).relay).toEqual(relay)
+  })
 })
 
 describe('isValidEd25519PublicKey', () => {

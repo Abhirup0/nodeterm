@@ -361,6 +361,9 @@ export interface Settings {
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
    *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
   telemetryEnabled: boolean
+  /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
+   *  (end-to-end encrypted). Pro-only; default off. Toggle in Settings → Phone. */
+  phoneAccessEnabled: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -390,7 +393,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
   defaultAgent: 'claude',
-  telemetryEnabled: false
+  telemetryEnabled: false,
+  phoneAccessEnabled: false
 }
 
 export interface SettingsApi {
@@ -912,6 +916,11 @@ export interface RemoteHostApi {
   approve(): void
   /** Reject the pending client → the connection is dropped. */
   reject(): void
+  /**
+   * Start/stop the standing (phone) relay host so a paired phone can reach this Mac from anywhere.
+   * Mirrors `settings.phoneAccessEnabled`; the host also honors the Pro gate internally.
+   */
+  setPhoneAccess(enabled: boolean): void
 }
 
 export interface RemoteClientApi {

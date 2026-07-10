@@ -5,8 +5,15 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { Button } from '@renderer/ui/Button'
+import { Switch } from '@renderer/ui/Switch'
+import { useSettings } from '@renderer/state/settings'
+import { useEntitlement } from '@renderer/state/entitlement'
 
 const ROWS = {
+  remote: {
+    title: 'Remote access from your phone',
+    keywords: ['phone', 'remote', 'anywhere', 'relay', 'encrypted', 'pro', 'access', 'cellular']
+  },
   pair: {
     title: 'Pair phone',
     keywords: ['phone', 'pair', 'qr', 'ios', 'mobile', 'ssh', 'scan', 'nodeterm']
@@ -40,6 +47,16 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
   const [pendingRevoke, setPendingRevoke] = useState<PairedDevice | null>(null)
   // Track whether a pairing listener is currently running so unmount can stop it.
   const runningRef = useRef(false)
+
+  const isPremium = useEntitlement((s) => s.isPremium)
+  const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
+  const updateSettings = useSettings((s) => s.update)
+
+  const togglePhoneAccess = (next: boolean): void => {
+    updateSettings({ phoneAccessEnabled: next })
+    // Start/stop the standing relay host immediately (main also honors the Pro gate).
+    window.nodeTerminal.remoteHost.setPhoneAccess(next)
+  }
 
   const refreshDevices = useCallback(async (): Promise<void> => {
     try {
@@ -118,6 +135,34 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
       isActive={isActive}
       searchEntries={ENTRIES}
     >
+      <SearchableRow {...ROWS.remote}>
+        <div className="space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h4 className="text-[13px] font-medium text-text">Remote access from your phone</h4>
+              <p className="mt-1 text-sm text-muted">
+                Reach this Mac from anywhere — not just your local network — end-to-end encrypted
+                over the relay. Your paired phone connects through the relay; the connection is
+                verified with a code the first time.
+              </p>
+            </div>
+            {isPremium ? (
+              <Switch
+                checked={phoneAccessEnabled}
+                onChange={togglePhoneAccess}
+                ariaLabel="Remote access from your phone"
+              />
+            ) : null}
+          </div>
+          {!isPremium ? (
+            <p className="text-sm text-muted">
+              Remote access from anywhere requires nodeterm Pro. Pairing over your local network is
+              free — set it up below.
+            </p>
+          ) : null}
+        </div>
+      </SearchableRow>
+
       <SearchableRow {...ROWS.pair}>
         <div className="space-y-4">
           <h4 className="text-[13px] font-medium text-text">Pair phone</h4>

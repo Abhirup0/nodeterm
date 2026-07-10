@@ -42,12 +42,19 @@ import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from './transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
-import { initLicense } from './license'
+import { initLicense, isPremium, getStoredEntitlement } from './license'
 import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
 import { isSafeLocalTranscriptPath } from './claude-accounts-core'
 import { installClaudeHooksInto } from './agents/hooks/claude'
 import { createPairingService } from './pairing-service'
-import { initRemoteHost } from './remote/host-service'
+import {
+  initRemoteHost,
+  loadOrCreateKeyPair,
+  relayAllowed,
+  API_BASE as RELAY_API_BASE,
+  RELAY_URL
+} from './remote/host-service'
+import { initStandingHost } from './remote/standing-host'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
@@ -356,7 +363,15 @@ app.whenReady().then(async () => {
   // Phone pairing (nodeterm iOS "scan a QR" flow): a one-shot LAN listener that installs the
   // phone's Ed25519 key into ~/.ssh/authorized_keys. The completion result is forwarded to the
   // window over `pairing:done` so the settings section can show the paired/timeout state.
-  const pairingService = createPairingService()
+  const pairingService = createPairingService({
+    getSettings: () => settingsStore.get(),
+    isPremium,
+    getEntitlement: getStoredEntitlement,
+    loadHostKeyPair: loadOrCreateKeyPair,
+    relayEndpoint: RELAY_URL,
+    apiBase: RELAY_API_BASE,
+    relayAllowed
+  })
   ipcMain.handle(IPC.pairingStart, () =>
     pairingService.start((result) => {
       const w = getMainWindow()
@@ -814,6 +829,12 @@ app.whenReady().then(async () => {
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager)
+  // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
+  // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
+  const standingHost = initStandingHost(win, ptyManager, () => settingsStore.get())
+  ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost.setEnabled(!!enabled))
+  // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
+  standingHost.syncFromSettings()
   initRemoteClient(win, { isPackaged: app.isPackaged })
   sshProjectManager = initSshProject(win)
   // Route git-service + commit-message git ops over the active SSH project's master only — and only
