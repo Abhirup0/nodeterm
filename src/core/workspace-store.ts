@@ -223,8 +223,30 @@ export class WorkspaceStore {
     return e ? this.readLocalRef(e.id) : null
   }
 
-  /** SSH refresh-on-connect — wired in Task 8. */
-  async refreshSshProject(_projectId: string): Promise<Project | null> {
+  /**
+   * Called when an SSH project's connection comes up. Reconciles the server's
+   * .nodeterm/project.json with our cached copy by rev: higher remote rev → adopt
+   * remote (returned; caller broadcasts it); otherwise → push our cache up.
+   */
+  async refreshSshProject(projectId: string): Promise<Project | null> {
+    const e = this.index?.entries.find((x) => x.id === projectId && x.ssh)
+    if (!e?.ssh || !this.remoteIO) return null
+    const raw = await this.remoteIO.read(projectId, e.ssh)
+    let remote: ProjectFileV1 | null = null
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as ProjectFileV1
+        if (parsed?.version === 1 && Array.isArray(parsed.nodes)) remote = parsed
+      } catch { /* corrupt remote file → treat as absent, our cache pushes up */ }
+    }
+    const cacheRev = e.cache?.rev ?? 0
+    if (remote && remote.rev > cacheRev) {
+      e.cache = remote
+      this.revs.set(projectId, remote.rev)
+      await writeAtomic(this.indexPath, JSON.stringify(this.index))
+      return fileToProject(remote, { ssh: e.ssh, closed: e.closed })
+    }
+    if (e.cache) void this.remoteIO.write(projectId, e.ssh, serializeProjectFile(e.cache))
     return null
   }
 }

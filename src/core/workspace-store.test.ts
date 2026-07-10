@@ -182,3 +182,52 @@ describe('readLocalRefByPath', () => {
     expect(await store.readLocalRefByPath(path.join(projRoot, 'nope/project.json'))).toBeNull()
   })
 })
+
+describe('refreshSshProject', () => {
+  const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
+  const remoteFileOf = async (store: WorkspaceStore, p: Project) => {
+    // seed: one ssh project saved → cache rev 1
+    await store.save(ws([p]))
+  }
+
+  it('remote rev > cache rev → adopts remote and reports it', async () => {
+    const remote: Record<string, string> = {}
+    const io = {
+      read: async (id: string) => remote[id] ?? null,
+      write: async (id: string, _s: any, c: string) => ((remote[id] = c), true)
+    }
+    const store = new WorkspaceStore(io)
+    const p = project({ id: 'ps', ssh: sshConn, cwd: undefined })
+    await remoteFileOf(store, p)                    // cache rev 1, mirrored to remote
+    const newer = JSON.parse(remote['ps'])
+    newer.rev = 5; newer.name = 'server-renamed'
+    remote['ps'] = JSON.stringify(newer)
+    const adopted = await store.refreshSshProject('ps')
+    expect(adopted).toMatchObject({ id: 'ps', name: 'server-renamed' })
+  })
+
+  it('cache rev >= remote rev → pushes the cache up instead and returns null', async () => {
+    const remote: Record<string, string> = {}
+    const writes: string[] = []
+    const io = {
+      read: async (id: string) => remote[id] ?? null,
+      write: async (id: string, _s: any, c: string) => (writes.push(id), (remote[id] = c), true)
+    }
+    const store = new WorkspaceStore(io)
+    await remoteFileOf(store, project({ id: 'ps', ssh: sshConn, cwd: undefined }))
+    const older = JSON.parse(remote['ps'])
+    older.rev = 0
+    remote['ps'] = JSON.stringify(older)
+    expect(await store.refreshSshProject('ps')).toBeNull()
+    expect(writes.filter((w) => w === 'ps').length).toBeGreaterThanOrEqual(2) // seed + push-up
+  })
+
+  it('no remote file yet → pushes the cache up (first machine wins)', async () => {
+    const remote: Record<string, string> = {}
+    const io = { read: async () => null, write: async (id: string, _s: any, c: string) => ((remote[id] = c), true) }
+    const store = new WorkspaceStore(io)
+    await remoteFileOf(store, project({ id: 'ps', ssh: sshConn, cwd: undefined }))
+    expect(await store.refreshSshProject('ps')).toBeNull()
+    expect(remote['ps']).toContain('"id": "ps"')
+  })
+})
