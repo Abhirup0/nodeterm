@@ -22,6 +22,7 @@ import type {
   WorkspaceApi
 } from '../../shared/types'
 import { buildStubApi } from './stubs'
+import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 
 type Listener = (...args: unknown[]) => void
 
@@ -393,7 +394,17 @@ export async function installWsBridge(): Promise<void> {
   const api: NodeTerminalApi = {
     ...buildStubApi(),
     ...buildRealApi(client),
-    ...buildFilesApi(client)
+    ...buildFilesApi(client),
+    // Web replacement for the Electron native dialog: an in-app server-directory browser over
+    // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
+    dialog: (() => {
+      mountPickerRoot()
+      const startDir = '/' // navigable up/down from root; the picker remembers nothing across calls in v1
+      return {
+        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list }),
+        selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: api.fs.list })
+      }
+    })()
   }
   ;(window as unknown as { nodeTerminal: NodeTerminalApi }).nodeTerminal = api
 }

@@ -1,16 +1,16 @@
 // Graceful non-terminal stub surface for the browser (Server Edition) build.
 //
-// The real namespaces (`pty`, `workspace`, `settings`, and the fs/git/files/context group from
-// `buildFilesApi`) are provided by the ws-bridge; everything else here degrades benignly so the
-// renderer boots without a full Electron preload. The exact per-member behavior is the boot-path
-// contract encoded in the Task 7 brief (derived from a full renderer-boot audit): every `on*`
-// subscription MUST return a callable no-op unsubscribe (the renderer uses the return value as a
-// React effect cleanup — a missing member or a non-function return is a mount crash), promise
-// members that the boot path awaits resolve to a benign value, and everything else rejects with a
-// coded error.
+// The real namespaces (`pty`, `workspace`, `settings`, the fs/git/files/context group from
+// `buildFilesApi`, and `dialog` from the in-app `dialog-picker`) are provided by the ws-bridge;
+// everything else here degrades benignly so the renderer boots without a full Electron preload.
+// The exact per-member behavior is the boot-path contract encoded in the Task 7 brief (derived
+// from a full renderer-boot audit): every `on*` subscription MUST return a callable no-op
+// unsubscribe (the renderer uses the return value as a React effect cleanup — a missing member or
+// a non-function return is a mount crash), promise members that the boot path awaits resolve to a
+// benign value, and everything else rejects with a coded error.
 //
 // The object is `satisfies Omit<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'fs' | 'git'
-// | 'files' | 'context'>`, so the TypeScript compiler is the completeness test: if
+// | 'files' | 'context' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
 // `NodeTerminalApi` gains a member, this file fails to typecheck until the stub is declared.
 
 import type { ClaudeUsage, NodeTerminalApi, NotifyPayload, UpdatePolicy } from '../../shared/types'
@@ -39,14 +39,9 @@ const pnoop = (): Promise<void> => Promise.resolve()
 
 export function buildStubApi(): Omit<
   NodeTerminalApi,
-  'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context'
+  'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context' | 'dialog'
 > {
   const api = {
-    dialog: {
-      // Web folder/file pickers are Phase 3.
-      selectFolder: U('dialog.selectFolder'),
-      selectFile: U('dialog.selectFile')
-    },
     ssh: {
       list: U('ssh.list'),
       save: U('ssh.save'),
@@ -208,7 +203,7 @@ export function buildStubApi(): Omit<
     sendAgentControlResult: noop
   } satisfies Omit<
     NodeTerminalApi,
-    'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context'
+    'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context' | 'dialog'
   >
 
   return api
