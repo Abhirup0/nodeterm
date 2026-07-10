@@ -292,7 +292,8 @@ const api: NodeTerminalApi = {
     onApplyMutation: subscribeMutation,
     onPeerPending: subscribePeerPending,
     approve: () => ipcRenderer.send(IPC.remoteHostApprove),
-    reject: () => ipcRenderer.send(IPC.remoteHostReject)
+    reject: () => ipcRenderer.send(IPC.remoteHostReject),
+    setPhoneAccess: (enabled) => ipcRenderer.send(IPC.remoteStandingHostSet, enabled)
   },
   remoteClient: {
     connect: (offer) => ipcRenderer.invoke(IPC.remoteClientConnect, offer),

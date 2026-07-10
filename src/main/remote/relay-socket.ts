@@ -67,6 +67,10 @@ export type RelaySocket = {
   // The Short Authentication String for this channel (derived from the shared key), or null
   // before the handshake has derived a key. Both peers compute the same value.
   sas(): string | null
+  // The peer's NaCl box public key (base64) once known: for a client it is the pinned host key
+  // passed in; for a host it is learned from the client's `e2ee_hello`. Null before then. Used by
+  // the standing (phone) host to look the connecting device up in its pin-once approval list.
+  peerPublicKeyB64(): string | null
   // Tear down: stops reconnects and closes the transport.
   close(): void
 }
@@ -122,6 +126,9 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
 
   let transport: RelayTransport | null = null
   let sharedKey: Uint8Array | null = null
+  // The peer's base64 public key. Known up front for a client (the pinned host key); learned from
+  // `e2ee_hello` for a host. Exposed via peerPublicKeyB64() for the standing host's pin-once check.
+  let peerPubB64: string | null = opts.role === 'client' ? opts.theirPubB64 ?? null : null
   let state: State = 'connecting'
   let intentionallyClosed = false
   let reconnectAttempt = 0
@@ -288,6 +295,7 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       if (typeof control.publicKeyB64 !== 'string') {
         return
       }
+      peerPubB64 = control.publicKeyB64
       sharedKey = deriveSharedKey(control.publicKeyB64, opts.ourKeys.secretKey)
       sendControl({ type: 'e2ee_ready' })
       return
@@ -486,6 +494,9 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     },
     sas() {
       return sharedKey ? sasFromSharedKey(sharedKey) : null
+    },
+    peerPublicKeyB64() {
+      return peerPubB64
     },
     close() {
       intentionallyClosed = true

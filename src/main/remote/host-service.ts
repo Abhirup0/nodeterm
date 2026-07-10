@@ -33,12 +33,13 @@ import { OP, type Frame } from './framing'
 import { encodeOffer } from './pairing'
 import { sanitizeClientMutation } from './canvas-sync'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
+import { initHostCanvasHub, currentCanvas, subscribeCanvas } from './host-canvas-hub'
 
 // Default relay endpoint; `NODETERM_RELAY_URL` overrides it (mirrors license.ts's API_BASE /
 // CHECKOUT_URL env-override pattern — used both as the dev gate and for local testing).
-const RELAY_URL = process.env.NODETERM_RELAY_URL || 'wss://relay.nodeterm.dev'
+export const RELAY_URL = process.env.NODETERM_RELAY_URL || 'wss://relay.nodeterm.dev'
 
-const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
+export const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -477,7 +478,10 @@ async function persistKeyPair(keys: KeyPair): Promise<void> {
 // migrated to the encrypted form in place, KEEPING the identity (never regenerate on migrate);
 // an undecryptable blob (OS keychain reset) falls through to a fresh identity — old offers are
 // single-use pairing tokens, so new offers simply carry the new key.
-async function loadOrCreateKeyPair(): Promise<KeyPair> {
+//
+// Exported so the standing (phone) host and the pairing service can advertise the SAME host
+// identity (public key → hostId) the interactive host uses.
+export async function loadOrCreateKeyPair(): Promise<KeyPair> {
   try {
     const raw = JSON.parse(await fs.readFile(keyFile(), 'utf-8')) as {
       publicKey?: string
@@ -512,8 +516,155 @@ async function loadOrCreateKeyPair(): Promise<KeyPair> {
 
 // Never hit the real relay/API from an unpackaged build unless a relay is explicitly targeted
 // (mirrors license.ts's `allowed()` gate). Packaged builds are always allowed.
-function relayAllowed(): boolean {
+export function relayAllowed(): boolean {
   return app.isPackaged || !!process.env.NODETERM_RELAY_URL
+}
+
+// --- shared host session (interactive host + standing phone host) ------------
+
+/**
+ * A live host<->client relay session: the bridged relay socket plus its RPC/frame handlers and
+ * canvas mirror, gated by an approval flag. Both the interactive remote host and the standing
+ * phone host build one of these; they differ only in how a freshly-bridged peer is approved
+ * (interactive SAS prompt vs. pin-once auto-approve).
+ */
+export interface HostSession {
+  /** Approve the currently-bridged peer → begin serving its pty/fs RPCs + input frames. */
+  approve(): void
+  /** Currently approved? */
+  isApproved(): boolean
+  /** Channel SAS (for the approval prompt), or null before the handshake derives a key. */
+  sas(): string | null
+  /** The bridged peer's box public key (base64), or null before `e2ee_hello`. */
+  peerPublicKeyB64(): string | null
+  /** Tear down: kill served PTYs + close the relay socket. */
+  close(): void
+}
+
+export interface HostSessionOptions {
+  /** Relay wss URL. */
+  url: string
+  /** Single-use pairing token gating entry at the relay. */
+  token: string
+  /** The long-lived host NaCl keypair. */
+  ourKeys: KeyPair
+  /** The real pty-manager whose tmux sessions the peer attaches to. */
+  pty: PtyManager
+  /** The host renderer's latest active-project canvas snapshot (source of the mirror). */
+  getLatestCanvas(): CanvasState | null
+  /** Subscribe to canvas updates so the mirror re-broadcasts. Returns unsubscribe. */
+  subscribeCanvas(cb: (state: CanvasState) => void): () => void
+  /** Forward a (sanitized) client canvas mutation to the host renderer (the single writer). */
+  applyMutation(mutation: CanvasMutation): void
+  /**
+   * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
+   * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
+   * host human, later calling `approve()`.
+   */
+  onPeerReady(session: HostSession): void
+  /** The relay socket dropped (client/relay gone). */
+  onClose(): void
+}
+
+/**
+ * Build a host relay session: connect as the host, wire the RPC/frame handlers + canvas mirror,
+ * and gate everything behind an approval flag. Extracted so the interactive host (initRemoteHost)
+ * and the standing phone host share one implementation.
+ */
+export function connectHostSession(opts: HostSessionOptions): HostSession {
+  // Approval gate: a freshly-bridged peer serves NO pty/fs RPCs or input frames until approved,
+  // so a leaked/guessed pairing cannot grant silent access. Reset on every (re)connect.
+  let approved = false
+  let handlers: HostHandlers | null = null
+  let canvasSync: HostCanvasSync | null = null
+  let unsubCanvas: (() => void) | null = null
+  // Small main-side debounce to coalesce bursts of renderer canvas updates.
+  let broadcastTimer: ReturnType<typeof setTimeout> | null = null
+
+  function pushCurrentCanvas(): void {
+    const state = opts.getLatestCanvas()
+    if (state) canvasSync?.setState(state)
+  }
+  function scheduleBroadcast(): void {
+    if (broadcastTimer) return
+    broadcastTimer = setTimeout(() => {
+      broadcastTimer = null
+      pushCurrentCanvas()
+    }, 120)
+    broadcastTimer.unref?.()
+  }
+
+  const session: HostSession = {
+    approve() {
+      approved = true
+    },
+    isApproved() {
+      return approved
+    },
+    sas() {
+      return socket.sas()
+    },
+    peerPublicKeyB64() {
+      return socket.peerPublicKeyB64()
+    },
+    close() {
+      if (broadcastTimer) {
+        clearTimeout(broadcastTimer)
+        broadcastTimer = null
+      }
+      approved = false
+      unsubCanvas?.()
+      unsubCanvas = null
+      handlers?.closeAll()
+      handlers = null
+      canvasSync = null
+      socket.close()
+    }
+  }
+
+  const socket: RelaySocket = connectRelay({
+    url: opts.url,
+    token: opts.token,
+    role: 'host',
+    ourKeys: opts.ourKeys,
+    onReady: () => {
+      // Bridge established. Require approval before serving any pty/fs RPC. Canvas state still
+      // pushes (read-only mirror) so the client isn't staring at a blank screen while pending.
+      approved = false
+      opts.onPeerReady(session)
+      pushCurrentCanvas()
+    },
+    onRpc: (req) => {
+      // A client asking for a fresh canvas snapshot → re-push the current one (read-only).
+      if (req.method === CANVAS_REQUEST_METHOD) {
+        canvasSync?.broadcastCurrent()
+        return
+      }
+      // Until approved, refuse every state-changing request (pty/fs RPCs + client mutations).
+      if (!approved) {
+        if (req.id) socket.respond(req.id, false, { message: 'Awaiting host approval.' })
+        return
+      }
+      if (canvasSync?.handleRpc(req)) return
+      handlers?.onRpc(req)
+    },
+    onFrame: (frame) => {
+      if (approved) handlers?.onFrame(frame)
+    },
+    onClose: () => {
+      approved = false
+      handlers?.closeAll()
+      opts.onClose()
+    }
+  })
+  // Confine the client's fs.* access to the cwds of the host's currently-shared canvas nodes.
+  handlers = createHostHandlers(opts.pty, socket, fsOps, () =>
+    rootsFromCanvas(opts.getLatestCanvas())
+  )
+  canvasSync = createHostCanvasSync(socket, opts.applyMutation)
+  unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
+
+  return session
 }
 
 // --- IPC wiring --------------------------------------------------------------
@@ -524,52 +675,12 @@ function relayAllowed(): boolean {
  * (which kills the served PTYs and drops the client's access).
  */
 export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void {
-  let socket: RelaySocket | null = null
-  let handlers: HostHandlers | null = null
-  let canvasSync: HostCanvasSync | null = null
-  // Connection-approval gate: a freshly-bridged client serves NO pty/fs RPCs or input frames
-  // until the host human approves it (so a leaked offer cannot grant silent access). Reset on
-  // every (re)connect and teardown.
-  let approved = false
-  // Latest snapshot pushed from the renderer, kept across (re)connects so a freshly joined
-  // client always gets the current state even if it connected after the last edit.
-  let latestCanvas: CanvasState | null = null
+  initHostCanvasHub()
+  let session: HostSession | null = null
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
   }
-
-  function teardown(): void {
-    if (broadcastTimer) {
-      clearTimeout(broadcastTimer)
-      broadcastTimer = null
-    }
-    approved = false
-    handlers?.closeAll()
-    handlers = null
-    canvasSync = null
-    socket?.close()
-    socket = null
-  }
-
-  // Re-broadcasting the *full* canvas on every renderer keystroke would be wasteful; the
-  // renderer already debounces, but a small main-side debounce coalesces bursts further.
-  let broadcastTimer: ReturnType<typeof setTimeout> | null = null
-  function scheduleBroadcast(): void {
-    if (broadcastTimer) return
-    broadcastTimer = setTimeout(() => {
-      broadcastTimer = null
-      if (latestCanvas) canvasSync?.setState(latestCanvas)
-    }, 120)
-    broadcastTimer.unref?.()
-  }
-
-  // Renderer pushes its serialized active-project canvas; remember it and (debounced) broadcast.
-  // Safe to receive when not hosting — it just updates the snapshot a future client will get.
-  ipcMain.on(IPC.remoteHostCanvasState, (_e, state: CanvasState) => {
-    latestCanvas = state
-    scheduleBroadcast()
-  })
 
   ipcMain.handle(IPC.remoteHostStart, async (): Promise<{ offer: string }> => {
     if (!isPremium()) {
@@ -584,60 +695,24 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
     }
 
     // Already hosting → tear the old session down before starting a fresh one.
-    teardown()
+    session?.close()
+    session = null
 
     const keys = await loadOrCreateKeyPair()
     const { pairingToken } = await mintPairingToken(entitlement)
 
-    // Connect FIRST and register as the pending host (the client joins later to trigger the
-    // bridge). The RPC/frame handlers are bound to this socket once it is created.
-    socket = connectRelay({
+    session = connectHostSession({
       url: RELAY_URL,
       token: pairingToken,
-      role: 'host',
       ourKeys: keys,
-      onReady: () => {
-        // Bridge established with a client. Require explicit host approval before serving any
-        // pty/fs RPC — surface the SAS so the human can verify + allow. Canvas state still pushes
-        // (read-only mirror) so the client isn't staring at a blank screen while pending.
-        approved = false
-        send(IPC.remoteHostPeerPending, { sas: socket?.sas() ?? null })
-        if (latestCanvas) canvasSync?.setState(latestCanvas)
-      },
-      onRpc: (req) => {
-        // A client asking for a fresh canvas snapshot → re-push the current one (read-only).
-        if (req.method === CANVAS_REQUEST_METHOD) {
-          canvasSync?.broadcastCurrent()
-          return
-        }
-        // Until the host approves this device, refuse every state-changing request: pty/fs RPCs
-        // and client canvas mutations. (canvas:request above is the only allowed pre-approval op.)
-        if (!approved) {
-          if (req.id) socket?.respond(req.id, false, { message: 'Awaiting host approval.' })
-          return
-        }
-        // Canvas mutations route to the canvas sync (which forwards them to the host renderer,
-        // the single writer); everything else is a pty RPC.
-        if (canvasSync?.handleRpc(req)) return
-        handlers?.onRpc(req)
-      },
-      // Input/resize frames are dropped until approved (no keystrokes reach a host PTY).
-      onFrame: (frame) => {
-        if (approved) handlers?.onFrame(frame)
-      },
-      onClose: () => {
-        // The client (or relay) dropped — kill served PTYs. relay-socket may reconnect; the
-        // handlers stay bound to the same socket object across reconnects. Re-require approval.
-        approved = false
-        handlers?.closeAll()
-      }
+      pty: ptyManager,
+      getLatestCanvas: currentCanvas,
+      subscribeCanvas,
+      applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
+      // Interactive host: surface the SAS so the human can verify + approve.
+      onPeerReady: (s) => send(IPC.remoteHostPeerPending, { sas: s.sas() }),
+      onClose: () => {}
     })
-    // Confine the client's fs.* access to the cwds of the host's currently-shared canvas nodes.
-    handlers = createHostHandlers(ptyManager, socket, fsOps, () => rootsFromCanvas(latestCanvas))
-    // The host renderer applies inbound client mutations to its React Flow (single writer).
-    canvasSync = createHostCanvasSync(socket, (mutation) =>
-      send(IPC.remoteHostApplyMutation, mutation)
-    )
 
     return {
       offer: encodeOffer({
@@ -648,16 +723,22 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
     }
   })
 
-  // Host human approved the pending device → start serving its pty/fs RPCs.
+  // Host human approved the pending device → start serving its pty/fs RPCs. Only act on a
+  // still-pending session: the approve/reject channels are shared with the standing phone host,
+  // so an event meant for the phone must not disturb an already-approved interactive session.
   ipcMain.on(IPC.remoteHostApprove, () => {
-    if (socket) approved = true
+    if (session && !session.isApproved()) session.approve()
   })
-  // Host human rejected the device → drop the connection entirely.
+  // Host human rejected the pending device → drop the connection entirely (pending sessions only).
   ipcMain.on(IPC.remoteHostReject, () => {
-    teardown()
+    if (session && !session.isApproved()) {
+      session.close()
+      session = null
+    }
   })
 
   ipcMain.handle(IPC.remoteHostStop, () => {
-    teardown()
+    session?.close()
+    session = null
   })
 }
