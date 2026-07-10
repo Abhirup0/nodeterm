@@ -317,10 +317,18 @@ function wsUrl(): string {
 // ── Reconnect overlay (kept out of RpcClient's unit-tested core) ────────────────────────────
 const OVERLAY_ID = 'nt-reconnect-overlay'
 
-function showReconnectOverlay(): void {
+/** Is the reconnect overlay currently mounted? Exported for the unit test. */
+export function isOverlayMounted(): boolean {
+  return typeof document !== 'undefined' && document.getElementById(OVERLAY_ID) !== null
+}
+
+/** Mount the full-screen "reconnecting" overlay (idempotent). Exported so both the initial-connect
+ *  failure path and the later onClose path — and the unit test — mount the identical UI. */
+export function showReconnectOverlay(): void {
   if (typeof document === 'undefined' || document.getElementById(OVERLAY_ID)) return
   const el = document.createElement('div')
   el.id = OVERLAY_ID
+  el.setAttribute('data-nt-reconnect', '')
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;' +
     'justify-content:center;background:rgba(0,0,0,0.72);color:#fff;' +
@@ -389,7 +397,16 @@ function startReconnect(): void {
  */
 export async function installWsBridge(): Promise<void> {
   const client = new RpcClient(wsUrl())
-  await client.ready()
+  try {
+    await client.ready()
+  } catch {
+    // First connection failed (server down at page load, or the socket errored before opening).
+    // Show the SAME reconnect overlay + backoff loop as a later drop instead of rejecting — a
+    // rejection here would bubble out of bootstrap() and leave a blank screen. `startReconnect`
+    // reloads the page on the first successful reopen, which re-runs installWsBridge cleanly.
+    startReconnect()
+    return
+  }
   client.onClose(() => startReconnect())
   const api: NodeTerminalApi = {
     ...buildStubApi(),
