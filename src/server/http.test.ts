@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import http from 'http'
 import fs from 'fs'
 import os from 'os'
@@ -96,6 +96,26 @@ describe('http layer', () => {
     const evil = await fetch(`${base}/..%2f..%2fauth.json`, { headers: { cookie } })
     expect([400, 401, 404]).toContain(evil.status)
     expect(await evil.text()).not.toContain('salt')
+  })
+
+  it('warns (and still 200s) when index.html lacks the CSP rewrite marker', async () => {
+    const cookie = await setupAndLogin()
+    fs.writeFileSync(
+      path.join(rendererDir, 'index.html'),
+      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'" /><div id="root"></div>`
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const res = await fetch(`${base}/`, { headers: { cookie } })
+      expect(res.status).toBe(200)
+      const html = await res.text()
+      expect(html).not.toContain('connect-src')
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0][0]).toContain('CSP')
+      expect(warn.mock.calls[0][0]).toContain('WebSocket')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('sessionTokenFromCookie parses the session out of a multi-cookie header', () => {

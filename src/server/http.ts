@@ -191,11 +191,18 @@ function serveStatic(
   let body: Buffer = fs.readFileSync(filePath)
   // CSP rewrite ONLY on index.html: relax connect-src so the WS client can connect.
   if (path.basename(filePath) === 'index.html') {
-    body = Buffer.from(
-      body
-        .toString('utf8')
-        .replace("default-src 'self';", "default-src 'self'; connect-src 'self' ws: wss:;")
-    )
+    const html = body.toString('utf8')
+    const marker = "default-src 'self';"
+    if (html.includes(marker)) {
+      body = Buffer.from(html.replace(marker, "default-src 'self'; connect-src 'self' ws: wss:;"))
+    } else {
+      // A silent no-op here would leave the desktop CSP intact and the browser
+      // would block the ws:/wss: WebSocket with no visible error — make sure an
+      // operator sees this in the server logs.
+      console.warn(
+        "[nodeterm-server] index.html CSP did not contain the expected `default-src 'self';` marker — the ws: connect-src rewrite did not apply; the browser will block the WebSocket. Rebuild the renderer or update the rewrite."
+      )
+    }
   }
   res.writeHead(200, { 'Content-Type': contentType })
   res.end(body)
