@@ -140,10 +140,15 @@ export function isPremium(): boolean {
   return verify(load().token) !== null
 }
 
-export function initLicense(): void {
+export function initLicense(onChange?: () => void): void {
   const deviceId = getDeviceId()
   const broadcast = (s: LicenseStatus) => {
     platform().broadcast(IPC.licenseChanged, s)
+    // Let the main process react to a Pro state change (activate / refresh / device-poll). The
+    // launch-time refresh is ASYNC, so anything gated on isPremium() at boot (the standing phone
+    // host) must re-reconcile once the entitlement settles — without this it would stay down
+    // until the toggle is flipped or the app restarts with an already-valid token.
+    onChange?.()
   }
 
   platform().handle(IPC.licenseStatus, () => statusFrom(load().token))

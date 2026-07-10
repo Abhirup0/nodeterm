@@ -857,15 +857,19 @@ app.whenReady().then(async () => {
   initCanvasControl()
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
-  initLicense()
+  // Declared before initLicense so its onChange hook can re-reconcile the standing host once the
+  // async launch-time entitlement refresh settles (fixes the boot race where Pro isn't yet valid
+  // when syncFromSettings first runs).
+  let standingHost: ReturnType<typeof initStandingHost> | undefined
+  initLicense(() => standingHost?.syncFromSettings())
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager, listProjectsOutput)
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
   // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
-  const standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)
-  ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost.setEnabled(!!enabled))
+  standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)
+  ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost?.setEnabled(!!enabled))
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()
   initRemoteClient(win, { isPackaged: app.isPackaged })
