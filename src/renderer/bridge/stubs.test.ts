@@ -11,7 +11,6 @@ describe('bridge stubs', () => {
     const s = buildStubApi()
     for (const un of [
       s.license.onChange(() => {}),
-      s.context.onUpdate(() => {}),
       s.onCloseNode(() => {}),
       s.onFocusNode(() => {}),
       s.browser.onBrowserNewWindow(() => {}),
@@ -46,7 +45,6 @@ describe('bridge stubs', () => {
     expect(() => {
       s.setBadgeCount(3)
       s.contextLink.setLinks({} as never)
-      s.context.ensure('sid', '/cwd', undefined)
       s.sendAgentControlResult({} as never)
     }).not.toThrow()
   })
