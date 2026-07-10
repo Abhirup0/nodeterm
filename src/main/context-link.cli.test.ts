@@ -23,12 +23,38 @@ beforeAll(() => {
     })
   ].join('\n')
   writeFileSync(join(dir, 'b.jsonl'), transcript)
+  const codexTranscript = [
+    JSON.stringify({ type: 'session_meta', payload: { id: 'sess-x' } }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'fix the tests' }] }
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Sure, running them.' }] }
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'shell', arguments: '{"command":["npm","test"]}' }
+    }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'function_call_output', output: '2 passed' } })
+  ].join('\n')
+  writeFileSync(join(dir, 'codex.jsonl'), codexTranscript)
+  const geminiTranscript = [
+    JSON.stringify({ sessionId: 'g-sess', projectHash: 'abc' }),
+    JSON.stringify({ $set: { messages: [{ type: 'user', content: 'hello gemini' }] } }),
+    JSON.stringify({ $push: { messages: { type: 'gemini', content: 'hello back' } } })
+  ].join('\n')
+  writeFileSync(join(dir, 'gemini.jsonl'), geminiTranscript)
   writeFileSync(
     join(dir, 'node-A.json'),
     JSON.stringify({
       self: { id: 'node-A' },
       links: [
         { id: 'node-B', title: 'Builder', cwd: '', transcriptPath: join(dir, 'b.jsonl'), tmux: 'nt-node-B' },
+        { id: 'node-X', title: 'Coder', cwd: '', transcriptPath: join(dir, 'codex.jsonl'), tmux: 'nt-node-X', agent: 'codex' },
+        { id: 'node-G', title: 'Gem', cwd: '', transcriptPath: join(dir, 'gemini.jsonl'), tmux: 'nt-node-G', agent: 'gemini' },
+        { id: 'node-Y', title: 'ColdCoder', cwd: '/nowhere', transcriptPath: '', tmux: 'nt-node-Y', agent: 'codex' },
         { id: 'note-1', title: 'Deploy notes', cwd: '', transcriptPath: '', tmux: '', note: 'use the staging key' }
       ],
       tmuxBin: null,
@@ -88,5 +114,21 @@ describe('context-cli', () => {
     const out = run('node-A', ['terminal', '--node', 'note-1'])
     expect(out).toContain('sticky note')
     expect(out).toContain('no terminal')
+  })
+  it('renders a codex rollout transcript', () => {
+    const out = run('node-A', ['summary', '-n', '20', '--node', 'node-X'])
+    expect(out).toContain('user: fix the tests')
+    expect(out).toContain('assistant: Sure, running them.')
+    expect(out).toContain('$ shell')
+    expect(out).toContain('= 2 passed')
+  })
+  it('renders a gemini chat transcript (event-sourced replay)', () => {
+    const out = run('node-A', ['transcript', '--node', 'node-G'])
+    expect(out).toContain('user: hello gemini')
+    expect(out).toContain('assistant: hello back')
+  })
+  it('non-claude agent without a resolved path gets no cwd fallback', () => {
+    const out = run('node-A', ['summary', '--node', 'node-Y'])
+    expect(out).toContain('no conversation transcript yet')
   })
 })

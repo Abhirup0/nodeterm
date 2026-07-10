@@ -361,7 +361,8 @@ const api: NodeTerminalApi = {
     revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
   },
   contextLink: {
-    setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map)
+    setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map),
+    info: () => ipcRenderer.invoke(IPC.contextLinkInfo)
   },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.

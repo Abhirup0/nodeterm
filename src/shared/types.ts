@@ -658,6 +658,8 @@ export type ContextLinkMap = Record<string, ContextLinkInfo[]>
 export interface ContextLinkApi {
   /** Push the current link map to main; main rewrites the per-node link files. */
   setLinks(map: ContextLinkMap): Promise<void>
+  /** Static facts the renderer needs to compose link messages: the CLI shim's absolute path. */
+  info(): Promise<{ shimPath: string }>
 }
 
 /** One usage window (5h session or 7d weekly) as shown in the indicator. */
