@@ -3,14 +3,13 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { promisify } from 'util'
-import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
-import { resolveGitRemote, runRemoteGit } from '../core/remote-ssh/remote-git'
-import { sendToMain } from './main-window'
+import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
+import { platform } from './platform'
 import {
   isValidCloneUrl,
   expandCloneUrl,
@@ -160,70 +159,70 @@ function githubTokenFromGitCredentials(cwd: string): Promise<string | null> {
  */
 export class GitService {
   registerIpc(): void {
-    ipcMain.handle(IPC.gitStatus, (_e, cwd: string) => this.status(cwd))
-    ipcMain.handle(IPC.gitInit, (_e, cwd: string) => this.init(cwd))
-    ipcMain.handle(IPC.gitClone, (_e, parentDir: string, url: string) => this.clone(parentDir, url))
-    ipcMain.handle(IPC.gitCloneAbort, () => this.cloneAbort())
-    ipcMain.handle(IPC.gitCloneDefaultParent, () => this.cloneDefaultParent())
-    ipcMain.handle(IPC.gitCommit, (_e, cwd: string, message: string) => this.commit(cwd, message))
-    ipcMain.handle(IPC.gitPush, (_e, cwd: string) => this.push(cwd))
-    ipcMain.handle(IPC.gitPull, (_e, cwd: string) => this.pull(cwd))
-    ipcMain.handle(IPC.gitSync, (_e, cwd: string) => this.sync(cwd))
-    ipcMain.handle(IPC.gitPublish, (_e, cwd: string, name: string, isPrivate: boolean) =>
+    platform().handle(IPC.gitStatus, (cwd: string) => this.status(cwd))
+    platform().handle(IPC.gitInit, (cwd: string) => this.init(cwd))
+    platform().handle(IPC.gitClone, (parentDir: string, url: string) => this.clone(parentDir, url))
+    platform().handle(IPC.gitCloneAbort, () => this.cloneAbort())
+    platform().handle(IPC.gitCloneDefaultParent, () => this.cloneDefaultParent())
+    platform().handle(IPC.gitCommit, (cwd: string, message: string) => this.commit(cwd, message))
+    platform().handle(IPC.gitPush, (cwd: string) => this.push(cwd))
+    platform().handle(IPC.gitPull, (cwd: string) => this.pull(cwd))
+    platform().handle(IPC.gitSync, (cwd: string) => this.sync(cwd))
+    platform().handle(IPC.gitPublish, (cwd: string, name: string, isPrivate: boolean) =>
       this.publish(cwd, name, isPrivate)
     )
-    ipcMain.handle(IPC.gitStage, (_e, cwd: string, paths: string[]) => this.stage(cwd, paths))
-    ipcMain.handle(IPC.gitUnstage, (_e, cwd: string, paths: string[]) => this.unstage(cwd, paths))
-    ipcMain.handle(IPC.gitStageAll, (_e, cwd: string) => this.stageAll(cwd))
-    ipcMain.handle(IPC.gitUnstageAll, (_e, cwd: string) => this.unstageAll(cwd))
-    ipcMain.handle(IPC.gitDiff, (_e, cwd: string, p: string, staged: boolean, untracked: boolean) =>
+    platform().handle(IPC.gitStage, (cwd: string, paths: string[]) => this.stage(cwd, paths))
+    platform().handle(IPC.gitUnstage, (cwd: string, paths: string[]) => this.unstage(cwd, paths))
+    platform().handle(IPC.gitStageAll, (cwd: string) => this.stageAll(cwd))
+    platform().handle(IPC.gitUnstageAll, (cwd: string) => this.unstageAll(cwd))
+    platform().handle(IPC.gitDiff, (cwd: string, p: string, staged: boolean, untracked: boolean) =>
       this.diff(cwd, p, staged, untracked)
     )
-    ipcMain.handle(IPC.gitDiscard, (_e, cwd: string, p: string, untracked: boolean) =>
+    platform().handle(IPC.gitDiscard, (cwd: string, p: string, untracked: boolean) =>
       this.discard(cwd, p, untracked)
     )
-    ipcMain.handle(IPC.gitSwitchBranch, (_e, cwd: string, name: string) =>
+    platform().handle(IPC.gitSwitchBranch, (cwd: string, name: string) =>
       this.switchBranch(cwd, name)
     )
-    ipcMain.handle(IPC.gitCreateBranch, (_e, cwd: string, name: string) =>
+    platform().handle(IPC.gitCreateBranch, (cwd: string, name: string) =>
       this.createBranch(cwd, name)
     )
-    ipcMain.handle(IPC.gitShowFile, (_e, cwd: string, ref: string, p: string) =>
+    platform().handle(IPC.gitShowFile, (cwd: string, ref: string, p: string) =>
       this.showFile(cwd, ref, p)
     )
-    ipcMain.handle(IPC.gitHistory, (_e, cwd: string, options) => this.history(cwd, options))
-    ipcMain.handle(IPC.gitCommitFiles, (_e, cwd: string, oid: string) => this.commitFiles(cwd, oid))
-    ipcMain.handle(IPC.gitRemoteCommitUrl, (_e, cwd: string, sha: string) =>
+    platform().handle(IPC.gitHistory, (cwd: string, options) => this.history(cwd, options))
+    platform().handle(IPC.gitCommitFiles, (cwd: string, oid: string) => this.commitFiles(cwd, oid))
+    platform().handle(IPC.gitRemoteCommitUrl, (cwd: string, sha: string) =>
       this.remoteCommitUrl(cwd, sha)
     )
-    ipcMain.handle(IPC.gitMerge, (_e, cwd: string, ref: string) => this.merge(cwd, ref))
-    ipcMain.handle(IPC.gitRebase, (_e, cwd: string, onto: string) => this.rebase(cwd, onto))
-    ipcMain.handle(IPC.gitDeleteBranch, (_e, cwd: string, name: string, force: boolean) =>
+    platform().handle(IPC.gitMerge, (cwd: string, ref: string) => this.merge(cwd, ref))
+    platform().handle(IPC.gitRebase, (cwd: string, onto: string) => this.rebase(cwd, onto))
+    platform().handle(IPC.gitDeleteBranch, (cwd: string, name: string, force: boolean) =>
       this.deleteBranch(cwd, name, force)
     )
-    ipcMain.handle(IPC.gitRenameBranch, (_e, cwd: string, newName: string) =>
+    platform().handle(IPC.gitRenameBranch, (cwd: string, newName: string) =>
       this.renameBranch(cwd, newName)
     )
-    ipcMain.handle(IPC.gitFetch, (_e, cwd: string) => this.fetch(cwd))
-    ipcMain.handle(IPC.gitForcePush, (_e, cwd: string) => this.forcePush(cwd))
-    ipcMain.handle(IPC.gitStashPush, (_e, cwd: string) => this.stashPush(cwd))
-    ipcMain.handle(IPC.gitStashPop, (_e, cwd: string) => this.stashPop(cwd))
-    ipcMain.handle(IPC.gitRevert, (_e, cwd: string, oid: string) => this.revert(cwd, oid))
-    ipcMain.handle(IPC.gitBranchAt, (_e, cwd: string, name: string, oid: string) =>
+    platform().handle(IPC.gitFetch, (cwd: string) => this.fetch(cwd))
+    platform().handle(IPC.gitForcePush, (cwd: string) => this.forcePush(cwd))
+    platform().handle(IPC.gitStashPush, (cwd: string) => this.stashPush(cwd))
+    platform().handle(IPC.gitStashPop, (cwd: string) => this.stashPop(cwd))
+    platform().handle(IPC.gitRevert, (cwd: string, oid: string) => this.revert(cwd, oid))
+    platform().handle(IPC.gitBranchAt, (cwd: string, name: string, oid: string) =>
       this.branchAt(cwd, name, oid)
     )
-    ipcMain.handle(IPC.gitCheckoutCommit, (_e, cwd: string, oid: string) =>
+    platform().handle(IPC.gitCheckoutCommit, (cwd: string, oid: string) =>
       this.checkoutCommit(cwd, oid)
     )
-    ipcMain.handle(IPC.gitRepoRoot, (_e, cwd: string) => this.repoRoot(cwd))
-    ipcMain.handle(IPC.gitWorktreeList, (_e, repoPath: string) => this.worktreeList(repoPath))
-    ipcMain.handle(IPC.gitWorktreeAdd, (_e, repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) =>
+    platform().handle(IPC.gitRepoRoot, (cwd: string) => this.repoRoot(cwd))
+    platform().handle(IPC.gitWorktreeList, (repoPath: string) => this.worktreeList(repoPath))
+    platform().handle(IPC.gitWorktreeAdd, (repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) =>
       this.worktreeAdd(repoPath, wtPath, branch, baseRef, isNew)
     )
-    ipcMain.handle(IPC.gitWorktreeMerge, (_e, repoPath: string, branch: string, baseRef: string) =>
+    platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string) =>
       this.worktreeMerge(repoPath, branch, baseRef)
     )
-    ipcMain.handle(IPC.gitWorktreeRemove, (_e, repoPath: string, wtPath: string, deleteBranch: boolean) =>
+    platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean) =>
       this.worktreeRemove(repoPath, wtPath, deleteBranch)
     )
   }
@@ -555,7 +554,7 @@ export class GitService {
         const text = d.toString('utf-8')
         tail = (tail + text).slice(-4096)
         const p = parseCloneProgress(text)
-        if (p) sendToMain(IPC.gitCloneProgress, p)
+        if (p) platform().broadcast(IPC.gitCloneProgress, p)
       })
       // Failure/abort: remove the dir we claimed (never anything pre-existing).
       const finishFail = (message: string): void => {
