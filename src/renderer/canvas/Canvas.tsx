@@ -1392,10 +1392,19 @@ export function Canvas() {
 
   const addDino = useCallback(
     (center?: { x: number; y: number }) => {
-      setNodes((ns) => [...ns, createDinoNode(ns.length, center ?? viewCenter())])
+      // Seed with the project record, maxed with any live dino nodes (pre-record projects
+      // only carry the score in node data).
+      const record = useProjects.getState().getProject(activeProjectId)?.dinoHighScore ?? 0
+      setNodes((ns) => {
+        const liveBest = Math.max(
+          record,
+          ...ns.filter((n) => n.type === 'dino').map((n) => (n.data.highScore as number) ?? 0)
+        )
+        return [...ns, createDinoNode(ns.length, center ?? viewCenter(), liveBest)]
+      })
       markDirty()
     },
-    [setNodes, markDirty, viewCenter]
+    [setNodes, markDirty, viewCenter, activeProjectId]
   )
 
   const addWebView = useCallback(

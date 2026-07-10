@@ -147,6 +147,8 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Default managed Claude account for new Claude/chat nodes in this project. */
   defaultAccountId?: string
+  /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
+  dinoHighScore?: number
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**

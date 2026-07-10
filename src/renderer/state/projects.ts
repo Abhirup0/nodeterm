@@ -21,6 +21,8 @@ interface ProjectsState {
   setProjectCwd(id: string, cwd: string): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
+  /** Raises the project's dino high score (never lowers it). */
+  setDinoHighScore(id: string, score: number): void
   /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
   commitCanvas(
     id: string,
@@ -137,6 +139,15 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectDefaultAccount(id, accountId) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, defaultAccountId: accountId } : p))
+    }))
+  },
+
+  setDinoHighScore(id, score) {
+    // Raise-only: a stale/lower report (e.g. a second dino node) must never shrink the record.
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === id && score > (p.dinoHighScore ?? 0) ? { ...p, dinoHighScore: score } : p
+      )
     }))
   },
 

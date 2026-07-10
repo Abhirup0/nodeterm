@@ -576,8 +576,12 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
   }
 }
 
-/** Creates a new dino (T-Rex Runner) game node. */
-export function createDinoNode(index: number, center?: { x: number; y: number }): CanvasNode {
+/** Creates a new dino (T-Rex Runner) game node, seeded with the project's record. */
+export function createDinoNode(
+  index: number,
+  center?: { x: number; y: number },
+  highScore = 0
+): CanvasNode {
   return {
     id: nextId('dino'),
     type: 'dino',
@@ -589,7 +593,7 @@ export function createDinoNode(index: number, center?: { x: number; y: number })
       title: 'Dino',
       color: '#a2a2a2',
       group: null,
-      highScore: 0
+      highScore
     }
   }
 }

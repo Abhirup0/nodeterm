@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { type CanvasNode } from '../state/workspace'
+import { useProjects } from '../state/projects'
 import { createDinoGame } from './dino/dino-game'
 
 /**
@@ -20,7 +21,13 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
     if (!host) return
     const game = createDinoGame(host, {
       initialHighScore: data.highScore ?? 0,
-      onHighScore: (score) => updateNodeData(id, { highScore: score })
+      onHighScore: (score) => {
+        updateNodeData(id, { highScore: score })
+        // Also raise the project-level record so a NEW dino node (after this one is
+        // closed) starts from it. Dino only runs while its project is active.
+        const s = useProjects.getState()
+        s.setDinoHighScore(s.activeProjectId, score)
+      }
     })
     return () => game.destroy()
     // Mount once; never re-run (would respawn the game). data.highScore is read

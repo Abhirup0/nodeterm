@@ -43,3 +43,21 @@ describe('openFolderProject', () => {
     expect(p.name).toBe('Project')
   })
 })
+
+describe('setDinoHighScore', () => {
+  it('raises the project record and never lowers it', () => {
+    const p = useProjects.getState().addProject('game', '/tmp/game')
+    useProjects.getState().setDinoHighScore(p.id, 120)
+    expect(useProjects.getState().getProject(p.id)?.dinoHighScore).toBe(120)
+    // A lower report (second dino node / stale game) must not shrink the record.
+    useProjects.getState().setDinoHighScore(p.id, 40)
+    expect(useProjects.getState().getProject(p.id)?.dinoHighScore).toBe(120)
+    useProjects.getState().setDinoHighScore(p.id, 200)
+    expect(useProjects.getState().getProject(p.id)?.dinoHighScore).toBe(200)
+  })
+
+  it('ignores unknown project ids', () => {
+    useProjects.getState().setDinoHighScore('nope', 99)
+    expect(useProjects.getState().projects).toHaveLength(0)
+  })
+})
