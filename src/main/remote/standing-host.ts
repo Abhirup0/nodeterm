@@ -20,8 +20,8 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, Settings } from '../../shared/types'
-import { PtyManager } from '../pty-manager'
-import { getStoredEntitlement, isPremium } from '../license'
+import { PtyManager } from '../../core/pty-manager'
+import { getStoredEntitlement, isPremium } from '../../core/license'
 import { publicKeyToB64 } from './e2ee'
 import {
   API_BASE,
