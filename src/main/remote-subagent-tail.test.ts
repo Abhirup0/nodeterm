@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
-import { formatSubagentChunk } from './subagent-tail'
+import { formatSubagentChunk } from '../core/subagent-tail'
 import type { RemoteFileRef } from './remote-ssh/remote-file'
 
 const ref: RemoteFileRef = { conn: { host: 'h', user: 'u' }, controlPath: '/s', path: '/abs/agent-1.jsonl' }

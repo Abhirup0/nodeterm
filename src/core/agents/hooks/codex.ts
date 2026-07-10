@@ -26,7 +26,7 @@ import {
   unlinkSync
 } from 'fs'
 import { randomUUID } from 'crypto'
-import { app } from 'electron'
+import { platform } from '../../platform'
 import { buildManagedScript } from './managed-script'
 import {
   computeTrustedHash,
@@ -84,7 +84,7 @@ function configTomlPath(): string {
 }
 
 function scriptPath(): string {
-  return path.join(app.getPath('userData'), 'agent-hooks', SCRIPT_FILE_NAME)
+  return path.join(platform().userDataDir, 'agent-hooks', SCRIPT_FILE_NAME)
 }
 
 // Why: match managed entries by the `agent-hooks/codex.sh` path segment (not

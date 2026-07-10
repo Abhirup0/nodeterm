@@ -6,15 +6,14 @@ import os from 'os'
 import path from 'path'
 import type { TranscriptLine, ChatMessage, ChatPart } from '../shared/types'
 import { transcriptRootFor } from './claude-accounts-core'
+import { platform } from './platform'
 
 // Transcript root for a managed account (its `projects` dir) or the system default
 // (`~/.claude/projects` when accountId is undefined — bit-for-bit the old behavior). Impure
-// wrapper over the pure `transcriptRootFor`: `electron.app` is required lazily (and only for the
-// account branch) so this module — and its vitest test — stays electron-free.
+// wrapper over the pure `transcriptRootFor`: the userData dir comes from the CorePlatform seam
+// (and only for the account branch) so this module — and its vitest test — stays electron-free.
 function transcriptRoot(accountId?: string): string {
-  const userData = accountId
-    ? (require('electron') as typeof import('electron')).app.getPath('userData')
-    : null
+  const userData = accountId ? platform().userDataDir : null
   return transcriptRootFor(os.homedir(), userData, accountId)
 }
 

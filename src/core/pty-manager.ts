@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { execFile, execFileSync } from 'child_process'
 import { promisify } from 'util'
-import { app, ipcMain, webContents } from 'electron'
+import { platform } from './platform'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
 import {
@@ -24,7 +24,7 @@ import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
-import { claudeConfigDirFor } from './claude-accounts'
+import { claudeConfigDirFor } from './claude-config-dir'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -309,7 +309,7 @@ export class PtyManager {
     void resolveShellPath()
     this.tmuxPath = findTmux()
     if (!this.tmuxPath) return
-    this.confPath = path.join(app.getPath('userData'), 'tmux.conf')
+    this.confPath = path.join(platform().userDataDir, 'tmux.conf')
     try {
       fs.writeFileSync(this.confPath, tmuxConf(getSettings().tmuxScrollback))
     } catch {
@@ -335,26 +335,26 @@ export class PtyManager {
   }
 
   registerIpc(): void {
-    ipcMain.handle(
+    platform().handleWithSender(
       IPC.ptyCreate,
-      (event, options: PtyCreateOptions): Promise<PtyCreateResult> =>
-        this.create(event.sender.id, options)
+      (senderId, options: PtyCreateOptions): Promise<PtyCreateResult> =>
+        this.create(senderId, options)
     )
-    ipcMain.on(IPC.ptyWrite, (_event, sessionId: string, data: string) =>
+    platform().on(IPC.ptyWrite, (sessionId: string, data: string) =>
       this.write(sessionId, data)
     )
-    ipcMain.on(IPC.ptyResize, (_event, sessionId: string, cols: number, rows: number) =>
+    platform().on(IPC.ptyResize, (sessionId: string, cols: number, rows: number) =>
       this.resize(sessionId, cols, rows)
     )
-    ipcMain.on(IPC.ptyFlow, (_event, sessionId: string, resume: boolean) =>
+    platform().on(IPC.ptyFlow, (sessionId: string, resume: boolean) =>
       this.setFlow(sessionId, resume)
     )
-    ipcMain.on(IPC.ptyKill, (_event, sessionId: string) => this.kill(sessionId))
-    ipcMain.on(IPC.ptyDestroy, (_event, persistKey: string) => this.destroySession(persistKey))
-    ipcMain.handle(IPC.ptyReadScrollback, (_event, persistKey: string) =>
+    platform().on(IPC.ptyKill, (sessionId: string) => this.kill(sessionId))
+    platform().on(IPC.ptyDestroy, (persistKey: string) => this.destroySession(persistKey))
+    platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
     )
-    ipcMain.handle(IPC.ptySendText, (_event, persistKey: string, text: string) =>
+    platform().handle(IPC.ptySendText, (persistKey: string, text: string) =>
       this.sendText(persistKey, text)
     )
   }
@@ -966,7 +966,6 @@ export class PtyManager {
   }
 
   private send(webContentsId: number, channel: string, payload: unknown): void {
-    const wc = webContents.fromId(webContentsId)
-    if (wc && !wc.isDestroyed()) wc.send(channel, payload)
+    platform().sendTo(webContentsId, channel, payload)
   }
 }

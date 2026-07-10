@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs'
 import path from 'path'
-import { app, ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
+import { platform } from './platform'
 import {
   DEFAULT_PROJECT_ID,
   EMPTY_WORKSPACE,
@@ -15,12 +15,12 @@ import {
  */
 export class WorkspaceStore {
   private get filePath(): string {
-    return path.join(app.getPath('userData'), 'workspace.json')
+    return path.join(platform().userDataDir, 'workspace.json')
   }
 
   registerIpc(): void {
-    ipcMain.handle(IPC.workspaceLoad, () => this.load())
-    ipcMain.handle(IPC.workspaceSave, (_event, workspace: Workspace) => this.save(workspace))
+    platform().handle(IPC.workspaceLoad, () => this.load())
+    platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
   }
 
   async load(): Promise<Workspace> {

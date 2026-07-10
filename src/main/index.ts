@@ -3,22 +3,22 @@ import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
-import * as fsOps from './fs-ops'
-import { PtyManager } from './pty-manager'
-import { WorkspaceStore } from './workspace-store'
-import { SettingsStore } from './settings-store'
+import * as fsOps from '../core/fs-ops'
+import { PtyManager } from '../core/pty-manager'
+import { WorkspaceStore } from '../core/workspace-store'
+import { SettingsStore } from '../core/settings-store'
 import { SshStore } from './ssh-store'
-import { GitService } from './git-service'
+import { GitService } from '../core/git-service'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from './commit-message'
 import { initUpdater } from './updater'
-import { fetchCheck } from './check'
-import { hookServer } from './agents/hook-server'
+import { fetchCheck } from '../core/check'
+import { hookServer } from '../core/agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
-import { initAgentStatusMirror, recordAgentEvent } from './agent-status-mirror'
+import { initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
 import { retainUntilDismissed } from './notifications'
-import { installManagedAgentHooks } from './agents/hooks'
-import { createSubagentTail } from './subagent-tail'
-import { createContextTail, type TaskNotification } from './context-tail'
+import { installManagedAgentHooks } from '../core/agents/hooks'
+import { createSubagentTail } from '../core/subagent-tail'
+import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import {
   readTranscriptLines,
@@ -29,28 +29,29 @@ import {
   parseTranscriptLines,
   parseChatMessages,
   SESSION_ID_RE
-} from './transcript-reader'
+} from '../core/transcript-reader'
 import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
-import { childArgs } from './remote-ssh/control-master'
+import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
-import { ChatDriver } from './chat-driver'
-import { initContextLink, setNodeTranscript } from './context-link'
+import { ChatDriver } from '../core/chat-driver'
+import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
-import { initTranscriptIndex, searchTranscripts } from './transcript-index'
+import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
-import { initLicense } from './license'
-import { initClaudeAccounts, claudeConfigDirFor } from './claude-accounts'
-import { isSafeLocalTranscriptPath } from './claude-accounts-core'
-import { installClaudeHooksInto } from './agents/hooks/claude'
+import { initLicense } from '../core/license'
+import { initClaudeAccounts } from './claude-accounts'
+import { claudeConfigDirFor } from '../core/claude-config-dir'
+import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
+import { installClaudeHooksInto } from '../core/agents/hooks/claude'
 import { createPairingService } from './pairing-service'
 import { initRemoteHost } from './remote/host-service'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
-import { setGitRemoteResolver, type GitRemoteRef } from './remote-ssh/remote-git'
+import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
 import {
   registerMediaScheme,
@@ -58,12 +59,19 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
+import { initPlatform } from '../core/platform'
+import { electronPlatform } from './platform-electron'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
 // in packaged builds. Must run before the stores below resolve userData paths.
 const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
 if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
+
+// First thing in bootstrap: install the Electron CorePlatform so anything in src/core
+// (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI
+// userData override so userDataDir reads the final path; nothing consumes it yet.
+initPlatform(electronPlatform())
 
 // Only hand the OS a URL with a vetted scheme. Blocks file://, smb://, and custom
 // protocol-handler schemes that could be smuggled in via remote announcement feeds or
@@ -438,7 +446,9 @@ app.whenReady().then(async () => {
   // local HTTP server that receives hook posts and forwards normalized events to the renderer.
   // A raw listener drives the transcript-tailing features (context meter + subagent transcript),
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
-  const subagentTail = createSubagentTail(win)
+  const subagentTail = createSubagentTail(({ toolUseId, chunk }) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+  })
   // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
   // transcript — their PostToolUse is only a launch ack (see the raw listener below). The
   // context tails already read that transcript, so they surface the notification here and we
@@ -461,7 +471,9 @@ app.whenReady().then(async () => {
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
-  const contextTail = createContextTail(win, { onTaskNotification })
+  const contextTail = createContextTail((payload) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
+  }, { onTaskNotification })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -805,11 +817,11 @@ app.whenReady().then(async () => {
   await hookServer.start()
   initMediaProtocol()
 
-  initContextLink(win, ptyManager)
+  initContextLink(ptyManager)
   initCanvasControl()
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
-  initLicense(win)
+  initLicense()
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)

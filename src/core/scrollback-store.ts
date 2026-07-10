@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
-import { app } from 'electron'
+import { platform } from './platform'
 
 // On a machine reboot the tmux server dies, so the live scrollback is lost. We persist a
 // byte-capped snapshot of each terminal's recent output to disk while it's running and replay
@@ -14,7 +14,7 @@ const DIR_NAME = 'terminal-scrollback'
 const MAX_BYTES = 256 * 1024
 
 function dir(): string {
-  return path.join(app.getPath('userData'), DIR_NAME)
+  return path.join(platform().userDataDir, DIR_NAME)
 }
 
 // persistKey is a node id (uuid-ish) but may contain arbitrary characters; hash it to a safe,

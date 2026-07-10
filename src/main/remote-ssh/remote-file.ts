@@ -1,7 +1,7 @@
 // Reads remote files over the project's existing ControlMaster (`ssh <childArgs> 'tail …'`).
 // Pure builders + an injected-runner class so the read logic is electron-free and unit-testable;
 // the actual ssh spawn is injected by the caller (Tasks 2/3 wire it to the project's runner).
-import { childArgs } from './control-master'
+import { childArgs } from '../../core/remote-ssh/control-master'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
 
 export interface RemoteFileRef {

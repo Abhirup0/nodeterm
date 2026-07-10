@@ -9,7 +9,7 @@
 // listener already learned it), so each entry is tracked directly by its RemoteFileRef.
 import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
-import { formatSubagentChunk, splitCompleteLines } from './subagent-tail'
+import { formatSubagentChunk, splitCompleteLines } from '../core/subagent-tail'
 import type { RemoteFile, RemoteFileRef } from './remote-ssh/remote-file'
 
 const POLL_MS = 1000

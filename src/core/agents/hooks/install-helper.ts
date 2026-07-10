@@ -10,7 +10,7 @@
 //   - fail open: a missing/unparseable settings.json defaults to {} (install) / returns
 //     early (remove); a write error is caught + warned, never thrown.
 import path from 'path'
-import { app } from 'electron'
+import { platform } from '../../platform'
 import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
 import { buildManagedScript } from './managed-script'
 
@@ -21,7 +21,7 @@ type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
 export type HookSettings = Settings
 
 function scriptPathFor(scriptFileName: string): string {
-  return path.join(app.getPath('userData'), 'agent-hooks', scriptFileName)
+  return path.join(platform().userDataDir, 'agent-hooks', scriptFileName)
 }
 
 // The marker identifying OUR entry: the `agent-hooks/<scriptFile>` tail of the managed

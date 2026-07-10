@@ -6,21 +6,22 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { app, ipcMain } from 'electron'
+import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
-import { accountConfigDir, isSupportedClaudeVersion, parseLoginCapture } from './claude-accounts-core'
-import { installClaudeHooksInto } from './agents/hooks/claude'
+import { isSupportedClaudeVersion, parseLoginCapture } from '../core/claude-accounts-core'
+import { claudeConfigDirFor } from '../core/claude-config-dir'
+import { installClaudeHooksInto } from '../core/agents/hooks/claude'
 import { installCanvasSkillInto } from './canvas-control'
-import { findInLoginPath } from './pty-manager'
+import { findInLoginPath } from '../core/pty-manager'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
-export function claudeConfigDirFor(accountId: string): string {
-  return accountConfigDir(app.getPath('userData'), accountId)
-}
+// Re-exported for this module's other consumers (claude-usage.ts) so their import path is
+// unchanged; the implementation now lives in core (../core/claude-config-dir).
+export { claudeConfigDirFor } from '../core/claude-config-dir'
 
 /**
  * Optional per-call SSH context. When `projectId` is present AND that project has a live

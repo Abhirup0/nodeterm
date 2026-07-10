@@ -3,7 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import { promisify } from 'util'
 import type { GitResult, Settings } from '../shared/types'
-import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
+import { resolveGitRemote, runRemoteGit } from '../core/remote-ssh/remote-git'
 
 const run = promisify(execFile)
 

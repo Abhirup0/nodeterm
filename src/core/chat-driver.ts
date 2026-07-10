@@ -8,7 +8,7 @@ import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import { sdkMessageToEvents } from './chat-events'
 import { ChatInputQueue, createPushIterable } from './chat-queue'
 import { resolveTranscriptPath } from './transcript-reader'
-import { claudeConfigDirFor } from './claude-accounts'
+import { claudeConfigDirFor } from './claude-config-dir'
 import { recordAgentEvent } from './agent-status-mirror'
 import { AUTH_ENV_STRIP } from './claude-accounts-core'
 

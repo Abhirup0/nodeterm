@@ -6,21 +6,10 @@ import path from 'path'
 import { IPC } from '../shared/ipc'
 import type { LicenseStatus } from '../shared/types'
 
-// One temp userData dir per run; hoisted so the electron mock factory can see it.
+// One temp userData dir per run; hoisted so the entitlement-key mock factory can see it.
 const h = vi.hoisted(() => ({
   userData: '',
-  publicKeyPem: '',
-  handlers: {} as Record<string, (...args: unknown[]) => unknown>
-}))
-
-vi.mock('electron', () => ({
-  app: { getPath: () => h.userData, isPackaged: false },
-  ipcMain: {
-    handle: (channel: string, fn: (...args: unknown[]) => unknown) => {
-      h.handlers[channel] = fn
-    }
-  },
-  shell: { openExternal: vi.fn() }
+  publicKeyPem: ''
 }))
 
 vi.mock('./entitlement-key', () => ({
@@ -51,19 +40,6 @@ function jsonResponse(body: unknown): { ok: boolean; status: number; json: () =>
   return { ok: true, status: 200, json: async () => body }
 }
 
-function fakeWindow(): { win: never; sent: LicenseStatus[] } {
-  const sent: LicenseStatus[] = []
-  const win = {
-    isDestroyed: () => false,
-    webContents: {
-      send: (channel: string, status: LicenseStatus) => {
-        if (channel === IPC.licenseChanged) sent.push(status)
-      }
-    }
-  }
-  return { win: win as never, sent }
-}
-
 const HOUR = 60 * 60 * 1000
 
 /** Let real I/O (fs writes in save()) and microtasks settle — setTimeout stays unfaked. */
@@ -73,13 +49,17 @@ async function flush(): Promise<void> {
 
 describe('license entitlement refresh', () => {
   let fetchMock: ReturnType<typeof vi.fn>
+  let fake: import('./platform-fake').FakePlatform
 
-  beforeEach(() => {
+  // The licenseChanged statuses broadcast so far (fake.sent records {to, channel, args}).
+  const sent = (): LicenseStatus[] =>
+    fake.sent.filter((s) => s.channel === IPC.licenseChanged).map((s) => s.args[0] as LicenseStatus)
+
+  beforeEach(async () => {
     // Only the refresh interval and the clock are faked: fetch/fs promises and the
     // 8s abort timers stay on the real event loop so awaits actually settle.
     vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
     h.userData = mkdtempSync(path.join(tmpdir(), 'nt-license-test-'))
-    h.handlers = {}
     // Pin this "machine"'s device id so minted tokens match it (device-bound verification).
     writeFileSync(path.join(h.userData, 'device-id'), 'test-device')
     delete process.env.DO_NOT_TRACK
@@ -88,11 +68,20 @@ describe('license entitlement refresh', () => {
     fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     vi.resetModules()
+    // device-id (imported transitively by license) reads userData through the core platform,
+    // so point the fake at this run's temp dir. Init on the post-reset module graph the
+    // dynamic `import('./license')` below will resolve against.
+    const { initPlatform } = await import('./platform')
+    const { fakePlatform } = await import('./platform-fake')
+    fake = fakePlatform({ userDataDir: h.userData, isPackaged: false })
+    initPlatform(fake)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllGlobals()
     vi.useRealTimers()
+    const { resetPlatformForTests } = await import('./platform')
+    resetPlatformForTests()
     rmSync(h.userData, { recursive: true, force: true })
   })
 
@@ -100,14 +89,13 @@ describe('license entitlement refresh', () => {
     const token = mint(7 * 24 * 60 * 60)
     fetchMock.mockResolvedValue(jsonResponse({ active: true, token }))
     const { initLicense } = await import('./license')
-    const { win, sent } = fakeWindow()
-    initLicense(win)
+    initLicense()
     await flush()
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(sent.length).toBe(1)
-    expect(sent[0].active).toBe(true)
-    expect(sent[0].tier).toBe('pro')
+    expect(sent().length).toBe(1)
+    expect(sent()[0].active).toBe(true)
+    expect(sent()[0].tier).toBe('pro')
   })
 
   it('keeps refreshing periodically so a mid-session token expiry re-mints instead of dropping Pro', async () => {
@@ -117,8 +105,7 @@ describe('license entitlement refresh', () => {
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
     )
     const { initLicense } = await import('./license')
-    const { win, sent } = fakeWindow()
-    initLicense(win)
+    initLicense()
     await flush()
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
@@ -127,7 +114,7 @@ describe('license entitlement refresh', () => {
     await vi.advanceTimersByTimeAsync(24 * HOUR)
     await flush()
     expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2)
-    const last = sent[sent.length - 1]
+    const last = sent().at(-1)!
     expect(last.active).toBe(true)
   })
 
@@ -136,16 +123,15 @@ describe('license entitlement refresh', () => {
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
     )
     const { initLicense } = await import('./license')
-    const { win, sent } = fakeWindow()
-    initLicense(win)
+    initLicense()
     await flush()
-    expect(sent[sent.length - 1].active).toBe(true)
+    expect(sent().at(-1)!.active).toBe(true)
 
     // From now on the server says: not entitled (canceled subscription).
     fetchMock.mockResolvedValue(jsonResponse({ active: false }))
     await vi.advanceTimersByTimeAsync(24 * HOUR)
     await flush()
-    expect(sent[sent.length - 1].active).toBe(false)
+    expect(sent().at(-1)!.active).toBe(false)
   })
 
   it('rejects a token minted for a different device (copied license.json)', async () => {
@@ -154,12 +140,11 @@ describe('license entitlement refresh', () => {
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60, 'other-device') })
     )
     const { initLicense } = await import('./license')
-    const { win, sent } = fakeWindow()
-    initLicense(win)
+    initLicense()
     await flush()
 
-    expect(sent.length).toBeGreaterThan(0)
-    expect(sent[sent.length - 1].active).toBe(false)
+    expect(sent().length).toBeGreaterThan(0)
+    expect(sent().at(-1)!.active).toBe(false)
   })
 
   it('does not revive an expired token when the system clock is rolled back', async () => {
@@ -167,10 +152,9 @@ describe('license entitlement refresh', () => {
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
     )
     const { initLicense } = await import('./license')
-    const { win, sent } = fakeWindow()
-    initLicense(win)
+    initLicense()
     await flush()
-    expect(sent[sent.length - 1].active).toBe(true)
+    expect(sent().at(-1)!.active).toBe(true)
 
     // Server unreachable from now on (offline grace path), and the token expires in-session.
     fetchMock.mockRejectedValue(new Error('offline'))
@@ -180,7 +164,7 @@ describe('license entitlement refresh', () => {
     // Attacker rolls the clock back before the expiry: exp is "in the future" again,
     // but the app has already observed a later time — the token must stay dead.
     vi.setSystemTime(Date.now() - 9 * 24 * HOUR)
-    const status = (await h.handlers[IPC.licenseStatus]()) as LicenseStatus
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
     expect(status.active).toBe(false)
   })
 })

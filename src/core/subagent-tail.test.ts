@@ -55,11 +55,6 @@ describe('splitCompleteLines', () => {
 
 // --- createSubagentTail integration (real fs, 400ms tick) ---
 
-function fakeWin(): { win: never; send: ReturnType<typeof vi.fn> } {
-  const send = vi.fn()
-  return { win: { isDestroyed: () => false, webContents: { send } } as never, send }
-}
-
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function setup(): { transcriptPath: string; subDir: string } {
@@ -71,7 +66,7 @@ function setup(): { transcriptPath: string; subDir: string } {
 }
 
 const streamed = (send: ReturnType<typeof vi.fn>): string =>
-  send.mock.calls.map((c) => (c[1] as { chunk: string }).chunk).join('')
+  send.mock.calls.map((c) => (c[0] as { chunk: string }).chunk).join('')
 
 describe('createSubagentTail', () => {
   it('does not drop a line written torn across two reads', async () => {
@@ -80,8 +75,8 @@ describe('createSubagentTail', () => {
     const file = path.join(subDir, 'agent-1.jsonl')
     const line = assistant('torn line survives')
     fs.writeFileSync(file, line.slice(0, 25)) // first half of the line, no newline yet
-    const { win, send } = fakeWin()
-    const tail = createSubagentTail(win)
+    const send = vi.fn()
+    const tail = createSubagentTail(send)
     tail.track('tu1', transcriptPath)
     await wait(900) // two ticks land while the line is still half-written
     fs.appendFileSync(file, line.slice(25) + '\n')
@@ -95,8 +90,8 @@ describe('createSubagentTail', () => {
     const metaPath = path.join(subDir, 'agent-1.meta.json')
     fs.writeFileSync(metaPath, '{}') // parseable but mid-write: toolUseId not there yet
     fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), assistant('late meta') + '\n')
-    const { win, send } = fakeWin()
-    const tail = createSubagentTail(win)
+    const send = vi.fn()
+    const tail = createSubagentTail(send)
     tail.track('tu1', transcriptPath)
     await wait(600) // first tick parses {} — must not blacklist this meta
     fs.writeFileSync(metaPath, JSON.stringify({ toolUseId: 'tu1' }))
@@ -109,8 +104,8 @@ describe('createSubagentTail', () => {
     const { transcriptPath, subDir } = setup()
     fs.writeFileSync(path.join(subDir, 'agent-1.meta.json'), JSON.stringify({ toolUseId: 'tu1' }))
     fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), assistant('unterminated final line'))
-    const { win, send } = fakeWin()
-    const tail = createSubagentTail(win)
+    const send = vi.fn()
+    const tail = createSubagentTail(send)
     tail.track('tu1', transcriptPath)
     await wait(600) // read, but held back as a partial line
     tail.finish('tu1')

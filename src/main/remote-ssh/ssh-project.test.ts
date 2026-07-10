@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SshProjectManager } from './ssh-project'
-import { controlPathFor } from './control-master'
+import { controlPathFor } from '../../core/remote-ssh/control-master'
 
 const conn = { host: 'h', user: 'u' }
 

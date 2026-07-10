@@ -4,6 +4,7 @@ import { resolve } from 'path'
 export default defineConfig({
   test: {
     include: [
+      'src/core/**/*.test.ts',
       'src/shared/**/*.test.ts',
       'src/main/**/*.test.ts',
       'src/renderer/**/*.test.ts',

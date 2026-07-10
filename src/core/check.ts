@@ -1,7 +1,7 @@
 // Polls the backend /v1/check feed from the main process (so the renderer CSP stays 'self').
 // Successor to the static announcements.json: returns targeted messages for the announcement
 // banner AND the mandatory-update policy for the Update Card. Persists nothing server-side.
-import { app } from 'electron'
+import { platform } from './platform'
 import type { Announcement, UpdatePolicy } from '../shared/types'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
@@ -19,7 +19,7 @@ const EMPTY: CheckResult = { messages: [], update: { minSupported: null, mandato
 // (the old announcements feed always ran) and /v1/check stores nothing.
 function allowed(): boolean {
   if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
-  if (!app.isPackaged && !process.env.NODETERM_API_BASE) return false
+  if (!platform().isPackaged && !process.env.NODETERM_API_BASE) return false
   return true
 }
 
@@ -53,7 +53,7 @@ export async function fetchCheck(): Promise<CheckResult> {
   if (cache && now - cache.at < CACHE_MS) return cache.data
   try {
     const q = new URLSearchParams({
-      version: app.getVersion(),
+      version: platform().appVersion,
       os: process.platform,
       channel: 'stable'
     })

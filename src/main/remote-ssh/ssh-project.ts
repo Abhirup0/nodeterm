@@ -5,7 +5,7 @@ import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatus } from '../../shared/types'
-import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../claude-accounts-core'
+import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
 import {
   controlPathFor,
   masterArgs,
@@ -17,10 +17,10 @@ import {
   childArgs,
   scpArgs,
   RMT_TMUX_SOCKET
-} from './control-master'
+} from '../../core/remote-ssh/control-master'
 import { RemoteHooks } from './remote-hooks'
-import { hookServer } from '../agents/hook-server'
-import { sessionName } from '../tmux-naming'
+import { hookServer } from '../../core/agents/hook-server'
+import { sessionName } from '../../core/tmux-naming'
 
 interface Runners {
   userDataDir: string

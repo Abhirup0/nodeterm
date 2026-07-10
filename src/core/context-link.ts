@@ -10,7 +10,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { app, ipcMain, type BrowserWindow } from 'electron'
+import { platform } from './platform'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
@@ -21,7 +21,7 @@ export { setNodeTranscript } from './context-link-core'
 
 let dir = ''
 export function contextLinkDir(): string {
-  if (!dir) dir = path.join(app.getPath('userData'), 'context-links')
+  if (!dir) dir = path.join(platform().userDataDir, 'context-links')
   return dir
 }
 function cliScriptPath(): string {
@@ -119,7 +119,7 @@ async function writeLinkFiles(map: ContextLinkMap): Promise<void> {
   }
 }
 
-export function initContextLink(win: BrowserWindow, ptyManager: PtyManager): void {
+export function initContextLink(ptyManager: PtyManager): void {
   pty = ptyManager
   try {
     const d = contextLinkDir()
@@ -137,10 +137,8 @@ export function initContextLink(win: BrowserWindow, ptyManager: PtyManager): voi
   // calls could interleave (B's clear runs before A's writes land) and leave a just-removed
   // link file behind — which is a read-authorization leak, not just a perf nit.
   let writeChain: Promise<void> = Promise.resolve()
-  ipcMain.handle(IPC.contextLinkSetLinks, (_e, map: ContextLinkMap) => {
+  platform().handle(IPC.contextLinkSetLinks, (map: ContextLinkMap) => {
     writeChain = writeChain.then(() => writeLinkFiles(map && typeof map === 'object' ? map : {}))
     return writeChain
   })
-  // win is reserved for future link-activity events; referenced to satisfy noUnusedParameters.
-  void win
 }

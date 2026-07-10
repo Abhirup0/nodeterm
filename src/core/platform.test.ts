@@ -1,0 +1,31 @@
+import { describe, it, expect, afterEach } from 'vitest'
+import { initPlatform, platform, resetPlatformForTests } from './platform'
+import { fakePlatform } from './platform-fake'
+
+afterEach(() => resetPlatformForTests())
+
+describe('core platform accessor', () => {
+  it('throws before initialization', () => {
+    expect(() => platform()).toThrow(/not initialized/)
+  })
+
+  it('returns the initialized platform', () => {
+    const fake = fakePlatform({ userDataDir: '/tmp/x' })
+    initPlatform(fake)
+    expect(platform().userDataDir).toBe('/tmp/x')
+  })
+
+  it('fake records handlers, sends and openExternal', async () => {
+    const fake = fakePlatform()
+    fake.handle('a:b', () => 42)
+    expect(await fake.handlers['a:b']()).toBe(42)
+    fake.sendTo(7, 'ev', 1)
+    fake.broadcast('ev2', 'x')
+    await fake.openExternal('https://example.com')
+    expect(fake.sent).toEqual([
+      { to: 7, channel: 'ev', args: [1] },
+      { to: 'broadcast', channel: 'ev2', args: ['x'] },
+    ])
+    expect(fake.opened).toEqual(['https://example.com'])
+  })
+})
