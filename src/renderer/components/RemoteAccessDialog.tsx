@@ -123,7 +123,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
               Sharing this machine requires nodeterm Pro. Connecting to a host you were given a code
               for is free.
             </p>
-            <Button onClick={() => void upgrade()}>Upgrade to Pro — $29/mo</Button>
+            <Button onClick={() => void upgrade()}>Upgrade to Pro — $10/mo</Button>
           </div>
         )}
 

@@ -47,7 +47,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
                 void ent.upgrade()
               }}
             >
-              Upgrade to Pro — $29/mo
+              Upgrade to Pro — $10/mo
             </Button>
             <p className="text-sm text-muted">
               {upgrading

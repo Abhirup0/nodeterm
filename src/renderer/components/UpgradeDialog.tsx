@@ -24,7 +24,7 @@ export function UpgradeDialog() {
             Maybe later
           </button>
           <button className="confirm__btn primary" autoFocus onClick={() => void upgrade()}>
-            Upgrade to Pro — $29/mo
+            Upgrade to Pro — $10/mo
           </button>
         </div>
       </div>
