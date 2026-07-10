@@ -18,6 +18,7 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
-    "src/core/**/*"
+    "src/core/**/*",
+    "src/server/**/*"
   ]
 }
