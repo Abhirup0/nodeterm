@@ -1,9 +1,10 @@
 // Per-agent transcript file locators. Each resolves an on-disk transcript path from the
-// sessionId captured via hooks. Filesystem + home-dir access — main process only.
+// sessionId captured via hooks. Filesystem + home-dir access only — lives in core so both
+// the handoff feature (src/main) and context-link (src/core) can use it.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { resolveTranscriptPath } from '../../core/transcript-reader'
+import { resolveTranscriptPath } from '../transcript-reader'
 
 // claude: ~/.claude/projects/<proj>/<sessionId>.jsonl — already implemented (searches all
 // project dirs for the exact <sessionId>.jsonl). `accountId` scopes to a managed account's

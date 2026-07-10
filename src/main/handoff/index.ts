@@ -8,7 +8,7 @@ import { SESSION_ID_RE } from '../../core/transcript-reader'
 import { renderClaudeTranscript } from './render-claude'
 import { renderCodexTranscript } from './render-codex'
 import { renderGeminiTranscript } from './render-gemini'
-import { locateClaude, locateCodex, locateGemini } from './locate'
+import { locateClaude, locateCodex, locateGemini } from '../../core/handoff/locate'
 
 export type HandoffResult = { filePath: string } | { error: string }
 
