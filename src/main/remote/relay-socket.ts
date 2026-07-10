@@ -412,20 +412,17 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       return
     }
     state = 'closed'
+    // Reconnect is the CALLER's responsibility (via onClose), NOT this socket's. Re-dialing here
+    // would reuse the same pairing token, which the relay rejects after its short TTL — and worse,
+    // for a standing host it fights the caller's fresh-token reconnect, repeatedly clobbering the
+    // new session so the connection never restabilises. So we fire onClose once and stop; the
+    // standing host mints a fresh token and reconnects cleanly.
+    void wasReady
     opts.onClose()
-    // Reconnect only applies to the production ws path; injected transports are
-    // single-shot (the test fake cannot re-open).
-    if (!opts.transport && wasReady) {
-      scheduleReconnect()
-    }
   }
 
-  // KNOWN MVP LIMITATION: this reconnect path re-dials with the *same* pairing token, which
-  // the real relay permanently rejects (the token is single-use and consumed on first pair,
-  // with a ~600s TTL). So a post-drop reconnect can never re-authenticate against the live
-  // relay — a working reconnect would need a freshly minted token, which is out of MVP scope.
-  // The machinery is kept (it's harmless and useful once token re-minting exists); don't be
-  // misled into thinking dropped connections currently recover on their own.
+  // (Internal same-token reconnect removed — see handleClose. The caller reconnects with a fresh
+  // token.)
   function scheduleReconnect(): void {
     if (reconnectTimer || intentionallyClosed) {
       return
