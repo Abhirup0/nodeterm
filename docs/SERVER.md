@@ -140,6 +140,48 @@ Two intentional departures from `docs/superpowers/specs/2026-07-10-server-editio
   `bufferedAmount` yet. Deferred to Phase 3.
 - **Single user.** One password, no accounts/roles.
 
+## Phase 3a: files, editor, diff & source control
+
+Phase 3a widens the browser surface from terminals-only to the file-and-git
+workflow. The server now registers the core **fs**, **git**, and **commit-message**
+handlers and the browser bridge exposes real `fs` / `git` / `files` / `context`
+APIs, so several node kinds and panels that were stubbed in Phase 2 now work in the
+browser:
+
+- **Editor & diff nodes** — Monaco editor nodes read/write files over `fs:read` /
+  `fs:write` (⌘S saves), and diff nodes render `git:show-file` + `fs:read` — both
+  now function unchanged in the browser.
+- **Source Control panel** — stage / unstage / discard, diff, branch switch/create,
+  commit + push, and the ✦ AI commit message (BYO local agent CLI on the staged
+  diff) all run against the server's `git` service.
+- **Explorer** — the file tree lists the project `cwd` via `fs:list`.
+
+The following affordances change shape in the browser (no native OS is reachable):
+
+- **Folder / file picker** — there is **no native dialog**. "Open folder…" and file
+  pickers use an **in-app server-directory browser** (built on `fs:list`) that lets
+  you navigate and pick a path on the server's filesystem.
+- **`shell.openExternal`** — opens the URL in a **new browser tab** rather than a
+  desktop-side default browser.
+- **"Reveal in Finder" / "open with default app"** — **inert** in the browser
+  (there is no desktop file manager to reveal into); these actions are hidden or
+  no-op rather than erroring.
+
+The **backpressure / flow-control** gap noted in the Phase 2 limitations is now
+closed: a flooding PTY is automatically paused based on the WebSocket
+`bufferedAmount` and resumed when it drains, so the WS is protected.
+
+> **Loose coordination (follow-up).** The server-side WS backpressure and the
+> renderer's terminal (xterm) flow control coordinate only **loosely** over a shared
+> pause actuator (`ptyManager.setFlow`) — full two-master coordination is a follow-up.
+> Because either side can resume the pty independently, the server **re-asserts** its
+> pause on every send while the socket buffer stays above the high-water mark (rather
+> than latching on a single rising edge), so a renderer-side resume cannot silently
+> latch the server's protection off.
+
+**Still deferred to Phase 3b:** the SDK **chat node** and the **agent-status
+badges/hooks** are not yet wired into the server bridge.
+
 ## Manual browser smoke checklist
 
 Run against a real browser (this is the human-verified path; the automated harness
@@ -159,3 +201,11 @@ only exercises the HTTP/auth surface). With `npm run server:dev` running:
    page. Same warm-reattach: the tmux server outlived the app, so state is intact.
 7. **Lockout** — sign out (or open a fresh session), enter the wrong password 5 times;
    the 6th attempt should be rejected with a "too many attempts" lockout for ~60s.
+8. **Open a folder (Phase 3a)** — use "Open folder…"; the **in-app server-directory
+   picker** appears (no native dialog). Navigate to a git repo on the server and pick
+   it; a project opens on its `cwd`.
+9. **Edit & save a file (Phase 3a)** — open a file (Explorer or picker) into an editor
+   node, make an edit, press ⌘S; the dirty dot clears and the change lands on disk.
+10. **Source Control (Phase 3a)** — open the Source Control panel; your edit shows as a
+    change. Click it to see the **diff**, **stage** it (+), type a message, and
+    **commit**; the file leaves the change list and the commit appears in recent commits.

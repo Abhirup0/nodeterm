@@ -9,6 +9,10 @@
 import { parseRpcMessage, decodePtyData, type RpcMessage } from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
 import type {
+  ContextApi,
+  FilesApi,
+  FsApi,
+  GitApi,
   NodeTerminalApi,
   PtyApi,
   PtyCreateOptions,
@@ -18,6 +22,7 @@ import type {
   WorkspaceApi
 } from '../../shared/types'
 import { buildStubApi } from './stubs'
+import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 
 type Listener = (...args: unknown[]) => void
 
@@ -187,6 +192,122 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
   return { pty, workspace, settings }
 }
 
+/**
+ * Build the real `fs` / `git` / `files` / `context` namespaces over an RpcClient, mirroring the
+ * preload's invoke(→request) / send(→cast) / on*(→subscribe) split member-for-member. Every
+ * `fs.*`, `git.*`, `files.quickOpen` and `git.generateMessage` member is an `invoke` in the
+ * preload → `client.request`; `context.ensure` is a `send` → `client.cast`; the event-shaped
+ * `git.onCloneProgress` / `context.onUpdate` are `.on` → `client.subscribe`. `git.generateMessage`
+ * routes over `IPC.commitGenerate` (not a git:* channel) exactly as the preload does. Each namespace
+ * is declared against its `NodeTerminalApi` slice so `satisfies` makes the compiler the completeness
+ * gate: a missing or misnamed member fails typecheck.
+ */
+export function buildFilesApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context'> {
+  const fs: FsApi = {
+    list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
+    read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
+    readBinary: (filePath) => client.request(IPC.fsReadBinary, filePath) as Promise<string>,
+    write: (filePath, content) => client.request(IPC.fsWrite, filePath, content) as Promise<boolean>
+  }
+
+  const git: GitApi = {
+    status: (cwd) => client.request(IPC.gitStatus, cwd) as ReturnType<GitApi['status']>,
+    init: (cwd) => client.request(IPC.gitInit, cwd) as ReturnType<GitApi['init']>,
+    clone: (parentDir, url) =>
+      client.request(IPC.gitClone, parentDir, url) as ReturnType<GitApi['clone']>,
+    cloneAbort: () => client.request(IPC.gitCloneAbort) as Promise<void>,
+    cloneDefaultParent: () => client.request(IPC.gitCloneDefaultParent) as Promise<string>,
+    onCloneProgress: (listener) => client.subscribe(IPC.gitCloneProgress, listener as Listener),
+    commit: (cwd, message) =>
+      client.request(IPC.gitCommit, cwd, message) as ReturnType<GitApi['commit']>,
+    push: (cwd) => client.request(IPC.gitPush, cwd) as ReturnType<GitApi['push']>,
+    pull: (cwd) => client.request(IPC.gitPull, cwd) as ReturnType<GitApi['pull']>,
+    sync: (cwd) => client.request(IPC.gitSync, cwd) as ReturnType<GitApi['sync']>,
+    publish: (cwd, name, isPrivate) =>
+      client.request(IPC.gitPublish, cwd, name, isPrivate) as ReturnType<GitApi['publish']>,
+    stage: (cwd, paths) => client.request(IPC.gitStage, cwd, paths) as ReturnType<GitApi['stage']>,
+    unstage: (cwd, paths) =>
+      client.request(IPC.gitUnstage, cwd, paths) as ReturnType<GitApi['unstage']>,
+    stageAll: (cwd) => client.request(IPC.gitStageAll, cwd) as ReturnType<GitApi['stageAll']>,
+    unstageAll: (cwd) => client.request(IPC.gitUnstageAll, cwd) as ReturnType<GitApi['unstageAll']>,
+    diff: (cwd, path, staged, untracked) =>
+      client.request(IPC.gitDiff, cwd, path, staged, untracked) as Promise<string>,
+    discard: (cwd, path, untracked) =>
+      client.request(IPC.gitDiscard, cwd, path, untracked) as ReturnType<GitApi['discard']>,
+    switchBranch: (cwd, name) =>
+      client.request(IPC.gitSwitchBranch, cwd, name) as ReturnType<GitApi['switchBranch']>,
+    createBranch: (cwd, name) =>
+      client.request(IPC.gitCreateBranch, cwd, name) as ReturnType<GitApi['createBranch']>,
+    showFile: (cwd, ref, path) =>
+      client.request(IPC.gitShowFile, cwd, ref, path) as Promise<string>,
+    generateMessage: (cwd) =>
+      client.request(IPC.commitGenerate, cwd) as ReturnType<GitApi['generateMessage']>,
+    history: (cwd, options) =>
+      client.request(IPC.gitHistory, cwd, options) as ReturnType<GitApi['history']>,
+    commitFiles: (cwd, oid) =>
+      client.request(IPC.gitCommitFiles, cwd, oid) as ReturnType<GitApi['commitFiles']>,
+    remoteCommitUrl: (cwd, sha) =>
+      client.request(IPC.gitRemoteCommitUrl, cwd, sha) as Promise<string | null>,
+    merge: (cwd, ref) => client.request(IPC.gitMerge, cwd, ref) as ReturnType<GitApi['merge']>,
+    rebase: (cwd, onto) => client.request(IPC.gitRebase, cwd, onto) as ReturnType<GitApi['rebase']>,
+    deleteBranch: (cwd, name, force) =>
+      client.request(IPC.gitDeleteBranch, cwd, name, force) as ReturnType<GitApi['deleteBranch']>,
+    renameBranch: (cwd, newName) =>
+      client.request(IPC.gitRenameBranch, cwd, newName) as ReturnType<GitApi['renameBranch']>,
+    fetch: (cwd) => client.request(IPC.gitFetch, cwd) as ReturnType<GitApi['fetch']>,
+    forcePush: (cwd) => client.request(IPC.gitForcePush, cwd) as ReturnType<GitApi['forcePush']>,
+    stashPush: (cwd) => client.request(IPC.gitStashPush, cwd) as ReturnType<GitApi['stashPush']>,
+    stashPop: (cwd) => client.request(IPC.gitStashPop, cwd) as ReturnType<GitApi['stashPop']>,
+    revert: (cwd, oid) => client.request(IPC.gitRevert, cwd, oid) as ReturnType<GitApi['revert']>,
+    branchAt: (cwd, name, oid) =>
+      client.request(IPC.gitBranchAt, cwd, name, oid) as ReturnType<GitApi['branchAt']>,
+    checkoutCommit: (cwd, oid) =>
+      client.request(IPC.gitCheckoutCommit, cwd, oid) as ReturnType<GitApi['checkoutCommit']>,
+    repoRoot: (cwd) => client.request(IPC.gitRepoRoot, cwd) as Promise<string | null>,
+    worktreeList: (repoPath) =>
+      client.request(IPC.gitWorktreeList, repoPath) as ReturnType<GitApi['worktreeList']>,
+    worktreeAdd: (repoPath, wtPath, branch, baseRef, isNew) =>
+      client.request(
+        IPC.gitWorktreeAdd,
+        repoPath,
+        wtPath,
+        branch,
+        baseRef,
+        isNew
+      ) as ReturnType<GitApi['worktreeAdd']>,
+    worktreeMerge: (repoPath, branch, baseRef) =>
+      client.request(
+        IPC.gitWorktreeMerge,
+        repoPath,
+        branch,
+        baseRef
+      ) as ReturnType<GitApi['worktreeMerge']>,
+    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
+      client.request(
+        IPC.gitWorktreeRemove,
+        repoPath,
+        wtPath,
+        deleteBranch
+      ) as ReturnType<GitApi['worktreeRemove']>,
+    setActiveRemote: (projectId) =>
+      client.request(IPC.gitSetActiveRemote, projectId) as Promise<void>
+  }
+
+  const files: FilesApi = {
+    quickOpen: (cwd) => client.request(IPC.filesQuickOpen, cwd) as Promise<string[]>
+  }
+
+  const context: ContextApi = {
+    onUpdate: (listener) => client.subscribe(IPC.contextUpdate, listener as Listener),
+    ensure: (sessionId, cwd, accountId) =>
+      client.cast(IPC.contextEnsure, sessionId, cwd, accountId)
+  }
+
+  return { fs, git, files, context }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -196,10 +317,18 @@ function wsUrl(): string {
 // ── Reconnect overlay (kept out of RpcClient's unit-tested core) ────────────────────────────
 const OVERLAY_ID = 'nt-reconnect-overlay'
 
-function showReconnectOverlay(): void {
+/** Is the reconnect overlay currently mounted? Exported for the unit test. */
+export function isOverlayMounted(): boolean {
+  return typeof document !== 'undefined' && document.getElementById(OVERLAY_ID) !== null
+}
+
+/** Mount the full-screen "reconnecting" overlay (idempotent). Exported so both the initial-connect
+ *  failure path and the later onClose path — and the unit test — mount the identical UI. */
+export function showReconnectOverlay(): void {
   if (typeof document === 'undefined' || document.getElementById(OVERLAY_ID)) return
   const el = document.createElement('div')
   el.id = OVERLAY_ID
+  el.setAttribute('data-nt-reconnect', '')
   el.style.cssText =
     'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;' +
     'justify-content:center;background:rgba(0,0,0,0.72);color:#fff;' +
@@ -268,11 +397,31 @@ function startReconnect(): void {
  */
 export async function installWsBridge(): Promise<void> {
   const client = new RpcClient(wsUrl())
-  await client.ready()
+  try {
+    await client.ready()
+  } catch {
+    // First connection failed (server down at page load, or the socket errored before opening).
+    // Show the SAME reconnect overlay + backoff loop as a later drop instead of rejecting — a
+    // rejection here would bubble out of bootstrap() and leave a blank screen. `startReconnect`
+    // reloads the page on the first successful reopen, which re-runs installWsBridge cleanly.
+    startReconnect()
+    return
+  }
   client.onClose(() => startReconnect())
   const api: NodeTerminalApi = {
     ...buildStubApi(),
-    ...buildRealApi(client)
+    ...buildRealApi(client),
+    ...buildFilesApi(client),
+    // Web replacement for the Electron native dialog: an in-app server-directory browser over
+    // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
+    dialog: (() => {
+      mountPickerRoot()
+      const startDir = '/' // navigable up/down from root; the picker remembers nothing across calls in v1
+      return {
+        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list }),
+        selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: api.fs.list })
+      }
+    })()
   }
   ;(window as unknown as { nodeTerminal: NodeTerminalApi }).nodeTerminal = api
 }

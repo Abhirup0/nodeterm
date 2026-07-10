@@ -12,6 +12,7 @@ import { initPlatform } from '../core/platform'
 import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
 import { PtyManager } from '../core/pty-manager'
+import { registerCoreHandlers } from './handlers'
 import { IPC } from '@shared/ipc'
 
 /**
@@ -69,6 +70,11 @@ export async function startServer(
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
 
+  // WS backpressure: when a connection's socket send buffer fills while streaming pty
+  // output, pause that tmux client so the OS pipe applies real backpressure (resumes below
+  // the low-water mark). See platform-server.ts sendTo.
+  platform.setFlowController((sid, resume) => ptyManager.setFlow(sid, resume))
+
   // Desktop's src/main/index.ts registers a few pty handlers outside PtyManager. Of those,
   // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
   // The others (ptyGenerateName / ptyGenerateGroupName → commit-message.ts; ptyReadSessionName
@@ -77,6 +83,9 @@ export async function startServer(
   platform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )
+
+  // fs + git + commit handlers (shared with desktop core services).
+  registerCoreHandlers(platform, { getSettings: () => settingsStore.get() })
 
   const server = http.createServer(createHttpHandler({ auth, rendererDir: config.rendererDir }))
   attachWsServer(server, { platform, auth })

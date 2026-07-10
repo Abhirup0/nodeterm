@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildStubApi, unsupported } from './stubs'
 import { E_UNSUPPORTED } from '../../shared/rpc'
 
@@ -11,7 +11,6 @@ describe('bridge stubs', () => {
     const s = buildStubApi()
     for (const un of [
       s.license.onChange(() => {}),
-      s.context.onUpdate(() => {}),
       s.onCloseNode(() => {}),
       s.onFocusNode(() => {}),
       s.browser.onBrowserNewWindow(() => {}),
@@ -41,12 +40,24 @@ describe('bridge stubs', () => {
     await expect(s.license.getStatus()).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 
+  it('shell.openExternal opens a new browser tab; reveal/openPath are documented no-ops', () => {
+    const s = buildStubApi()
+    const open = vi.fn(() => null)
+    vi.stubGlobal('window', { open })
+    s.shell.openExternal('https://example.com')
+    expect(open).toHaveBeenCalledWith('https://example.com', '_blank', 'noopener')
+    expect(() => {
+      s.shell.reveal('/x')
+      s.shell.openPath('/x')
+    }).not.toThrow()
+    vi.unstubAllGlobals()
+  })
+
   it('void members are safe no-ops', () => {
     const s = buildStubApi()
     expect(() => {
       s.setBadgeCount(3)
       s.contextLink.setLinks({} as never)
-      s.context.ensure('sid', '/cwd', undefined)
       s.sendAgentControlResult({} as never)
     }).not.toThrow()
   })

@@ -74,7 +74,8 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
   wss.on('connection', (ws: WebSocket) => {
     const uiId = platform.attach({
       sendText: (json) => ws.send(json),
-      sendBinary: (buf) => ws.send(buf, { binary: true })
+      sendBinary: (buf) => ws.send(buf, { binary: true }),
+      bufferedAmount: () => ws.bufferedAmount
     })
 
     ws.on('message', (data: unknown, isBinary: boolean) => {
