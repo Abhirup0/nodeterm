@@ -1,7 +1,7 @@
 import { promises as fs, readFileSync } from 'fs'
 import path from 'path'
-import { app, ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
+import { platform } from './platform'
 import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
 
 /**
@@ -12,7 +12,7 @@ export class SettingsStore {
   private cache: Settings = DEFAULT_SETTINGS
 
   private get filePath(): string {
-    return path.join(app.getPath('userData'), 'settings.json')
+    return path.join(platform().userDataDir, 'settings.json')
   }
 
   /** Load synchronously into cache (call after app is ready). */
@@ -30,8 +30,8 @@ export class SettingsStore {
   }
 
   registerIpc(): void {
-    ipcMain.handle(IPC.settingsLoad, () => this.cache)
-    ipcMain.handle(IPC.settingsSave, async (_e, settings: Settings) => {
+    platform().handle(IPC.settingsLoad, () => this.cache)
+    platform().handle(IPC.settingsSave, async (settings: Settings) => {
       this.cache = { ...DEFAULT_SETTINGS, ...settings }
       // Atomic write (temp + rename) so a mid-write crash can't corrupt settings.json.
       const tmp = `${this.filePath}.tmp`
