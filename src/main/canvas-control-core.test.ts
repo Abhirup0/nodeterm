@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { parseControlRequest, isDestructiveVerb } from './canvas-control-core'
+import {
+  parseControlRequest,
+  isDestructiveVerb,
+  mergeCanvasControlBlock,
+  buildCanvasControlInstructions
+} from './canvas-control-core'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -84,6 +89,28 @@ describe('parseControlRequest', () => {
       args: { node: 'n1', title: 'Feature Development' }
     })
     expect(isDestructiveVerb('rename')).toBe(false)
+  })
+
+  it('merges the canvas-control block idempotently, preserving other content', () => {
+    const block = buildCanvasControlInstructions('/tmp/nodeterm.sh')
+    const first = mergeCanvasControlBlock('# My own notes\n', block)
+    expect(first).toContain('# My own notes')
+    expect(first).toContain('nodeterm:manage-canvas:start')
+    expect(first).toContain('/tmp/nodeterm.sh')
+    // Re-merging (e.g. next app launch, updated verbs) replaces the block, not duplicates it.
+    const second = mergeCanvasControlBlock(first, buildCanvasControlInstructions('/new/nodeterm.sh'))
+    expect(second.match(/nodeterm:manage-canvas:start/g)).toHaveLength(1)
+    expect(second).toContain('/new/nodeterm.sh')
+    expect(second).not.toContain('/tmp/nodeterm.sh')
+    expect(second).toContain('# My own notes')
+  })
+
+  it('instructions cover the verb set and the confirm caveat', () => {
+    const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
+    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'arrange', 'rename', 'write', 'close']) {
+      expect(body).toContain(verb)
+    }
+    expect(body.toLowerCase()).toContain('confirm')
   })
 
   it('spawn-team requires --team and none of the layout verbs are destructive', () => {

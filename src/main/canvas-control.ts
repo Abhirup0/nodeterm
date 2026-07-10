@@ -1,12 +1,17 @@
-// Installs the outbound canvas-control CLI + a Claude skill describing it. Mirrors
+// Installs the outbound canvas-control CLI + per-agent discovery docs. Mirrors
 // context-link.ts: a self-contained CLI (canvas-control-cli.mjs, run via Electron-as-Node
-// through nodeterm.sh) POSTs to the hook server's /control/* routes; the skill tells the
-// agent how + when to call it. The CLI no-ops unless NODETERM_CANVAS_CONTROL is set.
+// through nodeterm.sh) POSTs to the hook server's /control/* routes; a Claude skill /
+// codex-gemini instruction blocks tell the agent how + when to call it. The CLI no-ops
+// unless NODETERM_CANVAS_CONTROL is set.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { app } from 'electron'
-import { CONTROL_CLI_SCRIPT } from './canvas-control-core'
+import {
+  CONTROL_CLI_SCRIPT,
+  buildCanvasControlInstructions,
+  mergeCanvasControlBlock
+} from './canvas-control-core'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -109,10 +114,37 @@ export function installCanvasSkillInto(configDir: string): void {
   }
 }
 
+// Codex/Gemini have no skill system — merge the canvas-control block into their global
+// instruction files (marker-delimited, idempotent, other content preserved). Same pattern
+// as context-link's get-linked-context block. The CLI env-gate keeps the block inert in
+// the user's normal (non-nodeterm) codex/gemini sessions.
+function installAgentInstructions(): void {
+  const block = buildCanvasControlInstructions(shimPath())
+  const targets = [
+    path.join(os.homedir(), '.codex', 'AGENTS.md'),
+    path.join(os.homedir(), '.gemini', 'GEMINI.md')
+  ]
+  for (const p of targets) {
+    try {
+      let existing = ''
+      try {
+        existing = fs.readFileSync(p, 'utf8')
+      } catch {
+        /* new file */
+      }
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      fs.writeFileSync(p, mergeCanvasControlBlock(existing, block), 'utf8')
+    } catch (e) {
+      console.warn('[canvas-control] instructions install failed', p, e)
+    }
+  }
+}
+
 export function initCanvasControl(): void {
   try {
     writeCliFiles()
     installCanvasSkillInto(path.join(os.homedir(), '.claude'))
+    installAgentInstructions()
   } catch (e) {
     console.error('[canvas-control] setup failed', e)
   }

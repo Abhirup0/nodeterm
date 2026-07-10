@@ -58,8 +58,10 @@ export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents that support naming the session in two directions: they emit a session title we adopt
 // into the node title, and accept `/rename <name>` to push a renamed node title back. Claude-only.
 export const RENAME_CAPABLE = ['claude'] as const
-// Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close). Claude-only.
-export const CANVAS_CONTROL_CAPABLE = ['claude'] as const
+// Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
+// Discovery differs per agent: claude gets the manage-nodeterm-canvas skill, codex/gemini a
+// marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md (see canvas-control.ts).
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 

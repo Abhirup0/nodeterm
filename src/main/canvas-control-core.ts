@@ -78,6 +78,60 @@ export function parseControlRequest(
   return { verb: v, args }
 }
 
+// Codex/Gemini have no skill system — canvas-control is announced to them via a
+// marker-delimited block merged into ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md (same
+// pattern as context-link's get-linked-context block, distinct markers).
+const CC_START = '<!-- nodeterm:manage-canvas:start -->'
+const CC_END = '<!-- nodeterm:manage-canvas:end -->'
+
+/** Idempotently merge the canvas-control block into a global instructions file.
+ *  Everything outside the markers is preserved; an existing block is replaced. */
+export function mergeCanvasControlBlock(existing: string, block: string): string {
+  const full = `${CC_START}\n${block.trim()}\n${CC_END}`
+  const start = existing.indexOf(CC_START)
+  const end = existing.indexOf(CC_END)
+  if (start >= 0 && end > start) {
+    return existing.slice(0, start) + full + existing.slice(end + CC_END.length)
+  }
+  const sep = existing.trim() ? (existing.endsWith('\n') ? '\n' : '\n\n') : ''
+  return existing + sep + full + '\n'
+}
+
+/** The instructions body telling codex/gemini how to control the nodeterm canvas.
+ *  Keep the verb list in sync with the skill template in canvas-control.ts. */
+export function buildCanvasControlInstructions(shimPath: string): string {
+  return [
+    '# Managing the nodeterm canvas (manage-nodeterm-canvas)',
+    '',
+    'When you run inside a node on the nodeterm canvas, you can create and control other',
+    'nodes (the CLI refuses outside a nodeterm session — do not retry there). Every node',
+    'you open is connected to your node by an edge. Use this when the user asks you to open',
+    'sessions/nodes, split work across agents, organize the canvas into groups, or show them',
+    'an image/video/web page you produced.',
+    '',
+    '```sh',
+    `sh "${shimPath}" <verb> [args]`,
+    '```',
+    '',
+    'Verbs:',
+    '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
+    '- `open-terminal [--cwd P] [--cmd C]` — open a terminal node.',
+    '- `open-claude [--count N] [--cwd P] [--prompt T]` — open N Claude sessions.',
+    '- `open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T]` — open any agent CLI.',
+    '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
+    '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
+    '- `open-browser --url U` — open a navigable browser node.',
+    '- `group --nodes <id,id> [--label L]` / `arrange --nodes <id,id> [--layout grid|row|column] [--cols N]` /',
+    '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — organize the canvas.',
+    '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
+    '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected to you.',
+    '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
+    '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
+    '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
+    '  Both ask the user to confirm a dialog and may be denied.'
+  ].join('\n')
+}
+
 // Standalone CLI written to disk by canvas-control.ts and run via Electron-as-Node.
 // Self-contained (no deps), no backticks / ${} so it survives this template literal.
 export const CONTROL_CLI_SCRIPT = `// nodeterm canvas-control CLI (auto-generated — do not edit).
