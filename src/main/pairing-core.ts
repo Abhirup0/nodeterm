@@ -26,6 +26,12 @@ export interface PairingPayloadInput {
   token: string
   pairPort: number
   name: string
+  /**
+   * The host's NaCl box public key (standard base64), authenticated by being shown on the host's
+   * own screen. When present, the phone encrypts the whole /pair exchange to it (E2EE). Omitted →
+   * the phone POSTs plaintext, exactly as before.
+   */
+  hostKey?: string
   /** Optional relay reachability block (standing host). Omitted from the payload when absent. */
   relay?: RelayPairingBlock
 }
@@ -34,8 +40,9 @@ export interface PairingPayloadInput {
  * Build the single-line JSON the QR encodes. The key order + compact separators match the
  * contract the phone parses:
  *   {"v":1,"host":"…","port":22,"user":"…","token":"…","pairPort":N,"nodeterm":true,"name":"…"}
- * When a relay block is supplied it is appended as `"relay":{…}` after `name`; otherwise the
- * payload is byte-for-byte the legacy LAN-only shape.
+ * When a host key is supplied it is appended as `"hostKey":"…"` after `name`; when a relay block is
+ * supplied it is appended as `"relay":{…}` after that. With neither, the payload is byte-for-byte
+ * the legacy LAN-only shape.
  */
 export function buildPairingPayload(input: PairingPayloadInput): string {
   const base = {
@@ -48,7 +55,8 @@ export function buildPairingPayload(input: PairingPayloadInput): string {
     nodeterm: true,
     name: input.name
   }
-  return JSON.stringify(input.relay ? { ...base, relay: input.relay } : base)
+  const withKey = input.hostKey ? { ...base, hostKey: input.hostKey } : base
+  return JSON.stringify(input.relay ? { ...withKey, relay: input.relay } : withKey)
 }
 
 /**

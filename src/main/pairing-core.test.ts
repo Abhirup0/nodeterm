@@ -74,6 +74,54 @@ describe('buildPairingPayload', () => {
     expect(JSON.parse(json)).not.toHaveProperty('relay')
   })
 
+  it('appends hostKey after name when supplied (no relay)', () => {
+    const json = buildPairingPayload({
+      host: '192.168.1.5',
+      user: 'enes',
+      token: 'tok',
+      pairPort: 5,
+      name: 'Mac',
+      hostKey: 'AAAAhostpub'
+    })
+    expect(json).toBe(
+      '{"v":1,"host":"192.168.1.5","port":22,"user":"enes","token":"tok","pairPort":5,"nodeterm":true,"name":"Mac","hostKey":"AAAAhostpub"}'
+    )
+    expect(JSON.parse(json).hostKey).toBe('AAAAhostpub')
+  })
+
+  it('places hostKey before the relay block when both are supplied', () => {
+    const relay = {
+      hostId: 'abcABC012_-def012ghij',
+      hostPublicKeyB64: 'AAAAhostpub',
+      relayEndpoint: 'wss://relay.nodeterm.dev'
+    }
+    const json = buildPairingPayload({
+      host: '192.168.1.5',
+      user: 'enes',
+      token: 'tok',
+      pairPort: 5,
+      name: 'Mac',
+      hostKey: 'AAAAhostpub',
+      relay
+    })
+    expect(json).toBe(
+      '{"v":1,"host":"192.168.1.5","port":22,"user":"enes","token":"tok","pairPort":5,"nodeterm":true,"name":"Mac","hostKey":"AAAAhostpub","relay":{"hostId":"abcABC012_-def012ghij","hostPublicKeyB64":"AAAAhostpub","relayEndpoint":"wss://relay.nodeterm.dev"}}'
+    )
+    expect(JSON.parse(json)).toMatchObject({ hostKey: 'AAAAhostpub', relay })
+  })
+
+  it('omits hostKey when absent (byte-for-byte legacy shape)', () => {
+    const json = buildPairingPayload({
+      host: 'h',
+      user: 'u',
+      token: 't',
+      pairPort: 1,
+      name: 'n'
+    })
+    expect(json).not.toContain('hostKey')
+    expect(JSON.parse(json)).not.toHaveProperty('hostKey')
+  })
+
   it('appends the relay block after name when supplied', () => {
     const relay = {
       hostId: 'abcABC012_-def012ghij',

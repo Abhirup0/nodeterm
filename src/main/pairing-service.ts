@@ -35,7 +35,7 @@ import {
   type RelayPairingBlock
 } from './pairing-core'
 import type { Settings } from '../shared/types'
-import { publicKeyToB64, type KeyPair } from './remote/e2ee'
+import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 
 const execFileAsync = promisify(execFile)
@@ -331,6 +331,21 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     // Relay reachability (network-free) — embedded in the QR so the phone can reach us over the
     // relay too. Also reused in handleRequest to mint the phone's device token. LAN-only when null.
     const relayCtx = await buildRelayContext(relayDeps)
+    // The host's NaCl box keypair — its public key rides the QR as `hostKey` (authenticated by
+    // being shown on this screen), so a new phone can E2EE the whole /pair exchange to it. Loaded
+    // once here and reused to decrypt the request in handleRequest. If the key can't be loaded we
+    // simply omit `hostKey` → the phone falls back to plaintext (never fail pairing over this).
+    let hostKeys: KeyPair | null = null
+    let hostKey: string | undefined
+    if (relayDeps) {
+      try {
+        hostKeys = await relayDeps.loadHostKeyPair()
+        hostKey = publicKeyToB64(hostKeys.publicKey)
+      } catch {
+        hostKeys = null
+        hostKey = undefined
+      }
+    }
     const payload = buildPairingPayload({
       host,
       port: 22,
@@ -338,6 +353,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
       token,
       pairPort,
       name,
+      hostKey,
       relay: relayCtx?.block
     })
 
@@ -352,12 +368,51 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
       }
       try {
         const raw = await readBody(req)
-        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown; deviceId?: unknown }
+        let outer: { epk?: unknown; box?: unknown } & Record<string, unknown>
         try {
-          body = JSON.parse(raw)
+          outer = JSON.parse(raw)
         } catch {
           res.writeHead(400).end('bad json')
           return
+        }
+        // E2EE branch: when the phone sealed the request to our host key, the outer body is
+        // {epk, box}. Derive the shared key from the ephemeral public key + our secret and open
+        // the box to recover the SAME {token, publicKey, deviceId} JSON. A present-but-undecryptable
+        // envelope is a hard 400 — we never fall through to parsing ciphertext as plaintext.
+        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown; deviceId?: unknown }
+        let sealed: Uint8Array | null = null // the shared key, set only on the encrypted path
+        if (typeof outer.epk === 'string') {
+          if (!hostKeys) {
+            res.writeHead(400).end('no host key')
+            return
+          }
+          let shared: Uint8Array
+          try {
+            shared = deriveSharedKey(outer.epk, hostKeys.secretKey)
+          } catch {
+            res.writeHead(400).end('bad epk')
+            return
+          }
+          const boxB64 = typeof outer.box === 'string' ? outer.box : ''
+          const plain = decrypt(Uint8Array.from(Buffer.from(boxB64, 'base64')), shared)
+          if (!plain) {
+            res.writeHead(400).end('decrypt failed')
+            return
+          }
+          try {
+            body = JSON.parse(Buffer.from(plain).toString('utf8'))
+          } catch {
+            res.writeHead(400).end('bad json')
+            return
+          }
+          sealed = shared
+        } else {
+          body = outer as {
+            token?: unknown
+            publicKey?: unknown
+            deviceName?: unknown
+            deviceId?: unknown
+          }
         }
         if (body.token !== token) {
           res.writeHead(403).end('bad token')
@@ -402,9 +457,22 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             }
           }
         }
-        res
-          .writeHead(200, { 'Content-Type': 'application/json' })
-          .end(JSON.stringify({ ok: true, deviceId, agentToken, ...relayFields }))
+        // Build the response exactly as before; wrap it in the box only when the request was
+        // encrypted (same shared key), so the relay device token never crosses the LAN in cleartext.
+        const responseObj = { ok: true, deviceId, agentToken, ...relayFields }
+        if (sealed) {
+          const respBox = encrypt(
+            Uint8Array.from(Buffer.from(JSON.stringify(responseObj), 'utf8')),
+            sealed
+          )
+          res
+            .writeHead(200, { 'Content-Type': 'application/json' })
+            .end(JSON.stringify({ box: Buffer.from(respBox).toString('base64') }))
+        } else {
+          res
+            .writeHead(200, { 'Content-Type': 'application/json' })
+            .end(JSON.stringify(responseObj))
+        }
         finish({ ok: true })
       } catch (err) {
         res.writeHead(500).end('pairing failed')
