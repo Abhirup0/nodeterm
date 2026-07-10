@@ -3,10 +3,8 @@
 // offset-based read + shared-interval pattern of subagent-tail.ts. Pushed to the renderer
 // as ContextWindowUsage keyed by sessionId.
 import fs from 'fs'
-import { type BrowserWindow } from 'electron'
-import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
-import { cachedWindowFor, resolveModelWindow } from './model-window'
+import { cachedWindowFor, resolveModelWindow } from '../main/model-window'
 import { splitCompleteLines } from './subagent-tail'
 
 const POLL_MS = 1000
@@ -120,12 +118,14 @@ export interface ContextTail {
   pathFor(sessionId: string | undefined): string | undefined
 }
 
-export function createContextTail(win: BrowserWindow, opts?: ContextTailOptions): ContextTail {
+export function createContextTail(
+  send: (payload: unknown) => void,
+  opts?: ContextTailOptions
+): ContextTail {
   const sessions = new Map<string, Tracked>()
   let timer: ReturnType<typeof setInterval> | null = null
 
   const push = (sessionId: string, t: Tracked): void => {
-    if (win.isDestroyed()) return
     const usedPercent = Math.min(100, Math.max(0, (t.used / t.window) * 100))
     const payload: ContextWindowUsage = {
       sessionId,
@@ -135,7 +135,7 @@ export function createContextTail(win: BrowserWindow, opts?: ContextTailOptions)
       model: t.model,
       updatedAt: Date.now()
     }
-    win.webContents.send(IPC.contextUpdate, payload)
+    send(payload)
   }
 
   // Read newly-appended transcript bytes (if any), reconcile the window from the model

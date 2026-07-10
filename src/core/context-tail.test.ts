@@ -67,8 +67,8 @@ describe('createContextTail — task notifications', () => {
     const line = notificationLine('tu-torn')
     fs.writeFileSync(file, line.slice(0, 40)) // first half, no newline
     const onTaskNotification = vi.fn()
-    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } } as never
-    const tail = createContextTail(win, { onTaskNotification })
+    const send = vi.fn()
+    const tail = createContextTail(send, { onTaskNotification })
     tail.track('s1', file)
     await new Promise((r) => setTimeout(r, 1200)) // ≥1 poll sees the partial line
     fs.appendFileSync(file, line.slice(40) + '\n')

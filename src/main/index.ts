@@ -17,8 +17,8 @@ import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './m
 import { initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
-import { createSubagentTail } from './subagent-tail'
-import { createContextTail, type TaskNotification } from './context-tail'
+import { createSubagentTail } from '../core/subagent-tail'
+import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import {
   readTranscriptLines,
@@ -446,7 +446,9 @@ app.whenReady().then(async () => {
   // local HTTP server that receives hook posts and forwards normalized events to the renderer.
   // A raw listener drives the transcript-tailing features (context meter + subagent transcript),
   // which need the raw transcript_path the NormalizedAgentEvent intentionally drops.
-  const subagentTail = createSubagentTail(win)
+  const subagentTail = createSubagentTail(({ toolUseId, chunk }) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+  })
   // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
   // transcript — their PostToolUse is only a launch ack (see the raw listener below). The
   // context tails already read that transcript, so they surface the notification here and we
@@ -469,7 +471,9 @@ app.whenReady().then(async () => {
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
-  const contextTail = createContextTail(win, { onTaskNotification })
+  const contextTail = createContextTail((payload) => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
+  }, { onTaskNotification })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner

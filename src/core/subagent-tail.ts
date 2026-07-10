@@ -7,8 +7,6 @@
 // All read-only — if Claude changes the format we just stream less (no crash).
 import fs from 'fs'
 import path from 'path'
-import { type BrowserWindow } from 'electron'
-import { IPC } from '../shared/ipc'
 
 interface Tracked {
   dir: string
@@ -133,12 +131,14 @@ export interface SubagentTail {
   finish(toolUseId: string): void
 }
 
-export function createSubagentTail(win: BrowserWindow): SubagentTail {
+export function createSubagentTail(
+  send: (payload: { toolUseId: string; chunk: string }) => void
+): SubagentTail {
   const tracked = new Map<string, Tracked>()
   let timer: ReturnType<typeof setInterval> | null = null
 
-  const send = (toolUseId: string, chunk: string) => {
-    if (chunk && !win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+  const emit = (toolUseId: string, chunk: string): void => {
+    if (chunk) send({ toolUseId, chunk })
   }
 
   // Async fs throughout: this ticks every 400ms per active subagent, and the sync version's
@@ -187,7 +187,7 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
       const { text, carry } = splitCompleteLines(data)
       e.carry = carry
       const out = formatSubagentChunk(text)
-      if (out) send(toolUseId, out + '\n')
+      if (out) emit(toolUseId, out + '\n')
     } catch {
       // file may not exist yet / transient read error
     } finally {
@@ -217,7 +217,7 @@ export function createSubagentTail(win: BrowserWindow): SubagentTail {
         if (!e.carry?.length) return
         const out = formatSubagentChunk(e.carry.toString('utf-8'))
         e.carry = null
-        if (out) send(toolUseId, out + '\n')
+        if (out) emit(toolUseId, out + '\n')
       }
       const e = tracked.get(toolUseId)
       if (e) void readOne(toolUseId, e).then(() => flushCarry(e)) // final flush (completes well within the grace delay)
