@@ -92,6 +92,30 @@ describe('R1: fs.* is confined to the shared roots', () => {
   })
 })
 
+// --- projects.list: read-only browse RPC ------------------------------------
+
+describe('projects.list serves the host projects blob', () => {
+  it('responds ok with the listProjects output', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const listProjects = vi.fn(async () => 'FIXTURE')
+    const handlers = createHostHandlers(pty, socket, fs, () => [], listProjects)
+    handlers.onRpc({ id: '1', method: 'projects.list', params: undefined })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(listProjects).toHaveBeenCalledTimes(1)
+    expect(responses).toEqual([{ id: '1', ok: true, body: { output: 'FIXTURE' } }])
+  })
+
+  it('defaults to an empty blob when no provider is injected (4-arg call)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '2', method: 'projects.list', params: undefined })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(responses).toEqual([{ id: '2', ok: true, body: { output: '' } }])
+  })
+})
+
 // --- R2: SAS determinism -----------------------------------------------------
 
 describe('R2: channel SAS', () => {

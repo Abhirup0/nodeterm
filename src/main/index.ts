@@ -1,4 +1,5 @@
 import { join, resolve, posix } from 'path'
+import { readFile } from 'fs/promises'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
@@ -103,6 +104,26 @@ const gitService = new GitService()
 const chatDriver = new ChatDriver(getMainWindow, sendToMain)
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
+
+// Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
+// strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],
+// matching the SSH browse pipeline it already uses — keep them in sync with NodetermProjects.swift.
+const NT_PROJECTS_MARK = '--NT-PROJECTS-SPLIT--'
+const NT_STATUS_MARK = '--NT-STATUS-SPLIT--'
+
+/**
+ * Build the marker-delimited projects blob served over the relay's `projects.list` RPC. Reads the
+ * same files the SSH browse path reads locally on the host (no SSH): `workspace.json` +
+ * `agent-status.json` under userData, plus the live nodeterm tmux session names. Every read is
+ * best-effort (missing files degrade to an empty section) so this never throws.
+ */
+async function listProjectsOutput(): Promise<string> {
+  const dir = app.getPath('userData')
+  const workspace = await readFile(join(dir, 'workspace.json'), 'utf8').catch(() => '')
+  const status = await readFile(join(dir, 'agent-status.json'), 'utf8').catch(() => '')
+  const sessions = (await ptyManager.listNodetermSessions().catch(() => [])).join('\n')
+  return `${workspace}\n${NT_PROJECTS_MARK}\n${sessions}\n${NT_STATUS_MARK}\n${status}`
+}
 
 // Remote git routing is scoped to the ACTIVE project only (set via `git:set-active-remote`).
 // A global cwd-keyed match would misroute when two SSH projects share a remote path, or when a
@@ -840,10 +861,10 @@ app.whenReady().then(async () => {
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
-  initRemoteHost(win, ptyManager)
+  initRemoteHost(win, ptyManager, listProjectsOutput)
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
   // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
-  const standingHost = initStandingHost(win, ptyManager, () => settingsStore.get())
+  const standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)
   ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost.setEnabled(!!enabled))
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()

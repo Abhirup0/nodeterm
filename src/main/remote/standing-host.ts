@@ -90,7 +90,8 @@ export interface StandingHost {
 export function initStandingHost(
   win: BrowserWindow,
   ptyManager: PtyManager,
-  getSettings: () => Settings
+  getSettings: () => Settings,
+  listProjects: () => Promise<string> = async () => ''
 ): StandingHost {
   initHostCanvasHub()
 
@@ -207,6 +208,7 @@ export function initStandingHost(
       getLatestCanvas: currentCanvas,
       subscribeCanvas,
       applyMutation: (mutation: CanvasMutation) => send(IPC.remoteHostApplyMutation, mutation),
+      listProjects,
       onPeerReady: (s) => void onPeerReady(s),
       onClose: () => {
         // Peer/relay dropped. Fully reset this session and re-register (fresh token).

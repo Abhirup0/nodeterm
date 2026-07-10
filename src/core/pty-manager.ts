@@ -914,6 +914,32 @@ export class PtyManager {
     }
   }
 
+  /**
+   * List the names of all live nodeterm tmux sessions (on our dedicated socket). Used by the
+   * relay host's `projects.list` RPC so a paired phone can enumerate the host's sessions the same
+   * way the SSH browse path does (`tmux -L node-terminal list-sessions`). Returns the trimmed,
+   * non-empty session names; `[]` on any error (tmux unavailable / no server / no sessions) so it
+   * never throws.
+   */
+  async listNodetermSessions(): Promise<string[]> {
+    if (!this.tmuxPath) return []
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'list-sessions',
+        '-F',
+        '#{session_name}'
+      ])
+      return stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+    } catch {
+      return []
+    }
+  }
+
   /** Permanently end a node's persistent tmux session (called when the user closes it). */
   async destroySession(persistKey: string): Promise<void> {
     // destroy() is called (close button) while the session is still live, so its sshRemote is

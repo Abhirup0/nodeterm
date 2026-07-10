@@ -135,7 +135,11 @@ export function createHostHandlers(
   fs: HostFsOps = fsOps,
   // Directories the remote client may read/write within. Empty ⇒ no filesystem access is served
   // (deny-by-default). Production passes the cwds of the host's shared canvas nodes.
-  getRoots: () => string[] = () => []
+  getRoots: () => string[] = () => [],
+  // Produce the marker-delimited "projects" blob for the `projects.list` RPC (workspace.json +
+  // live tmux session names + agent-status.json — the same bytes the iOS SSH browse path reads).
+  // Read-only, takes no client params. Default = empty so the 4-arg security tests still compile.
+  listProjects: () => Promise<string> = async () => ''
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -314,6 +318,14 @@ export function createHostHandlers(
         case 'fs.readBinary':
         case 'fs.write':
           handleFs(req)
+          break
+        case 'projects.list':
+          // Read-only enumeration of the host's projects/sessions/agent-status (no client params —
+          // nothing to jail). Gated by the same pre-handler approval check in connectHostSession, so
+          // an unapproved device never reaches here. Always respond ok; degrade to an empty blob.
+          void listProjects()
+            .then((output) => socket.respond(req.id, true, { output }))
+            .catch(() => socket.respond(req.id, true, { output: '' }))
           break
         default:
           socket.respond(req.id, false, { message: `Unknown method: ${req.method}` })
@@ -557,6 +569,11 @@ export interface HostSessionOptions {
   /** Forward a (sanitized) client canvas mutation to the host renderer (the single writer). */
   applyMutation(mutation: CanvasMutation): void
   /**
+   * Produce the marker-delimited projects blob for the `projects.list` RPC (see createHostHandlers).
+   * Optional: omit for host sessions that don't serve project browse (defaults to an empty blob).
+   */
+  listProjects?: () => Promise<string>
+  /**
    * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
    * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
    * host human, later calling `approve()`.
@@ -658,8 +675,12 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     }
   })
   // Confine the client's fs.* access to the cwds of the host's currently-shared canvas nodes.
-  handlers = createHostHandlers(opts.pty, socket, fsOps, () =>
-    rootsFromCanvas(opts.getLatestCanvas())
+  handlers = createHostHandlers(
+    opts.pty,
+    socket,
+    fsOps,
+    () => rootsFromCanvas(opts.getLatestCanvas()),
+    opts.listProjects ?? (async () => '')
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -674,7 +695,11 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
  * the relay as host, and returns the offer string. `remote:host:stop` closes the relay socket
  * (which kills the served PTYs and drops the client's access).
  */
-export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void {
+export function initRemoteHost(
+  win: BrowserWindow,
+  ptyManager: PtyManager,
+  listProjects: () => Promise<string> = async () => ''
+): void {
   initHostCanvasHub()
   let session: HostSession | null = null
 
@@ -709,6 +734,7 @@ export function initRemoteHost(win: BrowserWindow, ptyManager: PtyManager): void
       getLatestCanvas: currentCanvas,
       subscribeCanvas,
       applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
+      listProjects,
       // Interactive host: surface the SAS so the human can verify + approve.
       onPeerReady: (s) => send(IPC.remoteHostPeerPending, { sas: s.sas() }),
       onClose: () => {}
