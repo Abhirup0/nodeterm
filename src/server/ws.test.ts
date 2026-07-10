@@ -71,4 +71,32 @@ describe('ws endpoint', () => {
     expect(bins.length).toBe(1)
     ws.close()
   })
+
+  it('survives a receiver protocol error on one connection; others keep working', async () => {
+    platform.handle('echo:x', (v: string) => `got:${v}`)
+    const ws1 = await connect({ cookie, origin: `http://127.0.0.1:${port}` })
+    const ws2 = await connect({ cookie, origin: `http://127.0.0.1:${port}` })
+    // Swallow the expected client-side error when the server closes ws1's bad frame.
+    ws1.on('error', () => {})
+
+    // Corrupt ws1: write a raw UNMASKED text frame straight to its TCP socket.
+    // RFC 6455 requires client→server frames to be masked, so the server's receiver
+    // emits 'error' — which, without our listener, would throw and exit the process.
+    // 0x81 = FIN+text, 0x00 = mask bit unset + length 0.
+    ;(ws1 as unknown as { _socket: NodeJS.WritableStream })._socket.write(
+      Buffer.from([0x81, 0x00])
+    )
+    await new Promise((r) => setTimeout(r, 100))
+
+    // The process is still alive and ws2 round-trips a request.
+    const messages: string[] = []
+    ws2.on('message', (d, isBinary) => { if (!isBinary) messages.push(d.toString()) })
+    ws2.send(JSON.stringify({ t: 'req', id: 9, method: 'echo:x', args: ['ok'] }))
+    await new Promise((r) => setTimeout(r, 200))
+    expect(messages.map((m) => JSON.parse(m))).toContainEqual({
+      t: 'res', id: 9, ok: true, result: 'got:ok'
+    })
+    ws1.close()
+    ws2.close()
+  })
 })

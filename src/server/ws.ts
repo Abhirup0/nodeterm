@@ -58,6 +58,9 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
     if (pathname !== '/ws') return
 
     if (!upgradeAllowed(req, auth)) {
+      // Guard the raw socket: writing to an already-dead peer emits 'error', and an
+      // unhandled 'error' on a socket (EventEmitter) throws → crashes the process.
+      socket.on('error', () => {})
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
       socket.destroy()
       return
@@ -90,6 +93,14 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
         platform.cast(uiId, m.method, m.args)
       }
       // res/ev from a client are ignored.
+    })
+
+    // Without an 'error' listener, a receiver protocol error (malformed/unmasked
+    // frame, corrupted proxy frame) emits 'error' on the socket with no listener,
+    // which THROWS → uncaughtException → the whole server exits, tearing down every
+    // session's pty. Log and let 'close' fire for this one connection only.
+    ws.on('error', (e: NodeJS.ErrnoException) => {
+      console.warn('[nodeterm-server] ws socket error', (e && e.code) || e)
     })
 
     ws.on('close', () => {

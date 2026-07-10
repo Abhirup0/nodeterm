@@ -5,6 +5,11 @@ import { startServer } from './index'
  * Script entry point for the headless server. Kept separate from index.ts so that
  * `index.ts` stays side-effect-free (importable by tests without booting a server).
  */
+// Last-resort loggers: a stray throw/rejection anywhere in the process should be
+// logged, not silently exit the server (which would tear down every session's pty).
+process.on('uncaughtException', (e) => console.error('[nodeterm-server] uncaughtException', e))
+process.on('unhandledRejection', (e) => console.error('[nodeterm-server] unhandledRejection', e))
+
 async function main(): Promise<void> {
   const config = resolveConfig(process.env, process.argv.slice(2))
   const { port, close } = await startServer(config)
