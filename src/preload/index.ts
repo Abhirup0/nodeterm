@@ -4,6 +4,7 @@ import type {
   CanvasMutation,
   CanvasState,
   NodeTerminalApi,
+  Project,
   PtyCreateOptions,
   UpdateInfo,
   UpdateProgress,
@@ -70,7 +71,18 @@ const api: NodeTerminalApi = {
   },
   workspace: {
     load: () => ipcRenderer.invoke(IPC.workspaceLoad),
-    save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace)
+    save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace),
+    probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),
+    onMigrated: (cb: () => void) => {
+      const h = () => cb()
+      ipcRenderer.on(IPC.workspaceMigrated, h)
+      return () => ipcRenderer.removeListener(IPC.workspaceMigrated, h)
+    },
+    onExternalChange: (cb: (project: Project) => void) => {
+      const h = (_e: unknown, p: Project) => cb(p)
+      ipcRenderer.on(IPC.workspaceExternalChange, h)
+      return () => ipcRenderer.removeListener(IPC.workspaceExternalChange, h)
+    }
   },
   dialog: {
     selectFolder: () => ipcRenderer.invoke(IPC.dialogSelectFolder),
