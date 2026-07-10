@@ -101,6 +101,13 @@ export function initStandingHost(
   let session: HostSession | null = null
   // A bridged-but-not-yet-approved peer awaiting the host human's decision (unpinned device).
   let pendingPeer: HostSession | null = null
+  // The box public key of the last unknown device that asked for approval, REMEMBERED across the
+  // session's teardown. The phone's one-shot browse call closes its socket right after it gets
+  // 'Awaiting host approval', which tears this session down — but the human hasn't clicked Approve
+  // yet. Pin-once trusts a DEVICE (its stable key), not a live socket, so we keep the pubkey here
+  // and pin it when the human approves, even though that session is already gone. The phone's next
+  // connect (same stable key) then auto-approves.
+  let pendingApprovalPub: string | null = null
   let refreshTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempt = 0
@@ -176,7 +183,9 @@ export function initStandingHost(
       return
     }
     // Unknown device → require the host human's approval (shared SAS dialog). Pin on approve.
+    // Remember the pubkey so approval pins it even if the phone's browse socket closes first.
     pendingPeer = s
+    pendingApprovalPub = pub
     send(IPC.remoteHostPeerPending, { sas: s.sas() })
   }
 
@@ -242,21 +251,23 @@ export function initStandingHost(
   // Host human approved / rejected the pending phone. These channels are shared with the
   // interactive host; guarding on our own `pendingPeer` keeps the two independent.
   ipcMain.on(IPC.remoteHostApprove, () => {
+    // Pin the DEVICE (its stable box key), whether or not its session is still live — the phone's
+    // browse socket may have already closed. Prefer the live peer's key, else the remembered one.
+    const pub = pendingPeer?.peerPublicKeyB64() ?? pendingApprovalPub
+    if (!pub) return
+    pendingApprovalPub = null
+    void loadApprovedDevices()
+      .then((store) => saveApprovedDevices(pinDevice(store, pub)))
+      .catch(() => {
+        // A failed pin is non-fatal: the device re-prompts next connect. Never block on the write.
+      })
+    // Approve the live session too, if this device is still connected (fast approval, same socket).
     const s = pendingPeer
-    if (!s) return
     pendingPeer = null
-    const pub = s.peerPublicKeyB64()
-    if (pub) {
-      void loadApprovedDevices()
-        .then((store) => saveApprovedDevices(pinDevice(store, pub)))
-        .catch(() => {
-          // A failed pin is non-fatal: the device still works this session, it just re-prompts
-          // next time. Never block approval on a disk write.
-        })
-    }
-    s.approve()
+    s?.approve()
   })
   ipcMain.on(IPC.remoteHostReject, () => {
+    pendingApprovalPub = null
     const s = pendingPeer
     if (!s) return
     pendingPeer = null
