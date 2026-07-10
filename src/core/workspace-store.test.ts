@@ -104,6 +104,62 @@ describe('unavailable & corrupt refs', () => {
     const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
     expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(true)
   })
+
+  it('sets aside a valid-JSON but wrong-shape project file and marks it unavailable', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const p = path.join(projRoot, '.nodeterm/project.json')
+    await fs.writeFile(p, '{"version": 99}') // parses, but not a ProjectFileV1
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].unavailable).toBe(true)
+    const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(true)
+  })
+})
+
+describe('unavailable projects never overwrite real data on save', () => {
+  it('save() of an unavailable local project does not touch the project file', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const p = path.join(projRoot, '.nodeterm/project.json')
+    const original = await fs.readFile(p, 'utf-8')
+    // Folder goes missing at load → placeholder with nodes: []
+    await fs.rm(projRoot, { recursive: true, force: true })
+    const store2 = new WorkspaceStore()
+    const loaded = await store2.load()
+    expect(loaded.projects[0].unavailable).toBe(true)
+    // Disk comes back with the real file (remounted / restored checkout) before the next save
+    await fs.mkdir(path.join(projRoot, '.nodeterm'), { recursive: true })
+    await fs.writeFile(p, original, 'utf-8')
+    await store2.save(loaded)
+    expect(await fs.readFile(p, 'utf-8')).toBe(original) // untouched — no nodes:[] overwrite
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].cwd).toBe(projRoot) // entry still refs the cwd
+  })
+
+  it('save() of an unavailable ssh project preserves the previous cache verbatim', async () => {
+    // Chosen construction: seed a populated ssh cache in the index (so it loads fine), then
+    // hand-mark the loaded project unavailable before save — the real data-loss scenario is
+    // the placeholder replacing a *good* offline cache.
+    const cache = {
+      version: 1, rev: 5, savedAt: '2026-01-01T00:00:00.000Z',
+      id: 's1', name: 'remote', color: '#7aa2f7', viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [{ id: 'term-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null }]
+    }
+    const index = {
+      version: 3, activeProjectId: 's1',
+      entries: [{ id: 's1', name: 'remote', color: '#7aa2f7', ssh: { server: { host: 'h', user: 'u' }, remoteCwd: '~/app' }, cache }]
+    }
+    await fs.writeFile(path.join(userData, 'workspace.json'), JSON.stringify(index))
+    const store = new WorkspaceStore()
+    const loaded = await store.load()
+    expect(loaded.projects[0].unavailable).toBeFalsy() // cache-backed → loads fine
+    // Simulate the ref becoming unavailable in memory (e.g. server unreachable next cycle)
+    loaded.projects[0] = { ...loaded.projects[0], unavailable: true, nodes: [] }
+    await store.save(loaded)
+    const after = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(after.entries[0].cache).toEqual(cache) // good offline cache survived verbatim
+  })
 })
 
 describe('probeFolder', () => {

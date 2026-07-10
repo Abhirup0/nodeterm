@@ -124,19 +124,30 @@ export class WorkspaceStore {
     }
     try {
       const parsed = JSON.parse(raw) as ProjectFileV1
-      if (parsed?.version !== 1 || typeof parsed.id !== 'string' || !Array.isArray(parsed.nodes)) return null
-      return parsed
-    } catch {
-      try {
-        await fs.rename(file, `${file}.corrupt-${Date.now()}`)
-      } catch { /* best effort — never destroy data */ }
-      return null
-    }
+      if (parsed?.version === 1 && typeof parsed.id === 'string' && Array.isArray(parsed.nodes)) return parsed
+      // parses but isn't a ProjectFileV1 — sideline it too, so a later save can't overwrite the only copy.
+    } catch { /* not JSON — sideline below */ }
+    try {
+      await fs.rename(file, `${file}.corrupt-${Date.now()}`)
+    } catch { /* best effort — never destroy data */ }
+    return null
   }
 
   async save(workspace: Workspace): Promise<void> {
     const savedAt = new Date().toISOString()
     const { index, files } = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
+
+    // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
+    // and cache; here we restore the machine-local payload (ssh offline cache) from the previous
+    // index so the index rewrite doesn't drop a good cache we still can't reach.
+    const unavailableIds = new Set(workspace.projects.filter((p) => p.unavailable).map((p) => p.id))
+    if (unavailableIds.size) {
+      for (const e of index.entries) {
+        if (!unavailableIds.has(e.id)) continue
+        const old = this.index?.entries.find((o) => o.id === e.id)
+        if (old?.cache) e.cache = old.cache
+      }
+    }
 
     for (const [cwd, candidate] of files) {
       const file = projectFilePath(cwd)
@@ -175,7 +186,7 @@ export class WorkspaceStore {
       const bak = this.pendingV2Backup
       this.pendingV2Backup = null
       try {
-        await fs.writeFile(path.join(platform().userDataDir, 'workspace.v2.bak'), bak, 'utf-8')
+        await writeAtomic(path.join(platform().userDataDir, 'workspace.v2.bak'), bak)
       } catch { /* backup is best-effort */ }
       platform().broadcast(IPC.workspaceMigrated)
     }

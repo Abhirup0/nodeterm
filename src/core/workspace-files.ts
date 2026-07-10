@@ -120,6 +120,18 @@ export function splitWorkspace(
   const files = new Map<string, ProjectFileV1>()
   for (const p of ws.projects) {
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
+    if (p.unavailable) {
+      // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real
+      // data. Emit a header-only ref preserving the ref shape — NEVER a file and NEVER an ssh
+      // cache built from the placeholder, so a later save can't clobber the on-disk source.
+      if (p.ssh) entries.push({ ...header, ssh: p.ssh })
+      else if (p.cwd) entries.push({ ...header, cwd: p.cwd })
+      else {
+        const { unavailable: _u, ...inline } = p
+        entries.push({ ...header, project: inline })
+      }
+      continue
+    }
     if (p.ssh) {
       entries.push({ ...header, ssh: p.ssh, cache: projectToFile(p, revOf(p.id), savedAt) })
     } else if (p.cwd) {

@@ -89,6 +89,18 @@ describe('splitWorkspace', () => {
       () => 1, '2026-07-11T00:00:00.000Z')
     expect(index.entries[0].project!.unavailable).toBeUndefined()
   })
+  it('an unavailable ref is header-only: no file (local cwd) and no cache (ssh)', () => {
+    const local = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [project({ id: 'p1', cwd: '/a/foo', unavailable: true })] },
+      () => 1, '2026-07-11T00:00:00.000Z')
+    expect(local.index.entries[0]).toMatchObject({ id: 'p1', name: 'foo', cwd: '/a/foo' })
+    expect(local.files.has('/a/foo')).toBe(false) // no placeholder file written over real data
+    const remote = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [project({ id: 'p1', ssh: { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }, unavailable: true })] },
+      () => 1, '2026-07-11T00:00:00.000Z')
+    expect(remote.index.entries[0]).toMatchObject({ id: 'p1', ssh: { remoteCwd: '~/app' } })
+    expect(remote.index.entries[0].cache).toBeUndefined() // no cache fabricated from the placeholder
+  })
 })
 
 describe('serializeProjectFile', () => {
