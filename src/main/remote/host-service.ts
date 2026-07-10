@@ -20,6 +20,7 @@
 // testable with fakes; `initRemoteHost` wires it to IPC, the license gate, and the API call.
 
 import { promises as fs } from 'fs'
+import { randomUUID } from 'crypto'
 import path from 'path'
 import { app, ipcMain, safeStorage, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
@@ -599,6 +600,10 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
   let broadcastTimer: ReturnType<typeof setTimeout> | null = null
 
   function pushCurrentCanvas(): void {
+    // NEVER expose canvas state (node titles, project cwds, sticky text, editor file paths,
+    // browser URLs, ssh user@host) before the human approves the device — a leaked/unapproved
+    // client completing only the E2EE handshake must see nothing.
+    if (!approved) return
     const state = opts.getLatestCanvas()
     if (state) canvasSync?.setState(state)
   }
@@ -614,6 +619,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
   const session: HostSession = {
     approve() {
       approved = true
+      // Flush the current canvas now that the device is trusted.
+      pushCurrentCanvas()
     },
     isApproved() {
       return approved
@@ -645,21 +652,21 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     role: 'host',
     ourKeys: opts.ourKeys,
     onReady: () => {
-      // Bridge established. Require approval before serving any pty/fs RPC. Canvas state still
-      // pushes (read-only mirror) so the client isn't staring at a blank screen while pending.
+      // Bridge established. Require approval before serving ANYTHING — including canvas state
+      // (which carries workspace metadata). Nothing is pushed until approve() flushes it.
       approved = false
       opts.onPeerReady(session)
-      pushCurrentCanvas()
     },
     onRpc: (req) => {
+      // Until approved, refuse every request — pty/fs RPCs, client mutations, AND canvas
+      // snapshots (canvas:request). An unapproved device gets nothing but the approval prompt.
+      if (!approved) {
+        if (req.id) socket.respond(req.id, false, { message: 'Awaiting host approval.' })
+        return
+      }
       // A client asking for a fresh canvas snapshot → re-push the current one (read-only).
       if (req.method === CANVAS_REQUEST_METHOD) {
         canvasSync?.broadcastCurrent()
-        return
-      }
-      // Until approved, refuse every state-changing request (pty/fs RPCs + client mutations).
-      if (!approved) {
-        if (req.id) socket.respond(req.id, false, { message: 'Awaiting host approval.' })
         return
       }
       if (canvasSync?.handleRpc(req)) return
@@ -702,6 +709,10 @@ export function initRemoteHost(
 ): void {
   initHostCanvasHub()
   let session: HostSession | null = null
+  // A fresh id per pending approval. The approve/reject IPC channels are SHARED with the standing
+  // phone host, and a single "Approve" click broadcasts to both listeners — so each acts only on
+  // an event carrying ITS OWN pending id, never on one meant for the other host.
+  let pendingApprovalId: string | null = null
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
@@ -735,9 +746,14 @@ export function initRemoteHost(
       subscribeCanvas,
       applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
       listProjects,
-      // Interactive host: surface the SAS so the human can verify + approve.
-      onPeerReady: (s) => send(IPC.remoteHostPeerPending, { sas: s.sas() }),
-      onClose: () => {}
+      // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.
+      onPeerReady: (s) => {
+        pendingApprovalId = randomUUID()
+        send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pendingApprovalId })
+      },
+      onClose: () => {
+        pendingApprovalId = null
+      }
     })
 
     return {
@@ -752,11 +768,15 @@ export function initRemoteHost(
   // Host human approved the pending device → start serving its pty/fs RPCs. Only act on a
   // still-pending session: the approve/reject channels are shared with the standing phone host,
   // so an event meant for the phone must not disturb an already-approved interactive session.
-  ipcMain.on(IPC.remoteHostApprove, () => {
+  ipcMain.on(IPC.remoteHostApprove, (_e, msg: { id?: string } = {}) => {
+    if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
+    pendingApprovalId = null
     if (session && !session.isApproved()) session.approve()
   })
   // Host human rejected the pending device → drop the connection entirely (pending sessions only).
-  ipcMain.on(IPC.remoteHostReject, () => {
+  ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string } = {}) => {
+    if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
+    pendingApprovalId = null
     if (session && !session.isApproved()) {
       session.close()
       session = null

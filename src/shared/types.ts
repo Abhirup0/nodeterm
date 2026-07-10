@@ -915,11 +915,11 @@ export interface RemoteHostApi {
    * `approve()` before any of the client's pty/fs RPCs are served; `sas` is the channel
    * verification code to display. Returns an unsubscribe function.
    */
-  onPeerPending(listener: (info: { sas: string | null }) => void): () => void
-  /** Approve the pending client → the host begins serving its pty/fs RPCs. */
-  approve(): void
-  /** Reject the pending client → the connection is dropped. */
-  reject(): void
+  onPeerPending(listener: (info: { sas: string | null; id: string }) => void): () => void
+  /** Approve the pending client (by its pending id) → the host begins serving its pty/fs RPCs. */
+  approve(id: string): void
+  /** Reject the pending client (by its pending id) → the connection is dropped. */
+  reject(id: string): void
   /**
    * Start/stop the standing (phone) relay host so a paired phone can reach this Mac from anywhere.
    * Mirrors `settings.phoneAccessEnabled`; the host also honors the Pro gate internally.

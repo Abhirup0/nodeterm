@@ -321,7 +321,7 @@ export function Canvas() {
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
   const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
-  const [pendingPeer, setPendingPeer] = useState<{ sas: string | null } | null>(null)
+  const [pendingPeer, setPendingPeer] = useState<{ sas: string | null; id: string } | null>(null)
   const [confirm, setConfirm] = useState<{
     message: string
     onConfirm: () => void
@@ -3959,11 +3959,11 @@ export function Canvas() {
           cancelLabel="Deny"
           danger={false}
           onConfirm={() => {
-            window.nodeTerminal.remoteHost.approve()
+            window.nodeTerminal.remoteHost.approve(pendingPeer.id)
             setPendingPeer(null)
           }}
           onCancel={() => {
-            window.nodeTerminal.remoteHost.reject()
+            window.nodeTerminal.remoteHost.reject(pendingPeer.id)
             setPendingPeer(null)
           }}
         />

@@ -136,6 +136,10 @@ function loginPage(hasError: boolean): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in — nodeterm</title></head><body style="${PAGE_STYLE}"><form method="post" action="/auth/login" style="${CARD_STYLE}"><h1 style="${H1_STYLE}">nodeterm</h1><p style="${SUB_STYLE}">Sign in to continue</p>${errLine}<input style="${INPUT_STYLE}" type="password" name="password" placeholder="Password" autofocus autocomplete="current-password"><button style="${BUTTON_STYLE}" type="submit">Sign in</button></form></body></html>`
 }
 
+function setupNeedsTokenPage(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up — nodeterm</title></head><body style="${PAGE_STYLE}"><div style="${CARD_STYLE}"><h1 style="${H1_STYLE}">Set up nodeterm</h1><p style="${SUB_STYLE}">Open the setup link printed in the server console — it carries a one-time token. This page can't be used without it.</p></div></body></html>`
+}
+
 function setupPage(token: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up — nodeterm</title></head><body style="${PAGE_STYLE}"><form method="post" action="/auth/setup" style="${CARD_STYLE}"><h1 style="${H1_STYLE}">Welcome to nodeterm</h1><p style="${SUB_STYLE}">Choose a password to secure this server.</p><input type="hidden" name="token" value="${esc(token)}"><input style="${INPUT_STYLE}" type="password" name="password" placeholder="New password (min 8 chars)" autofocus autocomplete="new-password" minlength="8"><button style="${BUTTON_STYLE}" type="submit">Create password</button></form></body></html>`
 }
@@ -232,7 +236,15 @@ export function createHttpHandler(
         sendPage(res, 403, '<!doctype html><title>403</title><p style="color:#fff">Already configured.</p>')
         return
       }
-      sendPage(res, 200, setupPage(auth.setupToken()))
+      // The setup token is printed to the SERVER CONSOLE and must be presented as `?token=`.
+      // Never serve the live token to a caller that hasn't already got it (otherwise anyone who
+      // can reach /setup before a password is set could harvest it → POST /auth/setup → takeover).
+      const provided = url.searchParams.get('token') || ''
+      if (!auth.verifySetupToken(provided)) {
+        sendPage(res, 403, setupNeedsTokenPage())
+        return
+      }
+      sendPage(res, 200, setupPage(provided))
       return
     }
 

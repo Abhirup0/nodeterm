@@ -203,8 +203,8 @@ export function buildStubApi(): Omit<NodeTerminalApi, 'pty' | 'workspace' | 'set
       sendCanvasState: noop,
       onApplyMutation: noopUnsub,
       onPeerPending: noopUnsub,
-      approve: noop,
-      reject: noop,
+      approve: (_id: string) => {},
+      reject: (_id: string) => {},
       setPhoneAccess: noop
     },
     remoteClient: {

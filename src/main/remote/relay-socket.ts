@@ -30,7 +30,16 @@
 // so tests drive two RelaySockets via in-process fakes with no real network;
 // production passes a `ws` WebSocket wrapped via `wrapWebSocket`.
 
-import { decrypt, deriveSharedKey, encrypt, publicKeyToB64, sasFromSharedKey, type KeyPair } from './e2ee'
+import {
+  decrypt,
+  deriveSessionKey,
+  deriveSharedKey,
+  encrypt,
+  publicKeyToB64,
+  randomSessionNonce,
+  sasFromSharedKey,
+  type KeyPair
+} from './e2ee'
 import { decodeFrame, encodeFrame, type Frame, MAX_BINARY_BUFFERED_AMOUNT } from './framing'
 
 // A minimal duplex transport. `send` accepts a string (handshake control) or a
@@ -111,8 +120,17 @@ type RpcEnvelope =
   | { kind: 'keepalive' }
 
 type HandshakeControl =
-  | { type: 'e2ee_hello'; publicKeyB64: string }
-  | { type: 'e2ee_ready' }
+  | { type: 'e2ee_hello'; publicKeyB64: string; nonceB64: string }
+  | { type: 'e2ee_ready'; nonceB64: string }
+
+function nonceToB64(n: Uint8Array): string {
+  return Buffer.from(n).toString('base64')
+}
+function nonceFromB64(b64: unknown): Uint8Array | null {
+  if (typeof b64 !== 'string') return null
+  const n = Uint8Array.from(Buffer.from(b64, 'base64'))
+  return n.length === 16 ? n : null
+}
 
 type State = 'connecting' | 'handshaking' | 'ready' | 'closed'
 
@@ -125,7 +143,16 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
   }
 
   let transport: RelayTransport | null = null
-  let sharedKey: Uint8Array | null = null
+  // baseKey = the stable ECDH precompute (for the SAS, which represents the pinned identity).
+  // sessionKey = HKDF(baseKey, hostNonce‖clientNonce) = the fresh per-session traffic key.
+  let baseKey: Uint8Array | null = null
+  let sessionKey: Uint8Array | null = null
+  let ourNonce: Uint8Array | null = null
+  // Role byte prefixed to every sealed plaintext, so a relay can't REFLECT a box back to its
+  // sender (same sessionKey both directions): each side only accepts boxes tagged with the peer's
+  // role. host=1, client=2.
+  const OUR_ROLE = opts.role === 'host' ? 1 : 2
+  const PEER_ROLE = opts.role === 'host' ? 2 : 1
   // The peer's base64 public key. Known up front for a client (the pinned host key); learned from
   // `e2ee_hello` for a host. Exposed via peerPublicKeyB64() for the standing host's pin-once check.
   let peerPubB64: string | null = opts.role === 'client' ? opts.theirPubB64 ?? null : null
@@ -161,7 +188,9 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       return
     }
     state = 'connecting'
-    sharedKey = null
+    baseKey = null
+    sessionKey = null
+    ourNonce = randomSessionNonce()
     readyFired = false
     sendSeq = 0
     recvSeq = -1
@@ -180,9 +209,14 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
 
     state = 'handshaking'
     if (opts.role === 'client') {
-      // Client knows the host pubkey: derive now and greet.
-      sharedKey = deriveSharedKey(opts.theirPubB64!, opts.ourKeys.secretKey)
-      sendControl({ type: 'e2ee_hello', publicKeyB64: publicKeyToB64(opts.ourKeys.publicKey) })
+      // Client knows the host pubkey: derive the base (identity) key now and greet with our
+      // session nonce. The traffic key is derived once the host's nonce arrives in e2ee_ready.
+      baseKey = deriveSharedKey(opts.theirPubB64!, opts.ourKeys.secretKey)
+      sendControl({
+        type: 'e2ee_hello',
+        publicKeyB64: publicKeyToB64(opts.ourKeys.publicKey),
+        nonceB64: nonceToB64(ourNonce!)
+      })
     }
     // Host waits passively for `e2ee_hello` to learn the client pubkey.
   }
@@ -193,32 +227,36 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
 
   // Prepend the outbound monotonic counter (8 bytes LE) to the plaintext before sealing, so the
   // peer can reject replays/reorders. Mirrors framing.ts's 64-bit split to stay within safe ints.
+  // Authenticated plaintext layout: [role:1][seq:8][payload…]. The role defeats reflection; the
+  // strictly-increasing seq defeats in-session replay/reorder.
   const SEQ_BYTES = 8
-  function withSeq(plaintext: Uint8Array): Uint8Array {
+  const HEADER_BYTES = 1 + SEQ_BYTES
+  function withHeader(plaintext: Uint8Array): Uint8Array {
     const seq = sendSeq++
-    const out = new Uint8Array(SEQ_BYTES + plaintext.length)
+    const out = new Uint8Array(HEADER_BYTES + plaintext.length)
+    out[0] = OUR_ROLE
     const view = new DataView(out.buffer)
-    view.setUint32(0, Math.floor(seq / 0x100000000), true)
-    view.setUint32(4, seq >>> 0, true)
-    out.set(plaintext, SEQ_BYTES)
+    view.setUint32(1, Math.floor(seq / 0x100000000), true)
+    view.setUint32(5, seq >>> 0, true)
+    out.set(plaintext, HEADER_BYTES)
     return out
   }
 
   function sendEncrypted(plaintext: Uint8Array): boolean {
-    if (!transport || !sharedKey || state !== 'ready') {
+    if (!transport || !sessionKey || state !== 'ready') {
       return false
     }
-    transport.send(encrypt(withSeq(plaintext), sharedKey))
+    transport.send(encrypt(withHeader(plaintext), sessionKey))
     return true
   }
 
   // During the handshake the auth control frames must be sent before `state`
   // flips to 'ready', so this variant does not gate on state.
   function sendEncryptedHandshake(plaintext: Uint8Array): void {
-    if (!transport || !sharedKey) {
+    if (!transport || !sessionKey) {
       return
     }
-    transport.send(encrypt(withSeq(plaintext), sharedKey))
+    transport.send(encrypt(withHeader(plaintext), sessionKey))
   }
 
   function tagged(tag: number, body: Uint8Array): Uint8Array {
@@ -255,23 +293,27 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       return
     }
 
-    // Everything binary is an E2EE box.
-    if (!sharedKey) {
+    // Everything binary is an E2EE box, sealed under the fresh session key.
+    if (!sessionKey) {
       return
     }
-    const sealed = decrypt(bytes, sharedKey)
-    if (!sealed || sealed.length < SEQ_BYTES) {
+    const sealed = decrypt(bytes, sessionKey)
+    if (!sealed || sealed.length < HEADER_BYTES) {
+      return
+    }
+    // Reject a box tagged with our OWN role (a reflected message) — only the peer's role is valid.
+    if (sealed[0] !== PEER_ROLE) {
       return
     }
     // Enforce the strictly-increasing per-direction counter inside the authenticated plaintext.
     // A non-increasing counter means a replayed or reordered box — drop it.
     const seqView = new DataView(sealed.buffer, sealed.byteOffset, sealed.byteLength)
-    const seq = seqView.getUint32(0, true) * 0x100000000 + seqView.getUint32(4, true)
+    const seq = seqView.getUint32(1, true) * 0x100000000 + seqView.getUint32(5, true)
     if (seq <= recvSeq) {
       return
     }
     recvSeq = seq
-    const plain = sealed.subarray(SEQ_BYTES)
+    const plain = sealed.subarray(HEADER_BYTES)
 
     if (state === 'handshaking') {
       handleHandshakeEncrypted(plain)
@@ -291,19 +333,29 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       return
     }
     if (control.type === 'e2ee_hello' && opts.role === 'host') {
-      // Host learns the client pubkey, derives the shared key, replies ready.
-      if (typeof control.publicKeyB64 !== 'string') {
+      // Host learns the client pubkey + its session nonce, derives the base identity key and the
+      // fresh session traffic key, replies ready with its own nonce.
+      const clientNonce = nonceFromB64(control.nonceB64)
+      if (typeof control.publicKeyB64 !== 'string' || !clientNonce || !ourNonce) {
         return
       }
       peerPubB64 = control.publicKeyB64
-      sharedKey = deriveSharedKey(control.publicKeyB64, opts.ourKeys.secretKey)
-      sendControl({ type: 'e2ee_ready' })
+      baseKey = deriveSharedKey(control.publicKeyB64, opts.ourKeys.secretKey)
+      // salt = hostNonce ‖ clientNonce (host's nonce first, both roles agree on the order).
+      sessionKey = deriveSessionKey(baseKey, ourNonce, clientNonce)
+      sendControl({ type: 'e2ee_ready', nonceB64: nonceToB64(ourNonce) })
       return
     }
     if (control.type === 'e2ee_ready' && opts.role === 'client') {
-      // Client proves the pairing with an encrypted auth marker. The relay
-      // already verified the token and the offer pins the host pubkey, so a
-      // simple marker is sufficient for MVP.
+      // Client learns the host's nonce, derives the same session key, and proves the pairing with
+      // an encrypted auth marker. The marker is sealed under the SESSION key (which mixes in this
+      // session's fresh nonces), so a recorded auth box from an earlier session can't be replayed
+      // to silently authenticate a new one.
+      const hostNonce = nonceFromB64(control.nonceB64)
+      if (!hostNonce || !baseKey || !ourNonce) {
+        return
+      }
+      sessionKey = deriveSessionKey(baseKey, hostNonce, ourNonce)
       sendEncryptedHandshake(tagged(TAG_RPC, textEncoder.encode(JSON.stringify({ type: 'e2ee_auth' }))))
     }
   }
@@ -404,7 +456,8 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
   function handleClose(): void {
     stopKeepalive()
     transport = null
-    sharedKey = null
+    baseKey = null
+    sessionKey = null
     const wasReady = state === 'ready'
     rejectAllPending('Relay connection closed.')
     if (intentionallyClosed) {
@@ -490,7 +543,7 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       return sendEncrypted(tagged(TAG_FRAME, encodeFrame(op, streamId, seq, payload)))
     },
     sas() {
-      return sharedKey ? sasFromSharedKey(sharedKey) : null
+      return baseKey ? sasFromSharedKey(baseKey) : null
     },
     peerPublicKeyB64() {
       return peerPubB64
@@ -506,7 +559,8 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       state = 'closed'
       transport?.close()
       transport = null
-      sharedKey = null
+      baseKey = null
+      sessionKey = null
     }
   }
 }

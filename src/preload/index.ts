@@ -37,7 +37,7 @@ function subscribe<A extends unknown[] = []>(channel: string) {
 const subscribeMutation = subscribe<[CanvasMutation]>(IPC.remoteHostApplyMutation)
 // Fan-out subscriber for the connection-approval prompt (main → host renderer when a client
 // finishes the handshake; carries the SAS to show in the approval dialog).
-const subscribePeerPending = subscribe<[{ sas: string | null }]>(IPC.remoteHostPeerPending)
+const subscribePeerPending = subscribe<[{ sas: string | null; id: string }]>(IPC.remoteHostPeerPending)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -291,8 +291,8 @@ const api: NodeTerminalApi = {
     sendCanvasState: (state) => ipcRenderer.send(IPC.remoteHostCanvasState, state),
     onApplyMutation: subscribeMutation,
     onPeerPending: subscribePeerPending,
-    approve: () => ipcRenderer.send(IPC.remoteHostApprove),
-    reject: () => ipcRenderer.send(IPC.remoteHostReject),
+    approve: (id: string) => ipcRenderer.send(IPC.remoteHostApprove, { id }),
+    reject: (id: string) => ipcRenderer.send(IPC.remoteHostReject, { id }),
     setPhoneAccess: (enabled) => ipcRenderer.send(IPC.remoteStandingHostSet, enabled)
   },
   remoteClient: {

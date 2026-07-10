@@ -96,12 +96,18 @@ export class Auth {
     return this.setupTokenValue
   }
 
-  consumeSetupToken(candidate: string): boolean {
+  /** Constant-time check WITHOUT consuming — GET /setup uses this to decide whether the caller
+   *  (who must present the token printed to the console) may see the setup form. */
+  verifySetupToken(candidate: string): boolean {
     const current = this.setupTokenValue
-    if (current === null) return false
+    if (current === null || !candidate) return false
     const a = crypto.createHash('sha256').update(candidate).digest()
     const b = crypto.createHash('sha256').update(current).digest()
-    if (!crypto.timingSafeEqual(a, b)) return false
+    return crypto.timingSafeEqual(a, b)
+  }
+
+  consumeSetupToken(candidate: string): boolean {
+    if (!this.verifySetupToken(candidate)) return false
     this.setupTokenValue = null
     return true
   }
