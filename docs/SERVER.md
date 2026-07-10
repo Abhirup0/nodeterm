@@ -171,6 +171,14 @@ The **backpressure / flow-control** gap noted in the Phase 2 limitations is now
 closed: a flooding PTY is automatically paused based on the WebSocket
 `bufferedAmount` and resumed when it drains, so the WS is protected.
 
+> **Loose coordination (follow-up).** The server-side WS backpressure and the
+> renderer's terminal (xterm) flow control coordinate only **loosely** over a shared
+> pause actuator (`ptyManager.setFlow`) — full two-master coordination is a follow-up.
+> Because either side can resume the pty independently, the server **re-asserts** its
+> pause on every send while the socket buffer stays above the high-water mark (rather
+> than latching on a single rising edge), so a renderer-side resume cannot silently
+> latch the server's protection off.
+
 **Still deferred to Phase 3b:** the SDK **chat node** and the **agent-status
 badges/hooks** are not yet wired into the server bridge.
 

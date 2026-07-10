@@ -30,7 +30,7 @@ describe('server fs handlers', () => {
   it('list returns directory entries', async () => {
     fs.writeFileSync(path.join(dir, 'a.txt'), 'x')
     fs.mkdirSync(path.join(dir, 'sub'))
-    const entries = (await call(IPC.fsList, dir)) as Array<{ name: string; isDirectory: boolean }>
+    const entries = (await call(IPC.fsList, dir)) as Array<{ name: string; dir: boolean }>
     expect(entries.map((e) => e.name).sort()).toEqual(['a.txt', 'sub'])
   })
   it('readBinary returns base64', async () => {

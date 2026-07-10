@@ -69,7 +69,13 @@ export class ServerPlatform implements CorePlatform {
       if (this.flowController) {
         const buffered = sink.bufferedAmount?.() ?? 0
         const isPaused = this.paused.get(sessionId) ?? false
-        if (!isPaused && buffered > WS_HIGH_WATER) {
+        if (buffered > WS_HIGH_WATER) {
+          // Re-assert the pause on EVERY high send (not just the rising edge). The
+          // renderer's own xterm flow control drives the same setFlow actuator and may
+          // have resumed the pty underneath us; an edge-latched `!isPaused` guard would
+          // then never re-pause until the buffer drained to LOW. proc.pause() is
+          // idempotent, and this branch only runs when data actually arrived (the pty was
+          // running), so it self-limits — no spamming.
           this.paused.set(sessionId, true)
           this.flowController(sessionId, false)
         } else if (isPaused && buffered <= WS_LOW_WATER) {
