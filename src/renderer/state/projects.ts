@@ -17,6 +17,11 @@ interface ProjectsState {
    *  new one named after the folder. Activates and returns it (caller commits the current
    *  canvas first). */
   openFolderProject(folder: string): Project
+  /** Registers a probed project (from a folder's .nodeterm file). If the id collides with an
+   *  existing project, derives a fresh project id (node ids untouched). Activates it. */
+  adoptProject(project: Project): Project
+  /** Replaces one project's data wholesale (external file change). Keeps activeProjectId. */
+  replaceProject(project: Project): void
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
@@ -122,6 +127,23 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     const project = get().addProject(name, folder)
     set({ activeProjectId: project.id })
     return project
+  },
+
+  adoptProject(project) {
+    const taken = get().projects.some((p) => p.id === project.id)
+    // A copied folder carries the original's project id; derive a fresh one. Node ids are
+    // deliberately kept (they are tmux session names — see the spec's accepted limitation).
+    const adopted = taken
+      ? { ...project, id: `${project.id}-${Math.random().toString(36).slice(2, 8)}` }
+      : project
+    set((s) => ({ projects: [...s.projects, adopted], activeProjectId: adopted.id }))
+    return adopted
+  },
+
+  replaceProject(project) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === project.id ? project : p))
+    }))
   },
 
   renameProject(id, name) {

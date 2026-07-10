@@ -3375,8 +3375,17 @@ export function Canvas() {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return false
     commitActiveToStore()
-    // A folder maps to one project: reuse (and reopen, if closed) the existing one, or create.
-    useProjects.getState().openFolderProject(folder)
+    // A folder maps to one project: reuse the already-registered one first…
+    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+    if (existing) {
+      useProjects.getState().openFolderProject(folder)
+    } else {
+      // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
+      // another machine's project) — only a virgin folder gets a brand-new project.
+      const probed = await window.nodeTerminal.workspace.probeFolder(folder)
+      if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
+      else useProjects.getState().openFolderProject(folder)
+    }
     void writeDisk()
     return true
   }, [commitActiveToStore, writeDisk])
