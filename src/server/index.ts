@@ -70,6 +70,11 @@ export async function startServer(
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
 
+  // WS backpressure: when a connection's socket send buffer fills while streaming pty
+  // output, pause that tmux client so the OS pipe applies real backpressure (resumes below
+  // the low-water mark). See platform-server.ts sendTo.
+  platform.setFlowController((sid, resume) => ptyManager.setFlow(sid, resume))
+
   // Desktop's src/main/index.ts registers a few pty handlers outside PtyManager. Of those,
   // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
   // The others (ptyGenerateName / ptyGenerateGroupName → commit-message.ts; ptyReadSessionName
