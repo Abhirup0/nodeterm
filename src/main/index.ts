@@ -7,6 +7,7 @@ import { IPC } from '../shared/ipc'
 import * as fsOps from '../core/fs-ops'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
+import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
@@ -98,6 +99,19 @@ const settingsStore = new SettingsStore()
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 const workspaceStore = new WorkspaceStore()
+// Watch each local ref's project.json for outside edits (git pull, a teammate's commit).
+// Self-writes match the store's last-written cache and are ignored. Re-synced after every
+// store load/save via onPersist; disposed on quit next to ptyManager.killAll().
+const workspaceWatcher = new WorkspaceWatcher({
+  paths: () => workspaceStore.localRefPaths(),
+  isSelfWrite: (p, c) => workspaceStore.isSelfWrite(p, c),
+  onExternalChange: (filePath) => {
+    void workspaceStore.readLocalRefByPath(filePath).then((changed) => {
+      if (changed) sendToMain(IPC.workspaceExternalChange, changed)
+    })
+  }
+})
+workspaceStore.onPersist = () => workspaceWatcher.sync()
 const gitService = new GitService()
 // One driver for all chat nodes. Resolves the live window at send time (getMainWindow) so
 // pushes survive a macOS close→dock-reopen; disposed on quit next to ptyManager.killAll().
@@ -918,6 +932,7 @@ app.on('window-all-closed', () => {
 let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
+  workspaceWatcher.dispose()
   sshProjectManager?.disconnectAll()
   chatDriver.disposeAll() // tear down every chat node's SDK query (resume-based, so this is safe)
   if (quitFlushed) return
