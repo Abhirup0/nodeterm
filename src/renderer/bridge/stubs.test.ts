@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildStubApi, unsupported } from './stubs'
 import { E_UNSUPPORTED } from '../../shared/rpc'
 
@@ -38,6 +38,19 @@ describe('bridge stubs', () => {
     await expect(s.usage.fetch()).resolves.toBeNull()
     await expect(s.userDataDir()).resolves.toBe('')
     await expect(s.license.getStatus()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+  })
+
+  it('shell.openExternal opens a new browser tab; reveal/openPath are documented no-ops', () => {
+    const s = buildStubApi()
+    const open = vi.fn(() => null)
+    vi.stubGlobal('window', { open })
+    s.shell.openExternal('https://example.com')
+    expect(open).toHaveBeenCalledWith('https://example.com', '_blank', 'noopener')
+    expect(() => {
+      s.shell.reveal('/x')
+      s.shell.openPath('/x')
+    }).not.toThrow()
+    vi.unstubAllGlobals()
   })
 
   it('void members are safe no-ops', () => {

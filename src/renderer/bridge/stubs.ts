@@ -72,9 +72,14 @@ export function buildStubApi(): Omit<
       }
     },
     shell: {
+      // no filesystem-reveal in a browser; intentionally inert (see docs/SERVER.md)
       reveal: noop,
+      // no OS default-app open in a browser; intentionally inert (see docs/SERVER.md)
       openPath: noop,
-      openExternal: noop
+      // The one browser-native member: open the URL in a new tab.
+      openExternal: (url: string): void => {
+        window.open(url, '_blank', 'noopener')
+      }
     },
     media: {
       allow: U('media.allow'),
