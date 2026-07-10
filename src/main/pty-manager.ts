@@ -19,7 +19,7 @@ import {
   remoteTmuxKillArgs,
   remoteTmuxPtyArgs,
   remoteCapturePaneArgs
-} from './remote-ssh/control-master'
+} from '../core/remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from '../core/tmux-naming'
 import { releasePty, type ReleasablePty } from '../core/pty-release'
 import { machOArch, archMismatch } from '../core/macho-arch'

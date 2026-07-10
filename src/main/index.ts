@@ -33,7 +33,7 @@ import {
 import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
-import { childArgs } from './remote-ssh/control-master'
+import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { ChatDriver } from '../core/chat-driver'

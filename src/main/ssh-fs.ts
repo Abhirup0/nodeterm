@@ -3,7 +3,7 @@
 // Paths are quoteRemotePath'd (a leading `~`/`~/` stays UNQUOTED so the remote shell tilde-expands
 // it — SSH projects default to a home-relative remoteCwd); write content goes on stdin (never
 // interpolated). check-ignore entry NAMES are bare filenames, so they stay posixQuote'd.
-import { childArgs } from './remote-ssh/control-master'
+import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote, quoteRemotePath, type SshConnection } from '../shared/ssh'
 import type { DirEntry } from '../shared/types'
 
