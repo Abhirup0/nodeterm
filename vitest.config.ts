@@ -8,6 +8,8 @@ export default defineConfig({
       'src/shared/**/*.test.ts',
       'src/main/**/*.test.ts',
       'src/renderer/**/*.test.ts',
+      'src/server/**/*.test.ts',
+      'test/server/**/*.test.ts',
       'test/remote/**/*.test.ts'
     ],
     environment: 'node'
