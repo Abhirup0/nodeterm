@@ -204,7 +204,8 @@ export function buildStubApi(): Omit<NodeTerminalApi, 'pty' | 'workspace' | 'set
       onApplyMutation: noopUnsub,
       onPeerPending: noopUnsub,
       approve: noop,
-      reject: noop
+      reject: noop,
+      setPhoneAccess: noop
     },
     remoteClient: {
       connect: U('remoteClient.connect'),
