@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
-import { app } from 'electron'
+import { platform } from '../platform'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 
@@ -54,7 +54,7 @@ class HookServer {
   private endpointPath = ''
 
   endpointFilePath(): string {
-    if (!this.endpointPath) this.endpointPath = path.join(app.getPath('userData'), 'hook-endpoint.env')
+    if (!this.endpointPath) this.endpointPath = path.join(platform().userDataDir, 'hook-endpoint.env')
     return this.endpointPath
   }
 

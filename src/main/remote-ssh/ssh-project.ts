@@ -19,7 +19,7 @@ import {
   RMT_TMUX_SOCKET
 } from './control-master'
 import { RemoteHooks } from './remote-hooks'
-import { hookServer } from '../agents/hook-server'
+import { hookServer } from '../../core/agents/hook-server'
 import { sessionName } from '../../core/tmux-naming'
 
 interface Runners {

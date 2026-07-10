@@ -12,7 +12,7 @@ import {
   type PtyCreateResult,
   type Settings
 } from '../shared/types'
-import { hookServer } from './agents/hook-server'
+import { hookServer } from '../core/agents/hook-server'
 import {
   remoteHookEnvArgs,
   remoteTmuxHasSessionArgs,

@@ -5,8 +5,8 @@
 // agent simply runs without hooks. Takes an INJECTED runner so the flow is unit-testable
 // without real ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from './control-master'
-import { buildManagedScript } from '../agents/hooks/managed-script'
-import { mergeManagedHook, type HookSettings } from '../agents/hooks/install-helper'
+import { buildManagedScript } from '../../core/agents/hooks/managed-script'
+import { mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
 
 export interface RemoteRunner {
