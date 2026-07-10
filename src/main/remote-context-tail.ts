@@ -7,7 +7,7 @@
 import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
-import { cachedWindowFor, resolveModelWindow } from './model-window'
+import { cachedWindowFor, resolveModelWindow } from '../core/model-window'
 import { parseLatestUsage, parseTaskNotifications, type ContextTailOptions } from '../core/context-tail'
 import { splitCompleteLines } from '../core/subagent-tail'
 import type { RemoteFile, RemoteFileRef } from './remote-ssh/remote-file'

@@ -4,7 +4,7 @@
 // as ContextWindowUsage keyed by sessionId.
 import fs from 'fs'
 import type { ContextWindowUsage } from '../shared/types'
-import { cachedWindowFor, resolveModelWindow } from '../main/model-window'
+import { cachedWindowFor, resolveModelWindow } from './model-window'
 import { splitCompleteLines } from './subagent-tail'
 
 const POLL_MS = 1000
