@@ -6,11 +6,11 @@
 import { promises as fs, readFileSync } from 'fs'
 import path from 'path'
 import crypto from 'node:crypto'
-import { app, ipcMain, shell, type BrowserWindow } from 'electron'
+import { platform } from './platform'
 import { IPC } from '../shared/ipc'
 import type { LicenseStatus } from '../shared/types'
-import { getDeviceId } from '../core/device-id'
-import { ENTITLEMENT_PUBLIC_KEY } from '../core/entitlement-key'
+import { getDeviceId } from './device-id'
+import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
@@ -28,7 +28,7 @@ const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
 // local server is targeted explicitly, and honor DO_NOT_TRACK / the kill switch.
 function allowed(): boolean {
   if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
-  if (!app.isPackaged && !process.env.NODETERM_API_BASE) return false
+  if (!platform().isPackaged && !process.env.NODETERM_API_BASE) return false
   return true
 }
 
@@ -40,7 +40,7 @@ interface Stored {
 }
 
 function file(): string {
-  return path.join(app.getPath('userData'), 'license.json')
+  return path.join(platform().userDataDir, 'license.json')
 }
 function load(): Stored {
   try {
@@ -140,20 +140,20 @@ export function isPremium(): boolean {
   return verify(load().token) !== null
 }
 
-export function initLicense(win: BrowserWindow): void {
+export function initLicense(): void {
   const deviceId = getDeviceId()
   const broadcast = (s: LicenseStatus) => {
-    if (!win.isDestroyed()) win.webContents.send(IPC.licenseChanged, s)
+    platform().broadcast(IPC.licenseChanged, s)
   }
 
-  ipcMain.handle(IPC.licenseStatus, () => statusFrom(load().token))
+  platform().handle(IPC.licenseStatus, () => statusFrom(load().token))
 
   // Device-bound upgrade: open Stripe checkout (carrying our deviceId), then poll the status
   // endpoint until the webhook has bound + minted the entitlement. Status arrives via broadcast.
   let polling = false
-  ipcMain.handle(IPC.licenseUpgrade, async () => {
+  platform().handle(IPC.licenseUpgrade, async () => {
     const url = `${CHECKOUT_URL}${CHECKOUT_URL.includes('?') ? '&' : '?'}client_reference_id=${encodeURIComponent(deviceId)}`
-    await shell.openExternal(url)
+    await platform().openExternal(url)
     if (!polling) {
       polling = true
       const deadline = Date.now() + 6 * 60 * 1000 // poll up to 6 min after opening checkout
@@ -176,7 +176,7 @@ export function initLicense(win: BrowserWindow): void {
     return statusFrom(load().token)
   })
 
-  ipcMain.handle(IPC.licenseActivate, async (_e, key: string) => {
+  platform().handle(IPC.licenseActivate, async (key: string) => {
     const r = await call('/v1/license/activate', { key: String(key).trim(), deviceId })
     if (r.token) await save({ ...load(), key: String(key).trim(), token: r.token })
     const status = statusFrom(r.token, r.error ?? null)
@@ -184,7 +184,7 @@ export function initLicense(win: BrowserWindow): void {
     return status
   })
 
-  ipcMain.handle(IPC.licenseDeactivate, async () => {
+  platform().handle(IPC.licenseDeactivate, async () => {
     const stored = load()
     if (stored.key) await call('/v1/license/deactivate', { key: stored.key, deviceId })
     await save({ lastSeen: stored.lastSeen }) // keep the clock anchor across deactivations

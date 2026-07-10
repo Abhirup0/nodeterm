@@ -27,7 +27,7 @@ import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '..
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
-import { getStoredEntitlement, isPremium } from '../license'
+import { getStoredEntitlement, isPremium } from '../../core/license'
 import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
 import { OP, type Frame } from './framing'
 import { encodeOffer } from './pairing'

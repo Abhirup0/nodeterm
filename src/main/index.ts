@@ -37,12 +37,12 @@ import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
 import { ChatDriver } from '../core/chat-driver'
-import { initContextLink, setNodeTranscript } from './context-link'
+import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
-import { initLicense } from './license'
+import { initLicense } from '../core/license'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
@@ -817,11 +817,11 @@ app.whenReady().then(async () => {
   await hookServer.start()
   initMediaProtocol()
 
-  initContextLink(win, ptyManager)
+  initContextLink(ptyManager)
   initCanvasControl()
   initClaudeUsage(win)
   initTelemetry(() => settingsStore.get())
-  initLicense(win)
+  initLicense()
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
