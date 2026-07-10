@@ -90,7 +90,7 @@ export class WorkspaceStore {
       if (e.project) {
         projects.push(e.project)
       } else if (e.cwd) {
-        const p = await this.readProjectFile(e.cwd)
+        const p = await this.readProjectFile(e.cwd, true)
         if (p) {
           this.revs.set(p.id, p.rev)
           this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(p))
@@ -113,8 +113,14 @@ export class WorkspaceStore {
     return { version: 2, activeProjectId: active, projects }
   }
 
-  /** Reads + parses one project file; a corrupt file is set aside (never overwritten). */
-  private async readProjectFile(cwd: string): Promise<ProjectFileV1 | null> {
+  /**
+   * Reads + parses one project file. Only the authoritative loadV3 path passes `sideline: true`,
+   * which renames an unparsable/wrong-shape file to `.corrupt-<ts>` so a later save can't overwrite
+   * the only copy. Read-only callers (probeFolder — an RPC reachable with arbitrary paths on Server
+   * Edition — and the watcher's readLocalRef*) pass false: a probe must never mutate the disk, and a
+   * git-conflict-marked project.json mid-merge must be left in place so the user can hand-resolve it.
+   */
+  private async readProjectFile(cwd: string, sideline: boolean): Promise<ProjectFileV1 | null> {
     const file = projectFilePath(cwd)
     let raw: string
     try {
@@ -127,9 +133,11 @@ export class WorkspaceStore {
       if (parsed?.version === 1 && typeof parsed.id === 'string' && Array.isArray(parsed.nodes)) return parsed
       // parses but isn't a ProjectFileV1 — sideline it too, so a later save can't overwrite the only copy.
     } catch { /* not JSON — sideline below */ }
-    try {
-      await fs.rename(file, `${file}.corrupt-${Date.now()}`)
-    } catch { /* best effort — never destroy data */ }
+    if (sideline) {
+      try {
+        await fs.rename(file, `${file}.corrupt-${Date.now()}`)
+      } catch { /* best effort — never destroy data */ }
+    }
     return null
   }
 
@@ -178,24 +186,27 @@ export class WorkspaceStore {
       }
     }
 
+    // Back up the raw v2 file BEFORE the v3 index flip: a crash between the two must never leave a
+    // migrated tree (project files already written above) without its pre-migration backup.
+    const migrating = this.pendingV2Backup !== null
+    if (migrating) {
+      try {
+        await writeAtomic(path.join(platform().userDataDir, 'workspace.v2.bak'), this.pendingV2Backup!)
+      } catch { /* backup is best-effort */ }
+      this.pendingV2Backup = null
+    }
+
     // Compact index, atomic — same reasoning as the old single-file store.
     await writeAtomic(this.indexPath, JSON.stringify(index))
     this.index = index
 
-    if (this.pendingV2Backup !== null) {
-      const bak = this.pendingV2Backup
-      this.pendingV2Backup = null
-      try {
-        await writeAtomic(path.join(platform().userDataDir, 'workspace.v2.bak'), bak)
-      } catch { /* backup is best-effort */ }
-      platform().broadcast(IPC.workspaceMigrated)
-    }
+    if (migrating) platform().broadcast(IPC.workspaceMigrated)
 
     this.onPersist?.()
   }
 
   async probeFolder(folder: string): Promise<Project | null> {
-    const f = await this.readProjectFile(folder)
+    const f = await this.readProjectFile(folder, false)
     return f ? fileToProject(f, { cwd: folder }) : null
   }
 
@@ -210,7 +221,7 @@ export class WorkspaceStore {
   async readLocalRef(projectId: string): Promise<Project | null> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return null
-    const f = await this.readProjectFile(e.cwd)
+    const f = await this.readProjectFile(e.cwd, false)
     if (!f) return null
     this.revs.set(f.id, f.rev)
     this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(f))

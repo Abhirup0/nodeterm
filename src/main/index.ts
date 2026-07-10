@@ -143,7 +143,15 @@ const NT_STATUS_MARK = '--NT-STATUS-SPLIT--'
  */
 async function listProjectsOutput(): Promise<string> {
   const dir = app.getPath('userData')
-  const workspace = await readFile(join(dir, 'workspace.json'), 'utf8').catch(() => '')
+  // Serve the ASSEMBLED v2-shaped workspace, never the raw workspace.json. Post-migration the file
+  // is a v3 index ({version:3, entries:[…]}) whose local-ref entries hold no node data at all — the
+  // paired iOS client decodes `{ projects: [Project] }`, so a raw v3 file lists zero projects.
+  // load() re-reads each ref's .nodeterm/project.json and returns {version:2, projects:[…]}; it is
+  // idempotent (and re-syncs the watcher via onPersist), so calling it here is safe.
+  const workspace = await workspaceStore
+    .load()
+    .then((w) => JSON.stringify(w))
+    .catch(() => '')
   const status = await readFile(join(dir, 'agent-status.json'), 'utf8').catch(() => '')
   const sessions = (await ptyManager.listNodetermSessions().catch(() => [])).join('\n')
   return `${workspace}\n${NT_PROJECTS_MARK}\n${sessions}\n${NT_STATUS_MARK}\n${status}`

@@ -880,12 +880,15 @@ export function Canvas() {
     setConflict(null)
   }, [activeProjectId])
 
-  // Debounced auto-save for canvas edits.
+  // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
+  // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
+  // (overwrite the external disk version) before the user can choose. `conflict` is a dep so
+  // resolving it (either button clears it) re-arms the save.
   useEffect(() => {
-    if (!dirty) return
+    if (!dirty || conflict) return
     const t = setTimeout(() => void persist(), 800)
     return () => clearTimeout(t)
-  }, [dirty, persist])
+  }, [dirty, conflict, persist])
 
   // ---- remote canvas mirror (host side) ----
   // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
@@ -3459,10 +3462,18 @@ export function Canvas() {
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
       if (!folder) return
+      // Folder ↔ project is deduped like "Open folder…": if another project already owns this cwd,
+      // don't point a second tab at it (two same-cwd tabs collapse to one file on save) — just
+      // switch to the existing one.
+      const existing = useProjects.getState().projects.find((p) => p.cwd === folder && p.id !== id)
+      if (existing) {
+        switchProject(existing.id)
+        return
+      }
       useProjects.getState().setProjectCwd(id, folder)
       void persist()
     },
-    [persist]
+    [persist, switchProject]
   )
 
   const setProjectDefaultAccount = useCallback(
@@ -3664,7 +3675,10 @@ export function Canvas() {
     ]
     const store = useProjects.getState()
     store.projects
-      .filter((p) => p.id !== store.activeProjectId)
+      // Skip unavailable projects: activating one lets edits commit to the store but they're
+      // dropped on save (the ref emits header-only), so switching there silently loses work.
+      // The TabBar already guards its own click; this covers the palette (⌘K) path.
+      .filter((p) => p.id !== store.activeProjectId && !p.unavailable)
       .forEach((p) =>
         cmds.push({
           id: `proj-${p.id}`,
@@ -3769,6 +3783,10 @@ export function Canvas() {
           <ConflictBar
             onReload={() => {
               useProjects.getState().replaceProject(conflict)
+              // The canvas now matches disk exactly → no local unsaved edits. Clear dirty so the
+              // re-armed autosave (conflict just went null) can't turn around and overwrite the
+              // just-reloaded disk version.
+              setDirty(false)
               setConflict(null)
               reloadActiveProject()
             }}

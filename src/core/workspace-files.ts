@@ -134,9 +134,16 @@ export function splitWorkspace(
     }
     if (p.ssh) {
       entries.push({ ...header, ssh: p.ssh, cache: projectToFile(p, revOf(p.id), savedAt) })
-    } else if (p.cwd) {
+    } else if (p.cwd && !files.has(p.cwd)) {
       files.set(p.cwd, projectToFile(p, revOf(p.id), savedAt))
       entries.push({ ...header, cwd: p.cwd })
+    } else if (p.cwd) {
+      // Another project already claimed this cwd (two tabs on one folder). Keying `files` by cwd
+      // would collapse them last-wins, and reload would resurrect BOTH entries from the one file
+      // (duplicate ids, first canvas lost). Emit this one INLINE instead — kept verbatim in the
+      // index, no file write — so both canvases survive a save→load round trip.
+      const { unavailable: _u, ...inline } = p
+      entries.push({ ...header, project: inline })
     } else {
       const { unavailable: _u, ...inline } = p
       entries.push({ ...header, project: inline })

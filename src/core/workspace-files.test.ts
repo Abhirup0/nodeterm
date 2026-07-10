@@ -83,6 +83,25 @@ describe('splitWorkspace', () => {
     expect(index.entries[2].cache!.id).toBe('p3')
     expect(files.has('~/app')).toBe(false) // ssh files are not local writes
   })
+  it('two projects on the same cwd → one file + one inline entry (no last-wins clobber)', () => {
+    const shared: Workspace = {
+      version: 2, activeProjectId: 'a',
+      projects: [
+        project({ id: 'a', name: 'first', cwd: '/a/foo' }),
+        project({ id: 'b', name: 'second', cwd: '/a/foo' })
+      ]
+    }
+    const { index, files } = splitWorkspace(shared, () => 1, '2026-07-11T00:00:00.000Z')
+    expect(files.size).toBe(1) // only the first claims the file
+    expect(files.get('/a/foo')!.id).toBe('a')
+    expect(index.entries[0]).toMatchObject({ id: 'a', cwd: '/a/foo' })
+    expect(index.entries[0].project).toBeUndefined()
+    // The second is kept verbatim inline — no file, nothing lost.
+    expect(index.entries[1].cwd).toBeUndefined()
+    expect(index.entries[1].project).toMatchObject({ id: 'b', name: 'second', cwd: '/a/foo' })
+    expect(index.entries[1].project!.unavailable).toBeUndefined()
+  })
+
   it('never persists the runtime unavailable flag inline', () => {
     const { index } = splitWorkspace(
       { version: 2, activeProjectId: 'x', projects: [project({ id: 'x', unavailable: true })] },

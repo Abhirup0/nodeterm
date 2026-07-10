@@ -170,6 +170,17 @@ describe('probeFolder', () => {
     expect(probed).toMatchObject({ id: 'p1', cwd: projRoot })
     expect(await store.probeFolder(path.join(projRoot, 'nope'))).toBeNull()
   })
+
+  it('is read-only: a corrupt file returns null WITHOUT sidelining it (arbitrary-path RPC)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const p = path.join(projRoot, '.nodeterm/project.json')
+    await fs.writeFile(p, '{ not json')
+    expect(await store.probeFolder(projRoot)).toBeNull()
+    expect(await fs.readFile(p, 'utf-8')).toBe('{ not json') // untouched
+    const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(false) // no sideline
+  })
 })
 
 describe('readLocalRefByPath', () => {
@@ -180,6 +191,50 @@ describe('readLocalRefByPath', () => {
     const p = await store.readLocalRefByPath(filePath)
     expect(p).toMatchObject({ id: 'p1', cwd: projRoot })
     expect(await store.readLocalRefByPath(path.join(projRoot, 'nope/project.json'))).toBeNull()
+  })
+
+  it('leaves a git-conflict-marked file in place (mid-merge is hand-resolvable, never sidelined)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const filePath = path.join(projRoot, '.nodeterm/project.json')
+    const conflicted = '<<<<<<< HEAD\n{"version":1}\n=======\n{"version":1}\n>>>>>>> theirs\n'
+    await fs.writeFile(filePath, conflicted)
+    expect(await store.readLocalRefByPath(filePath)).toBeNull() // unparsable → no project
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(conflicted) // but left in place
+    const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(false)
+  })
+})
+
+describe('same-cwd projects survive a save → load round trip', () => {
+  it('two tabs on one folder both come back (first file-backed, second inline)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ id: 'a', name: 'first', cwd: projRoot }), project({ id: 'b', name: 'second', cwd: projRoot })]))
+    // Only one file exists on disk; the second is inline in the index.
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries.filter((e: any) => e.cwd).length).toBe(1)
+    expect(index.entries.find((e: any) => e.project)?.project.id).toBe('b')
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects.map((p) => p.id).sort()).toEqual(['a', 'b'])
+    expect(loaded.projects.find((p) => p.id === 'a')).toMatchObject({ name: 'first', cwd: projRoot })
+    expect(loaded.projects.find((p) => p.id === 'b')).toMatchObject({ name: 'second' })
+  })
+})
+
+describe('projects.list relay blob (iOS wire contract)', () => {
+  it('the blob JSON.stringify(load()) parses as {version:2, projects:[…]} even when the file is v3', async () => {
+    // Seed a real v3 tree on disk (file-backed local ref), as listProjectsOutput sees it.
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    const onDisk = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(onDisk.version).toBe(3) // the raw file the OLD blob shipped
+
+    // listProjectsOutput now serves JSON.stringify(await workspaceStore.load()).
+    const blob = JSON.stringify(await new WorkspaceStore().load())
+    const parsed = JSON.parse(blob)
+    expect(parsed.version).toBe(2)
+    expect(Array.isArray(parsed.projects)).toBe(true)
+    expect(parsed.projects[0]).toMatchObject({ id: 'p1', cwd: projRoot })
+    expect(parsed.projects[0].nodes[0].id).toBe('term-1') // node data present (not in the v3 file)
   })
 })
 
