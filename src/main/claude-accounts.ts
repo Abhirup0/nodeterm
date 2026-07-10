@@ -12,7 +12,7 @@ import { isSupportedClaudeVersion, parseLoginCapture } from '../core/claude-acco
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { installClaudeHooksInto } from '../core/agents/hooks/claude'
 import { installCanvasSkillInto } from './canvas-control'
-import { findInLoginPath } from './pty-manager'
+import { findInLoginPath } from '../core/pty-manager'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 
 const execFileP = promisify(execFile)
