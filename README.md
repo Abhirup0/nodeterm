@@ -33,8 +33,9 @@ a stack of hidden tabs.
 Stacked terminal tabs hide context — you lose track of what's running where. nodeterm
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
 into. Sessions are spatial and persistent, so your mental model stays intact across
-restarts. The architecture is built so remote access and premium tiers can slot in
-later without a UI rewrite.
+restarts. And because the app is built around a clean service seam, the same canvas now
+runs three ways — as the **macOS desktop app**, as a **self-hosted browser app** you
+reach from anywhere (Server Edition), and (in progress) a **mobile companion**.
 
 ## ✨ Features
 
@@ -46,19 +47,48 @@ later without a UI rewrite.
   switch between them without losing any running terminal.
 - **Many node kinds**, all on the same canvas:
   - 🖥 **Terminal** — xterm + tmux, click-to-rename, color, tags, AI naming.
-  - ✦ **Claude Code** — a terminal preset that launches `claude`.
-  - 📝 **Sticky note** — free-text colored notes.
+  - 🤖 **Agent** — a terminal preset that launches an agent CLI: **Claude Code**, **Codex**,
+    **Gemini**, or your own custom command.
+  - 💬 **Chat** — an SDK-driven Claude chat node (streaming, in-chat permission prompts,
+    image paste, cost meter) — not a PTY.
+  - 📝 **Sticky note** — free-text colored notes; link one to an agent to feed it context.
   - 🗂 **Group** — frame and move related nodes together.
-  - ✏️ **Editor** — Monaco code editor for a file (⌘S to save, markdown preview).
+  - ✏️ **Editor** — Monaco code editor for a file (⌘S to save, markdown/image preview).
   - 🔀 **Diff** — Monaco diff editor for staged/unstaged changes.
+  - 🌐 **Web / Video** — render a page or a video right on the canvas.
+- **Live agent status** — hook-driven **RUNNING / NEEDS YOU** badges, **subagent** cards
+  with a live transcript, a **context-window meter**, and unread dots + completion
+  notifications — for Claude, Codex, and Gemini, no output-scraping.
+- **Agent superpowers** — **context links** so two agent nodes (Claude / Codex / Gemini) can
+  read each other's transcript on demand, plus Claude-only **branch a conversation** into a
+  new node and **managed accounts** to run several logged-in Claude identities side by side.
+- **Remote / SSH projects** — open a project on a remote host over SSH; terminals, files,
+  and git run there while the canvas stays local.
 - **Source control** — VS Code-style file-level stage/unstage, discard, branch
-  switch/create, commit, push/sync/publish, and `gh` sign-in — backed by system `git`.
+  switch/create, commit, push/sync/publish, worktrees, and `gh` sign-in — backed by
+  system `git`.
 - **AI commit messages & terminal names** — bring-your-own local agent CLI
   (claude / codex / custom) run read-only on the staged diff or captured output.
 - **Command palette** (⌘K), **file explorer** (⌘⇧E), **markdown view** (⌘M),
   **undo/redo** (⌘Z / ⌘⇧Z), and a native macOS dark UI.
 - **Auto-update & in-app announcements** — the app checks a self-hosted feed and
   surfaces a "Restart to update" banner and product news.
+
+### 🌍 Server Edition — nodeterm in your browser
+
+The same canvas runs headless on a Linux (or macOS) host and is used from any browser —
+so your terminals, editors, source control, and agents live on a server you reach from
+anywhere. Single-user auth (password + secure cookie), a WebSocket bridge, and the exact
+same renderer as the desktop app.
+
+```bash
+npm run server:dev     # build + serve; open http://127.0.0.1:8443 and set a password
+```
+
+Terminals, files/editor/diff, the full git panel, and agent-status badges all work in the
+browser today; the SDK chat node is the one piece still desktop-only. See
+[`docs/SERVER.md`](./docs/SERVER.md) for the quickstart, security model, and current
+limitations.
 
 ## 📦 Download
 
@@ -80,9 +110,11 @@ npm start          # preview the production build
 npm run typecheck  # fastest correctness gate
 npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
+npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```
 
-`npm run dist` builds an unsigned `.dmg` for local testing.
+`npm run dist` builds an unsigned `.dmg` for local testing; `npm run server:dev` runs the
+headless browser edition.
 
 ## ⌨️ Keyboard shortcuts
 
@@ -99,17 +131,24 @@ npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
 
 ## 🏗 Architecture
 
-- **Electron, three contexts** — `src/main` (Node: PTY, fs, git), `src/preload` (the only
+- **Electron, three contexts** — `src/main` (the Electron shell), `src/preload` (the only
   bridge, `window.nodeTerminal`), `src/renderer` (React UI). `src/shared` holds the types
   and IPC channel names used by all three.
-- **`TerminalTransport` abstraction** — the renderer depends only on this interface, never
-  on IPC or node-pty directly. Today it's `LocalTransport`; a future `RemoteTransport`
-  (WebSocket to a remote agent) implements the same interface, so remote access drops in
-  without touching the canvas or terminal UI.
+- **`CorePlatform` seam** — every service (PTY, workspace/settings, git, agents, hooks) lives
+  in `src/core` behind a small platform interface and never imports `electron`. Electron is
+  one implementation of that seam; the browser Server Edition (`src/server`) is another,
+  booting the exact same services over a WebSocket-RPC bridge (`src/renderer/bridge` fills
+  `window.nodeTerminal` in the browser). One codebase, one renderer, multiple shells.
+- **`TerminalTransport` abstraction** — the renderer depends only on this interface, never on
+  IPC or node-pty directly. `LocalTransport` talks to the local host; `RemoteTransport` talks
+  to a remote agent over SSH — so remote projects drop in without touching the canvas UI.
 - **React Flow is the single source of truth** for live nodes; projects persist serialized
-  nodes to `workspace.json`, and tmux keeps sessions alive across restarts.
+  nodes to disk, and tmux keeps sessions alive across restarts.
+- **Three surfaces** — the desktop app, the browser **Server Edition**, and an in-progress
+  **mobile companion** (a separate SwiftUI repo) all ride the same core + transport seams.
 
-See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas.
+See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas, and
+[`docs/SERVER.md`](./docs/SERVER.md) for the Server Edition.
 
 ## 🤝 Contributing
 
