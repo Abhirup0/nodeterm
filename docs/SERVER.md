@@ -213,9 +213,13 @@ that path to the system-default `~/.claude/projects` or a managed account dir
 - **Canvas-control** (`agent:control`, the Claude-only `nodeterm` CLI verbs) is **not
   wired** over the server.
 - The **`ptyDestroy` tail-teardown is skipped**: the platform's single-listener registry
-  forbids a second `ptyDestroy` listener, so tails self-clear on `SessionEnd`. A node
-  closed *without* a SessionEnd leaves a **bounded, lingering file-tail** until the
-  process exits — no leak of unbounded resources.
+  forbids a second `ptyDestroy` listener (it would clobber `PtyManager`'s own destroy
+  handler), so tails self-clear on `SessionEnd`. A node closed *without* a SessionEnd (e.g.
+  the × button, which abruptly kills the tmux session) leaves a small idle file-tail — a
+  1 s stat poller that never re-broadcasts (a dead session produces no file changes). It is
+  bounded *per node* but accumulates across nodes closed-without-SessionEnd until the
+  process restarts. Cost is negligible; a `destroySession` teardown callback is the planned
+  follow-up to restore desktop parity.
 - **SSH-remote agent tails are N/A** — the server has no SSH-project manager, so the
   SSH branch of the desktop hook-wiring block is dropped (the raw listener falls straight
   through to the local logic).
