@@ -411,7 +411,10 @@ export class SshProjectManager {
   }
 }
 
-export function initSshProject(win: BrowserWindow): SshProjectManager {
+export function initSshProject(
+  win: BrowserWindow,
+  onConnected?: (projectId: string) => void
+): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
   const mgr = new SshProjectManager({
@@ -440,9 +443,13 @@ export function initSshProject(win: BrowserWindow): SshProjectManager {
       if (!win.isDestroyed()) win.webContents.send(IPC.sshProjectStatus, e)
     }
   })
-  ipcMain.handle(IPC.sshConnectProject, (_e, projectId: string, conn: SshConnection, remoteCwd?: string) =>
-    mgr.connect(projectId, conn, remoteCwd)
-  )
+  ipcMain.handle(IPC.sshConnectProject, async (_e, projectId: string, conn: SshConnection, remoteCwd?: string) => {
+    const res = await mgr.connect(projectId, conn, remoteCwd)
+    // Connection is up (master in the map) → reconcile the remote project file with our cache.
+    // Only fires on a successful connect; a throw above propagates without calling back.
+    onConnected?.(projectId)
+    return res
+  })
   ipcMain.handle(IPC.sshDisconnectProject, (_e, projectId: string) => mgr.disconnect(projectId))
   ipcMain.handle(IPC.sshKillSessions, (_e, projectId: string, nodeIds: string[]) =>
     mgr.killSessions(projectId, nodeIds)

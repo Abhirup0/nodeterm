@@ -7,6 +7,7 @@ import { IPC } from '../shared/ipc'
 import * as fsOps from '../core/fs-ops'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
+import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
@@ -61,6 +62,7 @@ import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
+import { makeRemoteWorkspaceIO } from './remote-workspace-io'
 import {
   registerMediaScheme,
   initMediaProtocol,
@@ -97,13 +99,35 @@ function isSafeExternalUrl(url: unknown): url is string {
 const settingsStore = new SettingsStore()
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
-const workspaceStore = new WorkspaceStore()
+// Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
+// (via the closures below) to resolve a live SSH project's ControlMaster for remote workspace IO.
+let sshProjectManager: ReturnType<typeof initSshProject> | undefined
+// Remote SSH IO for the workspace store: mirrors each SSH project's <remoteCwd>/.nodeterm/project.json
+// over that project's live master. Resolves the ref lazily — the manager is created after the window
+// is ready — and fails open (no-op) while the project is disconnected.
+const workspaceSshFs = new SshFs((args, stdin) =>
+  sshProjectManager ? sshProjectManager.sshRun(args, stdin) : Promise.resolve({ code: 1, stdout: '' })
+)
+const workspaceStore = new WorkspaceStore(
+  makeRemoteWorkspaceIO((projectId) => sshProjectManager?.refForProject(projectId) ?? null, workspaceSshFs)
+)
+// Watch each local ref's project.json for outside edits (git pull, a teammate's commit).
+// Self-writes match the store's last-written cache and are ignored. Re-synced after every
+// store load/save via onPersist; disposed on quit next to ptyManager.killAll().
+const workspaceWatcher = new WorkspaceWatcher({
+  paths: () => workspaceStore.localRefPaths(),
+  isSelfWrite: (p, c) => workspaceStore.isSelfWrite(p, c),
+  onExternalChange: (filePath) => {
+    void workspaceStore.readLocalRefByPath(filePath).then((changed) => {
+      if (changed) sendToMain(IPC.workspaceExternalChange, changed)
+    })
+  }
+})
+workspaceStore.onPersist = () => workspaceWatcher.sync()
 const gitService = new GitService()
 // One driver for all chat nodes. Resolves the live window at send time (getMainWindow) so
 // pushes survive a macOS close→dock-reopen; disposed on quit next to ptyManager.killAll().
 const chatDriver = new ChatDriver(getMainWindow, sendToMain)
-// Set once the app window is ready; used by the quit hooks to tear down SSH-project masters.
-let sshProjectManager: ReturnType<typeof initSshProject> | undefined
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],
@@ -119,7 +143,17 @@ const NT_STATUS_MARK = '--NT-STATUS-SPLIT--'
  */
 async function listProjectsOutput(): Promise<string> {
   const dir = app.getPath('userData')
-  const workspace = await readFile(join(dir, 'workspace.json'), 'utf8').catch(() => '')
+  // Serve the ASSEMBLED v2-shaped workspace, never the raw workspace.json. Post-migration the file
+  // is a v3 index ({version:3, entries:[…]}) whose local-ref entries hold no node data at all — the
+  // paired iOS client decodes `{ projects: [Project] }`, so a raw v3 file lists zero projects.
+  // load() re-reads each ref's .nodeterm/project.json and returns {version:2, projects:[…]}; it is
+  // idempotent (and re-syncs the watcher via onPersist), so calling it here is safe.
+  const workspace = await workspaceStore
+    // Read-only: a phone listing projects mid git-merge must NOT sideline a conflict-marked
+    // project.json to `.corrupt-<ts>` (the probe/watcher-path fix); sideline is boot/renderer-only.
+    .load({ sideline: false })
+    .then((w) => JSON.stringify(w))
+    .catch(() => '')
   const status = await readFile(join(dir, 'agent-status.json'), 'utf8').catch(() => '')
   const sessions = (await ptyManager.listNodetermSessions().catch(() => [])).join('\n')
   return `${workspace}\n${NT_PROJECTS_MARK}\n${sessions}\n${NT_STATUS_MARK}\n${status}`
@@ -873,7 +907,14 @@ app.whenReady().then(async () => {
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()
   initRemoteClient(win, { isPackaged: app.isPackaged })
-  sshProjectManager = initSshProject(win)
+  sshProjectManager = initSshProject(win, (projectId) => {
+    // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
+    // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
+    // silent replace / conflict bar). null means our cache was pushed up instead — nothing to send.
+    void workspaceStore.refreshSshProject(projectId).then((adopted) => {
+      if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
+    })
+  })
   // Route git-service + commit-message git ops over the active SSH project's master only — and only
   // for that project's exact remoteCwd. Any other cwd (a local project, or a different connected
   // project) resolves to undefined, so the local path stays byte-identical.
@@ -918,6 +959,7 @@ app.on('window-all-closed', () => {
 let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
+  workspaceWatcher.dispose()
   sshProjectManager?.disconnectAll()
   chatDriver.disposeAll() // tear down every chat node's SDK query (resume-based, so this is safe)
   if (quitFlushed) return

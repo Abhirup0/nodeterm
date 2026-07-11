@@ -67,6 +67,7 @@ import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
@@ -119,7 +120,7 @@ import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
-import type { SshProjectStatus, TranscriptHit } from '@shared/types'
+import type { Project, SshProjectStatus, TranscriptHit } from '@shared/types'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -269,6 +270,10 @@ export function Canvas() {
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
   const [dirty, setDirty] = useState(false)
+  // The active project's .nodeterm file changed on disk while we have unsaved local edits
+  // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
+  const [conflict, setConflict] = useState<Project | null>(null)
+  const [migrationNote, setMigrationNote] = useState<string | null>(null)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
@@ -370,7 +375,9 @@ export function Canvas() {
   // "Has projects" = at least one OPEN (non-closed) tab. With only closed projects left, the
   // welcome screen shows (and lists them under "Recently closed" for reopening).
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
-  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed))
+  // Exclude UNAVAILABLE closed projects (folder missing): reopenProject would activate them
+  // unconditionally → a silent-discard empty canvas (the same case the palette guard blocks).
+  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed && !p.unavailable))
   // The active project's SSH server (if it's an SSH project) — drives the connection banner.
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
@@ -823,12 +830,67 @@ export function Canvas() {
     await writeDisk()
   }, [commitActiveToStore, writeDisk])
 
-  // Debounced auto-save for canvas edits.
+  // Mirror `dirty` into a ref so the external-change listener (mounted once) reads the
+  // live value without re-subscribing on every edit.
+  const dirtyRef = useRef(false)
   useEffect(() => {
-    if (!dirty) return
+    dirtyRef.current = dirty
+  }, [dirty])
+
+  /** Re-runs the active-project load effect by nudging its dependency: flip the active id
+   *  to '' (the effect early-returns) then back to the same id on a microtask. */
+  const reloadActiveProject = useCallback(() => {
+    const id = useProjects.getState().activeProjectId
+    useProjects.getState().setActive('')
+    queueMicrotask(() => useProjects.getState().setActive(id))
+  }, [])
+
+  // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine).
+  useEffect(() => {
+    return window.nodeTerminal.workspace.onExternalChange((project) => {
+      const { activeProjectId: current } = useProjects.getState()
+      if (project.id !== current) {
+        // Background project: adopt silently — it reloads into React Flow on next switch.
+        useProjects.getState().replaceProject(project)
+        return
+      }
+      if (!dirtyRef.current) {
+        // Active but no unsaved local edits: reload in place.
+        useProjects.getState().replaceProject(project)
+        reloadActiveProject()
+        return
+      }
+      // Active with unsaved local edits: let the user pick a side.
+      setConflict(project)
+    })
+  }, [reloadActiveProject])
+
+  // One-shot note after a v2→v3 on-disk migration (dismissible, non-blocking strip).
+  useEffect(() => {
+    return window.nodeTerminal.workspace.onMigrated(() => {
+      setMigrationNote(
+        'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
+      )
+    })
+  }, [])
+
+  // A pending conflict is scoped to the project that was active when it fired. If the user
+  // switches projects first, drop it: commitActiveToStore already preserved the local edits in
+  // the store, so the next save keeps our version — resolving the stale bar against a different
+  // active project would be wrong.
+  useEffect(() => {
+    setConflict(null)
+  }, [activeProjectId])
+
+  // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
+  // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
+  // (overwrite the external disk version) before the user can choose. `conflict` is a dep so
+  // resolving it (either button clears it) re-arms the save.
+  useEffect(() => {
+    if (!dirty || conflict) return
     const t = setTimeout(() => void persist(), 800)
     return () => clearTimeout(t)
-  }, [dirty, persist])
+  }, [dirty, conflict, persist])
 
   // ---- remote canvas mirror (host side) ----
   // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
@@ -3375,8 +3437,17 @@ export function Canvas() {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return false
     commitActiveToStore()
-    // A folder maps to one project: reuse (and reopen, if closed) the existing one, or create.
-    useProjects.getState().openFolderProject(folder)
+    // A folder maps to one project: reuse the already-registered one first…
+    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+    if (existing) {
+      useProjects.getState().openFolderProject(folder)
+    } else {
+      // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
+      // another machine's project) — only a virgin folder gets a brand-new project.
+      const probed = await window.nodeTerminal.workspace.probeFolder(folder)
+      if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
+      else useProjects.getState().openFolderProject(folder)
+    }
     void writeDisk()
     return true
   }, [commitActiveToStore, writeDisk])
@@ -3393,10 +3464,18 @@ export function Canvas() {
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
       if (!folder) return
+      // Folder ↔ project is deduped like "Open folder…": if another project already owns this cwd,
+      // don't point a second tab at it (two same-cwd tabs collapse to one file on save) — just
+      // switch to the existing one.
+      const existing = useProjects.getState().projects.find((p) => p.cwd === folder && p.id !== id)
+      if (existing) {
+        switchProject(existing.id)
+        return
+      }
       useProjects.getState().setProjectCwd(id, folder)
       void persist()
     },
-    [persist]
+    [persist, switchProject]
   )
 
   const setProjectDefaultAccount = useCallback(
@@ -3598,7 +3677,10 @@ export function Canvas() {
     ]
     const store = useProjects.getState()
     store.projects
-      .filter((p) => p.id !== store.activeProjectId)
+      // Skip unavailable projects: activating one lets edits commit to the store but they're
+      // dropped on save (the ref emits header-only), so switching there silently loses work.
+      // The TabBar already guards its own click; this covers the palette (⌘K) path.
+      .filter((p) => p.id !== store.activeProjectId && !p.unavailable)
       .forEach((p) =>
         cmds.push({
           id: `proj-${p.id}`,
@@ -3684,6 +3766,38 @@ export function Canvas() {
 
       <div className="top-banners">
         <AnnouncementBanner />
+        {migrationNote && (
+          <div className="announce-banner announce-banner--info">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{migrationNote}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setMigrationNote(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {conflict && (
+          <ConflictBar
+            onReload={() => {
+              useProjects.getState().replaceProject(conflict)
+              // The canvas now matches disk exactly → no local unsaved edits. Clear dirty so the
+              // re-armed autosave (conflict just went null) can't turn around and overwrite the
+              // just-reloaded disk version.
+              setDirty(false)
+              setConflict(null)
+              reloadActiveProject()
+            }}
+            onKeepMine={() => {
+              setConflict(null)
+              void persist() // our in-memory canvas wins; the save overwrites the disk file
+            }}
+          />
+        )}
         {activeSshServer &&
           sshStatus[activeProjectId] &&
           sshStatus[activeProjectId] !== 'connected' &&

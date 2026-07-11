@@ -181,7 +181,12 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
 
   const workspace: WorkspaceApi = {
     load: () => client.request(IPC.workspaceLoad) as Promise<Workspace>,
-    save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>
+    save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>,
+    // No server handler — per-project file storage is desktop-only for now; degrade
+    // gracefully (null probe, no-op event subscriptions) so the boot path never rejects.
+    probeFolder: () => Promise.resolve(null),
+    onMigrated: () => () => {},
+    onExternalChange: () => () => {}
   }
 
   const settings: SettingsApi = {

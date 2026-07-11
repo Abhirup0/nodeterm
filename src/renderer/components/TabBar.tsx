@@ -152,10 +152,14 @@ export function TabBar({
             return (
               <div
                 key={p.id}
-                className={`tab${active ? ' active' : ''}`}
+                className={`tab${active ? ' active' : ''}${p.unavailable ? ' unavailable' : ''}`}
                 style={active ? { color: p.color } : undefined}
-                onClick={() => !editingId && onSwitch(p.id)}
-                title={p.cwd || undefined}
+                onClick={() => !editingId && !p.unavailable && onSwitch(p.id)}
+                title={
+                  p.unavailable
+                    ? `${p.cwd ?? 'project'} is unavailable (folder missing or unreachable)`
+                    : p.cwd || undefined
+                }
               >
                 <span
                   className="tab__dot"
