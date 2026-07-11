@@ -297,3 +297,67 @@ describe('refreshSshProject', () => {
     expect(remote['ps']).toContain('"id": "ps"')
   })
 })
+
+describe('ssh mirror guarantee (unmirrored retry)', () => {
+  const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
+
+  /** Fake IO whose write succeeds only while `up` is true (simulates the
+   *  ControlMaster still connecting during the first save). */
+  const flakyIO = () => {
+    const state = { up: false, writes: 0, remote: {} as Record<string, string> }
+    const io = {
+      read: async (id: string) => state.remote[id] ?? null,
+      write: async (id: string, _s: any, c: string) => {
+        state.writes++
+        if (!state.up) return false
+        state.remote[id] = c
+        return true
+      }
+    }
+    return { state, io }
+  }
+
+  it('retries a dropped mirror write on the next save even with unchanged content', async () => {
+    const { state, io } = flakyIO()
+    const store = new WorkspaceStore(io)
+    const w = ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])
+
+    await store.save(w) // connection not up yet → write dropped
+    expect(state.writes).toBe(1)
+    expect(state.remote['ps']).toBeUndefined()
+
+    state.up = true
+    await store.save(w) // content unchanged, but the mirror is still owed
+    expect(state.writes).toBe(2)
+    expect(state.remote['ps']).toContain('"id": "ps"')
+    expect(JSON.parse(state.remote['ps']).rev).toBe(1) // retry does not bump rev
+
+    await store.save(w) // confirmed → unchanged saves stop writing
+    expect(state.writes).toBe(2)
+  })
+
+  it('refreshSshProject records a failed push-up so the next save retries', async () => {
+    const { state, io } = flakyIO()
+    const store = new WorkspaceStore(io)
+    const w = ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])
+    await store.save(w) // dropped (down)
+
+    expect(await store.refreshSshProject('ps')).toBeNull() // still down: read null, push-up fails
+    state.up = true
+    await store.save(w) // unchanged content, retried because refresh confirmed it is owed
+    expect(state.remote['ps']).toContain('"id": "ps"')
+  })
+
+  it('a successful refresh push-up clears the debt (no redundant write on next save)', async () => {
+    const { state, io } = flakyIO()
+    const store = new WorkspaceStore(io)
+    const w = ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])
+    await store.save(w) // dropped
+    state.up = true
+    expect(await store.refreshSshProject('ps')).toBeNull() // push-up succeeds
+    expect(state.remote['ps']).toContain('"id": "ps"')
+    const writesAfterRefresh = state.writes
+    await store.save(w) // unchanged + already mirrored → no write
+    expect(state.writes).toBe(writesAfterRefresh)
+  })
+})

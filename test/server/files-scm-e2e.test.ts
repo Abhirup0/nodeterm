@@ -22,7 +22,10 @@ describe('files/scm e2e: fs.read + git over ws', () => {
     const srv = await startServer({
       port: 0, host: '127.0.0.1', dataDir,
       rendererDir: path.join(dataDir, 'no-renderer'), insecureHttp: false,
-      passwordSeed: 'scm-e2e-pw'
+      passwordSeed: 'scm-e2e-pw',
+      // Never touch the developer's real ~/.claude — the hook would point into `dataDir`,
+      // which afterAll removes, leaving a dangling hook that breaks every agent session.
+      installHooks: false
     })
     port = srv.port; close = srv.close
     const res = await fetch(`http://127.0.0.1:${port}/auth/login`, {

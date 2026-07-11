@@ -39,6 +39,10 @@ export class WorkspaceStore {
   private revs = new Map<string, number>()
   /** Raw v2 file content, kept until the first save backs it up (migration). */
   private pendingV2Backup: string | null = null
+  /** ssh project ids whose last mirror write was dropped (connection down). Retried on every
+   *  save/connect until a write confirms — guarantees the server file lands regardless of node
+   *  type or creation timing. Runtime-only, never persisted. */
+  private unmirrored = new Set<string>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -187,8 +191,13 @@ export class WorkspaceStore {
       )
       e.cache.rev = changedSinceLoad ? prevRev + 1 : prevRev
       this.revs.set(e.id, e.cache.rev)
-      if (this.remoteIO && changedSinceLoad) {
-        void this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
+      // Mirror on change, and re-mirror while a previous write is still owed (the first save
+      // often races the ControlMaster coming up — its write is dropped fail-open, and without
+      // the retry nothing rewrites until the next real content change).
+      if (this.remoteIO && (changedSinceLoad || this.unmirrored.has(e.id))) {
+        const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
+        if (ok) this.unmirrored.delete(e.id)
+        else this.unmirrored.add(e.id)
       }
     }
 
@@ -260,10 +269,17 @@ export class WorkspaceStore {
     if (remote && remote.rev > cacheRev) {
       e.cache = remote
       this.revs.set(projectId, remote.rev)
+      this.unmirrored.delete(projectId) // the server copy IS the truth now — nothing owed
       await writeAtomic(this.indexPath, JSON.stringify(this.index))
       return fileToProject(remote, { ssh: e.ssh, closed: e.closed })
     }
-    if (e.cache) void this.remoteIO.write(projectId, e.ssh, serializeProjectFile(e.cache))
+    if (e.cache) {
+      // Push-up runs with the master just up, but record the outcome anyway: a failed write
+      // (connection flapped) stays owed so the next save retries it.
+      const ok = await this.remoteIO.write(projectId, e.ssh, serializeProjectFile(e.cache))
+      if (ok) this.unmirrored.delete(projectId)
+      else this.unmirrored.add(projectId)
+    }
     return null
   }
 }

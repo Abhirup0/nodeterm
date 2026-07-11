@@ -97,11 +97,15 @@ export async function startServer(
   // the main HTTP server below.
   initAgentStatusMirror()
   wireAgentStatus(platform)
-  try {
-    // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
-    installManagedAgentHooks()
-  } catch (e) {
-    console.warn('[nodeterm-server] managed hook install failed', e)
+  // `installHooks: false` (tests) skips the merge into the user's real ~/.claude et al —
+  // the hook it would write points into `dataDir`, which a test then deletes.
+  if (config.installHooks !== false) {
+    try {
+      // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
+      installManagedAgentHooks()
+    } catch (e) {
+      console.warn('[nodeterm-server] managed hook install failed', e)
+    }
   }
   await hookServer.start()
 
