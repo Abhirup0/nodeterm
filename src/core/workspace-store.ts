@@ -56,13 +56,19 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
   }
 
-  async load(): Promise<Workspace> {
-    const result = await this.loadInner()
+  /**
+   * `sideline` (default true) forwards to readProjectFile: an unparsable/wrong-shape local
+   * project.json is renamed to `.corrupt-<ts>` so a later save can't overwrite the only copy —
+   * correct for boot/renderer loads. Read-only callers (e.g. the relay `projects.list` blob, which
+   * a phone can trigger mid git-merge) pass false so a conflict-marked file is left hand-resolvable.
+   */
+  async load(opts?: { sideline?: boolean }): Promise<Workspace> {
+    const result = await this.loadInner(opts?.sideline ?? true)
     this.onPersist?.()
     return result
   }
 
-  private async loadInner(): Promise<Workspace> {
+  private async loadInner(sideline: boolean): Promise<Workspace> {
     let raw: string
     try {
       raw = await fs.readFile(this.indexPath, 'utf-8')
@@ -76,21 +82,21 @@ export class WorkspaceStore {
       return EMPTY_WORKSPACE
     }
     const anyParsed = parsed as { version?: number }
-    if (anyParsed?.version === 3) return this.loadV3(parsed as WorkspaceIndexV3)
+    if (anyParsed?.version === 3) return this.loadV3(parsed as WorkspaceIndexV3, sideline)
     // v1/v2: assemble in memory now; the first save() performs the actual migration.
     const legacy = migrateLegacy(parsed)
     if (legacy.projects.length) this.pendingV2Backup = raw
     return legacy
   }
 
-  private async loadV3(index: WorkspaceIndexV3): Promise<Workspace> {
+  private async loadV3(index: WorkspaceIndexV3, sideline: boolean): Promise<Workspace> {
     this.index = index
     const projects: Project[] = []
     for (const e of index.entries) {
       if (e.project) {
         projects.push(e.project)
       } else if (e.cwd) {
-        const p = await this.readProjectFile(e.cwd, true)
+        const p = await this.readProjectFile(e.cwd, sideline)
         if (p) {
           this.revs.set(p.id, p.rev)
           this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(p))

@@ -149,7 +149,9 @@ async function listProjectsOutput(): Promise<string> {
   // load() re-reads each ref's .nodeterm/project.json and returns {version:2, projects:[…]}; it is
   // idempotent (and re-syncs the watcher via onPersist), so calling it here is safe.
   const workspace = await workspaceStore
-    .load()
+    // Read-only: a phone listing projects mid git-merge must NOT sideline a conflict-marked
+    // project.json to `.corrupt-<ts>` (the probe/watcher-path fix); sideline is boot/renderer-only.
+    .load({ sideline: false })
     .then((w) => JSON.stringify(w))
     .catch(() => '')
   const status = await readFile(join(dir, 'agent-status.json'), 'utf8').catch(() => '')

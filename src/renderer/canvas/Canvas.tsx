@@ -375,7 +375,9 @@ export function Canvas() {
   // "Has projects" = at least one OPEN (non-closed) tab. With only closed projects left, the
   // welcome screen shows (and lists them under "Recently closed" for reopening).
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
-  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed))
+  // Exclude UNAVAILABLE closed projects (folder missing): reopenProject would activate them
+  // unconditionally → a silent-discard empty canvas (the same case the palette guard blocks).
+  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed && !p.unavailable))
   // The active project's SSH server (if it's an SSH project) — drives the connection banner.
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server

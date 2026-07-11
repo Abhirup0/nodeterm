@@ -115,6 +115,17 @@ describe('unavailable & corrupt refs', () => {
     const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
     expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(true)
   })
+
+  it('load({ sideline: false }) marks a corrupt ref unavailable WITHOUT sidelining it', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const p = path.join(projRoot, '.nodeterm/project.json')
+    await fs.writeFile(p, '{ not json') // e.g. a git-conflict-marked file mid-merge
+    const loaded = await new WorkspaceStore().load({ sideline: false })
+    expect(loaded.projects[0].unavailable).toBe(true)
+    const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(false) // left in place
+  })
 })
 
 describe('unavailable projects never overwrite real data on save', () => {
