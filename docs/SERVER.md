@@ -182,6 +182,44 @@ closed: a flooding PTY is automatically paused based on the WebSocket
 **Still deferred to Phase 3b:** the SDK **chat node** and the **agent-status
 badges/hooks** are not yet wired into the server bridge.
 
+## Phase 3b: agent status, subagents & the context meter
+
+Phase 3b brings the agent-observability surface — the same code path the desktop app
+uses — to the browser. The server boots the loopback **hook server**
+(`hookServer.start()`, on its own `127.0.0.1` port) and installs the managed hook
+scripts, so every agent CLI the server spawns POSTs its lifecycle hooks back to the
+host. `wireAgentStatus` installs the hook server's normalized + raw listeners and
+routes each event over `platform.broadcast`, so the existing renderer badge / subagent
+/ context code now works unchanged in the browser:
+
+- **Agent-status badges** — an agent's own hooks (not output parsing) drive the shared
+  4-state model; the normalized event is broadcast over `agent:status` and the header
+  shows the pulsing **RUNNING** (working) / **NEEDS YOU** (waiting/blocked) badge, plus
+  the unread dot and completion notification (as a Web Notification — see Phase 2).
+- **Subagent visualization** — subagent start/end drive ephemeral **SubagentNode** cards
+  over `agent:subagent-activity`; the main-process subagent tail streams each card's live
+  transcript to the browser.
+- **Context-window meter** — the per-node context tail streams `context:update` so the
+  meter fills as the session's transcript grows (this channel was already real in 3a; 3b
+  feeds it from the hook pipeline).
+
+Because the hook POST carries a `transcript_path`, a forged POST is defended by jailing
+that path to the system-default `~/.claude/projects` or a managed account dir
+(`isSafeLocalTranscriptPath`) before any tail reads it.
+
+**Deliberate scope skips (Phase 3b):**
+
+- The SDK **chat node** is still **deferred** — it is not wired into the server bridge.
+- **Canvas-control** (`agent:control`, the Claude-only `nodeterm` CLI verbs) is **not
+  wired** over the server.
+- The **`ptyDestroy` tail-teardown is skipped**: the platform's single-listener registry
+  forbids a second `ptyDestroy` listener, so tails self-clear on `SessionEnd`. A node
+  closed *without* a SessionEnd leaves a **bounded, lingering file-tail** until the
+  process exits — no leak of unbounded resources.
+- **SSH-remote agent tails are N/A** — the server has no SSH-project manager, so the
+  SSH branch of the desktop hook-wiring block is dropped (the raw listener falls straight
+  through to the local logic).
+
 ## Manual browser smoke checklist
 
 Run against a real browser (this is the human-verified path; the automated harness
@@ -209,3 +247,11 @@ only exercises the HTTP/auth surface). With `npm run server:dev` running:
 10. **Source Control (Phase 3a)** — open the Source Control panel; your edit shows as a
     change. Click it to see the **diff**, **stage** it (+), type a message, and
     **commit**; the file leaves the change list and the commit appears in recent commits.
+11. **Agent status (Phase 3b)** — open a **Claude** terminal node, run a prompt; the header
+    should show the pulsing **RUNNING** badge while it works and clear (with an unread dot
+    if the tab is unfocused) when it's done.
+12. **Subagent card (Phase 3b)** — from a Claude node, run a prompt that dispatches a
+    subagent (e.g. a `/task`); an ephemeral **subagent card** appears connected to the
+    parent node; click it to watch its live transcript stream.
+13. **Context meter (Phase 3b)** — as a Claude session accumulates transcript, the node's
+    **context-window meter** should fill.
