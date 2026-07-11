@@ -35,7 +35,11 @@ describe('agent-status e2e: hook POST → agent:status over ws', () => {
       dataDir,
       rendererDir: path.join(dataDir, 'no-renderer'),
       insecureHttp: false,
-      passwordSeed: 'agst-e2e-pw'
+      passwordSeed: 'agst-e2e-pw',
+      // The loopback hook server still boots (that's what this test exercises); we only skip
+      // merging the managed hook into the developer's real ~/.claude — it would point into
+      // `dataDir`, which afterAll removes, leaving a dangling hook behind.
+      installHooks: false
     })
     port = srv.port
     close = srv.close

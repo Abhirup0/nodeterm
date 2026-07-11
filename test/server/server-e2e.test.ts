@@ -25,7 +25,10 @@ describe.skipIf(!hasTmux)('server e2e: login → ws → pty echo round-trip', ()
     const srv = await startServer({
       port: 0, host: '127.0.0.1', dataDir,
       rendererDir: path.join(dataDir, 'no-renderer'), insecureHttp: false,
-      passwordSeed: 'e2e-password-123'
+      passwordSeed: 'e2e-password-123',
+      // Never touch the developer's real ~/.claude — the hook would point into `dataDir`,
+      // which afterAll removes, leaving a dangling hook that breaks every agent session.
+      installHooks: false
     })
     port = srv.port
     close = srv.close

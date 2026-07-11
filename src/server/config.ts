@@ -12,6 +12,15 @@ export type ServerConfig = {
   rendererDir: string
   insecureHttp: boolean
   passwordSeed?: string
+  /**
+   * Merge the managed agent hooks into the user's real agent config dirs (~/.claude,
+   * ~/.codex, ~/.gemini) at boot. Defaults to true — the server needs them to receive
+   * agent status. Tests MUST pass false: the installed hook points at
+   * `<dataDir>/agent-hooks/<agent>.sh`, so a temp dataDir that gets removed after the run
+   * would leave a dangling hook behind in the developer's real settings.json, breaking
+   * every subsequent agent session on the machine.
+   */
+  installHooks?: boolean
 }
 
 /**
