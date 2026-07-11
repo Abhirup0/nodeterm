@@ -39,7 +39,16 @@ const pnoop = (): Promise<void> => Promise.resolve()
 
 export function buildStubApi(): Omit<
   NodeTerminalApi,
-  'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context' | 'dialog'
+  | 'pty'
+  | 'workspace'
+  | 'settings'
+  | 'fs'
+  | 'git'
+  | 'files'
+  | 'context'
+  | 'dialog'
+  | 'onAgentStatus'
+  | 'onSubagentActivity'
 > {
   const api = {
     ssh: {
@@ -202,13 +211,20 @@ export function buildStubApi(): Omit<
     },
     openNotificationSettings: pnoop,
     onFocusNode: noopUnsub,
-    onAgentStatus: noopUnsub,
-    onSubagentActivity: noopUnsub,
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop
   } satisfies Omit<
     NodeTerminalApi,
-    'pty' | 'workspace' | 'settings' | 'fs' | 'git' | 'files' | 'context' | 'dialog'
+    | 'pty'
+    | 'workspace'
+    | 'settings'
+    | 'fs'
+    | 'git'
+    | 'files'
+    | 'context'
+    | 'dialog'
+    | 'onAgentStatus'
+    | 'onSubagentActivity'
   >
 
   return api

@@ -13,6 +13,10 @@ import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
+import { hookServer } from '../core/agents/hook-server'
+import { installManagedAgentHooks } from '../core/agents/hooks'
+import { initAgentStatusMirror } from '../core/agent-status-mirror'
+import { wireAgentStatus } from './agent-status'
 import { IPC } from '@shared/ipc'
 
 /**
@@ -87,6 +91,20 @@ export async function startServer(
   // fs + git + commit handlers (shared with desktop core services).
   registerCoreHandlers(platform, { getSettings: () => settingsStore.get() })
 
+  // Agent status pipeline — mirrors the desktop boot order in src/main/index.ts:
+  // mirror-init → wire the hook-server listeners onto the platform → install the managed hook
+  // scripts → start the loopback hook server. The hook server binds its own port independent of
+  // the main HTTP server below.
+  initAgentStatusMirror()
+  wireAgentStatus(platform)
+  try {
+    // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
+    installManagedAgentHooks()
+  } catch (e) {
+    console.warn('[nodeterm-server] managed hook install failed', e)
+  }
+  await hookServer.start()
+
   const server = http.createServer(createHttpHandler({ auth, rendererDir: config.rendererDir }))
   attachWsServer(server, { platform, auth })
 
@@ -106,6 +124,8 @@ export async function startServer(
     async close() {
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       await ptyManager.killAll()
+      // Close the loopback hook-server listener (it would otherwise die with the process anyway).
+      hookServer.stop()
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })

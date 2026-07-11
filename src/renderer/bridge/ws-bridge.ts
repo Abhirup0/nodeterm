@@ -313,6 +313,22 @@ export function buildFilesApi(
   return { fs, git, files, context }
 }
 
+/**
+ * Build the top-level agent-event subscriptions (`onAgentStatus` / `onSubagentActivity`) over an
+ * RpcClient. These mirror the preload's `.on(channel, …)` → `client.subscribe(channel, …)` split:
+ * each takes a listener and returns an unsubscribe. Declared against its `NodeTerminalApi` slice so
+ * `satisfies` keeps the compiler as the completeness gate.
+ */
+export function buildAgentApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity'> {
+  return {
+    onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    onSubagentActivity: (listener) =>
+      client.subscribe(IPC.agentSubagentActivity, listener as Listener)
+  }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -417,6 +433,7 @@ export async function installWsBridge(): Promise<void> {
     ...buildStubApi(),
     ...buildRealApi(client),
     ...buildFilesApi(client),
+    ...buildAgentApi(client),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
     // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
     dialog: (() => {
