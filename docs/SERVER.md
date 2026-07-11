@@ -132,9 +132,11 @@ Two intentional departures from `docs/superpowers/specs/2026-07-10-server-editio
   overlay and the recovery path is to reload the page; on reload each terminal
   warm-reattaches to its still-running tmux session and tmux redraws. (The spec's
   lighter "thin reconnect strip" is recorded as a v1 tradeoff.)
-- **Initial-connect failure shows a blank screen.** If the server is unreachable at
-  the very first page load (as opposed to a mid-session drop), the reconnect overlay
-  does not appear — you get a blank page. Known follow-up.
+- **Initial-connect failure showed a blank screen** *(resolved in Phase 3c).* If the
+  server was unreachable at the very first page load (as opposed to a mid-session drop),
+  the reconnect overlay did not appear — you got a blank page. The bridge now shows the
+  reconnect overlay on a failed first connect instead of booting the app, and reloads on
+  reopen. See [Phase 3c](#phase-3c-follow-up-hardening).
 - **No backpressure / flow-control auto-trigger.** The `pty.setFlow` plumbing exists
   end-to-end, but nothing automatically pauses a flooding PTY based on WebSocket
   `bufferedAmount` yet. Deferred to Phase 3.
@@ -212,17 +214,35 @@ that path to the system-default `~/.claude/projects` or a managed account dir
 - The SDK **chat node** is still **deferred** — it is not wired into the server bridge.
 - **Canvas-control** (`agent:control`, the Claude-only `nodeterm` CLI verbs) is **not
   wired** over the server.
-- The **`ptyDestroy` tail-teardown is skipped**: the platform's single-listener registry
-  forbids a second `ptyDestroy` listener (it would clobber `PtyManager`'s own destroy
-  handler), so tails self-clear on `SessionEnd`. A node closed *without* a SessionEnd (e.g.
-  the × button, which abruptly kills the tmux session) leaves a small idle file-tail — a
-  1 s stat poller that never re-broadcasts (a dead session produces no file changes). It is
-  bounded *per node* but accumulates across nodes closed-without-SessionEnd until the
-  process restarts. Cost is negligible; a `destroySession` teardown callback is the planned
-  follow-up to restore desktop parity.
+- The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
+  (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
+  idle file-tail); the server now untracks agent tails on node close, at desktop parity.
+  See [Phase 3c](#phase-3c-follow-up-hardening).
 - **SSH-remote agent tails are N/A** — the server has no SSH-project manager, so the
   SSH branch of the desktop hook-wiring block is dropped (the raw listener falls straight
   through to the local logic).
+
+## Phase 3c: follow-up hardening
+
+Phase 3c closes two follow-ups left open by Phase 3b, bringing the browser bridge to
+desktop parity on agent-tail cleanup and first-connect behavior:
+
+- **`ptyDestroy` tail-teardown (desktop parity).** When a node is closed the server now
+  **untracks its agent tails** (the per-node context/subagent session state plus the
+  context tail and subagent tail) on `ptyDestroy`, exactly as the desktop app does — no
+  more idle file-tail lingering for a node closed *without* a `SessionEnd` (e.g. the ×
+  button). This was enabled by making `platform.on` **multi-listener** (matching Electron's
+  `ipcMain.on`): the new teardown listener runs **alongside** `PtyManager`'s own
+  `ptyDestroy` destroy handler instead of clobbering it.
+- **Clean boot on a failed initial connect.** A failed *first* WebSocket connect no longer
+  boots the app into a broken/blank state — the bridge shows the standard reconnect overlay
+  and the app reloads on reopen, so first-load failure now behaves like a mid-session drop.
+
+**Still deferred** (unchanged from Phase 3b): the SDK **chat node**, **canvas-control**
+(`agent:control` / the `nodeterm` CLI verbs), full **two-master flow-control coordination**
+(the server still re-asserts its WS backpressure pause on each send rather than co-managing
+a single actuator with the renderer), and the web folder picker's **hardcoded start
+directory**.
 
 ## Manual browser smoke checklist
 

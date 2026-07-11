@@ -95,4 +95,41 @@ describe('wireAgentStatus', () => {
     fh.fireRaw('codex', 'n1', { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_use_id: 'x' })
     expect(sub.calls).toEqual([])
   })
+
+  it('ptyDestroy untracks the node context tail and finishes its subagents, clearing the maps', () => {
+    const fh = fakeHooks()
+    const sub = recTail()
+    const ctx = recTail()
+    wireAgentStatus(platform, {
+      hooks: fh.hooks as never,
+      subagentTail: sub.tail as never,
+      contextTail: ctx.tail as never
+    })
+    // A safe local transcript path so contextTail.track runs and nodeContextSession is set.
+    const transcriptPath = path.join(os.homedir(), '.claude', 'projects', 't.jsonl')
+    // Populate the maps: a raw PreToolUse(Task) sets nodeContextSession + tracks a subagent.
+    fh.fireRaw('claude', 'n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id: 'tu1',
+      session_id: 's1',
+      transcript_path: transcriptPath
+    })
+    // Node closes → ptyDestroy cast fires the teardown listener.
+    platform.cast(
+      platform.attach({ sendText: () => {}, sendBinary: () => {} }),
+      IPC.ptyDestroy,
+      ['n1']
+    )
+    expect(ctx.calls.some((c) => c.m === 'untrack' && c.args[0] === 's1')).toBe(true)
+    expect(sub.calls.some((c) => c.m === 'finish' && c.args[0] === 'tu1')).toBe(true)
+    // Re-destroying the same node is a harmless no-op (maps already cleared).
+    const before = ctx.calls.length + sub.calls.length
+    platform.cast(
+      platform.attach({ sendText: () => {}, sendBinary: () => {} }),
+      IPC.ptyDestroy,
+      ['n1']
+    )
+    expect(ctx.calls.length + sub.calls.length).toBe(before)
+  })
 })

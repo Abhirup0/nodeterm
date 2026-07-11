@@ -4,7 +4,8 @@
 async function bootstrap(): Promise<void> {
   if (!window.nodeTerminal) {
     const { installWsBridge } = await import('./bridge/ws-bridge')
-    await installWsBridge()
+    const connected = await installWsBridge()
+    if (!connected) return // overlay is up; startReconnect reloads on the first reopen
   }
   await import('./boot')
 }

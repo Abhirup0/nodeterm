@@ -45,6 +45,18 @@ describe('ServerPlatform', () => {
     expect(got).toEqual(['hello'])
   })
 
+  it('on() supports multiple listeners per channel; cast fires all of them', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const hits: string[] = []
+    p.on('w', (a: string) => hits.push(`A:${a}`))
+    p.on('w', (a: string) => hits.push(`B:${a}`))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    p.cast(ui, 'w', ['x'])
+    expect(hits).toEqual(['A:x', 'B:x'])
+    p.cast(ui, 'unknown', ['ignored']) // no listener → silent no-op
+    expect(hits).toEqual(['A:x', 'B:x'])
+  })
+
   it('sendTo routes pty:data as binary, other channels as JSON events, drops when detached', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
     const a = fakeSink()
@@ -65,6 +77,21 @@ describe('ServerPlatform', () => {
     p.broadcast('license:changed', { tier: 'x' })
     expect(a.texts).toHaveLength(1)
     expect(b.texts).toHaveLength(1)
+  })
+
+  it('detach clears the backpressure paused map', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 2_000_000 })
+    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → session s1 marked paused
+    p.detach(ui)
+    // After detach the paused entry is gone: a fresh attach + low-buffer send does not emit a
+    // spurious resume.
+    const flow: Array<{ sid: string; resume: boolean }> = []
+    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    const ui2 = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 0 })
+    p.sendTo(ui2, 'pty:data:s1', 'x')
+    expect(flow).toEqual([]) // not paused (map was cleared) → no resume fired
   })
 
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {

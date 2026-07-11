@@ -30,7 +30,7 @@ export class ServerPlatform implements CorePlatform {
   readonly isPackaged = true
 
   private handlers = new Map<string, Handler>()
-  private listeners = new Map<string, (...args: any[]) => void>()
+  private listeners = new Map<string, Set<(...args: any[]) => void>>()
   private sinks = new Map<number, UiSink>()
   private nextUiId = 1
 
@@ -57,7 +57,12 @@ export class ServerPlatform implements CorePlatform {
   }
 
   on(channel: string, fn: (...args: any[]) => void): void {
-    this.listeners.set(channel, fn)
+    let set = this.listeners.get(channel)
+    if (!set) {
+      set = new Set()
+      this.listeners.set(channel, set)
+    }
+    set.add(fn)
   }
 
   sendTo(uiId: number, channel: string, ...args: any[]): void {
@@ -104,6 +109,9 @@ export class ServerPlatform implements CorePlatform {
 
   detach(uiId: number): void {
     this.sinks.delete(uiId)
+    // v1 is single-UI: every paused session belonged to the departing connection, so drop the
+    // whole backpressure map to avoid a stale pause leaking into the next attach.
+    this.paused.clear()
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {
@@ -127,6 +135,8 @@ export class ServerPlatform implements CorePlatform {
 
   cast(uiId: number, method: string, args: unknown[]): void {
     void uiId
-    this.listeners.get(method)?.(...args)
+    const set = this.listeners.get(method)
+    if (!set) return
+    for (const fn of set) fn(...args)
   }
 }
