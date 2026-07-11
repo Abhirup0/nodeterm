@@ -69,7 +69,7 @@ describe('reconnect overlay', () => {
     )
     expect(el).toBeTruthy()
     expect(el!.style.position).toBe('fixed')
-    expect(el!.textContent).toMatch(/bağlan/i)
+    expect(el!.textContent).toMatch(/reconnect/i)
   })
 
   it('is idempotent — a second call does not mount a duplicate', () => {

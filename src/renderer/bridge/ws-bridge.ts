@@ -354,7 +354,7 @@ export function showReconnectOverlay(): void {
     'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;' +
     'justify-content:center;background:rgba(0,0,0,0.72);color:#fff;' +
     'font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;padding:24px'
-  el.textContent = 'Bağlantı koptu — yeniden bağlanılıyor…'
+  el.textContent = 'Connection lost — reconnecting…'
   document.body.appendChild(el)
 }
 
@@ -414,9 +414,11 @@ function startReconnect(): void {
 
 /**
  * Connect the WS bridge and install `window.nodeTerminal`. Awaited by main.tsx's bootstrap
- * before the app boots, so the real namespaces are present on first render.
+ * before the app boots, so the real namespaces are present on first render. Resolves `true` once
+ * the socket is open and `window.nodeTerminal` is assigned; resolves `false` on the initial-connect
+ * failure path (overlay shown, reconnect loop running) so bootstrap can skip loading the app.
  */
-export async function installWsBridge(): Promise<void> {
+export async function installWsBridge(): Promise<boolean> {
   const client = new RpcClient(wsUrl())
   try {
     await client.ready()
@@ -425,8 +427,10 @@ export async function installWsBridge(): Promise<void> {
     // Show the SAME reconnect overlay + backoff loop as a later drop instead of rejecting — a
     // rejection here would bubble out of bootstrap() and leave a blank screen. `startReconnect`
     // reloads the page on the first successful reopen, which re-runs installWsBridge cleanly.
+    // Return false so bootstrap skips `import('./boot')` — booting the app with an undefined
+    // `window.nodeTerminal` throws under the (opaque) overlay.
     startReconnect()
-    return
+    return false
   }
   client.onClose(() => startReconnect())
   const api: NodeTerminalApi = {
@@ -446,4 +450,5 @@ export async function installWsBridge(): Promise<void> {
     })()
   }
   ;(window as unknown as { nodeTerminal: NodeTerminalApi }).nodeTerminal = api
+  return true
 }
