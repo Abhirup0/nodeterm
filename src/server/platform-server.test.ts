@@ -45,6 +45,18 @@ describe('ServerPlatform', () => {
     expect(got).toEqual(['hello'])
   })
 
+  it('on() supports multiple listeners per channel; cast fires all of them', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const hits: string[] = []
+    p.on('w', (a: string) => hits.push(`A:${a}`))
+    p.on('w', (a: string) => hits.push(`B:${a}`))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    p.cast(ui, 'w', ['x'])
+    expect(hits).toEqual(['A:x', 'B:x'])
+    p.cast(ui, 'unknown', ['ignored']) // no listener → silent no-op
+    expect(hits).toEqual(['A:x', 'B:x'])
+  })
+
   it('sendTo routes pty:data as binary, other channels as JSON events, drops when detached', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
     const a = fakeSink()
