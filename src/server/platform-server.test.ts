@@ -79,6 +79,21 @@ describe('ServerPlatform', () => {
     expect(b.texts).toHaveLength(1)
   })
 
+  it('detach clears the backpressure paused map', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 2_000_000 })
+    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → session s1 marked paused
+    p.detach(ui)
+    // After detach the paused entry is gone: a fresh attach + low-buffer send does not emit a
+    // spurious resume.
+    const flow: Array<{ sid: string; resume: boolean }> = []
+    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    const ui2 = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 0 })
+    p.sendTo(ui2, 'pty:data:s1', 'x')
+    expect(flow).toEqual([]) // not paused (map was cleared) → no resume fired
+  })
+
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {
     const p = new ServerPlatform({ userDataDir: '/data', appVersion: '9.9.9' })
     expect(p.userDataDir).toBe('/data')

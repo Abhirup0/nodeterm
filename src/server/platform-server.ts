@@ -109,6 +109,9 @@ export class ServerPlatform implements CorePlatform {
 
   detach(uiId: number): void {
     this.sinks.delete(uiId)
+    // v1 is single-UI: every paused session belonged to the departing connection, so drop the
+    // whole backpressure map to avoid a stale pause leaking into the next attach.
+    this.paused.clear()
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {
