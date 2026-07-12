@@ -322,15 +322,6 @@ export function createAgentNode(
   }
 }
 
-/** Creates a terminal that launches Claude Code (`claude`) on open. Thin wrapper. */
-export function createClaudeNode(
-  index: number,
-  cwd?: string,
-  center?: { x: number; y: number }
-): CanvasNode {
-  return createAgentNode('claude', index, cwd, center)
-}
-
 /**
  * Chip text for an account-bound node header. Given a node's `accountId` and the known
  * accounts, returns the short chip label (the part of the account label before `@`, capped

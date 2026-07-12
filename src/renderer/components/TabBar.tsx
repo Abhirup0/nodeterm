@@ -291,54 +291,52 @@ export function TabBar({
                 )}
               </>
             )}
-            <>
-              <button
-                className={`tab-menu__group${modeOpen ? ' open' : ''}`}
-                onClick={() => setModeOpen((v) => !v)}
-              >
-                Default permission mode
-                <span className="tab-menu__caret">▸</span>
-              </button>
-              {modeOpen && (
-                <div className="tab-menu__sub">
+            <button
+              className={`tab-menu__group${modeOpen ? ' open' : ''}`}
+              onClick={() => setModeOpen((v) => !v)}
+            >
+              Default permission mode
+              <span className="tab-menu__caret">▸</span>
+            </button>
+            {modeOpen && (
+              <div className="tab-menu__sub">
+                <button
+                  onClick={() => {
+                    onSetDefaultPermissionMode(menuProject.id, undefined)
+                    closeMenu()
+                  }}
+                >
+                  <span className="tab-menu__check">
+                    {menuProject.defaultPermissionMode ? '' : '✓'}
+                  </span>
+                  Use global ({PERMISSION_MODE_LABELS[globalMode]})
+                </button>
+                {ALL_PERMISSION_MODES.map((m) => (
                   <button
+                    key={m}
+                    // A project override is written to <cwd>/.nodeterm/project.json, which is
+                    // git-shared and mirrored to SSH servers — spell out for "Bypass all" that
+                    // the choice travels to everyone who clones the repo.
+                    title={
+                      m === 'bypassPermissions'
+                        ? 'Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs Claude without permission checks too.'
+                        : undefined
+                    }
                     onClick={() => {
-                      onSetDefaultPermissionMode(menuProject.id, undefined)
+                      onSetDefaultPermissionMode(menuProject.id, m)
                       closeMenu()
                     }}
                   >
                     <span className="tab-menu__check">
-                      {menuProject.defaultPermissionMode ? '' : '✓'}
+                      {menuProject.defaultPermissionMode === m ? '✓' : ''}
                     </span>
-                    Use global ({PERMISSION_MODE_LABELS[globalMode]})
+                    {m === 'bypassPermissions'
+                      ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
+                      : PERMISSION_MODE_LABELS[m]}
                   </button>
-                  {ALL_PERMISSION_MODES.map((m) => (
-                    <button
-                      key={m}
-                      // A project override is written to <cwd>/.nodeterm/project.json, which is
-                      // git-shared and mirrored to SSH servers — spell out for "Bypass all" that
-                      // the choice travels to everyone who clones the repo.
-                      title={
-                        m === 'bypassPermissions'
-                          ? 'Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs Claude without permission checks too.'
-                          : undefined
-                      }
-                      onClick={() => {
-                        onSetDefaultPermissionMode(menuProject.id, m)
-                        closeMenu()
-                      }}
-                    >
-                      <span className="tab-menu__check">
-                        {menuProject.defaultPermissionMode === m ? '✓' : ''}
-                      </span>
-                      {m === 'bypassPermissions'
-                        ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
-                        : PERMISSION_MODE_LABELS[m]}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
+                ))}
+              </div>
+            )}
             <button
               onClick={() => {
                 onCloseProject(menuProject.id)

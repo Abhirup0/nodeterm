@@ -2220,7 +2220,7 @@ export function Canvas() {
         setExplorerOpen((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
         e.preventDefault()
-        setScOpen(true)
+        setScOpen((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault()
         toggleSessionsPin()
