@@ -51,7 +51,7 @@ function autoSupportedFor(project: Project | undefined): boolean {
 /**
  * The permission mode a session launched RIGHT NOW actually starts in: the active project's
  * override, else the global setting — with `auto` degraded to `manual` (no flag → bare command)
- * when the CLI that will run it is too old to know the value (Claude Code < 2.1.90, which exits 1
+ * when the CLI that will run it is too old to know the value (Claude Code < 2.1.71, which exits 1
  * on it) or hasn't been probed yet. The other four modes are never touched by the gate.
  *
  * Lives in its own module rather than in workspace.ts because projects.ts imports workspace.ts

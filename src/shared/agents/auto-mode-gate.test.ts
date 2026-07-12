@@ -1,4 +1,4 @@
-// The `auto` permission mode only exists in Claude Code >= 2.1.90. Older CLIs REJECT it
+// The `auto` permission mode only exists in Claude Code >= 2.1.71. Older CLIs REJECT it
 // (`error: option '--permission-mode <mode>' argument 'auto' is invalid.` → exit 1), which would
 // kill every Claude node launch. These tests pin the version predicate + the gate that degrades
 // `auto` to the bare command (and nothing else) when the CLI is too old or unknown.
@@ -14,9 +14,9 @@ import {
 
 describe('supportsAutoPermissionMode', () => {
   it('accepts the first version that knows `auto` and everything above it', () => {
-    expect(AUTO_PERMISSION_MODE_MIN_VERSION).toBe('2.1.90')
-    expect(supportsAutoPermissionMode('2.1.90')).toBe(true)
-    expect(supportsAutoPermissionMode('2.1.91')).toBe(true)
+    expect(AUTO_PERMISSION_MODE_MIN_VERSION).toBe('2.1.71')
+    expect(supportsAutoPermissionMode('2.1.71')).toBe(true)
+    expect(supportsAutoPermissionMode('2.1.72')).toBe(true)
     expect(supportsAutoPermissionMode('2.1.207')).toBe(true)
     expect(supportsAutoPermissionMode('2.2.0')).toBe(true)
     expect(supportsAutoPermissionMode('3.0.0')).toBe(true)
@@ -24,14 +24,15 @@ describe('supportsAutoPermissionMode', () => {
 
   it('rejects the versions that reject the flag value', () => {
     expect(supportsAutoPermissionMode('2.1.50')).toBe(false)
-    expect(supportsAutoPermissionMode('2.1.89')).toBe(false)
+    // 2.1.70 is the last version confirmed to reject `auto`; 2.1.71 is the measured boundary.
+    expect(supportsAutoPermissionMode('2.1.70')).toBe(false)
     expect(supportsAutoPermissionMode('2.0.99')).toBe(false)
     expect(supportsAutoPermissionMode('1.9.999')).toBe(false)
   })
 
   it('reads the real `claude --version` output shape', () => {
     expect(supportsAutoPermissionMode('2.1.207 (Claude Code)')).toBe(true)
-    expect(supportsAutoPermissionMode('2.1.50 (Claude Code)\n')).toBe(false)
+    expect(supportsAutoPermissionMode('2.1.70 (Claude Code)\n')).toBe(false)
   })
 
   it('fails open (unsupported) on anything it cannot read', () => {

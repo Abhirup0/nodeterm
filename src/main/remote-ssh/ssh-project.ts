@@ -51,7 +51,7 @@ interface Conn {
   /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
    * connection's master. Undefined when the project has no folder selected. */
   remoteCwd?: string
-  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.90)? Probed once at
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed once at
    * connect: the remote CLI can be older than the local one, and the local answer must never be
    * applied to a remote launch. Undefined/false ⇒ the renderer omits the flag for this project's
    * Claude nodes (bare command — today's behavior), never a failed launch. */
@@ -211,7 +211,7 @@ export class SshProjectManager {
           }
         }
         // Probe the REMOTE claude CLI once per connect: `--permission-mode auto` only exists in
-        // >= 2.1.90 and the host's CLI may be older than the local one. Unknown ⇒ false ⇒ the
+        // >= 2.1.71 and the host's CLI may be older than the local one. Unknown ⇒ false ⇒ the
         // renderer launches this project's Claude nodes with the bare command (fail-open).
         const claudeAutoPermissionMode = supportsAutoPermissionMode(
           await this.remoteClaudeVersion(conn, controlPath)

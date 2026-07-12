@@ -378,7 +378,7 @@ export interface Settings {
   /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
    *  at launch; Shift+Tab still cycles modes at runtime. SDK chat nodes are NOT covered (the chat
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
-   *  `auto` is version-gated: CLIs below 2.1.90 reject the value, so it degrades to no flag. */
+   *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
    *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
@@ -871,7 +871,7 @@ export interface TranscriptsApi {
  *  is unknown (missing CLI, timeout, unreadable output). */
 export interface ClaudeCliCaps {
   version: string | null
-  /** `--permission-mode auto` is only accepted by Claude Code >= 2.1.90. */
+  /** `--permission-mode auto` is only accepted by Claude Code >= 2.1.71. */
   autoPermissionMode: boolean
 }
 

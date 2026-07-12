@@ -13,7 +13,7 @@ export interface SshConnInfo {
   /** The connection's resolved remote `$HOME`. Used to build an ABSOLUTE remote
    *  `CLAUDE_CONFIG_DIR` for a managed remote account. Optional: absent if it couldn't resolve. */
   remoteHome?: string
-  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.90)? Probed on the
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed on the
    *  host at connect — the local CLI's answer says nothing about the remote one. Absent/false ⇒
    *  this project's Claude nodes launch with the bare command (no `auto` flag). */
   claudeAutoPermissionMode?: boolean

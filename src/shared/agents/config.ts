@@ -132,8 +132,11 @@ export type AgentPermissionMode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | '
  *          Allowed choices are acceptEdits, bypassPermissions, default, dontAsk, plan.
  * Since `auto` is our default, an ungated flag would break every Claude launch on an older CLI.
  * The other four modes are accepted by every CLI we support, so ONLY `auto` is gated.
+ *
+ * MEASURED, not guessed: 2.1.0 through 2.1.70 reject `auto`; 2.1.71 is the first published
+ * version that accepts it (verified by running each published tarball's CLI directly).
  */
-export const AUTO_PERMISSION_MODE_MIN_VERSION = '2.1.90'
+export const AUTO_PERMISSION_MODE_MIN_VERSION = '2.1.71'
 
 const MIN_AUTO_VERSION: readonly number[] = AUTO_PERMISSION_MODE_MIN_VERSION.split('.').map(Number)
 

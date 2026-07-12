@@ -73,7 +73,7 @@ describe('activePermissionMode', () => {
   })
 })
 
-// The whole point of the version gate: `auto` is our DEFAULT, and a Claude CLI < 2.1.90 exits 1
+// The whole point of the version gate: `auto` is our DEFAULT, and a Claude CLI < 2.1.71 exits 1
 // on `--permission-mode auto`. Degrading to `manual` (= no flag) keeps every launch working.
 describe('activePermissionMode — the `auto` version gate', () => {
   it('keeps auto when the local CLI is new enough', async () => {

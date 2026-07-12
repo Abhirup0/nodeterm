@@ -1,5 +1,5 @@
 // Capability probe for the LOCAL Claude CLI. Today it answers exactly one question — does this
-// CLI accept `--permission-mode auto`? (Claude Code >= 2.1.90; older CLIs exit 1 on the value, see
+// CLI accept `--permission-mode auto`? (Claude Code >= 2.1.71; older CLIs exit 1 on the value, see
 // AUTO_PERMISSION_MODE_MIN_VERSION) — but it is shaped as a caps bag so the next version-gated
 // flag lands here instead of growing another probe.
 //

@@ -6,7 +6,7 @@ import './styles.css'
 import './tailwind.css'
 
 // Probe the local Claude CLI once, up front (never awaited — a launch is never blocked on it):
-// `--permission-mode auto` only exists in Claude Code >= 2.1.90, and until we know the version we
+// `--permission-mode auto` only exists in Claude Code >= 2.1.71, and until we know the version we
 // conservatively omit the flag. The shell warms the same memo at startup, so this normally
 // resolves immediately.
 void ensureClaudeCliCaps()
