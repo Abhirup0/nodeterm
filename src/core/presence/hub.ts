@@ -225,7 +225,18 @@ export class PresenceHub {
       typeof projectId === 'string' && projectId ? capCodePoints(projectId, REF_MAX_LEN) : null
     if (peer.projectId === next) return
     peer.projectId = next
-    this.emit({ op: 'update', clientId, patch: { projectId: next } })
+    const patch: Partial<Omit<PeerState, 'clientId'>> = { projectId: next }
+    // The cursor belonged to the OLD canvas. A project switch can be keyboard-driven (⌘1/⌘2, the
+    // palette) with the mouse parked, so no pointermove follows it and the renderer's sampler
+    // never sends a new position — the stale coordinates would then be drawn on the NEW project's
+    // canvas, forever, for everyone on it. Drop it HERE (the one place that knows the canvas
+    // changed) and carry both changes in ONE diff, so no peer can ever apply the new project with
+    // the old cursor still attached.
+    if (peer.cursor !== null) {
+      peer.cursor = null
+      patch.cursor = null
+    }
+    this.emit({ op: 'update', clientId, patch })
   }
 
   /** Someone wrote into a node's terminal. Throttled to 1 broadcast / TYPING_THROTTLE_MS per

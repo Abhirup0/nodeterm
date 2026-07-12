@@ -120,8 +120,22 @@ export class ServerPlatform implements CorePlatform {
 
   detach(uiId: number): void {
     this.sinks.delete(uiId)
-    // v1 is single-UI: every paused session belonged to the departing connection, so drop the
-    // whole backpressure map to avoid a stale pause leaking into the next attach.
+    // KNOWN WRONG, and knowingly left so — do not read this as a design.
+    //
+    // This clears the backpressure flags of EVERY connection, not just the departing one. It was
+    // written when the Server Edition was single-UI ("every paused session belonged to the
+    // departing connection"), which team presence has made false: two browsers are now a normal
+    // configuration, and browser B disconnecting drops browser A's pause flags. The consequence is
+    // bounded — a session A had paused is treated as unpaused, so the next high-water send
+    // re-pauses it (sendTo re-asserts the pause on EVERY high send, not just the rising edge) —
+    // but until then A can take one burst it should not have.
+    //
+    // The real fix is not a smaller patch here: `paused` is keyed by sessionId ALONE, so it cannot
+    // represent "paused for A, flowing for B" at all, and neither can `flowController`, which
+    // pauses the ONE tmux client behind that session. Stage 2 rekeys the map to (clientId,
+    // sessionId) and decides the pty-side policy (pause when ANY viewer is behind); a half-fix here
+    // — e.g. only clearing this uiId's entries — would silently leak a stale pause into the next
+    // attach, which is worse than the over-clear.
     this.paused.clear()
   }
 

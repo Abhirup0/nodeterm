@@ -116,15 +116,30 @@ export function capCodePoints(text: string, max: number): string {
   return bounded.slice(0, max).join('')
 }
 
-/** Cap a name at NAME_MAX_LEN code points. Trim runs again AFTER the cut, so a truncation
- *  landing on a space doesn't leave a trailing one. */
+/**
+ * Characters a display name may never contain. Names are UNVERIFIED by design (anyone may claim
+ * any name), but they must not be able to MISRENDER: a bidi override (U+202E) reverses everything
+ * after it, so a name stored as "Ada" + U+202E + "gnihsihp" DISPLAYS as "Adaphishing" — one peer
+ * visually impersonating another with a string that inspects as something else. The marks/isolates
+ * (U+200B-200F, U+2066-2069, U+FEFF) do the same job more quietly, and C0/C1 controls (newlines,
+ * NUL, escapes) break a name out of its one-line chip. Strip them all; ordinary spaces, accents,
+ * CJK and emoji are untouched.
+ */
+// eslint-disable-next-line no-control-regex
+const UNSAFE_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
+/** Cap a name at NAME_MAX_LEN code points, after stripping the characters that could spoof or
+ *  break the rendering of another peer's name (UNSAFE_NAME_CHARS). Trim runs again AFTER the cut,
+ *  so a truncation landing on a space doesn't leave a trailing one. */
 function capName(name: string): string {
-  return capCodePoints(name.trim(), NAME_MAX_LEN).trim()
+  return capCodePoints(name.replace(UNSAFE_NAME_CHARS, '').trim(), NAME_MAX_LEN).trim()
 }
 
-/** Coerce an untrusted {name, color} off the wire into a safe identity. Names are unverified
- *  (anyone can claim any name — documented trade-off) but they are length-capped, and the color
- *  must be one of ours so it can never be injected into a style attribute as arbitrary text. */
+/** Coerce an untrusted {name, color} off the wire into a safe identity — THE one door for
+ *  client-supplied identity. Names are unverified (anyone can claim any name — documented
+ *  trade-off) but they are length-capped and stripped of control/bidi characters (capName), so a
+ *  peer cannot visually spoof another's name, and the color must be one of ours so it can never be
+ *  injected into a style attribute as arbitrary text. */
 export function sanitizeIdentity(raw: unknown, fallback: PeerIdentity): PeerIdentity {
   const r = (raw ?? {}) as Partial<PeerIdentity>
   const name = typeof r.name === 'string' ? capName(r.name) : ''

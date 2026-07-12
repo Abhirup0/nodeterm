@@ -107,6 +107,38 @@ describe('sanitizeIdentity', () => {
     expect(out).not.toContain('�')
   })
 
+  // Names are unverified BY DESIGN (anyone may claim any name), but they must not be able to
+  // MISRENDER: this is the one untrusted-input door into every peer's facepile and cursor label.
+  // The hostile characters are written as escapes on purpose - pasted raw, they would reorder this
+  // very source file in your editor, which is exactly the attack.
+  it('strips control characters, newlines and bidi overrides (no visual name spoofing)', () => {
+    const RLO = '‮' // RIGHT-TO-LEFT OVERRIDE: displays everything after it backwards
+    // Stored as "Ada" + RLO + "gnihsihp", this DISPLAYS as "Adaphishing" in every facepile.
+    expect(
+      sanitizeIdentity({ name: `Ada${RLO}gnihsihp`, color: PRESENCE_COLORS[0] }, fallback).name
+    ).toBe('Adagnihsihp')
+
+    // The whole bidi family - marks, embeddings, overrides, isolates - plus the zero-width space
+    // and the BOM.
+    const bidi = 'A​‎‏‪‫‬‭‮B⁦⁧⁨⁩C﻿'
+    expect(sanitizeIdentity({ name: bidi, color: PRESENCE_COLORS[0] }, fallback).name).toBe('ABC')
+
+    // C0/C1 controls and newlines (a multi-line name would break out of its one-line chip).
+    // Ordinary spaces INSIDE the name survive - only the control characters go.
+    expect(
+      sanitizeIdentity({ name: 'Ada\n\r\tLove lace', color: PRESENCE_COLORS[0] }, fallback).name
+    ).toBe('AdaLove lace')
+
+    // Nothing left after stripping -> the fallback, never an empty label.
+    expect(
+      sanitizeIdentity({ name: `${RLO}​\n`, color: PRESENCE_COLORS[0] }, fallback).name
+    ).toBe(fallback.name)
+
+    // Legitimate names (spaces, accents, CJK, emoji) are untouched.
+    const real = 'Enes Kırca 库 🐙'
+    expect(sanitizeIdentity({ name: real, color: PRESENCE_COLORS[0] }, fallback).name).toBe(real)
+  })
+
   it('trims after truncating, so a cap landing on a space leaves no trailing space', () => {
     const name = 'a'.repeat(NAME_MAX_LEN - 1) + ' tail'
     const out = sanitizeIdentity({ name, color: PRESENCE_COLORS[0] }, fallback).name

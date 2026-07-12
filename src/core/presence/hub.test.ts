@@ -154,10 +154,13 @@ describe('PresenceHub signals', () => {
   it('setCursor / setFocus / setChat / setProject patch the peer and broadcast an update diff', () => {
     const hub = new PresenceHub()
     hub.join(1, 'browser')
+    // The project comes FIRST, as it does in the app (Canvas reports the canvas it loaded, then
+    // the pointer starts moving on it) — a later setProject would drop the cursor with the old
+    // canvas it belongs to (see the project-switch test below).
+    hub.setProject(1, 'web')
     hub.setCursor(1, { x: 12.4, y: -3 })
     hub.setFocus(1, 'node-a')
     hub.setChat(1, 'hey')
-    hub.setProject(1, 'web')
     expect(hub.peers()[0]).toMatchObject({
       cursor: { x: 12.4, y: -3 },
       focus: 'node-a',
@@ -165,10 +168,10 @@ describe('PresenceHub signals', () => {
       projectId: 'web'
     })
     expect(diffs().slice(-4)).toEqual([
+      { op: 'update', clientId: 1, patch: { projectId: 'web' } },
       { op: 'update', clientId: 1, patch: { cursor: { x: 12.4, y: -3 } } },
       { op: 'update', clientId: 1, patch: { focus: 'node-a' } },
-      { op: 'update', clientId: 1, patch: { chat: 'hey' } },
-      { op: 'update', clientId: 1, patch: { projectId: 'web' } }
+      { op: 'update', clientId: 1, patch: { chat: 'hey' } }
     ])
     hub.setCursor(1, null)
     hub.setChat(1, null)
@@ -189,6 +192,31 @@ describe('PresenceHub signals', () => {
     // Unknown client: silent no-op, no ghost peer.
     hub.setProject(42, 'web')
     expect(hub.peers()).toHaveLength(1)
+  })
+
+  // A project switch can be keyboard-driven (⌘1/⌘2, the palette) with the mouse parked, so no
+  // pointermove follows it and the renderer's sampler never sends a new position. Leaving the old
+  // cursor in the table would draw this peer on the NEW canvas at the OLD canvas's flow
+  // coordinates — a ghost pointing at nothing, indefinitely, for everyone on that project.
+  it('setProject drops the cursor with the old canvas (one coherent diff carries both)', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setProject(1, 'web')
+    hub.setCursor(1, { x: 400, y: 250 })
+
+    hub.setProject(1, 'api')
+    expect(hub.peers()[0]).toMatchObject({ projectId: 'api', cursor: null })
+    // ONE diff, carrying both changes: a peer applying it can never see the new project with the
+    // stale cursor, in either order.
+    expect(diffs().at(-1)).toEqual({
+      op: 'update',
+      clientId: 1,
+      patch: { projectId: 'api', cursor: null }
+    })
+
+    // Nothing to drop → the patch stays minimal (no redundant cursor: null on every switch).
+    hub.setProject(1, 'web')
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { projectId: 'web' } })
   })
 
   it('drops garbage input instead of broadcasting it (NaN cursor, over-long chat, unknown client)', () => {
@@ -518,10 +546,12 @@ describe('registerIpc', () => {
     const res = fake.handlers[IPC.presenceHello](4, { name: 'Ada', color: PRESENCE_COLORS[2] })
     expect(res).toMatchObject({ clientId: 4 })
 
+    // Project first, cursor after — the app's own order (a cursor only means something once the
+    // canvas it was sampled on is known; a later switch drops it).
+    fake.senderListeners[IPC.presenceProject](4, 'web')
     fake.senderListeners[IPC.presenceCursor](4, { x: 5, y: 6 })
     fake.senderListeners[IPC.presenceFocus](4, 'node-z')
     fake.senderListeners[IPC.presenceChat](4, 'yo')
-    fake.senderListeners[IPC.presenceProject](4, 'web')
     expect(hub.peers()[0]).toMatchObject({
       name: 'Ada',
       cursor: { x: 5, y: 6 },

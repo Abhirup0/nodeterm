@@ -106,7 +106,18 @@ peer table and fans out, and applies no policy.
 | server→clients | `presence:peer` | single-peer diff (join / update / leave) |
 
 Cursors travel in **flow coordinates** (`screenToFlowPosition`), never screen coordinates, so a
-cursor lands on the correct node regardless of each viewer's zoom and pan.
+cursor lands on the correct node regardless of each viewer's zoom and pan. A `presence:project`
+also **clears the cursor**: it belonged to the old canvas, and a keyboard-driven project switch
+sends no new sample.
+
+"Dumb reflector" is about *policy*, not about trust: everything the hub takes from one client it
+fans out to all of them, so the ingest side is hardened. Every string off the wire goes through the
+one truncation rule (`capCodePoints`: chat 200, name 32 — control/bidi characters stripped —
+focus/project ids 128 code points), and every cast is rate-limited per (client, channel) by a token
+bucket (`PRESENCE_RATE_BUDGETS`; the cursor budget is exactly the renderer's own 20 Hz, so an honest
+client never loses a sample — excess is dropped silently, never disconnected). The Server Edition
+socket additionally caps a single frame at `WS_MAX_PAYLOAD` (8 MiB), well above the largest
+legitimate one (an `fs:write` of an editor file).
 
 ## Terminal co-attach
 

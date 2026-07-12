@@ -190,6 +190,10 @@ export function selectFaces(s: PresenceStore): PeerFace[] {
   return faces
 }
 
+/** The one empty result every "nobody to draw" path returns — a shared, frozen constant, so the
+ *  common case allocates NOTHING and its identity is stable across calls (useShallow bails out). */
+const NO_FACES: PeerFace[] = []
+
 /** What ONE node's header chips draw: the peers (never me, never off-project) focused on that node,
  *  projected to the same cursor-immune face objects as the facepile.
  *
@@ -197,13 +201,23 @@ export function selectFaces(s: PresenceStore): PeerFace[] {
  *  `applyDiff` rebuilds a peer's whole PeerState object on every cursor patch (~20/s per peer). A
  *  selector returning PeerStates would therefore hand every node a fresh object 20×/s and re-render
  *  every terminal on the canvas — even under `useShallow`, which compares the ELEMENTS. Faces are
- *  reused objects, so a moving cursor changes nothing here and every strip bails out. */
+ *  reused objects, so a moving cursor changes nothing here and every strip bails out.
+ *
+ *  The early-out is the other half of that: this runs once per MOUNTED NODE on every store write
+ *  (40 nodes × 5 peers × 20 Hz ≈ 4k runs/s), and each run would otherwise allocate a filtered array
+ *  plus a mapped one — ~20k throwaway arrays/s — even on a canvas nobody else is on. When there is
+ *  provably no one to chip (hello unresolved, or the table holds only me), return NO_FACES. */
 export function selectFocusedFaces(
   s: PresenceStore,
   nodeId: string,
   projectId: string | null
 ): PeerFace[] {
-  return selectFocused(s, nodeId, projectId).map(faceFor)
+  // myId === null → the selectors draw nobody (see NEVER MY OWN PEER); < 2 peers → the table holds
+  // at most me. Either way there is nothing to compute, which is the overwhelmingly common case.
+  if (s.myId === null || Object.keys(s.peers).length < 2) return NO_FACES
+  const focused = selectFocused(s, nodeId, projectId)
+  if (focused.length === 0) return NO_FACES
+  return focused.map(faceFor)
 }
 
 /** Sent when the user has not named themselves yet. It claims NOTHING — sanitizeIdentity falls

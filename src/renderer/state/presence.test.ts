@@ -415,6 +415,39 @@ describe('reportFocus / reportProject', () => {
   })
 })
 
+describe('selectFocusedFaces: the alone / disconnected fast path', () => {
+  // This selector runs once PER MOUNTED NODE on EVERY store write — 40 nodes x 5 peers x 20 Hz is
+  // ~4k runs/s, each allocating a filtered array and a mapped one for a canvas that, most of the
+  // time, has nobody else on it. When there is provably no one to draw, bail out to ONE shared
+  // empty array (also stable identity → useShallow bails out too).
+  it('returns the SAME empty array while I am alone, or while myId is unknown', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [peer(7, { projectId: 'web' })] })
+    const { connectPresence, usePresence, selectFocusedFaces } = await import('./presence')
+
+    // Before hello resolves: myId is null, so nothing may be drawn at all.
+    const empty = selectFocusedFaces(usePresence.getState(), 'node-a', 'web')
+    expect(empty).toEqual([])
+
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    // Connected, but the table holds only me → still nobody to chip, same array object.
+    const alone = selectFocusedFaces(usePresence.getState(), 'node-a', 'web')
+    expect(alone).toBe(empty)
+
+    // A peer arrives → the selector does its real work again.
+    api.emitPeer({ op: 'join', peer: peer(8, { name: 'Ada', projectId: 'web', focus: 'node-a' }) })
+    const faces = selectFocusedFaces(usePresence.getState(), 'node-a', 'web')
+    expect(faces.map((f) => f.name)).toEqual(['Ada'])
+
+    // …and when they leave, back to the shared empty array.
+    api.emitPeer({ op: 'leave', clientId: 8 })
+    expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web')).toBe(empty)
+    stop()
+  })
+})
+
 describe('selectFocusedFaces (the node-header chips — one per node, so cursor traffic must not re-render them)', () => {
   it('projects the focused peers of THIS project and keeps object identity across cursor updates', async () => {
     vi.stubGlobal('localStorage', memStorage(STORED_ME))
