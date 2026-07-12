@@ -35,6 +35,7 @@ import { encodeOffer } from './pairing'
 import { sanitizeClientMutation } from './canvas-sync'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
 import { initHostCanvasHub, currentCanvas, subscribeCanvas } from './host-canvas-hub'
+import { createPhonePresence, type PhonePresence } from './phone-presence'
 
 // Default relay endpoint; `NODETERM_RELAY_URL` overrides it (mirrors license.ts's API_BASE /
 // CHECKOUT_URL env-override pattern — used both as the dev gate and for local testing).
@@ -709,6 +710,9 @@ export function initRemoteHost(
 ): void {
   initHostCanvasHub()
   let session: HostSession | null = null
+  // The live session's presence slot (the bridged phone's peer). Paired with `session` and replaced
+  // with it, so a superseded session's late callbacks can never touch the new session's peer.
+  let presence: PhonePresence | null = null
   // A fresh id per pending approval. The approve/reject IPC channels are SHARED with the standing
   // phone host, and a single "Approve" click broadcasts to both listeners — so each acts only on
   // an event carrying ITS OWN pending id, never on one meant for the other host.
@@ -716,6 +720,18 @@ export function initRemoteHost(
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
+  }
+
+  // Tear the live session down. Used by EVERY intentional end path (stop, reject, and a `start`
+  // that supersedes a live session): relay-socket treats close() as final and does NOT fire
+  // onClose, so the presence leave has to happen here as well as in onClose. PhonePresence.leave()
+  // is exactly-once, so whichever path runs second is a no-op and the peer never leaves twice.
+  function endSession(): void {
+    presence?.leave()
+    presence = null
+    session?.close()
+    session = null
+    pendingApprovalId = null
   }
 
   ipcMain.handle(IPC.remoteHostStart, async (): Promise<{ offer: string }> => {
@@ -731,12 +747,15 @@ export function initRemoteHost(
     }
 
     // Already hosting → tear the old session down before starting a fresh one.
-    session?.close()
-    session = null
+    endSession()
 
     const keys = await loadOrCreateKeyPair()
     const { pairingToken } = await mintPairingToken(entitlement)
 
+    // This session's presence slot, captured by its own callbacks (never read through `presence`,
+    // which by then may belong to a newer session).
+    const phone = createPhonePresence()
+    presence = phone
     session = connectHostSession({
       url: RELAY_URL,
       token: pairingToken,
@@ -748,10 +767,14 @@ export function initRemoteHost(
       listProjects,
       // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.
       onPeerReady: (s) => {
+        // Team presence: a bridged relay client is a peer. It has no mouse, so it stays cursorless
+        // and appears in the facepile only — see docs/team-presence.md ("Peers may have no cursor").
+        phone.join()
         pendingApprovalId = randomUUID()
         send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pendingApprovalId })
       },
       onClose: () => {
+        phone.leave()
         pendingApprovalId = null
       }
     })
@@ -777,14 +800,10 @@ export function initRemoteHost(
   ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string } = {}) => {
     if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
     pendingApprovalId = null
-    if (session && !session.isApproved()) {
-      session.close()
-      session = null
-    }
+    if (session && !session.isApproved()) endSession()
   })
 
   ipcMain.handle(IPC.remoteHostStop, () => {
-    session?.close()
-    session = null
+    endSession()
   })
 }
