@@ -182,6 +182,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const fontSize = useSettings((s) => s.settings.fontSize)
   const fontFamily = useSettings((s) => s.settings.fontFamily)
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -399,9 +400,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) copy the terminal selection — xterm renders to a
     // canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is left alone so
     // it still sends SIGINT.
+    // Returning false only tells xterm to skip the key — xterm never gets to its own
+    // preventDefault(), so the browser default would still run: in the Server Edition (and in
+    // `npm run dev` with DevTools attached) Ctrl+Shift+C is Chromium's inspect-element picker.
     term.attachCustomKeyEventHandler((e) => {
       if (!term.hasSelection() || !isCopyShortcut(e)) return true
       window.nodeTerminal.clipboard.writeText(term.getSelection())
+      e.preventDefault()
       return false
     })
 
@@ -642,19 +647,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
 
-  // Live-apply font/cursor settings to the running terminal.
+  // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
+  // reaches the terminals already on the canvas instead of only the next fresh one.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
     term.options.fontFamily = fontFamily
     term.options.cursorBlink = cursorBlink
+    term.options.scrollback = xtermScrollback(tmuxScrollback)
     try {
       fitRef.current?.fit()
     } catch {
       // ignore
     }
-  }, [fontSize, fontFamily, cursorBlink])
+  }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
