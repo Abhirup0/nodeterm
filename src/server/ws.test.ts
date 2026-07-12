@@ -158,4 +158,32 @@ describe('ws endpoint', () => {
     )
     ws.close()
   })
+
+  it('heartbeat: terminates a socket that never answers a ping, dropping its presence peer', async () => {
+    // Its own listener, so the heartbeat can run at test speed (production: WS_HEARTBEAT_MS).
+    const hbServer = http.createServer((_q, s) => { s.statusCode = 404; s.end() })
+    attachWsServer(hbServer, { platform, auth, heartbeatMs: 50 })
+    await new Promise<void>((r) => hbServer.listen(0, '127.0.0.1', r))
+    const hbPort = (hbServer.address() as { port: number }).port
+
+    const ws = new WebSocket(`ws://127.0.0.1:${hbPort}/ws`, { headers: { cookie } })
+    sockets.push(ws)
+    await new Promise<void>((res, rej) => {
+      ws.on('open', () => res())
+      ws.on('error', rej)
+    })
+    // Expected once the server terminates it (RST on a half-open socket).
+    ws.on('error', () => {})
+    await until(() => presenceHub.peers().length === 1, 'the peer joined')
+
+    // A vanished browser (laptop asleep, wifi dropped, NAT idle-reap): the TCP socket stays
+    // half-open — no FIN — so the peer never answers the ping and 'close' never fires on its own.
+    // Pausing the client's socket reproduces exactly that: frames arrive, nothing reads them, so
+    // the `ws` client never auto-pongs.
+    ;(ws as unknown as { _socket: { pause(): void } })._socket.pause()
+
+    // The heartbeat must terminate it — and termination fires 'close' → presenceHub.leave().
+    await until(() => presenceHub.peers().length === 0, 'the ghost peer is reaped')
+    await new Promise((r) => hbServer.close(r))
+  })
 })

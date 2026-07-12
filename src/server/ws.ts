@@ -20,9 +20,22 @@ import { sessionTokenFromCookie } from './http'
 import { parseRpcMessage } from '../shared/rpc'
 import { presenceHub } from '../core/presence/hub'
 
+/**
+ * Heartbeat period. Every WS_HEARTBEAT_MS the server pings each socket; a socket that answered
+ * nothing since the previous round is terminated (miss policy: ONE missed round). A dead peer is
+ * therefore reaped in 30–60 s — fast enough that a ghost cursor / phantom facepile entry is a blip
+ * rather than a permanent fixture, slow enough to survive a stalled tab or a brief network hiccup
+ * (a live browser answers a ping from the protocol layer, with no page JS involved) and to stay
+ * well inside the ~60 s idle timeout of common reverse proxies, which the ping traffic also keeps
+ * the connection alive against.
+ */
+export const WS_HEARTBEAT_MS = 30_000
+
 export interface WsServerOpts {
   platform: ServerPlatform
   auth: Auth
+  /** TEST ONLY: shorten the heartbeat period. Production always uses WS_HEARTBEAT_MS. */
+  heartbeatMs?: number
 }
 
 /**
@@ -49,8 +62,30 @@ function upgradeAllowed(req: http.IncomingMessage, auth: Auth): boolean {
 }
 
 export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
-  const { platform, auth } = opts
+  const { platform, auth, heartbeatMs = WS_HEARTBEAT_MS } = opts
   const wss = new WebSocketServer({ noServer: true })
+
+  // Liveness heartbeat. Node enables no TCP keepalive on an upgraded socket, so a browser that
+  // simply VANISHES (laptop asleep, wifi dropped, NAT idle-reap) leaves a half-open socket: no FIN
+  // ever arrives, 'close' never fires, and the peer would sit in the presence hub — a ghost cursor
+  // and a phantom facepile entry, its colour consumed by nextFreeColor — for the life of the
+  // process. So: mark a socket alive on any inbound traffic, ping every round, and terminate
+  // whatever answered nothing since the previous one. terminate() fires 'close', which is the ONE
+  // path that leaves the hub / detaches the UI (see the connection handler) — never leave() here.
+  const alive = new WeakSet<WebSocket>()
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!alive.has(ws)) {
+        ws.terminate()
+        continue
+      }
+      alive.delete(ws)
+      ws.ping()
+    }
+  }, heartbeatMs)
+  // Must never hold the process (or a vitest run) open, and must stop with its server.
+  if (heartbeat.unref) heartbeat.unref()
+  server.on('close', () => clearInterval(heartbeat))
 
   server.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
     // Only handle our path; a mismatched path is left for any other upgrade
@@ -73,6 +108,11 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
   })
 
   wss.on('connection', (ws: WebSocket) => {
+    alive.add(ws)
+    // A pong is the protocol-level proof of life (the browser's stack answers it with no page JS
+    // involved, so it works even while the tab is frozen or the app is wedged).
+    ws.on('pong', () => alive.add(ws))
+
     const uiId = platform.attach({
       sendText: (json) => ws.send(json),
       sendBinary: (buf) => ws.send(buf, { binary: true }),
@@ -84,6 +124,8 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
     presenceHub.join(uiId, 'browser')
 
     ws.on('message', (data: unknown, isBinary: boolean) => {
+      // Any inbound frame proves the peer is there, pong or not.
+      alive.add(ws)
       // Binary client→server frames are ignored in Phase 2 (pty input rides JSON casts).
       if (isBinary) return
       const text = Buffer.isBuffer(data)
