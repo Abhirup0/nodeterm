@@ -13,6 +13,12 @@ export interface SshConnInfo {
   /** The connection's resolved remote `$HOME`. Used to build an ABSOLUTE remote
    *  `CLAUDE_CONFIG_DIR` for a managed remote account. Optional: absent if it couldn't resolve. */
   remoteHome?: string
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? The local
+   *  CLI's answer says nothing about the remote one, so the host is probed on its own — AFTER
+   *  connect (the probe's login shell is slow and must not delay the project's terminals), so this
+   *  is usually absent here and arrives later on a `connected` status event. Absent/false ⇒ this
+   *  project's Claude nodes launch with the bare command (no `auto` flag). */
+  claudeAutoPermissionMode?: boolean
 }
 
 /**
@@ -24,18 +30,44 @@ export interface SshConnInfo {
  */
 interface SshConnState {
   byProject: Record<string, SshConnInfo>
+  /** project id → "the remote CLI accepts `--permission-mode auto`". Kept OUTSIDE `byProject`
+   *  because the remote probe runs after connect and can land before OR after the connect promise
+   *  writes the entry — a separate map makes the two orders equivalent. */
+  autoPermByProject: Record<string, boolean>
   setConn(projectId: string, info: SshConnInfo): void
+  /** Record the remote CLI probe's answer (pushed on a `connected` status event once it lands). */
+  setClaudeAutoPermissionMode(projectId: string, supported: boolean): void
   getControlPath(projectId: string): string | undefined
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
   getRemoteHome(projectId: string): string | undefined
+  /** True ONLY when the remote CLI was probed and is known to accept `--permission-mode auto`.
+   *  Not connected / never probed / older CLI all answer false (conservative — omit the flag). */
+  supportsAutoPermissionMode(projectId: string): boolean
+  /** Drop the cached probe answer WITHOUT touching the rest of the conn info (unlike `clear()`,
+   *  which is for project deletion). Call this on a `disconnected` / `reconnecting` status: if the
+   *  project's SSH server gets repointed to a different host, the previous host's cached `true`
+   *  must not survive to be served against the new (possibly older) remote CLI — the fail-open
+   *  design means "unknown" should win until the next probe lands, never a stale "yes". */
+  invalidateAutoPermissionMode(projectId: string): void
   clear(projectId: string): void
 }
 
 export const useSshConn = create<SshConnState>((set, get) => ({
   byProject: {},
+  autoPermByProject: {},
   setConn(projectId, info) {
-    set((s) => ({ byProject: { ...s.byProject, [projectId]: info } }))
+    set((s) => ({
+      byProject: { ...s.byProject, [projectId]: info },
+      // A reused (already probed) connection returns the answer with the connect result.
+      autoPermByProject:
+        info.claudeAutoPermissionMode === undefined
+          ? s.autoPermByProject
+          : { ...s.autoPermByProject, [projectId]: info.claudeAutoPermissionMode }
+    }))
+  },
+  setClaudeAutoPermissionMode(projectId, supported) {
+    set((s) => ({ autoPermByProject: { ...s.autoPermByProject, [projectId]: supported } }))
   },
   getControlPath(projectId) {
     return get().byProject[projectId]?.controlPath
@@ -49,11 +81,24 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   getRemoteHome(projectId) {
     return get().byProject[projectId]?.remoteHome
   },
+  supportsAutoPermissionMode(projectId) {
+    return get().autoPermByProject[projectId] === true
+  },
+  invalidateAutoPermissionMode(projectId) {
+    set((s) => {
+      if (!(projectId in s.autoPermByProject)) return s
+      const next = { ...s.autoPermByProject }
+      delete next[projectId]
+      return { autoPermByProject: next }
+    })
+  },
   clear(projectId) {
     set((s) => {
       const next = { ...s.byProject }
       delete next[projectId]
-      return { byProject: next }
+      const nextAuto = { ...s.autoPermByProject }
+      delete nextAuto[projectId]
+      return { byProject: next, autoPermByProject: nextAuto }
     })
   }
 }))

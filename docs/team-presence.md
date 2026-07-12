@@ -218,6 +218,26 @@ Three rules:
   never reaches this path at all: a fresh spawn has nothing to paint, and a warm reattach starts a
   tmux client, which redraws by itself.
 
+**Post-merge with `main`'s terminal work: `screen` became the joiner's FALLBACK, not its paint.**
+`main` gave every `fresh:false` attach a `warm-history` seed — it hydrates a fresh xterm from
+`transport.captureHistory` (tmux's own scrollback). A joiner is `fresh:false`, so it now lands on
+that path too, and painting *both* would splice the same screen onto the canvas twice. One source
+wins: **`captureHistory`**, because it is a strict superset of `screen` — the same tmux pane *plus*
+the scrollback above it, so the joiner opens on what its teammate sees **and** can scroll back.
+`PtyCreateResult.screen` remains as the fallback for the one case that path cannot cover:
+`captureHistory` returns `''` whenever tmux/ssh is unavailable, whereas `screen` is captured
+server-side inside `create()` and is guaranteed non-empty when present. So the joiner is painted
+**exactly once**, and never blank.
+
+**A `pty:resync` supersedes the seed, and the queue behind it.** `main`'s attach path subscribes to
+`pty:data` *before* awaiting its seed and holds the chunks in a `createDataGate`. A resync that lands
+during that window is a redraw of the CURRENT screen, so everything the gate is holding *predates*
+it: draining the queue would splice the stale flood back over the fresh screen, and the in-flight
+history seed would then write an even older screen on top of that. The resync handler therefore
+`gate.reset()`s (drops the queue, returning its bytes to the flow-control accounting, and switches to
+pass-through) and marks the seed **superseded**, so the seed writes nothing when its capture returns.
+Everything that arrives after the capture streams straight through, in order.
+
 ### Typing attribution — and why it is server-side
 
 `cast()` used to discard the sender (`void uiId`). `pty:write` is routed through the sender-aware

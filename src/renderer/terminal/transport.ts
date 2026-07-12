@@ -35,6 +35,14 @@ export interface TerminalTransport {
    * the replacement session), never the permanent, un-respawnable closed state.
    */
   recycle(persistKey: string): void
+
+  /**
+   * The persistent session's scrollback (its tmux history + the visible screen), used to hydrate a
+   * fresh xterm on a warm reattach. Part of the transport because the session — and therefore its
+   * history — lives wherever the transport points: in the local tmux server for LocalTransport, on
+   * the HOST for RemoteTransport. Resolves with '' when there is nothing to hydrate from.
+   */
+  captureHistory(persistKey: string): Promise<string>
   /** Listens for output; returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the session closes; returns an unsubscribe function. */

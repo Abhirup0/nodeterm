@@ -62,6 +62,10 @@ export const RENAME_CAPABLE = ['claude'] as const
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill, codex/gemini a
 // marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md (see canvas-control.ts).
 export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini'] as const
+// Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
+// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
+// (--approval-mode) join by being added here with their own flag mapping.
+export const PERMISSION_MODE_CAPABLE = ['claude'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
@@ -76,6 +80,7 @@ export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
+export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
 
 // Returns the builtin config for an id, or undefined for custom/unknown agents.
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>
@@ -105,4 +110,125 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
     default:
       return null
   }
+}
+
+/**
+ * The permission mode an agent session STARTS in. The user can still cycle modes at runtime
+ * with Shift+Tab — this only decides the starting state, which is exactly what the CLI's
+ * `--permission-mode` flag does.
+ *
+ * `dontAsk` is deliberately not exposed: from the user's point of view it overlaps `auto`.
+ *
+ * VERSION GATE: `auto` is the one value here that older Claude CLIs do NOT accept — see
+ * AUTO_PERMISSION_MODE_MIN_VERSION / gatePermissionMode below. Never hand a raw `auto` to a
+ * launch command without running it through `gatePermissionMode` first.
+ */
+export type AgentPermissionMode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
+/**
+ * First Claude Code version whose `--permission-mode` accepts `auto`. Earlier CLIs validate the
+ * value against their own choices list and EXIT 1:
+ *   error: option '--permission-mode <mode>' argument 'auto' is invalid.
+ *          Allowed choices are acceptEdits, bypassPermissions, default, dontAsk, plan.
+ * Since `auto` is our default, an ungated flag would break every Claude launch on an older CLI.
+ * The other four modes are accepted by every CLI we support, so ONLY `auto` is gated.
+ *
+ * MEASURED, not guessed: 2.1.0 through 2.1.70 reject `auto`; 2.1.71 is the first published
+ * version that accepts it (verified by running each published tarball's CLI directly).
+ */
+export const AUTO_PERMISSION_MODE_MIN_VERSION = '2.1.71'
+
+const MIN_AUTO_VERSION: readonly number[] = AUTO_PERMISSION_MODE_MIN_VERSION.split('.').map(Number)
+
+/**
+ * Does this `claude --version` output know `--permission-mode auto`? Pure (the probe that feeds it
+ * lives in core/claude-cli.ts). FAILS OPEN to `false` on anything unreadable — an unknown version
+ * means we omit the flag and launch the bare command (today's behavior), never a failed launch.
+ */
+export function supportsAutoPermissionMode(versionOutput: string | null | undefined): boolean {
+  const m = (versionOutput ?? '').match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return false
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])]
+  for (let i = 0; i < MIN_AUTO_VERSION.length; i++) {
+    if (v[i] > MIN_AUTO_VERSION[i]) return true
+    if (v[i] < MIN_AUTO_VERSION[i]) return false
+  }
+  return true // exactly the minimum
+}
+
+/**
+ * The mode a session can ACTUALLY start in on the CLI that will run it. `auto` degrades to
+ * `manual` — which emits no flag at all, i.e. the bare `claude` command nodeterm shipped before
+ * this setting existed — when that CLI is too old to know the value (or the probe never
+ * answered). Every other mode passes through untouched, so a failed probe can never strip
+ * `plan` / `acceptEdits` / `bypassPermissions`.
+ *
+ * The user's SETTING stays `auto`: only the emitted command line changes, and it changes back
+ * the moment they upgrade the CLI.
+ */
+export function gatePermissionMode(
+  mode: AgentPermissionMode,
+  autoSupported: boolean
+): AgentPermissionMode {
+  return mode === 'auto' && !autoSupported ? 'manual' : mode
+}
+
+// Declared first: its `Record<AgentPermissionMode, string>` type forces every member of the
+// union to be present, which is what makes ALL_PERMISSION_MODES below impossible to desync.
+export const PERMISSION_MODE_LABELS: Record<AgentPermissionMode, string> = {
+  manual: 'Ask each time',
+  auto: 'Auto',
+  acceptEdits: 'Accept edits',
+  plan: 'Plan',
+  bypassPermissions: 'Bypass all'
+}
+
+// Derived, never hand-maintained: add a mode to the union and the compiler makes you label it,
+// which lands it here (and so in the settings dropdown + isPermissionMode) automatically.
+export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = Object.keys(
+  PERMISSION_MODE_LABELS
+) as AgentPermissionMode[]
+
+/** Fallback whenever a persisted mode is missing or unrecognized. */
+export const DEFAULT_PERMISSION_MODE: AgentPermissionMode = 'auto'
+
+const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
+  typeof v === 'string' && (ALL_PERMISSION_MODES as readonly string[]).includes(v)
+
+/** CLI flags for a mode. `manual` yields NO flags, so the command stays bare — the exact
+ *  command nodeterm shipped before this setting existed.
+ *
+ *  The mode is re-validated HERE even though the parameter is typed: AgentPermissionMode is
+ *  compile-time only, and the value comes from hand-editable, git-shared JSON (settings.json /
+ *  project.json) before being interpolated into a shell command line. Same rule as
+ *  SAFE_SESSION_ID above — validate at the interpolation site. An unrecognized mode yields the
+ *  safe bare command rather than a flag carrying an unvalidated value. */
+export function permissionModeFlag(mode: AgentPermissionMode): string[] {
+  if (!isPermissionMode(mode) || mode === 'manual') return []
+  return ['--permission-mode', mode]
+}
+
+/** Appends the permission-mode flag to a launch command, if the agent supports one. The single
+ *  funnel for every CLI launch path (new node, cold-restore resume, branch). */
+export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
+  if (!hasPermissionMode(id)) return cmd
+  const flags = permissionModeFlag(mode)
+  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
+}
+
+/**
+ * The mode a new session starts in: the project override, else the global setting.
+ * Mirrors resolveNewNodeAccount's shape, including its stale-value guard — an unrecognized
+ * persisted mode must never reach the CLI as a flag value.
+ *
+ * Structurally typed (not `Project`/`Settings`) because src/shared/types.ts imports THIS file;
+ * importing it back would be a cycle.
+ */
+export function resolvePermissionMode(
+  project: { defaultPermissionMode?: AgentPermissionMode } | undefined,
+  settings: { claudePermissionMode: AgentPermissionMode }
+): AgentPermissionMode {
+  if (isPermissionMode(project?.defaultPermissionMode)) return project.defaultPermissionMode
+  if (isPermissionMode(settings.claudePermissionMode)) return settings.claudePermissionMode
+  return DEFAULT_PERMISSION_MODE
 }

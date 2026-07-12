@@ -128,3 +128,25 @@ describe('serializeProjectFile', () => {
     expect(s.startsWith('{\n  "version": 1,\n  "rev": 1,')).toBe(true)
   })
 })
+
+describe('permission mode persistence', () => {
+  const base = {
+    id: 'p1',
+    name: 'proj',
+    color: '#fff',
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodes: []
+  }
+
+  it('round-trips a project permission-mode override', () => {
+    const file = projectToFile({ ...base, defaultPermissionMode: 'plan' }, 1, 'now')
+    expect(file.defaultPermissionMode).toBe('plan')
+    expect(fileToProject(file, {}).defaultPermissionMode).toBe('plan')
+  })
+
+  it('omits the key entirely when there is no override', () => {
+    const file = projectToFile(base, 1, 'now')
+    expect('defaultPermissionMode' in file).toBe(false)
+    expect(fileToProject(file, {}).defaultPermissionMode).toBeUndefined()
+  })
+})

@@ -168,6 +168,17 @@ The following affordances change shape in the browser (no native OS is reachable
 - **"Reveal in Finder" / "open with default app"** — **inert** in the browser
   (there is no desktop file manager to reveal into); these actions are hidden or
   no-op rather than erroring.
+- **Clipboard (copy)** — the browser's `navigator.clipboard` only exists in a **secure
+  context** (https or `localhost`). Over plain http on a LAN it is `undefined`, so the
+  bridge falls back to a hidden-textarea `document.execCommand('copy')`. That fallback
+  only works **inside a user gesture**: the copy shortcut and the click-driven copy
+  buttons are fine, but an `OSC 52` write driven by terminal *output* (`vim "+y`, `gh`,
+  `yazi`) is not — it fails and raises a **banner** ("the browser blocks clipboard access
+  over plain http"). Copy never fails silently, but if you want it to work properly,
+  **serve over https (or localhost)** — that is one more reason for the TLS proxy above.
+  Note also that **Ctrl+Shift+C** (advertised as copy on Linux/Windows) additionally opens
+  Chromium's element inspector and a page cannot suppress that; **Ctrl+Insert** is the
+  browser-safe copy chord.
 
 The **backpressure / flow-control** gap noted in the Phase 2 limitations is now
 closed: a flooding PTY is automatically paused based on the WebSocket

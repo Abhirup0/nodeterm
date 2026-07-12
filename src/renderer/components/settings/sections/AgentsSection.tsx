@@ -1,20 +1,49 @@
+import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
 import {
   isAgentEnabled,
   setAgentEnabled,
   setDefaultAgent
 } from '../../../state/agentAvailability'
-import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { ensureClaudeCliCaps } from '../../../state/permissionMode'
+import type { ClaudeCliCaps } from '@shared/types'
+import {
+  AGENT_CONFIG,
+  ALL_PERMISSION_MODES,
+  AUTO_PERMISSION_MODE_MIN_VERSION,
+  BUILTIN_AGENT_IDS,
+  PERMISSION_MODE_LABELS,
+  type AgentId,
+  type AgentPermissionMode
+} from '@shared/agents/config'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
+import { Select } from '@renderer/ui/Select'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
+import { FieldRow } from '../FieldRow'
 
 const ROWS = {
   agents: {
     title: 'Agents',
     keywords: ['agent', 'claude', 'codex', 'gemini', 'enable', 'disable', 'default']
+  },
+  permissionMode: {
+    title: 'Permission mode',
+    keywords: [
+      'permission',
+      'mode',
+      'auto',
+      'auto mode',
+      'accept edits',
+      'plan',
+      'bypass',
+      'approve',
+      'ask',
+      'claude',
+      'shift tab'
+    ]
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -26,6 +55,28 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
     ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
     ...settings.customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
   ]
+
+  // The LOCAL Claude CLI's capabilities (the same memoized probe the launch path uses — no extra
+  // IPC). `Auto` is silently dropped on a CLI older than the floor (it exits 1 on the flag), and a
+  // setting that quietly does nothing reads as a broken setting — so say it where it's picked.
+  // Remote (SSH) projects run their own CLI; this note is about the machine running the app.
+  const [cliCaps, setCliCaps] = useState<ClaudeCliCaps | null>(null)
+  useEffect(() => {
+    let alive = true
+    void ensureClaudeCliCaps().then((c) => {
+      if (alive) setCliCaps(c)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+  // Only when the probe actually READ a version: an unknown version (probe failed / no CLI) is not
+  // evidence of an old CLI, and guessing would be its own kind of wrong.
+  const autoNote =
+    settings.claudePermissionMode === 'auto' && cliCaps?.version && !cliCaps.autoPermissionMode
+      ? `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer.`
+      : undefined
+
   return (
     <SettingsSection
       id="agents"
@@ -65,6 +116,30 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             )
           })}
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.permissionMode}>
+        <FieldRow
+          label="Permission mode"
+          note={autoNote}
+          description="The mode Claude terminal sessions start in (chat nodes are not affected). Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
+          control={
+            <Select
+              aria-label="Claude permission mode"
+              value={settings.claudePermissionMode}
+              onChange={(e) =>
+                update({ claudePermissionMode: e.target.value as AgentPermissionMode })
+              }
+            >
+              {ALL_PERMISSION_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {m === 'bypassPermissions'
+                    ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
+                    : PERMISSION_MODE_LABELS[m]}
+                </option>
+              ))}
+            </Select>
+          }
+        />
       </SearchableRow>
     </SettingsSection>
   )

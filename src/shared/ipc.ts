@@ -16,6 +16,7 @@ export const IPC = {
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
   ptyReadScrollback: 'pty:read-scrollback',
+  ptyCaptureHistory: 'pty:capture-history',
   ptySendText: 'pty:send-text',
   ptyReadSessionName: 'pty:read-session-name',
   claudeReadTranscript: 'claude:read-transcript',
@@ -31,6 +32,7 @@ export const IPC = {
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
+  claudeCliCaps: 'claude-cli:caps',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
@@ -211,6 +213,8 @@ export const IPC = {
   remoteClientWrite: 'remote:client:write',
   remoteClientResize: 'remote:client:resize',
   remoteClientKill: 'remote:client:kill',
+  // Scrollback of an already-attached remote session (hydrates the client's fresh xterm).
+  remoteClientCaptureHistory: 'remote:client:capture-history',
   // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
   // the client renderer sends its local mutations back for main to RPC to the host.
   remoteClientMutate: 'remote:client:mutate',

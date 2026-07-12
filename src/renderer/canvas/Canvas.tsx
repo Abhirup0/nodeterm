@@ -106,15 +106,18 @@ import {
   canContextLink,
   canControlCanvas,
   resumeCommand,
+  withPermissionMode,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
-  type AgentId
+  type AgentId,
+  type AgentPermissionMode
 } from '@shared/agents/config'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
+import { activePermissionMode } from '../state/permissionMode'
 import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -293,6 +296,10 @@ export function Canvas() {
   // told here rather than being left with a note their teammates never see. Dismissible; re-armed
   // by the next refused cast (the publisher keeps retrying that node, so it syncs once trimmed).
   const [syncNote, setSyncNote] = useState<string | null>(null)
+  // Copy-to-clipboard failure (browser build only): the bridge clipboard stub dispatches
+  // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
+  // non-secure context (plain http over a LAN). It must be seen, not swallowed.
+  const [copyError, setCopyError] = useState<string | null>(null)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
@@ -366,6 +373,15 @@ export function Canvas() {
     void window.nodeTerminal.userDataDir().then((d) => {
       userDataDirRef.current = d
     })
+  }, [])
+  // Clipboard failures reach us as a window event (the bridge stub has no React handle).
+  useEffect(() => {
+    const onToast = (e: Event): void => {
+      const detail = (e as CustomEvent<{ kind: string; message: string }>).detail
+      if (detail?.kind === 'error') setCopyError(detail.message)
+    }
+    window.addEventListener('nodeterm:toast', onToast)
+    return () => window.removeEventListener('nodeterm:toast', onToast)
   }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTarget] = useState<string | null>(null)
@@ -770,11 +786,11 @@ export function Canvas() {
       requireProOr('SSH Remote Projects', () => {
         window.nodeTerminal.sshProject
           .connect(project.id, ssh.server, ssh.remoteCwd)
-          .then(async ({ controlPath, hookEndpointPath, tmuxConfPath, remoteHome }) => {
+          .then(async (info) => {
             // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
             // Source Control panel's re-fetch (which keys off that entry) already hits the master.
             await window.nodeTerminal.git.setActiveRemote(project.id)
-            useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath, remoteHome })
+            useSshConn.getState().setConn(project.id, info)
           })
           .catch(() => {
             /* status surfaced via onStatus → the connection banner */
@@ -1617,7 +1633,16 @@ export function Canvas() {
       )
       setNodes((ns) => [
         ...ns,
-        createAgentNode('claude', ns.length, project?.cwd, viewCenter(), prompt, undefined, account)
+        createAgentNode(
+          'claude',
+          ns.length,
+          project?.cwd,
+          viewCenter(),
+          prompt,
+          undefined,
+          account,
+          activePermissionMode()
+        )
       ])
       markDirty()
     },
@@ -1780,7 +1805,8 @@ export function Canvas() {
           center ?? viewCenter(),
           undefined,
           project?.ssh,
-          account
+          account,
+          activePermissionMode()
         )
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
@@ -2250,7 +2276,12 @@ export function Canvas() {
       const copy = duplicateNode(source)
       copy.data = {
         ...copy.data,
-        initialCommand: `${claudeLaunchCommand()} -r ${originalId}`,
+        // Built fresh here (never re-wrapping a persisted command), so it is flagged exactly once.
+        initialCommand: withPermissionMode(
+          `${claudeLaunchCommand()} -r ${originalId}`,
+          'claude',
+          activePermissionMode()
+        ),
         title: `${source.data.title} (original)`
       }
       copy.position = {
@@ -2305,7 +2336,8 @@ export function Canvas() {
         undefined,
         // Inherit the source's Claude account (dropped by the factory unless the target is claude),
         // so a claude→claude transfer resumes the transcript from the right account dir.
-        source.data.accountId
+        source.data.accountId,
+        activePermissionMode()
       )
       node.position = {
         x: source.position.x + ((source.width as number) ?? 600) + 32,
@@ -2413,6 +2445,9 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
         setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        setScOpen((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault()
         toggleSessionsPin()
@@ -2839,7 +2874,11 @@ export function Canvas() {
       const cmd = resumeCommand('claude', hit.sessionId)
       if (!cmd) return
       const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
-      node.data = { ...node.data, initialCommand: cmd }
+      // The resume command replaces (never wraps) the factory's command, so it is flagged once.
+      node.data = {
+        ...node.data,
+        initialCommand: withPermissionMode(cmd, 'claude', activePermissionMode())
+      }
       node.selected = true
       setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
@@ -2990,7 +3029,8 @@ export function Canvas() {
                     placeBelow(i),
                     args.prompt,
                     undefined,
-                    account
+                    account,
+                    activePermissionMode()
                   )
                 )
               )
@@ -3141,7 +3181,8 @@ export function Canvas() {
                 placeBelow(i),
                 r.prompt,
                 undefined,
-                teamAccount
+                teamAccount,
+                activePermissionMode()
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
@@ -3623,9 +3664,22 @@ export function Canvas() {
 
   // Track SSH project connection status for the thin connection banner (keyed by project id).
   useEffect(() => {
-    return window.nodeTerminal.sshProject.onStatus((e) =>
+    return window.nodeTerminal.sshProject.onStatus((e) => {
       setSshStatus((prev) => ({ ...prev, [e.projectId]: e.status }))
-    )
+      // The remote claude probe runs AFTER connect (its login shell is slow) and pushes its answer
+      // on a later `connected` event — record it so this project's next Claude launch can use
+      // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
+      if (e.claudeAutoPermissionMode !== undefined) {
+        useSshConn.getState().setClaudeAutoPermissionMode(e.projectId, e.claudeAutoPermissionMode)
+      }
+      // A repointed server (different host, possibly an older claude CLI) reconnects under the
+      // SAME project id. Drop any cached auto-mode answer on disconnect/reconnect so a launch in
+      // the gap before the next probe lands degrades to the fail-open bare command instead of
+      // reusing the previous host's stale `true`.
+      if (e.status === 'disconnected' || e.status === 'reconnecting') {
+        useSshConn.getState().invalidateAutoPermissionMode(e.projectId)
+      }
+    })
   }, [])
 
   // Create an SSH project from the dialog: commit the current canvas, add + switch to the new
@@ -3702,6 +3756,16 @@ export function Canvas() {
   const setProjectDefaultAccount = useCallback(
     (id: string, accountId: string | undefined) => {
       useProjects.getState().setProjectDefaultAccount(id, accountId)
+      void persist()
+    },
+    [persist]
+  )
+
+  // `undefined` clears the override (the project falls back to settings.claudePermissionMode).
+  // The persist() is load-bearing: the store action alone never reaches project.json on disk.
+  const setProjectDefaultPermissionMode = useCallback(
+    (id: string, mode: AgentPermissionMode | undefined) => {
+      useProjects.getState().setProjectDefaultPermissionMode(id, mode)
       void persist()
     },
     [persist]
@@ -4016,6 +4080,7 @@ export function Canvas() {
         onCloseProject={closeProject}
         onRemoteAccess={() => setRemoteDialogOpen(true)}
         onSetDefaultAccount={setProjectDefaultAccount}
+        onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
       />
 
       <div className="top-banners">
@@ -4045,6 +4110,21 @@ export function Canvas() {
               className="announce-banner__close"
               title="Dismiss"
               onClick={() => setSyncNote(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {copyError && (
+          <div className="announce-banner announce-banner--warning">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{copyError}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setCopyError(null)}
             >
               ✕
             </button>
@@ -4133,8 +4213,8 @@ export function Canvas() {
         <button title="Explorer (⌘⇧E)" onClick={() => setExplorerOpen(true)}>
           🗂
         </button>
-        <button title="Source Control" onClick={() => setScOpen(true)}>
-          ⎇
+        <button title="Source Control (⌘⇧G)" onClick={() => setScOpen(true)}>
+          <IconBranch />
         </button>
         <button
           title="Settings (⌘,)"

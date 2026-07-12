@@ -288,12 +288,35 @@ export function pickSessionName(text: string): string | null {
 // title. Resolved STRICTLY by sessionId: the cwd is intentionally not a fallback here, because
 // multiple Claude nodes in one folder would all resolve to the same newest transcript and adopt
 // each other's names. Returns null until the node's own sessionId is known.
-const TITLE_TAIL_BYTES = 128 * 1024
+export const TITLE_TAIL_BYTES = 128 * 1024
+
+// An SSH project's agent runs on the REMOTE host, so its transcript lives on the remote
+// filesystem — `transcriptRoot()` is this machine's `$HOME` and can never resolve it. Main
+// registers a reader here (backed by the hook-fed remote transcript path + the project's
+// ControlMaster), mirroring the `setGitRemoteResolver` registry in remote-git.ts, so the reader
+// stays electron-free and this module keeps its signature. Returns null when `sessionId` is not
+// a live remote session, which is the signal to use the local path.
+export interface RemoteTranscriptTail {
+  text: string
+}
+let remoteReader: ((sessionId: string) => Promise<RemoteTranscriptTail | null>) | null = null
+export function setRemoteTranscriptReader(
+  fn: ((sessionId: string) => Promise<RemoteTranscriptTail | null>) | null
+): void {
+  remoteReader = fn
+}
+
 export async function readSessionName(
   sessionId: string,
   accountId?: string
 ): Promise<string | null> {
   if (!sessionId) return null
+  // Remote first: a remote session is never present under the local transcript root, so falling
+  // through to the local scan would be pure waste (the title poll runs every 4s per agent node).
+  if (remoteReader) {
+    const remote = await remoteReader(sessionId)
+    if (remote) return remote.text ? pickSessionName(remote.text) : null
+  }
   // Stale cache entries are healed inside resolveTranscriptPath (access-checked per hit).
   const p = await resolveTranscriptPath(sessionId, accountId)
   if (!p) return null

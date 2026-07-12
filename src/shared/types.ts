@@ -2,7 +2,7 @@
 
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
-import type { AgentId, PromptInjectionMode } from './agents/config'
+import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from './presence'
 
@@ -192,6 +192,9 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Default managed Claude account for new Claude/chat nodes in this project. */
   defaultAccountId?: string
+  /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
+   *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
+  defaultPermissionMode?: AgentPermissionMode
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
@@ -271,6 +274,9 @@ export interface PtyApi {
   capture(persistKey: string, full?: boolean): Promise<string>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
+  /** tmux scrollback above the visible screen, for hydrating a fresh emulator on a warm
+   *  reattach (the emulator owns scrolling now; tmux only redraws the visible screen). '' if none. */
+  captureHistory(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
@@ -446,6 +452,11 @@ export interface Settings {
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
+  /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
+   *  at launch; Shift+Tab still cycles modes at runtime. SDK chat nodes are NOT covered (the chat
+   *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
+   *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
+  claudePermissionMode: AgentPermissionMode
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
    *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
   telemetryEnabled: boolean
@@ -481,6 +492,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
   defaultAgent: 'claude',
+  // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
+  // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
+  claudePermissionMode: 'auto',
   telemetryEnabled: false,
   phoneAccessEnabled: false
 }
@@ -500,13 +514,33 @@ export interface SshApi {
 
 export type SshProjectStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error'
 
+/**
+ * A live SSH project's status, pushed from main. `claudeAutoPermissionMode` rides a `connected`
+ * event: the remote `claude --version` probe runs AFTER connect (its login shell is slow and must
+ * not delay the project's terminals), so the answer arrives on its own event once it lands.
+ * Absent = not probed / nothing new ⇒ the renderer keeps omitting the `auto` flag (fail-open).
+ */
+export interface SshProjectStatusEvent {
+  projectId: string
+  status: SshProjectStatus
+  error?: string
+  claudeAutoPermissionMode?: boolean
+}
+
 export interface SshProjectApi {
   /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
   connect(
     projectId: string,
     server: import('./ssh').SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }>
+  ): Promise<{
+    controlPath: string
+    hookEndpointPath?: string
+    tmuxConfPath?: string
+    remoteHome?: string
+    /** Whether the REMOTE host's claude CLI accepts `--permission-mode auto` (probed on connect). */
+    claudeAutoPermissionMode?: boolean
+  }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**
@@ -526,7 +560,7 @@ export interface SshProjectApi {
    * success, or null on any failure (not connected, unresolved remote home, mkdir/scp failure).
    */
   uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null>
-  onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
+  onStatus(cb: (e: SshProjectStatusEvent) => void): () => void
 }
 
 /**
@@ -938,7 +972,22 @@ export interface TranscriptsApi {
   search(query: string): Promise<TranscriptHit[]>
 }
 
+/** What the Claude CLI on THIS machine can do. Fed by the `claude --version` probe in
+ *  core/claude-cli.ts; every field fails open to the conservative answer when the version
+ *  is unknown (missing CLI, timeout, unreadable output). */
+export interface ClaudeCliCaps {
+  version: string | null
+  /** `--permission-mode auto` is only accepted by Claude Code >= 2.1.71. */
+  autoPermissionMode: boolean
+}
+
+/** The answer whenever the CLI version can't be determined: no `auto` flag → bare command. */
+export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = { version: null, autoPermissionMode: false }
+
 export interface ClaudeApi {
+  /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).
+   *  Never rejects — an unknown version resolves to the fail-open caps. */
+  cliCaps(): Promise<ClaudeCliCaps>
   /**
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
@@ -1046,6 +1095,13 @@ export interface RemoteClientApi {
   resize(connectionId: string, sessionId: string, cols: number, rows: number): void
   /** Kill a remote PTY (the host detaches; its tmux session survives host-side). */
   kill(connectionId: string, sessionId: string): void
+  /**
+   * The host-side scrollback (tmux history + visible screen) of a session this connection is
+   * ALREADY attached to — the client hydrates its empty xterm scrollback with it. Keyed by the
+   * session, never by a tmux name: the host only serves the history of streams it granted.
+   * Degrades to '' (no connection / unknown stream / host error).
+   */
+  captureHistory(connectionId: string, sessionId: string): Promise<string>
   /** Listen for a remote PTY's output. Returns an unsubscribe function. */
   onData(connectionId: string, sessionId: string, listener: (data: string) => void): () => void
   /** Fires when a remote PTY exits. Returns an unsubscribe function. */

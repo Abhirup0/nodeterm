@@ -28,6 +28,8 @@ import {
   readTranscriptLines,
   readChatMessages,
   readSessionName,
+  setRemoteTranscriptReader,
+  TITLE_TAIL_BYTES,
   resolveTranscriptPath,
   transcriptPathForCwd,
   parseTranscriptLines,
@@ -48,6 +50,7 @@ import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
 import { initClaudeAccounts } from './claude-accounts'
+import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { installClaudeHooksInto } from '../core/agents/hooks/claude'
@@ -349,6 +352,11 @@ app.whenReady().then(async () => {
   workspaceStore.registerIpc()
   gitService.registerIpc()
   presenceHub.registerIpc()
+  registerClaudeCliIpc()
+  // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
+  // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
+  // node — resolves from cache instead of racing the probe into a conservative "no auto".
+  void claudeCliCaps()
 
   ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())
@@ -588,6 +596,16 @@ app.whenReady().then(async () => {
   // search/chat read handlers (which receive only sessionId + cwd) read remotely without a
   // nodeId. Only remote sessions are ever inserted, so local reads stay on the local reader.
   const remoteTranscriptBySession = new Map<string, RemoteFileRef>()
+  // Route the session-name read (the node-title poll) through the same remote ref. An SSH
+  // project's agent runs on the remote host, so its transcript is NOT under the local
+  // `~/.claude/projects` — without this, `/rename` never reached the node title on remote nodes
+  // (and the poll re-scanned the local root every 4s for nothing). Returning null for an unknown
+  // sessionId keeps every local node on the local reader.
+  setRemoteTranscriptReader(async (sessionId) => {
+    const ref = remoteTranscriptBySession.get(sessionId)
+    if (!ref) return null
+    return { text: await remoteFile.readTail(ref, TITLE_TAIL_BYTES) }
+  })
   // toolUseIds whose remote subagent file resolution was cancelled (PostToolUse / node close
   // arrived before the file appeared) — checked by the async resolver to avoid a late track.
   // Bounded by `remoteSubagentResolving`: a cancel flag is only added (and only matters) while a

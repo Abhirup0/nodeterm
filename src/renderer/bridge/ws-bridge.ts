@@ -8,19 +8,22 @@
 
 import { parseRpcMessage, decodePtyData, type RpcMessage } from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
-import type {
-  ContextApi,
-  FilesApi,
-  FsApi,
-  GitApi,
-  NodeTerminalApi,
-  PresenceApi,
-  PtyApi,
-  PtyCreateOptions,
-  SettingsApi,
-  Settings,
-  Workspace,
-  WorkspaceApi
+import {
+  UNKNOWN_CLAUDE_CLI_CAPS,
+  type ClaudeApi,
+  type ClaudeCliCaps,
+  type ContextApi,
+  type FilesApi,
+  type FsApi,
+  type GitApi,
+  type NodeTerminalApi,
+  type PresenceApi,
+  type PtyApi,
+  type PtyCreateOptions,
+  type SettingsApi,
+  type Settings,
+  type Workspace,
+  type WorkspaceApi
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
@@ -172,6 +175,8 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
       client.request(IPC.ptyCapture, persistKey, full).catch(() => '') as Promise<string>,
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
+    captureHistory: (persistKey: string) =>
+      client.request(IPC.ptyCaptureHistory, persistKey) as Promise<string>,
     sendText: (persistKey, text) =>
       client.request(IPC.ptySendText, persistKey, text) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name.
@@ -379,6 +384,24 @@ export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'pres
   return { presence }
 }
 
+/**
+ * Build the `claude` namespace over an RpcClient. `cliCaps` is a REAL handler on the server
+ * (`registerClaudeCliIpc` runs in the server shell too), so the browser resolves the very same
+ * `--permission-mode auto` version gate as desktop instead of silently no-opping into "auto
+ * unsupported" — which would strip the flag from every Claude launch in the Server Edition.
+ * A failed request degrades to the fail-open caps (bare command), never a rejection: the launch
+ * path awaits this. `readTranscript` has no server handler yet, so it keeps the stub's reject.
+ */
+export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
+  return {
+    ...stub,
+    cliCaps: () =>
+      (client.request(IPC.claudeCliCaps) as Promise<ClaudeCliCaps>).catch(
+        () => UNKNOWN_CLAUDE_CLI_CAPS
+      )
+  }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -483,13 +506,16 @@ export async function installWsBridge(): Promise<boolean> {
     return false
   }
   client.onClose(() => startReconnect())
+  const stubApi = buildStubApi()
   const api: NodeTerminalApi = {
-    ...buildStubApi(),
+    ...stubApi,
     ...buildRealApi(client),
     ...buildFilesApi(client),
     ...buildAgentApi(client),
     ...buildCanvasApi(client),
     ...buildPresenceApi(client),
+    // Only `cliCaps` is real here — the rest of the namespace stays stubbed (see buildClaudeApi).
+    claude: buildClaudeApi(client, stubApi.claude),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
     // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
     dialog: (() => {

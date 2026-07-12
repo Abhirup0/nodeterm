@@ -56,6 +56,7 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
+    captureHistory: (persistKey) => ipcRenderer.invoke(IPC.ptyCaptureHistory, persistKey),
     sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
     readSessionName: (sessionId, accountId) =>
       ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId),
@@ -311,6 +312,7 @@ const api: NodeTerminalApi = {
     }
   },
   claude: {
+    cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
   },
@@ -361,6 +363,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.send(IPC.remoteClientResize, connectionId, sessionId, cols, rows),
     kill: (connectionId, sessionId) =>
       ipcRenderer.send(IPC.remoteClientKill, connectionId, sessionId),
+    captureHistory: (connectionId, sessionId) =>
+      ipcRenderer.invoke(IPC.remoteClientCaptureHistory, connectionId, sessionId),
     onData: (connectionId, sessionId, listener) => {
       const channel = IPC.remoteClientData(connectionId, Number(sessionId))
       const handler = (_e: unknown, data: string) => listener(data)

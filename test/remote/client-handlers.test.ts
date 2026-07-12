@@ -164,3 +164,73 @@ describe('createClientHandlers', () => {
     expect(sinks.data).toHaveLength(0)
   })
 })
+
+// --- captureHistory: the relay node's scrollback lives on the HOST ------------
+//
+// Regression guard: TerminalNode hydrates a fresh xterm's scrollback on a warm reattach. The
+// client machine has no `nt-<nodeId>` tmux session, so the LOCAL PtyManager can only answer '' —
+// the history has to be fetched from the host over the relay, keyed by the stream this client is
+// already attached to (never by a tmux session name: the host jails it to its granted streams).
+describe('createClientHandlers.captureHistory', () => {
+  function historySocket(output: unknown) {
+    const rpcs: { method: string; params: unknown }[] = []
+    const socket: ClientRelaySocket = {
+      rpc: vi.fn(async (method, params) => {
+        rpcs.push({ method, params })
+        if (method === 'pty.attach') return { streamId: 3 }
+        if (method === 'pty.captureHistory') return { output }
+        return {}
+      }),
+      sendFrame: vi.fn(() => true)
+    }
+    return { socket, rpcs }
+  }
+
+  it('sends RPC pty.captureHistory for an attached stream and returns the host output', async () => {
+    const sock = historySocket('line one\nline two\n')
+    const h = createClientHandlers(sock.socket, fakeSinks().sinks)
+    await h.create({ cols: 80, rows: 24, persistKey: 'node-a' })
+
+    await expect(h.captureHistory(3)).resolves.toBe('line one\nline two\n')
+    expect(sock.rpcs).toContainEqual({
+      method: 'pty.captureHistory',
+      params: { streamId: 3 }
+    })
+  })
+
+  it('does not RPC the host for a stream this client never attached to', async () => {
+    const sock = historySocket('secret')
+    const h = createClientHandlers(sock.socket, fakeSinks().sinks)
+
+    await expect(h.captureHistory(99)).resolves.toBe('')
+    expect(sock.rpcs).toHaveLength(0)
+  })
+
+  it('degrades to an empty history on a malformed reply or a failing RPC', async () => {
+    const sock = historySocket(42) // not a string
+    const h = createClientHandlers(sock.socket, fakeSinks().sinks)
+    await h.create({ cols: 80, rows: 24, persistKey: 'node-a' })
+    await expect(h.captureHistory(3)).resolves.toBe('')
+
+    const failing: ClientRelaySocket = {
+      rpc: vi.fn(async (method) => {
+        if (method === 'pty.attach') return { streamId: 3 }
+        throw new Error('relay dropped')
+      }),
+      sendFrame: vi.fn(() => true)
+    }
+    const h2 = createClientHandlers(failing, fakeSinks().sinks)
+    await h2.create({ cols: 80, rows: 24, persistKey: 'node-a' })
+    // History is a nicety — a failure must never reject into the attach path and freeze the seed.
+    await expect(h2.captureHistory(3)).resolves.toBe('')
+  })
+
+  it('forgets the stream on kill (no history for a dropped session)', async () => {
+    const sock = historySocket('history')
+    const h = createClientHandlers(sock.socket, fakeSinks().sinks)
+    await h.create({ cols: 80, rows: 24, persistKey: 'node-a' })
+    h.kill(3)
+
+    await expect(h.captureHistory(3)).resolves.toBe('')
+  })
+})

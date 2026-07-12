@@ -13,7 +13,13 @@
 // | 'files' | 'context' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
 // `NodeTerminalApi` gains a member, this file fails to typecheck until the stub is declared.
 
-import type { ClaudeUsage, NodeTerminalApi, NotifyPayload, UpdatePolicy } from '../../shared/types'
+import {
+  UNKNOWN_CLAUDE_CLI_CAPS,
+  type ClaudeUsage,
+  type NodeTerminalApi,
+  type NotifyPayload,
+  type UpdatePolicy
+} from '../../shared/types'
 import { E_UNSUPPORTED } from '../../shared/rpc'
 
 /** Reject with a coded error the RPC layer + renderer recognize (renderer degrades silently). */
@@ -36,6 +42,63 @@ const U = (name: string) => (): Promise<never> => unsupported(name)
 const noop = (): void => {}
 /** Promise<void> member: a resolved no-op. */
 const pnoop = (): Promise<void> => Promise.resolve()
+
+/** Copy without the Clipboard API (non-secure context): a hidden textarea + execCommand('copy').
+ *  Browsers only honor it inside a user gesture. That holds for the copy shortcut and the click-
+ *  driven copy buttons, but NOT for the OSC 52 path (`TerminalNode.tsx` — driven by terminal
+ *  OUTPUT, e.g. `vim "+y`, with no user activation): over plain http that one always fails and
+ *  lands in the error banner below. Returns false when the copy fails, so the caller surfaces it
+ *  rather than swallowing it — never silent.
+ *
+ *  Cleanup is in a `finally` on purpose: `select()`/`execCommand()` CAN throw (Firefox has thrown
+ *  NS_ERROR_FAILURE on execCommand('copy')), and a leaked scratch textarea would be invisible,
+ *  focused and `position:fixed` — i.e. it would swallow every subsequent keystroke. `select()` also
+ *  steals focus from xterm's helper textarea, so the previously-focused element is restored too
+ *  (the terminal's *selection* survives on its own — xterm paints it, it is not a DOM Selection). */
+function copyViaExecCommand(text: string): boolean {
+  const prev = document.activeElement as HTMLElement | null
+  let ta: HTMLTextAreaElement | undefined
+  try {
+    ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    if (!document.execCommand('copy')) throw new Error('execCommand returned false')
+    return true
+  } catch {
+    // Surfacing beats silence: the user needs to know why nothing landed in their clipboard. The
+    // diagnosis differs — plain http has no Clipboard API at all, while in a secure context we got
+    // here because the API rejected (permission denied / document not focused) AND the fallback
+    // failed too. Canvas listens for this event and shows a banner.
+    // This module only ever runs in a browser (it IS the browser shim), so `window` is there —
+    // guarded consistently rather than half-guarded.
+    const secure = window.isSecureContext
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:toast', {
+        detail: {
+          kind: 'error',
+          message: secure
+            ? 'Copy failed — the browser denied clipboard access. Click the page and try again.'
+            : 'Copy failed — the browser blocks clipboard access over plain http. Use https or localhost.'
+        }
+      })
+    )
+    return false
+  } finally {
+    // A throw in here would ESCAPE the function and replace the return value (a `finally` outranks
+    // both the `return true` and the `return false` above) — so cleanup can never be allowed to
+    // throw: `prev.focus()` on an exotic element is out of our control.
+    try {
+      ta?.remove()
+      prev?.focus?.()
+    } catch {
+      // Cleanup is best-effort; the copy's outcome is what the caller must see.
+    }
+  }
+}
 
 export function buildStubApi(): Omit<
   NodeTerminalApi,
@@ -75,11 +138,16 @@ export function buildStubApi(): Omit<
       write: U('sshFs.write')
     },
     clipboard: {
-      // The one browser-native member: use the Clipboard API when present, swallow failures.
+      // Clipboard API → execCommand → visible error. `navigator.clipboard` only exists in a SECURE
+      // context (https or localhost); over plain http on a LAN it is undefined, and the old
+      // optional-chained call copied nothing and told nobody. execCommand('copy') is deprecated but
+      // is the only thing that works there.
       writeText: (text: string): void => {
-        if (typeof navigator !== 'undefined') {
-          void navigator.clipboard?.writeText(text).catch(() => {})
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          void navigator.clipboard.writeText(text).catch(() => copyViaExecCommand(text))
+          return
         }
+        copyViaExecCommand(text)
       }
     },
     shell: {
@@ -135,6 +203,9 @@ export function buildStubApi(): Omit<
       onUpdate: noopUnsub
     },
     claude: {
+      // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
+      // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
+      cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
     },
     chat: {
@@ -173,6 +244,10 @@ export function buildStubApi(): Omit<
       write: noop,
       resize: noop,
       kill: noop,
+      // Relay client mode is desktop-only (the whole `remoteClient` block is unsupported here), so
+      // there is no host session to hydrate from — '' is the same "nothing to seed" the local
+      // hydration degrades to, and it keeps TerminalNode's warm-attach path from rejecting.
+      captureHistory: async () => '',
       onData: noopUnsub,
       onExit: noopUnsub,
       onClosed: noopUnsub,

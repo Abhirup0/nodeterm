@@ -22,6 +22,9 @@ import type { TerminalTransport } from './transport'
  * surfaces".
  */
 export class RemoteTransport implements TerminalTransport {
+  /** persistKey (host node id) -> the session (host streamId) this client attached for it. */
+  private readonly sessions = new Map<string, string>()
+
   constructor(private readonly connectionId: string) {}
 
   private get client() {
@@ -30,9 +33,20 @@ export class RemoteTransport implements TerminalTransport {
 
   async create(options: PtyCreateOptions): Promise<PtyCreateResult> {
     const sessionId = await this.client.create(this.connectionId, options)
+    if (options.persistKey) this.sessions.set(options.persistKey, sessionId)
     // Cold-restore (scrollback replay / agent resume) is the host's responsibility; a mirroring
     // client must never re-launch or replay, so it always reports a warm (non-fresh) attach.
     return { sessionId, fresh: false }
+  }
+
+  async captureHistory(persistKey: string): Promise<string> {
+    // The tmux session lives on the HOST, so its history has to come over the relay. The host jails
+    // the request to a stream this client already attached to (`pty.captureHistory {streamId}`) —
+    // hence the lookup: we ask for the history of the session `create()` opened for this node, not
+    // for an arbitrary tmux session name.
+    const sessionId = this.sessions.get(persistKey)
+    if (!sessionId) return ''
+    return this.client.captureHistory(this.connectionId, sessionId)
   }
 
   write(sessionId: string, data: string): void {

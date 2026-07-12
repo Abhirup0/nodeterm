@@ -26,7 +26,8 @@ describe('SshProjectManager', () => {
     const { mgr, statuses } = makeMgr()
     const { controlPath } = await mgr.connect('p1', conn)
     expect(controlPath).toBe(controlPathFor('p1'))
-    expect(statuses).toEqual(['connecting', 'connected'])
+    // (A later `connected` event can carry the async claude-CLI probe's answer — see below.)
+    expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
   })
 
   it('connect is idempotent — second call reuses the live master', async () => {
@@ -128,7 +129,7 @@ describe('SshProjectManager', () => {
     // The conf was written via `cat >` (with the conf body as stdin) and then source-file'd.
     const write = calls.find((c) => c.args.join(' ').includes(`cat > '/home/u/.nodeterm/tmux.conf'`))
     expect(write).toBeDefined()
-    expect(write?.stdin).toContain('set -g mouse on')
+    expect(write?.stdin).toContain('set -g mouse off')
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
   })
 
@@ -154,6 +155,105 @@ describe('SshProjectManager', () => {
     const { controlPath, tmuxConfPath } = await mgr.connect('p1', conn)
     expect(tmuxConfPath).toBeUndefined()
     expect(controlPath).toBe(controlPathFor('p1'))
+  })
+
+  // --- remote `claude --version` probe ------------------------------------------------------
+  //
+  // The probe runs through a LOGIN shell, so the user's profile can print banners to stdout. The
+  // value is marker-delimited and only what sits between the markers is parsed — a banner version
+  // (`Ubuntu 22.04.3`) must NEVER be read as claude's version, or every Claude node in the project
+  // would launch `--permission-mode auto` on a CLI that exits 1 on it.
+  const BANNER = 'Welcome — Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-89-generic)\nkernel 6.8.0-106\n'
+
+  /** A manager whose remote claude probe answers with `banner + <markers>version</markers>`. */
+  function mgrWithClaude(versionOut: string | null) {
+    const events: { status: string; claudeAutoPermissionMode?: boolean }[] = []
+    const run = vi.fn(async (args: string[]) => {
+      const cmd = args.join(' ')
+      if (cmd.includes('__NT_V_START__')) {
+        return { code: 0, stdout: versionOut === null ? BANNER : `${BANNER}${versionOut}` }
+      }
+      if (cmd.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+      return { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: (e) => events.push({ status: e.status, claudeAutoPermissionMode: e.claudeAutoPermissionMode })
+    })
+    return { mgr, events, run }
+  }
+
+  const probeEvent = (events: { claudeAutoPermissionMode?: boolean }[]) =>
+    events.find((e) => e.claudeAutoPermissionMode !== undefined)
+
+  it('a login-shell BANNER around an OLD claude never reports auto support (merge blocker)', async () => {
+    const { mgr, events } = mgrWithClaude('__NT_V_START__2.0.30 (Claude Code)__NT_V_END__')
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    // The banner's `22.04.3` is NOT the version: the CLI is 2.0.30 → no `--permission-mode auto`.
+    expect(probeEvent(events)?.claudeAutoPermissionMode).toBe(false)
+  })
+
+  it('a banner with no claude output at all is a FAILED probe, not a modern CLI', async () => {
+    const { mgr, events } = mgrWithClaude(null) // markers absent → unknown
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    expect(probeEvent(events)?.claudeAutoPermissionMode).toBe(false)
+  })
+
+  it('a modern claude behind a banner does report auto support', async () => {
+    const { mgr, events } = mgrWithClaude('__NT_V_START__2.1.90 (Claude Code)__NT_V_END__')
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    expect(probeEvent(events)?.claudeAutoPermissionMode).toBe(true)
+  })
+
+  it('connect does NOT wait on the claude probe (it runs after `connected`)', async () => {
+    // The probe's `$SHELL -lc` sources nvm/conda inits and can take seconds; every remote terminal
+    // in the project waits on connect, so the probe must be off that path.
+    const events: string[] = []
+    let releaseProbe: (() => void) | undefined
+    const run = vi.fn(async (args: string[]) => {
+      const cmd = args.join(' ')
+      if (cmd.includes('__NT_V_START__')) {
+        await new Promise<void>((r) => (releaseProbe = r)) // never resolves during this test
+        return { code: 0, stdout: '' }
+      }
+      return { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: (e) => events.push(e.status)
+    })
+    const res = await mgr.connect('p1', conn) // resolves while the probe is still hanging
+    expect(events).toEqual(['connecting', 'connected'])
+    expect(res.claudeAutoPermissionMode).toBeUndefined() // unknown ⇒ bare command (fail-open)
+    releaseProbe?.()
+  })
+
+  it('remoteAccountAdd reads the version from the markers, not from banner noise', async () => {
+    // Same probe, other consumer: an OLD remote CLI must still report versionSupported=false so the
+    // keychain-collision warning survives (the banner's `22.04.3` would have suppressed it).
+    const { mgr } = mgrWithClaude('__NT_V_START__2.0.14 (Claude Code)__NT_V_END__')
+    await mgr.connect('p1', conn)
+    expect((await mgr.remoteAccountAdd('p1', 'acc1'))?.versionSupported).toBe(false)
+
+    const modern = mgrWithClaude('__NT_V_START__2.1.0 (Claude Code)__NT_V_END__')
+    await modern.mgr.connect('p2', conn)
+    expect((await modern.mgr.remoteAccountAdd('p2', 'acc1'))?.versionSupported).toBe(true)
+
+    // Probe failed entirely (no markers) → fail-open true: adding an account is never blocked.
+    const unknown = mgrWithClaude(null)
+    await unknown.mgr.connect('p3', conn)
+    expect((await unknown.mgr.remoteAccountAdd('p3', 'acc1'))?.versionSupported).toBe(true)
   })
 
   it('uploadFile fails open (null) when not connected', async () => {

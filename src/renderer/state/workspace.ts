@@ -1,7 +1,7 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
-import type { AgentId } from '@shared/agents/config'
-import { agentConfig } from '@shared/agents/config'
+import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
+import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
+import { agentConfig, withPermissionMode } from '@shared/agents/config'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
@@ -290,13 +290,19 @@ export function createAgentNode(
   center?: { x: number; y: number },
   initialPrompt?: string,
   ssh?: Project['ssh'],
-  accountId?: string
+  accountId?: string,
+  permissionMode?: AgentPermissionMode
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
-  const initialCommand = initialPrompt
+  const withPrompt = initialPrompt
     ? `${baseCmd} ${shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())}`
     : baseCmd
+  // Flag goes last: the prompt is claude's positional argv and must stay adjacent to the binary.
+  // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
+  const initialCommand = permissionMode
+    ? withPermissionMode(withPrompt, agentId, permissionMode)
+    : withPrompt
   return {
     id: nextId('term'),
     type: 'terminal',
@@ -319,15 +325,6 @@ export function createAgentNode(
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
     }
   }
-}
-
-/** Creates a terminal that launches Claude Code (`claude`) on open. Thin wrapper. */
-export function createClaudeNode(
-  index: number,
-  cwd?: string,
-  center?: { x: number; y: number }
-): CanvasNode {
-  return createAgentNode('claude', index, cwd, center)
 }
 
 /**
@@ -1025,7 +1022,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
  * size after a peer resized the node — and re-publish it, fighting the peer. Dropping it lets React
  * Flow re-measure from the incoming `style`, which is what the peer sent.
  */
-export function applyMutationToFlow(nodes: CanvasNode[], m: import('@shared/types').CanvasMutation): CanvasNode[] {
+export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): CanvasNode[] {
   if (m.op === 'remove') {
     if (!nodes.some((n) => n.id === m.id)) return nodes // already gone — keep identity, skip render
     return nodes.filter((n) => n.id !== m.id)
