@@ -21,7 +21,9 @@ import { parseOsc52 } from '../terminal/osc52'
 import {
   attachReplay,
   createDataGate,
+  disposalAction,
   isCopyShortcut,
+  stripTrailingNewline,
   toXtermText,
   xtermScrollback
 } from '../terminal/terminal-config'
@@ -494,10 +496,26 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sshRemote
         })
         .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
-        if (disposed) {
+        // Disposal while the spawn/seed was in flight is NOT necessarily a teardown: an unmount
+        // with a live session PARKS it (same xterm, same PTY client, same `cleanups` array), and
+        // killing it here would leave the node permanently dead once it is re-adopted. Only a real
+        // unmount/delete (nothing parked for this session) kills. Here `sessionId` was still null
+        // when the cleanup ran, so it could not have parked — but the same helper keeps both
+        // early-returns honest.
+        const onDisposed = (): boolean => {
+          const action = disposalAction({
+            disposed,
+            sessionId: sid,
+            parkedSessionId: parkedTerminals.get(id)?.sessionId
+          })
+          if (action !== 'teardown') return false
+          offData?.()
           transport.kill(sid)
-          return
+          return true
         }
+        // Assigned below, once the data listener exists; before that there is nothing to detach.
+        let offData: (() => void) | undefined
+        if (onDisposed()) return
         sessionId = sid
         if (fellBack) setAccountFallback(true)
         // Catch up a size change that landed while the spawn was in flight (resize() skips the
@@ -530,7 +548,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // queues those chunks until the seed is written, then drains them in order. Queued bytes
         // still count towards `pending`, so a flood during the gap pauses the source.
         const gate = createDataGate(writeChunk)
-        const offData = transport.onData(sid, (chunk) => {
+        offData = transport.onData(sid, (chunk) => {
           pending += chunk.length
           if (!paused && pending > HIGH_WATER) {
             paused = true
@@ -543,48 +561,55 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
         // tmux's own scrollback. Parked terminals get neither — their buffer is still correct
         // and seeding it would duplicate content.
-        const replay = attachReplay({
-          parked: !!parked,
-          fresh,
-          hasInitialCommand: !!data.initialCommand
-        })
-        if (replay === 'cold-snapshot') {
-          const snapshot = await scrollbackPromise
-          if (disposed) {
-            offData()
-            transport.kill(sid)
-            return
+        // The gate MUST be opened whatever happens in here (`finally`): the data listener already
+        // exists, so a throw between it and `gate.open()` would queue chunks forever — the source
+        // pauses at the high-water mark and the terminal freezes silently and permanently. The
+        // only case that leaves it shut is a real teardown, where the xterm is disposed anyway.
+        let toreDown = false
+        try {
+          const replay = attachReplay({
+            parked: !!parked,
+            fresh,
+            hasInitialCommand: !!data.initialCommand
+          })
+          if (replay === 'cold-snapshot') {
+            const snapshot = await scrollbackPromise
+            if ((toreDown = onDisposed())) return
+            if (snapshot) {
+              // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
+              // with convertEol:false, so writing it raw would render as a staircase.
+              term.write(toXtermText(snapshot))
+              term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
+            }
+          } else if (replay === 'warm-history') {
+            // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
+            // missing from this fresh xterm. `captureHistory` includes the visible screen too —
+            // tmux's redraw (\x1b[H\x1b[2J) erases exactly those lines in place, so it overwrites
+            // the tail of what we write here instead of leaving a gap. This is the session's REAL
+            // history, not a restore boundary — it gets no separator line.
+            // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
+            // tmux is only reachable once `create()` has registered the session's ssh target — an
+            // earlier call would silently fall through to the LOCAL tmux and return ''.
+            const history = await window.nodeTerminal.pty.captureHistory(id).catch(() => '')
+            if ((toreDown = onDisposed())) return
+            if (history) {
+              // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
+              // start the block from a known-clean SGR state rather than an arbitrary one.
+              term.write('\x1b[0m')
+              // capture-pane ends with a trailing newline: writing it would drop the cursor one
+              // row below the last captured row, xterm would scroll, and tmux's redraw would
+              // repaint that row again — one duplicated line at the seam.
+              term.write(toXtermText(stripTrailingNewline(history)))
+            }
           }
-          if (snapshot) {
-            // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
-            // with convertEol:false, so writing it raw would render as a staircase.
-            term.write(toXtermText(snapshot))
-            term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
-          }
-        } else if (replay === 'warm-history') {
-          // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
-          // missing from this fresh xterm. `captureHistory` includes the visible screen too —
-          // tmux's redraw (\x1b[H\x1b[2J) erases exactly those lines in place, so it overwrites
-          // the tail of what we write here instead of leaving a gap. This is the session's REAL
-          // history, not a restore boundary — it gets no separator line.
-          // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
-          // tmux is only reachable once `create()` has registered the session's ssh target — an
-          // earlier call would silently fall through to the LOCAL tmux and return ''.
-          const history = await window.nodeTerminal.pty.captureHistory(id).catch(() => '')
-          if (disposed) {
-            offData()
-            transport.kill(sid)
-            return
-          }
-          if (history) {
-            // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
-            // start the block from a known-clean SGR state rather than an arbitrary one.
-            term.write('\x1b[0m')
-            term.write(toXtermText(history))
-          }
+        } catch (err) {
+          // Never let a seed failure freeze the terminal: the live stream matters more than the
+          // history. `finally` still opens the gate below.
+          console.error('[terminal] history seed failed', err)
+        } finally {
+          // Seed written — release the PTY output that arrived while it was in flight.
+          if (!toreDown) gate.open()
         }
-        // Seed written — release the PTY output that arrived while it was in flight.
-        gate.open()
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)

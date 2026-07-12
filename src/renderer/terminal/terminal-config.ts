@@ -49,6 +49,42 @@ export function toXtermText(text: string): string {
   return text.replace(/\r?\n/g, '\r\n')
 }
 
+/**
+ * Drop exactly ONE trailing newline from a tmux capture.
+ * `capture-pane -p -e -S -<n>` emits a trailing LF after its last line. Writing it would leave the
+ * cursor one row BELOW the last captured row: xterm scrolls, the topmost row of the captured
+ * visible screen is pushed into scrollback, and tmux's attach redraw (`\x1b[H\x1b[2J`) then
+ * repaints that same screen — so on every warm reattach the first visible row would appear twice.
+ * Strip on the RAW capture (LF-separated), before `toXtermText` turns the LFs into CRLFs.
+ */
+export function stripTrailingNewline(text: string): string {
+  return text.replace(/\r?\n$/, '')
+}
+
+/**
+ * What a spawn continuation must do when it finds the effect already cleaned up while an async
+ * seed (scrollback snapshot / tmux history) was in flight.
+ * - `proceed`         — still mounted: carry on.
+ * - `continue-parked` — the cleanup PARKED this very session (the park entry holds the same live
+ *   xterm, PTY client and `cleanups` array). Killing or unsubscribing here would leave the node
+ *   permanently dead when it is re-adopted, so the setup must simply finish.
+ * - `teardown`        — a real unmount/delete: nothing holds this session, so drop the data
+ *   listener and kill the PTY client.
+ */
+export type DisposalAction = 'proceed' | 'continue-parked' | 'teardown'
+
+export function disposalAction(opts: {
+  /** The effect cleanup has run. */
+  disposed: boolean
+  /** The session this continuation is wiring up. */
+  sessionId: string
+  /** sessionId of the node's parked entry, if the cleanup parked one. */
+  parkedSessionId: string | null | undefined
+}): DisposalAction {
+  if (!opts.disposed) return 'proceed'
+  return opts.parkedSessionId === opts.sessionId ? 'continue-parked' : 'teardown'
+}
+
 /** A gate that holds PTY chunks back until the emulator has been seeded. */
 export interface DataGate {
   /** Queue (while closed) or write straight through (once open). */

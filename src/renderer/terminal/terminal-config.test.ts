@@ -5,6 +5,8 @@ import {
   isCopyShortcut,
   attachReplay,
   toXtermText,
+  stripTrailingNewline,
+  disposalAction,
   createDataGate,
   type CopyShortcutEvent
 } from './terminal-config'
@@ -52,6 +54,57 @@ describe('toXtermText', () => {
 
   it('keeps escape sequences untouched', () => {
     expect(toXtermText('\x1b[31mred\x1b[0m\n')).toBe('\x1b[31mred\x1b[0m\r\n')
+  })
+})
+
+describe('stripTrailingNewline', () => {
+  it('drops exactly one trailing LF (tmux capture-pane ends with one)', () => {
+    expect(stripTrailingNewline('one\ntwo\n')).toBe('one\ntwo')
+  })
+
+  it('drops a trailing CRLF as a unit', () => {
+    expect(stripTrailingNewline('one\r\n')).toBe('one')
+  })
+
+  it('keeps blank lines that precede the final one (only ONE newline goes)', () => {
+    expect(stripTrailingNewline('one\n\n\n')).toBe('one\n\n')
+  })
+
+  it('leaves text without a trailing newline alone', () => {
+    expect(stripTrailingNewline('one\ntwo')).toBe('one\ntwo')
+    expect(stripTrailingNewline('')).toBe('')
+  })
+
+  it('composes with toXtermText so the seed leaves the cursor on the LAST captured row', () => {
+    // Writing the trailing newline would push the cursor one row down: xterm scrolls, the top row
+    // of the captured visible screen lands in scrollback, and tmux's redraw repaints it again —
+    // one duplicated line at the seam on every warm reattach.
+    expect(toXtermText(stripTrailingNewline('one\ntwo\n'))).toBe('one\r\ntwo')
+  })
+})
+
+describe('disposalAction', () => {
+  const parked = 'sess-1'
+
+  it('proceeds while the node is still mounted', () => {
+    expect(disposalAction({ disposed: false, sessionId: 'sess-1', parkedSessionId: undefined })).toBe('proceed')
+  })
+
+  it('continues the setup when the cleanup PARKED this very session', () => {
+    // Project switch during the hydration await: the park entry holds the same cleanups array and
+    // sessionId, so the session is alive and must be finished wiring — killing it here would leave
+    // a permanently dead node when the user switches back.
+    expect(disposalAction({ disposed: true, sessionId: 'sess-1', parkedSessionId: parked })).toBe('continue-parked')
+  })
+
+  it('tears down on a real unmount/delete (nothing parked)', () => {
+    expect(disposalAction({ disposed: true, sessionId: 'sess-1', parkedSessionId: undefined })).toBe('teardown')
+    expect(disposalAction({ disposed: true, sessionId: 'sess-1', parkedSessionId: null })).toBe('teardown')
+  })
+
+  it('tears down when the parked entry belongs to a different session', () => {
+    // Stale/other entry for this node id — this session is not the one being kept.
+    expect(disposalAction({ disposed: true, sessionId: 'sess-2', parkedSessionId: parked })).toBe('teardown')
   })
 })
 
