@@ -76,6 +76,12 @@ export const IPC = {
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,
+  /** Authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers.
+   *  Broadcast to every subscriber whenever the subscriber set or any reported size changes. */
+  ptySize: (sessionId: string) => `pty:size:${sessionId}`,
+  /** The node was permanently destroyed by another client (payload: { by: ClientId }). The
+   *  remaining subscribers show a "closed by <name>" state instead of respawning the session. */
+  ptyClosed: (sessionId: string) => `pty:closed:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
