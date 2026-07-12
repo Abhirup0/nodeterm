@@ -125,7 +125,13 @@ import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
-import type { Project, SshProjectStatus, TranscriptHit } from '@shared/types'
+import type { CanvasNodeState, Project, SshProjectStatus, TranscriptHit } from '@shared/types'
+import {
+  createCanvasPublisher,
+  isEphemeralNodeId,
+  publishableStates,
+  type CanvasPublisher
+} from '@shared/canvas-publish'
 import {
   applyCanvasMutation,
   claudeLaunchCommand,
@@ -372,6 +378,8 @@ export function Canvas() {
   const futureRef = useRef<CanvasNode[][]>([])
   const committedRef = useRef<CanvasNode[]>([])
   const draggingRef = useRef(false)
+  // Canvas sync (emitting side) — see the publish effect below.
+  const publisherRef = useRef<CanvasPublisher | null>(null)
   const [, bumpHist] = useState(0)
   const { setViewport, getViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
     useReactFlow()
@@ -816,6 +824,13 @@ export function Canvas() {
     if (!loadingRef.current) setDirty(true)
   }, [])
 
+  // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
+  // (subagent / loop), which every client derives for itself from the agent:status stream.
+  const publishableNow = useCallback((flow: CanvasNode[]): CanvasNodeState[] => {
+    const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
+    return publishableStates(flowToNodeStates(flow), ephIds)
+  }, [])
+
   // ---- persistence helpers ----
   const commitActiveToStore = useCallback(() => {
     const id = useProjects.getState().activeProjectId
@@ -941,6 +956,83 @@ export function Canvas() {
     return window.nodeTerminal.remoteHost.onPeerPending((info) => setPendingPeer(info))
   }, [])
 
+  // ---- canvas sync (team) ----
+  // Emitting side: diff each settled node snapshot against the last one we published and cast the
+  // mutations on `canvas:mut`. The core reflector (src/core/canvas-sync.ts) fans each one out to
+  // every OTHER attached client, so all clients converge on the same node set — no teammate's
+  // cursor hovering over stale geometry, and no client writing back a node someone else deleted on
+  // its next whole-file workspace.save. Declared BEFORE the [nodes] publish effect so the publisher
+  // exists by the time that one first runs on mount.
+  useEffect(() => {
+    const pub = createCanvasPublisher((m) => {
+      const projectId = useProjects.getState().activeProjectId
+      if (projectId) window.nodeTerminal.canvas.mutate(projectId, m)
+    })
+    publisherRef.current = pub
+    return () => {
+      pub.dispose()
+      publisherRef.current = null
+    }
+  }, [])
+
+  // Publish on every settled node change. While dragging we throttle to ~20 Hz (position frames);
+  // the drag-stop handlers flush, and every other change (add / remove / color / title / collapse /
+  // resize) is a full upsert, because this effect diffs the whole serialized snapshot — so edits
+  // made through a direct setNodes(...) (which never reaches handleNodesChange) sync too.
+  //
+  // A programmatic project load (`loadingRef`) ADOPTS instead of publishing: the newly loaded
+  // project's nodes are not an edit, and republishing them would cast the entire canvas as N
+  // upserts to every peer on each tab switch. Same suppression precedent as `markDirty`.
+  useEffect(() => {
+    const pub = publisherRef.current
+    if (!pub) return
+    const states = publishableNow(nodes)
+    if (loadingRef.current) {
+      pub.adopt(states)
+      return
+    }
+    pub.publish(states, { throttle: draggingRef.current })
+  }, [nodes, publishableNow])
+
+  // Receiving side: apply a PEER's mutation. Deliberately separate from the relay
+  // `remoteHost.onApplyMutation` effect above — that one is host↔client, this one is peer↔peer.
+  //
+  // `adopt` is the loop guard: the publisher takes the resulting snapshot as its baseline BEFORE
+  // the [nodes] effect above can diff it, so the applied mutation diffs to nothing and cannot be
+  // re-published (A→B→C→A forever). The reflector's sender-id echo suppression is the other half.
+  //
+  // A mutation for a project that is loaded but NOT active is applied to that project's SERIALIZED
+  // nodes in the projects store (React Flow only ever holds the active project's nodes). Dropping
+  // it would leave that canvas stale AND let our next whole-file save resurrect a node the peer
+  // deleted — the exact bug this stage exists to fix. Unknown project → nothing to apply.
+  //
+  // markDirty on both paths: a peer's mutation makes our in-memory canvas differ from disk, and a
+  // direct setNodes() bypasses handleNodesChange (which is where local edits mark dirty). Two
+  // clients saving the same converged state is harmless; never saving it is not.
+  useEffect(() => {
+    return window.nodeTerminal.canvas.onMutation((projectId, mutation) => {
+      if (projectId !== useProjects.getState().activeProjectId) {
+        if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
+        return
+      }
+      const next = applyCanvasMutation(flowToNodeStates(nodesRef.current), mutation)
+      // Adopt the ROUND-TRIPPED snapshot (nodeStatesToFlow defaults a few fields), so the baseline
+      // is byte-identical to what the [nodes] effect will serialize next.
+      const flow = nodeStatesToFlow(next)
+      // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
+      // before React re-renders, and each mutation must build on the previous one.
+      nodesRef.current = flow
+      publisherRef.current?.adopt(publishableNow(flow))
+      // Undo stays LOCAL: a peer's edit is not something YOU did, so it must not become an entry in
+      // your undo stack. Taking it as the committed baseline makes the debounced snapshot effect
+      // see `nodes === committedRef.current` and record nothing. (Your own undo still publishes —
+      // it goes through setNodes → the [nodes] effect → a normal diff.)
+      committedRef.current = flow
+      setNodes(flow)
+      markDirty()
+    })
+  }, [setNodes, markDirty, publishableNow])
+
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
     if (loadingRef.current) {
@@ -1003,8 +1095,10 @@ export function Canvas() {
     (changes) => {
       // Ephemeral nodes (subagent / loop) live outside the managed state. Persist their drag
       // positions to the agent-nodes store; drop their other changes from the managed updater.
-      const eph = useAgentNodes.getState().byId
-      const isEph = (id: string) => id in eph || id.startsWith('loop-')
+      // One definition of "ephemeral", shared with the publisher (which must never put these on
+      // the wire — every client derives them from agent:status), so the two cannot drift.
+      const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
+      const isEph = (id: string) => isEphemeralNodeId(id, ephIds)
       const managed = changes.filter((c) => {
         if ('id' in c && isEph(c.id)) {
           if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
@@ -3951,11 +4045,14 @@ export function Canvas() {
           onNodeDragStart={() => (draggingRef.current = true)}
           onNodeDragStop={() => {
             draggingRef.current = false
+            // Send the final position now instead of waiting for the throttle's trailing timer.
+            publisherRef.current?.flush()
             markDirty()
           }}
           onSelectionDragStart={() => (draggingRef.current = true)}
           onSelectionDragStop={() => {
             draggingRef.current = false
+            publisherRef.current?.flush()
             markDirty()
           }}
           onPaneClick={() => setEphSel({})}
