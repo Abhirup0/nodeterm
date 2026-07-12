@@ -84,6 +84,10 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   // so it can only be returned by that client (or by its departure).
   const flow = (clientId: number, sessionId: string, resume: boolean) =>
     fake.senderListeners[IPC.ptyFlow](clientId, sessionId, resume)
+  // pty:write is sender-aware as well: with one pty and N subscribers, a keystroke has to carry WHO
+  // typed it — that is what badges the node as "X is typing" (see pty-typing.test.ts).
+  const write = (clientId: number, sessionId: string, data: string) =>
+    fake.senderListeners[IPC.ptyWrite](clientId, sessionId, data)
 
   it('a second client on the same persistKey subscribes instead of spawning', async () => {
     await manager()
@@ -157,8 +161,8 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     await manager()
     const { sessionId } = await create(ALICE)
     await create(BOB)
-    fake.listeners[IPC.ptyWrite](sessionId, 'a')
-    fake.listeners[IPC.ptyWrite](sessionId, 'b')
+    write(ALICE, sessionId, 'a')
+    write(BOB, sessionId, 'b')
     expect(spawned[0].writes).toEqual(['a', 'b'])
   })
 

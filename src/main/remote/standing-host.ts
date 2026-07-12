@@ -273,6 +273,8 @@ export function initStandingHost(
         subscribeCanvas,
         applyMutation: (mutation: CanvasMutation) => send(IPC.remoteHostApplyMutation, mutation),
         listProjects,
+        // Typing attribution: this pooled session's input frames are ITS phone's keystrokes.
+        getClientId: () => pooled.presence.id(),
         onPeerReady: () => void onPeerReady(pooled),
         onClose: () => {
           clearApproval(pooled)

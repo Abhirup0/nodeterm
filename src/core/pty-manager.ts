@@ -27,6 +27,7 @@ import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import { presenceHub } from './presence/hub'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -409,8 +410,13 @@ export class PtyManager {
       (senderId, options: PtyCreateOptions): Promise<PtyCreateResult> =>
         this.create(senderId, options)
     )
-    platform().on(IPC.ptyWrite, (sessionId: string, data: string) =>
-      this.write(sessionId, data)
+    // Sender-aware: with co-attach, a keystroke arriving here is no longer self-evidently "the one
+    // user's" — WHO typed it is what lights the "X is typing" ring on everyone else's canvas (see
+    // `write`). Registered ONLY here: `on` and `onWithSender` compose on the same channel, so
+    // leaving the old plain listener in place would write every keystroke into the pty TWICE.
+    platform().onWithSender(
+      IPC.ptyWrite,
+      (senderId: number, sessionId: string, data: string) => this.write(senderId, sessionId, data)
     )
     // Sender-aware: a size is only meaningful with the client it belongs to — the pty runs at the
     // smallest one (`resize`). Registered ONLY here: `on` and `onWithSender` compose on the same
@@ -1045,8 +1051,38 @@ export class PtyManager {
     }
   }
 
-  write(sessionId: string, data: string): void {
-    this.sessions.get(sessionId)?.proc.write(data)
+  /**
+   * Input from ONE client into the (possibly shared) session.
+   *
+   * ATTRIBUTION IS SERVER-SIDE, never client-declared: the sender is already identified by the
+   * transport (Electron's webContents id, the Server Edition's uiId, the relay HostSession's
+   * peer ClientId), so nobody can type as somebody else — and a phone typing over the relay lights
+   * up the "X is typing" badge on every canvas with no client-side change at all. `clientId` is
+   * `null` for a client the transport cannot name (a relay-served pty whose session has no presence
+   * peer): its input still reaches the pty, it is just not badged.
+   *
+   * The badge is reported per NODE — the node id, which is what the canvas draws — never per
+   * sessionId. Both `indexKey` and `persistKey` ARE that node id; they differ only in which
+   * sessions carry them (`indexKey` is unset for a relay-served pty, which is deliberately not in
+   * the co-attach index, and `persistKey` is unset when tmux is off), so take whichever is there.
+   * A session with neither has no node id, and so nothing to badge.
+   *
+   * The hub throttles the broadcast (1 per 500 ms per client+node), so PtyManager does no
+   * throttling of its own — but it does skip presence entirely when the user is ALONE: with one
+   * peer in the table the only recipient would be the typist, whose own badge is never drawn, so a
+   * solo keystroke burst must not cost a presence fan-out. The single-user path stays exactly the
+   * old `sessions.get(id)?.proc.write(data)`.
+   *
+   * No locking — concurrent writers interleave characters in the one tmux session. That is the
+   * documented v1 behavior (docs/team-presence.md, "No locking"); the badge IS the warning.
+   */
+  write(clientId: ClientId | null, sessionId: string, data: string): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    const nodeId = session.indexKey ?? session.persistKey
+    if (clientId !== null && nodeId && presenceHub.peerCount() > 1)
+      presenceHub.noteTyping(clientId, nodeId)
+    session.proc.write(data)
   }
 
   /**

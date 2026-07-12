@@ -60,7 +60,9 @@ export interface HostPtyManager {
   ): string
   /** Current visible screen of a node's tmux session, for the attach snapshot. */
   captureSnapshot(persistKey: string): Promise<string>
-  write(sessionId: string, data: string): void
+  /** `clientId` identifies WHO typed (the bridged phone's presence peer), so the keystroke can be
+   *  attributed to it — null when this session has no peer, which just means it is not badged. */
+  write(clientId: number | null, sessionId: string, data: string): void
   /** `clientId` is null for a relay-served (detached) pty — see `kill` below. */
   resize(
     clientId: number | null,
@@ -151,7 +153,13 @@ export function createHostHandlers(
   // Produce the marker-delimited "projects" blob for the `projects.list` RPC (workspace.json +
   // live tmux session names + agent-status.json — the same bytes the iOS SSH browse path reads).
   // Read-only, takes no client params. Default = empty so the 4-arg security tests still compile.
-  listProjects: () => Promise<string> = async () => ''
+  listProjects: () => Promise<string> = async () => '',
+  // The presence ClientId of the phone this host serves (null until it bridges / if it has no
+  // presence slot). Read per frame, never captured: the slot is joined at onPeerReady, and the
+  // session's PhonePresence outlives none of it. It makes the phone's keystrokes attributable —
+  // the "X is typing" badge for a relay peer costs the iOS app exactly nothing, because the sender
+  // is the identified HostSession, not something the client claims.
+  getClientId: () => number | null = () => null
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -347,7 +355,7 @@ export function createHostHandlers(
       const stream = streams.get(frame.streamId)
       if (!stream) return
       if (frame.op === OP.Input) {
-        pty.write(stream.sessionId, textDecoder.decode(frame.payload))
+        pty.write(getClientId(), stream.sessionId, textDecoder.decode(frame.payload))
         return
       }
       if (frame.op === OP.Resize) {
@@ -588,6 +596,12 @@ export interface HostSessionOptions {
    */
   listProjects?: () => Promise<string>
   /**
+   * The presence ClientId of the phone this session bridges (its PhonePresence slot), so its
+   * keystrokes are attributed to it in the typing badge. Optional: a host session without a
+   * presence slot serves input exactly as before, unbadged.
+   */
+  getClientId?: () => number | null
+  /**
    * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
    * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
    * host human, later calling `approve()`.
@@ -700,7 +714,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     socket,
     fsOps,
     () => rootsFromCanvas(opts.getLatestCanvas()),
-    opts.listProjects ?? (async () => '')
+    opts.listProjects ?? (async () => ''),
+    opts.getClientId ?? (() => null)
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -777,6 +792,8 @@ export function initRemoteHost(
       subscribeCanvas,
       applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
       listProjects,
+      // Typing attribution: this session's input frames are this phone's keystrokes.
+      getClientId: () => phone.id(),
       // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.
       onPeerReady: (s) => {
         // Team presence: a bridged relay client is a peer. It has no mouse, so it stays cursorless

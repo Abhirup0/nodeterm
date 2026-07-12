@@ -300,6 +300,13 @@ export class PresenceHub {
     return [...this.table.values()].map(copyPeer)
   }
 
+  /** How many UIs are connected. Lets a caller skip work that only matters to OTHER people: the
+   *  pty:write path uses it to not report typing while the user is alone (a badge nobody but the
+   *  typist would receive — and their own is never drawn). See PtyManager.write. */
+  peerCount(): number {
+    return this.table.size
+  }
+
   /** Wire the presence channels into the shell. Idempotent on purpose: the shell's listener
    *  registry does not dedup identical function references, so a second registration would make
    *  every cast fire (and broadcast) twice. */
