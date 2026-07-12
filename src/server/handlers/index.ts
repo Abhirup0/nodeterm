@@ -3,6 +3,7 @@ import type { ServerPlatform } from '../platform-server'
 import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from './fs'
+import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { IPC } from '../../shared/ipc'
 
 /** Register the Phase-3a handler surface (fs + git + commit) on the server platform.
@@ -24,6 +25,11 @@ export function registerCoreHandlers(
   )
   // Local server has no SSH projects; keep git running against the local remote.
   platform.handle(IPC.gitSetActiveRemote, () => null)
+
+  // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own
+  // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.
+  registerClaudeCliIpc()
+  void claudeCliCaps()
 
   return { gitService }
 }

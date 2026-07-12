@@ -46,7 +46,10 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
   },
   {
     title: 'Source Control',
-    rows: [{ keys: ['⌘', '↵'], label: 'Commit the staged changes' }]
+    rows: [
+      { keys: ['⌘', '⇧', 'G'], label: 'Open Source Control' },
+      { keys: ['⌘', '↵'], label: 'Commit the staged changes' }
+    ]
   }
 ]
 

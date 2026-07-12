@@ -13,7 +13,13 @@
 // | 'files' | 'context' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
 // `NodeTerminalApi` gains a member, this file fails to typecheck until the stub is declared.
 
-import type { ClaudeUsage, NodeTerminalApi, NotifyPayload, UpdatePolicy } from '../../shared/types'
+import {
+  UNKNOWN_CLAUDE_CLI_CAPS,
+  type ClaudeUsage,
+  type NodeTerminalApi,
+  type NotifyPayload,
+  type UpdatePolicy
+} from '../../shared/types'
 import { E_UNSUPPORTED } from '../../shared/rpc'
 
 /** Reject with a coded error the RPC layer + renderer recognize (renderer degrades silently). */
@@ -195,6 +201,9 @@ export function buildStubApi(): Omit<
       onUpdate: noopUnsub
     },
     claude: {
+      // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
+      // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
+      cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
     },
     chat: {

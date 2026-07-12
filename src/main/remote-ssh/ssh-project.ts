@@ -4,8 +4,9 @@ import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
-import type { SshProjectStatus } from '../../shared/types'
+import type { SshProjectStatusEvent } from '../../shared/types'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
+import { supportsAutoPermissionMode } from '../../shared/agents/config'
 import {
   controlPathFor,
   masterArgs,
@@ -18,6 +19,7 @@ import {
   scpArgs,
   RMT_TMUX_SOCKET
 } from '../../core/remote-ssh/control-master'
+import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../../core/agents/hook-server'
 import { sessionName } from '../../core/tmux-naming'
@@ -32,7 +34,7 @@ interface Runners {
   runScp: (args: string[]) => Promise<{ code: number }>
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
   getHook: () => { port: number; token: string; version: string }
-  onStatus: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void
+  onStatus: (e: SshProjectStatusEvent) => void
 }
 
 interface Conn {
@@ -50,6 +52,11 @@ interface Conn {
   /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
    * connection's master. Undefined when the project has no folder selected. */
   remoteCwd?: string
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed once at
+   * connect: the remote CLI can be older than the local one, and the local answer must never be
+   * applied to a remote launch. Undefined/false ⇒ the renderer omits the flag for this project's
+   * Claude nodes (bare command — today's behavior), never a failed launch. */
+  claudeAutoPermissionMode?: boolean
 }
 
 /**
@@ -121,7 +128,13 @@ export class SshProjectManager {
     projectId: string,
     conn: SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }> {
+  ): Promise<{
+    controlPath: string
+    hookEndpointPath?: string
+    tmuxConfPath?: string
+    remoteHome?: string
+    claudeAutoPermissionMode?: boolean
+  }> {
     const existing = this.conns.get(projectId)
     if (existing) {
       // Verify the cached master is still alive before reusing it — a dropped/timed-out master
@@ -132,7 +145,13 @@ export class SshProjectManager {
         // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
         // Guard against a later connect without remoteCwd clearing a known cwd.
         existing.remoteCwd = remoteCwd ?? existing.remoteCwd
-        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath, tmuxConfPath: existing.tmuxConfPath, remoteHome: existing.remoteHome }
+        return {
+          controlPath: existing.controlPath,
+          hookEndpointPath: existing.hookEndpointPath,
+          tmuxConfPath: existing.tmuxConfPath,
+          remoteHome: existing.remoteHome,
+          claudeAutoPermissionMode: existing.claudeAutoPermissionMode
+        }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
@@ -199,7 +218,23 @@ export class SshProjectManager {
           entry.tmuxConfPath = tmuxConfPath
         }
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath, hookEndpointPath, tmuxConfPath, remoteHome }
+        // Probe the REMOTE claude CLI once per connect — `--permission-mode auto` only exists in
+        // >= 2.1.71 and the host's CLI may be older than the local one. NOT awaited: the answer is
+        // only ever an optional flag, and the probe's login shell must not delay the connect (and
+        // with it every terminal in the project). It pushes itself into the conn + renderer when
+        // it lands; until then this project's Claude nodes launch with the bare command.
+        // Swallow any rejection: this is a best-effort optional probe, and an unhandled rejection
+        // in the main process is a hard crash (Node's default --unhandled-rejections=throw), not a
+        // log line. Internals are already try/catch-guarded, but `this.r.onStatus` (IPC send) can
+        // still throw if the window is torn down mid-probe — that must never surface here.
+        if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry).catch(() => {})
+        return {
+          controlPath,
+          hookEndpointPath,
+          tmuxConfPath,
+          remoteHome,
+          claudeAutoPermissionMode: entry?.claudeAutoPermissionMode
+        }
       }
       await new Promise((res) => setTimeout(res, 100))
     }
@@ -369,16 +404,52 @@ export class SshProjectManager {
     await this.r.run(childArgs(c.conn, c.controlPath, `rm -rf ${quoteRemotePath(dir)}`))
   }
 
-  /** Best-effort remote `claude --version` check. Returns true when it can't be determined (a
-   *  non-login ssh shell may lack claude on PATH) so remote add is never blocked on detection. */
-  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
+  /**
+   * Best-effort `claude --version` ON THE REMOTE HOST. Null when it can't be determined.
+   *
+   * An ssh EXEC channel gets a non-interactive, non-login shell, whose rc file usually bails out
+   * early — so a claude installed via nvm/asdf/homebrew-on-PATH may be invisible to a plain
+   * `claude --version`. The remote tmux session that actually RUNS the node uses a login shell, so
+   * the probe tries that first and only then the bare command. A login shell also sources the
+   * user's profile, whose STDOUT noise (banners, neofetch, …) would otherwise be parsed as the
+   * version — hence the marker-delimited value (see `claude-version-probe.ts`).
+   */
+  private async remoteClaudeVersion(conn: SshConnection, controlPath: string): Promise<string | null> {
     try {
-      const { code, stdout } = await this.r.run(childArgs(c.conn, c.controlPath, 'claude --version'))
-      if (code !== 0) return true
-      return isSupportedClaudeVersion(stdout.trim())
+      const { stdout } = await this.r.run(childArgs(conn, controlPath, claudeVersionProbeCommand()))
+      // Markers absent ⇒ FAILED probe ⇒ null (unknown). Never scrape free-form stdout.
+      return parseClaudeVersionProbe(stdout)
     } catch {
-      return true
+      return null
     }
+  }
+
+  /**
+   * Probe the remote CLI's `--permission-mode auto` support AFTER the connect resolves, then push
+   * the answer into the live conn + the renderer (a `connected` status event carrying it).
+   *
+   * Deliberately OFF the connect critical path: it runs `$SHELL -lc`, which sources nvm/conda/rbenv
+   * inits — routinely hundreds of ms, sometimes seconds — and every remote terminal in the project
+   * waits on connect. A node launched in the gap just omits the flag (the designed fail-open
+   * fallback); the next launch, once the answer lands, gets `auto`.
+   */
+  private async probeClaudeAutoPermissionMode(projectId: string, entry: Conn): Promise<void> {
+    const supported = supportsAutoPermissionMode(
+      await this.remoteClaudeVersion(entry.conn, entry.controlPath)
+    )
+    // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
+    // connection; drop it rather than write it onto the new one.
+    if (this.conns.get(projectId) !== entry) return
+    entry.claudeAutoPermissionMode = supported
+    this.r.onStatus({ projectId, status: 'connected', claudeAutoPermissionMode: supported })
+  }
+
+  /** Is the remote claude new enough to scope credentials per config dir? Returns true when it
+   *  can't be determined so remote account add is never blocked on detection (fail-open). */
+  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
+    const version = await this.remoteClaudeVersion(c.conn, c.controlPath)
+    if (!version) return true
+    return isSupportedClaudeVersion(version)
   }
 
   async disconnect(projectId: string): Promise<void> {

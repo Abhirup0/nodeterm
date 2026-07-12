@@ -1,4 +1,5 @@
 import path from 'path'
+import type { AgentPermissionMode } from '../shared/agents/config'
 import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '../shared/types'
 
 export const PROJECT_DIR = '.nodeterm'
@@ -21,6 +22,7 @@ export interface ProjectFileV1 {
   bridges?: BridgeLink[]
   ropes?: BridgeLink[]
   defaultAccountId?: string
+  defaultPermissionMode?: AgentPermissionMode
   dinoHighScore?: number
 }
 
@@ -80,6 +82,7 @@ export function projectToFile(p: Project, rev: number, savedAt: string): Project
     ...(p.bridges ? { bridges: p.bridges } : {}),
     ...(p.ropes ? { ropes: p.ropes } : {}),
     ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
+    ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {})
   }
 }
@@ -97,6 +100,7 @@ export function fileToProject(
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(f.defaultAccountId ? { defaultAccountId: f.defaultAccountId } : {}),
+    ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),

@@ -296,3 +296,30 @@ describe('dino node serialization', () => {
     expect(node.width).toBe(600)
   })
 })
+
+describe('createAgentNode permission mode', () => {
+  it('appends the flag for claude', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, undefined, 'auto')
+    expect(node.data.initialCommand).toBe('claude --permission-mode auto')
+  })
+
+  it('stays bare in manual mode (legacy parity)', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, undefined, 'manual')
+    expect(node.data.initialCommand).toBe('claude')
+  })
+
+  it('stays bare when no mode is passed at all (legacy parity)', () => {
+    const node = createAgentNode('claude', 0)
+    expect(node.data.initialCommand).toBe('claude')
+  })
+
+  it('keeps the flag after the initial prompt so the prompt stays claude argv', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, 'fix the bug', undefined, undefined, 'auto')
+    expect(node.data.initialCommand).toBe("claude 'fix the bug' --permission-mode auto")
+  })
+
+  it('never flags a non-capable agent', () => {
+    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, undefined, 'auto')
+    expect(node.data.initialCommand).toBe('codex')
+  })
+})
