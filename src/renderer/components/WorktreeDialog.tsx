@@ -1,20 +1,18 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { WorktreeEntry } from '@shared/worktree'
-
-export interface WorktreeCreateValue {
-  repoPath: string
-  mode: 'new' | 'existing'
-  branch: string
-  baseRef: string
-  path: string
-}
+import type { WorktreeCreateValue, WorktreeEntry } from '@shared/worktree'
 
 interface Props {
+  /** 'create' = the pane/palette entry point (a new group frame); 'bind' = an existing group's
+   *  "Bind to worktree…". Only the wording differs — both can create or adopt a worktree. */
+  intent: 'create' | 'bind'
   /** Repo root, resolved from the project cwd. Empty only when the project is not a git repo. */
   repoPath: string
-  /** Worktrees that already exist for this repo, excluding the main checkout. */
+  /** Worktrees that already exist for this repo, excluding the main checkout and bound ones. */
   existing: WorktreeEntry[]
+  /** The repo's default branch (the main checkout's), used as the Base default. */
+  defaultBaseRef: string
+  /** Suggested worktree path. Returns '' when no writable base dir is known — see `pathUnknown`. */
   defaultPath: (repoPath: string, branch: string) => string
   busy: boolean
   error: string | null
@@ -25,8 +23,10 @@ interface Props {
 
 /** Create a worktree (and the group frame around it), or bind a group to one that already exists. */
 export function WorktreeDialog({
+  intent,
   repoPath,
   existing,
+  defaultBaseRef,
   defaultPath,
   busy,
   error,
@@ -36,7 +36,7 @@ export function WorktreeDialog({
 }: Props) {
   const [mode, setMode] = useState<'new' | 'existing'>('new')
   const [branch, setBranch] = useState('feature/')
-  const [baseRef, setBaseRef] = useState('main')
+  const [baseRef, setBaseRef] = useState(defaultBaseRef)
   const [path, setPath] = useState(() => defaultPath(repoPath, 'feature/'))
   const [pathEdited, setPathEdited] = useState(false)
 
@@ -44,6 +44,13 @@ export function WorktreeDialog({
   useEffect(() => {
     if (!pathEdited) setPath(defaultPath(repoPath, branch || 'work'))
   }, [repoPath, branch, pathEdited, defaultPath])
+
+  // The repo's default branch resolves asynchronously (the store fills after the first render);
+  // adopt it as long as the user has not typed a base of their own.
+  const [baseEdited, setBaseEdited] = useState(false)
+  useEffect(() => {
+    if (!baseEdited) setBaseRef(defaultBaseRef)
+  }, [defaultBaseRef, baseEdited])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -56,12 +63,17 @@ export function WorktreeDialog({
     return () => window.removeEventListener('keydown', onKey)
   }, [onCancel])
 
+  // No writable base dir is known, so we refuse to *suggest* a path — an empty base would
+  // otherwise propose `/worktrees/…` at the filesystem root. The user can still type one.
+  const pathUnknown = !pathEdited && !path.trim()
   const valid = !!repoPath.trim() && !!branch.trim() && !!path.trim() && !busy
+  const title = intent === 'bind' ? 'Bind to worktree' : 'New worktree'
+  const createLabel = intent === 'bind' ? 'Create & bind' : 'Create'
 
   return createPortal(
     <div className="confirm-overlay" onClick={onCancel}>
       <div className="confirm bind-dialog" onClick={(e) => e.stopPropagation()}>
-        <p className="confirm__msg">New worktree</p>
+        <p className="confirm__msg">{title}</p>
 
         <div className="bind-repo" title={repoPath}>
           {repoPath || 'This project is not a git repository.'}
@@ -107,7 +119,13 @@ export function WorktreeDialog({
         {mode === 'new' && (
           <label className="bind-field">
             Base
-            <input value={baseRef} onChange={(e) => setBaseRef(e.target.value)} />
+            <input
+              value={baseRef}
+              onChange={(e) => {
+                setBaseRef(e.target.value)
+                setBaseEdited(true)
+              }}
+            />
           </label>
         )}
 
@@ -122,6 +140,11 @@ export function WorktreeDialog({
           />
         </label>
 
+        {pathUnknown && (
+          <div className="bind-error">
+            No default worktree location is available. Enter a full path to create one.
+          </div>
+        )}
         {error && <div className="bind-error">{error}</div>}
 
         <div className="confirm__actions">
@@ -141,7 +164,7 @@ export function WorktreeDialog({
               })
             }
           >
-            {busy ? 'Creating…' : 'Create'}
+            {busy ? 'Creating…' : createLabel}
           </button>
         </div>
       </div>

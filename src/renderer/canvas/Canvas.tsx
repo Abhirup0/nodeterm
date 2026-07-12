@@ -72,7 +72,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
-import { WorktreeDialog, type WorktreeCreateValue } from '../components/WorktreeDialog'
+import { WorktreeDialog } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
@@ -93,10 +93,15 @@ import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
+  resolveBaseRef,
   sanitizeWorktreeBranch,
+  worktreeFromCreate,
+  worktreeFromEntry,
   type GroupWorktree,
+  type WorktreeCreateValue,
   type WorktreeEntry
 } from '@shared/worktree'
+import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { useWorktrees } from '../state/worktrees'
 import {
   agentConfig,
@@ -365,13 +370,27 @@ export function Canvas() {
   // (rather than reading getState() once) — the repo may resolve after it's already open.
   const worktreeRepoRoot = useWorktrees((s) => s.repoRoot)
   const worktreeOrphans = useWorktrees((s) => s.orphans)
-  // Writable base dir for the default worktree path (Electron userData), fetched once on mount.
-  const userDataDirRef = useRef('')
+  // git's order — entries[0] is the repo's main checkout, i.e. the real default branch.
+  const worktreeEntries = useWorktrees((s) => s.entries)
+  // Writable base dir for the default worktree path (userData on desktop, the server's data dir
+  // in the browser), fetched once on mount. STATE, not a ref: a dialog opened before the promise
+  // resolves must re-render with the real base, or it would keep suggesting nothing.
+  const [userDataDir, setUserDataDir] = useState('')
   useEffect(() => {
-    void window.nodeTerminal.userDataDir().then((d) => {
-      userDataDirRef.current = d
-    })
+    void window.nodeTerminal.userDataDir().then(setUserDataDir)
   }, [])
+  // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
+  // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
+  // guard that stops the dialog from offering a worktree a second group could bind to.
+  const boundWorktreePaths = useMemo(
+    () =>
+      new Set(
+        nodes
+          .filter((n) => n.type === 'group' && n.data.worktree)
+          .map((n) => normWorktreePath((n.data.worktree as GroupWorktree).path))
+      ),
+    [nodes]
+  )
   // Clipboard failures reach us as a window event (the bridge stub has no React handle).
   useEffect(() => {
     const onToast = (e: Event): void => {
@@ -1885,28 +1904,49 @@ export function Canvas() {
     []
   )
 
+  // Re-read git's facts after a mutation, so the store never lies: an adopted worktree must leave
+  // the orphan list (or the dialog would offer it again and a SECOND group could bind the same
+  // path) and a created one must enter `entries`. `extra` is the binding we just made — React's
+  // setNodes has not committed yet, so it is merged in by hand. Fire-and-forget: `refresh` is
+  // epoch-guarded and fails open.
+  const refreshWorktreeStore = useCallback(
+    (extra?: BoundGroup) => {
+      const project = useProjects.getState().getProject(activeProjectId ?? '')
+      if (!project?.cwd || project.ssh) return
+      const bound: BoundGroup[] = nodesRef.current
+        .filter((n) => n.type === 'group' && n.data.worktree && n.id !== extra?.groupId)
+        .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
+      if (extra) bound.push(extra)
+      void useWorktrees.getState().refresh(project.cwd, bound)
+    },
+    [activeProjectId]
+  )
+
   // Bind the worktree to an EXISTING group, or create a group around a new one. A group node
   // carries no cwd of its own — the worktree's path is what its children inherit
   // (`cwdForNewNodeIn`), so the frame IS the binding.
   const attachWorktree = useCallback(
     (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree) => {
-      if (target.groupId) {
+      let groupId = target.groupId
+      if (groupId) {
         setNodes((ns) =>
-          ns.map((n) =>
-            n.id === target.groupId ? { ...n, data: { ...n.data, worktree: wt } } : n
-          )
+          ns.map((n) => (n.id === groupId ? { ...n, data: { ...n.data, worktree: wt } } : n))
         )
       } else {
-        setNodes((ns) => {
-          const group = createGroupNode(target.at ?? viewCenter() ?? { x: 0, y: 0 }, undefined, ns.length)
-          group.data = { ...group.data, title: wt.branch, worktree: wt }
-          // Parents must come first — React Flow requires a group before its children.
-          return [group, ...(ns as CanvasNode[])]
-        })
+        const group = createGroupNode(
+          target.at ?? viewCenter() ?? { x: 0, y: 0 },
+          undefined,
+          nodesRef.current.length
+        )
+        group.data = { ...group.data, title: wt.branch, worktree: wt }
+        groupId = group.id
+        // Parents must come first — React Flow requires a group before its children.
+        setNodes((ns) => [group, ...(ns as CanvasNode[])])
       }
       markDirty()
+      refreshWorktreeStore({ groupId, worktree: wt })
     },
-    [setNodes, markDirty, viewCenter]
+    [setNodes, markDirty, viewCenter, refreshWorktreeStore]
   )
 
   const createWorktreeAndGroup = useCallback(
@@ -1927,14 +1967,8 @@ export function Canvas() {
         setWorktreeError(res.message) // inline, never window.alert
         return
       }
-      attachWorktree(target, {
-        repoPath: v.repoPath,
-        branch: v.branch,
-        baseRef: v.baseRef,
-        path: v.path,
-        // We created this directory, so Remove may delete it.
-        createdByApp: true
-      })
+      // We created this directory, so `createdByApp` is true — Remove may delete it.
+      attachWorktree(target, worktreeFromCreate(v))
       setWorktreeDialog(null)
     },
     [attachWorktree, worktreeDialog]
@@ -1943,16 +1977,14 @@ export function Canvas() {
   const bindExistingWorktree = useCallback(
     (e: WorktreeEntry) => {
       const target = worktreeDialog
-      const root = useWorktrees.getState().repoRoot
-      if (!target || !root || !e.branch) return
-      attachWorktree(target, {
-        repoPath: root,
-        branch: e.branch,
-        baseRef: 'main',
-        path: e.path,
-        // The user (or a previous Unbind) made this one — Remove must not delete it by default.
-        createdByApp: false
-      })
+      const { repoRoot, entries } = useWorktrees.getState()
+      if (!target || !repoRoot) return
+      // The user (or a previous Unbind) made this one — `createdByApp` is false, so Remove must
+      // not delete it by default. The base ref is the MAIN checkout's branch, not a hardcoded
+      // 'main' (a master/trunk repo would later merge at a ref that does not exist).
+      const wt = worktreeFromEntry(e, repoRoot, resolveBaseRef(entries))
+      if (!wt) return
+      attachWorktree(target, wt)
       setWorktreeDialog(null)
     },
     [attachWorktree, worktreeDialog]
@@ -4266,11 +4298,15 @@ export function Canvas() {
 
       {worktreeDialog && (
         <WorktreeDialog
+          // Opened from a group's "Bind to worktree…" (groupId set) vs. the pane/palette's
+          // "New worktree…" — the header and the primary button say which.
+          intent={worktreeDialog.groupId ? 'bind' : 'create'}
           repoPath={worktreeRepoRoot ?? ''}
-          existing={worktreeOrphans}
+          existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
+          defaultBaseRef={resolveBaseRef(worktreeEntries)}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
-              userDataDirRef.current,
+              userDataDir,
               repoPath.split('/').pop() || 'repo',
               sanitizeWorktreeBranch(branch)
             )
