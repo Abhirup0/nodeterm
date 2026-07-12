@@ -1663,7 +1663,11 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${n}`],
+        // `-J` unwraps: capture-pane hard-wraps each line at the HOST pane's width, and a client
+        // whose terminal is narrower (a phone) would re-wrap those fragments into ragged nonsense.
+        // `-E -1` excludes the visible screen — tmux repaints that itself on attach (see `warmSeed`).
+        // prettier-ignore
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-J', '-t', sessionName(persistKey), '-S', `-${n}`, '-E', '-1'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return trimToBytes(stdout, HISTORY_MAX_BYTES)

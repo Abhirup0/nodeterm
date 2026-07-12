@@ -97,7 +97,7 @@ export function remoteCaptureHistoryArgs(
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S -${n}`
+    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -J -t ${sessionId} -S -${n} -E -1`
   )
 }
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {

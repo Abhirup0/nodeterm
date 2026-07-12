@@ -31,6 +31,7 @@ import {
   repaintResync,
   reportedSize,
   seedPaint,
+  warmSeed,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
@@ -930,27 +931,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             // KEYBOARD INPUT path) and the initialCommand / agent-resume — must still be wired, or
             // the terminal streams output, looks alive, and silently accepts no input forever.
             const paint = seedPaint({ replay, superseded, history, screen })
-            if (paint === 'history') {
-              // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
-              // start the block from a known-clean SGR state rather than an arbitrary one.
-              term.write('\x1b[0m')
-              // capture-pane ends with a trailing newline: writing it would drop the cursor one
-              // row below the last captured row, xterm would scroll, and tmux's redraw would
-              // repaint that row again — one duplicated line at the seam.
-              term.write(toXtermText(stripTrailingNewline(history)))
-            } else if (paint === 'create-screen' && screen) {
-              // CO-ATTACH JOINER, history capture failed. A joiner also gets `fresh:false`, so it
-              // lands here — and `captureHistory` is the source that WINS for it: it is a strict
-              // superset of `PtyCreateResult.screen` (the same tmux pane, plus the scrollback above
-              // it), so the joiner opens on what its teammate sees AND can scroll back. Painting
-              // both would splice the same screen onto the canvas twice — hence one source, not two.
-              //
-              // `screen` is the FALLBACK for the one case the history path cannot cover: it is
-              // captured server-side inside `create()` and is guaranteed non-empty when present,
-              // whereas `captureHistory` returns '' whenever tmux/ssh is unavailable. Without this
-              // the joiner would open on a blank-but-live terminal — the exact failure the create
-              // result's screen exists to prevent. No reset: this xterm is empty.
-              term.write(toXtermText(screen))
+            if (paint !== 'none') {
+              // `warmSeed` owns the exact bytes: the history, pushed `term.rows` lines above the
+              // fold so tmux's in-place redraw cannot leave a second copy of it behind (see its
+              // doc), plus — for a CO-ATTACH JOINER — the visible `screen` from `create()`, which
+              // is the one thing the history no longer carries (the capture excludes the visible
+              // screen, because tmux is about to paint it) and which a joiner never gets a redraw
+              // for. A joiner whose history capture failed still opens on its teammate's screen.
+              term.write(warmSeed({ history, screen, rows: term.rows }))
             }
           }
         } catch (err) {

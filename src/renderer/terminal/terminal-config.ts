@@ -203,6 +203,41 @@ export function seedPaint(opts: {
   return shouldApplyResync(opts.screen) ? 'create-screen' : 'none'
 }
 
+/**
+ * The exact bytes a warm reattach writes into a fresh xterm, from tmux's scrollback (`history`) and,
+ * for a joiner, the visible screen (`screen`).
+ *
+ * The subtle part is the padding. tmux's attach redraw is `\x1b[H\x1b[2J` + a repaint, and
+ * `eraseInDisplay(2)` clears the viewport rows **in place** — it does not scroll them into
+ * scrollback. So whatever we leave sitting in the viewport SURVIVES the redraw, above the screen
+ * tmux then paints. The capture is hard-wrapped at the HOST pane's width, so it re-wraps to a
+ * different number of rows here, and the leftover can never line up with what the redraw overwrites:
+ * on a narrow client (a phone) the tail of the history reappears as a second copy the moment you
+ * scroll back. Emitting `rows` newlines pushes the history entirely above the fold, so the redraw
+ * lands on blank lines and overwrites nothing of ours. (The capture excludes the visible screen —
+ * `capture-pane -E -1` — precisely because tmux is about to paint it.)
+ *
+ * A **joiner** gets no redraw (it did not resize, so tmux never repaints for it), which is why its
+ * `screen` is painted here instead.
+ */
+export function warmSeed(opts: {
+  history?: string | null
+  screen?: string | null
+  /** The xterm's row count — how far the history has to be pushed to clear the viewport. */
+  rows: number
+}): string {
+  const out: string[] = []
+  const history = opts.history ? stripTrailingNewline(opts.history) : ''
+  const screen = shouldApplyResync(opts.screen) ? stripTrailingNewline(opts.screen) : ''
+  if (history) {
+    // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence — start from a
+    // known-clean SGR state rather than an arbitrary one.
+    out.push('\x1b[0m', toXtermText(history), '\r\n'.repeat(Math.max(1, opts.rows)))
+  }
+  if (screen) out.push('\x1b[0m', toXtermText(screen))
+  return out.join('')
+}
+
 /** The slice of xterm the resync repaint drives (so it can be tested without a DOM). */
 export interface ResyncTarget {
   write(data: string, done?: () => void): void

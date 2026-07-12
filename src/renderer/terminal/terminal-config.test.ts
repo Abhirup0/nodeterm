@@ -14,6 +14,7 @@ import {
   repaintResync,
   reportedSize,
   seedPaint,
+  warmSeed,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
@@ -451,8 +452,8 @@ describe('seedPaint', () => {
     expect(
       seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: 'live screen' })
     ).toBe('create-screen')
-    // history WINS when both are available — it is a strict superset of the screen, and painting
-    // both would splice the same screen onto the canvas twice.
+    // Both available: the seed is still driven by the history (`warmSeed` paints the joiner's
+    // screen underneath it — the capture EXCLUDES the visible screen, so the two don't overlap).
     expect(
       seedPaint({ replay: 'warm-history', superseded: false, history: 'hist', screen: 'scr' })
     ).toBe('history')
@@ -582,5 +583,44 @@ describe('repaintResync', () => {
     expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
     expect(term.ops).toContain('write:ONE')
     expect(term.ops).toContain('write:TWO')
+  })
+})
+
+describe('warmSeed', () => {
+  const rows = 20
+
+  it('pushes the history above the fold so tmux\'s in-place redraw cannot leave a second copy', () => {
+    const seed = warmSeed({ history: 'line1\nline2\n', rows })
+    // The history itself, CRLF-converted, with its trailing newline consumed by the padding.
+    expect(seed).toContain('line1\r\nline2')
+    // Exactly `rows` newlines after it: the viewport is blank when tmux repaints it, so nothing of
+    // ours survives in the viewport to reappear in the scrollback.
+    const padding = seed.slice(seed.indexOf('line2') + 'line2'.length)
+    expect(padding).toBe('\r\n'.repeat(rows))
+  })
+
+  it('starts the block from a clean SGR state (the capture can begin mid-escape)', () => {
+    expect(warmSeed({ history: 'x\n', rows }).startsWith('\x1b[0m')).toBe(true)
+  })
+
+  it('writes nothing at all when there is no history and no screen', () => {
+    expect(warmSeed({ history: '', screen: '', rows })).toBe('')
+    expect(warmSeed({ history: null, screen: null, rows })).toBe('')
+  })
+
+  it('emits no padding when there is no history (nothing to push above the fold)', () => {
+    expect(warmSeed({ screen: 'live\n', rows })).toBe('\x1b[0m' + 'live')
+  })
+
+  it("paints a joiner's screen after the history — it gets no tmux redraw of its own", () => {
+    const seed = warmSeed({ history: 'old\n', screen: 'now\n', rows })
+    expect(seed.indexOf('old')).toBeLessThan(seed.indexOf('now'))
+    expect(seed.endsWith('now')).toBe(true)
+    // …and the history is still pushed above the fold, so the screen lands on blank lines.
+    expect(seed).toContain('\r\n'.repeat(rows))
+  })
+
+  it('never divides by a zero-row terminal', () => {
+    expect(warmSeed({ history: 'x\n', rows: 0 })).toBe('\x1b[0m' + 'x' + '\r\n')
   })
 })
