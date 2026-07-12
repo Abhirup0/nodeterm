@@ -18,6 +18,16 @@ import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
+import {
+  attachReplay,
+  copyKeyAction,
+  createDataGate,
+  disposalAction,
+  stripTrailingNewline,
+  toXtermText,
+  xtermScrollback,
+  type SessionLife
+} from '../terminal/terminal-config'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -85,8 +95,10 @@ async function resolveSshRemote(
   // The remote hook endpoint (reverse tunnel + remote install) is set up alongside the master;
   // pass it through so the remote tmux session carries the hook env. Optional (fail-open).
   const hookEndpointPath = useSshConn.getState().getHookEndpointPath(projectId)
-  // The remote tmux config (mouse on → scroll; set-clipboard on → OSC 52) is written + sourced
-  // alongside the master; pass its path so a fresh remote session launches with `-f`. Optional.
+  // The remote tmux config (mouse off, so a drag is the emulator's own selection; set-clipboard on
+  // so an app that emits OSC 52 itself still reaches the local clipboard; history-limit) is written
+  // + sourced alongside the master; pass its path so a fresh remote session launches with `-f`.
+  // Optional.
   const tmuxConfPath = useSshConn.getState().getTmuxConfPath(projectId)
   // The connection's resolved remote $HOME, used to build an ABSOLUTE remote CLAUDE_CONFIG_DIR for a
   // managed remote account (Task 12). Optional (fail-open): absent → the remote account env is
@@ -124,6 +136,13 @@ interface ParkedTerminal {
   sentRows: number
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
+  /**
+   * Lifetime of the session itself, SHARED with the effect that created it (and with the effect
+   * that later adopts this entry). `dead` flips on the final dispose, `killed` guards the PTY kill
+   * so a session is killed at most once even when a still-in-flight spawn continuation, the effect
+   * cleanup and the park dispose all race for it.
+   */
+  life: SessionLife & { killed: boolean }
   timer: ReturnType<typeof setTimeout>
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
@@ -131,8 +150,15 @@ const TERM_PARK_MS = 5 * 60 * 1000
 
 function disposeParked(p: ParkedTerminal): void {
   clearTimeout(p.timer)
+  // Mark the session dead BEFORE tearing it down: a spawn continuation still awaiting its history
+  // seed reads this to see that the session it handed off no longer exists (→ teardown, not
+  // continue-parked), instead of wiring listeners onto a killed session.
+  p.life.dead = true
   p.cleanups.forEach((fn) => fn())
-  p.transport.kill(p.sessionId)
+  if (!p.life.killed) {
+    p.life.killed = true
+    p.transport.kill(p.sessionId)
+  }
   p.term.dispose()
 }
 
@@ -180,6 +206,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const fontSize = useSettings((s) => s.settings.fontSize)
   const fontFamily = useSettings((s) => s.settings.fontFamily)
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -332,7 +359,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         fontSize: s.fontSize,
         cursorBlink: s.cursorBlink,
         theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
-        allowProposedApi: true
+        allowProposedApi: true,
+        // Scrolling is xterm's job now (tmux's mouse is off), so it needs a real scrollback —
+        // the default is 1000 lines. Capped: the cost is per node and a canvas holds many.
+        scrollback: xtermScrollback(s.tmuxScrollback),
+        // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
+        // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
+        macOptionClickForcesSelection: true
       })
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
@@ -374,12 +407,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       loadWebgl()
       fit.fit()
       patchTerminalScale(term, getZoom)
-      // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
-      // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
-      // query so a remote program can never read the local clipboard. Returning true swallows the
-      // sequence (also the read query). This is additive: the local tmux conf also has set-clipboard
-      // on, so local tmux DOES emit OSC 52 and this handler fires too — a harmless redundant write of
-      // the same selection (pbcopy already wrote it), NOT a no-op.
+      // OSC 52 clipboard write: route the decoded text to the local clipboard. tmux's mouse is off,
+      // so tmux copy-mode no longer emits OSC 52 on our behalf — this handler is now the ONLY
+      // clipboard path for programs that emit OSC 52 themselves (vim "+y, gh, yazi), local and
+      // remote alike (both tmux confs keep `set-clipboard on` so those sequences pass through).
+      // Selection copy is xterm's own (see the Cmd+C / Ctrl+Shift+C handler below), not this.
+      // WRITE-ONLY — `parseOsc52` returns null for a `?` read query so a remote program can never
+      // read the local clipboard. Returning true swallows the sequence (also the read query).
       term.parser.registerOscHandler(52, (data) => {
         const text = parseOsc52(data)
         if (text !== null) window.nodeTerminal.clipboard.writeText(text)
@@ -387,20 +421,43 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     }
 
-    // Cmd+C copies the terminal selection (xterm renders to canvas, so the DOM-selection
-    // copy used elsewhere can't see it). Ctrl+C is left alone so it still sends SIGINT.
+    // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
+    // renders to a canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is
+    // left alone so it still sends SIGINT.
+    // The chord is swallowed whether or not there is a selection (`copyKeyAction`): with no
+    // selection, falling through would let xterm map ctrl+c to \x03 and SIGINT the foreground
+    // process — the exact opposite of the "copy" we advertise.
+    // Returning false only tells xterm to skip the key; the browser default still runs unless we
+    // preventDefault() ourselves. Note that in Chromium (Server Edition, or `npm run dev` with
+    // DevTools attached) Ctrl+Shift+C is ALSO the browser's inspect-element picker and that one is
+    // NOT preventable by a page — hence Ctrl+Insert, which no browser reserves.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'c') {
-        if (term.hasSelection()) {
-          window.nodeTerminal.clipboard.writeText(term.getSelection())
-          return false
-        }
-      }
-      return true
+      const action = copyKeyAction(e, term.hasSelection())
+      if (action === 'pass') return true
+      e.preventDefault()
+      if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
+      return false
     })
 
     let sessionId: string | null = parked ? parked.sessionId : null
     let disposed = false
+    // Shared with the park entry this session travels through: an adopted terminal keeps the very
+    // same PTY session, so its lifetime (and its kill-once guard) must be the same record.
+    const life: SessionLife & { killed: boolean } = parked
+      ? parked.life
+      : { dead: false, killed: false }
+    // The park entry THIS effect's cleanup handed the session off to, if it parked one. Closure
+    // state on purpose: the parked-terminals MAP cannot answer "was this session handed off?" —
+    // an adoption deletes the entry, so park-then-adopt would read as "never parked".
+    let handedOff: ParkedTerminal | null = null
+    // Kill the PTY client at most once per session: the effect cleanup, a park dispose and a
+    // still-in-flight spawn continuation can all reach for it. `PtyManager.kill` tolerates a
+    // repeat, but `RemoteTransport.kill` forwards to the relay unconditionally.
+    const killSession = (sid: string): void => {
+      if (life.killed) return
+      life.killed = true
+      transport.kill(sid)
+    }
     // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
     // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
     // mount) must not send one — on a bulk project load that redraw doubles per node.
@@ -477,10 +534,22 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sshRemote
         })
         .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
-        if (disposed) {
-          transport.kill(sid)
-          return
+        // Disposal while the spawn/seed was in flight is NOT necessarily a teardown: an unmount
+        // with a live session PARKS it (same xterm, same PTY client, same `cleanups` array), and
+        // killing it here would leave the node permanently dead. That holds even if the user
+        // switched straight BACK: the remount adopts the entry and deliberately re-wires nothing —
+        // it relies on this continuation to finish the wiring (gate.open / onExit / onData). So the
+        // question is the closure's `handedOff`, not the (already emptied) parked-terminals map.
+        const onDisposed = (): boolean => {
+          const action = disposalAction({ disposed, handedOff: handedOff?.life })
+          if (action !== 'teardown') return false
+          offData?.()
+          killSession(sid)
+          return true
         }
+        // Assigned below, once the data listener exists; before that there is nothing to detach.
+        let offData: (() => void) | undefined
+        if (onDisposed()) return
         sessionId = sid
         if (fellBack) setAccountFallback(true)
         // Catch up a size change that landed while the spawn was in flight (resize() skips the
@@ -490,44 +559,94 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sentRows = term.rows
           transport.resize(sid, term.cols, term.rows)
         }
-        // Cold restart: the tmux session (and anything that was running in it) is gone — replay
-        // the last persisted scrollback so the user sees where they left off. Warm reattach
-        // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
-        // duplicate it. Skipped on the very first open too (`fresh` true but initialCommand set).
-        if (fresh && !data.initialCommand) {
-          const snapshot = await scrollbackPromise
-          if (disposed) {
-            transport.kill(sid)
-            return
-          }
-          if (snapshot) {
-            term.write(snapshot)
-            term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
-          }
-        }
         // Flow control: track xterm's unprocessed write backlog (bytes handed to
-        // term.write but not yet parsed). Past a high watermark we pause the source so
-        // a flood can't grow this buffer without bound; we resume once it drains.
+        // term.write but not yet parsed, plus anything still queued in the gate below). Past a
+        // high watermark we pause the source so a flood can't grow this buffer without bound;
+        // we resume once it drains.
         let pending = 0
         let paused = false
         const HIGH_WATER = 1 << 20 // 1 MB
         const LOW_WATER = 1 << 18 //  256 KB
-        cleanups.push(
-          transport.onData(sid, (chunk) => {
-            pending += chunk.length
-            if (!paused && pending > HIGH_WATER) {
-              paused = true
-              transport.setFlow(sid, false)
+        const writeChunk = (chunk: string): void => {
+          term.write(chunk, () => {
+            pending -= chunk.length
+            if (paused && pending < LOW_WATER) {
+              paused = false
+              transport.setFlow(sid, true)
             }
-            term.write(chunk, () => {
-              pending -= chunk.length
-              if (paused && pending < LOW_WATER) {
-                paused = false
-                transport.setFlow(sid, true)
-              }
-            })
           })
-        )
+        }
+        // Subscribe BEFORE the seed below: main pushes pty data on a timer regardless of
+        // listeners and an IPC event with no listener is dropped, while tmux emits its attach
+        // redraw within tens of ms — i.e. inside the seed's subprocess/ssh round-trip. The gate
+        // queues those chunks until the seed is written, then drains them in order. Queued bytes
+        // still count towards `pending`, so a flood during the gap pauses the source.
+        const gate = createDataGate(writeChunk)
+        offData = transport.onData(sid, (chunk) => {
+          pending += chunk.length
+          if (!paused && pending > HIGH_WATER) {
+            paused = true
+            transport.setFlow(sid, false)
+          }
+          gate.push(chunk)
+        })
+        cleanups.push(offData)
+        // Seed the (fresh) emulator with the history it can't see: a cold restart replays the
+        // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
+        // tmux's own scrollback. Parked terminals get neither — their buffer is still correct
+        // and seeding it would duplicate content.
+        // The gate MUST be opened whatever happens in here (`finally`): the data listener already
+        // exists, so a throw between it and `gate.open()` would queue chunks forever — the source
+        // pauses at the high-water mark and the terminal freezes silently and permanently. The
+        // only case that leaves it shut is a real teardown, where the xterm is disposed anyway.
+        let toreDown = false
+        try {
+          const replay = attachReplay({
+            parked: !!parked,
+            fresh,
+            hasInitialCommand: !!data.initialCommand
+          })
+          if (replay === 'cold-snapshot') {
+            const snapshot = await scrollbackPromise
+            if ((toreDown = onDisposed())) return
+            if (snapshot) {
+              // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
+              // with convertEol:false, so writing it raw would render as a staircase.
+              term.write(toXtermText(snapshot))
+              term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
+            }
+          } else if (replay === 'warm-history') {
+            // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
+            // missing from this fresh xterm. `captureHistory` includes the visible screen too —
+            // tmux's redraw (\x1b[H\x1b[2J) erases exactly those lines in place, so it overwrites
+            // the tail of what we write here instead of leaving a gap. This is the session's REAL
+            // history, not a restore boundary — it gets no separator line.
+            // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
+            // tmux is only reachable once `create()` has registered the session's ssh target — an
+            // earlier call would silently fall through to the LOCAL tmux and return ''.
+            // Goes through the TRANSPORT, not `window.nodeTerminal.pty`: a relay-backed node's tmux
+            // session lives on the HOST, so the local PtyManager has nothing to capture and the
+            // node would come up with an empty scrollback.
+            const history = await transport.captureHistory(id).catch(() => '')
+            if ((toreDown = onDisposed())) return
+            if (history) {
+              // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
+              // start the block from a known-clean SGR state rather than an arbitrary one.
+              term.write('\x1b[0m')
+              // capture-pane ends with a trailing newline: writing it would drop the cursor one
+              // row below the last captured row, xterm would scroll, and tmux's redraw would
+              // repaint that row again — one duplicated line at the seam.
+              term.write(toXtermText(stripTrailingNewline(history)))
+            }
+          }
+        } catch (err) {
+          // Never let a seed failure freeze the terminal: the live stream matters more than the
+          // history. `finally` still opens the gate below.
+          console.error('[terminal] history seed failed', err)
+        } finally {
+          // Seed written — release the PTY output that arrived while it was in flight.
+          if (!toreDown) gate.open()
+        }
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
@@ -625,6 +744,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sentCols,
           sentRows,
           cleanups,
+          life,
           timer: setTimeout(() => {
             if (parkedTerminals.get(id) === entry) {
               parkedTerminals.delete(id)
@@ -634,28 +754,37 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         }
         disposeParkedTerminal(id) // defensive: never stack two entries for one node
         parkedTerminals.set(id, entry)
+        // A spawn continuation still awaiting its history seed reads this to know the session
+        // survived this unmount (parked, or adopted by a remount) and must be finished, not killed.
+        handedOff = entry
         return
       }
+      // Real teardown (respawn / permanent delete). `life` is shared, so a spawn continuation of an
+      // EARLIER effect (this terminal may have been adopted from a park) sees the session die here
+      // and tears down instead of wiring listeners onto it; `killSession` keeps the kill single.
+      life.dead = true
       cleanups.forEach((fn) => fn())
-      if (sessionId) transport.kill(sessionId)
+      if (sessionId) killSession(sessionId)
       term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
 
-  // Live-apply font/cursor settings to the running terminal.
+  // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
+  // reaches the terminals already on the canvas instead of only the next fresh one.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
     term.options.fontFamily = fontFamily
     term.options.cursorBlink = cursorBlink
+    term.options.scrollback = xtermScrollback(tmuxScrollback)
     try {
       fitRef.current?.fit()
     } catch {
       // ignore
     }
-  }, [fontSize, fontFamily, cursorBlink])
+  }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
 
   const toggleCollapse = () =>
     setNodes((ns) =>

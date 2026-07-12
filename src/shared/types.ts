@@ -221,6 +221,9 @@ export interface PtyApi {
   capture(persistKey: string, full?: boolean): Promise<string>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
+  /** tmux scrollback above the visible screen, for hydrating a fresh emulator on a warm
+   *  reattach (the emulator owns scrolling now; tmux only redraws the visible screen). '' if none. */
+  captureHistory(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
@@ -1002,6 +1005,13 @@ export interface RemoteClientApi {
   resize(connectionId: string, sessionId: string, cols: number, rows: number): void
   /** Kill a remote PTY (the host detaches; its tmux session survives host-side). */
   kill(connectionId: string, sessionId: string): void
+  /**
+   * The host-side scrollback (tmux history + visible screen) of a session this connection is
+   * ALREADY attached to — the client hydrates its empty xterm scrollback with it. Keyed by the
+   * session, never by a tmux name: the host only serves the history of streams it granted.
+   * Degrades to '' (no connection / unknown stream / host error).
+   */
+  captureHistory(connectionId: string, sessionId: string): Promise<string>
   /** Listen for a remote PTY's output. Returns an unsubscribe function. */
   onData(connectionId: string, sessionId: string, listener: (data: string) => void): () => void
   /** Fires when a remote PTY exits. Returns an unsubscribe function. */
