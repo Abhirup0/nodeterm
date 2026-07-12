@@ -11,6 +11,7 @@ import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { PublishDialog } from './PublishDialog'
+import type { ScmScope } from '@shared/scm-scope'
 
 interface SourceControlPanelProps {
   onClose: () => void
@@ -18,6 +19,11 @@ interface SourceControlPanelProps {
   onOpenDiff: (relPath: string, staged: boolean) => void
   onOpenCommitDiff: (relPath: string, commitOid: string) => void
   onExplainCommit: (prompt: string) => void
+  /** The checkouts this panel can operate on: the main one, plus every bound worktree. */
+  scopes: ScmScope[]
+  /** The scope to open on (derived from the canvas selection by the caller). */
+  defaultScope?: ScmScope
+  onNewWorktree: () => void
 }
 
 const AUTO_FETCH_MS = 180_000
@@ -46,14 +52,25 @@ export function SourceControlPanel({
   onRunInTerminal,
   onOpenDiff,
   onOpenCommitDiff,
-  onExplainCommit
+  onExplainCommit,
+  scopes,
+  defaultScope,
+  onNewWorktree
 }: SourceControlPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   // SSH project: git ops run on the remote repo over the master, so the cwd is the project's
   // exact remoteCwd (the remote-git registry matches by exact string — must not be transformed).
   // Local projects are byte-identical (the SSH branch fires only when `project.ssh` is set).
   const isSsh = !!project?.ssh
-  const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+  // The panel is mounted per open (`scOpen` in Canvas), so seeding the active scope from the
+  // caller's default here applies the smart default on EVERY open, not just the first.
+  const [scopeId, setScopeId] = useState<string>(() => defaultScope?.id ?? 'main')
+  const [scopeMenu, setScopeMenu] = useState<{ top: number; left: number } | null>(null)
+  // A scope whose group was deleted/unbound while the panel is open falls back to the main
+  // checkout rather than pointing at a checkout that no longer exists.
+  const scope = scopes.find((s) => s.id === scopeId) ?? scopes.find((s) => s.id === 'main')
+  // SSH projects have no worktrees (v1), so the remote cwd is still the whole story there.
+  const cwd = project?.ssh?.remoteCwd ?? scope?.cwd
   // For an SSH project the master may still be connecting when the panel mounts; its controlPath
   // appears once `setConn` runs (after `setActiveRemote` arms remote routing). Observing it lets the
   // refresh re-run when the master connects. Local projects have no entry → undefined → no effect.
@@ -364,7 +381,18 @@ export function SourceControlPanel({
         {cwd && status && status.hasRepo && (
           <>
             <div className="scm-bar">
-              <span className="scm-repo">⌥ {status.repoName}</span>
+              {/* The scope chip replaces the static repo-name chip: it names the checkout every
+                  action below operates on (main checkout or a bound worktree). */}
+              <button
+                className="scm-scope"
+                title={scope?.cwd}
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setScopeMenu({ top: r.bottom + 4, left: r.left })
+                }}
+              >
+                ⌥ {scope?.label ?? status.repoName} ⌄
+              </button>
               <button
                 className="scm-branch"
                 onClick={(e) => {
@@ -491,6 +519,45 @@ export function SourceControlPanel({
             </div>
           </>
         )}
+
+        {scopeMenu &&
+          createPortal(
+            <>
+              <div
+                className="tab-backdrop"
+                style={{ zIndex: 78 }}
+                onClick={() => setScopeMenu(null)}
+              />
+              <div
+                className="tab-menu"
+                style={{ top: scopeMenu.top, left: scopeMenu.left, zIndex: 80 }}
+              >
+                {scopes.map((s) => (
+                  <button
+                    key={s.id}
+                    title={s.cwd}
+                    onClick={() => {
+                      setScopeMenu(null)
+                      setScopeId(s.id)
+                    }}
+                  >
+                    {s.id === scope?.id ? '● ' : '   '}
+                    {s.label}
+                  </button>
+                ))}
+                <div className="ctx-sep" />
+                <button
+                  onClick={() => {
+                    setScopeMenu(null)
+                    onNewWorktree()
+                  }}
+                >
+                  New worktree…
+                </button>
+              </div>
+            </>,
+            document.body
+          )}
 
         {branchMenu &&
           status &&

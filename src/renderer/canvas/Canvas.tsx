@@ -102,6 +102,7 @@ import {
   type WorktreeEntry
 } from '@shared/worktree'
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
+import { scmScopes, defaultScmScope } from '@shared/scm-scope'
 import { useWorktrees } from '../state/worktrees'
 import {
   agentConfig,
@@ -391,6 +392,33 @@ export function Canvas() {
       ),
     [nodes]
   )
+  // The checkouts Source Control can act on: the project's own, plus every bound worktree on this
+  // canvas. Computed ONCE here so the default handed to the panel is an element of the very list
+  // the panel receives (a default from another array would name a scope it cannot select).
+  const activeProjectCwd = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.cwd
+  )
+  const activeProjectName = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.name
+  )
+  const scmScopeList = useMemo(
+    () =>
+      scmScopes(
+        { cwd: activeProjectCwd, name: activeProjectName ?? 'repo' },
+        nodes
+          .filter((n) => n.type === 'group' && n.data.worktree)
+          .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
+      ),
+    [activeProjectCwd, activeProjectName, nodes]
+  )
+  // The group the selection points at: a selected group node itself, else a selected node's parent
+  // group. That group's scope is what Source Control opens on (same selection source — `n.selected`
+  // — the context-menu/delete paths read).
+  const selectedGroupIdForScm = useMemo(() => {
+    const sel = nodes.find((n) => n.selected)
+    if (!sel) return null
+    return sel.type === 'group' ? sel.id : (sel.parentId ?? null)
+  }, [nodes])
   // Clipboard failures reach us as a window event (the bridge stub has no React handle).
   useEffect(() => {
     const onToast = (e: Event): void => {
@@ -4214,6 +4242,9 @@ export function Canvas() {
           onOpenDiff={openDiff}
           onOpenCommitDiff={openCommitDiff}
           onExplainCommit={explainCommit}
+          scopes={scmScopeList}
+          defaultScope={defaultScmScope(scmScopeList, selectedGroupIdForScm)}
+          onNewWorktree={() => openWorktreeDialog(null)}
         />
       )}
 
