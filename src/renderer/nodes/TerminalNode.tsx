@@ -27,7 +27,16 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
-import { reportFocus, releaseFocus } from '../state/presence'
+import {
+  closedByLabel,
+  isLetterboxed,
+  reportedSize,
+  shouldApplyResync,
+  toXtermText,
+  type TermSize
+} from '../terminal/terminal-config'
+import { reportFocus, releaseFocus, usePresence } from '../state/presence'
+import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
@@ -121,8 +130,6 @@ interface ParkedTerminal {
   search: SearchAddon
   transport: TerminalTransport
   sessionId: string
-  sentCols: number
-  sentRows: number
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
   timer: ReturnType<typeof setTimeout>
@@ -155,6 +162,45 @@ const noParkIds = new Set<string>()
 export function disposeTerminalOnUnmount(id: string): void {
   noParkIds.add(id)
   disposeParkedTerminal(id)
+  coStates.delete(id)
+}
+
+/**
+ * Co-attach UI state per node — kept OUTSIDE React on purpose.
+ *
+ * The transport listeners (onSize / onClosed / onResync) are wired ONCE, in the spawn
+ * continuation, and they SURVIVE a park: an adopted terminal carries its `cleanups` over and never
+ * re-subscribes. A remounted node is a NEW React instance, so a `setState` captured by those
+ * listeners would update a component that no longer exists. They publish here instead, and
+ * whichever instance is currently mounted subscribes.
+ *
+ * `closed` is also the respawn guard: once another client has DESTROYED this node's session
+ * (tmux kill-session — gone for everyone), a remount must NOT call `transport.create` again. Core
+ * can only make that respawn fresh, not impossible — it would resurrect a terminal its owner
+ * deliberately killed. Cleared only on permanent deletion (disposeTerminalOnUnmount).
+ */
+interface CoState {
+  /** The pty runs at a SMALLER subscriber's grid than we could fit → center + letterbox. */
+  letterbox: boolean
+  /** Set once the session was destroyed by someone else. `by` is null for an unattributed destroy. */
+  closed: { by: ClientId | null } | null
+}
+const NO_CO: CoState = { letterbox: false, closed: null }
+const coStates = new Map<string, CoState>()
+const coSubs = new Map<string, (s: CoState) => void>()
+
+function getCo(id: string): CoState {
+  return coStates.get(id) ?? NO_CO
+}
+
+function setCo(id: string, patch: Partial<CoState>): void {
+  const prev = getCo(id)
+  const next = { ...prev, ...patch }
+  // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
+  // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
+  if (next.letterbox === prev.letterbox && next.closed === prev.closed) return
+  coStates.set(id, next)
+  coSubs.get(id)?.(next)
 }
 
 /**
@@ -187,6 +233,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
+  // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
+  // effect), so effects outside that closure (font/cursor changes) resize through the same path.
+  const applyFitRef = useRef<(() => void) | null>(null)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
@@ -255,6 +304,20 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // Set when the session fell back to the system account because this node's account folder was
   // missing at spawn (Task 3 fallback) — flags the account chip with a warning tint + tooltip.
   const [accountFallback, setAccountFallback] = useState(false)
+  // Co-attach state published by the (park-surviving) transport listeners — see CoState.
+  const [co, setCo_] = useState<CoState>(() => getCo(id))
+  useEffect(() => {
+    coSubs.set(id, setCo_)
+    setCo_(getCo(id)) // catch up anything published while this instance was mounting
+    return () => {
+      if (coSubs.get(id) === setCo_) coSubs.delete(id)
+    }
+  }, [id])
+  // The name of the peer who closed this node. Read NON-reactively (getState, not a selector): the
+  // presence store is written at cursor rate and its perf contract reserves subscriptions for the
+  // presence components — a per-terminal subscriber would run on every one of those writes. The
+  // overlay is terminal state anyway, so resolving the name when `co.closed` appears is enough.
+  const closedName = co.closed ? closedByLabel(co.closed.by, usePresence.getState().peers) : ''
 
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
   const readBuffer = useCallback(() => {
@@ -358,22 +421,63 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
     }
 
+    let sessionId: string | null = parked ? parked.sessionId : null
+    let disposed = false
+    // Last cols/rows REPORTED to the pty (seeded at create): a resize IPC makes tmux redraw the
+    // whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after mount)
+    // must not send one — on a bulk project load that redraw doubles per node.
+    // NOT carried over from the park entry: parking REPORTS "not viewing" (null, null), which drops
+    // this client out of the pty's size set. Keeping the old values would make the common same-size
+    // adopt send nothing at all — we would never re-enter the set, while still being told to render
+    // the other viewer's (larger) grid. Zeroed here, so an adopting client always re-reports.
+    let sentCols = 0
+    let sentRows = 0
+    /** What we last reported — the reference the letterbox is measured against. */
+    let fitted: TermSize | null = null
+
+    /**
+     * Co-attach sizing: we REPORT what we could render (`proposeDimensions`) and the pty tells us
+     * what it actually runs at — the smallest subscriber's grid (`onSize`).
+     *
+     * Two rules, both load-bearing:
+     *  - a REPORTED fit is also applied locally, because that is exactly what the pty assumes we
+     *    are showing (PtyManager.resize → `session.shown`). If it is not the effective size, the
+     *    broadcast corrects us right back; solo, the min of a one-element set IS our fit, so no
+     *    broadcast is ever sent and this is the old `fit.fit()` + report, unchanged.
+     *  - an UNCHANGED fit resizes nothing. A sub-cell container change re-runs this with the same
+     *    cols/rows, and resizing the emulator back up to our fit here would undo a letterbox with
+     *    no report to correct it — the pty's state didn't change, so no `pty:size` would follow.
+     */
+    const applyFit = () => {
+      try {
+        const size = reportedSize(fit.proposeDimensions())
+        if (!size) return
+        if (size.cols === sentCols && size.rows === sentRows) return
+        fitted = size
+        sentCols = size.cols
+        sentRows = size.rows
+        if (term.cols !== size.cols || term.rows !== size.rows) term.resize(size.cols, size.rows)
+        setCo(id, { letterbox: false })
+        // Before the session exists we are the only voice: the size rides the initial `create()`.
+        if (sessionId) transport.resize(sessionId, size.cols, size.rows)
+      } catch {
+        // proposeDimensions can throw when the element is 0-sized (collapsed); ignore.
+      }
+    }
+    applyFitRef.current = applyFit
+
     if (parked) {
       // Reattach the parked xterm's DOM element: the PTY never detached, so the screen is
       // already current — no spawn, no tmux redraw, no terminal-mode re-negotiation.
       if (term.element) container.appendChild(term.element)
       loadWebgl()
-      try {
-        fit.fit()
-      } catch {
-        // zero-size (collapsed) — the ResizeObserver below refits when it grows
-      }
+      applyFit()
     } else {
       term.loadAddon(fit)
       term.loadAddon(searchAddon)
       term.open(container)
       loadWebgl()
-      fit.fit()
+      applyFit()
       patchTerminalScale(term, getZoom)
       // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
       // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
@@ -400,13 +504,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       return true
     })
 
-    let sessionId: string | null = parked ? parked.sessionId : null
-    let disposed = false
-    // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
-    // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
-    // mount) must not send one — on a bulk project load that redraw doubles per node.
-    let sentCols = parked ? parked.sentCols : 0
-    let sentRows = parked ? parked.sentRows : 0
     // Session-scoped teardown. An adopted terminal carries its listeners over (they were wired
     // to the still-live session on first mount); everything below that pushes here is gated on
     // `!parked` so nothing is wired twice.
@@ -448,11 +545,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const scrollbackPromise = parked
-      ? Promise.resolve('')
-      : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    const scrollbackPromise =
+      parked || getCo(id).closed
+        ? Promise.resolve('')
+        : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
     void (async () => {
       if (parked) return // adopted a live session — nothing to spawn or replay
+      // Another client DESTROYED this node's session (tmux kill-session — for everyone). Never
+      // spawn: `create(persistKey)` would happily start a brand-new tmux session and resurrect a
+      // terminal its owner deliberately killed. The overlay explains the state instead.
+      if (getCo(id).closed) return
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
@@ -484,12 +586,45 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         }
         sessionId = sid
         if (fellBack) setAccountFallback(true)
-        // Catch up a size change that landed while the spawn was in flight (resize() skips the
+        // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
-        if (term.cols !== sentCols || term.rows !== sentRows) {
-          sentCols = term.cols
-          sentRows = term.rows
-          transport.resize(sid, term.cols, term.rows)
+        applyFit()
+        // The pty is the authority on the grid: it runs at the SMALLEST subscriber's size, so
+        // render exactly that and letterbox the leftover space. With one subscriber the min is our
+        // own proposal, so a solo user is never sent this at all — nothing re-fits, nothing repaints.
+        if (transport.onSize) {
+          cleanups.push(
+            transport.onSize(sid, (size) => {
+              if (term.cols !== size.cols || term.rows !== size.rows)
+                term.resize(size.cols, size.rows)
+              setCo(id, { letterbox: isLetterboxed(size, fitted) })
+            })
+          )
+        }
+        // Someone else permanently destroyed this node (tmux kill-session): show who, and make sure
+        // this component never respawns the session — see CoState.
+        if (transport.onClosed) {
+          cleanups.push(
+            transport.onClosed(sid, ({ by }) => {
+              setCo(id, { closed: { by } })
+              term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
+            })
+          )
+        }
+        // We fell so far behind that the server discarded our queued output and redrew us from
+        // tmux. The capture IS the current screen, so reset the emulator and write it — writing it
+        // on top of a stale buffer would splice two different points in time. An EMPTY payload is
+        // ignored outright (shouldApplyResync): a wrongly cleared screen is unrecoverable, a
+        // skipped repaint is not. The separator mirrors the cold-restore one.
+        if (transport.onResync) {
+          cleanups.push(
+            transport.onResync(sid, (screen) => {
+              if (!shouldApplyResync(screen)) return
+              term.reset()
+              term.write(toXtermText(screen))
+              term.write('\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n')
+            })
+          )
         }
         // Cold restart: the tmux session (and anything that was running in it) is gone — replay
         // the last persisted scrollback so the user sees where they left off. Warm reattach
@@ -559,18 +694,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     })()
 
-    const resize = () => {
-      try {
-        fit.fit()
-        if (sessionId && (term.cols !== sentCols || term.rows !== sentRows)) {
-          sentCols = term.cols
-          sentRows = term.rows
-          transport.resize(sessionId, term.cols, term.rows)
-        }
-      } catch {
-        // fit can throw when the size is 0 (e.g. collapsed); ignore.
-      }
-    }
     // Coalesce observer bursts: dragging the NodeResizer fires per animation frame, and every
     // call is a full cell-geometry measure + a resize IPC → node-pty → tmux (which redraws the
     // whole pane). One trailing fit per settle is enough — the canvas node frame itself still
@@ -578,7 +701,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const observer = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(resize, 80)
+      resizeTimer = setTimeout(applyFit, 80)
     })
     observer.observe(container)
 
@@ -602,6 +725,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
+      if (applyFitRef.current === applyFit) applyFitRef.current = null
       // Free the GPU context while hidden either way (live WebGL contexts are capped ~16).
       try {
         webgl?.dispose()
@@ -610,9 +734,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
-      // the xterm (element detached) and its PTY stay alive so a remount re-adopts them.
+      // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session
+      // another client destroyed is gone — nothing to park (and nothing left to keep alive).
       const isRespawn = respawnNonceRef.current !== myNonce
-      if (sessionId && !isRespawn && !noParkIds.delete(id)) {
+      if (sessionId && !isRespawn && !getCo(id).closed && !noParkIds.delete(id)) {
+        // Park = "subscribed, but not viewing": report no size at all, so this window's (possibly
+        // small) grid stops clamping every other subscriber's terminal for the next five minutes.
+        // The subscription itself stays — output keeps streaming into the parked xterm — and the
+        // adopting mount re-reports its size (sentCols/sentRows are NOT carried over; see above).
+        transport.resize(sessionId, null, null)
         term.element?.remove()
         const entry: ParkedTerminal = {
           term,
@@ -620,8 +750,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           search: searchAddon,
           transport,
           sessionId,
-          sentCols,
-          sentRows,
           cleanups,
           timer: setTimeout(() => {
             if (parkedTerminals.get(id) === entry) {
@@ -641,18 +769,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
 
-  // Live-apply font/cursor settings to the running terminal.
+  // Live-apply font/cursor settings to the running terminal. A new font size means new cell
+  // geometry, i.e. a different grid — route it through applyFit (not a bare fit.fit()) so the pty
+  // is told the new size like any other resize, instead of running at a grid nobody renders.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
     term.options.fontFamily = fontFamily
     term.options.cursorBlink = cursorBlink
-    try {
-      fitRef.current?.fit()
-    } catch {
-      // ignore
-    }
+    applyFitRef.current?.()
   }, [fontSize, fontFamily, cursorBlink])
 
   const toggleCollapse = () =>
@@ -1139,7 +1265,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         onDragLeave={onBodyDragLeave}
         onDrop={onBodyDrop}
       >
-        <div className="term-node__xterm nodrag nowheel" ref={bodyRef} />
+        <div
+          className={`term-node__xterm nodrag nowheel${co.letterbox ? ' letterboxed' : ''}`}
+          ref={bodyRef}
+        />
+        {co.closed && (
+          <div className="term-node__closed nodrag">
+            Closed by {closedName} — this session was ended.
+          </div>
+        )}
         {armed && !mdMode && (
           <div
             className="term-hover-guard"

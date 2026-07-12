@@ -38,7 +38,11 @@ export class RemoteTransport implements TerminalTransport {
     this.client.write(this.connectionId, sessionId, data)
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number | null, rows: number | null): void {
+    // The relay frame protocol has no "not viewing" size: a mirrored client is not a subscriber of
+    // the host's size set, so a park signal (null) has nothing to say to it — drop it rather than
+    // sending a 0×0 the host would try to apply.
+    if (cols === null || rows === null) return
     this.client.resize(this.connectionId, sessionId, cols, rows)
   }
 

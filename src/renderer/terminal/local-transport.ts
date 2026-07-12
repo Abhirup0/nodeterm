@@ -20,7 +20,7 @@ export class LocalTransport implements TerminalTransport {
     this.pty.write(sessionId, data)
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number | null, rows: number | null): void {
     this.pty.resize(sessionId, cols, rows)
   }
 

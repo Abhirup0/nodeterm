@@ -203,8 +203,11 @@ export interface PtyApi {
   create(options: PtyCreateOptions): Promise<PtyCreateResult>
   /** Sends user input to the PTY. */
   write(sessionId: string, data: string): void
-  /** Updates the PTY when the terminal is resized. */
-  resize(sessionId: string, cols: number, rows: number): void
+  /** Updates the PTY when the terminal is resized. The pty runs at the SMALLEST subscriber's grid,
+   *  so this is a REPORT, not a command — the effective size comes back over `onSize`.
+   *  `cols`/`rows` null means "subscribed, but not viewing" (a parked terminal): the client leaves
+   *  the size set entirely, so a parked small window can't shrink everyone else's terminal. */
+  resize(sessionId: string, cols: number | null, rows: number | null): void
   /** Flow control: pause (false) or resume (true) reading the PTY when xterm is backed up. */
   setFlow(sessionId: string, resume: boolean): void
   /** Detaches/terminates the PTY client (the underlying tmux session survives). */

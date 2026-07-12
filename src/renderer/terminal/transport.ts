@@ -12,7 +12,12 @@ import type { ClientId } from '@shared/presence'
 export interface TerminalTransport {
   create(options: PtyCreateOptions): Promise<PtyCreateResult>
   write(sessionId: string, data: string): void
-  resize(sessionId: string, cols: number, rows: number): void
+  /**
+   * REPORT the size this client could render (not a command — the pty runs at the smallest
+   * subscriber's grid and answers over `onSize`). `null, null` means "subscribed, but not viewing"
+   * (a parked terminal): it leaves the size set, so a parked small window never clamps the others.
+   */
+  resize(sessionId: string, cols: number | null, rows: number | null): void
   /** Flow control: pause (false) / resume (true) the source when the terminal is backed up. */
   setFlow(sessionId: string, resume: boolean): void
   /** Detaches the client; with tmux the underlying session survives. */

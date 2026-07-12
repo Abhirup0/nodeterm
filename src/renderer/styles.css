@@ -1034,6 +1034,37 @@ body,
   height: 100%;
 }
 
+/* Co-attach: the pty runs at the SMALLEST subscriber's grid, so the terminal can be smaller than
+   this node's body. Center the leftover space instead of stretching — letterboxing, not
+   distortion. Only applied while a smaller peer is actually clamping us: a solo user's grid IS the
+   effective size, so their terminal keeps the plain (stretched, top-left) layout it always had. */
+.term-node__xterm.letterboxed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.term-node__xterm.letterboxed .xterm {
+  height: auto;
+}
+
+/* Another client permanently destroyed this node's session (tmux kill-session): the terminal is
+   dead and must never respawn — say so over the last screen. */
+.term-node__closed {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(30, 30, 30, 0.88);
+}
+
 /* Markdown view overlay (Cmd/Ctrl+M) */
 .term-md {
   position: absolute;
