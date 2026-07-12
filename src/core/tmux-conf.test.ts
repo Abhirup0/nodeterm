@@ -27,10 +27,14 @@ describe('tmuxConf', () => {
   it('keeps OSC 52 as a safety net for apps that emit it themselves', () => {
     expect(c).toContain('set -g set-clipboard on')
   })
-  it('keeps tmux on the NORMAL screen (smcup@/rmcup@) so xterm owns the scrollback', () => {
+  it('blanks smcup/rmcup AND indn — either one alone leaves nothing to scroll', () => {
     // Without this, tmux enters the alternate screen (\x1b[?1049h), which has no scrollback:
     // xterm's scrollback + the hydrated tmux history would both be invisible.
-    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@'`)
+    // smcup@/rmcup@: the alternate screen has no scrollback at all.
+    // indn@: with `indn` advertised tmux scrolls the pane with CSI S (SU), and xterm.js DISCARDS
+    // the lines SU pushes off the top instead of saving them — 80 lines of output left baseY=0
+    // (nothing to scroll). Blanked, tmux uses plain line feeds, which xterm does save.
+    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@:indn@'`)
   })
   it('floors history-limit at 1000', () => {
     expect(tmuxConf(10)).toContain('set -g history-limit 1000')

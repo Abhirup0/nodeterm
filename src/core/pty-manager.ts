@@ -68,11 +68,16 @@ setw -g aggressive-resize on
 # Not our copy path any more (the emulator owns selection), but kept so an app that emits
 # OSC 52 itself (vim "+y, gh, yazi) still reaches the local clipboard via the client's handler.
 set -g set-clipboard on
-# Keep tmux on the NORMAL screen. By default the client enters the alternate screen
-# (\\e[?1049h), which has NO scrollback — xterm's own scrollback and the history we hydrate on a
-# warm reattach would both be invisible. Blanking smcup/rmcup (@) makes tmux emit no ?1049 at
-# all, so its output flows into the emulator's scrollback and the mouse wheel scrolls it.
-set -ga terminal-overrides ',*:smcup@:rmcup@'
+# Two capabilities are blanked (@), and BOTH are load-bearing for scrollback:
+#  - smcup/rmcup: without them blanked the client enters the alternate screen (\\e[?1049h), which
+#    has NO scrollback at all — neither xterm's own nor the history we hydrate on a warm reattach
+#    would be reachable.
+#  - indn (parm_index): with it advertised, tmux scrolls the pane with CSI S (SU). xterm.js
+#    implements SU as a REGION scroll and DISCARDS the lines it pushes off the top — they never
+#    reach the scrollback (real xterm saves them; xterm.js does not). Blanked, tmux falls back to
+#    plain line feeds at the bottom row, which xterm DOES push into the scrollback. Measured: with
+#    indn advertised, 80 lines of output left baseY=0 (nothing scrollable); blanked, baseY=58.
+set -ga terminal-overrides ',*:smcup@:rmcup@:indn@'
 `
 }
 
