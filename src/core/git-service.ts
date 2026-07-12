@@ -118,9 +118,18 @@ async function git(cwd: string, args: string[]): Promise<Exec> {
  */
 const isRemoteRepo = (repoPath: string): boolean => !!resolveGitRemote(repoPath)
 
-/** What the worktree ops answer for a repo that lives on an SSH host. See `isRemoteRepo`. */
-const REMOTE_WORKTREE_REFUSAL =
-  'Worktrees are not supported in SSH projects. Nothing was changed.'
+/**
+ * What the worktree ops answer for a repo that lives on an SSH host. See `isRemoteRepo`.
+ *
+ * A plain failed op — and NEVER `worktreeGone`, which is the one field the renderer reads as proof
+ * that a directory is gone (it destroys the descendant terminals' tmux sessions and rewrites their
+ * persisted cwds on it). A refusal knows nothing about the host's filesystem, so it must not claim
+ * to.
+ */
+const REMOTE_WORKTREE_REFUSAL = (): worktreeOps.WorktreeOpResult => ({
+  ok: false,
+  message: 'Worktrees are not supported in SSH projects. Nothing was changed.'
+})
 
 function parseRepoName(url: string, fallback: string): string {
   const m = url.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)
@@ -270,29 +279,39 @@ export class GitService {
     // the other side of this IPC would otherwise mark every bound group missing on one bad read.
     return worktreeOps.listWorktrees(git, repoPath, async (p) => fs.existsSync(p))
   }
-  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) {
+  worktreeAdd(
+    repoPath: string,
+    wtPath: string,
+    branch: string,
+    baseRef: string,
+    isNew: boolean
+  ): Promise<worktreeOps.WorktreeOpResult> {
     // `wtPath` is computed from the LOCAL data dir, so adding it through a remote git would create a
     // worktree at a nonsense path on the host. Refuse (see `isRemoteRepo`).
-    if (isRemoteRepo(repoPath)) {
-      return Promise.resolve({ ok: false, message: REMOTE_WORKTREE_REFUSAL })
-    }
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
     return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)
   }
-  worktreeMerge(repoPath: string, branch: string, baseRef: string, push = false) {
-    if (isRemoteRepo(repoPath)) {
-      return Promise.resolve({ ok: false, message: REMOTE_WORKTREE_REFUSAL })
-    }
+  worktreeMerge(
+    repoPath: string,
+    branch: string,
+    baseRef: string,
+    push = false
+  ): Promise<worktreeOps.WorktreeOpResult> {
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
     // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops) — and the
     // only thing that stops a merge into a base checkout whose directory is gone. LOCAL-only: see
     // `isRemoteRepo` for why a remote repo is refused above instead of stat'd here.
     return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef, push, async (p) => fs.existsSync(p))
   }
-  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly = false) {
+  worktreeRemove(
+    repoPath: string,
+    wtPath: string,
+    deleteBranch: boolean,
+    pruneOnly = false
+  ): Promise<worktreeOps.WorktreeOpResult> {
     // Refuse — and note what the refusal does NOT say: `worktreeGone`. A local stat of a remote
     // worktree would claim exactly that, and the renderer treats it as proof the directory is gone.
-    if (isRemoteRepo(repoPath)) {
-      return Promise.resolve({ ok: false, message: REMOTE_WORKTREE_REFUSAL })
-    }
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
     // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops). LOCAL-only
     // (see `isRemoteRepo`).
     return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch, pruneOnly, async (p) =>
