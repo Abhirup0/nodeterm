@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DirEntry, FsApi } from '@shared/types'
 import { useProjects } from '../state/projects'
+import { useExplorer } from '../state/explorer'
 import { sshFs } from '../terminal/ssh-fs'
 
 interface ExplorerPanelProps {
@@ -36,9 +37,8 @@ function TreeEntry({
   path,
   depth,
   fs,
+  projectId,
   selected,
-  forcedOpen,
-  revealNonce,
   onContext,
   onOpenFile,
   onSelect
@@ -47,36 +47,32 @@ function TreeEntry({
   path: string
   depth: number
   fs: FsApi
+  projectId: string
   selected: string | null
-  forcedOpen: Set<string>
-  revealNonce: number | undefined
   onContext: ContextFn
   onOpenFile: OpenFn
   onSelect: SelectFn
 }) {
-  const [open, setOpen] = useState(false)
+  const open = useExplorer((s) => (s.expandedByProject[projectId] ?? []).includes(path))
   const [children, setChildren] = useState<DirEntry[] | null>(null)
   const rowRef = useRef<HTMLDivElement>(null)
-  // The last reveal nonce this row force-opened for, so we honor each reveal edge exactly once
-  // and don't re-assert open afterwards (otherwise a manual collapse wouldn't stick).
-  const lastHonoredRef = useRef<number | undefined>(undefined)
 
-  const expandDir = useCallback(async () => {
-    const next = !open
-    setOpen(next)
-    if (next && children === null) setChildren(await fs.list(path))
-  }, [open, children, path, fs])
+  const toggleDir = useCallback(() => {
+    useExplorer.getState().setExpanded(projectId, path, !open)
+  }, [projectId, path, open])
 
-  // Reveal: when this directory is force-opened (an ancestor of the reveal target), expand it
-  // ONCE per reveal edge. After the edge, a manual collapse sticks because this effect won't
-  // re-fire for the same nonce. Lazy-load children (awaiting the list, like the click path).
+  // Lazy-load children whenever this dir is (or becomes) open with nothing loaded yet —
+  // covers click-to-expand, restored-from-storage, and reveal-forced expansion alike.
   useEffect(() => {
-    if (!entry.dir || !forcedOpen.has(path)) return
-    if (revealNonce === lastHonoredRef.current) return
-    lastHonoredRef.current = revealNonce
-    if (children === null) void fs.list(path).then(setChildren)
-    setOpen(true)
-  }, [forcedOpen, path, entry.dir, children, revealNonce, fs])
+    if (!entry.dir || !open || children !== null) return
+    let cancelled = false
+    void fs.list(path).then((c) => {
+      if (!cancelled) setChildren(c)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [entry.dir, open, children, path, fs])
 
   // Reveal: scroll the selected (target) row into view once it has mounted.
   useEffect(() => {
@@ -88,13 +84,13 @@ function TreeEntry({
   const onClick = useCallback(() => {
     if (entry.dir) {
       onSelect(path)
-      void expandDir()
+      toggleDir()
     } else if (selected === path) {
       onOpenFile(path)
     } else {
       onSelect(path)
     }
-  }, [entry.dir, selected, path, onOpenFile, onSelect, expandDir])
+  }, [entry.dir, selected, path, onOpenFile, onSelect, toggleDir])
 
   return (
     <>
@@ -124,9 +120,8 @@ function TreeEntry({
             path={`${path}/${c.name}`}
             depth={depth + 1}
             fs={fs}
+            projectId={projectId}
             selected={selected}
-            forcedOpen={forcedOpen}
-            revealNonce={revealNonce}
             onContext={onContext}
             onOpenFile={onOpenFile}
             onSelect={onSelect}
@@ -161,7 +156,6 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
-  const [forcedOpen, setForcedOpen] = useState<Set<string>>(new Set())
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
 
   useEffect(() => {
@@ -187,7 +181,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
       acc = `${acc}/${parts[i]}`
       dirs.add(acc)
     }
-    setForcedOpen(dirs)
+    useExplorer.getState().expandMany(project!.id, [...dirs])
     setSelected(abs)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reveal?.nonce, cwd])
@@ -225,9 +219,8 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 path={`${cwd}/${e.name}`}
                 depth={0}
                 fs={fs}
+                projectId={project!.id}
                 selected={selected}
-                forcedOpen={forcedOpen}
-                revealNonce={reveal?.nonce}
                 onContext={onContext}
                 onOpenFile={handleOpenFile}
                 onSelect={setSelected}
