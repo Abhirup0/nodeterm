@@ -1910,13 +1910,14 @@ export function Canvas() {
   // setNodes has not committed yet, so it is merged in by hand. Fire-and-forget: `refresh` is
   // epoch-guarded and fails open.
   const refreshWorktreeStore = useCallback(
-    (extra?: BoundGroup) => {
+    (change?: { bind?: BoundGroup; unbound?: string }) => {
       const project = useProjects.getState().getProject(activeProjectId ?? '')
       if (!project?.cwd || project.ssh) return
+      const touched = new Set([change?.bind?.groupId, change?.unbound].filter(Boolean))
       const bound: BoundGroup[] = nodesRef.current
-        .filter((n) => n.type === 'group' && n.data.worktree && n.id !== extra?.groupId)
+        .filter((n) => n.type === 'group' && n.data.worktree && !touched.has(n.id))
         .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
-      if (extra) bound.push(extra)
+      if (change?.bind) bound.push(change.bind)
       void useWorktrees.getState().refresh(project.cwd, bound)
     },
     [activeProjectId]
@@ -1944,7 +1945,7 @@ export function Canvas() {
         setNodes((ns) => [group, ...(ns as CanvasNode[])])
       }
       markDirty()
-      refreshWorktreeStore({ groupId, worktree: wt })
+      refreshWorktreeStore({ bind: { groupId, worktree: wt } })
     },
     [setNodes, markDirty, viewCenter, refreshWorktreeStore]
   )
@@ -2029,13 +2030,15 @@ export function Canvas() {
       setRemoveTarget(null)
       return
     }
-    // 3) Clear the binding from the group node.
+    // 3) Clear the binding from the group node, and re-read git: the worktree is gone from disk,
+    //    so `entries` must drop it (a stale entry would be offered as an orphan).
     setNodes((ns) =>
       ns.map((n) => (n.id === t.groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
     )
     setRemoveTarget(null)
     markDirty()
-  }, [removeTarget, setNodes, markDirty])
+    refreshWorktreeStore({ unbound: t.groupId })
+  }, [removeTarget, setNodes, markDirty, refreshWorktreeStore])
 
   // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
@@ -2050,6 +2053,9 @@ export function Canvas() {
             )
           )
           markDirty()
+          // The worktree is now an ORPHAN (it stays on disk) — re-reconcile so the dialog offers
+          // it again instead of waiting for a project switch.
+          refreshWorktreeStore({ unbound: groupId })
           break
         case 'merge': {
           const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
@@ -2065,7 +2071,7 @@ export function Canvas() {
           break
       }
     },
-    [setNodes, markDirty, requestRemoveWorktree]
+    [setNodes, markDirty, requestRemoveWorktree, refreshWorktreeStore]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
