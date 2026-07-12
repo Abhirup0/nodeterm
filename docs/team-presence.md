@@ -286,11 +286,15 @@ deviations, recorded here so this document does not lie to the next reader:
    table forever — a permanent ghost cursor. The Server Edition now runs a 30 s ping/pong heartbeat
    and reaps sockets that miss a pong, so a vanished client leaves within ~60 s. A cleanly closed
    tab still leaves immediately, on `close`.
-3. **`PeerState.typing` exists but is always `null` in Stage 1.** The field, the `noteTyping()`
-   throttle on the hub (`src/core/presence/hub.ts`) and the renderer's badge decay are all in
-   place, but **nothing calls `noteTyping()`** — attribution needs the sender-aware `pty:write`
-   handler, which is Stage 2 work (see [Typing attribution](#typing-attribution--and-why-it-is-server-side)).
-   Until then no peer ever reports typing, and the UI simply never shows the badge.
+3. ~~**`PeerState.typing` exists but is always `null` in Stage 1.**~~ **Closed in Stage 2.** The
+   sender-aware `pty:write` handler calls `noteTyping()`, and the renderer draws the pulsing ring on
+   the typist's header chip (`src/renderer/lib/typingPeers.ts` + `components/PresenceChips.tsx`).
+   Two rules worth knowing before you touch it: the ring decays against the **local receipt time**,
+   not the host's `typing.at` (a viewer's clock can be minutes off), and it is fed **only** by live
+   `presence:peer` diffs — never by a `presence:sync` snapshot, which can carry a ten-minute-old
+   stamp because the hub never clears `typing`. It is also the one node-scoped signal that is
+   **not** project-filtered: a phone has `projectId: null`, and typing from the phone is exactly
+   what the ring exists to surface (node ids are globally unique, so this is safe).
 
 ## Non-goals (v1)
 

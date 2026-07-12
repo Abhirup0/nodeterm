@@ -7,6 +7,14 @@ import {
   type PeerIdentity,
   type PeerState
 } from '@shared/presence'
+import {
+  dropTyping,
+  markTyping,
+  nextTypingSweepDelay,
+  pruneTyping,
+  typingClientIds,
+  type TypingMarks
+} from '../lib/typingPeers'
 
 /**
  * Transient team-presence store (docs/team-presence.md). Holds the peer table for the current
@@ -69,6 +77,10 @@ export interface PresenceStore {
   me: PeerIdentity | null
   /** Everyone connected, INCLUDING me (selectOthers filters me out). */
   peers: Record<ClientId, PeerState>
+  /** Who is typing into which node, stamped on OUR clock. Built ONLY from live `presence:peer`
+   *  update diffs — never from a snapshot (see THE TYPING MARKS below) — and swept by a timer that
+   *  only exists while it is non-empty. Not `PeerState.typing`, and not a mirror of it. */
+  typing: TypingMarks
   /** True when we are connected but the user has never chosen a name → show the prompt. */
   needsName: boolean
   setMe(id: PeerIdentity): void
@@ -77,10 +89,26 @@ export interface PresenceStore {
   reset(): void
 }
 
-export const usePresence = create<PresenceStore>((set) => ({
+/**
+ * THE TYPING MARKS — why the ring does not read `PeerState.typing` off the wire.
+ *
+ * CLOCK: `PeerState.typing.at` is stamped on the HOST's clock; the ~2 s decay runs on the VIEWER's
+ * (a browser, a phone), which can be minutes off. Decaying against the wire stamp would pin a ring
+ * on forever or suppress it entirely, so every typing patch is RE-STAMPED with the local time we
+ * observed it (`markTyping(..., Date.now())`) and the decay runs against that. One clock, end to end.
+ *
+ * SNAPSHOTS: the hub keeps no timers and never clears `typing`, so a `presence:sync` (or the hello
+ * response) can carry a peer's typing from ten minutes ago. We therefore mark ONLY on a live `update`
+ * diff and NEVER seed from a snapshot — a stale stamp in a join snapshot can light nothing.
+ *
+ * A stale mark for a peer who has left is harmless: the selectors skip a clientId that is not in the
+ * peer table, and the sweep (armed for as long as any mark exists) removes it within TYPING_DECAY_MS.
+ */
+export const usePresence = create<PresenceStore>((set, get) => ({
   myId: null,
   me: loadIdentity(),
   peers: {},
+  typing: {},
   needsName: false,
 
   setMe: (id) => {
@@ -93,25 +121,70 @@ export const usePresence = create<PresenceStore>((set) => ({
     set(() => {
       const table: Record<ClientId, PeerState> = {}
       for (const p of peers) table[p.clientId] = p
-      return { peers: table }
+      return { peers: table } // `typing` untouched: a snapshot may not light a ring (see above)
     }),
 
-  applyDiff: (diff) =>
+  applyDiff: (diff) => {
+    const marksBefore = get().typing
     set((s) => {
       if (diff.op === 'join') return { peers: { ...s.peers, [diff.peer.clientId]: diff.peer } }
       if (diff.op === 'leave') {
         if (!(diff.clientId in s.peers)) return s
         const peers = { ...s.peers }
         delete peers[diff.clientId]
-        return { peers }
+        return { peers, typing: dropTyping(s.typing, diff.clientId) }
       }
       const prev = s.peers[diff.clientId]
       if (!prev) return s // an update for a peer we never saw join — ignore, never ghost a row
-      return { peers: { ...s.peers, [diff.clientId]: { ...prev, ...diff.patch } } }
-    }),
+      const peers = { ...s.peers, [diff.clientId]: { ...prev, ...diff.patch } }
+      const t = diff.patch.typing
+      if (!t) return { peers }
+      return { peers, typing: markTyping(s.typing, diff.clientId, t.nodeId, Date.now()) }
+    })
+    // Arm (or re-arm) the decay sweep AFTER the write, never inside the reducer — and ONLY when the
+    // marks actually moved. A cursor patch (~20/s per peer) must not churn the timer, and a canvas
+    // nobody else is typing on must not have one at all.
+    const marksAfter = get().typing
+    if (marksAfter !== marksBefore) armSweep(marksAfter)
+  },
 
-  reset: () => set({ myId: null, peers: {}, needsName: false })
+  reset: () => {
+    cancelSweep()
+    set({ myId: null, peers: {}, typing: {}, needsName: false })
+  }
 }))
+
+/**
+ * The decay sweep: the hub never sends a "stopped typing" event (it keeps no timers), so the ring
+ * has to fade on OUR side. ONE timer for the whole app — not one per node — armed at the earliest
+ * mark's expiry and re-armed after each sweep while any mark is left.
+ *
+ * A SOLO USER PAYS NOTHING: no peers → no typing diffs → no marks → nextTypingSweepDelay is null →
+ * no timer is ever created. The timer exists only while someone is actually typing into a node.
+ */
+let sweepTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelSweep(): void {
+  if (sweepTimer !== null) clearTimeout(sweepTimer)
+  sweepTimer = null
+}
+
+function armSweep(marks: TypingMarks): void {
+  const delay = nextTypingSweepDelay(marks, Date.now())
+  if (delay === null) return cancelSweep() // nobody is typing → no timer at all
+  cancelSweep()
+  sweepTimer = setTimeout(sweep, delay)
+}
+
+function sweep(): void {
+  sweepTimer = null
+  const s = usePresence.getState()
+  const next = pruneTyping(s.typing, Date.now())
+  // pruneTyping returns the SAME map when nothing decayed, so a still-typing peer costs no write
+  // (and so re-renders nobody) on the ticks in between.
+  if (next !== s.typing) usePresence.setState({ typing: next })
+  armSweep(next)
+}
 
 /** Everyone except me, on ANY project — the base of every other selector (the facepile shows who
  *  is working where, so it does NOT filter by project).
@@ -234,6 +307,37 @@ export function selectFocusedFaces(
   const focused = selectFocused(s, nodeId, projectId)
   if (focused.length === 0) return NO_FACES
   return focused.map(faceFor)
+}
+
+/**
+ * The peers TYPING INTO this node right now — the pulsing ring in its header. Same cursor-immune
+ * PeerFace projection as the chips (see selectFocusedFaces), so pair it with `useShallow`.
+ *
+ * DELIBERATELY NOT PROJECT-FILTERED, unlike every other node-scoped selector here. A phone has
+ * `projectId: null` (it has no canvas), so `peersOnProject` excludes it — and "someone is typing
+ * into this shell from their phone" is exactly the case this feature exists to surface. The filter
+ * exists because cursors and focus are only meaningful in a project's own coordinate/node space;
+ * `typing.nodeId` is neither: it is the session's persistKey, GLOBALLY unique, so keying the ring
+ * off it against the FULL peer table cannot chip the wrong node. If the peer is not typing into a
+ * node on our canvas, no mounted header asks about their nodeId and nothing is drawn.
+ *
+ * CURSOR IMMUNITY: a cursor patch touches `peers` only — never `typing` — and faces are the same
+ * objects until a name/color/project/kind changes, so this returns a shallow-equal array (usually
+ * the shared NO_FACES) on every cursor tick and re-renders nothing.
+ */
+export function selectTypingFaces(s: PresenceStore, nodeId: string): PeerFace[] {
+  if (s.myId === null) return NO_FACES // hello unresolved → we cannot rule out our own keystrokes
+  const ids = typingClientIds(s.typing, nodeId, Date.now())
+  if (ids.length === 0) return NO_FACES // the common case, allocation-free (see typingClientIds)
+  const faces: PeerFace[] = []
+  for (const id of ids) {
+    // Never me: my own writes are echoed back to me as a diff, and a ring on my own keystrokes
+    // would be noise. A mark for a peer who has left has no face — skip it.
+    if (id === s.myId) continue
+    const peer = s.peers[id]
+    if (peer) faces.push(faceFor(peer))
+  }
+  return faces.length > 0 ? faces : NO_FACES
 }
 
 /** Sent when the user has not named themselves yet. It claims NOTHING — sanitizeIdentity falls

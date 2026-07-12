@@ -5353,6 +5353,34 @@ body,
   border: 1px solid rgba(0, 0, 0, 0.45);
 }
 
+/* Co-attach: this peer's keystrokes are landing in THIS terminal right now. One PTY, N subscribers
+   and no locking — two people typing into one shell interleave their characters, so the ring IS the
+   warning. It decays ~2s after the last keystroke (TYPING_DECAY_MS, swept in state/presence.ts). */
+.presence-chip--typing {
+  animation: nt-typing-pulse 1.1s ease-out infinite;
+}
+
+@keyframes nt-typing-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--peer-color, #fff);
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Respect the OS setting: a ring that pulses forever is exactly the motion this asks us to drop.
+   The signal must survive it, so it becomes a static halo instead of an animation. */
+@media (prefers-reduced-motion: reduce) {
+  .presence-chip--typing {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--peer-color, #fff);
+  }
+}
+
 /* The "+N" bubble: neutral, so it never reads as one more person's color. */
 .presence-chip--more {
   width: auto;
