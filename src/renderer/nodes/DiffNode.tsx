@@ -14,15 +14,35 @@ import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements } = useReactFlow()
   const bodyRef = useRef<HTMLDivElement>(null)
+  const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null)
+  const originalRef = useRef<monaco.editor.ITextModel | null>(null)
+  const modifiedRef = useRef<monaco.editor.ITextModel | null>(null)
   const [loadError, setLoadError] = useState('')
   const cwd = (data.cwd as string) ?? ''
   const rel = (data.filePath as string) ?? ''
   const staged = !!data.diffStaged
   const commitOid = (data.commitOid as string | undefined) || ''
+  // Set by a worktree removal sweep (`displacedByWorktree` / `resetDisplacedCwd` in Canvas.tsx):
+  // the repo this diff was scoped to no longer exists, and there is nothing to re-point it at.
+  const fileMissing = !!data.fileMissing
+
+  // A worktree removal can mark `fileMissing` on a node that is ALREADY mounted (open, live diff
+  // editor). The main effect below only runs once on mount, so it can't react to that — free the
+  // editor/models here instead.
+  useEffect(() => {
+    if (!fileMissing) return
+    editorRef.current?.dispose()
+    originalRef.current?.dispose()
+    modifiedRef.current?.dispose()
+    editorRef.current = null
+    originalRef.current = null
+    modifiedRef.current = null
+  }, [fileMissing])
 
   useEffect(() => {
     const el = bodyRef.current
-    if (!el || !cwd || !rel) return
+    // fileMissing: the repo this diff was scoped to is gone — nothing to `git show` or read.
+    if (!el || !cwd || !rel || fileMissing) return
     let disposed = false
     let editor: monaco.editor.IStandaloneDiffEditor | null = null
     let original: monaco.editor.ITextModel | null = null
@@ -63,6 +83,8 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       const s = useSettings.getState().settings
       original = monaco.editor.createModel(orig, undefined, base.with({ fragment: `${id}-o` }))
       modified = monaco.editor.createModel(mod, undefined, base.with({ fragment: `${id}-m` }))
+      originalRef.current = original
+      modifiedRef.current = modified
       editor = monaco.editor.createDiffEditor(el, {
         theme: 'vs-dark',
         readOnly: true,
@@ -74,6 +96,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
         fontSize: s.fontSize,
         fontFamily: s.fontFamily
       })
+      editorRef.current = editor
       editor.setModel({ original, modified })
     })
 
@@ -82,6 +105,9 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       editor?.dispose()
       original?.dispose()
       modified?.dispose()
+      editorRef.current = null
+      originalRef.current = null
+      modifiedRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -108,7 +134,15 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
       </div>
 
-      {loadError ? (
+      {fileMissing ? (
+        <div className="editor-node__body nodrag">
+          <div className="editor-node__image">
+            <span className="editor-node__loading">
+              This file’s worktree was removed — it no longer exists.
+            </span>
+          </div>
+        </div>
+      ) : loadError ? (
         <div className="editor-node__body nodrag">
           <div className="editor-node__image">
             <span className="editor-node__loading">{loadError}</span>

@@ -2043,14 +2043,20 @@ export function Canvas() {
   /**
    * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
    * group's own cwd, else the project's. `displacedByWorktree` decides who those are: descendants
-   * (nested groups included) whose cwd is inside the worktree; anyone else is left alone.
+   * (nested groups included) whose cwd is inside the worktree, PLUS any editor/diff node anywhere
+   * on the canvas whose file was inside it.
    *
    * Leaving a dead `data.cwd` behind is the trap this whole task exists to remove — it is persisted
    * to project.json, tmux hides it (a warm reattach ignores cwd), and the next machine reboot cold-
    * starts the terminal into a directory that no longer exists, where pty-manager silently falls
    * back to $HOME while the dead path stays in the project file forever.
    *
-   * `respawn` separates the two callers:
+   * Editor/diff nodes get different treatment: unlike a terminal's cwd, there is no fallback to
+   * re-point a dead `filePath` AT — the file itself no longer exists — so they are marked
+   * `data.fileMissing` instead of rewritten. The node stays on the canvas (never auto-closed: it
+   * may hold unsaved Monaco edits the user hasn't copied out yet) and renders a persistent notice.
+   *
+   * `respawn` separates the two callers (terminal/chat only — editor/diff has no session to touch):
    *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
    *    destroyed and the terminals respawn straight into the fallback cwd.
    *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
@@ -2077,20 +2083,22 @@ export function Canvas() {
         }
       }
       setNodes((ns) =>
-        ns.map((n) =>
-          displaced.has(n.id)
-            ? {
-                ...n,
-                data: {
-                  ...n.data,
-                  cwd: fallbackCwd,
-                  ...(respawn && n.type === 'terminal'
-                    ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
-                    : {})
-                }
-              }
-            : n
-        )
+        ns.map((n) => {
+          if (!displaced.has(n.id)) return n
+          if (n.type === 'editor' || n.type === 'diff') {
+            return { ...n, data: { ...n.data, fileMissing: true } }
+          }
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              cwd: fallbackCwd,
+              ...(respawn && n.type === 'terminal'
+                ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+                : {})
+            }
+          }
+        })
       )
       markDirty()
     },
@@ -2104,10 +2112,11 @@ export function Canvas() {
    * through it, so none of them can quietly skip the two duties below again.
    *
    * For a STALE binding (the worktree directory was deleted behind git's back) that means:
-   *  a. reset the children's `data.cwd` off the dead path (`resetDisplacedCwd`, no respawn — nothing
-   *     here ends a process). Left behind, that dead path is persisted to project.json and tmux
-   *     hides it until the next machine reboot cold-starts the terminal into a directory that is not
-   *     there; and
+   *  a. displace the children (`resetDisplacedCwd`, no respawn — nothing here ends a process):
+   *     terminals/chats get `data.cwd` off the dead path (left behind, that dead path is persisted
+   *     to project.json and tmux hides it until the next machine reboot cold-starts the terminal
+   *     into a directory that is not there); editor/diff nodes get `data.fileMissing` instead,
+   *     since there is nothing to re-point a dead `filePath` at; and
    *  b. prune git's stale REGISTRATION, or a later `git worktree add` at the same path fails with
    *     git's raw "missing but already registered worktree". `pruneOnly` guarantees a directory that
    *     still EXISTS is never touched, so a wrongly-stale group can never delete a live checkout.
@@ -2526,19 +2535,23 @@ export function Canvas() {
       setNotice({ kind: 'error', text: res.message })
       return // sessions untouched: nothing was removed.
     }
-    // 3) The directory is gone. Two things must happen to every node that was living in it —
-    //    and "every node" means ALL DESCENDANTS, not just direct children (a terminal inside a
-    //    nested group was missed), and chat nodes as well as terminals (a chat's cwd is just as
-    //    dead):
+    // 3) The directory is gone. Every node that was living in it owes a cleanup — and "every node"
+    //    means ALL DESCENDANTS, not just direct children (a terminal inside a nested group was
+    //    missed), plus editor/diff nodes anywhere on the canvas whose file was inside it:
     //      a. terminals: end the tmux session, which is now sitting in a directory that no longer
     //         exists;
     //      b. terminals AND chats: reset `data.cwd` off the deleted path. Leaving it there is the
     //         exact trap this whole task exists to remove — on the next mount the node spawns into
     //         a path that is gone, pty-manager silently falls back to $HOME, and the dead cwd is
     //         persisted forever — only reached through the SANCTIONED Remove path.
+    //      c. editor/diff: mark `data.fileMissing`. There is no fallback path to re-point a dead
+    //         `filePath` at — the file is genuinely gone — so unlike terminals/chats these are
+    //         flagged, not rewritten, and the node shows a persistent notice instead of silently
+    //         opening blank or failing a `git show`.
     //    The respawn (nonce bump) puts the terminal straight back in the fallback cwd rather than
     //    leaving a dead pane behind; its session was destroyed a line earlier either way.
-    //    Nodes whose cwd was NOT inside the worktree are left alone: they were never affected.
+    //    Nodes whose cwd/filePath was NOT inside the worktree are left alone: they were never
+    //    affected.
     resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })

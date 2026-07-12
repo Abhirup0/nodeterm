@@ -128,6 +128,12 @@ export interface CanvasNodeState {
   highScore?: number
   // editor / diff
   filePath?: string
+  /**
+   * editor/diff-only: true once `filePath` was confirmed gone (e.g. its worktree was removed —
+   * see `displacedByWorktree` in `./worktree.ts`). There is nothing to re-point the node at, so
+   * it shows a persistent notice instead of silently opening blank / failing a `git show`.
+   */
+  fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
