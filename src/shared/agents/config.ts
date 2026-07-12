@@ -106,3 +106,71 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
       return null
   }
 }
+
+/**
+ * The permission mode an agent session STARTS in. The user can still cycle modes at runtime
+ * with Shift+Tab — this only decides the starting state, which is exactly what the CLI's
+ * `--permission-mode` flag does.
+ *
+ * `dontAsk` is deliberately not exposed: from the user's point of view it overlaps `auto`.
+ */
+export type AgentPermissionMode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
+export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = [
+  'manual',
+  'auto',
+  'acceptEdits',
+  'plan',
+  'bypassPermissions'
+]
+
+export const PERMISSION_MODE_LABELS: Record<AgentPermissionMode, string> = {
+  manual: 'Ask each time',
+  auto: 'Auto',
+  acceptEdits: 'Accept edits',
+  plan: 'Plan',
+  bypassPermissions: 'Bypass all'
+}
+
+/** Fallback whenever a persisted mode is missing or unrecognized. */
+export const DEFAULT_PERMISSION_MODE: AgentPermissionMode = 'auto'
+
+const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
+  typeof v === 'string' && (ALL_PERMISSION_MODES as readonly string[]).includes(v)
+
+// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
+// (--approval-mode) join by being added here with their own flag mapping.
+export const PERMISSION_MODE_CAPABLE = ['claude'] as const
+
+export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
+
+/** CLI flags for a mode. `manual` yields NO flags, so the command stays bare — the exact
+ *  command nodeterm shipped before this setting existed. */
+export function permissionModeFlag(mode: AgentPermissionMode): string[] {
+  return mode === 'manual' ? [] : ['--permission-mode', mode]
+}
+
+/** Appends the permission-mode flag to a launch command, if the agent supports one. The single
+ *  funnel for every CLI launch path (new node, cold-restore resume, branch). */
+export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
+  if (!hasPermissionMode(id)) return cmd
+  const flags = permissionModeFlag(mode)
+  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
+}
+
+/**
+ * The mode a new session starts in: the project override, else the global setting.
+ * Mirrors resolveNewNodeAccount's shape, including its stale-value guard — an unrecognized
+ * persisted mode must never reach the CLI as a flag value.
+ *
+ * Structurally typed (not `Project`/`Settings`) because src/shared/types.ts imports THIS file;
+ * importing it back would be a cycle.
+ */
+export function resolvePermissionMode(
+  project: { defaultPermissionMode?: AgentPermissionMode } | undefined,
+  settings: { claudePermissionMode: AgentPermissionMode }
+): AgentPermissionMode {
+  if (isPermissionMode(project?.defaultPermissionMode)) return project.defaultPermissionMode
+  if (isPermissionMode(settings.claudePermissionMode)) return settings.claudePermissionMode
+  return DEFAULT_PERMISSION_MODE
+}
