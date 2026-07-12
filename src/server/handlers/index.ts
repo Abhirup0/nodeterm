@@ -26,6 +26,11 @@ export function registerCoreHandlers(
   // Local server has no SSH projects; keep git running against the local remote.
   platform.handle(IPC.gitSetActiveRemote, () => null)
 
+  // Desktop: ipcMain.handle(IPC.appUserDataDir, () => app.getPath('userData')).
+  // The browser needs the REAL data dir: it is the writable base the worktree dialog derives its
+  // default path from, and an empty answer there proposes `/worktrees/…` at the filesystem root.
+  platform.handle(IPC.appUserDataDir, () => platform.userDataDir)
+
   // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own
   // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.
   registerClaudeCliIpc()

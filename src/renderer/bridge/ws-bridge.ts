@@ -154,9 +154,11 @@ const AI_NAMING_UNAVAILABLE = {
   message: 'AI naming is not available in the server edition yet'
 }
 
-/** Build the three real namespaces (`pty`, `workspace`, `settings`) over an RpcClient, mirroring
- *  the preload's invoke(→request)/send(→cast) split exactly. */
-function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings'> {
+/** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
+ *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
+function buildRealApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'userDataDir'> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -199,7 +201,12 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
   }
 
-  return { pty, workspace, settings }
+  // The server's data dir, over the SAME channel the desktop preload uses. It is the writable base
+  // the worktree dialog derives its default path from — a stub returning '' would suggest
+  // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
+  const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
+
+  return { pty, workspace, settings, userDataDir }
 }
 
 /**

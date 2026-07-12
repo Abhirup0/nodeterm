@@ -34,7 +34,6 @@ describe('bridge stubs', () => {
     await expect(s.announcements.fetch()).resolves.toEqual([])
     await expect(s.updates.getPolicy()).resolves.toBeNull()
     await expect(s.usage.fetch()).resolves.toBeNull()
-    await expect(s.userDataDir()).resolves.toBe('')
     await expect(s.license.getStatus()).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 
