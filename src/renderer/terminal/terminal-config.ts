@@ -120,11 +120,6 @@ export function shouldApplyResync(screen: string | null | undefined): screen is 
   return typeof screen === 'string' && screen.length > 0
 }
 
-/**
- * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be
- * tested without an xterm/DOM harness.
- */
-
 /** Hard cap on xterm's in-memory scrollback: the cost is per node and one canvas holds many. */
 export const XTERM_SCROLLBACK_MAX = 10000
 
@@ -172,6 +167,71 @@ export function attachReplay(opts: {
 }
 
 /**
+ * What a resolved seed PAINTS into the emulator:
+ * - `snapshot`      — the persisted cold-restore scrollback (with the "session restored" separator).
+ * - `history`       — tmux's own scrollback, pulled by `transport.captureHistory`.
+ * - `create-screen` — the joiner fallback: the screen captured server-side inside `create()`, used
+ *   only when the history capture came back empty (tmux/ssh unavailable) — see "Painting the
+ *   joiner" in docs/team-presence.md.
+ * - `none`          — paint NOTHING.
+ *
+ * The decision is deliberately about PAINTING ONLY, and the type has no "abort" member, because the
+ * spawn continuation that calls this must go on to do the rest of its job no matter what comes back:
+ * subscribe `onExit`, subscribe `term.onData` (**the keyboard input path**) and send
+ * `initialCommand` / the cold-start agent resume. A `superseded` seed (a `pty:resync` repainted this
+ * screen from tmux while we awaited the capture, so our capture is now stale) therefore means "write
+ * nothing", NOT "return": returning from the continuation would leave a terminal that streams output
+ * and looks perfectly alive while silently accepting no input, forever.
+ */
+export type SeedPaint = 'snapshot' | 'history' | 'create-screen' | 'none'
+
+/** What (if anything) the resolved seed should write. Never an instruction to stop. */
+export function seedPaint(opts: {
+  replay: AttachReplay
+  /** A `pty:resync` landed while the seed was in flight — its screen is strictly newer than ours. */
+  superseded: boolean
+  /** The persisted scrollback snapshot (`cold-snapshot`), '' when there is none. */
+  snapshot?: string | null
+  /** tmux's scrollback (`warm-history`), '' when the capture failed or tmux was unreachable. */
+  history?: string | null
+  /** `PtyCreateResult.screen`: present (and non-empty) only for a joiner that did not resize. */
+  screen?: string | null
+}): SeedPaint {
+  if (opts.replay === 'none' || opts.superseded) return 'none'
+  if (opts.replay === 'cold-snapshot') return opts.snapshot ? 'snapshot' : 'none'
+  if (opts.history) return 'history'
+  return shouldApplyResync(opts.screen) ? 'create-screen' : 'none'
+}
+
+/** The slice of xterm the resync repaint drives (so it can be tested without a DOM). */
+export interface ResyncTarget {
+  write(data: string, done?: () => void): void
+  reset(): void
+}
+
+/** The banner that marks the seam where a slow client's backlog was dropped. */
+export const RESYNC_NOTICE = '\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n'
+
+/**
+ * Repaint a terminal from a `pty:resync` capture (the server dropped our backlog and redrew us from
+ * tmux, so the capture IS the current screen and must REPLACE the buffer, not stack on top of it).
+ *
+ * The `reset()` is sequenced behind a zero-length write callback rather than called inline, because
+ * `term.write()` is PARSED ASYNCHRONOUSLY while `reset()` clears the buffer IMMEDIATELY. The warm
+ * reattach seed can hand xterm up to a megabyte of tmux history in one write; a resync landing after
+ * those writes are issued but before the parser reaches them would reset an almost-empty buffer, let
+ * the stale history parse onto the cleared screen, and append the fresh capture BELOW a full screen
+ * of stale content — the exact splice the reset exists to prevent. Deferring the reset to a write
+ * callback puts it after everything already queued has been parsed.
+ */
+export function repaintResync(term: ResyncTarget, screen: string): void {
+  term.write('', () => {
+    term.reset()
+    term.write(toXtermText(screen))
+    term.write(RESYNC_NOTICE)
+  })
+}
+
 /**
  * Make text captured from tmux (`capture-pane`, LF-separated lines) safe to `term.write()`.
  * xterm runs with `convertEol: false` — a bare LF moves down but keeps the column, so raw capture

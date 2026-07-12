@@ -238,6 +238,19 @@ history seed would then write an even older screen on top of that. The resync ha
 pass-through) and marks the seed **superseded**, so the seed writes nothing when its capture returns.
 Everything that arrives after the capture streams straight through, in order.
 
+Two details that are easy to get wrong, and are pinned by tests in `terminal-config.test.ts`:
+
+- **Superseded means "paint nothing", never "return".** The seed lives inside the spawn continuation,
+  which still has to wire `onExit`, `term.onData` (**the keyboard input path**) and the
+  `initialCommand` / cold-start agent resume *below* it. Returning early there yields a terminal that
+  streams output and looks perfectly alive while silently accepting no input, forever. The decision
+  is a pure helper — `seedPaint()` — whose result type has no abort member for exactly that reason.
+- **The repaint's `reset()` is sequenced behind a write callback** (`repaintResync()`): `term.write()`
+  is parsed asynchronously while `reset()` clears the buffer immediately, so an inline reset landing
+  between the seed's (up to a megabyte of) history writes and xterm parsing them would clear an
+  almost-empty buffer, let the stale history paint onto the cleared screen, and append the fresh
+  capture *below* it.
+
 ### Typing attribution — and why it is server-side
 
 `cast()` used to discard the sender (`void uiId`). `pty:write` is routed through the sender-aware

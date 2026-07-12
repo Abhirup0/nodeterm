@@ -11,13 +11,16 @@ import {
   letterboxFor,
   markRecycled,
   recycleAction,
+  repaintResync,
   reportedSize,
+  seedPaint,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
   takeRecycled,
   toXtermText,
   xtermScrollback,
+  RESYNC_NOTICE,
   XTERM_SCROLLBACK_MAX,
   XTERM_SCROLLBACK_MIN,
   type CopyShortcutEvent
@@ -427,5 +430,110 @@ describe('copyKeyAction', () => {
   it('passes plain Ctrl+C through to the pty (SIGINT), selection or not', () => {
     expect(copyKeyAction(ev({ ctrlKey: true }), true)).toBe('pass')
     expect(copyKeyAction(ev({ ctrlKey: true }), false)).toBe('pass')
+  })
+})
+
+describe('seedPaint', () => {
+  it('paints the snapshot on a cold restore, and nothing when there is none', () => {
+    expect(seedPaint({ replay: 'cold-snapshot', superseded: false, snapshot: 'old' })).toBe(
+      'snapshot'
+    )
+    expect(seedPaint({ replay: 'cold-snapshot', superseded: false, snapshot: '' })).toBe('none')
+  })
+
+  it('paints tmux history on a warm reattach', () => {
+    expect(seedPaint({ replay: 'warm-history', superseded: false, history: 'scrollback' })).toBe(
+      'history'
+    )
+  })
+
+  it('falls back to the create-result screen for a joiner whose history capture came back empty', () => {
+    expect(
+      seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: 'live screen' })
+    ).toBe('create-screen')
+    // history WINS when both are available — it is a strict superset of the screen, and painting
+    // both would splice the same screen onto the canvas twice.
+    expect(
+      seedPaint({ replay: 'warm-history', superseded: false, history: 'hist', screen: 'scr' })
+    ).toBe('history')
+    // Neither: a blank-but-live terminal beats a wrongly painted one.
+    expect(seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: '' })).toBe(
+      'none'
+    )
+  })
+
+  it('paints nothing for a parked terminal (its buffer is already correct)', () => {
+    expect(
+      seedPaint({ replay: 'none', superseded: false, snapshot: 'old', history: 'hist' })
+    ).toBe('none')
+  })
+
+  it('a resync SUPERSEDES every seed: the decision is "write nothing", never "abort"', () => {
+    // The whole point of the helper: a superseded seed still returns a PAINT decision, so the spawn
+    // continuation carries on to wire onExit, term.onData (the keyboard input path) and the
+    // initialCommand / agent resume. `none` is not a signal to return.
+    for (const replay of ['cold-snapshot', 'warm-history', 'none'] as const) {
+      expect(
+        seedPaint({
+          replay,
+          superseded: true,
+          snapshot: 'old snapshot',
+          history: 'old history',
+          screen: 'old screen'
+        })
+      ).toBe('none')
+    }
+  })
+})
+
+/** An xterm stand-in: `write` is PARSED ASYNCHRONOUSLY (callbacks fire on `parse()`). */
+function fakeTerm(): {
+  ops: string[]
+  parse: () => void
+  write(data: string, done?: () => void): void
+  reset(): void
+} {
+  const queue: Array<() => void> = []
+  return {
+    ops: [] as string[],
+    write(data: string, done?: () => void) {
+      this.ops.push(`write:${data}`)
+      if (done) queue.push(done)
+    },
+    reset() {
+      this.ops.push('reset')
+    },
+    parse() {
+      while (queue.length) queue.shift()!()
+    }
+  }
+}
+
+describe('repaintResync', () => {
+  it('resets only AFTER the writes already queued have been parsed (never mid-flight)', () => {
+    const term = fakeTerm()
+    term.write('STALE HISTORY') // a warm-history seed, handed to xterm but not yet parsed
+    repaintResync(term, 'FRESH')
+    // Nothing repainted yet: an inline reset() would have cleared an almost-empty buffer and the
+    // stale history would then parse on top of the cleared screen.
+    expect(term.ops).toEqual(['write:STALE HISTORY', 'write:'])
+    term.parse()
+    expect(term.ops).toEqual([
+      'write:STALE HISTORY',
+      'write:',
+      'reset',
+      'write:FRESH',
+      `write:${RESYNC_NOTICE}`
+    ])
+    const reset = term.ops.indexOf('reset')
+    expect(reset).toBeGreaterThan(term.ops.indexOf('write:STALE HISTORY'))
+    expect(reset).toBeLessThan(term.ops.indexOf('write:FRESH'))
+  })
+
+  it('CRLF-converts the capture (tmux emits bare LFs; xterm runs convertEol:false)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'a\nb')
+    term.parse()
+    expect(term.ops).toContain('write:a\r\nb')
   })
 })

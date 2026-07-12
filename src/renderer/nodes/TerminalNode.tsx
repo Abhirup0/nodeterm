@@ -28,7 +28,9 @@ import {
   letterboxFor,
   markRecycled,
   recycleAction,
+  repaintResync,
   reportedSize,
+  seedPaint,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
@@ -855,17 +857,20 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // seed would then write an even older screen over that. So the redraw SUPERSEDES both —
         // `gate.reset()` drops the queue (returning its bytes to the flow accounting) and switches
         // to pass-through, and `superseded` tells the seed its capture is now stale and to write
-        // nothing. Everything arriving after the capture streams straight through, in order.
+        // nothing (it still wires the rest of the session — see seedPaint). Everything arriving
+        // after the capture streams straight through, in order.
+        //
+        // `repaintResync` sequences the reset behind a write callback: writes already handed to
+        // xterm (up to a megabyte of history seed) are parsed asynchronously, and an inline
+        // `term.reset()` would clear the buffer before they land — see terminal-config.
         let superseded = false
         if (transport.onResync) {
           cleanups.push(
-            transport.onResync(sid, (screen) => {
-              if (!shouldApplyResync(screen)) return
+            transport.onResync(sid, (resyncScreen) => {
+              if (!shouldApplyResync(resyncScreen)) return
               superseded = true
               relieve(gate.reset())
-              term.reset()
-              term.write(toXtermText(screen))
-              term.write('\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n')
+              repaintResync(term, resyncScreen)
             })
           )
         }
@@ -887,7 +892,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           if (replay === 'cold-snapshot') {
             const snapshot = await scrollbackPromise
             if ((toreDown = onDisposed())) return
-            if (snapshot && !superseded) {
+            if (seedPaint({ replay, superseded, snapshot }) === 'snapshot') {
               // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
               // with convertEol:false, so writing it raw would render as a staircase.
               term.write(toXtermText(snapshot))
@@ -907,11 +912,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             // node would come up with an empty scrollback.
             const history = await transport.captureHistory(id).catch(() => '')
             if ((toreDown = onDisposed())) return
-            // A resync repainted this screen from tmux while we were awaiting the capture — it is
-            // strictly newer than what we just fetched. Writing the history now would paint an
-            // older screen over it.
-            if (superseded) return
-            if (history) {
+            // A resync that landed while we awaited the capture is strictly newer than what we just
+            // fetched, so `seedPaint` says 'none' and we write nothing. It is a CONDITION, never a
+            // `return`: everything below this try/finally — the onExit notice, `term.onData` (the
+            // KEYBOARD INPUT path) and the initialCommand / agent-resume — must still be wired, or
+            // the terminal streams output, looks alive, and silently accepts no input forever.
+            const paint = seedPaint({ replay, superseded, history, screen })
+            if (paint === 'history') {
               // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
               // start the block from a known-clean SGR state rather than an arbitrary one.
               term.write('\x1b[0m')
@@ -919,7 +926,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
               // row below the last captured row, xterm would scroll, and tmux's redraw would
               // repaint that row again — one duplicated line at the seam.
               term.write(toXtermText(stripTrailingNewline(history)))
-            } else if (shouldApplyResync(screen)) {
+            } else if (paint === 'create-screen' && screen) {
               // CO-ATTACH JOINER, history capture failed. A joiner also gets `fresh:false`, so it
               // lands here — and `captureHistory` is the source that WINS for it: it is a strict
               // superset of `PtyCreateResult.screen` (the same tmux pane, plus the scrollback above
