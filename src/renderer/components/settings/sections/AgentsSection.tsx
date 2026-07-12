@@ -94,7 +94,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       <SearchableRow {...ROWS.permissionMode}>
         <FieldRow
           label="Permission mode"
-          description="The mode Claude sessions start in. Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
+          description="The mode Claude terminal sessions start in (chat nodes are not affected). Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
           control={
             <Select
               aria-label="Claude permission mode"

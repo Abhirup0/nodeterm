@@ -28,7 +28,7 @@ interface ProjectsState {
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
   /** Sets (or clears, with undefined = fall back to the global setting) the project's default
-   *  permission mode for new Claude/chat sessions. */
+   *  permission mode for new Claude terminal (CLI) sessions. Chat nodes are not covered. */
   setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void

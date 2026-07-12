@@ -147,7 +147,8 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Default managed Claude account for new Claude/chat nodes in this project. */
   defaultAccountId?: string
-  /** Permission mode for new Claude/chat sessions in this project. Unset = use the global setting. */
+  /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
+   *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
@@ -374,8 +375,10 @@ export interface Settings {
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
-  /** The permission mode Claude sessions START in (Shift+Tab still cycles modes at runtime).
-   *  Overridable per project via Project.defaultPermissionMode. */
+  /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
+   *  at launch; Shift+Tab still cycles modes at runtime. SDK chat nodes are NOT covered (the chat
+   *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
+   *  `auto` is version-gated: CLIs below 2.1.90 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
    *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
