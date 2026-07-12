@@ -376,9 +376,13 @@ export class GitService {
     return r.ok ? r.out : ''
   }
 
-  async history(cwd: string, options: GitHistoryOptions = {}): Promise<GitHistoryResult> {
+  async history(cwd: string, options?: GitHistoryOptions | null): Promise<GitHistoryResult> {
+    // A default parameter is not enough: over WS-RPC (Server Edition) the args array is
+    // JSON-round-tripped, so the renderer's trailing `undefined` arrives as `null` and the default
+    // never fires. Normalize explicitly, or every history call throws in the browser.
+    const opts = options ?? {}
     if (!cwd) {
-      return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: options.limit ?? 50 }
+      return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: opts.limit ?? 50 }
     }
     // Adapt the shared executor (throws on failure) onto our env-configured git runner.
     return loadGitHistoryFromExecutor(
@@ -387,7 +391,7 @@ export class GitService {
         return { stdout }
       },
       cwd,
-      options
+      opts
     )
   }
 
