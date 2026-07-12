@@ -34,6 +34,17 @@ export function allocateRelayClientId(): ClientId {
   return nextRelayId++
 }
 
+/** A peer copy safe to hand out: the nested `cursor`/`typing` objects are cloned too, so a caller
+ *  holding a peers()/join-diff result cannot reach back into the hub's table through them.
+ *  (The setters already assign fresh objects, so these two are the only nested state.) */
+function copyPeer(p: PeerState): PeerState {
+  return {
+    ...p,
+    cursor: p.cursor ? { ...p.cursor } : null,
+    typing: p.typing ? { ...p.typing } : null
+  }
+}
+
 export class PresenceHub {
   private table = new Map<ClientId, PeerState>()
   /** `${clientId}:${nodeId}` → last typing broadcast (throttle window). */
@@ -60,7 +71,11 @@ export class PresenceHub {
     // The newcomer gets the whole table up front. A relay/phone peer cannot make a request, and a
     // browser's ws-bridge buffers events that land before it subscribes — so this is safe for both.
     platform().sendTo(clientId, IPC.presenceSync, this.peers())
-    this.emit({ op: 'join', peer })
+    // A COPY, never the live PeerState: the diff crosses the shell (and, in-process on the
+    // desktop, is handed to listeners as-is), so broadcasting the table's own object would let a
+    // consumer hold — or mutate — hub state, and would make every later setter retroactively
+    // rewrite an already-delivered diff.
+    this.emit({ op: 'join', peer: copyPeer(peer) })
   }
 
   /** A UI disconnected. Its color frees up for the next joiner. */
@@ -78,9 +93,14 @@ export class PresenceHub {
     const peer = this.table.get(clientId)
     if (!peer) return { clientId, peers: this.peers() }
     const { name, color } = sanitizeIdentity(id, { name: peer.name, color: peer.color })
-    peer.name = name
-    peer.color = color
-    this.emit({ op: 'update', clientId, patch: { name, color } })
+    // A reconnecting client re-sends its stored identity: unchanged → no broadcast (same rule as
+    // every setter below). The RETURN is unconditional — it is how the renderer learns its own
+    // ClientId, without which it would draw its own cursor as a peer's.
+    if (peer.name !== name || peer.color !== color) {
+      peer.name = name
+      peer.color = color
+      this.emit({ op: 'update', clientId, patch: { name, color } })
+    }
     return { clientId, peers: this.peers() }
   }
 
@@ -92,6 +112,13 @@ export class PresenceHub {
     if (cursor) {
       if (!Number.isFinite(cursor.x) || !Number.isFinite(cursor.y)) return
       next = { x: cursor.x, y: cursor.y }
+    }
+    // Unchanged → no broadcast. The renderer recomputes the flow position on every pan/zoom frame
+    // and sends null on both mouse-leave and blur, so identical values are common — and each one
+    // would otherwise fan out to every peer for zero visual change.
+    const prev = peer.cursor
+    if (prev === null ? next === null : next !== null && prev.x === next.x && prev.y === next.y) {
+      return
     }
     peer.cursor = next
     this.emit({ op: 'update', clientId, patch: { cursor: next } })
@@ -114,6 +141,9 @@ export class PresenceHub {
     const peer = this.table.get(clientId)
     if (!peer) return
     const next = typeof text === 'string' ? capCodePoints(text, CHAT_MAX_LEN) : null
+    // Unchanged → no broadcast (Esc-then-blur closes the bubble twice). Compared AFTER the cap:
+    // two different over-long strings that cap to the same 200 code points are the same peer state.
+    if (peer.chat === next) return
     peer.chat = next
     this.emit({ op: 'update', clientId, patch: { chat: next } })
   }
@@ -138,9 +168,13 @@ export class PresenceHub {
     const peer = this.table.get(clientId)
     if (!peer || !nodeId) return
     const now = Date.now()
+    // The throttle key is (client, node) ALONE — never the peer's *current* typing badge. Someone
+    // writing alternately into two nodes (agent + shell) would never match `peer.typing.nodeId`,
+    // so every keystroke would broadcast to every peer. Each node keeps its own window; a
+    // different node is a different key and so still re-fires immediately.
     const key = `${clientId}:${nodeId}`
     const last = this.lastTyping.get(key) ?? 0
-    if (peer.typing?.nodeId === nodeId && now - last < TYPING_THROTTLE_MS) return
+    if (last && now - last < TYPING_THROTTLE_MS) return
     this.lastTyping.set(key, now)
     const typing = { nodeId, at: now }
     peer.typing = typing
@@ -149,7 +183,7 @@ export class PresenceHub {
 
   /** The current table, in join order. Copies so a caller can't mutate hub state. */
   peers(): PeerState[] {
-    return [...this.table.values()].map((p) => ({ ...p }))
+    return [...this.table.values()].map(copyPeer)
   }
 
   /** Wire the presence channels into the shell. Idempotent on purpose: the shell's listener

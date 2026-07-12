@@ -119,6 +119,30 @@ describe('PresenceHub hello', () => {
     expect(res).toEqual({ clientId: 99, peers: hub.peers() })
     expect(hub.peers()).toHaveLength(1)
   })
+
+  // A reconnecting client re-sends its stored identity; that must not fan an identical diff out
+  // to every peer. But it must STILL get its own clientId back — that return is how the renderer
+  // learns which cursor is its own.
+  it('an unchanged identity broadcasts nothing but still returns {clientId, peers}', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.join(2, 'browser')
+    hub.hello(2, { name: 'Enes', color: PRESENCE_COLORS[3] })
+    const after = diffs().length
+
+    const res = hub.hello(2, { name: 'Enes', color: PRESENCE_COLORS[3] })
+    expect(diffs()).toHaveLength(after) // no change → no diff
+    expect(res.clientId).toBe(2)
+    expect(res.peers.map((p) => p.clientId)).toEqual([1, 2])
+
+    // A real change still broadcasts.
+    hub.hello(2, { name: 'Enes', color: PRESENCE_COLORS[4] })
+    expect(diffs().at(-1)).toEqual({
+      op: 'update',
+      clientId: 2,
+      patch: { name: 'Enes', color: PRESENCE_COLORS[4] }
+    })
+  })
 })
 
 describe('PresenceHub signals', () => {
@@ -185,6 +209,83 @@ describe('PresenceHub signals', () => {
     // The cap is enforced at ingest, so the broadcast diff carries the capped text too.
     expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { chat } })
   })
+
+  // The cursor is recomputed (and re-sent) on every pan/zoom frame, and mouse-leave/blur both
+  // send null. An unchanged value must not fan out to every peer for zero visual change.
+  it('setCursor: an unchanged position (and a repeated null) is a silent no-op', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setCursor(1, { x: 10, y: 20 })
+    const after = diffs().length
+
+    hub.setCursor(1, { x: 10, y: 20 }) // same position (pan/zoom recompute) → no diff
+    expect(diffs()).toHaveLength(after)
+
+    hub.setCursor(1, { x: 10, y: 21 }) // y moved → broadcast
+    expect(diffs()).toHaveLength(after + 1)
+    hub.setCursor(1, { x: 11, y: 21 }) // x moved → broadcast
+    expect(diffs()).toHaveLength(after + 2)
+
+    hub.setCursor(1, null) // mouse leave → broadcast
+    expect(diffs()).toHaveLength(after + 3)
+    hub.setCursor(1, null) // blur right after leave → already null → no diff
+    expect(diffs()).toHaveLength(after + 3)
+    expect(hub.peers()[0].cursor).toBeNull()
+
+    hub.setCursor(1, { x: 11, y: 21 }) // back from null → broadcast
+    expect(diffs()).toHaveLength(after + 4)
+  })
+
+  // Esc-then-blur closes the bubble twice, and a re-render can re-send identical text.
+  it('setChat: unchanged text (and a repeated null) is a silent no-op, compared AFTER the cap', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setChat(1, 'hey')
+    const after = diffs().length
+
+    hub.setChat(1, 'hey') // identical → no diff
+    expect(diffs()).toHaveLength(after)
+    hub.setChat(1, 'hey!') // changed → broadcast
+    expect(diffs()).toHaveLength(after + 1)
+
+    hub.setChat(1, null) // Esc closes the bubble
+    expect(diffs()).toHaveLength(after + 2)
+    hub.setChat(1, null) // blur closes it again → already null → no diff
+    expect(diffs()).toHaveLength(after + 2)
+
+    // Two DIFFERENT over-long strings that cap to the same 200 code points are the same peer
+    // state — comparing the raw text would leak a broadcast per keystroke past the cap.
+    hub.setChat(1, 'z'.repeat(500))
+    const capped = diffs().length
+    hub.setChat(1, 'z'.repeat(600))
+    expect(diffs()).toHaveLength(capped)
+    expect(hub.peers()[0].chat).toBe('z'.repeat(200))
+  })
+
+  it('peers() and the join diff hand out copies, so a caller cannot corrupt hub state', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setCursor(1, { x: 1, y: 2 })
+    hub.noteTyping(1, 'node-a')
+
+    // Nested objects are copies too — mutating them must not reach the hub's table.
+    const snap = hub.peers()[0]
+    snap.name = 'hacked'
+    ;(snap.cursor as { x: number; y: number }).x = 999
+    ;(snap.typing as { nodeId: string }).nodeId = 'node-evil'
+    expect(hub.peers()[0]).toMatchObject({
+      name: 'Someone',
+      cursor: { x: 1, y: 2 },
+      typing: { nodeId: 'node-a' }
+    })
+
+    // The join diff carries a copy, not the live PeerState reference.
+    hub.join(2, 'browser')
+    const joined = diffs().at(-1) as { op: 'join'; peer: PeerState }
+    expect(joined.op).toBe('join')
+    hub.setFocus(2, 'node-z')
+    expect(joined.peer.focus).toBeNull() // a live reference would have followed the setter
+  })
 })
 
 describe('PresenceHub noteTyping (Stage 2 caller; wired here)', () => {
@@ -207,6 +308,45 @@ describe('PresenceHub noteTyping (Stage 2 caller; wired here)', () => {
     vi.setSystemTime(1_000_000 + TYPING_THROTTLE_MS + 1)
     hub.noteTyping(1, 'node-a')
     expect(diffs()).toHaveLength(before + 3)
+  })
+
+  // The throttle key is (client, node) ALONE. A throttle that also required the peer's *current*
+  // typing badge to be on the same node would be defeated by a client writing alternately into
+  // two nodes (split terminal, agent + shell): every call would see a different last node and
+  // broadcast, at keystroke rate, to every peer.
+  it('throttles per (client, node) even when the client alternates between two nodes', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(2_000_000)
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    const before = diffs().length
+
+    // 20 interleaved keystrokes inside one throttle window → one broadcast per node, not 20.
+    for (let i = 0; i < 10; i++) {
+      hub.noteTyping(1, 'node-a')
+      hub.noteTyping(1, 'node-b')
+    }
+    expect(diffs()).toHaveLength(before + 2)
+
+    // Each node's window is its own: node-a's expires, node-b's has not.
+    vi.setSystemTime(2_000_000 + TYPING_THROTTLE_MS + 1)
+    hub.noteTyping(1, 'node-a')
+    expect(diffs()).toHaveLength(before + 3)
+    hub.noteTyping(1, 'node-b')
+    expect(diffs()).toHaveLength(before + 4) // node-b's window opened at the same time → also due
+  })
+
+  // Two clients typing in the same node must not throttle each other (the key carries the client).
+  it('throttles per client, not globally per node', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(3_000_000)
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.join(2, 'browser')
+    const before = diffs().length
+    hub.noteTyping(1, 'node-a')
+    hub.noteTyping(2, 'node-a')
+    expect(diffs()).toHaveLength(before + 2)
   })
 })
 
