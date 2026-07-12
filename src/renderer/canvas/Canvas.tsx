@@ -1832,6 +1832,99 @@ export function Canvas() {
     })
   }, [remoteConnId])
 
+  /**
+   * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
+   * group's own cwd, else the project's. `displacedByWorktree` decides who those are: descendants
+   * (nested groups included) whose cwd is inside the worktree; anyone else is left alone.
+   *
+   * Leaving a dead `data.cwd` behind is the trap this whole task exists to remove — it is persisted
+   * to project.json, tmux hides it (a warm reattach ignores cwd), and the next machine reboot cold-
+   * starts the terminal into a directory that no longer exists, where pty-manager silently falls
+   * back to $HOME while the dead path stays in the project file forever.
+   *
+   * `respawn` separates the two callers:
+   *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
+   *    destroyed and the terminals respawn straight into the fallback cwd.
+   *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
+   *    the node (and on disk); the running session keeps going until it is next cold-started, which
+   *    is precisely when the corrected cwd is needed.
+   *
+   * Declared HERE (above `deleteNodes`) rather than next to the other worktree code below, because
+   * `releaseWorktreeBinding` — which every binding-dropping path goes through, `deleteNodes`
+   * included — needs it, and a `const` further down would be in its TDZ.
+   */
+  const resetDisplacedCwd = useCallback(
+    (groupId: string, worktreePath: string, respawn: boolean) => {
+      const displaced = displacedByWorktree(nodesRef.current, groupId, worktreePath)
+      if (!displaced.size) return
+      const fallbackCwd =
+        (nodesRef.current.find((n) => n.id === groupId)?.data.cwd as string | undefined) ||
+        useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      if (respawn) {
+        for (const n of nodesRef.current) {
+          if (displaced.has(n.id) && n.type === 'terminal') transport.destroy(n.id)
+        }
+      }
+      setNodes((ns) =>
+        ns.map((n) =>
+          displaced.has(n.id)
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  cwd: fallbackCwd,
+                  ...(respawn && n.type === 'terminal'
+                    ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+                    : {})
+                }
+              }
+            : n
+        )
+      )
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId]
+  )
+
+  /**
+   * Everything a group owes the world when its worktree BINDING is dropped — minus the dropping
+   * itself, which each caller does its own way (clear `data.worktree`, dissolve the frame, delete
+   * the node). THE one place that knowledge lives: every path that can drop a bound group routes
+   * through it, so none of them can quietly skip the two duties below again.
+   *
+   * For a STALE binding (the worktree directory was deleted behind git's back) that means:
+   *  a. reset the children's `data.cwd` off the dead path (`resetDisplacedCwd`, no respawn — nothing
+   *     here ends a process). Left behind, that dead path is persisted to project.json and tmux
+   *     hides it until the next machine reboot cold-starts the terminal into a directory that is not
+   *     there; and
+   *  b. prune git's stale REGISTRATION, or a later `git worktree add` at the same path fails with
+   *     git's raw "missing but already registered worktree". `pruneOnly` guarantees a directory that
+   *     still EXISTS is never touched, so a wrongly-stale group can never delete a live checkout.
+   *
+   * A healthy binding owes nothing: the worktree simply becomes an orphan the bind dialog can offer
+   * again (the caller's refresh does that). An SSH project owes nothing either — a legacy binding
+   * there points at a LOCAL path that means nothing on the host, so a local prune and a cwd rewrite
+   * from a local verdict are both lies; plain unbinding is the whole of what we can honestly do.
+   *
+   * The returned promise resolves once the prune (if any) is DONE, so the caller can re-reconcile
+   * after it: a `worktree list` racing an unfinished prune still lists the pruned path, and the
+   * worktree we just cleaned up would pop back as an orphan the dialog offers.
+   */
+  const releaseWorktreeBinding = useCallback(
+    async (groupId: string): Promise<void> => {
+      const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+      if (!wt || isSshProject) return
+      if (!useWorktrees.getState().staleGroupIds.includes(groupId)) return
+      resetDisplacedCwd(groupId, wt.path, false)
+      // A failed prune must still let the binding go — dropping it is the user's ask, and a
+      // registration we could not clean up is not a reason to trap them in a dead group.
+      await window.nodeTerminal.git
+        .worktreeRemove(wt.repoPath, wt.path, false, true)
+        .catch(() => {})
+    },
+    [isSshProject, resetDisplacedCwd]
+  )
+
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
     (ids: string[]) => {
@@ -1892,17 +1985,26 @@ export function Canvas() {
           )
       })
       markDirty()
-      // A deleted group takes its worktree BINDING with it while the worktree stays on disk — so
-      // re-reconcile, or the orphan would not be offered again until a project switch. EVERY
-      // deleted bound group must be passed: box-selecting two of them and hitting Delete used to
-      // unbind both but only tell the store about the first, leaving the second's worktree
-      // unofferable until a project switch.
+      // A deleted group takes its worktree BINDING with it — and the frame is the only thing that
+      // goes: its children SURVIVE (freed to absolute positions above), dead `data.cwd` and all. So
+      // this is a binding-dropping path like Unbind, and it owes exactly what Unbind owes:
+      // `releaseWorktreeBinding` (children's cwd off a dead worktree + git's stale registration
+      // pruned). Then re-reconcile, or the orphan would not be offered again until a project switch.
+      // EVERY deleted bound group must be passed: box-selecting two of them and hitting Delete used
+      // to unbind both but only tell the store about the first, leaving the second's worktree
+      // unofferable until a project switch. The refresh waits for the prunes (see
+      // `releaseWorktreeBinding`) and is ONE call for the whole batch — one per group would race,
+      // and the last one to land would re-list the others as still bound.
       const boundGone = nodesRef.current
         .filter((n) => set.has(n.id) && !!n.data.worktree)
         .map((n) => n.id)
-      if (boundGone.length) refreshWorktreeStore({ unbound: boundGone })
+      if (boundGone.length) {
+        void Promise.all(boundGone.map((id) => releaseWorktreeBinding(id))).finally(() =>
+          refreshWorktreeStore({ unbound: boundGone })
+        )
+      }
     },
-    [setNodes, markDirty, refreshWorktreeStore]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
   // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
@@ -2013,13 +2115,24 @@ export function Canvas() {
   const ungroup = useCallback(
     (groupId: string) => {
       // Dissolving the frame destroys its worktree binding (the frame IS the binding) while the
-      // worktree stays on disk — re-reconcile so it is offered as an orphan right away.
+      // children — and their `data.cwd` — stay. That makes Ungroup (and the group menu's "Delete
+      // (keeps nodes)", which is the same call) a binding-dropping path, so it goes through
+      // `releaseWorktreeBinding` exactly like Unbind does: a STALE group's children get their dead
+      // cwd corrected and git's stale registration is pruned. Skipping that was the whole trap —
+      // right-clicking a "· missing" frame and picking Ungroup left the dead worktree path in every
+      // child's persisted cwd and left git still registering the path (so a later `worktree add`
+      // there failed).
+      //
+      // Order matters: release FIRST (it resolves the children through the group's `parentId`, which
+      // `ungroupNodes` is about to clear), then dissolve. The refresh waits for the prune, so the
+      // pruned path cannot come back as an orphan the bind dialog offers.
       const wasBound = !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+      const released = wasBound ? releaseWorktreeBinding(groupId) : null
       setNodes((ns) => ungroupNodes(ns as CanvasNode[], groupId))
       markDirty()
-      if (wasBound) refreshWorktreeStore({ unbound: groupId })
+      if (released) void released.finally(() => refreshWorktreeStore({ unbound: groupId }))
     },
-    [setNodes, markDirty, refreshWorktreeStore]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
   const groupHasWorktree = useCallback(
@@ -2163,56 +2276,6 @@ export function Canvas() {
     [setNodes, markDirty, refreshWorktreeStore]
   )
 
-  /**
-   * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
-   * group's own cwd, else the project's. `displacedByWorktree` decides who those are: descendants
-   * (nested groups included) whose cwd is inside the worktree; anyone else is left alone.
-   *
-   * Leaving a dead `data.cwd` behind is the trap this whole task exists to remove — it is persisted
-   * to project.json, tmux hides it (a warm reattach ignores cwd), and the next machine reboot cold-
-   * starts the terminal into a directory that no longer exists, where pty-manager silently falls
-   * back to $HOME while the dead path stays in the project file forever.
-   *
-   * `respawn` separates the two callers:
-   *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
-   *    destroyed and the terminals respawn straight into the fallback cwd.
-   *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
-   *    the node (and on disk); the running session keeps going until it is next cold-started, which
-   *    is precisely when the corrected cwd is needed.
-   */
-  const resetDisplacedCwd = useCallback(
-    (groupId: string, worktreePath: string, respawn: boolean) => {
-      const displaced = displacedByWorktree(nodesRef.current, groupId, worktreePath)
-      if (!displaced.size) return
-      const fallbackCwd =
-        (nodesRef.current.find((n) => n.id === groupId)?.data.cwd as string | undefined) ||
-        useProjects.getState().getProject(activeProjectId ?? '')?.cwd
-      if (respawn) {
-        for (const n of nodesRef.current) {
-          if (displaced.has(n.id) && n.type === 'terminal') transport.destroy(n.id)
-        }
-      }
-      setNodes((ns) =>
-        ns.map((n) =>
-          displaced.has(n.id)
-            ? {
-                ...n,
-                data: {
-                  ...n.data,
-                  cwd: fallbackCwd,
-                  ...(respawn && n.type === 'terminal'
-                    ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
-                    : {})
-                }
-              }
-            : n
-        )
-      )
-      markDirty()
-    },
-    [setNodes, markDirty, activeProjectId]
-  )
-
   // Confirmed removal: git FIRST, then the child terminals' tmux sessions — a git that refuses must
   // leave the user's running processes alone (see the numbered steps below).
   //
@@ -2300,39 +2363,16 @@ export function Canvas() {
       }
       switch (action) {
         case 'unbind': {
-          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
-          // A STALE binding (directory deleted behind git's back) is still REGISTERED in git, so a
-          // later `worktree add` at the same path fails with git's raw "missing but already
-          // registered worktree". Prune that registration on the way out. `pruneOnly` guarantees a
-          // directory that still exists is never touched, so a wrongly-stale group cannot delete a
-          // live checkout.
-          // …but only for a LOCAL project. An SSH project's groups no longer poll (GroupNode gates
-          // the status poll on it), so they cannot go stale — and if a leftover staleness ever did
-          // reach here, the prune would run local git against a remote path and the cwd reset would
-          // rewrite REMOTE cwds from a local verdict. Plain unbind is the whole of what we can
-          // honestly do there.
-          if (!sshProject && wt && useWorktrees.getState().staleGroupIds.includes(groupId)) {
-            // Unbind is the DOCUMENTED RECOVERY PATH for a worktree deleted outside the app — the
-            // only action a stale group offers — so it owes the children the same cwd reset Remove
-            // gives them. Without it they keep `data.cwd = <dead worktree path>`, persisted to
-            // project.json: tmux hides it (a warm reattach ignores cwd) right up until a machine
-            // reboot, when the cold start spawns into the dead path, pty-manager silently falls back
-            // to $HOME, and the dead path stays in the project file forever.
-            // No respawn: unbind ends no process. The correction lands on the node (and on disk),
-            // which is exactly where the next cold start reads it from.
-            resetDisplacedCwd(groupId, wt.path, false)
-            // AWAIT the prune before re-reconciling: `worktree list` racing an unfinished prune
-            // still lists the pruned path, and the worktree we just cleaned up would pop back as
-            // an orphan the dialog offers.
-            void window.nodeTerminal.git
-              .worktreeRemove(wt.repoPath, wt.path, false, true)
-              .catch(() => {}) // a failed prune must still unbind — the binding is the user's ask
-              .finally(() => clearWorktreeBinding(groupId))
-            break
-          }
-          // The worktree is now an ORPHAN (it stays on disk) — re-reconcile so the dialog offers
-          // it again instead of waiting for a project switch.
-          clearWorktreeBinding(groupId)
+          // Unbind is the DOCUMENTED RECOVERY PATH for a worktree deleted outside the app (the only
+          // action a stale group still offers), and everything it owes beyond forgetting the binding
+          // — the children's cwd off the dead path, git's stale registration pruned, nothing at all
+          // on an SSH project — lives in `releaseWorktreeBinding`, which Ungroup and Delete go
+          // through too. AWAIT it before clearing: `clearWorktreeBinding` re-reconciles, and a
+          // `worktree list` racing an unfinished prune still lists the pruned path (the worktree we
+          // just cleaned up would pop back as an orphan the bind dialog offers).
+          // A healthy worktree simply becomes an ORPHAN — it stays on disk and the dialog can adopt
+          // it again.
+          void releaseWorktreeBinding(groupId).finally(() => clearWorktreeBinding(groupId))
           break
         }
         case 'merge': {
@@ -2365,7 +2405,7 @@ export function Canvas() {
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding, resetDisplacedCwd, activeProjectId]
+    [requestRemoveWorktree, clearWorktreeBinding, releaseWorktreeBinding, activeProjectId]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
