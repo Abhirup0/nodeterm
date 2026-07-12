@@ -177,6 +177,16 @@ const GRID = 24
 /** How long a successful worktree notice stays on screen before fading itself out. */
 const NOTICE_MS = 6000
 
+/**
+ * Worktrees are out of scope for SSH projects in v1, and being honestly absent beats being
+ * silently wrong: the default worktree path is computed from the LOCAL data dir while the git
+ * commands would run on the REMOTE host, and the removal safety guard checks the LOCAL home dir.
+ * So every affordance is shown DISABLED with this reason (a silently-missing row teaches nothing),
+ * and the paths that can still be reached (palette, a legacy binding's chip) say it out loud.
+ */
+const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
+const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
+
 // Group labels counter-scale when zoomed OUT so they stay readable/clickable from afar
 // (like map labels): full inverse of the zoom, capped so far-out labels don't get huge,
 // and never below 1 (zooming IN doesn't shrink them). Written as a CSS var once per
@@ -484,6 +494,9 @@ export function Canvas() {
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
   )
+  /** The active project runs on a remote host → every worktree affordance is off (see
+   *  WORKTREE_SSH_HINT). Reactive, so the menus rebuild when the user switches projects. */
+  const isSshProject = !!activeSshServer
   nodesRef.current = nodes
   // Mirror the open-confirm state into a ref so the []-dep agent-control effect can see the
   // CURRENT dialog (it closes over a stale `confirm`), to reject overlapping destructive verbs.
@@ -2008,6 +2021,13 @@ export function Canvas() {
     (groupId: string | null, at?: { x: number; y: number }) => {
       const projectId = useProjects.getState().activeProjectId
       if (!projectId) return
+      // The single choke point for opening the dialog — the menus already render their rows
+      // disabled on an SSH project, but the command palette has no disabled state, so refuse HERE
+      // and say why. Silently doing nothing is the one outcome that is not allowed.
+      if (useProjects.getState().getProject(projectId)?.ssh) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
       setWorktreeError(null)
       setWorktreeDialog({ groupId, at, projectId })
     },
@@ -2231,6 +2251,15 @@ export function Canvas() {
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
     (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+      // A binding can only predate the SSH gate (hand-edited project file, or a project that became
+      // an SSH project), but it can still exist — and merge/remove would run LOCAL git against a
+      // path that lives on the remote host. Refuse them, out loud. `unbind` is still allowed: on an
+      // SSH project nothing is ever stale (the store never refreshes), so it only drops the binding
+      // and touches no disk — it is exactly the escape hatch such a group needs.
+      if (action !== 'unbind' && useProjects.getState().getProject(activeProjectId ?? '')?.ssh) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
       switch (action) {
         case 'unbind': {
           const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
@@ -2284,7 +2313,7 @@ export function Canvas() {
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding]
+    [requestRemoveWorktree, clearWorktreeBinding, activeProjectId]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -2332,7 +2361,15 @@ export function Canvas() {
     const node = nodesRef.current.find((n) => n.id === id)
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
-    if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
+    if (!node || !wtPath || node.data.cwd === wtPath) return
+    // A remote terminal's session lives on the SSH host; the worktree path was computed locally, so
+    // respawning it there would drop the session into a directory that does not exist on that host.
+    // This refusal used to be silent — the confirm closed and nothing happened, which reads as a
+    // bug. Say why (worktrees are local-only in v1).
+    if (node.data.remote) {
+      setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+      return
+    }
     // Re-check at confirm time: the directory can vanish (or the group go stale) while the dialog
     // is open. `cwdForNewNodeIn` returns the worktree path only for a HEALTHY binding.
     if (cwdForNewNodeIn(node.parentId) !== wtPath) {
@@ -2827,6 +2864,10 @@ export function Canvas() {
             {
               label: 'Bind to worktree…',
               icon: <IconBranch />,
+              // On an SSH project the row stays, greyed, with the reason: the user learns the
+              // feature exists and why it is off, instead of wondering where it went.
+              disabled: isSshProject,
+              hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
               onClick: () => openWorktreeDialog(groupId)
             } as MenuItem
           ]),
@@ -2838,6 +2879,7 @@ export function Canvas() {
       ungroup,
       groupHasWorktree,
       openWorktreeDialog,
+      isSshProject,
       addTerminal,
       agentCreationItems,
       addSticky
@@ -2868,7 +2910,14 @@ export function Canvas() {
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
           // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
-          { label: 'New worktree…', icon: <IconBranch />, onClick: () => openWorktreeDialog(null, at) },
+          // Disabled (with the reason) on an SSH project — see WORKTREE_SSH_HINT.
+          {
+            label: 'New worktree…',
+            icon: <IconBranch />,
+            disabled: isSshProject,
+            hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
+            onClick: () => openWorktreeDialog(null, at)
+          },
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
@@ -2886,6 +2935,7 @@ export function Canvas() {
       openFileDialog,
       openRemotePicker,
       openWorktreeDialog,
+      isSshProject,
       selectAll,
       fitView
     ]
@@ -4111,6 +4161,9 @@ export function Canvas() {
         id: 'worktree-new',
         label: 'New worktree…',
         icon: <IconBranch />,
+        // The palette has no disabled row, so the hint carries the reason and `openWorktreeDialog`
+        // refuses with a banner — the command never silently does nothing.
+        hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
         run: () => openWorktreeDialog(null)
       },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
@@ -4182,6 +4235,7 @@ export function Canvas() {
     addBrowser,
     openFileDialog,
     openWorktreeDialog,
+    isSshProject,
     addProject,
     fitView,
     persist,

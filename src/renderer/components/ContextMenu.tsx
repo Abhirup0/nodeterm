@@ -9,7 +9,12 @@ export type MenuItem =
       onClick: () => void
       icon?: ReactNode
       danger?: boolean
+      /** Renders the row muted and inert (`onClick` never fires). Pair it with `hint`: a row that
+       *  is off for a reason the user cannot see teaches nothing — worse than not showing it. */
       disabled?: boolean
+      /** Why the row is disabled (or what it does). Surfaced as the row's native `title` tooltip —
+       *  deliberately not a tooltip system of our own. */
+      hint?: string
     }
   | { type: 'separator' }
   | { type: 'label'; label: string }
@@ -89,6 +94,7 @@ export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) 
                           key={j}
                           className={`ctx-item${child.danger ? ' danger' : ''}`}
                           disabled={child.disabled}
+                          title={child.hint}
                           onClick={() => {
                             child.onClick()
                             onClose()
@@ -109,6 +115,7 @@ export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) 
               key={i}
               className={`ctx-item${item.danger ? ' danger' : ''}`}
               disabled={item.disabled}
+              title={item.hint}
               onClick={() => {
                 item.onClick()
                 onClose()
