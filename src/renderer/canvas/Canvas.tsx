@@ -4224,9 +4224,11 @@ export function Canvas() {
         id: 'worktree-new',
         label: 'New worktree…',
         icon: <IconBranch />,
-        // The palette has no disabled row, so the hint carries the reason and `openWorktreeDialog`
-        // refuses with a banner — the command never silently does nothing.
-        hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
+        // The palette has no disabled row, so the reason rides along and `openWorktreeDialog`
+        // refuses with a banner — the command never silently does nothing. `note`, not `hint`:
+        // a hint is part of the search corpus, and "Not supported in SSH projects yet" made this
+        // row answer queries like "ssh" or "supported".
+        note: isSshProject ? WORKTREE_SSH_HINT : undefined,
         run: () => openWorktreeDialog(null)
       },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
