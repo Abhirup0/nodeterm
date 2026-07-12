@@ -1,15 +1,18 @@
 # Team presence — design
 
 **Date:** 2026-07-12
-**Status:** **Stage 1 landed** — the `PresenceHub` (`src/core/presence/hub.ts`), both shells joining
-it (Server Edition browsers, the Electron window, cursorless relay phones), a real
-`window.nodeTerminal.presence` on **both** surfaces, and the three UI surfaces: project-scoped live
-cursors + cursor chat (`PresenceLayer`), the `Facepile` (off-project peers included), and per-node
-focused-avatar chips. **Stage 2** (terminal co-attach + typing attribution — the
-[Terminal co-attach](#terminal-co-attach) section) and **Stage 3** (canvas mutation sync — the
-[Canvas sync](#canvas-sync) section) are **not implemented**; each gets its own plan. Deltas between
-this document and what Stage 1 actually shipped are recorded in
-[What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec).
+**Status:** **Stage 1 and Stage 2 landed.**
+**Stage 1** — the `PresenceHub` (`src/core/presence/hub.ts`), both shells joining it (Server Edition
+browsers, the Electron window, cursorless relay phones), a real `window.nodeTerminal.presence` on
+**both** surfaces, and the three UI surfaces: project-scoped live cursors + cursor chat
+(`PresenceLayer`), the `Facepile` (off-project peers included), and per-node focused-avatar chips.
+**Stage 2** — terminal co-attach (the [Terminal co-attach](#terminal-co-attach) section): one pty,
+N subscribers; idempotent `pty:create`; smallest-subscriber-wins sizing; per-client backpressure with
+an 8 MB drop-and-redraw ceiling; typing attribution; and the delete/recycle split.
+**Stage 3** (canvas mutation sync — the [Canvas sync](#canvas-sync) section) is **not implemented**;
+it gets its own plan. Deltas between this document and what actually shipped are recorded in
+[What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec) and
+[What Stage 2 changed](#what-stage-2-changed-relative-to-this-spec).
 **Scope:** live cursors with names, ephemeral cursor chat, per-node "who is active here",
 and the terminal co-attach that makes those indicators mean something.
 
@@ -322,6 +325,65 @@ deviations, recorded here so this document does not lie to the next reader:
    **not** project-filtered: a phone has `projectId: null`, and typing from the phone is exactly
    what the ring exists to surface (node ids are globally unique, so this is safe).
 
+## What Stage 2 changed relative to this spec
+
+Stage 2 implemented [Terminal co-attach](#terminal-co-attach) as approved — one pty with N
+subscribers, an idempotent `pty:create`, smallest-subscriber-wins sizing, per-client backpressure,
+and server-side typing attribution. Four things are **not** in the spec as originally written and
+were added during implementation; the sections above have been amended to match, and they are
+collected here so the delta is legible.
+
+1. **`pty:recycle` — a separate primitive from delete.** The spec had exactly one way to kill a tmux
+   session (`destroy`), and co-viewers of a destroyed session are told "closed by <name>" and must
+   never respawn it. But **"Move into worktree"** also kills the session (`new-session -A` would
+   otherwise just reattach the *old* working directory) — and there the node is **not** going away:
+   it stays on every canvas and must keep working. Routing a worktree move through `destroy` would
+   have shown every co-viewer a false "closed by …" and bricked their node. So the two intents are
+   now distinct primitives with distinct events — `destroy` → `pty:closed {by}` (do not respawn) and
+   `recycle` → `pty:recycled {ready}` (restart and re-attach; the node moved). See
+   [Deletion vs recycling](#deletion-vs-recycling) for the full contract, including why the recycled
+   notice is **withheld** until the replacement session is registered and why the 10 s escape-hatch
+   timeout sends `ready:false` (= *do not respawn*) rather than letting a co-viewer silently re-spawn
+   the node in its stale cwd.
+
+2. **The tombstone — and its limit, stated plainly.** `pty:closed` only reaches a session's
+   **subscribers**. A co-viewer whose project is closed or inactive has no mounted terminal, so it is
+   not one — yet the node is still on its canvas, and its next `create` would spawn a fresh
+   `nt-<nodeId>`: the deleted terminal, resurrected as an empty shell. `PtyManager.tombstones`
+   refuses that create (`PtyCreateResult.closed = {by}`), exempting the destroying client so its own
+   ⌘Z still works.
+   **The limit is real and is not papered over: the tombstone is in-memory.** It lives exactly as
+   long as the core process. Restart the core — the Server Edition process, or the desktop app
+   hosting the relay — and the tombstones are gone; a client whose canvas still carries the deleted
+   node will spawn a fresh session for it the next time it opens that project. This is deliberately
+   **not** fixed by persisting the tombstone, because persistence is not the missing piece: **the
+   node should not be on that canvas at all.** The actual fix is **Stage 3's canvas-delete
+   mutation**, which removes the node from every client so nobody is left holding one to re-create.
+   Until Stage 3 lands this is a bounded, named gap (also listed under [Known risks](#known-risks)),
+   not a promise.
+
+3. **A parked node reports `null`, not a size.** The spec said the pty runs at
+   `min(cols) × min(rows)` over its subscribers, which is only correct for subscribers that are
+   actually *looking*. A **parked** node (project switched away — the xterm is detached from the DOM
+   but the PTY client is still alive and subscribed) has no meaningful size, and a collapsed or
+   zero-height node measures as `0×0`. Either would clamp everyone else's terminal to nothing. So
+   `transport.resize(sid, cols, rows)` takes `number | null`, and `null` means **"subscribed but not
+   viewing"**: the subscriber is *absent* from the size map and is excluded from the min entirely
+   (`reportedSize` in `src/renderer/terminal/terminal-config.ts`; `effectiveSize` in
+   `src/core/pty-size.ts`). Parking a node therefore stops it constraining the shared grid, and
+   un-parking makes it constrain again.
+
+4. **Drop-and-redraw is a two-sided contract.** The 8 MB `WS_DROP_WATER` ceiling drops a slow
+   client's queued output and resynchronises it by redrawing the current screen from tmux — never by
+   replaying the backlog. Two rules, one per side, and **both** are enforced:
+   - **Sender:** an **empty capture is never sent.** `captureForResync` returns `''` on any tmux/ssh
+     failure, and `pty:resync` payloads are guaranteed non-empty (`ServerPlatform.resync`); an empty
+     capture keeps the client desynced and is retried with backoff (250 ms → 10 s cap).
+   - **Receiver:** the renderer **must ignore an empty payload anyway** (`shouldApplyResync`). The
+     resync handler `term.reset()`s before repainting, so acting on `''` would blank a live terminal
+     and leave only the separator. The two guards are redundant on purpose: a wrongly cleared screen
+     is unrecoverable, a skipped repaint is not.
+
 ## Non-goals (v1)
 
 Roles/permissions, follow/spotlight mode, persistent chat history, comment threads, write
@@ -333,10 +395,22 @@ read-only guests, per-user settings.
 - `PresenceHub` pure unit tests: join / leave / diff, cursorless peer.
 - Server e2e with **two** WS clients: hello → snapshot, cursor fan-out, echo suppression, leave
   on disconnect.
-- Co-attach: two clients, one `persistKey` → a single spawn; both receive output; min-size
-  resize; one client's backpressure does not stall the other.
-- Canvas convergence: interleaved mutations from two clients → identical node sets.
-- **Single-client regression:** min-size equals your own size and the spawn path is unchanged.
+- **Co-attach** (delivered): two clients, one `persistKey` → a single spawn; both receive output;
+  min-size resize; one client's backpressure does not stall the other, and a client that falls 8 MB
+  behind is dropped and redrawn from tmux rather than buffered forever. →
+  `src/core/pty-coattach.test.ts` (44 tests), `src/core/pty-size.test.ts`,
+  `src/server/backpressure.test.ts`, `src/server/platform-server.test.ts`
+- **Typing attribution** (delivered): the sender-aware `pty:write` stamps the writer; the ring decays
+  against local receipt time and is fed only by live diffs. → `src/core/pty-typing.test.ts`,
+  `src/renderer/lib/typingPeers.test.ts`
+- **Renderer co-attach logic** (delivered): reported-vs-effective size, letterboxing, resync-empty
+  guard, recycle action, "closed by" label. → `src/renderer/terminal/terminal-config.test.ts`
+- **Registration guard** (delivered): `pty:write` must stay routed through the *sender-aware* seam —
+  the test fails if a merge resurrects the old sender-less `platform().on(IPC.ptyWrite, …)` beside
+  it. → `src/core/pty-manager-platform.test.ts`
+- **Single-client regression** (delivered): min-size equals your own size and the spawn path is
+  unchanged. → `src/core/pty-single-user.test.ts` (17 tests)
+- Canvas convergence: interleaved mutations from two clients → identical node sets. *(Stage 3.)*
 
 ### Manual smoke test (Stage 1)
 
@@ -383,12 +457,88 @@ same identity. Call them **A** and **B**; log both in with the shared password.
 10. **Desktop alone is silent.** Launch the Electron app with no other client: no facepile, no
     cursors, no name prompt — presence costs nothing when you are the only peer.
 
+### Manual smoke test (Stage 2 — terminal co-attach)
+
+Same two-client rig as Stage 1 above (`npm run server:dev`, one **normal** and one **private**
+window, so the two peers have distinct identities in `localStorage`). Do the Stage 1 script first —
+this one assumes **A** and **B** are logged in, named, and on the **same project**. Everything below
+is about *one terminal node*, so create one in A and let it appear in B.
+
+Co-attach is invisible when it works, so the checks are mostly *negative*: the last one (a solo user
+sees no change) is the one that must never regress.
+
+1. **One pty, two viewers.** Open the same terminal node in A and in B. Run `ls -la` in A. B shows
+   the **same live output**, in the same shell — not a second prompt in a second shell. The server
+   logs exactly **one** spawn: B's `create` subscribed to A's session (`fresh:false`) rather than
+   spawning. `tmux -L node-terminal ls` on the server shows exactly one `nt-<nodeId>` session with
+   exactly **one** client attached (co-attach does not add a tmux client; `-D` is untouched).
+2. **Both can type; characters interleave.** Type `echo hello` in A — the characters appear in B as
+   you type. Now type in **both at once**: the characters interleave in the one shell. This is
+   expected, not a bug (see [No locking](#no-locking-v1)) — the typing ring is the warning, and
+   there is no lock.
+3. **The typing ring.** While A types, B's copy of that node shows a **pulsing ring on A's avatar
+   chip** in the node header. It fades ~2 s after A stops. Type from B → A sees the ring on **B's**
+   chip. (The ring decays against the *viewer's* local receipt time, so a skewed clock on either
+   machine cannot leave a ring stuck on.)
+4. **The smaller window wins; the bigger one letterboxes.** Make B's browser window **narrower**
+   than A's. Both terminals reflow to **B's** (smaller) grid: the shell's own wrapping matches in
+   both, with no wrapping artifacts. In **A** — the larger one — the leftover space is
+   **letterboxed** (dead margin), because A is now rendering B's smaller grid. Run
+   `tput cols; tput lines` in either: it reports the **min**, not A's own size. Widen B again → both
+   grow back and A's letterbox disappears.
+5. **Parking releases the size constraint.** With B still the narrower (constraining) client, in
+   **B** switch to a different project tab. B's node unmounts and **parks** — it stays subscribed but
+   reports `null` ("subscribed, not viewing"), so it drops out of the min. **A's terminal grows back
+   to A's own size and stops letterboxing**, within a moment and without B closing anything. Switch
+   B back → the node re-adopts, re-fits, and constrains A again. (This is the fix for the obvious
+   bug: a teammate who wandered off to another tab must not hold everyone's terminal hostage at a
+   grid they can't even see.)
+6. **Delete shows "closed by", and does NOT respawn.** In **A**, delete the node (× / Delete). In
+   **B**, that terminal enters the **"closed by <A's name>"** state — and **B does not respawn it**:
+   no new shell appears, no new prompt, and `tmux -L node-terminal ls` shows the `nt-<nodeId>`
+   session **gone** and not recreated. Now the harder half: in **B**, *before* deleting, switch to
+   another project (so B has no mounted terminal for that node and cannot receive `pty:closed`), have
+   **A** delete the node, then switch **B** back. B must **still** land in the closed state — the
+   in-memory **tombstone** refuses the create — and must **not** spawn a fresh shell. **Known limit:**
+   restart the server process and repeat this — the tombstone is gone and B *will* spawn a fresh
+   session. That is the documented gap, fixed by Stage 3's canvas-delete mutation (see
+   [Known risks](#known-risks)); it is not a smoke-test failure today.
+7. **"Move into worktree" does NOT say "closed".** Restore/create a shared terminal node in a git
+   project, open it in both. In **A**, use **Move into worktree**. **B must never show "closed by
+   …"** — that would be a lie, the node is alive and on B's canvas too. Instead B's terminal
+   **restarts in place** with a `── session restarted by another user (moved to a new folder) ──`
+   separator, and it **follows the node into the new session**: `pwd` in **B** prints the
+   **worktree** path, the same one A is in, in the *same* shared session (this is `pty:recycle`, not
+   `destroy` — see [Deletion vs recycling](#deletion-vs-recycling)).
+8. **A slow client is dropped, not buffered — and lands on the current screen.** Throttle **B**'s
+   network (DevTools → Network → "Slow 3G") and run `yes | head -5000000` in the shared terminal.
+   **A must keep streaming at full speed** (B's slow socket must not pace the team), and the server
+   process's RSS must **plateau** — past 8 MB buffered, B's queued output is dropped rather than
+   queued forever. Remove the throttle: B lands on the **current screen** with a single
+   `── reconnected — earlier output skipped ──` separator. It must **not** grind through the backlog,
+   and B's screen must **never** go blank (an empty capture is never sent, and is ignored if it were).
+9. **One client leaving does not stall the other.** Close **B**'s browser entirely while output is
+   streaming. **A keeps streaming** — no stall, no stale pause left behind by B's disconnect
+   (`dropClient()`), no dead subscriber holding the grid at B's old size.
+10. **A SOLO user sees no change whatsoever.** The regression that matters most. In the desktop app
+    (`npm run dev`), alone, with no other client: open a terminal, run `yes | head -100000`, resize
+    the node, switch projects and back (park → adopt), quit and relaunch (warm reattach). The min of
+    a one-element set is your own size, so: **no letterbox ever appears**, the grid is exactly your
+    own fit, no resync separator is ever printed, no typing ring, no facepile. Nothing may look or
+    behave differently from `main`.
+
 ## Known risks
 
 - **Weak identity** — anyone can claim any name.
 - **Concurrent typing garbles input** — accepted; the badge is the warning.
 - **Cross-user undo** — last-write-wins, no CRDT.
 - **Cursor traffic** is 20 Hz × peers: comfortable for a 5–10 person team, not for a public room.
+- **Plain-shell (no tmux) co-attach shows a joiner a blank-but-live terminal** until the next output
+  arrives (pressing Enter paints it). A joiner gets `fresh:false`, so it skips the cold-restore
+  replay, and with no tmux there is no client to redraw the screen for it either. Named in the code
+  (`src/core/pty-manager.ts:594`); a join-time repaint needs a new `PtyCreateResult` field plus
+  renderer replay, i.e. a cross-surface contract change. A plain-shell session has no cross-client
+  continuity to inherit anyway — that is what "no tmux = no persistence" already means everywhere.
 - **A deleted node can still be resurrected across a core restart.** The respawn guard is two
   layers: the `pty:closed` event (subscribers only) and the in-memory `tombstones` map (everyone
   else, for as long as the core process lives). Restart the core — the Server Edition process, the
