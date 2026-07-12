@@ -37,8 +37,15 @@ export class ServerPlatform implements CorePlatform {
   private sinks = new Map<number, UiSink>()
   private nextUiId = 1
 
-  // WS backpressure: per-session paused flag + the controller that pauses/resumes the
-  // tmux client. Keyed by sessionId alone (a session's pty:data always routes to one ui).
+  // WS backpressure: per-session paused flag + the controller that pauses/resumes the pty.
+  //
+  // Keyed by sessionId ALONE, which co-attach (one pty, N subscribers) has made too coarse: a
+  // session's pty:data now fans out to every subscribed ui, so this flag cannot express "behind
+  // for browser A, flowing for browser B", and `flowController` pauses the ONE pty behind the
+  // session for EVERYONE. Net effect today: one slow/backed-up browser pauses the shared pty for
+  // all viewers (bounded — the pause is re-asserted per high send and resumes below LOW_WATER,
+  // and PtyManager resumes on any subscriber change so nobody can be left frozen). Task 5 rekeys
+  // this to (uiId, sessionId) and decides the pty-side policy (pause when ANY viewer is behind).
   private paused = new Map<string, boolean>()
   private flowController?: (sessionId: string, resume: boolean) => void
 

@@ -15,6 +15,8 @@ import { IPC } from '../shared/ipc'
 let dir: string, server: http.Server, port: number, auth: Auth, platform: ServerPlatform, cookie: string
 /** Every socket this file opens, so afterEach can tear them all down (see below). */
 let sockets: WebSocket[] = []
+/** uiIds reported gone by the WS close hook (wired to PtyManager.dropClient at boot). */
+let gone: number[] = []
 
 /** Poll until `pred` holds (or throw after ~2s) — socket teardown is async. */
 async function until(pred: () => boolean, what: string): Promise<void> {
@@ -33,7 +35,8 @@ beforeEach(async () => {
   // core platform singleton — so this unit test must install the platform, exactly as boot does.
   initPlatform(platform)
   server = http.createServer((_q, s) => { s.statusCode = 404; s.end() })
-  attachWsServer(server, { platform, auth })
+  gone = []
+  attachWsServer(server, { platform, auth, onClientGone: (uiId) => gone.push(uiId) })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   port = (server.address() as { port: number }).port
   cookie = `${SESSION_COOKIE}=${auth.createSession()}`
@@ -175,6 +178,17 @@ describe('ws endpoint', () => {
     const code = await new Promise<number>((resolve) => ws.on('close', resolve))
     expect(code).toBe(1009)
     expect(casts).toEqual([])
+  })
+
+  it('a closed connection is reported gone, so its pty subscriptions are dropped', async () => {
+    // A closed tab (or a reload) is the NORMAL way to leave the Server Edition and sends no
+    // `pty:kill`. Without this hook the client stays a subscriber of every session it was
+    // watching: the pty is never released, its final scrollback snapshot is skipped, and a
+    // session it had paused would freeze the next client that co-attaches to that node.
+    const ws = await connect({ cookie })
+    ws.close()
+    await until(() => gone.length === 1, 'the close hook fires')
+    expect(gone).toEqual([1]) // the uiId this socket attached as
   })
 
   it('heartbeat: terminates a socket that never answers a ping, dropping its presence peer', async () => {

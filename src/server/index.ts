@@ -114,7 +114,9 @@ export async function startServer(
   await hookServer.start()
 
   const server = http.createServer(createHttpHandler({ auth, rendererDir: config.rendererDir }))
-  attachWsServer(server, { platform, auth })
+  // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
+  // so the WS close hook is what unsubscribes that client from the sessions it was watching.
+  attachWsServer(server, { platform, auth, onClientGone: (uiId) => ptyManager.dropClient(uiId) })
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

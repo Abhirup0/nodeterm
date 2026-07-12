@@ -55,6 +55,14 @@ export const WS_MAX_PAYLOAD = 8 * 1024 * 1024
 export interface WsServerOpts {
   platform: ServerPlatform
   auth: Auth
+  /**
+   * A connection is GONE (tab closed — the normal way to leave the Server Edition — reload, or a
+   * peer reaped by the heartbeat). Wired to `PtyManager.dropClient` at boot, so the sessions that
+   * client was watching lose it as a subscriber and the ones nobody watches any more are released.
+   * Passed in rather than imported, because `src/server` owns the wiring and `src/core` may not
+   * know about `ws`.
+   */
+  onClientGone?: (uiId: number) => void
   /** TEST ONLY: shorten the heartbeat period. Production always uses WS_HEARTBEAT_MS. */
   heartbeatMs?: number
 }
@@ -83,7 +91,7 @@ function upgradeAllowed(req: http.IncomingMessage, auth: Auth): boolean {
 }
 
 export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
-  const { platform, auth, heartbeatMs = WS_HEARTBEAT_MS } = opts
+  const { platform, auth, onClientGone, heartbeatMs = WS_HEARTBEAT_MS } = opts
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
 
   // Liveness heartbeat. Node enables no TCP keepalive on an upgraded socket, so a browser that
@@ -174,6 +182,11 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
 
     ws.on('close', () => {
       presenceHub.leave(uiId)
+      // Before detaching the sink: this client is a pty subscriber, and nothing else would ever
+      // tell PtyManager it is gone (a closed tab sends no `pty:kill`). Leaving it subscribed
+      // leaks the pty client, skips the detach-time scrollback snapshot, and can strand a
+      // session it had paused — a client joining that node later would inherit a frozen pty.
+      onClientGone?.(uiId)
       platform.detach(uiId)
     })
   })

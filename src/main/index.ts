@@ -246,7 +246,19 @@ function createWindow(): BrowserWindow {
   // its webContents are destroyed by then.)
   const presenceId = win.webContents.id
   presenceHub.join(presenceId, 'desktop')
-  win.on('closed', () => presenceHub.leave(presenceId))
+  win.on('closed', () => {
+    presenceHub.leave(presenceId)
+    // This webContents is a pty SUBSCRIBER (co-attach: one pty, N subscribers, keyed by the
+    // webContents id). A destroyed window sends no `pty:kill`, so without this it would stay
+    // subscribed forever: the pty client is never released, the detach-time scrollback snapshot
+    // is skipped, and a session it had paused via flow control could never be resumed — the next
+    // client to co-attach to that node would inherit a frozen terminal. The tmux sessions
+    // themselves keep running, exactly as they do on quit (killAll).
+    ptyManager.dropClient(presenceId)
+  })
+  // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
+  // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
+  win.webContents.on('render-process-gone', () => ptyManager.dropClient(presenceId))
 
   win.on('ready-to-show', () => win.show())
 

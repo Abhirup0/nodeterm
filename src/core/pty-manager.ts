@@ -255,6 +255,12 @@ interface Session {
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
+  /** True while the pty is paused by flow control (`setFlow(id,false)`). Tracked because the
+   *  resume can otherwise be LOST: the renderer's flow control is per-client and only resumes
+   *  when more data arrives, so a pty paused by a client that then vanished (tab closed) would
+   *  stay paused forever — a co-attaching client would inherit a frozen, blank terminal it can
+   *  never unfreeze. Every subscriber change re-checks it (join / leave / dropClient). */
+  paused: boolean
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
@@ -301,6 +307,10 @@ export class PtyManager {
   /** persistKey (node id) → live sessionId. The index that makes `pty:create` idempotent:
    *  a second client asking for the same node subscribes to the running session. */
   private byPersistKey = new Map<string, string>()
+  /** persistKey (node id) → the create() currently spawning it. Makes `pty:create` idempotent
+   *  ACROSS the awaits inside a spawn (see create()), not just after them. Entries are removed
+   *  as soon as the spawn settles, success or failure. */
+  private inflight = new Map<string, Promise<PtyCreateResult>>()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -395,22 +405,75 @@ export class PtyManager {
   }
 
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
+    const key = options.persistKey
+    if (!key) return this.spawnNew(clientId, options)
     // Co-attach: a live session for this node id already exists in THIS process (another client,
     // or this client's own second view). Subscribe to it instead of spawning a second tmux client
-    // — `-D` would otherwise kick the first viewer off. `fresh:false` tells the renderer it joined
-    // a live session: no cold-restore scrollback replay, no agent resume (tmux redraws instead).
-    if (options.persistKey) {
-      const existingId = this.byPersistKey.get(options.persistKey)
-      const existing = existingId ? this.sessions.get(existingId) : undefined
-      if (existingId && existing) {
-        existing.subscribers.add(clientId)
-        existing.sizes.set(clientId, { cols: options.cols, rows: options.rows })
-        this.applySize(existingId, existing)
-        return existing.accountFallback
-          ? { sessionId: existingId, fresh: false, accountFallback: true }
-          : { sessionId: existingId, fresh: false }
-      }
+    // — `-D` would otherwise kick the first viewer off.
+    const joined = this.join(clientId, options, key)
+    if (joined) return joined
+    // Same-tick race: spawnNew() awaits a `tmux has-session` SUBPROCESS (tens of ms, not a
+    // microtask) before spawnSession registers the session in `byPersistKey`, so two clients
+    // opening the same node in that window would BOTH miss the index and both spawn — and the
+    // second `tmux -A -D` detaches the first client, killing that user's terminal. So the spawn
+    // is published as an in-flight promise from the TOP of create(): a racing create awaits it
+    // and then takes the subscribe branch. (No locking primitive: the promise IS the barrier —
+    // the single-user path never sees an in-flight entry and behaves exactly as before.)
+    const inflight = this.inflight.get(key)
+    if (inflight) {
+      await inflight.catch(() => undefined) // the other spawn failed → fall through and try ourselves
+      const late = this.join(clientId, options, key)
+      if (late) return late
     }
+    const spawn = this.spawnNew(clientId, options)
+    this.inflight.set(key, spawn)
+    // Clear on settle — INCLUDING on failure, or a single failed spawn would leave a rejected
+    // promise in the map and make the node permanently unopenable.
+    const clear = (): void => {
+      if (this.inflight.get(key) === spawn) this.inflight.delete(key)
+    }
+    spawn.then(clear, clear)
+    return spawn
+  }
+
+  /**
+   * Subscribe `clientId` to the live session for this node id, if there is one. Returns the
+   * create() result (`fresh:false` — the renderer joined a live session: no cold-restore
+   * scrollback replay, no agent resume; tmux redraws instead), or undefined if none exists.
+   */
+  private join(
+    clientId: ClientId,
+    options: PtyCreateOptions,
+    persistKey: string
+  ): PtyCreateResult | undefined {
+    const existingId = this.byPersistKey.get(persistKey)
+    const existing = existingId ? this.sessions.get(existingId) : undefined
+    if (!existingId || !existing) return undefined
+    existing.subscribers.add(clientId)
+    existing.sizes.set(clientId, { cols: options.cols, rows: options.rows })
+    this.applySize(existingId, existing)
+    // A joiner's backlog is empty by definition, so it will never issue the resume that a
+    // previous (now gone) client's flow control owed us — and no data would ever arrive to
+    // trigger one either. Resume here, or the new client stares at a frozen terminal forever.
+    // (Per-client backpressure is Task 5's job; this only guarantees a join never lands on a
+    // paused pty.)
+    this.resumeIfPaused(existing)
+    // KNOWN GAP — plain-shell (tmux disabled / unavailable) co-attach: `fresh:false` makes the
+    // renderer skip the cold-restore scrollback replay, and with no tmux there is no client to
+    // redraw the screen either, so this joiner sees a blank-but-live terminal until the next
+    // output arrives (typing Enter paints it). Not fixed here on purpose: the renderer only
+    // subscribes to `pty:data:<id>` AFTER create() resolves, so a join-time repaint cannot be
+    // pushed on the wire — it needs a new field on PtyCreateResult plus renderer replay, i.e. a
+    // cross-surface contract change that belongs with the per-client backlog work (Task 5), not
+    // in a bugfix. A plain-shell session has no cross-client continuity to inherit anyway (it is
+    // exactly what "no tmux = no persistence" already means everywhere else in this file).
+    return existing.accountFallback
+      ? { sessionId: existingId, fresh: false, accountFallback: true }
+      : { sessionId: existingId, fresh: false }
+  }
+
+  /** Spawn a brand-new session for this client (the non-co-attach path). */
+  private async spawnNew(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -777,6 +840,7 @@ export class PtyManager {
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
       outputSinceSnapshot: true, // capture the initial screen on the first tick
+      paused: false,
       accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
@@ -846,11 +910,24 @@ export class PtyManager {
   setFlow(sessionId: string, resume: boolean): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    session.paused = !resume
     try {
       if (resume) session.proc.resume()
       else session.proc.pause()
     } catch {
       // pause/resume can throw if the proc already exited; ignore.
+    }
+  }
+
+  /** Resume a pty that flow control left paused. Called on every subscriber change, because a
+   *  pause is owed a resume by the client that issued it — and that client may be gone. */
+  private resumeIfPaused(session: Session): void {
+    if (!session.paused) return
+    session.paused = false
+    try {
+      session.proc.resume()
+    } catch {
+      // proc already exited; ignore.
     }
   }
 
@@ -887,6 +964,11 @@ export class PtyManager {
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.
       this.applySize(sessionId, session)
+      // The departing client may have been the one that paused us (its xterm backlog was over
+      // the watermark) — and it will never send the matching resume now. Leaving the pause in
+      // place would freeze the terminal for everyone who stayed. Whoever is still behind will
+      // re-pause on their next high-water send.
+      this.resumeIfPaused(session)
       return
     }
     if (session.flushTimer) clearTimeout(session.flushTimer)
@@ -899,6 +981,25 @@ export class PtyManager {
     // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
     releasePty(session.proc as ReleasablePty)
     this.forget(sessionId, session)
+  }
+
+  /**
+   * A client VANISHED (browser tab closed — the normal way to leave the Server Edition — or a
+   * destroyed/crashed renderer): unsubscribe it from every session it was watching, exactly as a
+   * `pty:kill` per session would. Sessions that fall to zero subscribers are released (final
+   * scrollback snapshot + pty client released). tmux sessions are NOT killed — releasing the pty
+   * client is the whole point: the terminal keeps running and the next open reattaches.
+   *
+   * Without this, a vanished client stays in `subscribers` forever: the pty is never released,
+   * its detach-time snapshot never taken, and — worse — a pty that client had PAUSED could never
+   * be resumed (the leave path is what returns the owed resume).
+   */
+  dropClient(clientId: ClientId): void {
+    // Snapshot the entries: kill() mutates `sessions` when a session falls to zero subscribers.
+    for (const [sessionId, session] of [...this.sessions]) {
+      if (!session.subscribers.has(clientId)) continue
+      this.kill(clientId, sessionId)
+    }
   }
 
   /**
@@ -1031,6 +1132,9 @@ export class PtyManager {
     // kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
     // session instead of co-attaching to the one we are about to destroy. The Session object
     // itself is dropped by its own onExit / the client's kill().
+    // Also drop any in-flight create for this node: a create racing the kill-session below must
+    // spawn a fresh session, not await (and then join) the one we are destroying.
+    this.inflight.delete(persistKey)
     const dyingId = this.byPersistKey.get(persistKey)
     if (dyingId) {
       this.byPersistKey.delete(persistKey)
