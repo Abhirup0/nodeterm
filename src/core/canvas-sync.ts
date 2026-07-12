@@ -38,16 +38,16 @@
 
 import { platform, type CorePlatform } from './platform'
 import { IPC } from '../shared/ipc'
-import { REF_MAX_LEN, type ClientId } from '../shared/presence'
+import { isCanvasMutation, isRefId, MUTATION_MAX_BYTES } from '../shared/canvas-mutations'
+import { type ClientId } from '../shared/presence'
 import type { CanvasMutation } from '../shared/types'
 
-/**
- * Ceiling on one mutation's serialized size. A node carries free text (a sticky's body, an
- * editor's path), and the whole object is reflected verbatim to every peer — so an unbounded one
- * is an N-way amplifier straight into everyone's WS send buffer (the same sink pty output rides).
- * 256 KB is orders of magnitude past any real node and cannot refuse a legitimate edit.
- */
-export const MUTATION_MAX_BYTES = 256_000
+// The ingest guard (`isCanvasMutation`) and its size cap live in `shared`, because the PUBLISHER
+// must reach the same verdict BEFORE it casts: a mutation this reflector refuses is dropped
+// silently, and a publisher that only learned about it by never hearing an ack would advance its
+// baseline (never retrying the edit) and deafen that node to its peers for a whole pending TTL.
+// Re-exported here because this is where the refusal is enforced, and where the tests look for it.
+export { isCanvasMutation, MUTATION_MAX_BYTES }
 
 /**
  * Every attached client the mutation goes to — INCLUDING the sender, whose copy is its ack (see the
@@ -69,44 +69,6 @@ export function stampMutation(m: CanvasMutation, seq: number): CanvasMutation {
   const stamped: CanvasMutation = { ...m, seq }
   if (!isRefId(stamped.src)) delete stamped.src
   return stamped
-}
-
-/** An id off the wire: non-empty and bounded by the shared ref cap (node ids and project ids are
- *  short and generated — `term-ab12`, `project-1` — so this can never refuse a real one). Ids are
- *  REJECTED, never truncated: a truncated id would address the WRONG node on every peer. */
-function isRefId(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= REF_MAX_LEN
-}
-
-/**
- * Shape + size guard: a client cast is untrusted input, and it is reflected to every peer as-is.
- * A malformed payload would wedge a peer's React Flow (applyCanvasMutation would upsert a node with
- * no id, or a NaN position, which React Flow cannot lay out); an oversized one would flood their
- * sockets. Drop it here — the reflector never throws, and never keys anything by a wire string.
- */
-export function isCanvasMutation(value: unknown): value is CanvasMutation {
-  if (!value || typeof value !== 'object') return false
-  const m = value as { op?: unknown; id?: unknown; node?: unknown }
-  if (m.op === 'remove') return isRefId(m.id)
-  if (m.op !== 'upsert') return false
-  const node = m.node as { id?: unknown; position?: { x?: unknown; y?: unknown } } | undefined
-  if (!node || typeof node !== 'object') return false
-  if (!isRefId(node.id)) return false
-  const pos = node.position
-  if (!pos || typeof pos !== 'object') return false
-  if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return false
-  return withinSizeLimit(m)
-}
-
-function withinSizeLimit(m: unknown): boolean {
-  try {
-    // The wire form is JSON on the server and a structured clone on the desktop; either way this
-    // is a faithful measure of what would be pushed to every peer. A value that cannot even be
-    // stringified (BigInt, a cycle) is not something we should be reflecting.
-    return JSON.stringify(m).length <= MUTATION_MAX_BYTES
-  } catch {
-    return false
-  }
 }
 
 /** The platform this reflector is already installed on. `on`/`onWithSender` COMPOSE on the same

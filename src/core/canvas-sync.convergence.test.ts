@@ -19,9 +19,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { initPlatform, resetPlatformForTests, type CorePlatform } from './platform'
-import { initCanvasSync } from './canvas-sync'
-import { applyCanvasMutation } from '../shared/canvas-mutations'
-import { createCanvasOrder } from '../shared/canvas-order'
+import { initCanvasSync, MUTATION_MAX_BYTES } from './canvas-sync'
+import { applyCanvasMutation, isCanvasMutation } from '../shared/canvas-mutations'
+import { createCanvasOrder, PENDING_TTL_MS } from '../shared/canvas-order'
 import { createCanvasPublisher, publishableStates } from '../shared/canvas-publish'
 import { IPC } from '../shared/ipc'
 import type { CanvasMutation, CanvasNodeState } from '../shared/types'
@@ -35,6 +35,15 @@ const node = (id: string, x: number, title = 't', color = '#fff'): CanvasNodeSta
     group: null,
     position: { x, y: 0 },
     size: { width: 10, height: 10 }
+  }) as CanvasNodeState
+
+/** A sticky whose body someone pasted a document into: its serialized form is over
+ *  MUTATION_MAX_BYTES, so the reflector REFUSES it at ingest — silently, with no negative ack. */
+const fat = (id: string): CanvasNodeState =>
+  ({
+    ...node(id, 0),
+    kind: 'sticky',
+    data: { text: 'x'.repeat(MUTATION_MAX_BYTES) }
   }) as CanvasNodeState
 
 const PROJECT = 'p1'
@@ -54,6 +63,10 @@ class Bus {
   clients: number[] = []
   /** Total casts made BY clients (publisher → reflector). One per real local edit; never more. */
   castCount = 0
+  /** Clients whose INBOX is stalled — their socket is backed up (Stage 2 tolerates an 8 MB pty
+   *  backlog on the very same socket), so their acks and their peers' mutations arrive late.
+   *  Their casts still reach the reflector: only the return path is blocked. */
+  private readonly stalled = new Set<number>()
 
   platform: CorePlatform = {
     userDataDir: '/tmp/nodeterm-convergence',
@@ -88,9 +101,19 @@ class Bus {
     return true
   }
 
+  /** Stall / unstall one client's inbox (a backed-up socket). */
+  stall(id: number): void {
+    this.stalled.add(id)
+  }
+
+  unstall(id: number): void {
+    this.stalled.delete(id)
+  }
+
   /** Pop one queued delivery into its addressed client (FIFO within that client's inbox). */
   private stepDelivery(): boolean {
     for (const id of this.clients) {
+      if (this.stalled.has(id)) continue
       const q = this.inbox.get(id)
       if (!q?.length) continue
       const d = q.shift() as { projectId: string; m: CanvasMutation }
@@ -120,6 +143,8 @@ class Client {
   ephemeral = new Set<string>()
   /** Mutations APPLIED from the wire (an own echo, or one the order supersedes, is not applied). */
   applied = 0
+  /** Local mutations the publisher tried to cast and this client refused (oversized / malformed). */
+  refused = 0
   private readonly order: ReturnType<typeof createCanvasOrder>
   private readonly pub: ReturnType<typeof createCanvasPublisher>
 
@@ -131,11 +156,22 @@ class Client {
     // properties are assigned, so `this.id` would still be undefined and both clients would stamp
     // the same `src` — every peer mutation would then look like their own echo.
     const src = `src-${id}`
-    this.order = createCanvasOrder(src)
+    // A FAKE clock: the pending TTL is the one time-dependent rule in canvas-order, and the tests
+    // below need to cross it deliberately (`clock += ...`) rather than by sleeping.
+    this.order = createCanvasOrder(src, { now: () => clock })
     this.pub = createCanvasPublisher(
       (m) => {
+        // Mirrors Canvas: ask the SAME predicate the reflector's ingest asks, BEFORE recording a
+        // pending entry or casting. A refusal means nothing was cast — so nothing is pending (the
+        // node stays open to its peers) and the publisher keeps the node in its baseline and
+        // retries it on the next publish. Canvas also surfaces the refusal to the user.
+        if (!isCanvasMutation(m)) {
+          this.refused++
+          return false
+        }
         this.order.onLocal(m)
         bus.cast(id, PROJECT, m)
+        return true
       },
       { src }
     )
@@ -195,8 +231,11 @@ const canon = (c: Client): CanvasNodeState[] =>
 let bus: Bus
 let a: Client
 let b: Client
+/** The clients' shared fake clock (ms), read by every canvas-order pending TTL. */
+let clock = 0
 
 function boot(): void {
+  clock = 1_000
   bus = new Bus()
   initPlatform(bus.platform)
   initCanvasSync()
@@ -439,6 +478,73 @@ describe('canvas convergence (async bus)', () => {
     expect(b.states).toEqual(a.states)
     expect(a.ids()).toEqual(['n2', 'n4'])
     expect(a.persisted()).toEqual(c.persisted())
+  })
+
+  // A LATE ACK. Rule 1 (never re-apply our own echo) is only sound while our optimistic value is
+  // still on our canvas. Once rule 2's suppression lapses on the TTL and a peer's OLDER mutation
+  // overwrites it, our echo is the only thing that can restore the value that won everywhere else —
+  // and rule 1 used to throw it away. Realistic trigger: our socket is backed up with pty output
+  // (Stage 2 tolerates an 8 MB backlog on that same socket), so our ack takes longer than the TTL.
+  it('a peer edit applied after the TTL is repaired by our own late ack (no permanent split-brain)', () => {
+    a.edit([node('n1', 0)])
+    bus.settle()
+
+    bus.stall(a.id) // A's socket backs up: nothing reaches A, but its casts still leave.
+    b.edit([node('n1', 50)]) // B's edit is cast (and ordered) FIRST…
+    a.edit([node('n1', 100)]) // …A's is ordered AFTER it, so A's value wins on every other client.
+    bus.settle()
+    expect(b.x('n1')).toBe(100) // …and it does: B (and every other client) shows A's 100.
+
+    clock += PENDING_TTL_MS + 1 // A's pending entry expires while its inbox is still stalled.
+    bus.unstall(a.id)
+    bus.settle() // A now receives B's older mutation, then its OWN echo.
+
+    // A must not be left holding the value that lost the total order — its next whole-file
+    // workspace.save would write those losing bytes over everyone else's canvas.
+    expect(a.x('n1')).toBe(100)
+    expect(a.x('n1')).toBe(b.x('n1'))
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  // A REFUSED CAST. The reflector drops a malformed / oversized mutation at ingest (silently — there
+  // is no negative ack). If the publisher has already advanced its baseline it never retries, and if
+  // the ordering state has already recorded a pending entry the node goes DEAF to its peers for the
+  // whole TTL. A peer's `remove` landing in that window was dropped and never recovered → the next
+  // save resurrected the node they deleted. Trigger: a sticky whose body a user pasted a document
+  // into (sticky text is unbounded in the UI) is over MUTATION_MAX_BYTES.
+  it('an oversized node the reflector refuses does not deafen it to a peer delete', () => {
+    a.edit([node('n1', 0), node('n2', 0)])
+    bus.settle()
+
+    a.edit([fat('n1'), node('n2', 0)]) // A pastes a document into n1 → the cast is refused at ingest
+    b.edit(b.states.filter((n) => n.id !== 'n1')) // …and B deletes n1 in the same window
+    bus.settle()
+
+    expect(a.ids()).toEqual(b.ids()) // was: A ['n1','n2'] vs B ['n2'] — forever
+    expect(a.ids()).toEqual(['n2'])
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  it('a refused cast is retried on the next publish (once the node is within the size limit)', () => {
+    a.edit([node('n1', 0)])
+    bus.settle()
+
+    a.edit([fat('n1')]) // refused: never reaches B
+    bus.settle()
+    expect(b.x('n1')).toBe(0) // B still shows the last mutation that WAS reflected
+
+    a.edit([node('n1', 7)]) // the user trims the sticky → the edit is within the limit again
+    bus.settle()
+    expect(b.x('n1')).toBe(7)
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  it('a refused cast does not block the OTHER nodes in the same snapshot', () => {
+    a.edit([node('n1', 0), node('n2', 0)])
+    bus.settle()
+    a.edit([fat('n1'), node('n2', 42)]) // one refused upsert, one legitimate one
+    bus.settle()
+    expect(b.x('n2')).toBe(42)
   })
 
   it('a peer delete is not resurrected by the surviving client (the save-safety property)', () => {

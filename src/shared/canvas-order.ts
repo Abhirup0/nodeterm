@@ -28,6 +28,14 @@
 //      necessarily LATER in the total order than anything we are hearing now — it will win on every
 //      other client, and keeping it here is what agrees with them.
 //
+//   3. …AND RULE 1 IS ONLY SOUND WHILE OUR OPTIMISTIC VALUE IS STILL ON OUR CANVAS. Rule 2's
+//      suppression is bounded by a TTL (an ack can be late — our socket carries pty output too), and
+//      once it lapses a peer's mutation can overwrite the value we are still waiting to have acked.
+//      From that moment our echo is not "something we already show", it is the ONLY copy of a value
+//      that won on every other client — so it is APPLIED, not dropped (`superseded` below). Without
+//      this, a late ack left the client permanently on the losing value and its whole-file save
+//      wrote those bytes over everyone else's canvas.
+//
 // Together those give: every client ends on the mutation with the highest `seq` for that node.
 // Convergence, on any interleaving. What it deliberately does NOT give is intent preservation —
 // two people dragging one node still fight, and a delete concurrent with an edit is decided by the
@@ -40,12 +48,17 @@ import type { CanvasMutation } from './types'
 /**
  * How long an unacked local mutation keeps suppressing peers' mutations for that node.
  *
- * Rule 2 above assumes the ack ALWAYS comes back. Almost always it does — but the reflector drops
- * a mutation it cannot validate (an oversized sticky body: MUTATION_MAX_BYTES) and a cast made with
- * no project active never reaches it at all. Without a bound, one such drop would silently deafen
- * that node to its peers for the rest of the session. So a pending entry expires: after this long,
- * the node listens again. Generous next to a round trip (sub-millisecond in-process, single-digit
- * ms over a LAN WS) and short next to a human noticing.
+ * Rule 2 above assumes the ack ALWAYS comes back, and normally it does — but an ack can be LATE
+ * (our socket carries pty output too, and Stage 2 tolerates an 8 MB backlog on it before it gives
+ * up), so the suppression cannot be unbounded: one slow ack would deafen that node to its peers for
+ * the rest of the session. Hence the expiry — a TIME bound on a CORRECTNESS rule, which is only
+ * sound because of RULE 3 below: expiring the suppression is reversible, and the late ack repairs
+ * whatever it cost us. Generous next to a round trip (sub-millisecond in-process, single-digit ms
+ * over a LAN WS) and short next to a human noticing.
+ *
+ * A cast the reflector REFUSES (oversized / malformed) is not this case and must never reach here:
+ * the publisher validates with the same predicate the reflector uses (`isCanvasMutation`) BEFORE
+ * calling `onLocal`, so a refused cast records no pending entry at all.
  */
 export const PENDING_TTL_MS = 5000
 
@@ -70,8 +83,16 @@ export interface CanvasOrder {
 
 interface Pending {
   count: number
-  /** When the OLDEST still-unacked mutation for this node was cast (for PENDING_TTL_MS). */
+  /** When the MOST RECENT still-unacked mutation for this node was cast (for PENDING_TTL_MS).
+   *  Refreshed on every local mutation: a continuous drag emits a frame every 50 ms, and dating the
+   *  entry from the OLDEST one expired it mid-drag — after 5 s of dragging, a peer's older frame
+   *  would land and rubber-band the node out from under the hand holding it. What the TTL is for is
+   *  an ack that is not coming back soon; a drag we are still emitting is not that. */
   since: number
+  /** The TTL lapsed: this node no longer suppresses its peers (rule 2 is off), but our casts are
+   *  still unacked, so the entry stays — `count` still has to be drawn down by the acks, and rule 3
+   *  needs to know they are ours. */
+  stale?: boolean
 }
 
 /**
@@ -88,14 +109,25 @@ export function createCanvasOrder(
   const seen = new Map<string, number>()
   /** Our own casts for a node that have not been echoed back yet. */
   const pending = new Map<string, Pending>()
+  /**
+   * RULE 3 — nodes where our optimistic value is NO LONGER on our canvas: the TTL lapsed on one of
+   * our unacked casts and a peer's mutation overwrote it. Rule 1 (drop our own echo) is only sound
+   * while our optimistic value is still showing; here it is not, so the echo — when it finally
+   * arrives — is the ONLY thing that can put back a value that already won on every other client
+   * (it has the higher `seq` there). Dropping it left this client permanently on the LOSING value,
+   * and its whole-file workspace.save then wrote those losing bytes over everyone else's canvas —
+   * the exact save-safety property this stage exists to guarantee. So: while a node is in here, a
+   * late ack is APPLIED rather than dropped, if the total order still says it wins.
+   */
+  const superseded = new Set<string>()
 
-  const hasPending = (id: string): boolean => {
+  /** Is rule 2's suppression live for this node? Lapses on the TTL (the entry stays: see Pending). */
+  const suppressing = (id: string): boolean => {
     const p = pending.get(id)
     if (!p) return false
+    if (p.stale) return false
     if (now() - p.since > ttlMs) {
-      // The ack never came (the reflector refused the cast, or the project went away). Stop
-      // suppressing this node's peers — a lost ack must not cost us the node forever.
-      pending.delete(id)
+      p.stale = true
       return false
     }
     return true
@@ -105,35 +137,57 @@ export function createCanvasOrder(
     onLocal(m) {
       const id = mutationNodeId(m)
       const p = pending.get(id)
-      if (p) p.count++
-      else pending.set(id, { count: 1, since: now() })
+      if (p) {
+        p.count++
+        p.since = now() // a live drag re-arms its own suppression (see Pending.since)
+        p.stale = false
+      } else {
+        pending.set(id, { count: 1, since: now() })
+      }
+      // A fresh local edit IS an optimistic value on our canvas again, so rule 1 is sound for this
+      // node once more and an older echo of ours must not be replayed over it. (This one's own echo
+      // will be dropped as the ack it is; it carries what we already show.)
+      superseded.delete(id)
     },
 
     accept(m) {
       const id = mutationNodeId(m)
       const seq = m.seq ?? 0
       const highest = seen.get(id) ?? 0
+      // `seq` 0 means an unstamped mutation (no reflector in the path) — never treat it as stale.
+      const current = seq === 0 || seq > highest
       if (seq > highest) seen.set(id, seq)
 
       if (m.src && m.src === src) {
-        // Rule 1: our own mutation, echoed back. It is the ack — consume it, apply nothing.
         const p = pending.get(id)
-        if (p && --p.count <= 0) pending.delete(id)
-        return false
+        // Rule 3: our optimistic value was overwritten by a peer while this cast was in flight (the
+        // TTL had lapsed, so rule 2 no longer held it off). If this echo still wins the total order,
+        // it is a REPAIR, not a rubber-band — apply it and land where every other client already is.
+        const repair = superseded.has(id) && current
+        // Rule 1: otherwise our own echo is just an ack — consume it, apply nothing.
+        if (p && --p.count <= 0) {
+          pending.delete(id)
+          superseded.delete(id) // every cast of ours is accounted for; the node is settled
+        }
+        return repair
       }
       // A straggler: a mutation the total order has already superseded on this client (applied, or
       // deliberately dropped). Applying it would move the node BACKWARDS out of the total order.
-      // `seq` 0 means an unstamped mutation (no reflector in the path) — never treat it as stale.
-      if (seq !== 0 && seq <= highest) return false
+      if (!current) return false
       // Rule 2: an edit of ours for this node is still in flight, so it is later in the total order
       // than this one and will win everywhere. Keep ours; the peers will land on it.
-      if (hasPending(id)) return false
+      if (suppressing(id)) return false
+      // Applying a peer's mutation over an unacked cast of ours (the TTL lapsed — `suppressing`
+      // just said so, but the entry is still there): remember that our value is gone, so the late
+      // ack can repair it (rule 3).
+      if (pending.has(id)) superseded.add(id)
       return true
     },
 
     reset() {
       seen.clear()
       pending.clear()
+      superseded.clear()
     }
   }
 }

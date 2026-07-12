@@ -133,6 +133,7 @@ import {
   type CanvasPublisher
 } from '@shared/canvas-publish'
 import { createCanvasOrder, type CanvasOrder } from '@shared/canvas-order'
+import { isCanvasMutation } from '@shared/canvas-mutations'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
@@ -287,6 +288,11 @@ export function Canvas() {
   // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
   const [conflict, setConflict] = useState<Project | null>(null)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
+  // A local edit team-sync cannot carry (a node over MUTATION_MAX_BYTES — in practice a sticky
+  // whose body someone pasted a document into). The reflector refuses it SILENTLY, so the user is
+  // told here rather than being left with a note their teammates never see. Dismissible; re-armed
+  // by the next refused cast (the publisher keeps retrying that node, so it syncs once trimmed).
+  const [syncNote, setSyncNote] = useState<string | null>(null)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
@@ -989,18 +995,47 @@ export function Canvas() {
     // Solo gate: publish only once someone else is attached. The presence hub's peer table includes
     // US, so >1 means a peer. Subscribed imperatively (no useStore selector) — this must never
     // re-render Canvas.
-    const readPeers = (): void => {
+    //
+    // The same subscription watches our own clientId. A NEW one means a NEW connection to the core —
+    // and if the core RESTARTED, its `seq` counter restarted at 0 while our `seen` map still holds
+    // the old (high) values, which would make us silently drop every mutation that follows as a
+    // straggler. Forget the order state on every (re)connect: correctness must not depend on
+    // ws-bridge happening to `location.reload()` the page. (NOT on a project switch: this Canvas
+    // keeps applying mutations for loaded-but-inactive projects, so their order state has to
+    // survive a tab switch.)
+    let myId = usePresence.getState().myId
+    const readPresence = (): void => {
       hasPeersRef.current =
         hasPeersRef.current || Object.keys(usePresence.getState().peers).length > 1
+      const id = usePresence.getState().myId
+      if (id !== myId) {
+        myId = id
+        order.reset()
+      }
     }
-    readPeers()
-    const unsub = usePresence.subscribe(readPeers)
+    readPresence()
+    const unsub = usePresence.subscribe(readPresence)
     const pub = createCanvasPublisher(
       (m) => {
         const projectId = useProjects.getState().activeProjectId
-        if (!projectId) return // no active canvas → the cast would be dropped at ingest, un-acked
+        if (!projectId) return false // no active canvas: nothing was cast — retry on the next publish
+        // The reflector REFUSES an oversized / malformed mutation at ingest, silently: no peer ever
+        // sees it and there is no negative ack. Ask the same predicate FIRST, so a refusal costs us
+        // neither a pending entry (which would deafen this node to its peers for the whole TTL — a
+        // peer's delete landing in that window would be lost, and our next whole-file save would
+        // resurrect their node) nor the retry (the publisher keeps the node in its baseline). The
+        // only thing that can legitimately blow the cap is free text, i.e. a sticky's body — so say
+        // so, instead of letting the note silently never sync.
+        if (!isCanvasMutation(m)) {
+          setSyncNote(
+            'This note is too large to share with your teammates (over 250 KB). It stays on your ' +
+              'canvas, but they will not see it until you shorten it.'
+          )
+          return false
+        }
         order.onLocal(m)
         window.nodeTerminal.canvas.mutate(projectId, m)
+        return true
       },
       { src, shouldPublish: () => hasPeersRef.current }
     )
@@ -3986,6 +4021,21 @@ export function Canvas() {
               className="announce-banner__close"
               title="Dismiss"
               onClick={() => setMigrationNote(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {syncNote && (
+          <div className="announce-banner announce-banner--info">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{syncNote}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setSyncNote(null)}
             >
               ✕
             </button>

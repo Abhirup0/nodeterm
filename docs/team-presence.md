@@ -340,12 +340,35 @@ independently on each client from the already-broadcast `agent:status` stream; a
   attached client, the sender included (`CorePlatform.clientIds()` + `onWithSender`). `seq` is
   server-authoritative (a client-supplied one is overwritten at ingest).
 - **Ordering** (`src/shared/canvas-order.ts`) — the client half, and the reason concurrent edits
-  converge instead of splitting the canvas in two. Per node, the highest `seq` wins. Two rules: (1)
+  converge instead of splitting the canvas in two. Per node, the highest `seq` wins. Three rules: (1)
   our own echo is an **ack**, not an edit — it carries the `seq` our mutation was given, and is never
   re-applied (re-applying it would rubber-band a node we are still dragging); (2) while one of our
   own mutations for a node is unacked, we ignore peers' mutations for that node — FIFO delivery means
-  ours is necessarily *later* in the total order, so it will win on every other client too. A pending
-  entry expires after `PENDING_TTL_MS` so a cast the reflector refused cannot deafen a node forever.
+  ours is necessarily *later* in the total order, so it will win on every other client too; (3) rule
+  1 is only sound **while our optimistic value is still on our canvas**. Rule 2's suppression is
+  bounded by `PENDING_TTL_MS` (an ack can be late — the same socket carries pty output, and Stage 2
+  tolerates an 8 MB backlog on it), and once it lapses a peer's mutation can overwrite the value we
+  are still waiting to have acked. From that moment our echo is the **only** copy of a value that
+  already won on every other client, so it is **applied** (a repair), not dropped. Without rule 3 a
+  late ack left that client permanently on the losing value — and its whole-file `workspace.save`
+  then wrote those losing bytes over everyone else's canvas, which is precisely the property this
+  stage exists to guarantee. The pending entry's `since` is refreshed on every local mutation for
+  that node, so a drag longer than the TTL cannot expire its own suppression mid-drag.
+  `order.reset()` is called whenever our presence clientId changes (i.e. on every (re)connect): if
+  the core restarted, its `seq` restarted at 0 while our `seen` map still held high values, and we
+  would silently drop every new mutation as a straggler. Correctness no longer depends on the
+  ws-bridge's `location.reload()`.
+- **A cast the reflector would refuse is never made** — the publisher validates with the **same**
+  predicate the reflector's ingest uses (`isCanvasMutation`, moved to `src/shared/canvas-mutations.ts`
+  so both ends share one verdict) *before* recording a pending entry and *before* casting. A refusal
+  therefore costs neither a pending entry (which would have deafened that node to its peers for the
+  whole TTL — a peer's `remove` landing in that window was dropped and never recovered, so the next
+  whole-file save resurrected the node they deleted) nor the retry: the refused node keeps its
+  **previous baseline entry**, so the very next publish re-emits it and it syncs the moment it becomes
+  castable. The only thing that can legitimately exceed `MUTATION_MAX_BYTES` is free text — a sticky
+  someone pasted a document into — so Canvas **tells the user** ("This note is too large to share with
+  your teammates (over 250 KB)… they will not see it until you shorten it") instead of leaving them
+  with a note the team silently never receives.
 - **Loop guard** — a mutation applied from a peer is `adopt()`ed into the publisher's baseline before
   the next diff runs, so it can never be re-published (no A→B→C→A ping-pong).
 - **Apply** — the vocabulary is single-sourced in `src/shared/canvas-mutations.ts` and used by both
@@ -567,6 +590,13 @@ persistence depends on: whichever client's whole-file `workspace.save` runs, it 
 others agree with. Proven end-to-end against an **asynchronous** bus (queued casts + FIFO deliveries,
 edits genuinely in flight) in `src/core/canvas-sync.convergence.test.ts`.
 
+That guarantee does **not** rest on any timeout. The pending TTL is a bound on how long we *suppress*
+peers, never on correctness: an ack that arrives after it **repairs** the node (rule 3 above), and a
+cast the reflector would refuse is never made in the first place (the publisher shares the reflector's
+predicate, records no pending entry, and keeps retrying the node until it is castable). Both cases are
+in the convergence suite — a client whose socket is stalled past the TTL, and an oversized sticky cast
+concurrently with a peer's delete.
+
 **Does NOT converge — named, not hidden:**
 
 - **Array order after a resurrection.** If a delete *loses* the order race, the client that issued it
@@ -576,13 +606,18 @@ edits genuinely in flight) in `src/core/canvas-sync.convergence.test.ts`.
 - **Intent, on a contended node.** Two people dragging the same node fight: the node lands wherever
   the last-ordered frame put it. Two people typing a title get one title. That is last-write-wins,
   not a merge — by design (no CRDT).
-- **A delete that loses to a concurrent edit.** If A deletes a node while B is mid-drag, and B's next
-  frame is ordered after A's remove, the node **survives on both canvases** — the last write wins,
-  and it happened to be an upsert. A's `transport.destroy` already killed the tmux session, so the
-  surviving node is a shell: opening it starts a fresh session. The node is *consistent* everywhere
-  (no split-brain save, which was the whole point), it is simply not the outcome A wanted. Deleting a
-  node someone else is actively dragging is a race between two humans; nodeterm resolves it, it does
-  not arbitrate it.
+- **A delete that loses to a concurrent edit — and the node comes back with a DEAD TERMINAL.** If A
+  deletes a node while B is mid-drag, and B's next frame is ordered after A's remove, the node
+  **survives on both canvases** — the last write wins, and it happened to be an upsert. But A's
+  `transport.destroy` had already run `tmux kill-session`, and nothing resurrects a killed session:
+  the node that comes back is a **shell around a dead terminal**. Its scrollback and its running
+  process are gone; the next time it is opened, `pty.create` starts a **fresh** session under the same
+  `nt-<nodeId>` (a cold start: scrollback replay finds nothing, an agent node re-launches its CLI).
+  The canvas is *consistent* everywhere (no split-brain save, which was the whole point) — the node
+  content is not. Deleting a node someone else is actively dragging is a race between two humans;
+  nodeterm resolves the canvas, it cannot un-kill a process. A "delete always wins" tiebreak would
+  trade this for the opposite hazard (a stale drag frame from a disconnected peer erasing a node that
+  was legitimately re-created), so v1 leaves the total order in charge and names the wart here.
 - **Anything outside the node vocabulary** — edges, project lifecycle (see item 5 above).
 
 ## Non-goals (v1)
@@ -623,7 +658,10 @@ read-only guests, per-user settings.
   `src/shared/canvas-mutations.test.ts`
 - **Ordering** (delivered): an own echo is an ack and is never re-applied; a peer's edit loses to an
   unacked local edit of the same node (per node, counted per in-flight frame); a superseded straggler
-  is dropped; an ack that never comes expires. → `src/shared/canvas-order.test.ts` (11 tests)
+  is dropped; an ack that never comes expires; a **late** ack repairs a node a peer overwrote after
+  the TTL lapsed (and one that lost the total order is still just an ack); a fresh local edit re-arms
+  the node; a continuous drag keeps its own suppression alive past the TTL.
+  → `src/shared/canvas-order.test.ts` (15 tests)
 - **Canvas convergence** (delivered): two clients running the **real** publisher and **real** ordering
   against the **real** reflector, over an **ASYNCHRONOUS** bus (casts and deliveries queued, FIFO per
   link — so several edits are genuinely in flight and the test chooses the interleaving). *The
@@ -634,8 +672,11 @@ read-only guests, per-user settings.
   editing one node converge; every interleaving × every settle point of a six-edit set converges; a
   peer's mutation is applied once and **re-published never** (one cast per local edit, no
   counter-cast, even for a bulk delete across three clients); ephemeral cards never go on the wire; a
-  late joiner converges; and a peer's delete is not resurrected by the surviving client's next save.
-  → `src/core/canvas-sync.convergence.test.ts` (14 tests)
+  late joiner converges; a peer's delete is not resurrected by the surviving client's next save; a
+  client whose **inbox is stalled past the TTL** (a backed-up socket) is repaired by its own late ack
+  instead of being left on the losing value; and an **oversized** node the reflector would refuse
+  neither deafens that node to a peer's concurrent delete nor is silently lost (it is retried, and
+  syncs once trimmed). → `src/core/canvas-sync.convergence.test.ts` (18 tests)
 - **Applying a peer's mutation** (delivered): patches the live React Flow array — keeps your
   selection, keeps relay-remote nodes, keeps local-only node data, keeps every untouched node's
   object identity, drops the stale `measured` size so a peer's resize is not fought back, and keeps

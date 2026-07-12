@@ -22,6 +22,7 @@
 // Pure + DOM-free (vitest runs in the node environment): only setTimeout, no React, no window.
 
 import { diffToMutations } from './canvas-mutations'
+import { mutationNodeId } from './canvas-order'
 import type { CanvasMutation, CanvasNodeState } from './types'
 
 /** ~20 Hz while dragging — the same budget the presence cursor stream uses. */
@@ -42,7 +43,44 @@ export interface CanvasPublisher {
 }
 
 /**
- * @param send        casts one mutation (already stamped with `src`).
+ * The baseline after a cast was REFUSED (`send` returned false: an oversized sticky the reflector
+ * would drop at ingest, or no active project to cast into). The refused nodes keep their PREVIOUS
+ * baseline entry — as if the edit had never been published — so the very next diff emits them again
+ * and the edit syncs the moment it becomes castable (the user trims the sticky, a project opens).
+ * Advancing the baseline over them, which is what the publisher used to do, meant the edit was
+ * dropped SILENTLY AND FOREVER: the peers never saw it and nothing ever retried it.
+ *
+ * Per NODE, not per snapshot: everything else in the same snapshot was cast and must not be re-sent.
+ * A refused node that had no previous entry is simply left OUT of the baseline (so it re-diffs as an
+ * add); a refused `remove` keeps its node in the baseline (so the remove is re-emitted).
+ */
+function rebaseRefused(
+  prev: CanvasNodeState[],
+  next: CanvasNodeState[],
+  refused: Set<string>
+): CanvasNodeState[] {
+  const prevById = new Map(prev.map((n) => [n.id, n]))
+  const nextIds = new Set(next.map((n) => n.id))
+  const out: CanvasNodeState[] = []
+  for (const n of next) {
+    if (!refused.has(n.id)) {
+      out.push(n)
+      continue
+    }
+    const before = prevById.get(n.id)
+    if (before) out.push(before)
+  }
+  for (const n of prev) {
+    if (refused.has(n.id) && !nextIds.has(n.id)) out.push(n) // a refused remove: still owed
+  }
+  return out
+}
+
+/**
+ * @param send        casts one mutation (already stamped with `src`). Returning `false` means the
+ *                    cast did NOT happen (refused / no project): the mutation is then owed — its
+ *                    node keeps its old baseline entry and the next publish retries it. Any other
+ *                    return value (including `undefined`) means it was cast.
  * @param opts.src    this client's publisher tag, stamped onto every mutation it sends, so it can
  *                    recognize its own echo coming back (see canvas-order). Omitted in tests that
  *                    only care about the diff.
@@ -55,7 +93,7 @@ export interface CanvasPublisher {
  *   there is no resync step and no missed mutation. Default: always publish.
  */
 export function createCanvasPublisher(
-  send: (m: CanvasMutation) => void,
+  send: (m: CanvasMutation) => void | boolean,
   opts: { intervalMs?: number; src?: string; shouldPublish?: () => boolean } = {}
 ): CanvasPublisher {
   const intervalMs = opts.intervalMs ?? PUBLISH_INTERVAL_MS
@@ -70,8 +108,11 @@ export function createCanvasPublisher(
       return
     }
     const mutations = diffToMutations(last, next)
-    last = next
-    for (const m of mutations) send(opts.src ? { ...m, src: opts.src } : m)
+    const refused = new Set<string>()
+    for (const m of mutations) {
+      if (send(opts.src ? { ...m, src: opts.src } : m) === false) refused.add(mutationNodeId(m))
+    }
+    last = refused.size ? rebaseRefused(last, next, refused) : next
   }
 
   const onTimer = (): void => {

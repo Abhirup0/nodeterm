@@ -99,16 +99,65 @@ describe('createCanvasOrder', () => {
     expect(o.accept(up('n1', 1, 'other', 5))).toBe(true) // a NEWER one can (that is undo-of-delete)
   })
 
-  // The pending gate assumes the ack always comes back. It usually does — but the reflector drops
-  // a mutation it refuses (oversized), and that would otherwise deafen the node to its peers for
-  // the rest of the session.
+  // The pending gate assumes the ack always comes back. It usually does — but an ack can be LATE
+  // (our socket carries pty output too), and unbounded suppression would deafen the node to its
+  // peers for the rest of the session.
   it('an ack that never arrives expires — a lost cast cannot deafen a node forever', () => {
     let t = 1000
     const o = createCanvasOrder('me', { now: () => t })
-    o.onLocal(up('n1', 1, 'me', 0)) // cast… and the reflector refuses it: no ack, ever
+    o.onLocal(up('n1', 1, 'me', 0)) // cast… and no ack comes back
     expect(o.accept(up('n1', 5, 'peer', 2))).toBe(false)
     t += PENDING_TTL_MS + 1
     expect(o.accept(up('n1', 6, 'peer', 3))).toBe(true)
+  })
+
+  // Rule 3. Expiring the suppression let a peer overwrite an optimistic value we are still waiting
+  // to have acked. Our echo is then the only copy of a value that WON on every other client — so it
+  // repairs the node instead of being dropped as an ack. Without this, this client sat on the
+  // losing value forever and wrote it to disk over everyone else's canvas.
+  it('a late ack REPAIRS a node a peer overwrote after the TTL lapsed', () => {
+    let t = 1000
+    const o = createCanvasOrder('me', { now: () => t })
+    o.onLocal(up('n1', 100, 'me', 0)) // cast; the reflector ordered it 7th — it wins everywhere
+    t += PENDING_TTL_MS + 1 // our ack is stuck behind a backed-up socket
+    expect(o.accept(up('n1', 50, 'peer', 6))).toBe(true) // …so the peer's OLDER edit lands on us
+    expect(o.accept(up('n1', 100, 'me', 7))).toBe(true) // …and our late ack puts our value back
+    // Settled: the node listens to peers again, and later echoes are ordinary acks once more.
+    expect(o.accept(up('n1', 20, 'peer', 8))).toBe(true)
+  })
+
+  it('a late ack that LOST the total order is still just an ack (no rubber-band)', () => {
+    let t = 1000
+    const o = createCanvasOrder('me', { now: () => t })
+    o.onLocal(up('n1', 100, 'me', 0)) // ordered 6th — the peer's edit is ordered AFTER it
+    t += PENDING_TTL_MS + 1
+    expect(o.accept(up('n1', 50, 'peer', 7))).toBe(true) // the peer's edit wins everywhere…
+    expect(o.accept(up('n1', 100, 'me', 6))).toBe(false) // …so our echo is superseded: dropped
+  })
+
+  it('a fresh local edit re-arms the node, so an older echo of ours cannot replay over it', () => {
+    let t = 1000
+    const o = createCanvasOrder('me', { now: () => t })
+    o.onLocal(up('n1', 100, 'me', 0))
+    t += PENDING_TTL_MS + 1
+    expect(o.accept(up('n1', 50, 'peer', 6))).toBe(true) // peer overwrote our optimistic value…
+    o.onLocal(up('n1', 300, 'me', 0)) // …but the user drags it again: 300 is on our canvas now
+    expect(o.accept(up('n1', 100, 'me', 7))).toBe(false) // the old echo must not rubber-band it
+    expect(o.accept(up('n1', 300, 'me', 8))).toBe(false) // our new cast's echo is a plain ack
+  })
+
+  // A drag emits a frame every 50 ms. Dating the pending entry from the OLDEST unacked cast expired
+  // it mid-drag, and a peer's older frame then rubber-banded a node the user was still holding.
+  it('a continuous drag keeps its own suppression alive past the TTL', () => {
+    let t = 1000
+    const o = createCanvasOrder('me', { now: () => t })
+    for (let i = 0; i < 200; i++) {
+      o.onLocal(up('n1', i, 'me', 0)) // 200 frames × 50 ms = 10 s of dragging, all acked promptly
+      expect(o.accept(up('n1', i, 'me', i + 1))).toBe(false)
+      t += 50
+    }
+    o.onLocal(up('n1', 999, 'me', 0)) // still dragging, this frame not yet acked
+    expect(o.accept(up('n1', 5, 'peer', 500))).toBe(false) // …a peer's frame still loses to ours
   })
 
   it('an unstamped mutation (no reflector in the path) is never treated as stale', () => {

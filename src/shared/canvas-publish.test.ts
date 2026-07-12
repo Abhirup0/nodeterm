@@ -19,7 +19,10 @@ const node = (id: string, x = 0): CanvasNodeState =>
 
 function collect() {
   const sent: CanvasMutation[] = []
-  return { sent, send: (m: CanvasMutation) => sent.push(m) }
+  return {
+    sent,
+    send: (m: CanvasMutation): void => void sent.push(m) // void: `send` returning false means REFUSED
+  }
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -116,6 +119,82 @@ describe('createCanvasPublisher', () => {
     p.dispose()
     vi.advanceTimersByTime(PUBLISH_INTERVAL_MS * 4)
     expect(c.sent).toEqual([{ op: 'upsert', node: node('a', 1) }])
+  })
+})
+
+// A cast the reflector would REFUSE (an oversized sticky; a cast with no project active) must not
+// be counted as published: it never reaches a peer, and nothing else would ever re-emit it.
+describe('a refused cast (send → false)', () => {
+  /** Refuses every mutation touching `bad`, records everything it was asked to send. */
+  function gate(bad: string) {
+    const tried: CanvasMutation[] = []
+    const sent: CanvasMutation[] = []
+    const send = (m: CanvasMutation): boolean => {
+      tried.push(m)
+      const id = m.op === 'remove' ? m.id : m.node.id
+      if (id === bad) return false
+      sent.push(m)
+      return true
+    }
+    return { tried, sent, send }
+  }
+
+  it('is retried on the next publish (the baseline does not advance over it)', () => {
+    const c = gate('a')
+    const p = createCanvasPublisher(c.send)
+    p.adopt([node('a')])
+    p.publish([node('a', 5)]) // refused: the peers never see it
+    expect(c.sent).toEqual([])
+    p.publish([node('a', 5)]) // the same snapshot again → still owed, so it is re-emitted
+    expect(c.tried).toHaveLength(2)
+  })
+
+  it('syncs the moment the edit becomes castable again (the user trims the sticky)', () => {
+    let bad = 'a'
+    const sent: CanvasMutation[] = []
+    const p = createCanvasPublisher((m) => {
+      const id = m.op === 'remove' ? m.id : m.node.id
+      if (id === bad) return false
+      sent.push(m)
+      return true
+    })
+    p.adopt([node('a')])
+    p.publish([node('a', 5)]) // oversized → refused
+    expect(sent).toEqual([])
+    bad = '' // trimmed: it fits now
+    p.publish([node('a', 6)])
+    expect(sent).toEqual([{ op: 'upsert', node: node('a', 6) }]) // …and it carries the LIVE value
+  })
+
+  it('does not hold up the other nodes in the same snapshot', () => {
+    const c = gate('a')
+    const p = createCanvasPublisher(c.send)
+    p.adopt([node('a'), node('b')])
+    p.publish([node('a', 5), node('b', 5)])
+    expect(c.sent).toEqual([{ op: 'upsert', node: node('b', 5) }])
+    p.publish([node('a', 5), node('b', 5)])
+    expect(c.sent).toEqual([{ op: 'upsert', node: node('b', 5) }]) // b was cast: not re-sent
+  })
+
+  it('re-emits a refused ADD as an add, and a refused REMOVE as a remove', () => {
+    const c = gate('a')
+    const p = createCanvasPublisher(c.send)
+    p.publish([node('a')]) // an ADD, refused → not in the baseline
+    p.publish([node('a')])
+    expect(c.tried).toEqual([
+      { op: 'upsert', node: node('a') },
+      { op: 'upsert', node: node('a') }
+    ])
+
+    const d = gate('z')
+    const q = createCanvasPublisher(d.send)
+    q.adopt([node('z')])
+    q.publish([]) // a REMOVE, refused → the node stays in the baseline
+    q.publish([])
+    expect(d.tried).toEqual([
+      { op: 'remove', id: 'z' },
+      { op: 'remove', id: 'z' }
+    ])
   })
 })
 
