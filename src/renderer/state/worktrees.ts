@@ -105,6 +105,16 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       // `entries` stays in git's order — reconcileWorktrees identifies the main checkout positionally.
       const entries = await git.worktreeList(root)
       if (mineEpoch !== epoch) return
+      // A miss-streak is a fact about a BINDING, not about a path forever. It is keyed by path and
+      // `computeWorktreePath` is deterministic, so a streak that outlives its binding comes back to
+      // haunt the next one: delete a worktree dir → the group strikes out → Unbind (which prunes)
+      // → create a worktree for the same branch → the SAME path → the union below drags the dead
+      // streak onto a brand-new, healthy group, which renders "· missing" (Merge/Remove/↪ hidden)
+      // until the next successful poll. So the moment a path is no longer bound to any group
+      // (unbind / remove / ungroup / delete — all of which re-refresh), forget its streak.
+      // Only BOUND paths are ever consulted below, so nothing else can depend on it.
+      const boundPaths = new Set(bound.map((b) => normWorktreePath(b.worktree.path)))
+      for (const key of [...missStreak.keys()]) if (!boundPaths.has(key)) missStreak.delete(key)
       // Reconcile only the groups bound to THIS repo. A group bound to another repo's worktree
       // (legacy binding, or hand-typed) would otherwise be compared against the wrong entry list
       // and falsely reported stale.
@@ -118,7 +128,11 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       // to reconcile's answer alone would ERASE, on any of those, a group the poll had already
       // proven dead: the chip goes healthy again and "↪ Move into worktree" reopens the very window
       // in which it kills a live session into a directory that no longer exists.
-      const struck = mine.filter((b) => struckOut(b.worktree.path)).map((b) => b.groupId)
+      // Struck-out over ALL bindings, not just `mine`: a group bound to ANOTHER repo (a legacy or
+      // hand-edited binding) is excluded from reconciliation by design, but its miss-streak is
+      // still a fact about its own path. Filtering it out here dropped it from `staleGroupIds` on
+      // every refresh, so a dead cross-repo worktree looked healthy again until the next poll tick.
+      const struck = bound.filter((b) => struckOut(b.worktree.path)).map((b) => b.groupId)
       const staleIds = [...new Set([...stale, ...struck])]
       set({ repoRoot: root, entries, orphans, staleGroupIds: staleIds })
     } catch {

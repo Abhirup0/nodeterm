@@ -353,6 +353,60 @@ describe('useWorktrees.refreshStatus', () => {
     expect(useWorktrees.getState().staleGroupIds).toEqual([])
   })
 
+  // The miss-streak is keyed by PATH and `computeWorktreePath` is deterministic, so a streak that
+  // survives its binding lands on the NEXT worktree at the same path: unbind a struck-out group,
+  // create a worktree for the same branch again, and the brand-new healthy group would render
+  // "· missing" (Merge/Remove/↪ hidden) until the next poll.
+  it('forgets a path´s strike streak once nothing is bound to it any more (unbind → rebind is healthy)', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+
+    // Unbind: the group is gone from `bound`, and the dead worktree's registration was pruned.
+    gitMock.worktreeList.mockResolvedValue([{ path: '/repo', branch: 'main', head: 'a', isBare: false }])
+    await useWorktrees.getState().refresh('/repo', [])
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+
+    // The user creates a worktree for the same branch → git hands out the SAME path → a NEW group.
+    gitMock.worktreeList.mockResolvedValue([
+      { path: '/repo', branch: 'main', head: 'a', isBare: false },
+      { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
+    ])
+    await useWorktrees.getState().refresh('/repo', [
+      { groupId: 'group-2', worktree: { path: '/wt/feat', repoPath: '/repo' } as never }
+    ])
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+  })
+
+  // A cross-repo binding is excluded from RECONCILIATION on purpose (it would be compared against
+  // the wrong entry list), but its strike streak is a fact about its own path — dropping it on
+  // every refresh made a dead cross-repo worktree look healthy again until the next poll tick.
+  it('keeps a cross-repo binding´s strike staleness across a refresh', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/other-wt/feat', 'other')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/other-wt/feat', 'other')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['other'])
+
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue([{ path: '/repo', branch: 'main', head: 'a', isBare: false }])
+    await useWorktrees.getState().refresh('/repo', [
+      { groupId: 'other', worktree: { path: '/other-wt/feat', repoPath: '/other-repo' } as never }
+    ])
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['other'])
+  })
+
   it('leaves staleness alone when no group id is given', async () => {
     gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
 
