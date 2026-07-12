@@ -453,7 +453,13 @@ export class PtyManager {
     platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) =>
       this.kill(senderId, sessionId)
     )
-    platform().on(IPC.ptyDestroy, (persistKey: string) => this.destroySession(persistKey))
+    // Sender-aware: the × permanently ends a session OTHER people may be watching, so the close
+    // event they get has to name WHO did it ("closed by <name>" — see `destroySession`).
+    // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
+    // plain listener would run the destroy — and its `tmux kill-session` — twice.
+    platform().onWithSender(IPC.ptyDestroy, (senderId: number, persistKey: string) =>
+      this.destroySession(senderId, persistKey)
+    )
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
     )
@@ -1339,23 +1345,62 @@ export class PtyManager {
     }
   }
 
-  /** Permanently end a node's persistent tmux session (called when the user closes it). */
-  async destroySession(persistKey: string): Promise<void> {
+  /**
+   * Permanently end a node's persistent session — the user clicked ×, and that means "this
+   * terminal is gone, for everyone" (`tmux kill-session`), which is the whole meaning of the
+   * button. With co-attach the node may have OTHER viewers, and they must be told: each one gets
+   * `pty:closed:<sessionId>` carrying `{ by: <the ClientId that pressed ×> }`, so their terminal
+   * lands in a "closed by <name>" state.
+   *
+   * The payload names the CLIENT, not the person: names are unverified presence data and live in
+   * the renderer's presence table, so PtyManager needs no dependency on the peer table (and cannot
+   * be made to lie about a name it never sees).
+   *
+   * The close event is what STOPS the other viewers from quietly reopening the node: a respawn
+   * would resurrect a session its owner deliberately deleted — a fresh shell with none of the
+   * state, plus a stray tmux session nobody asked for. Everything below therefore also makes a
+   * respawn structurally impossible from THIS process: the co-attach index entry, the in-flight
+   * create, and the Session itself all go away synchronously, before the kill-session lands.
+   *
+   * `clientId` is null when nothing/no-one attributable did it (an internal caller).
+   */
+  async destroySession(clientId: ClientId | null, persistKey: string): Promise<void> {
     // destroy() is called (close button) while the session is still live, so its sshRemote is
-    // known. Capture it synchronously before any await.
-    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    // known. Capture it synchronously before any await. The index is the co-attach one (UI
+    // sessions); the scan is the fallback for a session that is live but not indexed.
+    const dyingId = this.byPersistKey.get(persistKey)
+    const dying = dyingId ? this.sessions.get(dyingId) : undefined
+    const sshRemote = dying?.sshRemote ?? this.sessionByPersistKey(persistKey)?.sshRemote
     // Un-index NOW (synchronously): the node is gone for good, so a create() that races the
     // kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
-    // session instead of co-attaching to the one we are about to destroy. The Session object
-    // itself is dropped by its own onExit / the client's kill().
+    // session instead of co-attaching to the one we are about to destroy.
     // Also drop any in-flight create for this node: a create racing the kill-session below must
     // spawn a fresh session, not await (and then join) the one we are destroying.
     this.inflight.delete(persistKey)
-    const dyingId = this.byPersistKey.get(persistKey)
-    if (dyingId) {
+    if (dyingId && dying) {
       this.byPersistKey.delete(persistKey)
-      const dying = this.sessions.get(dyingId)
-      if (dying) dying.indexKey = undefined
+      dying.indexKey = undefined
+      const channel = IPC.ptyClosed(dyingId)
+      for (const sub of dying.subscribers) {
+        if (sub !== clientId) this.send(sub, channel, { by: clientId })
+      }
+      // Tear the session down HERE rather than leaving it to the client's own `kill` / the pty's
+      // onExit: with N subscribers there is no single kill to wait for, and every one of them may
+      // be mid-anything — parked, paused (its owed resume will never come now), desynced past the
+      // drop ceiling. The Session object holds all of that state, so dropping it drops the lot: no
+      // leaked pause, no stray subscriber still in the fan-out, no timer. (The per-client
+      // backpressure bookkeeping on the Server Edition shell is pruned by the `pty:closed:` event
+      // itself — see ServerPlatform.forgetFlowState.)
+      if (dying.flushTimer) clearTimeout(dying.flushTimer)
+      dying.subscribers.clear()
+      dying.sizes.clear()
+      dying.shown.clear()
+      dying.pausedBy.clear()
+      // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone would leak the
+      // master fd — and a session destroyed while a drowning viewer had it paused is exactly that
+      // case (see pty-release.ts). It resumes the pty first, so the fd actually closes.
+      releasePty(dying.proc as ReleasablePty)
+      this.forget(dyingId, dying)
     }
     // The node is gone for good — drop its cold-restore snapshot too.
     await deleteScrollback(persistKey)

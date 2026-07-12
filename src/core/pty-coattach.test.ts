@@ -169,7 +169,7 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   it('a destroyed node is never co-attached to (the × path un-indexes it)', async () => {
     const m = await manager()
     const first = await create(ALICE)
-    await m.destroySession('node-1') // user clicked ×: the tmux session is gone for good
+    await m.destroySession(ALICE, 'node-1') // user clicked ×: the tmux session is gone for good
 
     const second = await create(BOB)
     expect(second.sessionId).not.toBe(first.sessionId)
@@ -525,6 +525,114 @@ describe('size negotiation: smallest subscriber wins', () => {
     resize(ALICE, sessionId, null, null)
     expect(spawned[0].resizes).toEqual([]) // no viewers → keep the last size, never resize to 1x1
     expect(sizes(sessionId)).toEqual([])
+  })
+})
+
+// ── A node DELETED while somebody else is watching it ─────────────────────────────────────────
+// The × button means "this terminal is gone for good" (tmux kill-session). With co-attach the
+// node may have other viewers, and the one thing they must NOT do is quietly reopen it: a respawn
+// would resurrect a session its owner deliberately destroyed — in a fresh shell, with none of the
+// state, and leaving a stray tmux session behind. They are told WHO closed it instead, and land in
+// a closed state (the renderer paints "closed by <name>" from the presence table — Tasks 9-10).
+describe('node destroyed while co-viewed', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  const create = (clientId: number, persistKey = 'node-1') =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols: 80, rows: 24, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+    }>
+  // pty:destroy is sender-aware: the closed event has to name WHO pressed ×.
+  const destroy = (clientId: number, persistKey = 'node-1') =>
+    fake.senderListeners[IPC.ptyDestroy](clientId, persistKey) as unknown as Promise<void>
+  const flow = (clientId: number, sessionId: string, resume: boolean) =>
+    fake.senderListeners[IPC.ptyFlow](clientId, sessionId, resume)
+  const closed = (sessionId: string) =>
+    fake.sent.filter((s) => s.channel === IPC.ptyClosed(sessionId))
+
+  it('tells the OTHER subscribers who closed it, and does not respawn', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    fake.sent.length = 0
+    await destroy(ALICE) // Alice hits the × on the node
+
+    expect(closed(sessionId).map((s) => s.to)).toEqual([BOB]) // the closer does not need telling
+    expect(closed(sessionId)[0].args[0]).toEqual({ by: ALICE })
+    expect(spawned[0].killed).toBe(true) // the pty client is released with the session
+    expect(spawned).toHaveLength(1) // …and nothing respawned it
+  })
+
+  it('a create AFTER the destroy spawns a fresh session — it never joins the doomed one', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    await destroy(ALICE)
+
+    // Bob's renderer re-creating the node (a remount, a reconnect) must not resurrect the session.
+    const again = await create(BOB)
+    expect(again.sessionId).not.toBe(sessionId)
+    expect(again.fresh).toBe(true) // a brand-new session, not a co-attach to the dead one
+    expect(spawned).toHaveLength(2)
+  })
+
+  it('the destroyed session stops fanning out: no data, and no exit after the close', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    await destroy(ALICE)
+
+    fake.sent.length = 0
+    spawned[0].onDataCb?.('ghost output') // the pty client is being torn down
+    vi.advanceTimersByTime(20)
+    spawned[0].onExitCb?.({ exitCode: 1 }) // …and its exit lands after the close event
+    expect(fake.sent.filter((s) => s.channel === IPC.ptyData(sessionId))).toEqual([])
+    // "[process exited with code 1]" on top of "closed by Alice" would be noise at best: the
+    // subscribers were told the truth already, and the session is off the books.
+    expect(fake.sent.filter((s) => s.channel === IPC.ptyExit(sessionId))).toEqual([])
+  })
+
+  it('releases a session a subscriber had PAUSED (a dying pty must not keep its fd)', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    flow(BOB, sessionId, false) // Bob's xterm is drowning — the pty is paused for everyone
+    expect(spawned[0].paused).toBe(true)
+
+    await destroy(ALICE)
+    // releasePty resumes before destroying: a paused pty never reads EOF, so it would otherwise
+    // leak its master fd (see pty-release.ts). Bob owes a resume that will never come — the
+    // session is gone, so the ledger goes with it.
+    expect(spawned[0].paused).toBe(false)
+    expect(spawned[0].killed).toBe(true)
+    expect(closed(sessionId).map((s) => s.to)).toEqual([BOB])
+  })
+
+  it('a destroy with no live session still tells nobody and kills the tmux session', async () => {
+    await manager()
+    // Nothing was ever created for node-9 in this process (e.g. it is only running in tmux).
+    await destroy(ALICE, 'node-9')
+    expect(fake.sent).toEqual([])
+    expect(spawned).toHaveLength(0)
   })
 })
 

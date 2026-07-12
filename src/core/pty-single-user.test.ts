@@ -346,7 +346,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   it('destroy (the × button) DOES kill the tmux session', async () => {
     const m = await tmuxManager()
     await create(80, 24)
-    await m.destroySession('solo-1')
+    await m.destroySession(SOLO, 'solo-1')
     const kills = tmuxCalls('kill-session')
     expect(kills).toHaveLength(1)
     expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))

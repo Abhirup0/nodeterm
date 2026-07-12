@@ -46,7 +46,7 @@ describe('PtyManager platform registration', () => {
   it('registers the sender-aware pty channels EXACTLY ONCE (no composed plain listener)', async () => {
     const { PtyManager } = await import('./pty-manager')
     new PtyManager().registerIpc()
-    for (const ch of [IPC.ptyWrite, IPC.ptyResize, IPC.ptyFlow, IPC.ptyKill]) {
+    for (const ch of [IPC.ptyWrite, IPC.ptyResize, IPC.ptyFlow, IPC.ptyKill, IPC.ptyDestroy]) {
       expect(fake.senderListeners[ch], ch).toBeDefined()
       expect(fake.listeners[ch], ch).toBeUndefined()
     }
