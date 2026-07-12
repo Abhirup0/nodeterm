@@ -78,6 +78,11 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
+import { PresenceLayer } from '../components/PresenceLayer'
+import { Facepile } from '../components/Facepile'
+import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
+import { connectPresence, reportProject } from '../state/presence'
+import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -722,6 +727,12 @@ export function Canvas() {
 
   // 2) Whenever the active project changes, load its canvas into React Flow.
   useEffect(() => {
+    // Team presence: tell the hub which canvas we are on (this effect fires on load AND on every
+    // tab switch). Peers only draw each other's cursors and node chips when the project matches —
+    // each project is its own canvas with its own coordinate space. No project open (welcome
+    // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
+    // and Canvas deliberately never READS the presence store (see the connectPresence effect).
+    reportProject(activeProjectId || null)
     if (!activeProjectId) return
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
@@ -2636,6 +2647,13 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
+  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session ([] deps —
+  // connectPresence is idempotent, but a second live connection whose teardown ran first would tear
+  // the shared one down under the survivor). Canvas deliberately does NOT read the presence store:
+  // only PresenceLayer / Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never
+  // re-renders this component (docs/team-presence.md → UI).
+  useEffect(() => connectPresence(), [])
+
   // A browser guest's new-window (target=_blank / window.open) request → open another browser node
   // (never a real popup; main denies the real one) roped below/right of the source. Reads the
   // latest nodes via nodesRef so the deps stay []. Rope is display-only (controlEdges, not persisted).
@@ -3553,6 +3571,39 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  // ---- presence travel ("go to where my teammate is", from the facepile) ----
+  // A peer may be working in a project we have CLOSED — the facepile shows off-project peers on
+  // purpose. A closed project still lives in the store (`closed: true`), so `setActive` alone would
+  // activate a canvas the tab bar does not show: route it through reopenProject instead. An
+  // `unavailable` project (its file is unreadable) is not travelled to at all. See lib/presenceTravel.
+  const travelToProject = useCallback(
+    (projectId: string) => {
+      const { projects, activeProjectId: active } = useProjects.getState()
+      const travel = projectTravel(projects, active, projectId)
+      if (travel.kind === 'reopen') reopenProject(travel.projectId)
+      else if (travel.kind === 'switch') switchProject(travel.projectId)
+    },
+    [reopenProject, switchProject]
+  )
+
+  // Jump to the node a peer is focused on. focusNodeById already handles the same-project focus and
+  // the switch to another OPEN project; the closed-project case has to reopen the tab first and let
+  // the active-project effect finish the focus (pendingFocusRef, same mechanism as a notification).
+  const travelToNode = useCallback(
+    (nodeId: string) => {
+      const { projects, activeProjectId: active } = useProjects.getState()
+      const travel = nodeTravel(projects, active, nodeId)
+      if (travel.kind === 'blocked') return
+      if (travel.kind === 'reopen') {
+        pendingFocusRef.current = nodeId
+        reopenProject(travel.projectId)
+        return
+      }
+      focusNodeById(nodeId)
+    },
+    [focusNodeById, reopenProject]
+  )
+
   // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux
   // session, drop persisted agent status, tear down any SSH master, then delete it from disk.
   const deleteProject = useCallback(
@@ -3928,8 +3979,17 @@ export function Canvas() {
           />
           <Controls showInteractive={false} position="bottom-left" />
           <UsageIndicator />
+          {/* Peer cursors live INSIDE <ReactFlow>: PresenceLayer uses ViewportPortal +
+              useReactFlow, which throw outside the provider — and cursors are flow coordinates. */}
+          <PresenceLayer />
           <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
+
+        {/* Mounted unconditionally, even when we are alone: the facepile renders null with no peers,
+            but it is also what prunes the presence store's face cache — gating its mount on a peer
+            count would leak departed peers' faces forever (state/presence.ts → selectFaces). */}
+        <Facepile onJump={travelToNode} onSwitchProject={travelToProject} />
+        <PresenceNamePrompt />
 
         {(!hasProjects || welcomeOpen) && (
           <WelcomeScreen
