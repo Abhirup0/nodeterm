@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ServerPlatform, type UiSink } from './platform-server'
 
 function sink(buffered: () => number): UiSink {
@@ -110,5 +110,131 @@ describe('ws backpressure', () => {
     const ui = p.attach(sink(() => 5_000_000))
     expect(() => p.sendTo(ui, 'pty:data:s1', 'x')).not.toThrow()
     expect(() => p.sendTo(ui, 'some:event', 1)).not.toThrow()
+  })
+})
+
+describe('ws drop-and-redraw ceiling (bounded memory)', () => {
+  /** A sink whose buffer GROWS with every byte it is handed — a client that is not draining. */
+  type Growing = { buffered: number; sends: number; resyncs: string[]; sink: UiSink }
+  function growingSink(start = 0): Growing {
+    const s: Growing = {
+      buffered: start,
+      sends: 0,
+      resyncs: [] as string[],
+      sink: {
+        sendText: (json: string) => {
+          const m = JSON.parse(json)
+          if (typeof m.channel === 'string' && m.channel.startsWith('pty:resync:'))
+            s.resyncs.push(String(m.args[0]))
+        },
+        sendBinary: (b: Uint8Array) => {
+          s.sends++
+          s.buffered += b.byteLength
+        },
+        bufferedAmount: () => s.buffered
+      } as UiSink
+    }
+    return s
+  }
+
+  it('a client over WS_DROP_WATER stops receiving that session, the other client is untouched, and the pty is NOT paused', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ sid: string; resume: boolean }> = []
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
+    p.setResyncProvider(async () => 'SCREEN')
+    const slow = growingSink(8_000_001) // already past the ceiling
+    const fast = growingSink(0)
+    const slowId = p.attach(slow.sink)
+    const fastId = p.attach(fast.sink)
+
+    for (let i = 0; i < 3; i++) {
+      p.sendTo(slowId, 'pty:data:s1', 'chunk')
+      p.sendTo(fastId, 'pty:data:s1', 'chunk')
+    }
+    expect(slow.sends).toBe(0) // dropped — nothing more is queued for it
+    expect(slow.buffered).toBe(8_000_001) // …so its buffer stops growing (bounded)
+    expect(fast.sends).toBe(3) // the fast client keeps streaming, uninterrupted
+    expect(flow).toEqual([]) // and the shared pty is never paused for it
+  })
+
+  it('a client that crosses the ceiling while it OWED a pause hands that pause back', async () => {
+    // The whole point of dropping: a desynced client must not hold the shared pty hostage. It
+    // stopped receiving output, so it can never drain and return the pause itself — the drop is
+    // where the resume is owed back, or the other viewers' terminal would freeze forever.
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ uiId: number; sid: string; resume: boolean }> = []
+    p.setFlowController((uiId, sid, resume) => flow.push({ uiId, sid, resume }))
+    p.setResyncProvider(async () => 'SCREEN')
+    let buffered = 2_000_000 // above HIGH, below DROP
+    const ui = p.attach({
+      sendText: () => {},
+      sendBinary: () => {},
+      bufferedAmount: () => buffered
+    })
+
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // over high-water → this client owes a resume
+    expect(flow).toEqual([{ uiId: ui, sid: 's1', resume: false }])
+
+    buffered = 9_000_000 // it never drained: past the ceiling
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // → desynced, and the pause is returned
+    expect(flow).toEqual([
+      { uiId: ui, sid: 's1', resume: false },
+      { uiId: ui, sid: 's1', resume: true }
+    ])
+  })
+
+  it('resyncs ONCE via the tmux capture path when the client drains, then resumes streaming', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const capture = vi.fn(async () => 'CURRENT SCREEN')
+    p.setResyncProvider(capture)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'a') // over the ceiling → desync + drop
+    expect(slow.sends).toBe(0)
+
+    slow.buffered = 1000 // the socket drained below WS_LOW_WATER
+    p.sendTo(id, 'pty:data:s1', 'b') // still dropped: the redraw is in flight
+    p.sendTo(id, 'pty:data:s1', 'c')
+    await vi.waitFor(() => expect(slow.resyncs).toEqual(['CURRENT SCREEN']))
+    expect(capture).toHaveBeenCalledTimes(1) // ONE capture — not a replay of the backlog
+    expect(capture).toHaveBeenCalledWith('s1')
+
+    slow.buffered = 1000
+    p.sendTo(id, 'pty:data:s1', 'd') // resynced → normal streaming resumes
+    expect(slow.sends).toBe(1)
+  })
+
+  it('desyncing one (client, session) does not desync that client s other sessions', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    p.setResyncProvider(async () => '')
+    const s = growingSink(8_000_001)
+    const id = p.attach(s.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'x') // s1 crosses the ceiling → dropped
+    expect(s.sends).toBe(0)
+    s.buffered = 0 // the buffer is a socket-wide number; s2 is nowhere near the ceiling
+    p.sendTo(id, 'pty:data:s2', 'y') // a DIFFERENT session on the same client still streams
+    expect(s.sends).toBe(1)
+  })
+
+  it('a client that leaves while desynced is not redrawn, and leaves no state behind', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const capture = vi.fn(async () => 'SCREEN')
+    p.setResyncProvider(capture)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'x') // desynced
+    p.detach(id) // tab closed while behind
+    slow.buffered = 0
+    p.sendTo(id, 'pty:data:s1', 'y') // gone: no send, no capture
+    await Promise.resolve()
+    expect(slow.sends).toBe(0)
+    expect(slow.resyncs).toEqual([])
+    expect(capture).not.toHaveBeenCalled()
   })
 })

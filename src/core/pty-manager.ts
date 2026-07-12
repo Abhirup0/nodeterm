@@ -1186,6 +1186,23 @@ export class PtyManager {
   }
 
   /**
+   * The CURRENT screen of a live session, by sessionId — the redraw sent to a client that fell so
+   * far behind that its socket backlog was discarded (see ServerPlatform's WS_DROP_WATER). Reuses
+   * the existing `tmux capture-pane -e` paths (`captureSnapshot`, which the relay host already
+   * paints a joining mirror with; `captureSession` for an ssh-project node, whose tmux lives on the
+   * remote host) rather than adding a second capture. '' when the session or tmux is unavailable —
+   * the client then just clears and resumes streaming.
+   */
+  async captureForResync(sessionId: string): Promise<string> {
+    const session = this.sessions.get(sessionId)
+    if (!session) return ''
+    const key = session.persistKey ?? session.indexKey
+    if (!key) return ''
+    if (session.sshRemote) return this.captureSession(key)
+    return this.captureSnapshot(key)
+  }
+
+  /**
    * Snapshot a node's recent scrollback (with colors, `-e`) to disk for cold-restart replay.
    * Best-effort: a missing session / unavailable tmux just leaves the prior snapshot in place.
    * Returns false when the capture failed, so the periodic tick can re-mark the session dirty

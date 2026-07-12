@@ -1,4 +1,5 @@
 import type { CorePlatform } from '../core/platform'
+import { IPC } from '../shared/ipc'
 import {
   E_NO_HANDLER,
   encodePtyData,
@@ -19,6 +20,16 @@ const PTY_DATA_PREFIX = 'pty:data:'
 /** Watermarks match the renderer terminal's own flow control. */
 const WS_HIGH_WATER = 1_000_000
 const WS_LOW_WATER = 256_000
+/**
+ * Hard ceiling per (client, session). Because backpressure is per-client (a slow client must not
+ * pause the pty for everyone), a client that never drains would otherwise grow its send buffer
+ * without bound until the server OOMs. Past this we DROP that session's output for that client and
+ * redraw it from tmux once it recovers: for a terminal the CURRENT SCREEN is what matters, not the
+ * 8 MB of scrollback a bad link missed — replaying that backlog would be slower to deliver, stale
+ * on arrival, and keep the buffer full. tmux is the authoritative source of the current screen.
+ * Do not "fix" this back into a replay.
+ */
+const WS_DROP_WATER = 8_000_000
 
 type Handler = { fn: (...args: any[]) => unknown; withSender: boolean }
 type Listener = { fn: (...args: any[]) => void; withSender: boolean }
@@ -48,14 +59,30 @@ export class ServerPlatform implements CorePlatform {
   // browser B": B's low-water send would hand back the resume A owes, and with the pty paused no
   // further data would arrive for A to re-assert it — the terminal would hang for both of them.
   //
-  // Still Task 5's: a viewer that STAYS behind currently sets the pace for everyone (the slowest
-  // socket throttles the shared pty). The fix is a per-client drop-and-redraw above a second,
-  // higher watermark (WS_DROP_WATER) rather than pausing the producer indefinitely.
+  // A viewer that STAYS behind does not set the pace for everyone: above WS_DROP_WATER we stop
+  // sending to it and redraw it from tmux when it recovers (see `dropOrDesync`), so the pause it
+  // owes is bounded in time and the producer is never throttled indefinitely by one bad link.
   private paused = new Set<string>()
   private flowController?: (uiId: number, sessionId: string, resume: boolean) => void
 
+  /** The (client, session) pairs whose backlog we discarded; each gets a tmux redraw once it
+   *  drains back under WS_LOW_WATER. Keyed like `paused` — desync is per (client, session), so a
+   *  drowning phone affects neither the other viewers of that session nor its own other sessions. */
+  private desynced = new Set<string>()
+  /** Redraws currently in flight (a capture is async) — one per (client, session), never N. */
+  private resyncing = new Set<string>()
+  private resyncProvider?: (sessionId: string) => Promise<string>
+
   setFlowController(fn: (uiId: number, sessionId: string, resume: boolean) => void): void {
     this.flowController = fn
+  }
+
+  /** How a desynced client is brought back: the session's CURRENT screen, captured from tmux
+   *  (PtyManager.captureForResync). Unset (tests / no tmux) degrades to an EMPTY redraw — the
+   *  client still clears and resumes streaming; it just isn't repainted. It must never be left
+   *  desynced forever, which is what a bail-out here would do. */
+  setResyncProvider(fn: (sessionId: string) => Promise<string>): void {
+    this.resyncProvider = fn
   }
 
   /** Key of one client's view of one session — the unit backpressure is tracked in. */
@@ -98,6 +125,8 @@ export class ServerPlatform implements CorePlatform {
     if (!sink) return
     if (channel.startsWith(PTY_DATA_PREFIX)) {
       const sessionId = channel.slice(PTY_DATA_PREFIX.length)
+      // Bounded memory: read the socket backlog BEFORE queueing more, so the ceiling can refuse.
+      if (this.dropOrDesync(uiId, sessionId, sink.bufferedAmount?.() ?? 0)) return
       sink.sendBinary(encodePtyData(sessionId, String(args[0] ?? '')))
       if (this.flowController) {
         const buffered = sink.bufferedAmount?.() ?? 0
@@ -119,6 +148,45 @@ export class ServerPlatform implements CorePlatform {
       }
     } else {
       sink.sendText(JSON.stringify({ t: 'ev', channel, args }))
+    }
+  }
+
+  /**
+   * The bounded-memory gate for one (client, session). Returns true when this chunk must be
+   * DISCARDED — either because the client is already desynced (its backlog was dropped and the
+   * redraw hasn't landed yet), or because it just crossed WS_DROP_WATER.
+   */
+  private dropOrDesync(uiId: number, sessionId: string, buffered: number): boolean {
+    const key = ServerPlatform.flowKey(uiId, sessionId)
+    if (this.desynced.has(key)) {
+      // Drained enough to be worth talking to again → redraw it onto the CURRENT screen.
+      if (buffered <= WS_LOW_WATER) void this.resync(uiId, sessionId)
+      return true
+    }
+    if (buffered <= WS_DROP_WATER) return false
+    this.desynced.add(key)
+    // We stopped streaming to this client, so it must not hold the shared pty hostage: a pause it
+    // owes could never be returned (it receives nothing, so it can never drain and re-report), and
+    // PtyManager keeps the pty paused while ANY client owes a resume — the other viewers' terminal
+    // would freeze forever. Hand the pause back here; the clients still being served decide alone.
+    if (this.paused.delete(key)) this.flowController?.(uiId, sessionId, true)
+    return true
+  }
+
+  /** Redraw one desynced client from tmux, then let it stream again. One capture, never a replay. */
+  private async resync(uiId: number, sessionId: string): Promise<void> {
+    const key = ServerPlatform.flowKey(uiId, sessionId)
+    if (this.resyncing.has(key)) return
+    this.resyncing.add(key)
+    try {
+      const screen = this.resyncProvider ? await this.resyncProvider(sessionId) : ''
+      if (!this.sinks.has(uiId)) return // client left while the capture was in flight
+      this.desynced.delete(key)
+      // Not a pty:data frame, so it is not subject to the gate above (and the flag is cleared
+      // anyway): a plain event the terminal turns into a clear + redraw.
+      this.sendTo(uiId, IPC.ptyResync(sessionId), screen)
+    } finally {
+      this.resyncing.delete(key)
     }
   }
 
@@ -145,6 +213,9 @@ export class ServerPlatform implements CorePlatform {
     // returned by PtyManager.dropClient (wired to the same close hook in server/index.ts).
     const prefix = `${uiId} `
     for (const key of this.paused) if (key.startsWith(prefix)) this.paused.delete(key)
+    // Same for the drop-and-redraw state: a departing client leaves none behind (and an in-flight
+    // capture for it lands on a missing sink, so it is discarded — see `resync`).
+    for (const key of this.desynced) if (key.startsWith(prefix)) this.desynced.delete(key)
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {

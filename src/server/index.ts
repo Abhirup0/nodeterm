@@ -88,6 +88,10 @@ export async function startServer(
   // can no longer be un-paused by another browser's join/leave.
   platform.setFlowController((uiId, sid, resume) => ptyManager.setFlow(uiId, sid, resume))
 
+  // Bounded memory: a client whose socket backlog we discarded (WS_DROP_WATER) is REDRAWN from
+  // tmux — the current screen — rather than replayed. See platform-server.ts dropOrDesync.
+  platform.setResyncProvider((sid) => ptyManager.captureForResync(sid))
+
   // Desktop's src/main/index.ts registers a few pty handlers outside PtyManager. Of those,
   // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
   // The others (ptyGenerateName / ptyGenerateGroupName → commit-message.ts; ptyReadSessionName

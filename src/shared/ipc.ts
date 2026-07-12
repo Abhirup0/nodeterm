@@ -82,6 +82,10 @@ export const IPC = {
   /** The node was permanently destroyed by another client (payload: { by: ClientId }). The
    *  remaining subscribers show a "closed by <name>" state instead of respawning the session. */
   ptyClosed: (sessionId: string) => `pty:closed:${sessionId}`,
+  /** Redraw for a client that fell too far behind: the session's CURRENT screen, captured from
+   *  tmux. Sent instead of the discarded backlog (payload: the capture text). The terminal clears
+   *  and repaints from it — see ServerPlatform's WS_DROP_WATER. */
+  ptyResync: (sessionId: string) => `pty:resync:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
