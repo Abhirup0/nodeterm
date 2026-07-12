@@ -223,7 +223,11 @@ export class SshProjectManager {
         // only ever an optional flag, and the probe's login shell must not delay the connect (and
         // with it every terminal in the project). It pushes itself into the conn + renderer when
         // it lands; until then this project's Claude nodes launch with the bare command.
-        if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry)
+        // Swallow any rejection: this is a best-effort optional probe, and an unhandled rejection
+        // in the main process is a hard crash (Node's default --unhandled-rejections=throw), not a
+        // log line. Internals are already try/catch-guarded, but `this.r.onStatus` (IPC send) can
+        // still throw if the window is torn down mid-probe — that must never surface here.
+        if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry).catch(() => {})
         return {
           controlPath,
           hookEndpointPath,

@@ -44,6 +44,12 @@ interface SshConnState {
   /** True ONLY when the remote CLI was probed and is known to accept `--permission-mode auto`.
    *  Not connected / never probed / older CLI all answer false (conservative — omit the flag). */
   supportsAutoPermissionMode(projectId: string): boolean
+  /** Drop the cached probe answer WITHOUT touching the rest of the conn info (unlike `clear()`,
+   *  which is for project deletion). Call this on a `disconnected` / `reconnecting` status: if the
+   *  project's SSH server gets repointed to a different host, the previous host's cached `true`
+   *  must not survive to be served against the new (possibly older) remote CLI — the fail-open
+   *  design means "unknown" should win until the next probe lands, never a stale "yes". */
+  invalidateAutoPermissionMode(projectId: string): void
   clear(projectId: string): void
 }
 
@@ -77,6 +83,14 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   supportsAutoPermissionMode(projectId) {
     return get().autoPermByProject[projectId] === true
+  },
+  invalidateAutoPermissionMode(projectId) {
+    set((s) => {
+      if (!(projectId in s.autoPermByProject)) return s
+      const next = { ...s.autoPermByProject }
+      delete next[projectId]
+      return { autoPermByProject: next }
+    })
   },
   clear(projectId) {
     set((s) => {

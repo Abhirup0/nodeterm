@@ -3438,6 +3438,13 @@ export function Canvas() {
       if (e.claudeAutoPermissionMode !== undefined) {
         useSshConn.getState().setClaudeAutoPermissionMode(e.projectId, e.claudeAutoPermissionMode)
       }
+      // A repointed server (different host, possibly an older claude CLI) reconnects under the
+      // SAME project id. Drop any cached auto-mode answer on disconnect/reconnect so a launch in
+      // the gap before the next probe lands degrades to the fail-open bare command instead of
+      // reusing the previous host's stale `true`.
+      if (e.status === 'disconnected' || e.status === 'reconnecting') {
+        useSshConn.getState().invalidateAutoPermissionMode(e.projectId)
+      }
     })
   }, [])
 
