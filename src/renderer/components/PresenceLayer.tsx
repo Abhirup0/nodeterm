@@ -59,6 +59,15 @@ export function PresenceLayer(): JSX.Element | null {
   // whether a `chat(null)` is owed (on close, on the last peer leaving, on unmount).
   const publishedRef = useRef(false)
 
+  // This flag claims what our PEERS can see, so it must never over-claim a retraction. The hub
+  // rate-limits `presence:chat` (one cast per keystroke, and a held key repeats far faster than
+  // anyone types), and it drops silently — but a `chat(null)` is EXEMPT from that bucket
+  // (src/core/presence/hub.ts, isClearingCast), precisely so that clearing publishedRef here is
+  // not a lie. Without the exemption a keyup retraction landing on a drained bucket would leave a
+  // chat bubble pinned to our cursor on every peer's canvas, forever: we would already believe we
+  // had retracted it, and nothing re-announces.
+  // The other direction is safe by construction: a DROPPED non-null cast still sets the flag, so
+  // at worst we retract something no peer saw — and the hub ignores an unchanged value.
   const sendChat = useCallback((text: string | null): void => {
     if (text === null && !publishedRef.current) return // nothing to retract — don't spam the wire
     publishedRef.current = text !== null

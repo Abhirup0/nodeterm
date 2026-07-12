@@ -537,6 +537,105 @@ describe('rate limiting (a hostile tab must not degrade the room)', () => {
   })
 })
 
+describe('rate limiting must never drop an EDGE signal (a lost clear is lost state, not a lost frame)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+
+  /** Drain a channel's bucket at t=0 with casts that carry a value (the flood-capable shape). */
+  function drain(channel: string, cast: (i: number) => void): void {
+    for (let i = 0; i < PRESENCE_RATE_BUDGETS[channel].burst + 50; i++) cast(i)
+  }
+
+  // THE STUCK BUBBLE: sendChat fires per keystroke, so a held key (X11 repeats ~25/s, macOS with
+  // KeyRepeat=0 far faster) drains the chat bucket. On release the renderer retracts with
+  // chat(null) — and if THAT is dropped, the hub keeps the last accepted line and every peer keeps
+  // a chat bubble pinned to a cursor forever. The renderer has no ack and no retry: it already
+  // believes it retracted.
+  it('a chat retraction lands (and is broadcast) with the chat bucket drained', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+
+    drain(IPC.presenceChat, (i) => fake.senderListeners[IPC.presenceChat](1, `msg ${i}`))
+    const stuck = hub.peers()[0].chat
+    expect(stuck).not.toBeNull() // the bubble a peer is currently showing
+
+    const before = diffs().length
+    fake.senderListeners[IPC.presenceChat](1, null) // the retraction — must NOT be droppable
+    expect(hub.peers()[0].chat).toBeNull()
+    expect(diffs().slice(before)).toEqual([{ op: 'update', clientId: 1, patch: { chat: null } }])
+  })
+
+  it('a cursor retraction lands with the cursor bucket drained (mouse-leave / blur)', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+
+    drain(IPC.presenceCursor, (i) => fake.senderListeners[IPC.presenceCursor](1, { x: i, y: 0 }))
+    expect(hub.peers()[0].cursor).not.toBeNull()
+
+    const before = diffs().length
+    fake.senderListeners[IPC.presenceCursor](1, null)
+    expect(hub.peers()[0].cursor).toBeNull()
+    expect(diffs().slice(before)).toEqual([{ op: 'update', clientId: 1, patch: { cursor: null } }])
+  })
+
+  it('a focus release lands with the focus bucket drained (else a ghost chip stays on the node)', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+
+    drain(IPC.presenceFocus, (i) => fake.senderListeners[IPC.presenceFocus](1, `node-${i}`))
+    expect(hub.peers()[0].focus).not.toBeNull()
+
+    const before = diffs().length
+    fake.senderListeners[IPC.presenceFocus](1, null)
+    expect(hub.peers()[0].focus).toBeNull()
+    expect(diffs().slice(before)).toEqual([{ op: 'update', clientId: 1, patch: { focus: null } }])
+  })
+
+  // Exempting the clears cannot become a flood vector, and this is WHY: the setters ignore an
+  // unchanged value, so a clear only broadcasts once — the next one needs an intervening non-null
+  // cast to re-arm it, and THAT one is bucketed. So the clear's broadcast rate is bounded by the
+  // (rate-limited) value casts, not by the client's send loop.
+  it('an exempt clear is self-limiting: a null flood broadcasts at most once', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    fake.senderListeners[IPC.presenceCursor](1, { x: 1, y: 1 })
+
+    const before = diffs().length
+    for (let i = 0; i < 5000; i++) fake.senderListeners[IPC.presenceCursor](1, null)
+    for (let i = 0; i < 5000; i++) fake.senderListeners[IPC.presenceChat](1, null)
+    for (let i = 0; i < 5000; i++) fake.senderListeners[IPC.presenceFocus](1, null)
+    expect(diffs().length - before).toBe(1) // the one cursor clear; chat/focus were already null
+  })
+
+  // THE WRONG PROJECT: presence:project is a state switch, not a sample — nothing supersedes a
+  // dropped one, and the renderer has already recorded it as sent. A dropped switch leaves the hub
+  // (and therefore every teammate's canvas, chips and facepile) on the project you LEFT, forever.
+  // The budget must be far out of reach of any human input path.
+  it('a project switch survives every rate a human input path can produce', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    const budget = PRESENCE_RATE_BUDGETS[IPC.presenceProject]
+    expect(budget.perSec).toBeGreaterThanOrEqual(20) // > any key-repeat rate (X11 ~25/s is deduped)
+    expect(budget.burst).toBeGreaterThanOrEqual(60) // ~30 s of frantic ⌘1/⌘2 switching, back to back
+
+    // 30 distinct switches inside one second — far past anything a person can click or type — and
+    // the last one still lands, because the hub must always know which canvas you are on.
+    for (let i = 0; i < 30; i++) {
+      vi.setSystemTime(i * 33)
+      fake.senderListeners[IPC.presenceProject](1, `p-${i}`)
+    }
+    expect(hub.peers()[0].projectId).toBe('p-29')
+    expect(diffs().at(-1)).toMatchObject({ op: 'update', clientId: 1, patch: { projectId: 'p-29' } })
+  })
+})
+
 describe('registerIpc', () => {
   it('registers hello as a sender-aware request and the three signals as sender-aware casts', () => {
     const hub = new PresenceHub()

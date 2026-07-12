@@ -38,7 +38,12 @@ export const TYPING_THROTTLE_MS = 500
  *   - cursor: 20/s, exactly the renderer's CURSOR_MIN_INTERVAL_MS (50 ms) throttle, with 2 s of
  *     burst for scheduling jitter,
  *   - chat: one cast per keystroke — faster than any human types,
- *   - focus / project: one per node hover / tab switch — orders of magnitude of headroom,
+ *   - focus: one per node hover — orders of magnitude of headroom,
+ *   - project: one per tab switch. DELIBERATELY generous (see isClearingCast): a dropped project
+ *     switch is not a lost frame but LOST STATE — the hub, and so every teammate's canvas, chips
+ *     and facepile, would stay on the project you left, forever. A human input path cannot come
+ *     near this: holding ⌘1 repeats the SAME id (the renderer dedups it, and the hub's setter
+ *     ignores an unchanged value anyway), so only DISTINCT switches spend a token.
  *   - hello: sent at connect (and once more when the user names themselves).
  * Excess casts are DROPPED silently. Never disconnect: an honest client that hits a burst edge
  * (a wedged event loop suddenly flushing) would lose a frame, not its session — and the next
@@ -48,8 +53,34 @@ export const PRESENCE_RATE_BUDGETS: Record<string, { perSec: number; burst: numb
   [IPC.presenceCursor]: { perSec: 20, burst: 40 },
   [IPC.presenceChat]: { perSec: 25, burst: 50 },
   [IPC.presenceFocus]: { perSec: 10, burst: 20 },
-  [IPC.presenceProject]: { perSec: 5, burst: 10 },
+  [IPC.presenceProject]: { perSec: 20, burst: 60 },
   [IPC.presenceHello]: { perSec: 2, burst: 5 }
+}
+
+/**
+ * Does this cast CLEAR the client's state (a null cursor, a closed chat, a released focus)?
+ *
+ * Such a cast is EXEMPT from the bucket, because a bucket may only ever drop a signal whose loss
+ * is self-correcting. A cursor sample is superseded by the next one, so dropping it costs a frame.
+ * A clear is an EDGE: nothing supersedes it, no client acks it, nothing re-announces it — the
+ * renderer has already recorded "I retracted that" (publishedRef / lastFocus) and will never send
+ * it again. Drop one and the hub keeps the last value it accepted: a chat bubble pinned to a
+ * teammate's cursor forever, a ghost cursor, a "who is here" chip on a node nobody is in.
+ * Reachable in practice: a held key at X11's ~25/s repeat drains the chat bucket, and the keyup
+ * retraction is the very next cast.
+ *
+ * And it CANNOT become a flood vector, by construction: the setters ignore an unchanged value, so
+ * a clear broadcasts at most ONCE — re-arming it takes an intervening value cast, which IS bucketed.
+ * The clears' fan-out rate is therefore bounded by the (rate-limited) value casts, not by the
+ * client's send loop; an unlimited null flood is a no-op loop inside the hub.
+ *
+ * The predicates mirror each setter's own "is this null?" rule exactly — keep them in sync.
+ */
+function isClearingCast(channel: string, payload: unknown): boolean {
+  if (channel === IPC.presenceCursor) return !payload
+  if (channel === IPC.presenceChat) return typeof payload !== 'string'
+  if (channel === IPC.presenceFocus) return typeof payload !== 'string' || payload === ''
+  return false
 }
 
 // Relay peers (phones) have no webContents id and no ServerPlatform uiId, so their ClientIds are
@@ -130,10 +161,14 @@ export class PresenceHub {
    * peer); rate-limiting those would throttle the app's own trusted plumbing. The entry point is
    * the exact seam where an untrusted client's message becomes hub state, which is what needs a
    * budget — and it is the one place ALL shells funnel through, so no shell can forget it.
+   *
+   * A CLEARING cast (see isClearingCast) is exempt and spends no token: the bucket may only drop
+   * signals whose loss is self-correcting, and a clear is an edge — losing it is lost state.
    */
-  private allow(clientId: ClientId, channel: string): boolean {
+  private allow(clientId: ClientId, channel: string, payload?: unknown): boolean {
     const budget = PRESENCE_RATE_BUDGETS[channel]
     if (!budget) return true
+    if (isClearingCast(channel, payload)) return true
     const key = `${clientId}:${channel}`
     const now = Date.now()
     const prev = this.buckets.get(key)
@@ -280,23 +315,29 @@ export class PresenceHub {
       if (!this.allow(senderId, IPC.presenceHello)) return { clientId: senderId, peers: this.peers() }
       return this.hello(senderId, id)
     })
+    // The payload goes to allow() too: a cast that CLEARS state is exempt from the bucket (a
+    // dropped clear is permanent, and it cannot flood — see isClearingCast).
     p.onWithSender(
       IPC.presenceCursor,
       (senderId: number, cursor: { x: number; y: number } | null) => {
-        if (!this.allow(senderId, IPC.presenceCursor)) return
+        if (!this.allow(senderId, IPC.presenceCursor, cursor)) return
         this.setCursor(senderId, cursor)
       }
     )
     p.onWithSender(IPC.presenceFocus, (senderId: number, nodeId: string | null) => {
-      if (!this.allow(senderId, IPC.presenceFocus)) return
+      if (!this.allow(senderId, IPC.presenceFocus, nodeId)) return
       this.setFocus(senderId, nodeId)
     })
     p.onWithSender(IPC.presenceChat, (senderId: number, text: string | null) => {
-      if (!this.allow(senderId, IPC.presenceChat)) return
+      if (!this.allow(senderId, IPC.presenceChat, text)) return
       this.setChat(senderId, text)
     })
     p.onWithSender(IPC.presenceProject, (senderId: number, projectId: string | null) => {
-      if (!this.allow(senderId, IPC.presenceProject)) return
+      // NOT exempted, unlike the clears: every project cast may carry a NEW id, so it always
+      // broadcasts — an unlimited one would hand a hostile tab the same N-way amplifier the buckets
+      // exist to stop (a clear cannot do that: it broadcasts at most once). Its budget is instead
+      // sized so far above any human input path that an honest client can never lose a switch.
+      if (!this.allow(senderId, IPC.presenceProject, projectId)) return
       this.setProject(senderId, projectId)
     })
   }

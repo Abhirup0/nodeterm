@@ -446,6 +446,28 @@ describe('selectFocusedFaces: the alone / disconnected fast path', () => {
     expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web')).toBe(empty)
     stop()
   })
+
+  // The fast path must mean "nobody ELSE to draw", not "fewer than two rows in the table". Our own
+  // peer is normally one of those rows — but it need not be (a client that dropped mid-handshake,
+  // a hub that answered hello before the join diff landed). A table holding exactly ONE peer, and
+  // that peer a REAL teammate, must still chip: the Facepile shows them either way, and the two
+  // surfaces must never disagree about who is here.
+  it('still chips a lone real peer when my own row is missing from the table', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [] }) // hello answers, but I am not in it
+    const { connectPresence, usePresence, selectFocusedFaces, selectFaces } = await import(
+      './presence'
+    )
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    api.emitPeer({ op: 'join', peer: peer(8, { name: 'Ada', projectId: 'web', focus: 'node-a' }) })
+    expect(selectFaces(usePresence.getState()).map((f) => f.name)).toEqual(['Ada'])
+    expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web').map((f) => f.name)).toEqual([
+      'Ada'
+    ])
+    stop()
+  })
 })
 
 describe('selectFocusedFaces (the node-header chips — one per node, so cursor traffic must not re-render them)', () => {

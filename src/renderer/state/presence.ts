@@ -194,6 +194,22 @@ export function selectFaces(s: PresenceStore): PeerFace[] {
  *  common case allocates NOTHING and its identity is stable across calls (useShallow bails out). */
 const NO_FACES: PeerFace[] = []
 
+/** Is there anyone but me in the table? The literal question the chip fast path asks — not a proxy
+ *  for it (`Object.keys(peers).length < 2` assumed my own row is always one of them: a client that
+ *  dropped mid-handshake, or a hello answered before our join diff landed, leaves a table of ONE
+ *  REAL peer — whom the Facepile happily draws while the chips stayed blank; the two surfaces must
+ *  never disagree about who is here).
+ *  ALLOCATION-FREE, and that is the point: this runs once per MOUNTED NODE on EVERY store write
+ *  (~4k times/s on a busy canvas), so it may not build an array — `for…in` walks the keys in place,
+ *  `Object.keys()` would materialize one every single time. */
+function hasOtherPeers(s: PresenceStore): boolean {
+  if (s.myId === null) return false // hello unresolved → we cannot tell our own row from a peer's
+  for (const key in s.peers) {
+    if (s.peers[key as unknown as ClientId].clientId !== s.myId) return true
+  }
+  return false
+}
+
 /** What ONE node's header chips draw: the peers (never me, never off-project) focused on that node,
  *  projected to the same cursor-immune face objects as the facepile.
  *
@@ -206,15 +222,15 @@ const NO_FACES: PeerFace[] = []
  *  The early-out is the other half of that: this runs once per MOUNTED NODE on every store write
  *  (40 nodes × 5 peers × 20 Hz ≈ 4k runs/s), and each run would otherwise allocate a filtered array
  *  plus a mapped one — ~20k throwaway arrays/s — even on a canvas nobody else is on. When there is
- *  provably no one to chip (hello unresolved, or the table holds only me), return NO_FACES. */
+ *  provably no one to chip (hello unresolved, or nobody else in the table), return NO_FACES. */
 export function selectFocusedFaces(
   s: PresenceStore,
   nodeId: string,
   projectId: string | null
 ): PeerFace[] {
-  // myId === null → the selectors draw nobody (see NEVER MY OWN PEER); < 2 peers → the table holds
-  // at most me. Either way there is nothing to compute, which is the overwhelmingly common case.
-  if (s.myId === null || Object.keys(s.peers).length < 2) return NO_FACES
+  // Nobody else here → nothing to compute, which is the overwhelmingly common case. The guard is
+  // itself allocation-free (see hasOtherPeers), or it would defeat its own purpose.
+  if (!hasOtherPeers(s)) return NO_FACES
   const focused = selectFocused(s, nodeId, projectId)
   if (focused.length === 0) return NO_FACES
   return focused.map(faceFor)
@@ -308,6 +324,18 @@ export function connectPresence(): () => void {
 
 // The last focus/project we published — a terminal re-focusing the same node, or a tab switch
 // back to the project we are already on, must not spam the wire.
+//
+// THE DEDUP IS A CLAIM THAT THE CAST LANDED, so it is only sound for casts the hub cannot drop.
+// The hub rate-limits per (client, channel) and drops silently; there is no ack and no re-announce.
+// It is sound here because of two hub rules (src/core/presence/hub.ts — keep them in sync):
+//   - a CLEARING cast (focus null) is exempt from the bucket, so `lastFocus = null` can never be a
+//     lie. A dropped non-null focus is self-healing anyway: the hub keeps the previous node, and
+//     the very next focus change — or the exempt release — corrects it.
+//   - `presence:project` is bucketed, but with a budget no human input path can reach (only
+//     DISTINCT switches spend a token — this dedup is what makes key-repeat free), so an honest
+//     client cannot lose the switch it has already recorded here.
+// Do not tighten the project budget without revisiting this line: a dropped project cast that we
+// have already recorded is permanent — teammates keep drawing us on a canvas we left.
 let lastFocus: string | null = null
 let lastProject: string | null = null
 
