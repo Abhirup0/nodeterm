@@ -27,6 +27,8 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
+import { reportFocus, releaseFocus } from '../state/presence'
+import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
@@ -586,6 +588,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       useAgentStatus.getState().setActive(id, false)
+      // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
+      // project switch every node unmounts, and an unconditional clear could undo the focus the
+      // node we just moved into already published.
+      releaseFocus(id)
       // Unmount happens on a project switch (a detach — the tmux session keeps running) as
       // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
       // persisted status (that would drop the sessionId the context meter looks up on remount,
@@ -680,6 +686,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       termRef.current?.focus()
       useAgentStatus.getState().setActive(id, true)
       useAgentStatus.getState().clearUnread(id)
+      // "I am working in this node" — the same signal the agent-status active flag uses, i.e. the
+      // dwell has elapsed and the terminal actually took the keyboard (a mouse merely passing over
+      // never gets here). Deduped in the store, so re-entering the same node costs nothing.
+      reportFocus(id)
     }
     dwellRef.current = setTimeout(enter, panHoverDelay)
   }
@@ -688,6 +698,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     setArmed(true)
     termRef.current?.blur()
     useAgentStatus.getState().setActive(id, false)
+    releaseFocus(id)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
   // terminal doesn't grab focus mid-drag; restart it on release.
@@ -740,6 +751,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.focus()
     term.paste(paths.join(' ') + ' ')
     useAgentStatus.getState().setActive(id, true)
+    reportFocus(id)
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
@@ -1010,6 +1022,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           </span>
         ) : null}
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
+        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
+        <PresenceChips nodeId={id} />
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
             <span className="term-node__status-dot" />

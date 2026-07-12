@@ -389,4 +389,63 @@ describe('reportFocus / reportProject', () => {
       ['project', null]
     ])
   })
+
+  it('releaseFocus only clears the focus THIS node published (a leaving node cannot steal the next one)', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi()
+    const { reportFocus, releaseFocus } = await import('./presence')
+
+    reportFocus('node-a')
+    // node-b took over (its dwell fired before node-a's unmount cleanup ran) — node-a going away
+    // must NOT report "nobody is focused", which would blank the chips on node-b.
+    reportFocus('node-b')
+    releaseFocus('node-a')
+    expect(api.calls.filter((c) => c[0] === 'focus')).toEqual([
+      ['focus', 'node-a'],
+      ['focus', 'node-b']
+    ])
+
+    // The node we ARE focused on leaving does clear it.
+    releaseFocus('node-b')
+    expect(api.calls.filter((c) => c[0] === 'focus')).toEqual([
+      ['focus', 'node-a'],
+      ['focus', 'node-b'],
+      ['focus', null]
+    ])
+  })
+})
+
+describe('selectFocusedFaces (the node-header chips — one per node, so cursor traffic must not re-render them)', () => {
+  it('projects the focused peers of THIS project and keeps object identity across cursor updates', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [peer(7, { projectId: 'web' })] })
+    const { connectPresence, usePresence, selectFocusedFaces } = await import('./presence')
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    api.emitPeer({ op: 'join', peer: peer(8, { name: 'Ada', projectId: 'web', focus: 'node-a' }) })
+    // Same node id, ANOTHER project: node ids are globally unique, so without the project filter
+    // this peer would chip node-a's header on my canvas.
+    api.emitPeer({ op: 'join', peer: peer(9, { name: 'Bo', projectId: 'api', focus: 'node-a' }) })
+
+    const before = selectFocusedFaces(usePresence.getState(), 'node-a', 'web')
+    expect(before.map((f) => f.name)).toEqual(['Ada'])
+    expect(selectFocusedFaces(usePresence.getState(), 'node-b', 'web')).toEqual([])
+
+    // A cursor patch replaces the whole PeerState object (~20/s). The projected face must stay the
+    // SAME object, so useShallow bails out and the chips do not re-render at cursor rate.
+    api.emitPeer({ op: 'update', clientId: 8, patch: { cursor: { x: 1, y: 2 } } })
+    const after = selectFocusedFaces(usePresence.getState(), 'node-a', 'web')
+    expect(after[0]).toBe(before[0])
+
+    // Something the chip actually shows changes → a new object (the chip updates).
+    api.emitPeer({ op: 'update', clientId: 8, patch: { name: 'Ada L.' } })
+    expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web')[0]).not.toBe(before[0])
+
+    // Focus moves → the chip moves with it.
+    api.emitPeer({ op: 'update', clientId: 8, patch: { focus: 'node-b' } })
+    expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web')).toEqual([])
+    expect(selectFocusedFaces(usePresence.getState(), 'node-b', 'web').map((f) => f.clientId)).toEqual([8])
+    stop()
+  })
 })

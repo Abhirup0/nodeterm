@@ -154,29 +154,56 @@ export interface PeerFace {
 /** clientId → the last face we handed out, so an unchanged face keeps its object identity. */
 const faceCache = new Map<ClientId, PeerFace>()
 
+/** The cached face for a peer: the SAME object as last time while none of the five projected fields
+ *  changed — that identity is what makes every face-based selector cursor-immune. */
+function faceFor(p: PeerState): PeerFace {
+  const prev = faceCache.get(p.clientId)
+  if (
+    prev &&
+    prev.name === p.name &&
+    prev.color === p.color &&
+    prev.projectId === p.projectId &&
+    prev.kind === p.kind
+  ) {
+    return prev
+  }
+  const face: PeerFace = {
+    clientId: p.clientId,
+    name: p.name,
+    color: p.color,
+    projectId: p.projectId,
+    kind: p.kind
+  }
+  faceCache.set(p.clientId, face)
+  return face
+}
+
 /** The facepile projection: everyone but me, cursor-immune (see PeerFace). Pair it with
  *  `useShallow` — the array is fresh each call, its ELEMENTS are not. */
 export function selectFaces(s: PresenceStore): PeerFace[] {
-  const faces: PeerFace[] = []
-  const fresh = new Map<ClientId, PeerFace>()
-  for (const p of selectOthers(s)) {
-    const prev = faceCache.get(p.clientId)
-    const same =
-      prev &&
-      prev.name === p.name &&
-      prev.color === p.color &&
-      prev.projectId === p.projectId &&
-      prev.kind === p.kind
-    const face: PeerFace = same
-      ? prev
-      : { clientId: p.clientId, name: p.name, color: p.color, projectId: p.projectId, kind: p.kind }
-    fresh.set(p.clientId, face)
-    faces.push(face)
-  }
-  // Rebuild rather than accumulate: a peer that left must not linger in the cache.
-  faceCache.clear()
-  for (const [id, face] of fresh) faceCache.set(id, face)
+  const others = selectOthers(s)
+  const faces = others.map(faceFor)
+  // Prune rather than accumulate: a peer that left must not linger in the cache. (This is the only
+  // pruner — selectFocusedFaces sees a subset of the peers and must never evict the rest.)
+  const alive = new Set(others.map((p) => p.clientId))
+  for (const id of faceCache.keys()) if (!alive.has(id)) faceCache.delete(id)
   return faces
+}
+
+/** What ONE node's header chips draw: the peers (never me, never off-project) focused on that node,
+ *  projected to the same cursor-immune face objects as the facepile.
+ *
+ *  PERF, and the reason this is not just `selectFocused`: there is one chip strip PER NODE, and
+ *  `applyDiff` rebuilds a peer's whole PeerState object on every cursor patch (~20/s per peer). A
+ *  selector returning PeerStates would therefore hand every node a fresh object 20×/s and re-render
+ *  every terminal on the canvas — even under `useShallow`, which compares the ELEMENTS. Faces are
+ *  reused objects, so a moving cursor changes nothing here and every strip bails out. */
+export function selectFocusedFaces(
+  s: PresenceStore,
+  nodeId: string,
+  projectId: string | null
+): PeerFace[] {
+  return selectFocused(s, nodeId, projectId).map(faceFor)
 }
 
 /** Sent when the user has not named themselves yet. It claims NOTHING — sanitizeIdentity falls
@@ -275,6 +302,16 @@ export function reportFocus(nodeId: string | null): void {
   if (lastFocus === nodeId) return
   lastFocus = nodeId
   window.nodeTerminal.presence.focus(nodeId)
+}
+
+/** "This node is no longer where I work" — the counterpart of reportFocus(nodeId), for a node that
+ *  is losing focus (mouse left, unmounted). It clears the focus ONLY if this node is the one we
+ *  actually published: a node's leave/unmount can land AFTER the next node's enter (the mouse moves
+ *  on; a project switch unmounts the old canvas), and an unconditional reportFocus(null) would then
+ *  blank the chips on the node the user just moved into. */
+export function releaseFocus(nodeId: string): void {
+  if (lastFocus !== nodeId) return
+  reportFocus(null)
 }
 
 /** Publish "I am looking at this canvas" (null = no project open). Called from Canvas's
