@@ -61,6 +61,18 @@ export const IPC = {
   usageUpdate: 'usage:update',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
+  // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the
+  // client its own clientId, so it never draws its own cursor. The rest are casts (client→server)
+  // and events (server→clients); the server is a dumb reflector and applies no policy.
+  presenceHello: 'presence:hello',
+  presenceCursor: 'presence:cursor',
+  presenceFocus: 'presence:focus',
+  presenceChat: 'presence:chat',
+  // Which project (canvas) the client is looking at. Cursors/focus are only meaningful to a
+  // viewer on the same project — each project has its own nodes and coordinate space.
+  presenceProject: 'presence:project',
+  presenceSync: 'presence:sync',
+  presencePeer: 'presence:peer',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,

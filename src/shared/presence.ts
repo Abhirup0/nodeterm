@@ -86,12 +86,18 @@ export function peersOnProject(peers: PeerState[], projectId: string | null): Pe
   return peers.filter((p) => p.projectId === projectId)
 }
 
-/** Cap a name at NAME_MAX_LEN *code points*, not UTF-16 code units: `slice` would cut a
- *  surrogate pair (emoji, CJK extensions) in half and leave a lone surrogate, which renders as
- *  "�" in every peer's facepile. Trim runs again AFTER the cut, so a truncation landing on a
- *  space doesn't leave a trailing one. */
+/** Cap a string at `max` *code points*, not UTF-16 code units: `slice` would cut a surrogate
+ *  pair (emoji, CJK extensions) in half and leave a lone surrogate, which renders as "�" in
+ *  every peer's facepile / chat bubble. The single truncation rule for the whole feature — the
+ *  hub caps chat with it (CHAT_MAX_LEN) and capName caps names with it. */
+export function capCodePoints(text: string, max: number): string {
+  return [...text].slice(0, max).join('')
+}
+
+/** Cap a name at NAME_MAX_LEN code points. Trim runs again AFTER the cut, so a truncation
+ *  landing on a space doesn't leave a trailing one. */
 function capName(name: string): string {
-  return [...name.trim()].slice(0, NAME_MAX_LEN).join('').trim()
+  return capCodePoints(name.trim(), NAME_MAX_LEN).trim()
 }
 
 /** Coerce an untrusted {name, color} off the wire into a safe identity. Names are unverified
