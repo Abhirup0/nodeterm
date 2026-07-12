@@ -2743,6 +2743,9 @@ export function Canvas() {
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
+      const project = useProjects.getState().getProject(activeProjectId)
+      const hasCwd = !!(project?.ssh?.remoteCwd ?? project?.cwd)
       setMenu({
         x: e.clientX,
         y: e.clientY,
@@ -2761,7 +2764,9 @@ export function Canvas() {
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
-          { label: 'New file…', icon: <IconEditor />, onClick: () => void newProjectFile(at) },
+          ...(hasCwd
+            ? [{ label: 'New file…', icon: <IconEditor />, onClick: () => void newProjectFile(at) }]
+            : []),
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
@@ -2771,6 +2776,7 @@ export function Canvas() {
     },
     [
       screenToFlowPosition,
+      activeProjectId,
       addTerminal,
       agentCreationItems,
       addSticky,
@@ -3987,6 +3993,8 @@ export function Canvas() {
 
   const buildCommands = useCallback((): Command[] => {
     const disabled = useSettings.getState().settings.disabledAgents
+    const activeProject = useProjects.getState().getProject(activeProjectId)
+    const newFileHasCwd = !!(activeProject?.ssh?.remoteCwd ?? activeProject?.cwd)
     const cmds: Command[] = [
       { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
       ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
@@ -4027,7 +4035,10 @@ export function Canvas() {
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
-      { id: 'new-file', label: 'New file…', icon: <IconEditor />, run: () => void newProjectFile() },
+      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
+      ...(newFileHasCwd
+        ? [{ id: 'new-file', label: 'New file…', icon: <IconEditor />, run: () => void newProjectFile() }]
+        : []),
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
       { id: 'open-browser', label: 'New browser', icon: <IconRemote />, run: () => addBrowser() },
       ...useSshServers.getState().servers.map(

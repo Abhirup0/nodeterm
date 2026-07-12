@@ -43,4 +43,12 @@ describe('resolveFileToken', () => {
     expect(resolveFileToken('src/a.ts', undefined)).toBeNull()
     expect(resolveFileToken('../../../../etc/passwd', '/a')).toBeNull()
   })
+
+  it('preserves a tilde-rooted cwd (SSH default) instead of mangling it to /~', () => {
+    expect(resolveFileToken('src/a.ts', '~/proj')).toBe('~/proj/src/a.ts')
+    expect(resolveFileToken('./src/a.ts', '~')).toBe('~/src/a.ts')
+    expect(resolveFileToken('../x.ts', '~/proj/sub')).toBe('~/proj/x.ts')
+    expect(resolveFileToken('../../../x.ts', '~/proj')).toBeNull() // .. may not pop the ~
+    expect(resolveFileToken('/abs/x.ts', '~/proj')).toBe('/abs/x.ts') // absolutes unaffected
+  })
 })

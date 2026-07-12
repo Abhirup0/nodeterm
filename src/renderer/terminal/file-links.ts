@@ -6,7 +6,9 @@
 // Existence (and dir-ness) is verified before a link is offered, via a short-TTL cache of
 // parent-directory listings — one fs.list covers every sibling on a compiler-error screen.
 // Wrapped rows are joined into one logical line so long paths still match; the provider
-// only fires from a logical line's FIRST row (continuation rows resolve to the same links).
+// only fires from a logical line's FIRST row, whose link ranges span the wrapped rows.
+// A continuation row resolves to NO links of its own (the provider returns undefined for it),
+// so hovering a wrapped tail directly is a known non-clickable v1 limitation.
 import type { IBufferLine, ILink, ILinkProvider, Terminal } from '@xterm/xterm'
 
 export interface FileToken {
@@ -55,19 +57,24 @@ export function matchFileTokens(lineText: string): FileToken[] {
 }
 
 /** Absolute path for a token: absolutes pass through, relatives resolve against cwd,
- *  `.`/`..` segments normalized. Null when unresolvable or when `..` escapes the root. */
+ *  `.`/`..` segments normalized. Null when unresolvable or when `..` escapes the root.
+ *  A home-relative cwd (`~` or `~/proj`, the SSH-project default) keeps its leading `~` as
+ *  the first segment — the downstream sshFs stack tilde-expands it via quoteRemotePath, so
+ *  `/`-prefixing it (→ `/~/proj`) would break the remote listing. `..` may not pop the `~`. */
 export function resolveFileToken(path: string, cwd: string | undefined): string | null {
   const raw = path.startsWith('/') ? path : cwd ? `${cwd.replace(/\/+$/, '')}/${path}` : null
   if (!raw) return null
-  const out: string[] = []
-  for (const seg of raw.split('/')) {
-    if (!seg || seg === '.') continue
+  const segs = raw.split('/').filter((s) => s && s !== '.')
+  const tilde = segs[0] === '~'
+  const out: string[] = tilde ? ['~'] : []
+  const floor = tilde ? 1 : 0 // the `~` root is fixed; `..` may not pop below it
+  for (const seg of tilde ? segs.slice(1) : segs) {
     if (seg === '..') {
-      if (!out.length) return null
+      if (out.length <= floor) return null
       out.pop()
     } else out.push(seg)
   }
-  return '/' + out.join('/')
+  return tilde ? out.join('/') : '/' + out.join('/')
 }
 
 export interface FileLinkDeps {

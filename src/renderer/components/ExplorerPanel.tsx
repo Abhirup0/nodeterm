@@ -45,6 +45,7 @@ function TreeEntry({
   depth,
   fs,
   projectId,
+  version,
   selected,
   onContext,
   onOpenFile,
@@ -55,6 +56,7 @@ function TreeEntry({
   depth: number
   fs: FsApi
   projectId: string
+  version: number
   selected: string | null
   onContext: ContextFn
   onOpenFile: OpenFn
@@ -67,6 +69,16 @@ function TreeEntry({
   const toggleDir = useCallback(() => {
     useExplorer.getState().setExpanded(projectId, path, !open)
   }, [projectId, path, open])
+
+  // A version bump (create/refresh) invalidates every cached subtree; open dirs re-list
+  // through the children===null effect below. Initial mount is a no-op (ref seeded with the
+  // current version), so a collapsed dir never fetches eagerly.
+  const lastVersionRef = useRef(version)
+  useEffect(() => {
+    if (lastVersionRef.current === version) return
+    lastVersionRef.current = version
+    setChildren(null)
+  }, [version])
 
   // Lazy-load children whenever this dir is (or becomes) open with nothing loaded yet —
   // covers click-to-expand, restored-from-storage, and reveal-forced expansion alike.
@@ -128,6 +140,7 @@ function TreeEntry({
             depth={depth + 1}
             fs={fs}
             projectId={projectId}
+            version={version}
             selected={selected}
             onContext={onContext}
             onOpenFile={onOpenFile}
@@ -274,6 +287,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 depth={0}
                 fs={fs}
                 projectId={project!.id}
+                version={version}
                 selected={selected}
                 onContext={onContext}
                 onOpenFile={handleOpenFile}
