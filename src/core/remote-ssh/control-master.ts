@@ -4,6 +4,8 @@ import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
 import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+// Dependency-free (no node-pty): safe to import from these pure builders.
+import { clampHistoryLines } from '../history-limits'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
@@ -74,6 +76,28 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
     conn,
     controlPath,
     `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`
+  )
+}
+/** Capture the session's history INCLUDING the visible screen (deliberately no `-E -1`). tmux's
+ *  attach redraw begins with `\x1b[H\x1b[2J`, and xterm's eraseInDisplay(2) resets the viewport
+ *  lines in place rather than scrolling them into scrollback — so it wipes the newest screenful
+ *  of anything we hydrated. Capturing the visible screen and letting the redraw overwrite it
+ *  leaves neither a gap nor a duplicate.
+ *  `lines` is interpolated into a remote shell command run by the login shell, so it is clamped
+ *  HERE, at the injection sink — not left to a caller-side convention that a future call site
+ *  (an IPC handler, the Server Edition shell) could forget. `PtyManager.captureHistory` clamps
+ *  again at its entry point; the clamp is idempotent. */
+export function remoteCaptureHistoryArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  lines: number
+): string[] {
+  const n = clampHistoryLines(lines)
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S -${n}`
   )
 }
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {

@@ -128,7 +128,7 @@ describe('SshProjectManager', () => {
     // The conf was written via `cat >` (with the conf body as stdin) and then source-file'd.
     const write = calls.find((c) => c.args.join(' ').includes(`cat > '/home/u/.nodeterm/tmux.conf'`))
     expect(write).toBeDefined()
-    expect(write?.stdin).toContain('set -g mouse on')
+    expect(write?.stdin).toContain('set -g mouse off')
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
   })
 

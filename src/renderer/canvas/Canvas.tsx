@@ -274,6 +274,10 @@ export function Canvas() {
   // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
   const [conflict, setConflict] = useState<Project | null>(null)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
+  // Copy-to-clipboard failure (browser build only): the bridge clipboard stub dispatches
+  // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
+  // non-secure context (plain http over a LAN). It must be seen, not swallowed.
+  const [copyError, setCopyError] = useState<string | null>(null)
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
@@ -347,6 +351,15 @@ export function Canvas() {
     void window.nodeTerminal.userDataDir().then((d) => {
       userDataDirRef.current = d
     })
+  }, [])
+  // Clipboard failures reach us as a window event (the bridge stub has no React handle).
+  useEffect(() => {
+    const onToast = (e: Event): void => {
+      const detail = (e as CustomEvent<{ kind: string; message: string }>).detail
+      if (detail?.kind === 'error') setCopyError(detail.message)
+    }
+    window.addEventListener('nodeterm:toast', onToast)
+    return () => window.removeEventListener('nodeterm:toast', onToast)
   }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTarget] = useState<string | null>(null)
@@ -3776,6 +3789,21 @@ export function Canvas() {
               className="announce-banner__close"
               title="Dismiss"
               onClick={() => setMigrationNote(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {copyError && (
+          <div className="announce-banner announce-banner--warning">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{copyError}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setCopyError(null)}
             >
               ✕
             </button>

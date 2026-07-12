@@ -33,6 +33,7 @@ function makeHostFakes() {
     createDetached: vi.fn(() => 'sess'),
     attachDetached: vi.fn(() => 'sess'),
     captureSnapshot: vi.fn(async () => ''),
+    captureHistory: vi.fn(async () => 'HISTORY'),
     write: vi.fn(),
     resize: vi.fn(),
     setFlow: vi.fn(),
@@ -89,6 +90,95 @@ describe('R1: fs.* is confined to the shared roots', () => {
     await Promise.resolve()
     expect(reads).toEqual([])
     expect(responses[0]).toEqual({ id: '1', ok: true, body: { entries: [] } })
+  })
+})
+
+// --- pty.captureHistory: scoped to an already-attached stream ----------------
+
+describe('pty.captureHistory is scoped to the client\'s own streams', () => {
+  it('captures the history of the session the streamId is attached to', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+    await Promise.resolve()
+    await Promise.resolve()
+    const streamId = (responses[0].body as { streamId: number }).streamId
+
+    handlers.onRpc({ id: '2', method: 'pty.captureHistory', params: { streamId } })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).toHaveBeenCalledWith('node-a', 5000)
+    expect(responses[1]).toEqual({ id: '2', ok: true, body: { output: 'HISTORY' } })
+  })
+
+  it('keeps the streamId as the target even when hostile session names ride along', async () => {
+    // The actual override-attempt shape: a VALID streamId (the client legitimately holds it) plus
+    // a hostile persistKey/nodeId/session in the same params. The target must still come from the
+    // stream, never from the client's names.
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+    await Promise.resolve()
+    await Promise.resolve()
+    const streamId = (responses[0].body as { streamId: number }).streamId
+
+    handlers.onRpc({
+      id: '2',
+      method: 'pty.captureHistory',
+      params: { streamId, persistKey: 'victim', nodeId: 'victim', session: 'nt-victim' }
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    const captureHistory = pty.captureHistory as ReturnType<typeof vi.fn>
+    expect(captureHistory).toHaveBeenCalledTimes(1)
+    expect(captureHistory).toHaveBeenCalledWith('node-a', 5000) // NOT 'victim'
+    expect(responses[1]).toEqual({ id: '2', ok: true, body: { output: 'HISTORY' } })
+  })
+
+  it('clamps the client\'s lines/maxBytes hints (they can only shrink the reply)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    ;(pty.captureHistory as ReturnType<typeof vi.fn>).mockResolvedValue('one\ntwo\nthree\n')
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+    await Promise.resolve()
+    await Promise.resolve()
+    const streamId = (responses[0].body as { streamId: number }).streamId
+
+    // A client asking for MORE than the caps is clamped down to them; a small maxBytes trims the
+    // reply from the head (oldest lines first).
+    handlers.onRpc({
+      id: '2',
+      method: 'pty.captureHistory',
+      params: { streamId, lines: 999_999, maxBytes: 8 }
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).toHaveBeenCalledWith('node-a', 5000)
+    const body = responses[1].body as { output: string }
+    expect(Buffer.byteLength(body.output, 'utf-8')).toBeLessThanOrEqual(8)
+    expect(body.output).toBe('three\n')
+  })
+
+  it('degrades to an empty result for an unknown streamId (never reads another session)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.captureHistory', params: { streamId: 42 } })
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    expect(responses).toEqual([{ id: '1', ok: true, body: { output: '' } }])
+  })
+
+  it('ignores a client-supplied session name / persistKey', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({
+      id: '1',
+      method: 'pty.captureHistory',
+      params: { session: 'nt-victim', persistKey: 'victim', nodeId: 'victim' }
+    })
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    expect(responses).toEqual([{ id: '1', ok: true, body: { output: '' } }])
   })
 })
 
