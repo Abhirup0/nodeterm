@@ -34,7 +34,12 @@ const norm = normWorktreePath
 export function reconcileWorktrees(bound: BoundGroup[], entries: WorktreeEntry[]): Reconciliation {
   const usable = entries.filter((e) => !e.isBare)
   const mainCheckout = usable[0]?.path
-  const onDisk = new Set(usable.map((e) => norm(e.path)))
+  // `prunable` = git still lists it, but its directory is gone (deleted behind git's back, and
+  // nobody has run `git worktree prune` yet). Listed is NOT the same as present: counting these
+  // as on-disk would report a dead binding as live, and would offer a directory that no longer
+  // exists as an adoptable orphan.
+  const present = usable.filter((e) => !e.prunable)
+  const onDisk = new Set(present.map((e) => norm(e.path)))
   const boundPaths = new Set(bound.map((b) => norm(b.worktree.path)))
 
   const live: string[] = []
@@ -43,7 +48,7 @@ export function reconcileWorktrees(bound: BoundGroup[], entries: WorktreeEntry[]
     ;(onDisk.has(norm(b.worktree.path)) ? live : stale).push(b.groupId)
   }
 
-  const orphans = usable.filter(
+  const orphans = present.filter(
     (e) => norm(e.path) !== norm(mainCheckout ?? '') && !boundPaths.has(norm(e.path))
   )
 

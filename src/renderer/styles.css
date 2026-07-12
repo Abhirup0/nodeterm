@@ -3679,6 +3679,22 @@ body,
   cursor: grab;
 }
 
+/* Bound to a git worktree: a checkout, not a loose grouping. Solid, thicker border (the tint is
+   bumped inline from the group's own data.color — no separate palette) so it reads as bound from
+   across the canvas, where the label pill is too small to parse. */
+.group-node--worktree {
+  border-style: solid;
+  border-width: 2px;
+}
+
+/* The worktree directory is gone from disk: drop the hue (GroupNode emits no inline border/background
+   for this case), go muted/warning. */
+.group-node--worktree-stale {
+  border-style: dashed;
+  border-color: rgba(255, 159, 10, 0.5);
+  background: rgba(255, 159, 10, 0.05);
+}
+
 /* Floating label pill, sitting on the top border (opaque so it "cuts" the dashes).
    --group-label-boost (set per viewport frame in Canvas.onMove) counter-scales the pill
    when the canvas is zoomed out, so group names stay readable/clickable from afar. */
@@ -3729,13 +3745,32 @@ body,
 }
 
 .group-node__branch {
-  max-width: 160px;
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
+}
+
+/* The worktree is gone from disk — muted/warning, not colorful. */
+.group-node__branch--stale {
+  color: #ff9f0a;
+  cursor: help;
+}
+
+/* Live status suffixes: dirty / ahead / behind, quieter than the branch name itself. */
+.group-node__wt-dirty,
+.group-node__wt-ahead,
+.group-node__wt-behind {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.group-node__wt-dirty {
+  color: #ff9f0a;
 }
 
 .group-node__wt-btn {

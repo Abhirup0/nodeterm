@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
+import { useWorktrees, WORKTREE_STATUS_THROTTLE_MS } from '../state/worktrees'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind'
 
@@ -27,14 +28,48 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, setNodes } = useReactFlow()
   const [showColors, setShowColors] = useState(false)
 
+  const wt = data.worktree
+  // The store is the ONLY caller of the worktree/status git IPC; it throttles
+  // (WORKTREE_STATUS_THROTTLE_MS) and is epoch-guarded, so asking often is free.
+  const status = useWorktrees((s) => (wt ? s.statusByPath[wt.path] : undefined))
+  const stale = useWorktrees((s) => (wt ? s.staleGroupIds.includes(id) : false))
+
+  const wtPath = wt?.path
+  // Asking once per render is NOT enough to make the chip live: nothing re-renders a group frame
+  // while the user works inside its terminals, so the dirty count would freeze at whatever it was
+  // when the node last happened to render (verified — it sat at "0 changed" until the canvas was
+  // clicked). Hence a tick. It owns no cache and no `git status` of its own: it just pokes the
+  // store, whose throttle still decides whether a real read happens (so N frames don't mean N
+  // reads, and a mid-window render still coalesces). A stale worktree has no directory left to
+  // stat, so it isn't polled.
+  useEffect(() => {
+    if (!wtPath || stale) return
+    const poke = () => void useWorktrees.getState().refreshStatus(wtPath)
+    poke()
+    const t = setInterval(poke, WORKTREE_STATUS_THROTTLE_MS)
+    return () => clearInterval(t)
+  }, [wtPath, stale])
+
   const ungroup = () => setNodes((ns) => ungroupNodes(ns as CanvasNode[], id))
+
+  // A bound frame must read as a checkout at a glance: solid border + a stronger tint of the
+  // group's OWN color (no new palette). Stale drops the hue entirely and goes muted/warning.
+  const bound = !!wt
+  const frameClass = [
+    'group-node',
+    selected ? 'selected' : '',
+    bound ? 'group-node--worktree' : '',
+    bound && stale ? 'group-node--worktree-stale' : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   return (
     <div
-      className={`group-node${selected ? ' selected' : ''}`}
+      className={frameClass}
       style={{
-        borderColor: data.color,
-        background: `${data.color}0f`,
+        borderColor: bound && stale ? undefined : data.color,
+        background: bound && stale ? undefined : `${data.color}${bound ? '1c' : '0f'}`,
         // Rounded selection ring (box-shadow follows border-radius, unlike the resizer line).
         boxShadow: selected ? `0 0 0 1.5px ${data.color}` : undefined
       }}
@@ -74,18 +109,51 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
           spellCheck={false}
           onChange={(e) => updateNodeData(id, { title: e.target.value })}
         />
-        {data.worktree && (
+        {wt && (
           <div className="group-node__wt nodrag">
-            <span className="group-node__branch" title={data.worktree.path}>
-              ⎇ {data.worktree.branch}
-            </span>
-            <button
-              className="group-node__wt-btn"
-              title="Merge to main"
-              onClick={() => worktreeActionHandler?.(id, 'merge')}
-            >
-              ⤴
-            </button>
+            {stale ? (
+              // The directory is gone from disk (deleted outside the app). Merge and Remove would
+              // act on a path that no longer exists, so only Unbind is offered.
+              <span
+                className="group-node__branch group-node__branch--stale"
+                title={`Worktree directory is gone: ${wt.path}\nUnbind to detach this group from it.`}
+              >
+                ⎇ {wt.branch} · missing
+              </span>
+            ) : (
+              <span className="group-node__branch" title={wt.path}>
+                {/* The branch git reports NOW wins: the user may have switched branches inside
+                    the worktree from a terminal, and the persisted name would then be a lie. */}
+                ⎇ {status?.branch || wt.branch}
+                {!!status && status.dirty > 0 && (
+                  <em className="group-node__wt-dirty" title={`${status.dirty} changed file(s)`}>
+                    {' '}
+                    · {status.dirty} changed
+                  </em>
+                )}
+                {!!status && status.ahead > 0 && (
+                  <em className="group-node__wt-ahead" title={`${status.ahead} commit(s) ahead`}>
+                    {' '}
+                    · {status.ahead}↑
+                  </em>
+                )}
+                {!!status && status.behind > 0 && (
+                  <em className="group-node__wt-behind" title={`${status.behind} commit(s) behind`}>
+                    {' '}
+                    · {status.behind}↓
+                  </em>
+                )}
+              </span>
+            )}
+            {!stale && (
+              <button
+                className="group-node__wt-btn"
+                title="Merge to main"
+                onClick={() => worktreeActionHandler?.(id, 'merge')}
+              >
+                ⤴
+              </button>
+            )}
             <button
               className="group-node__wt-btn"
               title="Unbind worktree (keeps the worktree on disk)"
@@ -93,13 +161,15 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
             >
               Unbind
             </button>
-            <button
-              className="group-node__wt-btn"
-              title="Remove worktree"
-              onClick={() => worktreeActionHandler?.(id, 'remove')}
-            >
-              ✕
-            </button>
+            {!stale && (
+              <button
+                className="group-node__wt-btn"
+                title="Remove worktree"
+                onClick={() => worktreeActionHandler?.(id, 'remove')}
+              >
+                ✕
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -16,6 +16,12 @@ export interface WorktreeEntry {
   branch: string | null
   head: string | null
   isBare: boolean
+  /**
+   * git still LISTS a worktree whose directory was deleted behind its back — it just tags it
+   * `prunable` (until someone runs `git worktree prune`). Treating such an entry as alive is what
+   * makes a dead binding look healthy, so the flag has to survive the parse.
+   */
+  prunable?: boolean
 }
 
 /**
@@ -114,10 +120,19 @@ export function worktreeFromEntry(
 export function parseWorktreePorcelain(out: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = []
   let cur: Partial<WorktreeEntry> | null = null
+  const flush = (c: Partial<WorktreeEntry>): void => {
+    entries.push({
+      path: c.path!,
+      branch: c.branch ?? null,
+      head: c.head ?? null,
+      isBare: c.isBare ?? false,
+      prunable: c.prunable ?? false
+    })
+  }
   for (const raw of out.split('\n')) {
     const line = raw.trimEnd()
     if (line.startsWith('worktree ')) {
-      if (cur) entries.push({ path: cur.path!, branch: cur.branch ?? null, head: cur.head ?? null, isBare: cur.isBare ?? false })
+      if (cur) flush(cur)
       cur = { path: line.slice('worktree '.length), isBare: false }
     } else if (!cur) {
       continue
@@ -127,9 +142,12 @@ export function parseWorktreePorcelain(out: string): WorktreeEntry[] {
       cur.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '')
     } else if (line === 'bare') {
       cur.isBare = true
+    } else if (line === 'prunable' || line.startsWith('prunable ')) {
+      // e.g. "prunable gitdir file points to non-existent location" — the directory is gone.
+      cur.prunable = true
     }
   }
-  if (cur) entries.push({ path: cur.path!, branch: cur.branch ?? null, head: cur.head ?? null, isBare: cur.isBare ?? false })
+  if (cur) flush(cur)
   return entries
 }
 

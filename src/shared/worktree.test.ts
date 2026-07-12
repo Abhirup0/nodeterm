@@ -127,10 +127,30 @@ describe('parseWorktreePorcelain', () => {
     ].join('\n')
     const entries = parseWorktreePorcelain(out)
     expect(entries).toEqual([
-      { path: '/repo', head: 'abc123', branch: 'main', isBare: false },
-      { path: '/wt/x', head: 'def456', branch: 'feature/x', isBare: false },
-      { path: '/bare', head: null, branch: null, isBare: true }
+      { path: '/repo', head: 'abc123', branch: 'main', isBare: false, prunable: false },
+      { path: '/wt/x', head: 'def456', branch: 'feature/x', isBare: false, prunable: false },
+      { path: '/bare', head: null, branch: null, isBare: true, prunable: false }
     ])
+  })
+
+  // git keeps LISTING a worktree whose directory was deleted behind its back, tagging it
+  // `prunable`. Dropping that tag is what would let a dead worktree render as a healthy one.
+  it('flags a worktree whose directory is gone as prunable', () => {
+    const out = [
+      'worktree /repo', 'HEAD abc123', 'branch refs/heads/main', '',
+      'worktree /wt/gone', 'HEAD def456', 'branch refs/heads/feat',
+      'prunable gitdir file points to non-existent location', ''
+    ].join('\n')
+    const entries = parseWorktreePorcelain(out)
+    expect(entries[0].prunable).toBe(false)
+    expect(entries[1]).toEqual({
+      path: '/wt/gone', head: 'def456', branch: 'feat', isBare: false, prunable: true
+    })
+  })
+
+  it('flags a bare `prunable` line with no reason', () => {
+    const entries = parseWorktreePorcelain(['worktree /wt/gone', 'prunable', ''].join('\n'))
+    expect(entries[0].prunable).toBe(true)
   })
 })
 

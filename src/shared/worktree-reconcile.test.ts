@@ -50,6 +50,22 @@ describe('reconcileWorktrees', () => {
     expect(r.orphans).toEqual([])
   })
 
+  // The realistic "deleted outside the app" case: `rm -rf` the directory and git STILL lists the
+  // worktree, tagged `prunable`. Before this, the entry counted as on-disk, the group was reported
+  // live, and a dead binding rendered as a healthy one (and was offered for adoption as an orphan).
+  it('treats a prunable entry (directory deleted behind git´s back) as gone, not live', () => {
+    const gone: WorktreeEntry = { ...wt('/wt/feat', 'feat'), prunable: true }
+    const r = reconcileWorktrees([bound('g1', '/wt/feat', 'feat')], [wt('/repo', 'main'), gone])
+    expect(r.stale).toEqual(['g1'])
+    expect(r.live).toEqual([])
+  })
+
+  it('never offers a prunable worktree as an adoptable orphan', () => {
+    const gone: WorktreeEntry = { ...wt('/wt/loose', 'loose'), prunable: true }
+    const r = reconcileWorktrees([], [wt('/repo', 'main'), gone, wt('/wt/real', 'real')])
+    expect(r.orphans.map((o) => o.path)).toEqual(['/wt/real'])
+  })
+
   it('classifies a mixed workspace in one pass', () => {
     const r = reconcileWorktrees(
       [bound('g1', '/wt/a', 'a'), bound('g2', '/wt/gone', 'gone')],
