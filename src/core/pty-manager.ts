@@ -272,12 +272,23 @@ interface Session {
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
-  /** True while the pty is paused by flow control (`setFlow(id,false)`). Tracked because the
-   *  resume can otherwise be LOST: the renderer's flow control is per-client and only resumes
-   *  when more data arrives, so a pty paused by a client that then vanished (tab closed) would
-   *  stay paused forever — a co-attaching client would inherit a frozen, blank terminal it can
-   *  never unfreeze. Every subscriber change re-checks it (join / leave / dropClient). */
-  paused: boolean
+  /**
+   * The clients that currently OWE us a resume: each has cast `pty:flow(sessionId,false)` because
+   * ITS OWN xterm write-backlog crossed the high-water mark. The pty is paused while this set is
+   * non-empty and resumes only when it becomes empty (`setFlow` / `releaseFlow`). `null` keys the
+   * relay host's detached sink, which pauses on relay backpressure and has no ClientId.
+   *
+   * It has to be a SET, not a boolean, because both of these must hold at once:
+   *  (a) a pause owed by a client that LEFT is always returned (its renderer is gone and will
+   *      never send the matching resume — the co-attaching or remaining clients would stare at a
+   *      frozen, blank terminal forever). `kill` / `dropClient` / `join` return it.
+   *  (b) a pause owed by a client that is STILL HERE is never silently cancelled. That client's
+   *      flow control is EDGE-latched (`if (!paused && pending > HIGH_WATER)` in TerminalNode) —
+   *      once it has pumped the pause it will NOT re-pause, so resuming the pty behind its back is
+   *      permanent and its write queue then grows without bound for the rest of the flood.
+   * A single boolean can only ever satisfy one of the two (it cannot tell the cases apart).
+   */
+  pausedBy: Set<ClientId | null>
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
@@ -409,8 +420,14 @@ export class PtyManager {
       (senderId: number, sessionId: string, cols: number | null, rows: number | null) =>
         this.resize(senderId, sessionId, cols, rows)
     )
-    platform().on(IPC.ptyFlow, (sessionId: string, resume: boolean) =>
-      this.setFlow(sessionId, resume)
+    // Sender-aware: a pause belongs to the client whose xterm backlog overflowed, and only that
+    // client (or its departure) can return it — see `Session.pausedBy`. Registered ONLY here:
+    // `on` and `onWithSender` compose on the same channel, so a leftover plain listener would
+    // run the flow change twice (and, with an unattributed sessionId, wrongly).
+    platform().onWithSender(
+      IPC.ptyFlow,
+      (senderId: number, sessionId: string, resume: boolean) =>
+        this.setFlow(senderId, sessionId, resume)
     )
     // Sender-aware: with co-attach a kill detaches just THAT client, and the pty (and the tmux
     // session behind it) survives while any other subscriber is still watching.
@@ -446,6 +463,12 @@ export class PtyManager {
       await inflight.catch(() => undefined) // the other spawn failed → fall through and try ourselves
       const late = this.join(clientId, options, key)
       if (late) return late
+      // The spawn we awaited REJECTED, so there is no session to join. With two clients queued
+      // behind that one failure, the first of them re-spawns — and the second must see THAT spawn
+      // (published below, synchronously) rather than fall through and spawn a second tmux client,
+      // whose `-D` would detach the first. Recurse: the in-flight guard is the barrier, so waiting
+      // on a *new* in-flight entry is exactly the same wait as the one we just did.
+      if (this.inflight.get(key)) return this.create(clientId, options)
     }
     const spawn = this.spawnNew(clientId, options)
     this.inflight.set(key, spawn)
@@ -479,12 +502,12 @@ export class PtyManager {
     existing.sizes.set(clientId, size)
     existing.shown.set(clientId, size)
     this.applySize(existingId, existing)
-    // A joiner's backlog is empty by definition, so it will never issue the resume that a
-    // previous (now gone) client's flow control owed us — and no data would ever arrive to
-    // trigger one either. Resume here, or the new client stares at a frozen terminal forever.
-    // (Per-client backpressure is Task 5's job; this only guarantees a join never lands on a
-    // paused pty.)
-    this.resumeIfPaused(existing)
+    // A (re)joining client's backlog is empty by definition, so its fresh page will never issue a
+    // resume its PREVIOUS page owed us — a renderer reload keeps the same ClientId, so without this
+    // the reloaded terminal would stay frozen forever with no data arriving to unstick it. Return
+    // only THIS client's owed pause: a pause owed by a DIFFERENT client that is still here and
+    // still drowning stays in place (invariant (b) on `pausedBy`).
+    this.releaseFlow(existing, clientId)
     // KNOWN GAP — plain-shell (tmux disabled / unavailable) co-attach: `fresh:false` makes the
     // renderer skip the cold-restore scrollback replay, and with no tmux there is no client to
     // redraw the screen either, so this joiner sees a blank-but-live terminal until the next
@@ -877,7 +900,7 @@ export class PtyManager {
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
       outputSinceSnapshot: true, // capture the initial screen on the first tick
-      paused: false,
+      pausedBy: new Set<ClientId | null>(),
       accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
@@ -971,32 +994,54 @@ export class PtyManager {
   }
 
   /**
-   * Flow control: the renderer pauses us when xterm's write backlog grows past a high
-   * watermark and resumes once it drains, so a flood can't grow the renderer buffer
-   * without bound. node-pty pause()/resume() stops/starts reading the pty fd; the OS
-   * pipe applies backpressure to the producing process.
+   * Flow control: a client pauses us when ITS xterm write backlog grows past a high watermark and
+   * resumes once it drains, so a flood can't grow that renderer's buffer without bound. node-pty
+   * pause()/resume() stops/starts reading the pty fd; the OS pipe applies backpressure to the
+   * producing process.
+   *
+   * Co-attach makes this per-client: there is ONE pty behind N subscribers, so it must be paused
+   * while ANY subscriber is behind (the slowest viewer sets the pace — the alternative, dropping
+   * output for the laggard, needs a per-client backlog and a redraw, which is Task 5) and resumed
+   * only when the LAST owed resume lands. `pausedBy` is that ledger.
+   *
+   * `clientId` is null for the relay host's detached pty, whose sink pauses on relay backpressure
+   * and returns the resume on drain — one more owner in the same ledger, no special casing.
+   *
+   * Single user: the set holds exactly his ClientId while paused and is empty when he resumes, so
+   * the actuator sees exactly the pause/resume pair it always saw.
    */
-  setFlow(sessionId: string, resume: boolean): void {
+  setFlow(clientId: ClientId | null, sessionId: string, resume: boolean): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    session.paused = !resume
+    if (resume) {
+      this.releaseFlow(session, clientId)
+      return
+    }
+    const wasPaused = session.pausedBy.size > 0
+    session.pausedBy.add(clientId)
+    if (wasPaused) return // already paused by someone — pause() again would be a no-op
     try {
-      if (resume) session.proc.resume()
-      else session.proc.pause()
+      session.proc.pause()
     } catch {
-      // pause/resume can throw if the proc already exited; ignore.
+      // pause can throw if the proc already exited; ignore.
     }
   }
 
-  /** Resume a pty that flow control left paused. Called on every subscriber change, because a
-   *  pause is owed a resume by the client that issued it — and that client may be gone. */
-  private resumeIfPaused(session: Session): void {
-    if (!session.paused) return
-    session.paused = false
+  /**
+   * Return the pause `clientId` owed us — because it resumed, or because it LEFT (kill /
+   * dropClient) or reloaded (join). The pty resumes only when the ledger empties: a pause still
+   * owed by a client that is here and behind must survive every other client's comings and goings,
+   * or that client's renderer queue grows without bound (its flow control is edge-latched and will
+   * never re-pause). No-op when this client owed nothing — the single-user resume path is then
+   * exactly the old `paused=false; proc.resume()`.
+   */
+  private releaseFlow(session: Session, clientId: ClientId | null): void {
+    if (!session.pausedBy.delete(clientId)) return
+    if (session.pausedBy.size > 0) return
     try {
       session.proc.resume()
     } catch {
-      // proc already exited; ignore.
+      // resume can throw if the proc already exited; ignore.
     }
   }
 
@@ -1064,14 +1109,14 @@ export class PtyManager {
       session.sizes.delete(clientId)
       session.shown.delete(clientId)
     }
+    // The departing client (or sink) may have been one of the ones that paused us, and it will
+    // never send the matching resume now — leaving that pause in place would freeze the terminal
+    // for everyone who stayed. A pause owed by a client that is STILL here is untouched: the pty
+    // stays paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
+    this.releaseFlow(session, clientId)
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.
       this.applySize(sessionId, session)
-      // The departing client may have been the one that paused us (its xterm backlog was over
-      // the watermark) — and it will never send the matching resume now. Leaving the pause in
-      // place would freeze the terminal for everyone who stayed. Whoever is still behind will
-      // re-pause on their next high-water send.
-      this.resumeIfPaused(session)
       return
     }
     if (session.flushTimer) clearTimeout(session.flushTimer)
@@ -1288,6 +1333,10 @@ export class PtyManager {
     }
     this.sessions.clear()
     this.byPersistKey.clear()
+    // Clear the in-flight index with the other two, or a create still spawning at quit would leave
+    // a promise (and the session it resolves to) reachable from a manager that has released
+    // everything else — a later create would then co-attach to a session we already let go.
+    this.inflight.clear()
     return Promise.all(finals).then(() => undefined)
   }
 

@@ -36,7 +36,9 @@ function fakePty() {
     write: (sessionId, data) => calls.push({ method: 'write', args: [sessionId, data] }),
     resize: (clientId, sessionId, cols, rows) =>
       calls.push({ method: 'resize', args: [clientId, sessionId, cols, rows] }),
-    setFlow: (sessionId, resume) => calls.push({ method: 'setFlow', args: [sessionId, resume] }),
+    // A relay-served (detached) pty has no ClientId: its pause is owed by the host's sink (null).
+    setFlow: (clientId, sessionId, resume) =>
+      calls.push({ method: 'setFlow', args: [clientId, sessionId, resume] }),
     // Relay-served ptys are killed with clientId null (they have no UI subscribers).
     kill: (clientId, sessionId) => calls.push({ method: 'kill', args: [clientId, sessionId] })
   }
@@ -196,12 +198,12 @@ describe('createHostHandlers', () => {
     await openViaAttach(h)
 
     pty.sinks().onData('a') // send fails → pause
-    expect(pty.calls).toContainEqual({ method: 'setFlow', args: ['pty-1', false] })
+    expect(pty.calls).toContainEqual({ method: 'setFlow', args: [null, 'pty-1', false] })
 
     // Flip the socket to succeed, then deliver more output → resume.
     sock.socket.sendFrame = vi.fn(() => true)
     pty.sinks().onData('b')
-    expect(pty.calls).toContainEqual({ method: 'setFlow', args: ['pty-1', true] })
+    expect(pty.calls).toContainEqual({ method: 'setFlow', args: [null, 'pty-1', true] })
   })
 
   it('rejects unknown RPC methods', () => {

@@ -9,7 +9,7 @@ describe('ws backpressure', () => {
   it('pauses the session when buffered crosses the high-water mark and resumes below low', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     const flow: Array<{ sid: string; resume: boolean }> = []
-    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
     let buffered = 0
     const ui = p.attach(sink(() => buffered))
 
@@ -40,7 +40,7 @@ describe('ws backpressure', () => {
     // server must be able to re-pause — an edge-latched guard would silently latch OFF.
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     const flow: Array<{ sid: string; resume: boolean }> = []
-    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
     const ui = p.attach(sink(() => 1_500_000)) // stays above high-water
 
     p.sendTo(ui, 'pty:data:s1', 'chunk') // pause (rising edge)
@@ -54,6 +54,54 @@ describe('ws backpressure', () => {
       { sid: 's1', resume: false },
       { sid: 's1', resume: false },
       { sid: 's1', resume: false }
+    ])
+  })
+
+  // The pause must be ATTRIBUTED to the backed-up connection: PtyManager keeps a per-client ledger
+  // (Session.pausedBy) and pauses the shared pty while ANY viewer owes a resume. Sending the pause
+  // without a uiId would make it unattributable — and a pause the drowning browser still owes could
+  // then be cancelled by another browser's join/leave (unbounded backlog on the drowning one).
+  it('attributes the pause/resume to the ui whose socket is backed up', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ uiId: number; sid: string; resume: boolean }> = []
+    p.setFlowController((uiId, sid, resume) => flow.push({ uiId, sid, resume }))
+    let aBuffered = 0
+    const a = p.attach(sink(() => aBuffered))
+    const b = p.attach(sink(() => 0)) // B keeps up
+
+    aBuffered = 1_500_000
+    p.sendTo(a, 'pty:data:s1', 'chunk')
+    expect(flow).toEqual([{ uiId: a, sid: 's1', resume: false }])
+
+    // B is keeping up, but B never paused: its send must NOT hand back the resume A owes. (With a
+    // sessionId-keyed flag it would — and with the pty then paused for nobody, no data would ever
+    // arrive for A to re-assert it. Attribution is what makes the pause survivable.)
+    p.sendTo(b, 'pty:data:s1', 'chunk')
+    expect(flow).toHaveLength(1)
+
+    aBuffered = 0
+    p.sendTo(a, 'pty:data:s1', 'chunk') // A drained → A returns its own pause
+    expect(flow.at(-1)).toEqual({ uiId: a, sid: 's1', resume: true })
+  })
+
+  it('a disconnecting connection does not drop another one\'s pause flag', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ uiId: number; sid: string; resume: boolean }> = []
+    p.setFlowController((uiId, sid, resume) => flow.push({ uiId, sid, resume }))
+    let aBuffered = 1_500_000
+    const a = p.attach(sink(() => aBuffered))
+    const b = p.attach(sink(() => 0))
+
+    p.sendTo(a, 'pty:data:s1', 'chunk') // A is behind → paused
+    p.detach(b) // B closes its tab
+    expect(flow).toEqual([{ uiId: a, sid: 's1', resume: false }])
+
+    // A's flag survived B's departure, so A's drain still fires exactly one resume.
+    aBuffered = 0
+    p.sendTo(a, 'pty:data:s1', 'chunk')
+    expect(flow).toEqual([
+      { uiId: a, sid: 's1', resume: false },
+      { uiId: a, sid: 's1', resume: true }
     ])
   })
 

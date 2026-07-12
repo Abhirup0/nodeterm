@@ -37,20 +37,30 @@ export class ServerPlatform implements CorePlatform {
   private sinks = new Map<number, UiSink>()
   private nextUiId = 1
 
-  // WS backpressure: per-session paused flag + the controller that pauses/resumes the pty.
+  // WS backpressure: which (ui, session) streams this server has paused, + the controller that
+  // pauses/resumes the pty.
   //
-  // Keyed by sessionId ALONE, which co-attach (one pty, N subscribers) has made too coarse: a
-  // session's pty:data now fans out to every subscribed ui, so this flag cannot express "behind
-  // for browser A, flowing for browser B", and `flowController` pauses the ONE pty behind the
-  // session for EVERYONE. Net effect today: one slow/backed-up browser pauses the shared pty for
-  // all viewers (bounded — the pause is re-asserted per high send and resumes below LOW_WATER,
-  // and PtyManager resumes on any subscriber change so nobody can be left frozen). Task 5 rekeys
-  // this to (uiId, sessionId) and decides the pty-side policy (pause when ANY viewer is behind).
-  private paused = new Map<string, boolean>()
-  private flowController?: (sessionId: string, resume: boolean) => void
+  // Both sides are per-CLIENT, and they have to be. Co-attach means one pty fans out to N
+  // subscribers, so a pause has to say WHO is behind: PtyManager keeps a per-client ledger
+  // (Session.pausedBy), pauses the shared pty while ANY viewer owes a resume, and resumes it only
+  // when the last owed resume lands — or when the client that owed it disconnects (dropClient).
+  // A `paused` flag keyed by sessionId alone cannot express "behind for browser A, flowing for
+  // browser B": B's low-water send would hand back the resume A owes, and with the pty paused no
+  // further data would arrive for A to re-assert it — the terminal would hang for both of them.
+  //
+  // Still Task 5's: a viewer that STAYS behind currently sets the pace for everyone (the slowest
+  // socket throttles the shared pty). The fix is a per-client drop-and-redraw above a second,
+  // higher watermark (WS_DROP_WATER) rather than pausing the producer indefinitely.
+  private paused = new Set<string>()
+  private flowController?: (uiId: number, sessionId: string, resume: boolean) => void
 
-  setFlowController(fn: (sessionId: string, resume: boolean) => void): void {
+  setFlowController(fn: (uiId: number, sessionId: string, resume: boolean) => void): void {
     this.flowController = fn
+  }
+
+  /** Key of one client's view of one session — the unit backpressure is tracked in. */
+  private static flowKey(uiId: number, sessionId: string): string {
+    return `${uiId} ${sessionId}`
   }
 
   constructor(opts: { userDataDir: string; appVersion: string }) {
@@ -91,19 +101,20 @@ export class ServerPlatform implements CorePlatform {
       sink.sendBinary(encodePtyData(sessionId, String(args[0] ?? '')))
       if (this.flowController) {
         const buffered = sink.bufferedAmount?.() ?? 0
-        const isPaused = this.paused.get(sessionId) ?? false
+        const key = ServerPlatform.flowKey(uiId, sessionId)
+        const isPaused = this.paused.has(key)
         if (buffered > WS_HIGH_WATER) {
-          // Re-assert the pause on EVERY high send (not just the rising edge). The
-          // renderer's own xterm flow control drives the same setFlow actuator and may
-          // have resumed the pty underneath us; an edge-latched `!isPaused` guard would
-          // then never re-pause until the buffer drained to LOW. proc.pause() is
-          // idempotent, and this branch only runs when data actually arrived (the pty was
-          // running), so it self-limits — no spamming.
-          this.paused.set(sessionId, true)
-          this.flowController(sessionId, false)
+          // Re-assert the pause on EVERY high send (not just the rising edge). This connection's
+          // browser runs the SAME flow control on its xterm backlog and casts pty:flow under the
+          // same uiId, so it may have handed back the pause underneath us; an edge-latched
+          // `!isPaused` guard would then never re-pause until the buffer drained to LOW.
+          // proc.pause() is idempotent, and this branch only runs when data actually arrived (the
+          // pty was running), so it self-limits — no spamming.
+          this.paused.add(key)
+          this.flowController(uiId, sessionId, false)
         } else if (isPaused && buffered <= WS_LOW_WATER) {
-          this.paused.set(sessionId, false)
-          this.flowController(sessionId, true)
+          this.paused.delete(key)
+          this.flowController(uiId, sessionId, true)
         }
       }
     } else {
@@ -127,23 +138,13 @@ export class ServerPlatform implements CorePlatform {
 
   detach(uiId: number): void {
     this.sinks.delete(uiId)
-    // KNOWN WRONG, and knowingly left so — do not read this as a design.
-    //
-    // This clears the backpressure flags of EVERY connection, not just the departing one. It was
-    // written when the Server Edition was single-UI ("every paused session belonged to the
-    // departing connection"), which team presence has made false: two browsers are now a normal
-    // configuration, and browser B disconnecting drops browser A's pause flags. The consequence is
-    // bounded — a session A had paused is treated as unpaused, so the next high-water send
-    // re-pauses it (sendTo re-asserts the pause on EVERY high send, not just the rising edge) —
-    // but until then A can take one burst it should not have.
-    //
-    // The real fix is not a smaller patch here: `paused` is keyed by sessionId ALONE, so it cannot
-    // represent "paused for A, flowing for B" at all, and neither can `flowController`, which
-    // pauses the ONE tmux client behind that session. Stage 2 rekeys the map to (clientId,
-    // sessionId) and decides the pty-side policy (pause when ANY viewer is behind); a half-fix here
-    // — e.g. only clearing this uiId's entries — would silently leak a stale pause into the next
-    // attach, which is worse than the over-clear.
-    this.paused.clear()
+    // Drop only the DEPARTING connection's backpressure entries. (This used to clear the map for
+    // every connection — harmless when the Server Edition was single-UI, wrong the moment two
+    // browsers share a session, since it dropped the other one's flags.) Nothing leaks: uiIds are
+    // monotonic, so a reconnect is a new key, and the pty-side pause this connection owed is
+    // returned by PtyManager.dropClient (wired to the same close hook in server/index.ts).
+    const prefix = `${uiId} `
+    for (const key of this.paused) if (key.startsWith(prefix)) this.paused.delete(key)
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {

@@ -68,7 +68,9 @@ export interface HostPtyManager {
     cols: number | null,
     rows: number | null
   ): void
-  setFlow(sessionId: string, resume: boolean): void
+  /** `clientId` is null for a relay-served (detached) pty: the pause is owed by the host's sink,
+   *  which returns it on drain — see PtyManager.setFlow / Session.pausedBy. */
+  setFlow(clientId: number | null, sessionId: string, resume: boolean): void
   /** `clientId` is null for a relay-served (detached) pty: the sinks ARE its only subscriber. */
   kill(clientId: number | null, sessionId: string): void
 }
@@ -170,10 +172,10 @@ export function createHostHandlers(
         if (!ok && !stream.paused) {
           // Relay buffer is full — pause the PTY so the OS pipe backpressures the producer.
           stream.paused = true
-          pty.setFlow(stream.sessionId, false)
+          pty.setFlow(null, stream.sessionId, false)
         } else if (ok && stream.paused) {
           stream.paused = false
-          pty.setFlow(stream.sessionId, true)
+          pty.setFlow(null, stream.sessionId, true)
         }
       },
       onExit: (exitCode) => {

@@ -49,6 +49,7 @@ vi.mock('node-pty', () => ({
 
 const ALICE = 1
 const BOB = 2
+const CAROL = 3
 
 describe('terminal co-attach: one PTY, N subscribers', () => {
   let fake: FakePlatform
@@ -79,6 +80,10 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   // pty:kill is sender-aware (it unsubscribes ONE client), so it lands in senderListeners.
   const kill = (clientId: number, sessionId: string) =>
     fake.senderListeners[IPC.ptyKill](clientId, sessionId)
+  // pty:flow is sender-aware too: a pause is OWED by the client whose xterm backlog overflowed,
+  // so it can only be returned by that client (or by its departure).
+  const flow = (clientId: number, sessionId: string, resume: boolean) =>
+    fake.senderListeners[IPC.ptyFlow](clientId, sessionId, resume)
 
   it('a second client on the same persistKey subscribes instead of spawning', async () => {
     await manager()
@@ -192,31 +197,82 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(spawned[0].killed).toBe(true)
   })
 
-  // ── Finding 1: a joiner must never inherit a PAUSED pty ────────────────────────────────
-  // Flow control is per-client in the renderer (xterm backlog > 1 MB → setFlow(false)) and its
-  // `paused` flag only clears when more data arrives. So a pty left paused by a client that
-  // vanished can never be resumed by a new one: it would show a blank, frozen terminal forever.
-  it('a client joining a PAUSED session resumes the pty (an empty backlog cannot resume it)', async () => {
+  // ── Flow control is OWED PER CLIENT (`pausedBy`) ─────────────────────────────────────────
+  // Two invariants, and a single `paused` boolean per session can only ever satisfy one of them:
+  //  (a) a pause owed by a client that LEFT is always returned  → nobody is frozen forever;
+  //  (b) a pause owed by a client that is STILL HERE is never silently cancelled → its renderer's
+  //      write queue cannot grow without bound (its flow control is EDGE-latched: once it has
+  //      pumped `setFlow(false)` it will not re-pause, so a resume behind its back is permanent).
+  it('a solo client pauses and resumes its own pty (single-user path unchanged)', async () => {
     await manager()
     const { sessionId } = await create(ALICE)
-    fake.listeners[IPC.ptyFlow](sessionId, false) // Alice's xterm backlog crossed the high water mark
+
+    flow(ALICE, sessionId, false)
+    expect(spawned[0].paused).toBe(true)
+    flow(ALICE, sessionId, true)
+    expect(spawned[0].paused).toBe(false)
+  })
+
+  it('a client joining a session PAUSED by a client that left resumes the pty', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    flow(ALICE, sessionId, false) // Alice's xterm backlog crossed the high water mark
     expect(spawned[0].paused).toBe(true)
 
-    // Alice's browser tab is gone (or reloaded): a new client co-attaches to the same node.
-    const bob = await create(BOB)
-    expect(bob.sessionId).toBe(sessionId)
-    expect(spawned[0].paused).toBe(false) // a joiner has an empty backlog by definition
+    // Alice's tab is gone; her renderer reloads (same client id) and re-creates the node. Her new
+    // page has an empty backlog, so it will never send the resume her old page owed us.
+    const again = await create(ALICE)
+    expect(again.sessionId).toBe(sessionId)
+    expect(spawned[0].paused).toBe(false)
   })
 
   it('a departing client cannot leave the pty paused for the subscribers that stay', async () => {
     await manager()
     const { sessionId } = await create(ALICE)
     await create(BOB)
-    fake.listeners[IPC.ptyFlow](sessionId, false)
+    flow(ALICE, sessionId, false)
     expect(spawned[0].paused).toBe(true)
 
     kill(ALICE, sessionId) // the client that paused it leaves
     expect(spawned[0].paused).toBe(false) // Bob's terminal keeps streaming
+  })
+
+  it('a DIFFERENT client joining does NOT cancel a pause the drowning client still owes', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    flow(ALICE, sessionId, false) // Alice is 1 MB behind a `yes`-grade flood
+    expect(spawned[0].paused).toBe(true)
+
+    await create(BOB) // Bob opens the same node — Alice is still drowning
+    expect(spawned[0].paused).toBe(true) // resuming here would grow Alice's queue without bound
+
+    flow(ALICE, sessionId, true) // Alice drains → the last owed resume lands
+    expect(spawned[0].paused).toBe(false)
+  })
+
+  it('a DIFFERENT client leaving does NOT cancel a pause the drowning client still owes', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    flow(ALICE, sessionId, false)
+
+    kill(BOB, sessionId) // Bob closes his tab; Alice is still behind
+    expect(spawned[0].paused).toBe(true)
+    expect(spawned[0].killed).toBe(false)
+  })
+
+  it('the pty resumes only when the LAST owed resume lands', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    flow(ALICE, sessionId, false)
+    flow(BOB, sessionId, false)
+    expect(spawned[0].paused).toBe(true)
+
+    flow(ALICE, sessionId, true)
+    expect(spawned[0].paused).toBe(true) // Bob is still behind
+    flow(BOB, sessionId, true)
+    expect(spawned[0].paused).toBe(false)
   })
 
   // ── Finding 2: a client that vanishes (WS close / destroyed webContents) is dropped ──────
@@ -247,11 +303,21 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     const m = await manager()
     const { sessionId } = await create(ALICE)
     await create(BOB)
-    fake.listeners[IPC.ptyFlow](sessionId, false)
+    flow(ALICE, sessionId, false)
 
     m.dropClient(ALICE)
     expect(spawned[0].paused).toBe(false)
     expect(spawned[0].killed).toBe(false)
+  })
+
+  it('dropClient leaves a pause another (still present) client owes in place', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    flow(ALICE, sessionId, false)
+
+    m.dropClient(BOB) // Bob's tab vanished; Alice is still drowning
+    expect(spawned[0].paused).toBe(true)
   })
 
   it('dropClient leaves a relay-served (detached) pty alone', async () => {
@@ -294,6 +360,23 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(a.status).toBe('rejected')
     expect(b.status).toBe('fulfilled')
     expect(spawned).toHaveLength(1) // Bob's create spawned after the failure cleared the entry
+  })
+
+  // TWO racers behind ONE failed spawn: the first survivor re-spawns, and the second must see
+  // THAT spawn in `inflight` (the entry it awaited is long gone) instead of spawning again — a
+  // second `tmux -A -D` would detach the first survivor's client, which is the very race the
+  // in-flight guard exists to prevent.
+  it('two creates racing a failed spawn resolve to ONE session, not two', async () => {
+    await manager()
+    failNextSpawn = true
+    const [a, b, c] = await Promise.allSettled([create(ALICE), create(BOB), create(CAROL)])
+    expect(a.status).toBe('rejected')
+    expect(b.status).toBe('fulfilled')
+    expect(c.status).toBe('fulfilled')
+    expect(spawned).toHaveLength(1)
+    const bId = b.status === 'fulfilled' ? b.value.sessionId : 'b'
+    const cId = c.status === 'fulfilled' ? c.value.sessionId : 'c'
+    expect(cId).toBe(bId)
   })
 })
 

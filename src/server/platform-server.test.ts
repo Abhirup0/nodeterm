@@ -121,19 +121,19 @@ describe('ServerPlatform', () => {
     expect(b.texts).toHaveLength(1)
   })
 
-  it('detach clears the backpressure paused map', () => {
+  it("detach clears the departing connection's backpressure entries", () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     p.setFlowController(() => {})
     const ui = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 2_000_000 })
-    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → session s1 marked paused
+    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → (ui, s1) marked paused
     p.detach(ui)
-    // After detach the paused entry is gone: a fresh attach + low-buffer send does not emit a
-    // spurious resume.
+    // The entry is gone with the connection: a fresh attach + low-buffer send does not emit a
+    // spurious resume for a pause the NEW connection never issued.
     const flow: Array<{ sid: string; resume: boolean }> = []
-    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
     const ui2 = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 0 })
     p.sendTo(ui2, 'pty:data:s1', 'x')
-    expect(flow).toEqual([]) // not paused (map was cleared) → no resume fired
+    expect(flow).toEqual([]) // ui2 owes nothing → no resume fired
   })
 
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {

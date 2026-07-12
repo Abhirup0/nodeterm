@@ -81,7 +81,12 @@ export async function startServer(
   // WS backpressure: when a connection's socket send buffer fills while streaming pty
   // output, pause that tmux client so the OS pipe applies real backpressure (resumes below
   // the low-water mark). See platform-server.ts sendTo.
-  platform.setFlowController((sid, resume) => ptyManager.setFlow(sid, resume))
+  //
+  // The pause is attributed to the UI whose socket is backed up (`uiId`), exactly like the pause
+  // that UI's own renderer casts over `pty:flow` — so PtyManager's per-client ledger (Session
+  // .pausedBy) returns it when that UI drains OR when it disconnects, and one backed-up browser
+  // can no longer be un-paused by another browser's join/leave.
+  platform.setFlowController((uiId, sid, resume) => ptyManager.setFlow(uiId, sid, resume))
 
   // Desktop's src/main/index.ts registers a few pty handlers outside PtyManager. Of those,
   // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
