@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   descendantIds,
+  displacedByWorktree,
   isInsideDir,
   sanitizeWorktreeBranch,
   computeWorktreePath,
@@ -217,6 +218,46 @@ describe('descendantIds', () => {
       { id: 'g', parentId: 'b' } // g is its own descendant
     ]
     expect([...descendantIds(cyclic, 'g')].sort()).toEqual(['a', 'b', 'g'])
+  })
+})
+
+// The one derivation BOTH teardown paths use — Remove (which also ends the sessions) and the stale
+// group's Unbind (which does not). Unbind is the documented recovery path for a worktree deleted
+// outside the app, and it used to leave `data.cwd = <dead path>` on the children, persisted to
+// project.json: tmux hides it (a warm reattach ignores cwd) until a machine reboot, when the cold
+// start spawns into the dead path, pty-manager silently falls back to $HOME, and the dead path
+// stays in the project file forever.
+describe('displacedByWorktree', () => {
+  const wt = '/wt/feat'
+  const nodes = [
+    { id: 'g', type: 'group', data: { cwd: wt } },
+    { id: 'term', type: 'terminal', parentId: 'g', data: { cwd: wt } },
+    { id: 'chat', type: 'chat', parentId: 'g', data: { cwd: `${wt}/src` } },
+    { id: 'inner', type: 'group', parentId: 'g', data: { cwd: wt } },
+    { id: 'nested', type: 'terminal', parentId: 'inner', data: { cwd: `${wt}/pkg` } },
+    // In the group, but its cwd was pointed somewhere else by hand — it was never displaced.
+    { id: 'elsewhere', type: 'terminal', parentId: 'g', data: { cwd: '/repo' } },
+    // A sibling directory that merely shares the prefix must not be swept up.
+    { id: 'prefix', type: 'terminal', parentId: 'g', data: { cwd: '/wt/feature' } },
+    { id: 'nocwd', type: 'terminal', parentId: 'g', data: {} },
+    { id: 'sticky', type: 'sticky', parentId: 'g', data: { cwd: wt } },
+    // Same cwd, but not in the group: not this group's business.
+    { id: 'stranger', type: 'terminal', data: { cwd: wt } }
+  ]
+
+  it('collects every descendant terminal and chat living in the worktree, nested ones included', () => {
+    expect([...displacedByWorktree(nodes, 'g', wt)].sort()).toEqual(['chat', 'nested', 'term'])
+  })
+
+  it('leaves nodes outside the group, outside the path, or without a cwd alone', () => {
+    const got = displacedByWorktree(nodes, 'g', wt)
+    for (const id of ['elsewhere', 'prefix', 'nocwd', 'sticky', 'stranger', 'g', 'inner']) {
+      expect(got.has(id)).toBe(false)
+    }
+  })
+
+  it('displaces nothing for an empty worktree path (never sweeps the whole canvas)', () => {
+    expect(displacedByWorktree(nodes, 'g', '').size).toBe(0)
   })
 })
 

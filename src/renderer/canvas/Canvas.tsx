@@ -93,8 +93,7 @@ import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
-  descendantIds,
-  isInsideDir,
+  displacedByWorktree,
   resolveBaseRef,
   sanitizeWorktreeBranch,
   worktreeFromCreate,
@@ -2153,6 +2152,56 @@ export function Canvas() {
     [setNodes, markDirty, refreshWorktreeStore]
   )
 
+  /**
+   * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
+   * group's own cwd, else the project's. `displacedByWorktree` decides who those are: descendants
+   * (nested groups included) whose cwd is inside the worktree; anyone else is left alone.
+   *
+   * Leaving a dead `data.cwd` behind is the trap this whole task exists to remove — it is persisted
+   * to project.json, tmux hides it (a warm reattach ignores cwd), and the next machine reboot cold-
+   * starts the terminal into a directory that no longer exists, where pty-manager silently falls
+   * back to $HOME while the dead path stays in the project file forever.
+   *
+   * `respawn` separates the two callers:
+   *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
+   *    destroyed and the terminals respawn straight into the fallback cwd.
+   *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
+   *    the node (and on disk); the running session keeps going until it is next cold-started, which
+   *    is precisely when the corrected cwd is needed.
+   */
+  const resetDisplacedCwd = useCallback(
+    (groupId: string, worktreePath: string, respawn: boolean) => {
+      const displaced = displacedByWorktree(nodesRef.current, groupId, worktreePath)
+      if (!displaced.size) return
+      const fallbackCwd =
+        (nodesRef.current.find((n) => n.id === groupId)?.data.cwd as string | undefined) ||
+        useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      if (respawn) {
+        for (const n of nodesRef.current) {
+          if (displaced.has(n.id) && n.type === 'terminal') transport.destroy(n.id)
+        }
+      }
+      setNodes((ns) =>
+        ns.map((n) =>
+          displaced.has(n.id)
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  cwd: fallbackCwd,
+                  ...(respawn && n.type === 'terminal'
+                    ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+                    : {})
+                }
+              }
+            : n
+        )
+      )
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId]
+  )
+
   // Confirmed removal: git FIRST, then the child terminals' tmux sessions — a git that refuses must
   // leave the user's running processes alone (see the numbered steps below).
   //
@@ -2205,34 +2254,10 @@ export function Canvas() {
     //    The respawn (nonce bump) puts the terminal straight back in the fallback cwd rather than
     //    leaving a dead pane behind; its session was destroyed a line earlier either way.
     //    Nodes whose cwd was NOT inside the worktree are left alone: they were never affected.
-    const under = descendantIds(nodesRef.current, t.groupId)
-    const fallbackCwd =
-      (nodesRef.current.find((n) => n.id === t.groupId)?.data.cwd as string | undefined) ||
-      useProjects.getState().getProject(activeProjectId ?? '')?.cwd
-    const displaced = (n: CanvasNode): boolean =>
-      under.has(n.id) &&
-      (n.type === 'terminal' || n.type === 'chat') &&
-      isInsideDir(n.data.cwd as string | undefined, wt.path)
-    for (const n of nodesRef.current) if (displaced(n) && n.type === 'terminal') transport.destroy(n.id)
-    setNodes((ns) =>
-      ns.map((n) =>
-        displaced(n as CanvasNode)
-          ? {
-              ...n,
-              data: {
-                ...n.data,
-                cwd: fallbackCwd,
-                ...(n.type === 'terminal'
-                  ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
-                  : {})
-              }
-            }
-          : n
-      )
-    )
+    resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, setNodes, activeProjectId])
+  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -2269,6 +2294,15 @@ export function Canvas() {
           // directory that still exists is never touched, so a wrongly-stale group cannot delete a
           // live checkout.
           if (wt && useWorktrees.getState().staleGroupIds.includes(groupId)) {
+            // Unbind is the DOCUMENTED RECOVERY PATH for a worktree deleted outside the app — the
+            // only action a stale group offers — so it owes the children the same cwd reset Remove
+            // gives them. Without it they keep `data.cwd = <dead worktree path>`, persisted to
+            // project.json: tmux hides it (a warm reattach ignores cwd) right up until a machine
+            // reboot, when the cold start spawns into the dead path, pty-manager silently falls back
+            // to $HOME, and the dead path stays in the project file forever.
+            // No respawn: unbind ends no process. The correction lands on the node (and on disk),
+            // which is exactly where the next cold start reads it from.
+            resetDisplacedCwd(groupId, wt.path, false)
             // AWAIT the prune before re-reconciling: `worktree list` racing an unfinished prune
             // still lists the pruned path, and the worktree we just cleaned up would pop back as
             // an orphan the dialog offers.
@@ -2313,7 +2347,7 @@ export function Canvas() {
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding, activeProjectId]
+    [requestRemoveWorktree, clearWorktreeBinding, resetDisplacedCwd, activeProjectId]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).

@@ -191,6 +191,48 @@ export function descendantIds(
   return out
 }
 
+/** The shape `displacedByWorktree` needs of a canvas node (structural, so the shared layer stays
+ *  free of React Flow types). */
+interface WorktreeNodeLike {
+  id: string
+  type?: string
+  parentId?: string
+  data?: { cwd?: unknown }
+}
+
+/**
+ * The nodes a worktree teardown DISPLACES: every descendant of the bound group that carries a
+ * working directory (a terminal or a chat) inside the worktree path.
+ *
+ * BOTH teardown paths derive from this — Remove (which also ends their sessions and respawns them)
+ * and a stale group's Unbind (which touches no process at all). Unbind is the documented recovery
+ * path for a worktree deleted outside the app — the only action a stale group offers — and leaving
+ * `data.cwd` on the dead path there is not cosmetic: it is persisted to `project.json`, tmux hides
+ * it (a warm reattach ignores cwd), and the next machine reboot cold-starts the terminal into a
+ * directory that no longer exists, where pty-manager silently falls back to $HOME while the dead
+ * path stays in the project file forever.
+ *
+ * Nodes whose cwd was never inside the worktree (pointed elsewhere by hand, a sibling directory
+ * that merely shares the prefix, no cwd at all) are NOT displaced — they were never affected, and
+ * rewriting them would be a change the user never asked for.
+ */
+export function displacedByWorktree(
+  nodes: readonly WorktreeNodeLike[],
+  groupId: string,
+  worktreePath: string
+): Set<string> {
+  if (!worktreePath) return new Set()
+  const under = descendantIds(nodes, groupId)
+  const out = new Set<string>()
+  for (const n of nodes) {
+    if (!under.has(n.id)) continue
+    if (n.type !== 'terminal' && n.type !== 'chat') continue
+    const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
+    if (isInsideDir(cwd, worktreePath)) out.add(n.id)
+  }
+  return out
+}
+
 /** Refuse removals that would nuke the repo, home, or filesystem root. */
 export function isDangerousWorktreeRemovalPath(worktreePath: string, repoPath: string, homeDir: string): boolean {
   const wt = (worktreePath || '').replace(/\/+$/, '')
