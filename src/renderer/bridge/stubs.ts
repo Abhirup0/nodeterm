@@ -135,7 +135,9 @@ export function buildStubApi(): Omit<
       list: U('sshFs.list'),
       read: U('sshFs.read'),
       readBinary: U('sshFs.readBinary'),
-      write: U('sshFs.write')
+      write: U('sshFs.write'),
+      mkdir: U('sshFs.mkdir'),
+      exists: U('sshFs.exists')
     },
     clipboard: {
       // Clipboard API → execCommand → visible error. `navigator.clipboard` only exists in a SECURE

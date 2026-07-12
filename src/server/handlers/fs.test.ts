@@ -38,6 +38,12 @@ describe('server fs handlers', () => {
     fs.writeFileSync(f, Buffer.from([1, 2, 3]))
     expect(await call(IPC.fsReadBinary, f)).toBe(Buffer.from([1, 2, 3]).toString('base64'))
   })
+  it('mkdir creates a nested dir and exists reports it', async () => {
+    const nested = path.join(dir, 'x/y/z')
+    expect(await call(IPC.fsExists, nested)).toBe(false)
+    expect(await call(IPC.fsMkdir, nested)).toBe(true)
+    expect(await call(IPC.fsExists, nested)).toBe(true)
+  })
   it('quickOpen lists files under the root', async () => {
     fs.writeFileSync(path.join(dir, 'q.txt'), 'x')
     const files = (await call(IPC.filesQuickOpen, dir)) as string[]

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, sshCheckIgnoreArgs, parseLsEntries, SshFs } from './ssh-fs'
+import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, sshMkdirArgs, sshExistsArgs, sshCheckIgnoreArgs, parseLsEntries, SshFs } from './ssh-fs'
 
 const conn = { host: 'h', user: 'u' }
 const ref = { conn, controlPath: '/s.sock' }
@@ -28,6 +28,18 @@ describe('ssh-fs arg builders', () => {
     const j = sshWriteArgs(conn, '/s', '~/projects/file.txt').join(' ')
     expect(j).toContain(`mkdir -p ~/'projects'`)
     expect(j).toContain(`cat > ~/'projects/file.txt'`)
+  })
+  it('mkdir runs mkdir -p on the quoted path', () => {
+    expect(sshMkdirArgs(conn, '/s.sock', '/a b/c').join(' ')).toContain(`mkdir -p '/a b/c'`)
+  })
+  it('mkdir leaves a leading ~/ unquoted so the remote shell tilde-expands the path', () => {
+    expect(sshMkdirArgs(conn, '/s', '~/projects/new').join(' ')).toContain(`mkdir -p ~/'projects/new'`)
+  })
+  it('exists runs test -e on the quoted path', () => {
+    expect(sshExistsArgs(conn, '/s.sock', '/a b/c').join(' ')).toContain(`test -e '/a b/c'`)
+  })
+  it('exists leaves a leading ~/ unquoted so the remote shell tilde-expands the path', () => {
+    expect(sshExistsArgs(conn, '/s', '~/projects/file.txt').join(' ')).toContain(`test -e ~/'projects/file.txt'`)
   })
   it('check-ignore quotes the dir as a remote path (~ expands) but quotes entry NAMES literally', () => {
     const j = sshCheckIgnoreArgs(conn, '/s', '~/p', ['node_modules', "a'b"]).join(' ')
@@ -69,5 +81,13 @@ describe('SshFs (injected runner)', () => {
   })
   it('fail-open: listDir → [] when the ls run fails', async () => {
     expect(await new SshFs(async () => ({ code: 1, stdout: '' })).listDir(ref, '/p')).toEqual([])
+  })
+  it('mkdir true on code 0, false otherwise', async () => {
+    expect(await new SshFs(async () => ({ code: 0, stdout: '' })).mkdir(ref, '/d')).toBe(true)
+    expect(await new SshFs(async () => ({ code: 1, stdout: '' })).mkdir(ref, '/d')).toBe(false)
+  })
+  it('exists true on code 0 (test -e), false otherwise', async () => {
+    expect(await new SshFs(async () => ({ code: 0, stdout: '' })).exists(ref, '/d')).toBe(true)
+    expect(await new SshFs(async () => ({ code: 1, stdout: '' })).exists(ref, '/d')).toBe(false)
   })
 })

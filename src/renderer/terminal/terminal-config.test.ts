@@ -19,9 +19,11 @@ import {
   shouldApplyResync,
   stripTrailingNewline,
   takeRecycled,
+  terminalKeyAction,
   toXtermText,
   xtermScrollback,
   RESYNC_NOTICE,
+  SHIFT_ENTER_SEQ,
   XTERM_SCROLLBACK_MAX,
   XTERM_SCROLLBACK_MIN,
   type CopyShortcutEvent
@@ -431,6 +433,45 @@ describe('copyKeyAction', () => {
   it('passes plain Ctrl+C through to the pty (SIGINT), selection or not', () => {
     expect(copyKeyAction(ev({ ctrlKey: true }), true)).toBe('pass')
     expect(copyKeyAction(ev({ ctrlKey: true }), false)).toBe('pass')
+  })
+})
+
+describe('terminalKeyAction', () => {
+  it('maps Shift+Enter keydown to shift-enter', () => {
+    expect(terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false)).toBe(
+      'shift-enter'
+    )
+    // selection state is irrelevant for shift-enter
+    expect(terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), true)).toBe(
+      'shift-enter'
+    )
+  })
+
+  it('only fires on keydown, with shift alone', () => {
+    // `code: 'Enter'` overrides the ev factory's default `code: 'KeyC'` — otherwise the extra
+    // modifiers below would match the copy chord via the physical KeyC position, not shift-enter.
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true, type: 'keyup' }), false)
+    ).toBe('pass')
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true, metaKey: true }), false)
+    ).toBe('pass')
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true, ctrlKey: true }), false)
+    ).toBe('pass')
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true, altKey: true }), false)
+    ).toBe('pass')
+    expect(terminalKeyAction(ev({ key: 'Enter', code: 'Enter' }), false)).toBe('pass') // plain Enter untouched
+  })
+
+  it('still resolves copy chords like copyKeyAction', () => {
+    expect(terminalKeyAction(ev({ metaKey: true }), true)).toBe('copy') // Cmd+C w/ selection (ev defaults key:'c')
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), false)).toBe('swallow')
+  })
+
+  it('exports the ESC+CR sequence', () => {
+    expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })
 })
 
