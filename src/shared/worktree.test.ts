@@ -275,18 +275,51 @@ describe('displacedByWorktree', () => {
     { id: 'nocwd', type: 'terminal', parentId: 'g', data: {} },
     { id: 'sticky', type: 'sticky', parentId: 'g', data: { cwd: wt } },
     // Same cwd, but not in the group: not this group's business.
-    { id: 'stranger', type: 'terminal', data: { cwd: wt } }
+    { id: 'stranger', type: 'terminal', data: { cwd: wt } },
+    // Editor/diff nodes never get a parentId (they float free on the canvas — see
+    // createEditorNode/createDiffNode), so group membership can't identify them. Path
+    // containment is the only signal: editor stores the ABSOLUTE path in `filePath`; diff
+    // stores the repo root in `cwd` and the file's path RELATIVE to it in `filePath`.
+    { id: 'editor-in', type: 'editor', data: { filePath: `${wt}/src/index.ts` } },
+    { id: 'editor-out', type: 'editor', data: { filePath: '/repo/src/index.ts' } },
+    // Shares the prefix but is a sibling directory, not really inside the worktree.
+    { id: 'editor-prefix', type: 'editor', data: { filePath: '/wt/feature/index.ts' } },
+    { id: 'diff-in', type: 'diff', data: { cwd: wt, filePath: 'src/index.ts' } },
+    { id: 'diff-out', type: 'diff', data: { cwd: '/repo', filePath: 'src/index.ts' } }
   ]
 
   it('collects every descendant terminal and chat living in the worktree, nested ones included', () => {
-    expect([...displacedByWorktree(nodes, 'g', wt)].sort()).toEqual(['chat', 'nested', 'term'])
+    expect([...displacedByWorktree(nodes, 'g', wt)].sort()).toEqual(
+      ['chat', 'diff-in', 'editor-in', 'nested', 'term'].sort()
+    )
   })
 
   it('leaves nodes outside the group, outside the path, or without a cwd alone', () => {
     const got = displacedByWorktree(nodes, 'g', wt)
-    for (const id of ['elsewhere', 'prefix', 'nocwd', 'sticky', 'stranger', 'g', 'inner']) {
+    for (const id of [
+      'elsewhere',
+      'prefix',
+      'nocwd',
+      'sticky',
+      'stranger',
+      'g',
+      'inner',
+      'editor-out',
+      'editor-prefix',
+      'diff-out'
+    ]) {
       expect(got.has(id)).toBe(false)
     }
+  })
+
+  it('collects an editor/diff node by path even though it has no parentId at all', () => {
+    // Same as 'editor-in'/'diff-in' above, spelled out: neither carries a parentId, and neither
+    // is a descendant of 'g' by any group-membership test — only the path says they're displaced.
+    expect(nodes.find((n) => n.id === 'editor-in')?.parentId).toBeUndefined()
+    expect(nodes.find((n) => n.id === 'diff-in')?.parentId).toBeUndefined()
+    const got = displacedByWorktree(nodes, 'g', wt)
+    expect(got.has('editor-in')).toBe(true)
+    expect(got.has('diff-in')).toBe(true)
   })
 
   it('displaces nothing for an empty worktree path (never sweeps the whole canvas)', () => {

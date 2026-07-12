@@ -230,12 +230,13 @@ interface WorktreeNodeLike {
   id: string
   type?: string
   parentId?: string
-  data?: { cwd?: unknown }
+  data?: { cwd?: unknown; filePath?: unknown }
 }
 
 /**
  * The nodes a worktree teardown DISPLACES: every descendant of the bound group that carries a
- * working directory (a terminal or a chat) inside the worktree path.
+ * working directory (a terminal or a chat) inside the worktree path, PLUS any editor/diff node
+ * anywhere on the canvas whose file lives inside it.
  *
  * BOTH teardown paths derive from this — Remove (which also ends their sessions and respawns them)
  * and a stale group's Unbind (which touches no process at all). Unbind is the documented recovery
@@ -248,6 +249,15 @@ interface WorktreeNodeLike {
  * Nodes whose cwd was never inside the worktree (pointed elsewhere by hand, a sibling directory
  * that merely shares the prefix, no cwd at all) are NOT displaced — they were never affected, and
  * rewriting them would be a change the user never asked for.
+ *
+ * Terminal/chat displacement is GROUP-scoped (`under.has`) because a cwd match alone is too broad —
+ * plenty of terminals legitimately share a cwd with a worktree without living inside its frame.
+ * Editor/diff nodes get no such scoping: `createEditorNode`/`createDiffNode` never set a
+ * `parentId` (they float free on the canvas, `group: null`), so they are never a "descendant" of
+ * anything — path containment is the only signal there is. A node that opened a file out of a
+ * worktree is displaced by that worktree going away no matter where it happens to sit visually.
+ * Editor stores the file's ABSOLUTE path in `filePath`; diff stores the repo root in `cwd` and the
+ * file's path RELATIVE to it in `filePath`, so the two are joined before the containment check.
  */
 export function displacedByWorktree(
   nodes: readonly WorktreeNodeLike[],
@@ -258,10 +268,16 @@ export function displacedByWorktree(
   const under = descendantIds(nodes, groupId)
   const out = new Set<string>()
   for (const n of nodes) {
-    if (!under.has(n.id)) continue
-    if (n.type !== 'terminal' && n.type !== 'chat') continue
-    const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
-    if (isInsideDir(cwd, worktreePath)) out.add(n.id)
+    if (n.type === 'terminal' || n.type === 'chat') {
+      if (!under.has(n.id)) continue
+      const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
+      if (isInsideDir(cwd, worktreePath)) out.add(n.id)
+    } else if (n.type === 'editor' || n.type === 'diff') {
+      const filePath = typeof n.data?.filePath === 'string' ? n.data.filePath : undefined
+      const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
+      const abs = n.type === 'diff' && cwd && filePath ? `${cwd}/${filePath}` : filePath
+      if (isInsideDir(abs, worktreePath)) out.add(n.id)
+    }
   }
   return out
 }
