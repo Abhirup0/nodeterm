@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
+import { useProjects } from '../state/projects'
 import { useWorktrees, WORKTREE_STATUS_THROTTLE_MS } from '../state/worktrees'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind'
@@ -34,7 +35,14 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const status = useWorktrees((s) => (wt ? s.statusByPath[wt.path] : undefined))
   const stale = useWorktrees((s) => (wt ? s.staleGroupIds.includes(id) : false))
 
-  const wtPath = wt?.path
+  // On an SSH project the poll is OFF, not merely useless: `git status <path>` would be answered by
+  // the LOCAL filesystem for a project whose checkout lives on the host (remote git routing is
+  // exact-cwd, and a worktree path is never the project's remoteCwd), so the chip would report a
+  // local directory's branch — or, far worse, strike the group out and unlock the stale-Unbind path,
+  // which rewrites the children's cwds. Worktrees are unsupported in SSH projects (v1): the honest
+  // behaviour is no facts at all, not local facts about a remote checkout.
+  const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
+  const wtPath = sshProject ? undefined : wt?.path
   // Asking once per render is NOT enough to make the chip live: nothing re-renders a group frame
   // while the user works inside its terminals, so the dirty count would freeze at whatever it was
   // when the node last happened to render (verified — it sat at "0 changed" until the canvas was

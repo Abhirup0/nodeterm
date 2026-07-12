@@ -24,6 +24,39 @@ export interface WorktreeEntry {
   prunable?: boolean
 }
 
+/** `git worktree list`, plus WHETHER GIT COULD BE READ AT ALL — see `worktree-ops.listWorktrees`. */
+export interface WorktreeListResult {
+  ok: boolean
+  entries: WorktreeEntry[]
+}
+
+/** The node fields that can say "this session does not run on this machine". */
+interface RemoteNodeLike {
+  /** Relay-bound node (`createRemoteTerminalNode`) — not persisted. */
+  remote?: unknown
+  /** SSH-PROJECT terminal (`createTerminalNode(..., project.ssh)`) — the connection it runs on. */
+  ssh?: unknown
+  /** SSH-PROJECT terminal: its tmux server lives on the host, not here. */
+  sshRemoteTmux?: unknown
+}
+
+/**
+ * Does this node's session live on a REMOTE host?
+ *
+ * Worktrees are local-only in v1: the path is computed from the LOCAL data dir and `git worktree`
+ * runs against the LOCAL filesystem. A node whose tmux session is on another machine must therefore
+ * never be moved into one — its session would be destroyed and respawned into a directory that does
+ * not exist there, and the dead path would be persisted to `project.json`.
+ *
+ * THREE different fields mean "remote", and guarding only one is how the exact node this protects
+ * slipped through: `data.remote` is set ONLY by `createRemoteTerminalNode` (relay nodes, never
+ * persisted, never inside an SSH project), while an SSH-PROJECT terminal carries `data.ssh` +
+ * `data.sshRemoteTmux` and NEVER `data.remote`. Ask about all of them.
+ */
+export function isRemoteSessionNode(data: RemoteNodeLike | undefined): boolean {
+  return !!(data && (data.remote || data.ssh || data.sshRemoteTmux))
+}
+
 /**
  * Reject refs that could smuggle CLI flags (leading `-`) or are not valid git refs.
  * Electron-free port of git-service.ts's `isValidRef` so worktree-ops can validate too.

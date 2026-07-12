@@ -8,6 +8,7 @@ import {
   parseWorktreePorcelain,
   isDangerousWorktreeRemovalPath,
   decideMergeStrategy,
+  isRemoteSessionNode,
   isValidGitRef,
   resolveBaseRef,
   worktreeFromCreate,
@@ -21,6 +22,38 @@ const entry = (path: string, branch: string | null): WorktreeEntry => ({
   branch,
   head: 'abc',
   isBare: false
+})
+
+// Worktrees are local-only in v1, and the gate that keeps a remote session out of one used to ask
+// about `data.remote` — a field ONLY a relay node (`createRemoteTerminalNode`) carries, and one that
+// can never occur inside an SSH project. So the exact node the gate exists to protect — an
+// SSH-PROJECT terminal, created by `createTerminalNode(…, project.ssh)` with `data.ssh` +
+// `data.sshRemoteTmux` — walked straight through it: ↪ destroyed its REMOTE tmux session (running
+// processes and all) and respawned it in a local path that does not exist on the host.
+describe('isRemoteSessionNode', () => {
+  it('is true for an SSH-project terminal (data.ssh + data.sshRemoteTmux — never data.remote)', () => {
+    expect(
+      isRemoteSessionNode({
+        ssh: { host: 'box', user: 'me' },
+        sshRemoteTmux: true
+      })
+    ).toBe(true)
+  })
+
+  it('is true for a relay-bound remote terminal (data.remote)', () => {
+    expect(isRemoteSessionNode({ remote: { connectionId: 'c1' } })).toBe(true)
+  })
+
+  it('is true when only one of the two SSH markers survived a hand-edited project file', () => {
+    expect(isRemoteSessionNode({ ssh: { host: 'box', user: 'me' } })).toBe(true)
+    expect(isRemoteSessionNode({ sshRemoteTmux: true })).toBe(true)
+  })
+
+  it('is false for a plain local terminal (nothing changes for the local case)', () => {
+    expect(isRemoteSessionNode({})).toBe(false)
+    expect(isRemoteSessionNode(undefined)).toBe(false)
+    expect(isRemoteSessionNode({ ssh: undefined, remote: undefined, sshRemoteTmux: false })).toBe(false)
+  })
 })
 
 describe('isValidGitRef', () => {

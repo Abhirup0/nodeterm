@@ -94,6 +94,7 @@ import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
   displacedByWorktree,
+  isRemoteSessionNode,
   resolveBaseRef,
   sanitizeWorktreeBranch,
   worktreeFromCreate,
@@ -867,7 +868,10 @@ export function Canvas() {
     // Worktree facts are per project: drop the previous project's (reset also clears its
     // statuses), then re-resolve from this project's cwd. SSH projects are skipped — local git
     // cannot reason about a remote path. Fire-and-forget: the store is epoch-guarded + fails open.
-    useWorktrees.getState().reset()
+    // The project id scopes the strike streaks, which SURVIVE the switch (a dead worktree does not
+    // come back to life while the user works in another tab) — so it is passed even for the projects
+    // that never refresh (SSH, no cwd), which must not inherit the last project's scope.
+    useWorktrees.getState().reset(project.id)
     if (project.cwd && !project.ssh) {
       void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
     }
@@ -1408,13 +1412,20 @@ export function Canvas() {
   // A STALE binding (the worktree directory was deleted outside the app) must never be handed out:
   // the terminal would spawn into a directory that no longer exists and fail at launch. Fall back
   // to the group's own cwd / the project instead, so the node still opens somewhere real.
-  const cwdForNewNodeIn = useCallback((parentId: string | undefined): string | undefined => {
-    if (!parentId) return undefined
-    const parent = nodesRef.current.find((n) => n.id === parentId)
-    const stale = useWorktrees.getState().staleGroupIds.includes(parentId)
-    if (parent?.data.worktree && !stale) return parent.data.worktree.path
-    return parent?.data.cwd || undefined
-  }, [])
+  // On an SSH project a worktree path is not handed out either: it was computed from the LOCAL data
+  // dir and means nothing on the host (only a legacy / hand-edited binding can even exist there —
+  // worktrees are unsupported in SSH projects in v1). This also keeps the two ↪ guards below honest,
+  // since both decide by comparing against what this returns.
+  const cwdForNewNodeIn = useCallback(
+    (parentId: string | undefined): string | undefined => {
+      if (!parentId) return undefined
+      const parent = nodesRef.current.find((n) => n.id === parentId)
+      const stale = useWorktrees.getState().staleGroupIds.includes(parentId)
+      if (parent?.data.worktree && !stale && !isSshProject) return parent.data.worktree.path
+      return parent?.data.cwd || undefined
+    },
+    [isSshProject]
+  )
 
   // Reparent a freshly-created node into a group (parentId + extent 'parent', position made
   // relative to the group frame). Mirrors how `groupSelectedNodes` parents its children.
@@ -2277,11 +2288,13 @@ export function Canvas() {
   const onWorktreeAction = useCallback(
     (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
       // A binding can only predate the SSH gate (hand-edited project file, or a project that became
-      // an SSH project), but it can still exist — and merge/remove would run LOCAL git against a
-      // path that lives on the remote host. Refuse them, out loud. `unbind` is still allowed: on an
-      // SSH project nothing is ever stale (the store never refreshes), so it only drops the binding
-      // and touches no disk — it is exactly the escape hatch such a group needs.
-      if (action !== 'unbind' && useProjects.getState().getProject(activeProjectId ?? '')?.ssh) {
+      // an SSH project), but it can still exist — and merge/remove would run against the LOCAL
+      // filesystem for a project whose git and terminals live on the remote host. Refuse them, out
+      // loud. `unbind` stays allowed: it touches no disk at all (it only drops the binding, and
+      // resets the children's cwd off a path that means nothing here), so it is exactly the escape
+      // hatch such a group needs — and the ONLY worktree action an SSH project offers.
+      const sshProject = !!useProjects.getState().getProject(activeProjectId ?? '')?.ssh
+      if (action !== 'unbind' && sshProject) {
         setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
         return
       }
@@ -2293,7 +2306,12 @@ export function Canvas() {
           // registered worktree". Prune that registration on the way out. `pruneOnly` guarantees a
           // directory that still exists is never touched, so a wrongly-stale group cannot delete a
           // live checkout.
-          if (wt && useWorktrees.getState().staleGroupIds.includes(groupId)) {
+          // …but only for a LOCAL project. An SSH project's groups no longer poll (GroupNode gates
+          // the status poll on it), so they cannot go stale — and if a leftover staleness ever did
+          // reach here, the prune would run local git against a remote path and the cwd reset would
+          // rewrite REMOTE cwds from a local verdict. Plain unbind is the whole of what we can
+          // honestly do there.
+          if (!sshProject && wt && useWorktrees.getState().staleGroupIds.includes(groupId)) {
             // Unbind is the DOCUMENTED RECOVERY PATH for a worktree deleted outside the app — the
             // only action a stale group offers — so it owes the children the same cwd reset Remove
             // gives them. Without it they keep `data.cwd = <dead worktree path>`, persisted to
@@ -2375,6 +2393,11 @@ export function Canvas() {
         | string
         | undefined
       if (!wtPath) return
+      // Never open the confirm for a session that does not live on this machine (see the confirm).
+      if (isSshProject || isRemoteSessionNode(node?.data)) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
       if (cwdForNewNodeIn(parentId) !== wtPath) {
         // Stale binding: the button should already be hidden, so this is the belt to that braces.
         setNotice({
@@ -2385,7 +2408,7 @@ export function Canvas() {
       }
       setMoveTarget(nodeId)
     },
-    [cwdForNewNodeIn]
+    [cwdForNewNodeIn, isSshProject]
   )
 
   const confirmMoveIntoWorktree = useCallback(async () => {
@@ -2396,11 +2419,17 @@ export function Canvas() {
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
     if (!node || !wtPath || node.data.cwd === wtPath) return
-    // A remote terminal's session lives on the SSH host; the worktree path was computed locally, so
-    // respawning it there would drop the session into a directory that does not exist on that host.
-    // This refusal used to be silent — the confirm closed and nothing happened, which reads as a
-    // bug. Say why (worktrees are local-only in v1).
-    if (node.data.remote) {
+    // A session that runs on another machine must never be moved into a LOCAL worktree: `destroy`
+    // would end its REMOTE tmux session (running processes and all) and respawn it in a directory
+    // that does not exist on that host — pty-manager falls back to the host's $HOME and the dead
+    // path is persisted to project.json. Worktrees are local-only in v1; say so instead of failing
+    // silently (the confirm closing with nothing happening reads as a bug).
+    //
+    // The question is the PROJECT's (does its git — and its tmux — run over ssh?) and the NODE's
+    // (`isRemoteSessionNode`: relay `data.remote` OR an SSH project's `data.ssh`/`data.sshRemoteTmux`).
+    // Guarding `data.remote` alone asked only about relay nodes, which cannot occur in an SSH project
+    // at all — so the one node kind this exists to protect walked straight through it.
+    if (isSshProject || isRemoteSessionNode(node.data)) {
       setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
       return
     }
@@ -2447,7 +2476,7 @@ export function Canvas() {
       )
     )
     markDirty()
-  }, [moveTarget, setNodes, markDirty, cwdForNewNodeIn])
+  }, [moveTarget, setNodes, markDirty, cwdForNewNodeIn, isSshProject])
 
   // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
   useEffect(() => {
