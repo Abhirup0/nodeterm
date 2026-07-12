@@ -45,6 +45,23 @@ export interface PtyCreateResult {
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
   /**
+   * The CURRENT SCREEN of a session this create JOINED (co-attach), captured from tmux — write it
+   * into the fresh xterm before the live stream starts.
+   *
+   * Only a co-attaching client ever gets it, and only when the join left the pty's grid unchanged.
+   * A joiner is `fresh:false`, so it skips the cold-restore scrollback replay; the only other thing
+   * that could paint its empty terminal is a tmux redraw, and tmux only redraws on SIGWINCH — i.e.
+   * when the joiner is strictly SMALLER and actually resizes the pty. Equal (the expected case: the
+   * node's persisted geometry and the font settings are the same on both clients) or larger resizes
+   * nothing, so without this the second viewer would sit on a blank-but-live terminal until the next
+   * byte of output. When the join DOES resize, this is deliberately absent: tmux paints it, and
+   * painting twice would splice two points in time.
+   *
+   * Guaranteed non-empty when present (an empty/failed capture is omitted, exactly like `pty:resync`
+   * — a plain-shell session has no tmux to capture and simply gets nothing).
+   */
+  screen?: string
+  /**
    * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
    * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
    *

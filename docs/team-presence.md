@@ -180,6 +180,32 @@ Changes:
      terminal. An empty/failed capture keeps the client desynced and is retried with backoff
      (250 ms → 10 s cap). `pty:resync` payloads are therefore guaranteed non-empty.
 
+### Painting the joiner
+
+A joining client gets `fresh:false`, which is what tells the renderer *not* to replay the persisted
+scrollback (tmux is live; a replay would duplicate it). But co-attach adds **no tmux client** — the
+session already has one — so nothing redraws for the joiner either, *unless* the join happens to
+resize the pty: tmux repaints on SIGWINCH, and only a joiner strictly **smaller** than the current
+grid causes one. **Equal is the expected case** (both clients render the node's persisted geometry
+with the same font; canvas zoom is a CSS transform and does not change `clientWidth`), and equal or
+larger resizes nothing. Left alone, the headline path of the feature — open the same terminal in a
+second client — lands on a **blank but live** terminal until the next byte of output, nondeterministically
+(a ±1-cell measurement difference between two machines silently hides the bug).
+
+So a join that did **not** resize the pty carries the session's **current screen** on
+`PtyCreateResult.screen`, captured with the same `captureForResync` (`tmux capture-pane -e`) the
+drop-and-redraw path uses; the renderer writes it into its empty xterm before the live stream starts.
+Three rules:
+
+- It rides the **create result**, not a `pty:resync` event: the renderer only subscribes to a
+  session's channels *after* `create()` resolves, so an event pushed at join time would land on no
+  listener.
+- A join that **did** resize gets nothing — tmux is already painting it, and two paints would splice
+  two different points in time onto one screen.
+- An **empty capture is omitted**, never sent as `''` (same contract as `pty:resync`). A solo user
+  never reaches this path at all: a fresh spawn has nothing to paint, and a warm reattach starts a
+  tmux client, which redraws by itself.
+
 ### Typing attribution — and why it is server-side
 
 `cast()` currently discards the sender (`platform-server.ts:136`, `void uiId`). We route
@@ -535,10 +561,10 @@ sees no change) is the one that must never regress.
 - **Cursor traffic** is 20 Hz × peers: comfortable for a 5–10 person team, not for a public room.
 - **Plain-shell (no tmux) co-attach shows a joiner a blank-but-live terminal** until the next output
   arrives (pressing Enter paints it). A joiner gets `fresh:false`, so it skips the cold-restore
-  replay, and with no tmux there is no client to redraw the screen for it either. Named in the code
-  (`src/core/pty-manager.ts:594`); a join-time repaint needs a new `PtyCreateResult` field plus
-  renderer replay, i.e. a cross-surface contract change. A plain-shell session has no cross-client
-  continuity to inherit anyway — that is what "no tmux = no persistence" already means everywhere.
+  replay, and with no tmux there is nothing to capture its current screen from either. With tmux —
+  i.e. every normal install — the joiner IS painted: the create result carries the screen (see
+  [Painting the joiner](#painting-the-joiner)). A plain-shell session has no cross-client continuity
+  to inherit anyway; that is what "no tmux = no persistence" already means everywhere else.
 - **A deleted node can still be resurrected across a core restart.** The respawn guard is two
   layers: the `pty:closed` event (subscribers only) and the in-memory `tombstones` map (everyone
   else, for as long as the core process lives). Restart the core — the Server Edition process, the

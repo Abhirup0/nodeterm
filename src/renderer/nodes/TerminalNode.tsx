@@ -664,7 +664,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen }) => {
         // REFUSED: core's tombstone says another client deleted this node while we weren't
         // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
         // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
@@ -738,6 +738,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           term.write(
             '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
           )
+        // CO-ATTACH: we joined a session somebody else already has open, so this xterm is empty and
+        // nothing else will fill it — `fresh:false` skips the scrollback replay, and tmux only
+        // redraws when the join actually resized the pty (i.e. when we are the new smallest client).
+        // The create result carries the current screen for exactly the case where it did not, so
+        // write it: the terminal opens on what our teammate is looking at, not on a blank rectangle.
+        // Guarded like a resync (never paint an empty capture); no reset — the buffer IS empty.
+        if (shouldApplyResync(screen)) term.write(toXtermText(screen as string))
         // We fell so far behind that the server discarded our queued output and redrew us from
         // tmux. The capture IS the current screen, so reset the emulator and write it — writing it
         // on top of a stale buffer would splice two different points in time. An EMPTY payload is

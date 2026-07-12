@@ -567,13 +567,33 @@ export class PtyManager {
   /**
    * Subscribe `clientId` to the live session for this node id, if there is one. Returns the
    * create() result (`fresh:false` — the renderer joined a live session: no cold-restore
-   * scrollback replay, no agent resume; tmux redraws instead), or undefined if none exists.
+   * scrollback replay, no agent resume), or undefined if none exists.
+   *
+   * WHAT PAINTS THE JOINER'S SCREEN. Its xterm is brand-new and empty, and `fresh:false` has just
+   * told it to skip the scrollback replay. The only other thing that could paint it is a tmux
+   * redraw — and tmux redraws on SIGWINCH, i.e. only when `applySize` below actually RESIZES the
+   * pty, which happens only for a joiner strictly SMALLER than the current grid. Equal is the
+   * EXPECTED case (the node's persisted geometry and the font settings are the same on both
+   * clients, and canvas zoom is a CSS transform that doesn't change `clientWidth`), and equal or
+   * larger resizes nothing — so the headline path of the whole feature, "open the same terminal in
+   * a second client", would land on a blank-but-live terminal until the next byte of output.
+   *
+   * So a join that did NOT resize carries the current screen (`PtyCreateResult.screen`), captured
+   * from tmux with the same `captureForResync` the drop-and-redraw path already uses. It rides the
+   * create RESULT rather than a `pty:resync` event on purpose: the renderer only subscribes to this
+   * session's channels AFTER create() resolves, so an event pushed here would land on no listener.
+   * A join that DID resize gets nothing — tmux paints it, and two paints would splice two different
+   * points in time onto one screen.
+   *
+   * The capture is skipped entirely (not just discarded) when the pty resized, so the solo paths
+   * pay nothing: a solo user never reaches `join` at all (a fresh spawn has nothing to paint, and a
+   * warm reattach spawns a tmux client, which redraws by itself).
    */
   private join(
     clientId: ClientId,
     options: PtyCreateOptions,
     persistKey: string
-  ): PtyCreateResult | undefined {
+  ): Promise<PtyCreateResult> | undefined {
     const existingId = this.byPersistKey.get(persistKey)
     const existing = existingId ? this.sessions.get(existingId) : undefined
     if (!existingId || !existing) return undefined
@@ -584,25 +604,27 @@ export class PtyManager {
     const size = normalizeSize(options.cols, options.rows)
     existing.sizes.set(clientId, size)
     existing.shown.set(clientId, size)
+    const before = existing.appliedSize
     this.applySize(existingId, existing)
+    const resized =
+      before?.cols !== existing.appliedSize?.cols || before?.rows !== existing.appliedSize?.rows
     // A (re)joining client's backlog is empty by definition, so its fresh page will never issue a
     // resume its PREVIOUS page owed us — a renderer reload keeps the same ClientId, so without this
     // the reloaded terminal would stay frozen forever with no data arriving to unstick it. Return
     // only THIS client's owed pause: a pause owed by a DIFFERENT client that is still here and
     // still drowning stays in place (invariant (b) on `pausedBy`).
     this.releaseFlow(existing, clientId)
-    // KNOWN GAP — plain-shell (tmux disabled / unavailable) co-attach: `fresh:false` makes the
-    // renderer skip the cold-restore scrollback replay, and with no tmux there is no client to
-    // redraw the screen either, so this joiner sees a blank-but-live terminal until the next
-    // output arrives (typing Enter paints it). Not fixed here on purpose: the renderer only
-    // subscribes to `pty:data:<id>` AFTER create() resolves, so a join-time repaint cannot be
-    // pushed on the wire — it needs a new field on PtyCreateResult plus renderer replay, i.e. a
-    // cross-surface contract change that belongs with the per-client backlog work (Task 5), not
-    // in a bugfix. A plain-shell session has no cross-client continuity to inherit anyway (it is
-    // exactly what "no tmux = no persistence" already means everywhere else in this file).
-    return existing.accountFallback
+    const base: PtyCreateResult = existing.accountFallback
       ? { sessionId: existingId, fresh: false, accountFallback: true }
       : { sessionId: existingId, fresh: false }
+    if (resized) return Promise.resolve(base) // tmux is redrawing this client — do not paint twice
+    // An empty capture (plain shell — no tmux to capture; a tmux/ssh blip) is OMITTED, never sent
+    // as '': the renderer must not reset a terminal for nothing. A plain-shell joiner therefore
+    // still lands on a blank-but-live screen — there is no source of truth for its past output,
+    // which is exactly what "no tmux = no continuity" already means everywhere else here.
+    return this.captureForResync(existingId)
+      .catch(() => '')
+      .then((screen) => (screen ? { ...base, screen } : base))
   }
 
   /** Spawn a brand-new session for this client (the non-co-attach path). */

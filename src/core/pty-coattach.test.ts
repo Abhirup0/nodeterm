@@ -796,6 +796,93 @@ describe('node recycled (worktree move) while co-viewed', () => {
   })
 })
 
+// ── A joiner's screen has to be PAINTED ───────────────────────────────────────────────────────
+// A co-attaching client gets `fresh:false` (no cold-restore replay) and joins an existing tmux
+// client, so the ONLY thing that could paint its empty xterm is a tmux redraw — and tmux only
+// redraws on SIGWINCH, i.e. when the join actually RESIZES the pty. A joiner whose grid is EQUAL
+// (the expected case: same persisted node geometry, same font) or LARGER resizes nothing, so it
+// would stare at a blank-but-live terminal until the next byte of output. The join therefore
+// carries the CURRENT SCREEN, captured from tmux — the same bytes the drop-and-redraw path uses.
+describe('a joiner is painted from the current screen', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  const create = (clientId: number, cols = 80, rows = 24, persistKey = 'node-1') =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+      screen?: string
+    }>
+
+  it('paints a joiner whose grid EQUALS the pty (nothing is resized, so tmux never redraws)', async () => {
+    const m = await manager()
+    const capture = vi.spyOn(m, 'captureForResync').mockResolvedValue('$ ls\r\nREADME.md')
+    const a = await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.sessionId).toBe(a.sessionId)
+    expect(spawned[0].resizes).toEqual([]) // equal grids → no SIGWINCH → no tmux redraw
+    expect(capture).toHaveBeenCalledWith(a.sessionId)
+    expect(b.screen).toBe('$ ls\r\nREADME.md') // …so the screen rides the create result instead
+  })
+
+  it('paints a joiner BIGGER than the pty (it letterboxes; the pty is not resized)', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 120, 40)
+    expect(spawned[0].resizes).toEqual([])
+    expect(b.screen).toBe('current screen')
+  })
+
+  it('does NOT paint a joiner that shrinks the pty — tmux redraws it, and two paints would splice', async () => {
+    const m = await manager()
+    const capture = vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 120, 40)
+
+    const b = await create(BOB, 80, 24) // strictly smaller → the pty resizes → tmux redraws
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 })
+    expect(capture).not.toHaveBeenCalled()
+    expect(b.screen).toBeUndefined()
+  })
+
+  it('never paints a SOLO user: a fresh spawn has nothing to paint, and a reattach gets tmux own redraw', async () => {
+    const m = await manager()
+    const capture = vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    const a = await create(ALICE, 80, 24)
+    expect(a.screen).toBeUndefined()
+    expect(capture).not.toHaveBeenCalled()
+  })
+
+  it('omits the screen when the capture comes back empty (plain shell / tmux unavailable)', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.screen).toBeUndefined() // never an empty payload — the renderer would reset for nothing
+    expect(b.fresh).toBe(false)
+  })
+})
+
 describe('tmuxAttachFlags', () => {
   it("keeps -D for the app's own client: exactly ONE tmux client per session", async () => {
     const { tmuxAttachFlags } = await import('./pty-manager')
