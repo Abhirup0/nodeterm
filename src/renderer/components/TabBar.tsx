@@ -5,6 +5,11 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, systemAccountDisplay } from '../state/workspace'
 import { useSystemAccount } from '../state/systemAccount'
+import {
+  ALL_PERMISSION_MODES,
+  PERMISSION_MODE_LABELS,
+  type AgentPermissionMode
+} from '@shared/agents/config'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -18,6 +23,8 @@ interface TabBarProps {
   onRemoteAccess: () => void
   /** Set (or clear, with undefined) the project's default Claude account for new nodes. */
   onSetDefaultAccount: (id: string, accountId: string | undefined) => void
+  /** Set (or clear, with undefined = use the global setting) the project's default permission mode. */
+  onSetDefaultPermissionMode: (id: string, mode: AgentPermissionMode | undefined) => void
 }
 
 /**
@@ -33,7 +40,8 @@ export function TabBar({
   onSetFolder,
   onCloseProject,
   onRemoteAccess,
-  onSetDefaultAccount
+  onSetDefaultAccount,
+  onSetDefaultPermissionMode
 }: TabBarProps) {
   // Select the raw array and filter in a memo — a `.filter()` inside the selector returns a
   // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
@@ -55,7 +63,11 @@ export function TabBar({
   const [draft, setDraft] = useState('')
   // Whether the caret menu's "Default Claude account" group is expanded (inline, in-place).
   const [acctOpen, setAcctOpen] = useState(false)
+  // Whether the caret menu's "Default permission mode" group is expanded (same idiom as acctOpen).
+  const [modeOpen, setModeOpen] = useState(false)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  // The mode a project without an override falls back to — shown in the "Use global (…)" entry.
+  const globalMode = useSettings((s) => s.settings.claudePermissionMode)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
   const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
@@ -69,6 +81,7 @@ export function TabBar({
     setMenuId(null)
     setMenuPos(null)
     setAcctOpen(false)
+    setModeOpen(false)
   }
 
   const openMenu = (id: string, anchor: HTMLElement) => {
@@ -278,6 +291,54 @@ export function TabBar({
                 )}
               </>
             )}
+            <>
+              <button
+                className={`tab-menu__group${modeOpen ? ' open' : ''}`}
+                onClick={() => setModeOpen((v) => !v)}
+              >
+                Default permission mode
+                <span className="tab-menu__caret">▸</span>
+              </button>
+              {modeOpen && (
+                <div className="tab-menu__sub">
+                  <button
+                    onClick={() => {
+                      onSetDefaultPermissionMode(menuProject.id, undefined)
+                      closeMenu()
+                    }}
+                  >
+                    <span className="tab-menu__check">
+                      {menuProject.defaultPermissionMode ? '' : '✓'}
+                    </span>
+                    Use global ({PERMISSION_MODE_LABELS[globalMode]})
+                  </button>
+                  {ALL_PERMISSION_MODES.map((m) => (
+                    <button
+                      key={m}
+                      // A project override is written to <cwd>/.nodeterm/project.json, which is
+                      // git-shared and mirrored to SSH servers — spell out for "Bypass all" that
+                      // the choice travels to everyone who clones the repo.
+                      title={
+                        m === 'bypassPermissions'
+                          ? 'Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs Claude without permission checks too.'
+                          : undefined
+                      }
+                      onClick={() => {
+                        onSetDefaultPermissionMode(menuProject.id, m)
+                        closeMenu()
+                      }}
+                    >
+                      <span className="tab-menu__check">
+                        {menuProject.defaultPermissionMode === m ? '✓' : ''}
+                      </span>
+                      {m === 'bypassPermissions'
+                        ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
+                        : PERMISSION_MODE_LABELS[m]}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
             <button
               onClick={() => {
                 onCloseProject(menuProject.id)

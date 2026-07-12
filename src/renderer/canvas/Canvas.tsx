@@ -104,7 +104,8 @@ import {
   withPermissionMode,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
-  type AgentId
+  type AgentId,
+  type AgentPermissionMode
 } from '@shared/agents/config'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
@@ -3510,6 +3511,16 @@ export function Canvas() {
     [persist]
   )
 
+  // `undefined` clears the override (the project falls back to settings.claudePermissionMode).
+  // The persist() is load-bearing: the store action alone never reaches project.json on disk.
+  const setProjectDefaultPermissionMode = useCallback(
+    (id: string, mode: AgentPermissionMode | undefined) => {
+      useProjects.getState().setProjectDefaultPermissionMode(id, mode)
+      void persist()
+    },
+    [persist]
+  )
+
   // Close a project: hide it from the tab bar but keep it (and its tmux/agent sessions) intact
   // so it can be reopened later from the start screen. Non-destructive — the inverse of the old
   // "Delete project". Switching away unmounts its nodes (a detach, not a kill); the sessions
@@ -3786,6 +3797,7 @@ export function Canvas() {
         onCloseProject={closeProject}
         onRemoteAccess={() => setRemoteDialogOpen(true)}
         onSetDefaultAccount={setProjectDefaultAccount}
+        onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
       />
 
       <div className="top-banners">
