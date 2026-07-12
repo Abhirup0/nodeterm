@@ -20,9 +20,9 @@ import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
 import {
   attachReplay,
+  copyKeyAction,
   createDataGate,
   disposalAction,
-  isCopyShortcut,
   stripTrailingNewline,
   toXtermText,
   xtermScrollback,
@@ -420,16 +420,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     }
 
-    // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) copy the terminal selection — xterm renders to a
-    // canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is left alone so
-    // it still sends SIGINT.
-    // Returning false only tells xterm to skip the key — xterm never gets to its own
-    // preventDefault(), so the browser default would still run: in the Server Edition (and in
-    // `npm run dev` with DevTools attached) Ctrl+Shift+C is Chromium's inspect-element picker.
+    // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
+    // renders to a canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is
+    // left alone so it still sends SIGINT.
+    // The chord is swallowed whether or not there is a selection (`copyKeyAction`): with no
+    // selection, falling through would let xterm map ctrl+c to \x03 and SIGINT the foreground
+    // process — the exact opposite of the "copy" we advertise.
+    // Returning false only tells xterm to skip the key; the browser default still runs unless we
+    // preventDefault() ourselves. Note that in Chromium (Server Edition, or `npm run dev` with
+    // DevTools attached) Ctrl+Shift+C is ALSO the browser's inspect-element picker and that one is
+    // NOT preventable by a page — hence Ctrl+Insert, which no browser reserves.
     term.attachCustomKeyEventHandler((e) => {
-      if (!term.hasSelection() || !isCopyShortcut(e)) return true
-      window.nodeTerminal.clipboard.writeText(term.getSelection())
+      const action = copyKeyAction(e, term.hasSelection())
+      if (action === 'pass') return true
       e.preventDefault()
+      if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       return false
     })
 
@@ -618,7 +623,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
             // tmux is only reachable once `create()` has registered the session's ssh target — an
             // earlier call would silently fall through to the LOCAL tmux and return ''.
-            const history = await window.nodeTerminal.pty.captureHistory(id).catch(() => '')
+            // Goes through the TRANSPORT, not `window.nodeTerminal.pty`: a relay-backed node's tmux
+            // session lives on the HOST, so the local PtyManager has nothing to capture and the
+            // node would come up with an empty scrollback.
+            const history = await transport.captureHistory(id).catch(() => '')
             if ((toreDown = onDisposed())) return
             if (history) {
               // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —

@@ -7,12 +7,21 @@
 export const XTERM_SCROLLBACK_MAX = 10000
 
 /**
+ * Floor, mirroring the tmux conf's own `history-limit ${Math.max(1000, scrollback)}`. Without it a
+ * user who sets `tmuxScrollback: 100` would get 1000 lines of tmux history but a 100-line xterm
+ * buffer — and xterm is the buffer the user actually scrolls, so the tmux history would be
+ * unreachable.
+ */
+export const XTERM_SCROLLBACK_MIN = 1000
+
+/**
  * How many scrollback lines xterm keeps. Scrolling is xterm's job now (tmux's mouse is off),
  * so it needs a real scrollback — xterm's default is only 1000 lines. It follows the same
- * `settings.tmuxScrollback` the user picked for tmux's history-limit, but capped.
+ * `settings.tmuxScrollback` the user picked for tmux's history-limit, but floored and capped
+ * (same floor as the tmux conf, so the two buffers never disagree at the low end).
  */
 export function xtermScrollback(tmuxScrollback: number): number {
-  return Math.min(tmuxScrollback, XTERM_SCROLLBACK_MAX)
+  return Math.min(Math.max(XTERM_SCROLLBACK_MIN, tmuxScrollback), XTERM_SCROLLBACK_MAX)
 }
 
 /**
@@ -145,11 +154,12 @@ export interface CopyShortcutEvent {
 }
 
 /**
- * True for the keydowns that should copy the terminal selection: Cmd+C (mac) and
- * Ctrl+Shift+C (Linux, Windows). Plain Ctrl+C is deliberately NOT one of them — it must keep
- * reaching the pty as SIGINT.
+ * True for the keydowns that should copy the terminal selection: Cmd+C (mac), Ctrl+Shift+C
+ * (Linux, Windows) and Ctrl+Insert (the traditional terminal binding — the only one of the three
+ * that no browser reserves). Plain Ctrl+C is deliberately NOT one of them — it must keep reaching
+ * the pty as SIGINT.
  *
- * The key is matched on the printed letter (`e.key`, so Dvorak/AZERTY follow the letter the user
+ * The letter is matched on the printed key (`e.key`, so Dvorak/AZERTY follow the letter the user
  * actually presses) OR on the physical `KeyC` position (`e.code`) — on a non-Latin layout
  * (Cyrillic 'с', Greek 'ψ') `e.key` is never 'c', and without the fallback an xterm selection
  * would have no keyboard copy at all (the OS Edit menu only copies the DOM selection, not
@@ -160,8 +170,30 @@ export interface CopyShortcutEvent {
  */
 export function isCopyShortcut(e: CopyShortcutEvent): boolean {
   if (e.type !== 'keydown') return false
-  if (e.key.toLowerCase() !== 'c' && e.code !== 'KeyC') return false
+  const insert = e.key === 'Insert' || e.code === 'Insert'
+  const letterC = e.key.toLowerCase() === 'c' || e.code === 'KeyC'
+  if (!insert && !letterC) return false
+  if (insert) {
+    // Ctrl+Insert = copy (Shift+Insert is paste — not ours). No meta/alt.
+    return e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+  }
   const cmdC = e.metaKey && !e.ctrlKey && !e.altKey
   const ctrlShiftC = e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey
   return cmdC || ctrlShiftC
+}
+
+/**
+ * What a terminal keydown that MIGHT be a copy chord should do:
+ * - `copy`    — it is a copy chord and there is a selection: copy it, swallow the key.
+ * - `swallow` — it is a copy chord with NO selection: still swallow it. Critical for Ctrl+Shift+C:
+ *   letting it through means xterm maps ctrl+c to `\x03` and SIGINTs the foreground process. We
+ *   advertise the chord as "copy", so pressing it right after a click cleared the selection must
+ *   never kill the user's process.
+ * - `pass`    — not a copy chord: xterm handles it as usual.
+ */
+export type CopyKeyAction = 'copy' | 'swallow' | 'pass'
+
+export function copyKeyAction(e: CopyShortcutEvent, hasSelection: boolean): CopyKeyAction {
+  if (!isCopyShortcut(e)) return 'pass'
+  return hasSelection ? 'copy' : 'swallow'
 }

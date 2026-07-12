@@ -3795,7 +3795,7 @@ export function Canvas() {
           </div>
         )}
         {copyError && (
-          <div className="announce-banner announce-banner--info">
+          <div className="announce-banner announce-banner--warning">
             <span className="announce-banner__dot" />
             <div className="announce-banner__content">
               <span className="announce-banner__body">{copyError}</span>

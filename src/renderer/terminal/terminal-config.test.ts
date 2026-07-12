@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest'
 import {
   xtermScrollback,
   XTERM_SCROLLBACK_MAX,
+  XTERM_SCROLLBACK_MIN,
   isCopyShortcut,
+  copyKeyAction,
   attachReplay,
   toXtermText,
   stripTrailingNewline,
@@ -163,6 +165,14 @@ describe('xtermScrollback', () => {
     expect(xtermScrollback(50000)).toBe(XTERM_SCROLLBACK_MAX)
     expect(XTERM_SCROLLBACK_MAX).toBe(10000)
   })
+
+  it('floors a tiny setting the same way the tmux conf does (history-limit max(1000, n))', () => {
+    // tmux would still keep 1000 lines of history — an xterm buffer smaller than that would make
+    // them unreachable, since xterm is the buffer the user scrolls.
+    expect(XTERM_SCROLLBACK_MIN).toBe(1000)
+    expect(xtermScrollback(100)).toBe(XTERM_SCROLLBACK_MIN)
+    expect(xtermScrollback(0)).toBe(XTERM_SCROLLBACK_MIN)
+  })
 })
 
 describe('isCopyShortcut', () => {
@@ -209,5 +219,38 @@ describe('isCopyShortcut', () => {
   it('leaves AltGr combos alone (ctrl+alt+shift+C must not copy)', () => {
     expect(isCopyShortcut(ev({ ctrlKey: true, altKey: true, shiftKey: true }))).toBe(false)
     expect(isCopyShortcut(ev({ ctrlKey: true, altKey: true }))).toBe(false)
+  })
+
+  it('copies on Ctrl+Insert (the traditional binding no browser reserves)', () => {
+    expect(isCopyShortcut(ev({ ctrlKey: true, key: 'Insert', code: 'Insert' }))).toBe(true)
+    // Shift+Insert is PASTE, not ours; bare Insert is a plain key.
+    expect(isCopyShortcut(ev({ shiftKey: true, key: 'Insert', code: 'Insert' }))).toBe(false)
+    expect(isCopyShortcut(ev({ key: 'Insert', code: 'Insert' }))).toBe(false)
+    expect(
+      isCopyShortcut(ev({ ctrlKey: true, altKey: true, key: 'Insert', code: 'Insert' }))
+    ).toBe(false)
+  })
+})
+
+describe('copyKeyAction', () => {
+  it('copies a copy chord when there is a selection', () => {
+    expect(copyKeyAction(ev({ metaKey: true }), true)).toBe('copy')
+    expect(copyKeyAction(ev({ ctrlKey: true, shiftKey: true }), true)).toBe('copy')
+  })
+
+  it('SWALLOWS Ctrl+Shift+C with no selection — it must never reach the pty as SIGINT', () => {
+    // Regression: falling through to xterm here maps ctrl+c to \x03 and kills the foreground
+    // process, right after the user's selection was cleared by a click. We advertise the chord as
+    // copy, so it can only ever copy or do nothing.
+    expect(copyKeyAction(ev({ ctrlKey: true, shiftKey: true }), false)).toBe('swallow')
+    expect(copyKeyAction(ev({ metaKey: true }), false)).toBe('swallow')
+    expect(copyKeyAction(ev({ ctrlKey: true, key: 'Insert', code: 'Insert' }), false)).toBe(
+      'swallow'
+    )
+  })
+
+  it('passes plain Ctrl+C through to the pty (SIGINT), selection or not', () => {
+    expect(copyKeyAction(ev({ ctrlKey: true }), true)).toBe('pass')
+    expect(copyKeyAction(ev({ ctrlKey: true }), false)).toBe('pass')
   })
 })

@@ -167,6 +167,8 @@ export const IPC = {
   remoteClientWrite: 'remote:client:write',
   remoteClientResize: 'remote:client:resize',
   remoteClientKill: 'remote:client:kill',
+  // Scrollback of an already-attached remote session (hydrates the client's fresh xterm).
+  remoteClientCaptureHistory: 'remote:client:capture-history',
   // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
   // the client renderer sends its local mutations back for main to RPC to the host.
   remoteClientMutate: 'remote:client:mutate',

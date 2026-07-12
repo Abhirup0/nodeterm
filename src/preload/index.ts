@@ -319,6 +319,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.send(IPC.remoteClientResize, connectionId, sessionId, cols, rows),
     kill: (connectionId, sessionId) =>
       ipcRenderer.send(IPC.remoteClientKill, connectionId, sessionId),
+    captureHistory: (connectionId, sessionId) =>
+      ipcRenderer.invoke(IPC.remoteClientCaptureHistory, connectionId, sessionId),
     onData: (connectionId, sessionId, listener) => {
       const channel = IPC.remoteClientData(connectionId, Number(sessionId))
       const handler = (_e: unknown, data: string) => listener(data)

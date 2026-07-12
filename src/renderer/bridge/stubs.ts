@@ -67,7 +67,9 @@ function copyViaExecCommand(text: string): boolean {
     // diagnosis differs — plain http has no Clipboard API at all, while in a secure context we got
     // here because the API rejected (permission denied / document not focused) AND the fallback
     // failed too. Canvas listens for this event and shows a banner.
-    const secure = typeof window !== 'undefined' && window.isSecureContext
+    // This module only ever runs in a browser (it IS the browser shim), so `window` is there —
+    // guarded consistently rather than half-guarded.
+    const secure = window.isSecureContext
     window.dispatchEvent(
       new CustomEvent('nodeterm:toast', {
         detail: {
@@ -80,8 +82,15 @@ function copyViaExecCommand(text: string): boolean {
     )
     return false
   } finally {
-    ta?.remove()
-    prev?.focus?.()
+    // A throw in here would ESCAPE the function and replace the return value (a `finally` outranks
+    // both the `return true` and the `return false` above) — so cleanup can never be allowed to
+    // throw: `prev.focus()` on an exotic element is out of our control.
+    try {
+      ta?.remove()
+      prev?.focus?.()
+    } catch {
+      // Cleanup is best-effort; the copy's outcome is what the caller must see.
+    }
   }
 }
 
@@ -224,6 +233,10 @@ export function buildStubApi(): Omit<
       write: noop,
       resize: noop,
       kill: noop,
+      // Relay client mode is desktop-only (the whole `remoteClient` block is unsupported here), so
+      // there is no host session to hydrate from — '' is the same "nothing to seed" the local
+      // hydration degrades to, and it keeps TerminalNode's warm-attach path from rejecting.
+      captureHistory: async () => '',
       onData: noopUnsub,
       onExit: noopUnsub,
       onClosed: noopUnsub,
