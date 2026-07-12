@@ -56,6 +56,11 @@ export const useWorktrees = create<WorktreesState>((set) => ({
   statusByPath: {},
 
   async refresh(projectCwd, bound) {
+    // Bump the epoch at the START, before any await. This ensures a newer refresh always
+    // supersedes an older one: if two refreshes are called in quick succession without an
+    // intervening reset(), the second one bumps the epoch, making the first's epoch stale.
+    // After bumping, capture the new epoch so this refresh knows if it was superseded.
+    epoch++
     const mineEpoch = epoch
     const git = window.nodeTerminal.git
     try {

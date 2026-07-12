@@ -309,3 +309,58 @@ describe('useWorktrees.refresh error handling', () => {
     expect(useWorktrees.getState().staleGroupIds).toEqual([])
   })
 })
+
+describe('useWorktrees.refresh interleaving without reset', () => {
+  // Two rapid refresh calls without an intervening reset would previously race: both capture the
+  // same epoch, so the older project's in-flight reads would overwrite the newer project's facts.
+  // This test ensures the epoch is bumped at the START of each refresh, so a newer refresh always
+  // supersedes an older one.
+  afterEach(() => vi.useRealTimers())
+
+  it('a newer refresh always supersedes an in-flight older one', async () => {
+    let releaseRootA: (v: string) => void = () => {}
+    let releaseListA: (v: unknown[]) => void = () => {}
+
+    const promiseRootA = new Promise<string>((r) => (releaseRootA = r))
+    const promiseListA = new Promise<unknown[]>((r) => (releaseListA = r))
+
+    // Track which cwd/root is being queried and return appropriate promises.
+    gitMock.repoRoot.mockImplementation((cwd: string) => {
+      if (cwd === '/repo-a') return promiseRootA
+      return Promise.resolve('/repo-b')
+    })
+
+    gitMock.worktreeList.mockImplementation((root: string) => {
+      if (root === '/repo-a') return promiseListA
+      return Promise.resolve([
+        { path: '/repo-b', branch: 'main', head: 'b1', isBare: false },
+        { path: '/wt/b-feat', branch: 'b-feat', head: 'b2', isBare: false }
+      ])
+    })
+
+    // Start refresh for repo A (in flight, blocked on our controlled promises).
+    const refreshA = useWorktrees.getState().refresh('/repo-a', [])
+
+    // Start refresh for repo B while A is still in flight. B should bump the epoch past A's,
+    // so even though A resolves later, its older epoch is stale and its write is dropped.
+    const refreshB = useWorktrees.getState().refresh('/repo-b', [])
+    await refreshB
+
+    // Now let A finish. Even though A resolves after B, the epoch bump ensures A's older
+    // epoch is stale and its write is dropped.
+    releaseRootA('/repo-a')
+    releaseListA([
+      { path: '/repo-a', branch: 'main', head: 'a1', isBare: false },
+      { path: '/wt/a-old', branch: 'a-old', head: 'a2', isBare: false }
+    ])
+    await refreshA
+
+    // The store must hold B's facts, not A's. If the epoch is not bumped per-refresh, A's later
+    // write would have overwritten B.
+    expect(useWorktrees.getState().repoRoot).toBe('/repo-b')
+    expect(useWorktrees.getState().entries.map((e) => e.path)).toEqual([
+      '/repo-b',
+      '/wt/b-feat'
+    ])
+  })
+})
