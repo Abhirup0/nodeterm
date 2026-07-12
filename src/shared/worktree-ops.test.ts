@@ -124,6 +124,32 @@ describe('worktreeMerge', () => {
     expect(r.message).not.toContain('worktree terminal')
   })
 
+  // Without the `pathExists` seam, a base checkout deleted behind git's back is listed as healthy,
+  // `decideMergeStrategy` picks merge-in-place, and the merge into a directory that is not there
+  // fails — leaving the user chasing "a conflict" in a directory that does not exist.
+  it('refuses honestly when the base checkout´s directory is gone (no phantom conflict)', async () => {
+    const list = 'worktree /base\nHEAD aaa\nbranch refs/heads/main\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', false, async (p) => p !== '/base')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('/base')
+    expect(r.message).toMatch(/missing/i)
+    expect(r.message).not.toMatch(/conflict/i)
+    // Nothing was attempted in the dead directory, and the ref was not advanced behind git's back.
+    expect(calls.some((c) => c[0] === 'merge' || c[0] === 'fetch')).toBe(false)
+  })
+
+  it('still merges in place when the base checkout is really there (pathExists says so)', async () => {
+    const list = 'worktree /base\nHEAD aaa\nbranch refs/heads/main\n'
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      'status --porcelain': ok('')
+    })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', false, async () => true)
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'merge --no-ff --no-edit feature/x')).toBe(true)
+  })
+
   // The push is what the user is asked to consent to (Task 6): merging must NEVER publish to a
   // shared remote unless the caller explicitly said so.
   it('never pushes unless the caller asks for it', async () => {

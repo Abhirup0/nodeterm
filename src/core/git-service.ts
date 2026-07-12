@@ -240,7 +240,9 @@ export class GitService {
     return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)
   }
   worktreeMerge(repoPath: string, branch: string, baseRef: string, push = false) {
-    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef, push)
+    // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops) — and the
+    // only thing that stops a merge into a base checkout whose directory is gone.
+    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef, push, async (p) => fs.existsSync(p))
   }
   worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly = false) {
     // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops).

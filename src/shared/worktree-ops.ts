@@ -92,11 +92,28 @@ export async function worktreeAdd(
  * default is not to push, and the result message states exactly what happened.
  */
 export async function worktreeMerge(
-  git: GitExecutor, repoPath: string, branch: string, baseRef: string, push = false
+  git: GitExecutor, repoPath: string, branch: string, baseRef: string, push = false,
+  /** See `PathExists` / `worktreeList`. Without it, a base checkout whose directory was deleted
+   *  behind git's back is listed as healthy and `decideMergeStrategy` merges INTO A DIRECTORY THAT
+   *  IS NOT THERE — the merge fails and the user is told to resolve a conflict that does not exist
+   *  in a directory that does not exist. */
+  pathExists: PathExists = alwaysExists
 ): Promise<WorktreeOpResult> {
   if (!isValidGitRef(branch) || !isValidGitRef(baseRef)) return { ok: false, message: 'Invalid ref.' }
-  const list = await worktreeList(git, repoPath)
+  const list = await worktreeList(git, repoPath, pathExists)
   const baseEntry = list.find((e) => e.branch === baseRef) ?? null
+  // The base branch is checked out in a worktree whose directory is GONE. Do not merge in place
+  // (nothing to merge into) and do not quietly fall through to `fetch-update` either: git still has
+  // the registration and refuses to update a ref that is checked out elsewhere, so that would fail
+  // with an obscure message. Say what is actually wrong.
+  if (baseEntry?.prunable) {
+    return {
+      ok: false,
+      message:
+        `The checkout of ${baseRef} is missing (${baseEntry.path}). ` +
+        `Restore that directory or run \`git worktree prune\`, then try again.`
+    }
+  }
   let baseDirty = false
   if (baseEntry) {
     const st = await git(baseEntry.path, ['status', '--porcelain'])
