@@ -3430,9 +3430,15 @@ export function Canvas() {
 
   // Track SSH project connection status for the thin connection banner (keyed by project id).
   useEffect(() => {
-    return window.nodeTerminal.sshProject.onStatus((e) =>
+    return window.nodeTerminal.sshProject.onStatus((e) => {
       setSshStatus((prev) => ({ ...prev, [e.projectId]: e.status }))
-    )
+      // The remote claude probe runs AFTER connect (its login shell is slow) and pushes its answer
+      // on a later `connected` event — record it so this project's next Claude launch can use
+      // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
+      if (e.claudeAutoPermissionMode !== undefined) {
+        useSshConn.getState().setClaudeAutoPermissionMode(e.projectId, e.claudeAutoPermissionMode)
+      }
+    })
   }, [])
 
   // Create an SSH project from the dialog: commit the current canvas, add + switch to the new

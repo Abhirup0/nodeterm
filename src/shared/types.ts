@@ -437,6 +437,19 @@ export interface SshApi {
 
 export type SshProjectStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error'
 
+/**
+ * A live SSH project's status, pushed from main. `claudeAutoPermissionMode` rides a `connected`
+ * event: the remote `claude --version` probe runs AFTER connect (its login shell is slow and must
+ * not delay the project's terminals), so the answer arrives on its own event once it lands.
+ * Absent = not probed / nothing new ⇒ the renderer keeps omitting the `auto` flag (fail-open).
+ */
+export interface SshProjectStatusEvent {
+  projectId: string
+  status: SshProjectStatus
+  error?: string
+  claudeAutoPermissionMode?: boolean
+}
+
 export interface SshProjectApi {
   /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
   connect(
@@ -470,7 +483,7 @@ export interface SshProjectApi {
    * success, or null on any failure (not connected, unresolved remote home, mkdir/scp failure).
    */
   uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null>
-  onStatus(cb: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void): () => void
+  onStatus(cb: (e: SshProjectStatusEvent) => void): () => void
 }
 
 /**

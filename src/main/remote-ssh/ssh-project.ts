@@ -4,7 +4,7 @@ import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
-import type { SshProjectStatus } from '../../shared/types'
+import type { SshProjectStatusEvent } from '../../shared/types'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
 import { supportsAutoPermissionMode } from '../../shared/agents/config'
 import {
@@ -19,6 +19,7 @@ import {
   scpArgs,
   RMT_TMUX_SOCKET
 } from '../../core/remote-ssh/control-master'
+import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../../core/agents/hook-server'
 import { sessionName } from '../../core/tmux-naming'
@@ -33,7 +34,7 @@ interface Runners {
   runScp: (args: string[]) => Promise<{ code: number }>
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
   getHook: () => { port: number; token: string; version: string }
-  onStatus: (e: { projectId: string; status: SshProjectStatus; error?: string }) => void
+  onStatus: (e: SshProjectStatusEvent) => void
 }
 
 interface Conn {
@@ -210,21 +211,26 @@ export class SshProjectManager {
             /* fail-open: no conf → remote tmux uses host defaults */
           }
         }
-        // Probe the REMOTE claude CLI once per connect: `--permission-mode auto` only exists in
-        // >= 2.1.71 and the host's CLI may be older than the local one. Unknown ⇒ false ⇒ the
-        // renderer launches this project's Claude nodes with the bare command (fail-open).
-        const claudeAutoPermissionMode = supportsAutoPermissionMode(
-          await this.remoteClaudeVersion(conn, controlPath)
-        )
         const entry = this.conns.get(projectId)
         if (entry) {
           entry.hookEndpointPath = hookEndpointPath
           entry.remoteHome = remoteHome
           entry.tmuxConfPath = tmuxConfPath
-          entry.claudeAutoPermissionMode = claudeAutoPermissionMode
         }
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath, hookEndpointPath, tmuxConfPath, remoteHome, claudeAutoPermissionMode }
+        // Probe the REMOTE claude CLI once per connect — `--permission-mode auto` only exists in
+        // >= 2.1.71 and the host's CLI may be older than the local one. NOT awaited: the answer is
+        // only ever an optional flag, and the probe's login shell must not delay the connect (and
+        // with it every terminal in the project). It pushes itself into the conn + renderer when
+        // it lands; until then this project's Claude nodes launch with the bare command.
+        if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry)
+        return {
+          controlPath,
+          hookEndpointPath,
+          tmuxConfPath,
+          remoteHome,
+          claudeAutoPermissionMode: entry?.claudeAutoPermissionMode
+        }
       }
       await new Promise((res) => setTimeout(res, 100))
     }
@@ -400,18 +406,38 @@ export class SshProjectManager {
    * An ssh EXEC channel gets a non-interactive, non-login shell, whose rc file usually bails out
    * early — so a claude installed via nvm/asdf/homebrew-on-PATH may be invisible to a plain
    * `claude --version`. The remote tmux session that actually RUNS the node uses a login shell, so
-   * we try that first and only then the bare command.
+   * the probe tries that first and only then the bare command. A login shell also sources the
+   * user's profile, whose STDOUT noise (banners, neofetch, …) would otherwise be parsed as the
+   * version — hence the marker-delimited value (see `claude-version-probe.ts`).
    */
   private async remoteClaudeVersion(conn: SshConnection, controlPath: string): Promise<string | null> {
     try {
-      const { code, stdout } = await this.r.run(
-        childArgs(conn, controlPath, `$SHELL -lc 'claude --version' 2>/dev/null || claude --version 2>/dev/null`)
-      )
-      const out = stdout.trim()
-      return code === 0 && out ? out : null
+      const { stdout } = await this.r.run(childArgs(conn, controlPath, claudeVersionProbeCommand()))
+      // Markers absent ⇒ FAILED probe ⇒ null (unknown). Never scrape free-form stdout.
+      return parseClaudeVersionProbe(stdout)
     } catch {
       return null
     }
+  }
+
+  /**
+   * Probe the remote CLI's `--permission-mode auto` support AFTER the connect resolves, then push
+   * the answer into the live conn + the renderer (a `connected` status event carrying it).
+   *
+   * Deliberately OFF the connect critical path: it runs `$SHELL -lc`, which sources nvm/conda/rbenv
+   * inits — routinely hundreds of ms, sometimes seconds — and every remote terminal in the project
+   * waits on connect. A node launched in the gap just omits the flag (the designed fail-open
+   * fallback); the next launch, once the answer lands, gets `auto`.
+   */
+  private async probeClaudeAutoPermissionMode(projectId: string, entry: Conn): Promise<void> {
+    const supported = supportsAutoPermissionMode(
+      await this.remoteClaudeVersion(entry.conn, entry.controlPath)
+    )
+    // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
+    // connection; drop it rather than write it onto the new one.
+    if (this.conns.get(projectId) !== entry) return
+    entry.claudeAutoPermissionMode = supported
+    this.r.onStatus({ projectId, status: 'connected', claudeAutoPermissionMode: supported })
   }
 
   /** Is the remote claude new enough to scope credentials per config dir? Returns true when it
