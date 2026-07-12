@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { WorktreeCreateValue, WorktreeEntry } from '@shared/worktree'
+import { isValidGitRef, type WorktreeCreateValue, type WorktreeEntry } from '@shared/worktree'
 
 interface Props {
   /** 'create' = the pane/palette entry point (a new group frame); 'bind' = an existing group's
@@ -68,7 +68,14 @@ export function WorktreeDialog({
   // tracks the FIELD, not `pathEdited`: clearing the box after editing it also leaves Create
   // disabled, and a disabled button with no explanation is a dead end.
   const pathUnknown = !path.trim()
-  const valid = !!repoPath.trim() && !!branch.trim() && !!path.trim() && !busy
+  // The default branch value ('feature/') is a STARTING POINT for typing, not a submittable one —
+  // it fails `isValidGitRef` (trailing slash), so a fresh dialog must not let Create through: the
+  // ops layer would reject it and the user would see "Invalid branch name." on the very first use
+  // of the feature. Gate the button on the same validator the ops layer uses, so "clickable" always
+  // means "will not be rejected for this reason." The hint only fires once the field is non-empty —
+  // an untouched-but-empty field needs no explanation, `!valid` alone covers it.
+  const branchInvalid = !!branch.trim() && !isValidGitRef(branch)
+  const valid = !!repoPath.trim() && !!branch.trim() && !branchInvalid && !!path.trim() && !busy
   const title = intent === 'bind' ? 'Bind to worktree' : 'New worktree'
   const createLabel = intent === 'bind' ? 'Create & bind' : 'Create'
 
@@ -126,6 +133,13 @@ export function WorktreeDialog({
           Branch
           <input value={branch} onChange={(e) => setBranch(e.target.value)} />
         </label>
+
+        {branchInvalid && (
+          <div className="bind-error">
+            Not a valid branch name — finish typing one (no spaces, "..", or a leading/trailing
+            slash).
+          </div>
+        )}
 
         {mode === 'new' && (
           <label className="bind-field">
