@@ -29,11 +29,15 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import {
   closedByLabel,
-  isLetterboxed,
+  forgetNodeTermState,
+  letterboxFor,
+  markRecycled,
+  recycleAction,
   reportedSize,
+  setFittedSize,
   shouldApplyResync,
-  toXtermText,
-  type TermSize
+  takeRecycled,
+  toXtermText
 } from '../terminal/terminal-config'
 import { reportFocus, releaseFocus, usePresence } from '../state/presence'
 import type { ClientId } from '@shared/presence'
@@ -163,7 +167,27 @@ export function disposeTerminalOnUnmount(id: string): void {
   noParkIds.add(id)
   disposeParkedTerminal(id)
   coStates.delete(id)
-  recycledIds.delete(id)
+  forgetNodeTermState(id)
+}
+
+/**
+ * Resize the emulator the way `FitAddon.fit()` does — clearing the render service FIRST.
+ *
+ * We drive `term.resize()` ourselves (the pty, not the fit, is the authority on the grid under
+ * co-attach), and the `clear()` is not decoration: it forces a full repaint, without which
+ * shrinking a terminal can leave stale glyph rows behind in the area that was cut. That is a
+ * regression EVERY user would hit on a plain drag-resize, solo included — so we keep the addon's
+ * behavior byte for byte. Private API (`_core._renderService`), exactly as addon-fit uses it, so it
+ * is fail-soft: if xterm ever renames it, we still resize.
+ */
+function resizeTerm(term: Terminal, cols: number, rows: number): void {
+  if (term.cols === cols && term.rows === rows) return
+  try {
+    ;(term as unknown as { _core: { _renderService: { clear(): void } } })._core._renderService.clear()
+  } catch {
+    // private API moved — the resize below still happens (worst case: a stale row until the next paint)
+  }
+  term.resize(cols, rows)
 }
 
 /**
@@ -185,8 +209,20 @@ interface CoState {
   letterbox: boolean
   /** Set once the session was destroyed by someone else. `by` is null for an unattributed destroy. */
   closed: { by: ClientId | null } | null
+  /**
+   * The session ENDED under us and there is nothing to re-attach to, but the node is NOT deleted:
+   * the client that recycled it (moved it into a worktree) never registered a replacement session
+   * — its app quit or crashed mid-move — so core released us on the escape-hatch timeout.
+   *
+   * We must not respawn: our create options still carry the node's OLD cwd (the mover's cwd change
+   * is not broadcast to us), so we would spawn `nt-<id>` in the stale folder and the mover's own
+   * `new-session -A` would then reattach it — everyone's node claiming the worktree path with a
+   * shell sitting somewhere else. So the terminal ends and the user reopens it deliberately, which
+   * is recoverable and, unlike a silent stale-cwd respawn, honest. Cleared by that reopen.
+   */
+  ended: boolean
 }
-const NO_CO: CoState = { letterbox: false, closed: null }
+const NO_CO: CoState = { letterbox: false, closed: null, ended: false }
 const coStates = new Map<string, CoState>()
 const coSubs = new Map<string, (s: CoState) => void>()
 
@@ -205,10 +241,6 @@ const coSubs = new Map<string, (s: CoState) => void>()
  * instead — a parked terminal is holding the dead pty, and the next mount creates fresh.
  */
 const restartSubs = new Map<string, () => void>()
-/** Node ids whose next spawn is a recycle restart — the new xterm prints a one-line reason (the
- *  replacement session is a fresh shell in a different folder, so the screen legitimately changes
- *  under the co-viewer and a silent reset would just look like a glitch). */
-const recycledIds = new Set<string>()
 
 function getCo(id: string): CoState {
   return coStates.get(id) ?? NO_CO
@@ -219,7 +251,8 @@ function setCo(id: string, patch: Partial<CoState>): void {
   const next = { ...prev, ...patch }
   // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
   // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
-  if (next.letterbox === prev.letterbox && next.closed === prev.closed) return
+  if (next.letterbox === prev.letterbox && next.closed === prev.closed && next.ended === prev.ended)
+    return
   coStates.set(id, next)
   coSubs.get(id)?.(next)
 }
@@ -353,6 +386,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // overlay is terminal state anyway, so resolving the name when `co.closed` appears is enough.
   const closedName = co.closed ? closedByLabel(co.closed.by, usePresence.getState().peers) : ''
 
+  // "Session ended" (a recycle whose replacement never came — see CoState.ended): the user asks for
+  // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
+  const reopenEnded = (): void => {
+    setCo(id, { ended: false })
+    updateNodeData(id, (n) => ({
+      respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+    }))
+  }
+
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
   const readBuffer = useCallback(() => {
     const t = termRef.current
@@ -466,8 +508,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // the other viewer's (larger) grid. Zeroed here, so an adopting client always re-reports.
     let sentCols = 0
     let sentRows = 0
-    /** What we last reported — the reference the letterbox is measured against. */
-    let fitted: TermSize | null = null
+    // What we last REPORTED — the reference the letterbox is measured against — is published to a
+    // module-level registry (`setFittedSize`), NOT held here: the `onSize` listener that reads it is
+    // wired once and SURVIVES a park, so a closure variable would leave it comparing the pty's size
+    // against a previous mount's grid (see terminal-config's fittedByNode).
 
     /**
      * Co-attach sizing: we REPORT what we could render (`proposeDimensions`) and the pty tells us
@@ -487,10 +531,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const size = reportedSize(fit.proposeDimensions())
         if (!size) return
         if (size.cols === sentCols && size.rows === sentRows) return
-        fitted = size
+        setFittedSize(id, size)
         sentCols = size.cols
         sentRows = size.rows
-        if (term.cols !== size.cols || term.rows !== size.rows) term.resize(size.cols, size.rows)
+        resizeTerm(term, size.cols, size.rows)
         setCo(id, { letterbox: false })
         // Before the session exists we are the only voice: the size rides the initial `create()`.
         if (sessionId) transport.resize(sessionId, size.cols, size.rows)
@@ -579,16 +623,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
+    const noSpawn = !!getCo(id).closed || getCo(id).ended
     const scrollbackPromise =
-      parked || getCo(id).closed
+      parked || noSpawn
         ? Promise.resolve('')
         : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    // Consume the recycle-restart flag HERE, at the start of the spawn it belongs to — not in the
+    // create() continuation, which returns early when the node unmounted mid-spawn and would leave
+    // the flag set for some unrelated mount hours later ("session restarted by another user" out of
+    // nowhere). The banner is printed below once the session resolves.
+    const wasRecycled = takeRecycled(id)
     void (async () => {
       if (parked) return // adopted a live session — nothing to spawn or replay
-      // Another client DESTROYED this node's session (tmux kill-session — for everyone). Never
-      // spawn: `create(persistKey)` would happily start a brand-new tmux session and resurrect a
-      // terminal its owner deliberately killed. The overlay explains the state instead.
-      if (getCo(id).closed) return
+      // Another client DESTROYED this node's session (tmux kill-session — for everyone), or it was
+      // recycled with no replacement to re-attach to. Never spawn: `create(persistKey)` would
+      // happily start a brand-new tmux session — resurrecting a terminal its owner deliberately
+      // killed, or reviving this node in our STALE cwd. The overlay explains the state instead.
+      if (noSpawn) return
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
@@ -613,7 +664,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed }) => {
+        // REFUSED: core's tombstone says another client deleted this node while we weren't
+        // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
+        // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
+        if (closed) {
+          setCo(id, { closed })
+          if (!disposed) term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
+          return
+        }
         if (disposed) {
           transport.kill(sid)
           return
@@ -629,9 +688,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (transport.onSize) {
           cleanups.push(
             transport.onSize(sid, (size) => {
-              if (term.cols !== size.cols || term.rows !== size.rows)
-                term.resize(size.cols, size.rows)
-              setCo(id, { letterbox: isLetterboxed(size, fitted) })
+              resizeTerm(term, size.cols, size.rows)
+              // Measured against the CURRENT mount's fit (the registry, not a closure): this
+              // listener outlives the mount that wired it — see terminal-config's fittedByNode.
+              setCo(id, { letterbox: letterboxFor(id, size) })
             })
           )
         }
@@ -645,19 +705,28 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             })
           )
         }
-        // Someone else RECYCLED this node (moved it into a worktree): our session id is dead, but a
-        // replacement is already live under the same node id. Restart onto it — the node is still
-        // on our canvas and still working, so the closed state above would be a lie, and parking
-        // this now-dead pty would hand a corpse to the next mount.
+        // Someone else RECYCLED this node (moved it into a worktree): our session id is dead. If a
+        // replacement is already live under the same node id (`ready`), restart onto it — the node
+        // is still on our canvas and still working, so the closed state above would be a lie, and
+        // parking this now-dead pty would hand a corpse to the next mount. If NO replacement ever
+        // came (the mover's app died mid-move), we must NOT respawn: our options still carry the
+        // node's stale cwd, and spawning it would silently undo the worktree move for everyone —
+        // the terminal ends instead, with a reopen (see CoState.ended / recycleAction).
         if (transport.onRecycled) {
           cleanups.push(
-            transport.onRecycled(sid, () => {
+            transport.onRecycled(sid, (info) => {
+              if (recycleAction(info) === 'ended') {
+                disposeParkedTerminal(id) // the park holds a dead pty either way
+                setCo(id, { ended: true })
+                term.write('\r\n\x1b[90m[session ended — reopen to restart]\x1b[0m\r\n')
+                return
+              }
               const restart = restartSubs.get(id)
               if (!restart) {
                 disposeParkedTerminal(id) // unmounted: drop the park, the next mount creates fresh
                 return
               }
-              recycledIds.add(id)
+              markRecycled(id)
               restart()
             })
           )
@@ -665,7 +734,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // A restart we did not ask for: say why once, before the new session's output lands. (We
         // JOIN the replacement session, so tmux — which already has a client — does not redraw for
         // us; the first thing on this screen is whatever the new shell prints next.)
-        if (recycledIds.delete(id))
+        if (wasRecycled)
           term.write(
             '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
           )
@@ -793,9 +862,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
       // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session
-      // another client destroyed is gone — nothing to park (and nothing left to keep alive).
+      // another client destroyed — or ended under us with no replacement — is gone: nothing to park
+      // (and nothing left to keep alive).
       const isRespawn = respawnNonceRef.current !== myNonce
-      if (sessionId && !isRespawn && !getCo(id).closed && !noParkIds.delete(id)) {
+      const co = getCo(id)
+      if (sessionId && !isRespawn && !co.closed && !co.ended && !noParkIds.delete(id)) {
         // Park = "subscribed, but not viewing": report no size at all, so this window's (possibly
         // small) grid stops clamping every other subscriber's terminal for the next five minutes.
         // The subscription itself stays — output keeps streaming into the parked xterm — and the
@@ -1330,6 +1401,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         {co.closed && (
           <div className="term-node__closed nodrag">
             Closed by {closedName} — this session was ended.
+          </div>
+        )}
+        {!co.closed && co.ended && (
+          <div className="term-node__closed nodrag">
+            <span>Session ended — the node was moved and never came back.</span>
+            <button className="term-node__reopen" onClick={reopenEnded}>
+              Reopen
+            </button>
           </div>
         )}
         {armed && !mdMode && (

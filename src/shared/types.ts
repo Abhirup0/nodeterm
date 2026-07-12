@@ -44,6 +44,24 @@ export interface PtyCreateResult {
   /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
+  /**
+   * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
+   * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
+   *
+   * This is the tombstone (PtyManager): `pty:closed` only reaches a session's SUBSCRIBERS, and a
+   * co-viewer whose project is inactive or closed is not one. Without this, the create it issues
+   * when it later opens that project would happily spawn a brand-new `nt-<id>` and resurrect a
+   * terminal its owner deliberately deleted. The client that DID the destroy is exempt (its ⌘Z
+   * must still restore the node), so the single-user delete→undo path is unchanged.
+   */
+  closed?: { by: number | null }
+}
+
+/** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
+export interface RecycledInfo {
+  /** A replacement session is registered for the node: restart onto it. False = the escape-hatch
+   *  timeout fired with no replacement (the recycler died mid-move) → do NOT respawn. */
+  ready: boolean
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -247,11 +265,12 @@ export interface PtyApi {
    *  client's ClientId, or null when the destroy was not attributed to a client (a local desktop
    *  destroy); resolve it to a name via the presence store. Returns an unsubscribe. */
   onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
-  /** Another client RECYCLED this node (moved it into a worktree): this session id is dead, but a
-   *  replacement is already live under the same node id. Restart the terminal — the re-create
-   *  co-attaches to it — instead of showing the closed state: nothing was deleted. No payload.
-   *  Returns an unsubscribe. */
-  onRecycled(sessionId: string, listener: () => void): () => void
+  /** Another client RECYCLED this node (moved it into a worktree): this session id is dead. With
+   *  `ready:true` a replacement is already live under the same node id — restart the terminal (the
+   *  re-create co-attaches to it) instead of showing the closed state: nothing was deleted. With
+   *  `ready:false` no replacement ever came (the recycler died mid-move): do NOT respawn — the
+   *  terminal ends and offers a manual reopen. Returns an unsubscribe. */
+  onRecycled(sessionId: string, listener: (info: RecycledInfo) => void): () => void
   /** We fell too far behind and the server dropped our queued output; this is the session's
    *  CURRENT screen captured from tmux. Reset the emulator and repaint from it.
    *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent). The

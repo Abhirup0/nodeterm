@@ -379,6 +379,28 @@ export class PtyManager {
     string,
     { sessionId: string; clients: Set<ClientId>; timer: ReturnType<typeof setTimeout> }
   >()
+  /**
+   * persistKey (node id) → the client that DELETED it. The respawn guard for clients the
+   * `pty:closed` event cannot reach.
+   *
+   * `pty:closed` fans out to the dying session's SUBSCRIBERS. A co-viewer whose project is
+   * inactive or closed has no mounted terminal, is not a subscriber, and is told nothing — yet the
+   * node is still on its canvas. When it opens that project, its `create` finds no session, `tmux
+   * has-session` fails, and it would SPAWN A BRAND-NEW `nt-<id>`: a terminal its owner deliberately
+   * deleted, resurrected as a fresh shell, plus a stray tmux session nobody asked for. The
+   * tombstone makes that create refuse (`PtyCreateResult.closed`) instead.
+   *
+   * Deliberate limits, because this is the smallest honest fix and not the real one:
+   *  - it is IN-MEMORY, so it dies with the core process. Co-attach means one core with N clients
+   *    (Server Edition / relay), so it covers every co-viewer for as long as that core lives — but
+   *    after a server restart the resurrection is back.
+   *  - it is keyed by the DESTROYER, who is exempt: their own ⌘Z (undo of a delete) must still
+   *    restore the node, and a solo user is always the destroyer, so their path is untouched.
+   *  - a `recycle` (worktree move) explicitly CLEARS it: nothing was deleted there.
+   * The real fix is Stage 3's canvas-delete mutation, which removes the node from every canvas so
+   * no client is left holding one to re-create. See docs/team-presence.md (Known risks).
+   */
+  private tombstones = new Map<string, { by: ClientId | null }>()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -526,6 +548,11 @@ export class PtyManager {
       // on a *new* in-flight entry is exactly the same wait as the one we just did.
       if (this.inflight.get(key)) return this.create(clientId, options)
     }
+    // Another client DELETED this node (and there is no live session for it — `join` above already
+    // covers a resurrection by its owner). Refuse rather than spawn: see `tombstones`. Checked
+    // AFTER the in-flight barrier so a create racing the owner's own respawn joins it instead.
+    const tomb = this.tombstones.get(key)
+    if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
     const spawn = this.spawnNew(clientId, options)
     this.inflight.set(key, spawn)
     // Clear on settle — INCLUDING on failure, or a single failed spawn would leave a rejected
@@ -967,11 +994,16 @@ export class PtyManager {
     // (relay-served) ptys are deliberately NOT indexed — the relay path keeps its own session,
     // exactly as before, so this change cannot regress it.
     if (session.indexKey) this.byPersistKey.set(session.indexKey, sessionId)
+    // This node has a live session again, so it is no longer deleted: drop any tombstone. Only the
+    // destroyer can even reach a spawn for a tombstoned node (create() refuses everyone else), so
+    // this is exactly "the owner brought the node back" (⌘Z) — and its co-viewers must be able to
+    // join the new session rather than stay refused.
+    if (session.indexKey) this.tombstones.delete(session.indexKey)
     // The replacement session for a RECYCLED node (worktree move) is now live and indexed, so its
     // co-viewers can safely be told to restart: their create() will `join` THIS session instead of
     // spawning `nt-<nodeId>` from their own (stale) cwd. This is the whole reason the notice waits.
     if (session.indexKey && this.pendingRecycle.has(session.indexKey))
-      this.fireRecycled(session.indexKey)
+      this.fireRecycled(session.indexKey, true)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
@@ -997,21 +1029,34 @@ export class PtyManager {
     this.pendingRecycle.set(persistKey, {
       sessionId,
       clients: new Set(clients),
-      timer: setTimeout(() => this.fireRecycled(persistKey), RECYCLE_NOTIFY_TIMEOUT_MS)
+      timer: setTimeout(() => this.fireRecycled(persistKey, false), RECYCLE_NOTIFY_TIMEOUT_MS)
     })
   }
 
-  /** Tell a recycled node's co-viewers to restart their terminal. Fired the moment the replacement
-   *  session is registered — or, if none ever is, on the timeout, so nobody is left holding a dead
-   *  pty forever (their restart then spawns the node itself, which is the best available outcome).
-   *  The event is keyed by the OLD session id: that is the one their listeners are subscribed to. */
-  private fireRecycled(persistKey: string): void {
+  /**
+   * Release a recycled node's co-viewers from the dead session. The event is keyed by the OLD
+   * session id — that is the one their listeners are subscribed to — and carries the ONE thing they
+   * cannot know and must not guess: whether there is a replacement session to restart onto.
+   *
+   * `ready` (fired the moment the replacement is registered) → restart: their create() joins it and
+   * they follow the node into its new cwd.
+   *
+   * `!ready` (the escape-hatch timeout: the recycler's app died between the kill and its create) →
+   * the terminal ENDS and offers a manual reopen. It must NOT auto-respawn: a co-viewer's create
+   * options still carry the node's OLD cwd (a cwd change is not broadcast to other clients on this
+   * branch), so it would spawn `nt-<id>` in the stale directory — and when the mover's app comes
+   * back, its own `new-session -A` REATTACHES that stale-cwd session (the cwd option is ignored on
+   * attach). Everyone's node would then claim the worktree path while the shell sits in the old
+   * folder: exactly the silent failure the withheld notice exists to prevent, just 10 s later. An
+   * ended terminal is honest, recoverable, and cannot lose the move.
+   */
+  private fireRecycled(persistKey: string, ready: boolean): void {
     const entry = this.pendingRecycle.get(persistKey)
     if (!entry) return
     this.pendingRecycle.delete(persistKey)
     clearTimeout(entry.timer)
     const channel = IPC.ptyRecycled(entry.sessionId)
-    for (const client of entry.clients) this.send(client, channel)
+    for (const client of entry.clients) this.send(client, channel, { ready })
   }
 
   /** Drop a dead/released session from both indexes. Keyed off `indexKey` (not `persistKey`,
@@ -1423,7 +1468,9 @@ export class PtyManager {
    *
    * The close event is what STOPS the other viewers from quietly reopening the node: a respawn
    * would resurrect a session its owner deliberately deleted — a fresh shell with none of the
-   * state, plus a stray tmux session nobody asked for.
+   * state, plus a stray tmux session nobody asked for. It only reaches SUBSCRIBERS, though, so the
+   * destroy also leaves a `tombstone`: a client that was never subscribed (its project is closed /
+   * inactive, so it has no mounted terminal) is refused at `create` time instead.
    *
    * `clientId` is null when nothing/no-one attributable did it (an internal caller).
    */
@@ -1479,6 +1526,12 @@ export class PtyManager {
     // Also drop any in-flight create for this node: a create racing the kill-session below must
     // spawn a fresh session, not await (and then join) the one we are ending.
     this.inflight.delete(persistKey)
+    // A DELETE is remembered (the respawn guard for clients `pty:closed` cannot reach — see
+    // `tombstones`); a RECYCLE explicitly forgets, because the node is not going anywhere and its
+    // replacement session must be spawnable. Recorded even when no live session exists in this
+    // process: the node may be deleted from a canvas whose terminal was never opened here.
+    if (intent === 'delete') this.tombstones.set(persistKey, { by: clientId })
+    else this.tombstones.delete(persistKey)
     if (dyingId && dying) {
       this.byPersistKey.delete(persistKey)
       dying.indexKey = undefined

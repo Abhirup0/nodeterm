@@ -1063,6 +1063,24 @@ body,
   font-size: 12px;
   color: var(--muted);
   background: rgba(30, 30, 30, 0.88);
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* "Session ended — reopen to restart": the ONLY way a terminal whose session was recycled without
+   a replacement gets a shell back. Deliberately a manual action — an automatic respawn would use
+   this client's stale cwd and silently undo the worktree move (see CoState.ended). */
+.term-node__reopen {
+  padding: 4px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.term-node__reopen:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* Markdown view overlay (Cmd/Ctrl+M) */

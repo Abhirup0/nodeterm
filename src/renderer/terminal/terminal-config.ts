@@ -41,6 +41,76 @@ export function isLetterboxed(effective: TermSize, fitted: TermSize | null): boo
 }
 
 /**
+ * Per-node terminal state that must OUTLIVE a mount — because the transport listeners that read it
+ * do. `TerminalNode` wires `onSize` / `onClosed` / `onRecycled` ONCE, in the spawn continuation,
+ * and an adopted (parked) terminal carries those listeners into the next mount without
+ * re-subscribing. Anything they read therefore cannot live in the mounting effect's closure: the
+ * live listener would keep reading MOUNT A's variables while mount B updates its own.
+ *
+ * `fitted` is exactly that: the last size THIS client reported, and the reference the letterbox is
+ * measured against (`letterboxFor`). Park, change the font size, come back — mount B fits a
+ * different grid, and a closure-captured `fitted` would leave the surviving `onSize` listener
+ * comparing the pty's size against the pre-park one, permanently letterboxing a terminal that
+ * should fill its node (or un-letterboxing one that shouldn't).
+ */
+const fittedByNode = new Map<string, TermSize>()
+
+/** Record what this client last REPORTED it can render (called from every applyFit). */
+export function setFittedSize(nodeId: string, size: TermSize): void {
+  fittedByNode.set(nodeId, size)
+}
+
+/** `isLetterboxed` against the CURRENT mount's fit — see `fittedByNode`. */
+export function letterboxFor(nodeId: string, effective: TermSize): boolean {
+  return isLetterboxed(effective, fittedByNode.get(nodeId) ?? null)
+}
+
+/**
+ * Node ids whose next spawn is a recycle RESTART: the co-viewer's session was replaced under it
+ * (someone moved the node into a worktree), and the new xterm prints a one-line reason — the
+ * replacement is a fresh shell in a different folder, so the screen legitimately changes and a
+ * silent reset would just look like a glitch.
+ *
+ * `takeRecycled` consumes the flag, and the spawn path consumes it BEFORE `create()` resolves: a
+ * node that unmounts while its create is in flight abandons that spawn, and a flag left behind
+ * would print "session restarted by another user" on some unrelated mount hours later.
+ */
+const recycledIds = new Set<string>()
+
+export function markRecycled(nodeId: string): void {
+  recycledIds.add(nodeId)
+}
+
+/** Consume the recycle flag: true exactly once per `markRecycled`. */
+export function takeRecycled(nodeId: string): boolean {
+  return recycledIds.delete(nodeId)
+}
+
+/** Drop every cross-mount trace of a node — called when it is permanently deleted. */
+export function forgetNodeTermState(nodeId: string): void {
+  fittedByNode.delete(nodeId)
+  recycledIds.delete(nodeId)
+}
+
+/**
+ * What a `pty:recycled` notice means for this terminal.
+ *
+ * `ready` says a REPLACEMENT session is already registered for the node, so restarting is safe:
+ * our re-create co-attaches to it and we follow the node into its new cwd.
+ *
+ * Without one — the recycler's app died between the `tmux kill-session` and its own `create()`, so
+ * the notice fired on the escape-hatch timeout — a restart would be actively harmful: our create
+ * options still carry the node's OLD cwd (a cwd change is not broadcast to other clients), so we
+ * would spawn `nt-<id>` in the stale directory, and the mover's app, on its return, would
+ * `new-session -A` straight into it. Everyone's node would then claim the worktree path while the
+ * shell sits in the old folder — the exact silent failure the withheld notice exists to prevent.
+ * So we DON'T spawn: the terminal ends, and the user reopens it deliberately if they want a shell.
+ */
+export function recycleAction(info: { ready: boolean } | undefined): 'restart' | 'ended' {
+  return info?.ready ? 'restart' : 'ended'
+}
+
+/**
  * Should a `pty:resync` payload be painted? The server promises never to send an empty capture,
  * but the renderer guards anyway: a resync RESETS the emulator, and a screen reset on an empty
  * payload is unrecoverable (the user loses the screen for nothing), while a skipped repaint is

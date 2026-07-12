@@ -6,6 +6,7 @@ import type {
   NodeTerminalApi,
   Project,
   PtyCreateOptions,
+  RecycledInfo,
   UpdateInfo,
   UpdateProgress,
   Workspace
@@ -84,7 +85,7 @@ const api: NodeTerminalApi = {
     },
     onRecycled: (sessionId, listener) => {
       const channel = IPC.ptyRecycled(sessionId)
-      const handler = (): void => listener()
+      const handler = (_e: unknown, info: RecycledInfo): void => listener(info)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     },

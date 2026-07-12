@@ -76,6 +76,7 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey }) as Promise<{
       sessionId: string
       fresh: boolean
+      closed?: { by: number | null }
     }>
   // pty:kill is sender-aware (it unsubscribes ONE client), so it lands in senderListeners.
   const kill = (clientId: number, sessionId: string) =>
@@ -166,14 +167,15 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(spawned[0].writes).toEqual(['a', 'b'])
   })
 
-  it('a destroyed node is never co-attached to (the × path un-indexes it)', async () => {
+  it('a destroyed node is never co-attached to, and never respawned (the × path un-indexes + tombstones it)', async () => {
     const m = await manager()
-    const first = await create(ALICE)
+    await create(ALICE)
     await m.destroySession(ALICE, 'node-1') // user clicked ×: the tmux session is gone for good
 
     const second = await create(BOB)
-    expect(second.sessionId).not.toBe(first.sessionId)
-    expect(spawned).toHaveLength(2)
+    expect(second.sessionId).toBe('') // neither the dead session…
+    expect(second.closed).toEqual({ by: ALICE }) // …nor a fresh one: the node is gone
+    expect(spawned).toHaveLength(1)
   })
 
   it('a relay-served (detached) pty is NOT indexed: it keeps its own session', async () => {
@@ -559,6 +561,7 @@ describe('node destroyed while co-viewed', () => {
     fake.handlers[IPC.ptyCreate](clientId, { cols: 80, rows: 24, persistKey }) as Promise<{
       sessionId: string
       fresh: boolean
+      closed?: { by: number | null }
     }>
   // pty:destroy is sender-aware: the closed event has to name WHO pressed ×.
   const destroy = (clientId: number, persistKey = 'node-1') =>
@@ -582,16 +585,58 @@ describe('node destroyed while co-viewed', () => {
     expect(spawned).toHaveLength(1) // …and nothing respawned it
   })
 
-  it('a create AFTER the destroy spawns a fresh session — it never joins the doomed one', async () => {
+  // The `pty:closed` event only reaches SUBSCRIBERS. A co-viewer whose project is inactive/closed
+  // has no mounted terminal, is not subscribed, and hears nothing — its canvas still has the node,
+  // so opening that project later would `create` it and RESURRECT a terminal its owner deliberately
+  // deleted, in a fresh shell. The tombstone is what makes that create refuse instead of spawn.
+  it('a create by ANOTHER client after the destroy is refused — it never resurrects the node', async () => {
     await manager()
-    const { sessionId } = await create(ALICE)
+    await create(ALICE)
     await create(BOB)
     await destroy(ALICE)
 
-    // Bob's renderer re-creating the node (a remount, a reconnect) must not resurrect the session.
     const again = await create(BOB)
-    expect(again.sessionId).not.toBe(sessionId)
-    expect(again.fresh).toBe(true) // a brand-new session, not a co-attach to the dead one
+    expect(again.closed).toEqual({ by: ALICE }) // "closed by Alice", not a brand-new shell
+    expect(again.sessionId).toBe('')
+    expect(spawned).toHaveLength(1) // …and nothing was spawned
+  })
+
+  it('a create by a client that never saw the destroy is refused too (unsubscribed co-viewer)', async () => {
+    await manager()
+    await create(ALICE)
+    await destroy(ALICE) // Carol was not watching — she got no pty:closed
+
+    const carol = await create(CAROL)
+    expect(carol.closed).toEqual({ by: ALICE })
+    expect(spawned).toHaveLength(1)
+  })
+
+  it('the client that DELETED the node may still respawn it (undo) — and that clears the tombstone', async () => {
+    await manager()
+    await create(ALICE)
+    await destroy(ALICE)
+
+    // ⌘Z restores the node on Alice's canvas: her own re-create must spawn, exactly as it always
+    // did (the single-user delete→undo path is untouched by the tombstone).
+    const undone = await create(ALICE)
+    expect(undone.closed).toBeUndefined()
+    expect(undone.fresh).toBe(true)
+    expect(spawned).toHaveLength(2)
+    // The node is alive again, so a co-viewer must be able to join it rather than stay tombstoned.
+    const bob = await create(BOB)
+    expect(bob.sessionId).toBe(undone.sessionId)
+  })
+
+  it('a RECYCLE (worktree move) leaves no tombstone — the node is not deleted', async () => {
+    await manager()
+    await create(ALICE)
+    await create(BOB)
+    await (fake.senderListeners[IPC.ptyRecycle](ALICE, 'node-1') as unknown as Promise<void>)
+
+    const again = await create(ALICE) // the mover respawns in the new cwd
+    expect(again.closed).toBeUndefined()
+    const bob = await create(BOB) // and the co-viewer joins it
+    expect(bob.sessionId).toBe(again.sessionId)
     expect(spawned).toHaveLength(2)
   })
 
@@ -702,6 +747,8 @@ describe('node recycled (worktree move) while co-viewed', () => {
     expect(spawned).toHaveLength(2)
     expect(fresh.sessionId).not.toBe(sessionId)
     expect(recycled(sessionId).map((s) => s.to)).toEqual([BOB]) // only now is Bob told
+    // `ready` is what makes Bob's restart safe: there IS a session to co-attach to.
+    expect(recycled(sessionId)[0].args[0]).toEqual({ ready: true })
 
     const bob = await create(BOB) // Bob's terminal restarts…
     expect(bob.sessionId).toBe(fresh.sessionId) // …onto the LIVE new session
@@ -730,6 +777,11 @@ describe('node recycled (worktree move) while co-viewed', () => {
     // has to be released from the dead session, so the notice fires on a timeout.
     vi.advanceTimersByTime(15_000)
     expect(recycled(sessionId).map((s) => s.to)).toEqual([BOB])
+    // …but it says there is NOTHING to restart onto. Bob must not spawn `nt-node-1` himself: his
+    // options still carry the node's OLD cwd, so his session would silently undo the move (and
+    // Alice's app, on its return, would `new-session -A` straight back into that stale-cwd
+    // session). He shows "session ended — reopen to restart" instead.
+    expect(recycled(sessionId)[0].args[0]).toEqual({ ready: false })
   })
 
   it('a recycle with no other subscriber notifies nobody (the solo path is untouched)', async () => {

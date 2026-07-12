@@ -1,4 +1,4 @@
-import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult, RecycledInfo } from '@shared/types'
 import type { ClientId } from '@shared/presence'
 
 /**
@@ -57,13 +57,16 @@ export interface TerminalTransport {
    */
   onClosed?(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
   /**
-   * Another client RECYCLED this node (moved it into a worktree): this session id is dead, but a
-   * replacement is already live under the same node id — so restart the terminal (its re-create
-   * co-attaches to the new session) rather than showing the closed state. Nothing was deleted; the
-   * node is still on the canvas and still working.
+   * Another client RECYCLED this node (moved it into a worktree): this session id is dead. With
+   * `ready:true` a replacement is already live under the same node id — so restart the terminal
+   * (its re-create co-attaches to the new session) rather than showing the closed state. Nothing
+   * was deleted; the node is still on the canvas and still working.
+   * With `ready:false` NO replacement ever came (the recycler's app died mid-move): do not
+   * respawn — a restart would spawn the node in this client's own, stale cwd and silently undo the
+   * move. The terminal ends and offers a manual reopen.
    * OPTIONAL for the same reason as onSize. Returns an unsubscribe function.
    */
-  onRecycled?(sessionId: string, listener: () => void): () => void
+  onRecycled?(sessionId: string, listener: (info: RecycledInfo) => void): () => void
   /**
    * This client fell so far behind that the server discarded its queued output (WS_DROP_WATER)
    * and is redrawing it from tmux: clear the emulator and write this capture — it is the CURRENT

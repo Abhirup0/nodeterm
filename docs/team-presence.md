@@ -208,14 +208,40 @@ Killing a node's tmux session is used for two opposite intents, and PtyManager k
   owner deliberately killed, in a fresh shell, and strand a tmux session.
 - **Recycling** ("move into worktree") → `recycle(persistKey)`. Same `tmux kill-session` (otherwise
   `new-session -A` would just reattach the old working directory), but the node **stays** on every
-  canvas and keeps working. Co-viewers get `pty:recycled:<sid>` (no payload): restart the terminal,
+  canvas and keeps working. Co-viewers get `pty:recycled:<sid> { ready }`: restart the terminal,
   the node moved. Their re-create **co-attaches** to the replacement session, so they follow the node
   into its new cwd and are never left holding the dead pty.
 
-The recycled notice is **withheld until the replacement session is registered** (and, as an escape
-hatch for a recycler that never respawns, after a 10 s timeout). Sent any earlier, a co-viewer's
-restart could beat the mover's own `create()` and spawn `nt-<nodeId>` from *its* options — i.e. in
-the node's stale cwd — silently undoing the move for everyone.
+The recycled notice is **withheld until the replacement session is registered** (`ready:true`). Sent
+any earlier, a co-viewer's restart could beat the mover's own `create()` and spawn `nt-<nodeId>` from
+*its* options — i.e. in the node's stale cwd — silently undoing the move for everyone.
+
+A recycler can die between the `kill-session` and its own `create()` (app quit / crash), so a 10 s
+timeout releases the co-viewers anyway — with **`ready:false`**, which means *do not respawn*. This
+is the one case where restarting is worse than not: a co-viewer's create options still carry the
+node's **old cwd** (a cwd change is not broadcast on this branch), so its spawn would put
+`nt-<nodeId>` back in the stale folder — and when the mover's app returns, its own `new-session -A`
+**reattaches** that session (the cwd option is ignored on attach), so *everyone's* node would claim
+the worktree path while the shell sits in the old directory. Silent, and exactly what the withheld
+notice exists to prevent. So the terminal shows **"session ended — reopen to restart"** instead: the
+move can be lost only by an explicit user click, never by a timeout.
+
+### The respawn guard — and the tombstone that backs it
+
+`pty:closed` only reaches a session's **subscribers**. A co-viewer whose project is *inactive or
+closed* has no mounted terminal, so it is not one — yet the node is still on its canvas. Its next
+`create` for that node (opening the project later) would find no session, fail `tmux has-session`,
+and spawn a brand-new one: the deleted terminal, resurrected as a fresh shell.
+
+`PtyManager.tombstones` closes that: a destroyed `persistKey` is remembered, and a later `create`
+for it by **another** client is refused (`PtyCreateResult.closed = { by }`) instead of spawning —
+the renderer lands in the same "closed by <name>" state. The destroying client is **exempt**, so its
+own ⌘Z (undo of a delete) still restores the node, and the single-user path is untouched. A
+`recycle` clears the tombstone (nothing was deleted).
+
+Its limits are real (see Known risks): the tombstone is in-memory, so it lives exactly as long as
+the core process. The complete fix is Stage 3's canvas-delete **mutation**, which removes the node
+from every canvas so no client is left holding one to re-create.
 
 ## Canvas sync
 
@@ -363,3 +389,11 @@ same identity. Call them **A** and **B**; log both in with the shared password.
 - **Concurrent typing garbles input** — accepted; the badge is the warning.
 - **Cross-user undo** — last-write-wins, no CRDT.
 - **Cursor traffic** is 20 Hz × peers: comfortable for a 5–10 person team, not for a public room.
+- **A deleted node can still be resurrected across a core restart.** The respawn guard is two
+  layers: the `pty:closed` event (subscribers only) and the in-memory `tombstones` map (everyone
+  else, for as long as the core process lives). Restart the core — the Server Edition process, the
+  desktop app hosting the relay — and the tombstones are gone: a client whose canvas still carries
+  the deleted node will spawn a fresh `nt-<id>` for it the next time it opens that project. The
+  tombstone is deliberately not persisted, because persistence is not the missing piece: the node
+  should not be on that canvas at all. Stage 3's canvas-delete mutation removes it from every
+  client, which is the actual fix; until then this is a bounded, honestly-named gap, not a promise.

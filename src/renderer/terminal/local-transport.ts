@@ -1,4 +1,4 @@
-import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult, RecycledInfo } from '@shared/types'
 import type { ClientId } from '@shared/presence'
 import type { TerminalTransport } from './transport'
 
@@ -56,7 +56,7 @@ export class LocalTransport implements TerminalTransport {
     return this.pty.onClosed(sessionId, listener)
   }
 
-  onRecycled(sessionId: string, listener: () => void): () => void {
+  onRecycled(sessionId: string, listener: (info: RecycledInfo) => void): () => void {
     return this.pty.onRecycled(sessionId, listener)
   }
 

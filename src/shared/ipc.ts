@@ -91,7 +91,11 @@ export const IPC = {
    *  dead, but a replacement is already live under the same node id — restart the terminal so it
    *  co-attaches to it. Deliberately emitted only AFTER the replacement session exists (see
    *  PtyManager.recycleSession), so a co-viewer's restart can never spawn the node in its own,
-   *  stale cwd. No payload. */
+   *  stale cwd.
+   *  Payload: `{ ready: boolean }`. `ready:true` = the replacement session is registered, restart
+   *  onto it. `ready:false` = the escape-hatch timeout fired and NO replacement ever came (the
+   *  recycler's app died mid-move): the terminal must NOT respawn — it would spawn `nt-<id>` in
+   *  its own stale cwd and silently undo the move — it ends and offers a manual reopen. */
   ptyRecycled: (sessionId: string) => `pty:recycled:${sessionId}`,
   /** Redraw for a client that fell too far behind: the session's CURRENT screen, captured from
    *  tmux. Sent instead of the discarded backlog (payload: the capture text). The terminal clears
