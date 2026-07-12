@@ -39,10 +39,75 @@ export function sanitizeWorktreeBranch(input: string): string {
     .replace(/(^-|-$)/g, '')
 }
 
-/** Default on-disk location: <userData>/worktrees/<repo>/<branch-flattened>. */
+/**
+ * Default on-disk location: <userData>/worktrees/<repo>/<branch-flattened>.
+ * An unknown base dir yields NO suggestion (empty string) rather than a root-relative
+ * `/worktrees/...` — the Server Edition often runs as root and `git worktree add` would
+ * cheerfully create that at the filesystem root. Callers must treat '' as "no default".
+ */
 export function computeWorktreePath(userDataDir: string, repoName: string, branch: string): string {
+  const base = userDataDir.trim().replace(/\/+$/, '')
+  if (!base) return ''
   const flat = branch.replace(/\//g, '-')
-  return `${userDataDir}/worktrees/${repoName}/${flat}`
+  return `${base}/worktrees/${repoName}/${flat}`
+}
+
+/** Values the worktree dialog collects. Mapped to a `GroupWorktree` by `worktreeFromCreate`. */
+export interface WorktreeCreateValue {
+  repoPath: string
+  mode: 'new' | 'existing'
+  branch: string
+  baseRef: string
+  path: string
+}
+
+/** Last-resort merge target when the repo's default branch cannot be read. */
+export const DEFAULT_BASE_REF = 'main'
+
+/**
+ * The repo's default branch = the branch of its MAIN checkout, which git prints FIRST in
+ * `git worktree list` (the caller must keep git's order). Hardcoding 'main' would send a
+ * master/trunk repo's merge at a ref that does not exist.
+ */
+export function resolveBaseRef(entries: WorktreeEntry[]): string {
+  return entries[0]?.branch?.trim() || DEFAULT_BASE_REF
+}
+
+/**
+ * Binding for a worktree THIS APP just created — `createdByApp: true` grants Remove the right
+ * to delete the directory. Only call this after `git worktree add` succeeded.
+ */
+export function worktreeFromCreate(v: WorktreeCreateValue): GroupWorktree {
+  return {
+    repoPath: v.repoPath.trim(),
+    branch: v.branch.trim(),
+    baseRef: v.baseRef.trim() || DEFAULT_BASE_REF,
+    path: v.path.trim(),
+    createdByApp: true
+  }
+}
+
+/**
+ * Binding for a worktree that ALREADY EXISTED on disk (adopted from `git worktree list`) —
+ * `createdByApp: false`, so Remove must never delete a directory the user made themselves.
+ * Returns null when the binding cannot be trusted (detached HEAD, unknown repo root/path).
+ */
+export function worktreeFromEntry(
+  entry: WorktreeEntry,
+  repoPath: string,
+  baseRef: string
+): GroupWorktree | null {
+  const path = entry.path.trim()
+  const branch = entry.branch?.trim()
+  const repo = repoPath.trim()
+  if (!repo || !branch || !path) return null
+  return {
+    repoPath: repo,
+    branch,
+    baseRef: baseRef.trim() || DEFAULT_BASE_REF,
+    path,
+    createdByApp: false
+  }
 }
 
 /** Parse `git worktree list --porcelain` into structured entries. */
