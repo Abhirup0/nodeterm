@@ -58,6 +58,9 @@ describe('typing attribution', () => {
       rows: 24,
       persistKey: 'node-42'
     })) as { sessionId: string }
+    // Bob opens the same node — he CO-ATTACHES to Alice's session (one pty, two subscribers). He
+    // has to: only a subscriber may write into a shared session (see pty-coattach.test.ts).
+    await fake.handlers[IPC.ptyCreate](BOB, { cols: 80, rows: 24, persistKey: 'node-42' })
 
     write(ALICE, sessionId, 'l')
     write(BOB, sessionId, 's') // a second person typing into the same shell

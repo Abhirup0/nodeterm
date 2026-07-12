@@ -475,17 +475,19 @@ export class PtyManager {
     // user's" — WHO typed it is what lights the "X is typing" ring on everyone else's canvas (see
     // `write`). Registered ONLY here: `on` and `onWithSender` compose on the same channel, so
     // leaving the old plain listener in place would write every keystroke into the pty TWICE.
-    platform().onWithSender(
-      IPC.ptyWrite,
-      (senderId: number, sessionId: string, data: string) => this.write(senderId, sessionId, data)
-    )
+    platform().onWithSender(IPC.ptyWrite, (senderId: number, sessionId: string, data: string) => {
+      if (!this.subscribes(senderId, sessionId)) return
+      this.write(senderId, sessionId, data)
+    })
     // Sender-aware: a size is only meaningful with the client it belongs to — the pty runs at the
     // smallest one (`resize`). Registered ONLY here: `on` and `onWithSender` compose on the same
     // channel, so leaving the old plain listener in place would run the resize twice.
     platform().onWithSender(
       IPC.ptyResize,
-      (senderId: number, sessionId: string, cols: number | null, rows: number | null) =>
+      (senderId: number, sessionId: string, cols: number | null, rows: number | null) => {
+        if (!this.subscribes(senderId, sessionId)) return
         this.resize(senderId, sessionId, cols, rows)
+      }
     )
     // Sender-aware: a pause belongs to the client whose xterm backlog overflowed, and only that
     // client (or its departure) can return it — see `Session.pausedBy`. Registered ONLY here:
@@ -493,14 +495,17 @@ export class PtyManager {
     // run the flow change twice (and, with an unattributed sessionId, wrongly).
     platform().onWithSender(
       IPC.ptyFlow,
-      (senderId: number, sessionId: string, resume: boolean) =>
+      (senderId: number, sessionId: string, resume: boolean) => {
+        if (!this.subscribes(senderId, sessionId)) return
         this.setFlow(senderId, sessionId, resume)
+      }
     )
     // Sender-aware: with co-attach a kill detaches just THAT client, and the pty (and the tmux
     // session behind it) survives while any other subscriber is still watching.
-    platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) =>
+    platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) => {
+      if (!this.subscribes(senderId, sessionId)) return
       this.kill(senderId, sessionId)
-    )
+    })
     // Sender-aware: the × permanently ends a session OTHER people may be watching, so the close
     // event they get has to name WHO did it ("closed by <name>" — see `destroySession`).
     // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
@@ -519,6 +524,26 @@ export class PtyManager {
     platform().handle(IPC.ptySendText, (persistKey: string, text: string) =>
       this.sendText(persistKey, text)
     )
+  }
+
+  /**
+   * Does this client actually WATCH this session? The membership check every wire-facing pty cast
+   * (write / resize / flow / kill) is gated on.
+   *
+   * Session ids are sequential and guessable (`pty-1`, `pty-2`, …) and each of those casts takes the
+   * id straight off the wire. Ungated, ANY authenticated client could steer a terminal it never
+   * opened: `pty:flow(pty-3, false)` pauses the shared pty (the producing process then blocks on a
+   * full pipe and every real viewer's terminal freezes), `pty:resize(pty-3, 1, 1)` pins everyone's
+   * grid at 1x1, `pty:write` types into someone else's shell. The invariant this establishes —
+   * EVERYTHING IN `pausedBy` / `sizes` BELONGS TO A SUBSCRIBER — is what makes `dropClient` a
+   * complete cleanup: a client can only ever owe what it subscribed for.
+   *
+   * The gate lives HERE, at the IPC seam, not inside the methods: the relay host calls
+   * `write`/`resize`/`kill`/`setFlow` directly for its DETACHED (sink-served) ptys, which have no
+   * subscribers by design, and that path is not off the wire.
+   */
+  private subscribes(clientId: ClientId, sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.subscribers.has(clientId) ?? false
   }
 
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
@@ -1334,8 +1359,22 @@ export class PtyManager {
   dropClient(clientId: ClientId): void {
     // Snapshot the entries: kill() mutates `sessions` when a session falls to zero subscribers.
     for (const [sessionId, session] of [...this.sessions]) {
-      if (!session.subscribers.has(clientId)) continue
-      this.kill(clientId, sessionId)
+      if (session.subscribers.has(clientId)) {
+        this.kill(clientId, sessionId)
+        continue
+      }
+      // NOT a subscriber — and yet it may still hold state here. Sweeping only the sessions a client
+      // subscribes to made the departure an INCOMPLETE cleanup: anything it owed elsewhere (a pause,
+      // a size) could never be returned, so a single entry left behind froze or clamped a shared pty
+      // for every real viewer, for the life of the core process. The wire casts are now gated on
+      // membership (`subscribes`), so this should find nothing; sweep unconditionally anyway — the
+      // invariant "nothing outlives its client" must not depend on every future caller remembering
+      // the gate.
+      const hadSize = session.sizes.delete(clientId)
+      const hadShown = session.shown.delete(clientId)
+      if (!hadSize && !hadShown && !session.pausedBy.has(clientId)) continue
+      this.releaseFlow(session, clientId)
+      this.applySize(sessionId, session)
     }
   }
 

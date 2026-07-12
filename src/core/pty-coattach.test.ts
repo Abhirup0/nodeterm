@@ -89,6 +89,9 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   // typed it — that is what badges the node as "X is typing" (see pty-typing.test.ts).
   const write = (clientId: number, sessionId: string, data: string) =>
     fake.senderListeners[IPC.ptyWrite](clientId, sessionId, data)
+  // pty:resize is sender-aware: the pty runs at the smallest SUBSCRIBER's grid.
+  const resize = (clientId: number, sessionId: string, cols: number | null, rows: number | null) =>
+    fake.senderListeners[IPC.ptyResize](clientId, sessionId, cols, rows)
 
   it('a second client on the same persistKey subscribes instead of spawning', async () => {
     await manager()
@@ -333,6 +336,75 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(spawned[0].killed).toBe(false)
     m.kill(null, id)
     expect(spawned[0].killed).toBe(true)
+  })
+
+  // ── Only a SUBSCRIBER may steer a shared session ─────────────────────────────────────────
+  // Session ids are sequential and guessable (`pty-1`, `pty-2`, …) and every one of these casts
+  // takes the id straight off the wire. Without a membership check, any authenticated client could
+  // pause, clamp or type into a terminal it never opened — and since `dropClient` only ever swept
+  // sessions the client was subscribed to, the pause/size it planted would outlive its tab and
+  // freeze (or pin at 1x1) the shared pty for every real viewer, permanently.
+  it('a non-subscriber cannot pause the shared pty', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+
+    flow(BOB, sessionId, false) // Bob never opened this node
+    expect(spawned[0].paused).toBe(false)
+  })
+
+  it('a non-subscriber cannot clamp the shared grid', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    fake.sent.length = 0
+
+    resize(BOB, sessionId, 1, 1)
+    expect(spawned[0].resizes).toEqual([]) // Alice's terminal keeps its size
+    expect(fake.sent.filter((s) => s.channel === IPC.ptySize(sessionId))).toEqual([])
+  })
+
+  it('a non-subscriber cannot type into the shared pty', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+
+    write(BOB, sessionId, 'rm -rf /\n')
+    expect(spawned[0].writes).toEqual([])
+  })
+
+  it('a client that unsubscribed cannot keep steering the session it left', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    kill(BOB, sessionId)
+
+    flow(BOB, sessionId, false)
+    write(BOB, sessionId, 'x')
+    resize(BOB, sessionId, 1, 1)
+    expect(spawned[0].paused).toBe(false)
+    expect(spawned[0].writes).toEqual([])
+    expect(spawned[0].resizes).toEqual([])
+  })
+
+  // Belt and braces for the invariant the check above establishes: NOTHING a client left behind may
+  // outlive it. dropClient sweeps every session, not just the ones it subscribes to, so even a
+  // pause/size planted by some other (internal) path is returned when the client goes away.
+  it('dropClient sweeps a pause the client owes on a session it never subscribed to', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+    m.setFlow(BOB, sessionId, false) // planted through the internal API, not the wire
+    expect(spawned[0].paused).toBe(true)
+
+    m.dropClient(BOB)
+    expect(spawned[0].paused).toBe(false) // Alice's terminal is not frozen forever
+  })
+
+  it('dropClient sweeps a size the client owes on a session it never subscribed to', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    m.resize(BOB, sessionId, 1, 1)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 1, rows: 1 })
+
+    m.dropClient(BOB)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 }) // back to the real viewer
   })
 
   // ── Finding 3: the same-tick create race ────────────────────────────────────────────────
