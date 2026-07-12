@@ -17,6 +17,9 @@ export interface UiSink {
 }
 
 const PTY_DATA_PREFIX = 'pty:data:'
+/** Session-death channels — the point where a (client, session)'s backpressure state is pruned. */
+const PTY_EXIT_PREFIX = 'pty:exit:'
+const PTY_CLOSED_PREFIX = 'pty:closed:'
 /** Watermarks match the renderer terminal's own flow control. */
 const WS_HIGH_WATER = 1_000_000
 const WS_LOW_WATER = 256_000
@@ -30,6 +33,21 @@ const WS_LOW_WATER = 256_000
  * Do not "fix" this back into a replay.
  */
 const WS_DROP_WATER = 8_000_000
+/**
+ * How often the desynced set is swept for clients whose socket has drained. A flood that ENDS is
+ * the normal case (`npm run build` finishes, the socket drains, no further pty output ever
+ * arrives) — driving the redraw off the NEXT chunk of that session would leave such a client on a
+ * screen truncated mid-flood forever. The sweep is the drain trigger, and it only runs while
+ * something is actually desynced (armed on desync, cleared when the set empties), so the healthy
+ * path — the only path a solo user is ever on — pays nothing.
+ */
+const RESYNC_SWEEP_MS = 250
+/** A capture that comes back empty is retried on this schedule (250 ms, 500, 1 s … capped), so a
+ *  session that can never be captured cannot turn the sweep into a subprocess treadmill. */
+const RESYNC_BACKOFF_MAX_MS = 10_000
+
+/** One (client, session) whose backlog we discarded, and when its redraw may next be attempted. */
+type Desync = { attempts: number; nextAttemptAt: number }
 
 type Handler = { fn: (...args: any[]) => unknown; withSender: boolean }
 type Listener = { fn: (...args: any[]) => void; withSender: boolean }
@@ -65,12 +83,27 @@ export class ServerPlatform implements CorePlatform {
   private paused = new Set<string>()
   private flowController?: (uiId: number, sessionId: string, resume: boolean) => void
 
-  /** The (client, session) pairs whose backlog we discarded; each gets a tmux redraw once it
-   *  drains back under WS_LOW_WATER. Keyed like `paused` — desync is per (client, session), so a
-   *  drowning phone affects neither the other viewers of that session nor its own other sessions. */
-  private desynced = new Set<string>()
+  /**
+   * The (client, session) pairs whose backlog we discarded; each gets a tmux redraw once its
+   * socket drains back under WS_LOW_WATER.
+   *
+   * The BOUND is socket-wide, not per session: `UiSink.bufferedAmount` is `ws.bufferedAmount` —
+   * one number for the whole connection, because that is where the bytes actually sit (there is no
+   * per-session send queue to measure, and the socket is what would OOM us). So a client that
+   * floods the socket past WS_DROP_WATER on ONE session desyncs on EVERY session it is watching,
+   * as soon as each gets its next chunk. That is deliberate: at 8 MB queued, that connection is
+   * hopeless for all of its terminals, and dropping only the loudest session would leave the
+   * others queueing behind the same jammed socket.
+   *
+   * What IS per (client, session) is the desync STATE and the recovery: each session is captured
+   * and repainted on its own, and other VIEWERS of those sessions are untouched (they have their
+   * own sockets). Keyed like `paused`.
+   */
+  private desynced = new Map<string, Desync>()
   /** Redraws currently in flight (a capture is async) — one per (client, session), never N. */
   private resyncing = new Set<string>()
+  /** Armed only while `desynced` is non-empty (see RESYNC_SWEEP_MS). */
+  private sweepTimer?: ReturnType<typeof setInterval>
   private resyncProvider?: (sessionId: string) => Promise<string>
 
   setFlowController(fn: (uiId: number, sessionId: string, resume: boolean) => void): void {
@@ -78,9 +111,9 @@ export class ServerPlatform implements CorePlatform {
   }
 
   /** How a desynced client is brought back: the session's CURRENT screen, captured from tmux
-   *  (PtyManager.captureForResync). Unset (tests / no tmux) degrades to an EMPTY redraw — the
-   *  client still clears and resumes streaming; it just isn't repainted. It must never be left
-   *  desynced forever, which is what a bail-out here would do. */
+   *  (PtyManager.captureForResync). Unset (tests / no tmux) means nothing can ever repaint this
+   *  client, so a desync is simply cleared and streaming resumes un-repainted — it must never be
+   *  left desynced forever, which is what a silent bail-out would do. */
   setResyncProvider(fn: (sessionId: string) => Promise<string>): void {
     this.resyncProvider = fn
   }
@@ -147,8 +180,24 @@ export class ServerPlatform implements CorePlatform {
         }
       }
     } else {
+      // A session that DIED takes its backpressure state with it: nothing will ever be captured or
+      // resumed for it again, and a stale desync key would keep the sweep (and its tmux captures)
+      // alive for a session that no longer exists. Both channels are per-subscriber, so this prunes
+      // exactly the (this client, that session) entries. Costs the healthy path nothing — pty:data
+      // never reaches this branch.
+      const deadPrefix = [PTY_EXIT_PREFIX, PTY_CLOSED_PREFIX].find((p) => channel.startsWith(p))
+      if (deadPrefix) this.forgetFlowState(ServerPlatform.flowKey(uiId, channel.slice(deadPrefix.length)))
       sink.sendText(JSON.stringify({ t: 'ev', channel, args }))
     }
+  }
+
+  /** Drop every trace of one (client, session) from the backpressure bookkeeping. The pty-side
+   *  pause is not handed back here: these are dead-session / departing-client paths, where
+   *  PtyManager's own ledger (kill / dropClient) releases it. */
+  private forgetFlowState(key: string): void {
+    this.paused.delete(key)
+    this.desynced.delete(key)
+    this.stopSweepIfIdle()
   }
 
   /**
@@ -159,12 +208,15 @@ export class ServerPlatform implements CorePlatform {
   private dropOrDesync(uiId: number, sessionId: string, buffered: number): boolean {
     const key = ServerPlatform.flowKey(uiId, sessionId)
     if (this.desynced.has(key)) {
-      // Drained enough to be worth talking to again → redraw it onto the CURRENT screen.
-      if (buffered <= WS_LOW_WATER) void this.resync(uiId, sessionId)
+      // Output is still flowing, so take the chance to recover early — the sweep would get there
+      // within RESYNC_SWEEP_MS anyway, but a chunk we can see right now is free.
+      this.maybeResync(uiId, sessionId, buffered)
       return true
     }
     if (buffered <= WS_DROP_WATER) return false
-    this.desynced.add(key)
+    // nextAttemptAt 0: the very first drain (from the sweep or the next chunk) redraws immediately.
+    this.desynced.set(key, { attempts: 0, nextAttemptAt: 0 })
+    this.armSweep()
     // We stopped streaming to this client, so it must not hold the shared pty hostage: a pause it
     // owes could never be returned (it receives nothing, so it can never drain and re-report), and
     // PtyManager keeps the pty paused while ANY client owes a resume — the other viewers' terminal
@@ -173,21 +225,101 @@ export class ServerPlatform implements CorePlatform {
     return true
   }
 
-  /** Redraw one desynced client from tmux, then let it stream again. One capture, never a replay. */
+  /** Redraw a desynced client IF it has drained and its (backoff-gated) turn has come. */
+  private maybeResync(uiId: number, sessionId: string, buffered: number): void {
+    const key = ServerPlatform.flowKey(uiId, sessionId)
+    const state = this.desynced.get(key)
+    if (!state || this.resyncing.has(key)) return
+    // Never redraw into a socket that is still backed up: the repaint would queue behind the
+    // backlog and be stale by the time it arrived. And never faster than the backoff allows.
+    if (buffered > WS_LOW_WATER || Date.now() < state.nextAttemptAt) return
+    // A provider that throws would otherwise be an unhandled rejection → process exit under Node's
+    // default. `resync` already contains its own failures; this is the last line of defence.
+    void this.resync(uiId, sessionId).catch((err) => {
+      console.warn(
+        '[nodeterm-server] resync failed',
+        err instanceof Error ? err.message : String(err)
+      )
+    })
+  }
+
+  /**
+   * Redraw one desynced client from tmux, then let it stream again. One capture, never a replay.
+   *
+   * CONTRACT WITH THE RENDERER: a `pty:resync:<sid>` event is only ever sent with a NON-EMPTY
+   * payload, so the renderer may reset the terminal and repaint from it unconditionally. Captures
+   * fail empty (`captureForResync` returns '' on any tmux/ssh error — a ControlMaster blip, tmux
+   * not yet resolved, a session mid-respawn), and sending that would blank a perfectly live
+   * terminal and leave only the separator. So an empty capture sends NOTHING: the client stays
+   * desynced (output still dropped, screen intact, if stale) and the sweep retries with backoff.
+   */
   private async resync(uiId: number, sessionId: string): Promise<void> {
     const key = ServerPlatform.flowKey(uiId, sessionId)
     if (this.resyncing.has(key)) return
     this.resyncing.add(key)
     try {
-      const screen = this.resyncProvider ? await this.resyncProvider(sessionId) : ''
+      if (!this.desynced.has(key)) return
+      if (!this.resyncProvider) {
+        // No capture path at all (tests / no tmux): retrying is pointless and staying desynced
+        // would strand the client forever. Resume streaming un-repainted.
+        this.desynced.delete(key)
+        return
+      }
+      let screen = ''
+      try {
+        screen = await this.resyncProvider(sessionId)
+      } catch {
+        screen = '' // treated exactly like an empty capture: retry, never clear the screen
+      }
       if (!this.sinks.has(uiId)) return // client left while the capture was in flight
+      const state = this.desynced.get(key)
+      if (!state) return // pruned (session died) while the capture was in flight
+      if (!screen) {
+        state.attempts++
+        state.nextAttemptAt =
+          Date.now() + Math.min(RESYNC_SWEEP_MS * 2 ** (state.attempts - 1), RESYNC_BACKOFF_MAX_MS)
+        return
+      }
       this.desynced.delete(key)
       // Not a pty:data frame, so it is not subject to the gate above (and the flag is cleared
       // anyway): a plain event the terminal turns into a clear + redraw.
       this.sendTo(uiId, IPC.ptyResync(sessionId), screen)
     } finally {
       this.resyncing.delete(key)
+      this.stopSweepIfIdle()
     }
+  }
+
+  /** The drain trigger. A flood that ends leaves no further pty output to hang a redraw off, so a
+   *  low-frequency sweep watches the socket instead. It exists ONLY while something is desynced. */
+  private armSweep(): void {
+    if (this.sweepTimer || this.desynced.size === 0) return
+    this.sweepTimer = setInterval(() => this.sweepDesynced(), RESYNC_SWEEP_MS)
+    // Must never hold the process (or a vitest run) open.
+    this.sweepTimer.unref?.()
+  }
+
+  private stopSweepIfIdle(): void {
+    if (this.sweepTimer && this.desynced.size === 0) {
+      clearInterval(this.sweepTimer)
+      this.sweepTimer = undefined
+    }
+  }
+
+  private sweepDesynced(): void {
+    for (const key of [...this.desynced.keys()]) {
+      const sep = key.indexOf(' ')
+      const uiId = Number(key.slice(0, sep))
+      const sink = this.sinks.get(uiId)
+      if (!sink) {
+        this.desynced.delete(key) // client gone (belt and braces: detach already prunes)
+        continue
+      }
+      // `maybeResync` is a no-op above the low-water mark and while a capture is in flight, so a
+      // client that never drains costs one bufferedAmount read per tick — it cannot spin.
+      this.maybeResync(uiId, key.slice(sep + 1), sink.bufferedAmount?.() ?? 0)
+    }
+    this.stopSweepIfIdle()
   }
 
   broadcast(channel: string, ...args: any[]): void {
@@ -215,7 +347,8 @@ export class ServerPlatform implements CorePlatform {
     for (const key of this.paused) if (key.startsWith(prefix)) this.paused.delete(key)
     // Same for the drop-and-redraw state: a departing client leaves none behind (and an in-flight
     // capture for it lands on a missing sink, so it is discarded — see `resync`).
-    for (const key of this.desynced) if (key.startsWith(prefix)) this.desynced.delete(key)
+    for (const key of this.desynced.keys()) if (key.startsWith(prefix)) this.desynced.delete(key)
+    this.stopSweepIfIdle() // the last desynced client left → no timer survives it
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {

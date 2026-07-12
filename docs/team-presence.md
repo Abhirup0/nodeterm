@@ -153,13 +153,29 @@ Changes:
    high-water, so the slowest link no longer sets the pace for the team.
 
    That alone would let a slow client's send buffer grow without bound, so it is capped:
-   at `WS_DROP_WATER` (8 MB buffered for one client on one session) we **drop that client's
+   at `WS_DROP_WATER` (8 MB buffered on one client's socket) we **drop that client's
    queued output** rather than pause the others, and when its buffer drains we **resynchronise
    it by redrawing the current screen from tmux** (reusing the existing `capture-pane` path)
    with a "reconnected — earlier output skipped" separator. For a terminal the current screen
    is what matters, not the 8 MB of scrollback a bad link missed; tmux is the authoritative
-   source of that screen. Drop-and-redraw is per `(client, session)`: a desynced phone affects
-   neither the other clients of that session nor its own other sessions.
+   source of that screen.
+
+   Three properties of that ceiling, stated honestly:
+   - **The bound is per SOCKET, not per session.** `bufferedAmount` is `ws.bufferedAmount` — one
+     number for the whole connection, which is where the bytes actually sit. So a client that
+     floods past the ceiling on one session desyncs on *every* session it is watching (each on its
+     next chunk). Other **viewers** of those sessions are untouched — they have their own sockets.
+   - **Recovery is per `(client, session)`:** the desync state is keyed that way, so each session
+     gets its own capture and its own redraw.
+   - **The drain is the trigger, not the next chunk.** The common case is a flood that *ends*
+     (`npm run build` finishes; the socket drains; no further output ever arrives). A redraw hung
+     off the next chunk would never fire, leaving the user on a screen truncated mid-flood. A
+     250 ms sweep — armed on desync, cleared when the desynced set empties, so the healthy path
+     pays nothing — watches the socket and redraws once it is back under the low-water mark.
+   - **An empty capture is never sent.** `captureForResync` returns `''` on any tmux/ssh failure,
+     and the renderer's resync handler resets the terminal; sending `''` would blank a live
+     terminal. An empty/failed capture keeps the client desynced and is retried with backoff
+     (250 ms → 10 s cap). `pty:resync` payloads are therefore guaranteed non-empty.
 
 ### Typing attribution — and why it is server-side
 

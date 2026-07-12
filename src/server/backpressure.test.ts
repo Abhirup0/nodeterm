@@ -206,18 +206,119 @@ describe('ws drop-and-redraw ceiling (bounded memory)', () => {
     expect(slow.sends).toBe(1)
   })
 
-  it('desyncing one (client, session) does not desync that client s other sessions', () => {
+  // The ceiling is a SOCKET-wide bound, because `bufferedAmount` is `ws.bufferedAmount` — there is
+  // no per-session send queue to measure. So when one session floods the socket past the ceiling,
+  // EVERY session on that socket desyncs on its next chunk. That is the honest semantics (and the
+  // memory bound we actually want: the socket is what holds the bytes). What IS per (client,
+  // session) is the desync STATE and the redraw: each session is captured and repainted on its own.
+  it('the ceiling is socket-wide: a second session on the drowning socket also desyncs — but each session gets its OWN redraw', async () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     p.setFlowController(() => {})
-    p.setResyncProvider(async () => '')
+    const capture = vi.fn(async (sid: string) => `SCREEN ${sid}`)
+    p.setResyncProvider(capture)
     const s = growingSink(8_000_001)
     const id = p.attach(s.sink)
 
     p.sendTo(id, 'pty:data:s1', 'x') // s1 crosses the ceiling → dropped
+    p.sendTo(id, 'pty:data:s2', 'y') // s2 shares the SAME socket buffer → also dropped
     expect(s.sends).toBe(0)
-    s.buffered = 0 // the buffer is a socket-wide number; s2 is nowhere near the ceiling
-    p.sendTo(id, 'pty:data:s2', 'y') // a DIFFERENT session on the same client still streams
+
+    s.buffered = 1000 // the socket drained: both sessions recover, each with its own capture
+    await vi.waitFor(
+      () => expect([...s.resyncs].sort()).toEqual(['SCREEN s1', 'SCREEN s2']),
+      { timeout: 3000 }
+    )
+    expect(capture.mock.calls.map((c) => c[0]).sort()).toEqual(['s1', 's2'])
+
+    p.sendTo(id, 'pty:data:s2', 'z') // resynced → normal streaming resumes for both
     expect(s.sends).toBe(1)
+  })
+
+  // FINDING 1: the flood ENDS. The build finishes, the socket drains, and NO further pty output
+  // ever arrives — so a redraw triggered by "the next chunk of that session" never happens and the
+  // user stares at a truncated screen forever. The drain itself must be the trigger.
+  it('resyncs a desynced client when its buffer DRAINS, even though no further output arrives', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const capture = vi.fn(async () => 'CURRENT SCREEN')
+    p.setResyncProvider(capture)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'a') // the flood crosses the ceiling → desync + drop
+    expect(slow.sends).toBe(0)
+
+    // Still above the low-water mark: the redraw must NOT fire yet (it would land behind an 8 MB
+    // backlog and be stale on arrival).
+    slow.buffered = 2_000_000
+    await new Promise((r) => setTimeout(r, 400))
+    expect(capture).not.toHaveBeenCalled()
+
+    // The flood is over and the socket drained. Nothing else is ever sent on this session.
+    slow.buffered = 1000
+    await vi.waitFor(() => expect(slow.resyncs).toEqual(['CURRENT SCREEN']), { timeout: 3000 })
+    expect(capture).toHaveBeenCalledTimes(1) // exactly one capture, not one per sweep tick
+  })
+
+  // FINDING 2: captureForResync returns '' on ANY tmux/ssh failure (ControlMaster blip, session
+  // mid-respawn). The renderer's resync contract is reset() + separator + write(payload), so an
+  // empty payload would WIPE a live terminal. An empty capture must never be sent.
+  it('never sends a resync for an empty/failed capture — it retries instead of clearing the screen', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const capture = vi.fn(async () => '') // tmux/ssh hiccup: every capture comes back empty
+    p.setResyncProvider(capture)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'a') // desynced
+    slow.buffered = 0 // drained → resync attempts start
+
+    await vi.waitFor(() => expect(capture.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 3000 })
+    expect(slow.resyncs).toEqual([]) // NOTHING sent: an empty resync would blank a live terminal
+    p.sendTo(id, 'pty:data:s1', 'b')
+    expect(slow.sends).toBe(0) // still desynced (output still dropped) → the retry keeps its chance
+
+    // The blip passes: the next capture succeeds and the client is finally repainted + streaming.
+    capture.mockResolvedValue('BACK')
+    await vi.waitFor(() => expect(slow.resyncs).toEqual(['BACK']), { timeout: 3000 })
+    slow.buffered = 0
+    p.sendTo(id, 'pty:data:s1', 'c')
+    expect(slow.sends).toBe(1)
+  })
+
+  it('a throwing resync provider is contained: no unhandled rejection, the client stays desynced and recovers', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    p.setFlowController(() => {})
+    const capture = vi.fn(async () => {
+      throw new Error('tmux exploded')
+    })
+    p.setResyncProvider(capture as unknown as (sid: string) => Promise<string>)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'a')
+    slow.buffered = 0
+    await vi.waitFor(() => expect(capture.mock.calls.length).toBeGreaterThanOrEqual(1), { timeout: 3000 })
+    expect(slow.resyncs).toEqual([])
+    expect(slow.sends).toBe(0) // still desynced, not crashed
+  })
+
+  it('a dead session leaves no desync/pause state behind (pruned on pty:exit)', async () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ sid: string; resume: boolean }> = []
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
+    const capture = vi.fn(async () => 'SCREEN')
+    p.setResyncProvider(capture)
+    const slow = growingSink(8_000_001)
+    const id = p.attach(slow.sink)
+
+    p.sendTo(id, 'pty:data:s1', 'a') // desynced
+    p.sendTo(id, 'pty:exit:s1', 0) // the session died while the client was behind
+    slow.buffered = 0
+    await new Promise((r) => setTimeout(r, 500))
+    expect(capture).not.toHaveBeenCalled() // nothing to capture — and no sweep is left running
+    expect(slow.resyncs).toEqual([])
   })
 
   it('a client that leaves while desynced is not redrawn, and leaves no state behind', async () => {

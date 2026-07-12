@@ -84,7 +84,10 @@ export const IPC = {
   ptyClosed: (sessionId: string) => `pty:closed:${sessionId}`,
   /** Redraw for a client that fell too far behind: the session's CURRENT screen, captured from
    *  tmux. Sent instead of the discarded backlog (payload: the capture text). The terminal clears
-   *  and repaints from it — see ServerPlatform's WS_DROP_WATER. */
+   *  and repaints from it — see ServerPlatform's WS_DROP_WATER.
+   *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent — an
+   *  empty redraw would wipe a live terminal). The renderer must still IGNORE an empty payload
+   *  rather than reset on it. */
   ptyResync: (sessionId: string) => `pty:resync:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
