@@ -137,7 +137,11 @@ Changes:
 
 1. **`Session.webContentsId: number | null` → `subscribers: Set<ClientId>`**
    (`pty-manager.ts:251`). `flush()` (`:780`) fans out to the subscriber set instead of
-   unicasting. Relay `onData` sinks live in the same set — two paths collapse into one.
+   unicasting. The relay's `onData`/`onExit` sinks are **not** in that set (they have no
+   `ClientId`): a detached, relay-served pty keeps its own session and is deliberately left out of
+   `subscribers` *and* out of the `byPersistKey` co-attach index, so the relay path is bit-for-bit
+   what it was. `flush()` calls the sink and then fans out to the subscribers — two paths, kept
+   apart on purpose.
 2. **`pty:create` becomes idempotent.** A live session for that `persistKey` means subscribe +
    return `fresh:false` rather than spawn. Cold-restore and scrollback replay already branch on
    `fresh`, so they keep working.
@@ -208,10 +212,17 @@ Three rules:
 
 ### Typing attribution — and why it is server-side
 
-`cast()` currently discards the sender (`platform-server.ts:136`, `void uiId`). We route
-`pty:write` through the existing `handleWithSender` seam (`:55`), so the handler can stamp
-`session.lastWriter = {clientId, at}`. The hub broadcasts that, throttled to 1/500 ms per node;
-the badge decays after ~2 s.
+`cast()` used to discard the sender (`void uiId`). `pty:write` is routed through the sender-aware
+seam (`onWithSender`) instead, so the handler knows WHO typed: it calls `presenceHub.noteTyping(
+clientId, session.nodeId)` directly — there is no `lastWriter` field on the session, because nothing
+would read one (the badge is peer state, and it lives in the hub's peer table, not on the pty). The
+hub throttles the broadcast to 1/500 ms per (client, node); the badge decays after ~2 s. `write`
+skips the call entirely when there is only one peer, so a solo keystroke burst costs nothing.
+
+A write is only accepted from a **subscriber** of that session (session ids are guessable), and the
+same membership check gates `pty:resize` / `pty:flow` / `pty:kill` — everything in a session's
+`pausedBy` / `sizes` therefore belongs to a client that is actually watching it, which is what makes
+`dropClient` a complete cleanup.
 
 Attribution is done **on the server rather than by client self-declaration** specifically
 because of mobile: when the phone writes over the relay, the sender is already known as a
@@ -271,6 +282,14 @@ own ⌘Z (undo of a delete) still restores the node, and the single-user path is
 Its limits are real (see Known risks): the tombstone is in-memory, so it lives exactly as long as
 the core process. The complete fix is Stage 3's canvas-delete **mutation**, which removes the node
 from every canvas so no client is left holding one to re-create.
+
+The map is also **bounded in size and time** (`TOMBSTONE_MAX` / `TOMBSTONE_TTL_MS`, an LRU), and the
+`pty:destroy` / `pty:recycle` casts are **length-capped** (`REF_MAX_LEN`, like every other
+client-supplied reference) and **rate-limited** per client (`PTY_END_BUDGET`). They have to be: the
+key comes verbatim off the wire, a tombstone is recorded even when no live session exists, and each
+call costs an `fs.rm` plus a `tmux kill-session` subprocess. The burst is sized well past a bulk
+delete (one cast per node in a single tick), so it can never fail a real user; eviction degrades to
+the pre-tombstone behavior, never to something worse.
 
 ## Canvas sync
 
@@ -422,9 +441,12 @@ read-only guests, per-user settings.
 - Server e2e with **two** WS clients: hello → snapshot, cursor fan-out, echo suppression, leave
   on disconnect.
 - **Co-attach** (delivered): two clients, one `persistKey` → a single spawn; both receive output;
-  min-size resize; one client's backpressure does not stall the other, and a client that falls 8 MB
-  behind is dropped and redrawn from tmux rather than buffered forever. →
-  `src/core/pty-coattach.test.ts` (44 tests), `src/core/pty-size.test.ts`,
+  min-size resize; the joiner is painted from the current screen when the join did not resize the
+  pty (and is NOT painted when it did); only a subscriber may write/resize/pause/kill a session, and
+  nothing it owed outlives it; the destroy path is capped, bounded and rate-limited; one client's
+  backpressure does not stall the other; a client that falls 8 MB behind is dropped and redrawn from
+  tmux rather than buffered forever; and a pause is released by the drain sweep even when no further
+  output ever arrives. → `src/core/pty-coattach.test.ts` (60 tests), `src/core/pty-size.test.ts`,
   `src/server/backpressure.test.ts`, `src/server/platform-server.test.ts`
 - **Typing attribution** (delivered): the sender-aware `pty:write` stamps the writer; the ring decays
   against local receipt time and is fed only by live diffs. → `src/core/pty-typing.test.ts`,

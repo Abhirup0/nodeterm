@@ -361,6 +361,51 @@ describe('project scoping (a peer on another canvas is never drawn on mine)', ()
 })
 
 describe('reportFocus / reportProject', () => {
+  /** Two peers in the table — me and somebody else. Focus is only published when there IS somebody
+   *  to draw the chip: alone, the cast is pure cost (see the solo test below). */
+  async function withPeer() {
+    const mod = await import('./presence')
+    mod.usePresence.setState({ myId: 7, peers: { 7: peer(7), 8: peer(8) } })
+    return mod
+  }
+
+  it('publishes NOTHING while alone: a hover must not cost an IPC round-trip', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi()
+    const { reportFocus, releaseFocus, usePresence } = await import('./presence')
+    usePresence.setState({ myId: 7, peers: { 7: peer(7) } }) // just me
+
+    reportFocus('node-a') // hover-dwell into a terminal
+    releaseFocus('node-a') // …and out again
+    expect(api.calls.filter((c) => c[0] === 'focus')).toEqual([])
+
+    // A peer shows up: focus is published from the next hover on, and its retraction with it.
+    usePresence.setState({ peers: { 7: peer(7), 8: peer(8) } })
+    reportFocus('node-a')
+    releaseFocus('node-a')
+    expect(api.calls.filter((c) => c[0] === 'focus')).toEqual([
+      ['focus', 'node-a'],
+      ['focus', null]
+    ])
+  })
+
+  it('still retracts a published focus after the last peer leaves (never a stale chip)', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi()
+    const { reportFocus, releaseFocus, usePresence } = await import('./presence')
+    usePresence.setState({ myId: 7, peers: { 7: peer(7), 8: peer(8) } })
+    reportFocus('node-a')
+
+    // Peer 8 closed its tab while we sit in the node. The clear is NOT gated: the hub still holds
+    // our focus, and the next peer to join would get it in the snapshot and chip a node we left.
+    usePresence.setState({ peers: { 7: peer(7) } })
+    releaseFocus('node-a')
+    expect(api.calls.filter((c) => c[0] === 'focus')).toEqual([
+      ['focus', 'node-a'],
+      ['focus', null]
+    ])
+  })
+
   it('send only on change (a terminal re-focusing the same node, or a tab switch back, must not spam the wire)', async () => {
     vi.stubGlobal(
       'localStorage',
@@ -369,7 +414,7 @@ describe('reportFocus / reportProject', () => {
       })
     )
     const api = fakePresenceApi()
-    const { reportFocus, reportProject } = await import('./presence')
+    const { reportFocus, reportProject } = await withPeer()
     reportFocus('node-a')
     reportFocus('node-a')
     reportFocus(null)
@@ -393,7 +438,7 @@ describe('reportFocus / reportProject', () => {
   it('releaseFocus only clears the focus THIS node published (a leaving node cannot steal the next one)', async () => {
     vi.stubGlobal('localStorage', memStorage(STORED_ME))
     const api = fakePresenceApi()
-    const { reportFocus, releaseFocus } = await import('./presence')
+    const { reportFocus, releaseFocus } = await withPeer()
 
     reportFocus('node-a')
     // node-b took over (its dwell fired before node-a's unmount cleanup ran) — node-a going away

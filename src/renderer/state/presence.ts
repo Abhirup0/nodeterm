@@ -443,11 +443,29 @@ export function connectPresence(): () => void {
 let lastFocus: string | null = null
 let lastProject: string | null = null
 
-/** Publish "I am working in this node" (null = nowhere). Deduped; safe to call before connect. */
+/**
+ * Publish "I am working in this node" (null = nowhere). Deduped; safe to call before connect.
+ *
+ * ALONE, IT PUBLISHES NOTHING. A focus only exists to be drawn on somebody else's canvas, and every
+ * terminal hover-dwell / leave calls this — so with no peers the cast is pure cost (an IPC
+ * round-trip and a hub write per hover, on a path a solo user is on constantly). Same guard
+ * PtyManager.write already uses for typing attribution: presence is FREE when you are by yourself.
+ *
+ * The CLEAR is deliberately not gated: `lastFocus` is only ever non-null because a publish went out
+ * while peers existed, and if the last peer leaves while we sit in that node, the hub still holds
+ * our focus — the next peer to join would receive it in its snapshot and chip a node we left long
+ * ago. So a retraction always goes out (the dedup above makes it a no-op when we never published).
+ */
 export function reportFocus(nodeId: string | null): void {
   if (lastFocus === nodeId) return
+  if (nodeId !== null && !hasPeers()) return
   lastFocus = nodeId
   window.nodeTerminal.presence.focus(nodeId)
+}
+
+/** Is anyone else connected? (The table includes me, so "somebody else" is > 1.) */
+function hasPeers(): boolean {
+  return Object.keys(usePresence.getState().peers).length > 1
 }
 
 /** "This node is no longer where I work" — the counterpart of reportFocus(nodeId), for a node that
