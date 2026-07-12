@@ -76,6 +76,20 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`
   )
 }
+/** Capture ONLY the history above the visible screen (`-E -1`). tmux redraws the visible screen
+ *  itself on attach, so including it here would print it twice. */
+export function remoteCaptureHistoryArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  lines: number
+): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S -${lines} -E -1`
+  )
+}
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
   return childArgs(conn, controlPath, 'command -v tmux')
 }

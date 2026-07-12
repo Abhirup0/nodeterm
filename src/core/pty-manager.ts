@@ -18,7 +18,8 @@ import {
   remoteTmuxHasSessionArgs,
   remoteTmuxKillArgs,
   remoteTmuxPtyArgs,
-  remoteCapturePaneArgs
+  remoteCapturePaneArgs,
+  remoteCaptureHistoryArgs
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -31,6 +32,11 @@ import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '.
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
 // runs on detach; the interval covers an ungraceful power loss between detaches.
 const SCROLLBACK_SNAPSHOT_MS = 15_000
+
+// Reattach hydration caps: tmux history is the source, but an attach must not stall on a huge
+// transfer (an ssh/mobile link pays for every byte, and `-e` colour codes inflate it).
+const HISTORY_LINES = 5000
+const HISTORY_MAX_BYTES = 1024 * 1024
 
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
@@ -59,6 +65,18 @@ setw -g aggressive-resize on
 # OSC 52 itself (vim "+y, gh, yazi) still reaches the local clipboard via the client's handler.
 set -g set-clipboard on
 `
+}
+
+/** Trim `text` to at most `maxBytes`, dropping whole lines from the HEAD (oldest first) and
+ *  never splitting a multi-byte character. */
+export function trimToBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, 'utf-8')
+  if (buf.byteLength <= maxBytes) return text
+  const tail = buf.subarray(buf.byteLength - maxBytes).toString('utf-8')
+  // toString on a mid-character boundary yields a leading replacement char; drop the partial
+  // first line either way — it is the oldest content and the least missed.
+  const nl = tail.indexOf('\n')
+  return nl === -1 ? tail : tail.slice(nl + 1)
 }
 
 /** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). */
@@ -847,6 +865,41 @@ export class PtyManager {
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Capture a session's scrollback ABOVE the visible screen, for hydrating a fresh emulator on a
+   * warm reattach (the app restarted; tmux kept running and only redraws the visible screen).
+   * `-E -1` excludes that visible screen, so the hydration cannot duplicate the redraw.
+   * Best-effort: returns '' when tmux/ssh is unavailable.
+   */
+  async captureHistory(persistKey: string, lines = HISTORY_LINES): Promise<string> {
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return ''
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteCaptureHistoryArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), lines),
+          { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+        )
+        return trimToBytes(stdout, HISTORY_MAX_BYTES)
+      } catch {
+        return ''
+      }
+    }
+    if (!this.tmuxPath) return ''
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${lines}`, '-E', '-1'],
+        { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
+      )
+      return trimToBytes(stdout, HISTORY_MAX_BYTES)
     } catch {
       return ''
     }

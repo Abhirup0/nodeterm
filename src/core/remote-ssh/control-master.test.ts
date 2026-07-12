@@ -6,6 +6,7 @@ import {
   childArgs,
   remoteTmuxHasSessionArgs,
   remoteCapturePaneArgs,
+  remoteCaptureHistoryArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
   mkDirArgs,
@@ -181,5 +182,13 @@ describe('listDirArgs', () => {
       'deploy@h.example.com',
       `ls -1Ap ~/'my dir'`
     ])
+  })
+})
+
+describe('remoteCaptureHistoryArgs', () => {
+  it('captures history ABOVE the visible screen (-E -1) so the attach redraw is not duplicated', () => {
+    const args = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', 5000)
+    const cmd = args[args.length - 1]
+    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000 -E -1')
   })
 })
