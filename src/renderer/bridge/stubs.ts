@@ -38,34 +38,50 @@ const noop = (): void => {}
 const pnoop = (): Promise<void> => Promise.resolve()
 
 /** Copy without the Clipboard API (non-secure context): a hidden textarea + execCommand('copy').
- *  Only works inside a user gesture — which is exactly where copy is triggered from (keydown).
- *  Returns false when even that fails, so the caller can surface it rather than swallow it. */
+ *  Browsers only honor it inside a user gesture. That holds for the copy shortcut and the click-
+ *  driven copy buttons, but NOT for the OSC 52 path (`TerminalNode.tsx` — driven by terminal
+ *  OUTPUT, e.g. `vim "+y`, with no user activation): over plain http that one always fails and
+ *  lands in the error banner below. Returns false when the copy fails, so the caller surfaces it
+ *  rather than swallowing it — never silent.
+ *
+ *  Cleanup is in a `finally` on purpose: `select()`/`execCommand()` CAN throw (Firefox has thrown
+ *  NS_ERROR_FAILURE on execCommand('copy')), and a leaked scratch textarea would be invisible,
+ *  focused and `position:fixed` — i.e. it would swallow every subsequent keystroke. `select()` also
+ *  steals focus from xterm's helper textarea, so the previously-focused element is restored too
+ *  (the terminal's *selection* survives on its own — xterm paints it, it is not a DOM Selection). */
 function copyViaExecCommand(text: string): boolean {
+  const prev = document.activeElement as HTMLElement | null
+  let ta: HTMLTextAreaElement | undefined
   try {
-    const ta = document.createElement('textarea')
+    ta = document.createElement('textarea')
     ta.value = text
     ta.setAttribute('readonly', '')
     ta.style.position = 'fixed'
     ta.style.opacity = '0'
     document.body.appendChild(ta)
     ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    if (!ok) throw new Error('execCommand returned false')
+    if (!document.execCommand('copy')) throw new Error('execCommand returned false')
     return true
   } catch {
-    // Surfacing beats silence: over plain http there is no way to copy, and the user needs to know
-    // why nothing landed in their clipboard. Canvas listens for this event and shows a banner.
+    // Surfacing beats silence: the user needs to know why nothing landed in their clipboard. The
+    // diagnosis differs — plain http has no Clipboard API at all, while in a secure context we got
+    // here because the API rejected (permission denied / document not focused) AND the fallback
+    // failed too. Canvas listens for this event and shows a banner.
+    const secure = typeof window !== 'undefined' && window.isSecureContext
     window.dispatchEvent(
       new CustomEvent('nodeterm:toast', {
         detail: {
           kind: 'error',
-          message:
-            'Copy failed — the browser blocks clipboard access over plain http. Use https or localhost.'
+          message: secure
+            ? 'Copy failed — the browser denied clipboard access. Click the page and try again.'
+            : 'Copy failed — the browser blocks clipboard access over plain http. Use https or localhost.'
         }
       })
     )
     return false
+  } finally {
+    ta?.remove()
+    prev?.focus?.()
   }
 }
 
