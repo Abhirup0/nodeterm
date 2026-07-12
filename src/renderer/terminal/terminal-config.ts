@@ -49,6 +49,37 @@ export function toXtermText(text: string): string {
   return text.replace(/\r?\n/g, '\r\n')
 }
 
+/** A gate that holds PTY chunks back until the emulator has been seeded. */
+export interface DataGate {
+  /** Queue (while closed) or write straight through (once open). */
+  push(chunk: string): void
+  /** Drain the queue in arrival order and switch to pass-through. Idempotent. */
+  open(): void
+}
+
+/**
+ * Buffer PTY output that arrives while an async seed (scrollback snapshot / tmux history) is in
+ * flight. The main process does NOT buffer: it pushes `pty:data:<sid>` on a timer whether or not
+ * anyone is listening, and an IPC event with no listener is simply dropped. So we must subscribe
+ * BEFORE awaiting the seed and park the chunks here — on a warm reattach tmux emits its redraw
+ * within tens of ms, well inside a subprocess/ssh round-trip. Once the seed is written, `open()`
+ * replays the queue in order and later chunks stream straight through.
+ */
+export function createDataGate(write: (chunk: string) => void): DataGate {
+  let queued: string[] | null = []
+  return {
+    push(chunk) {
+      if (queued) queued.push(chunk)
+      else write(chunk)
+    },
+    open() {
+      const pendingChunks = queued
+      queued = null // pass-through first, so a re-entrant push during the drain stays in order
+      pendingChunks?.forEach(write)
+    }
+  }
+}
+
 /** The subset of a KeyboardEvent the copy-shortcut decision looks at. */
 export interface CopyShortcutEvent {
   type: string

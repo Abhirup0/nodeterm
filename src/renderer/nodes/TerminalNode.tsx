@@ -18,7 +18,13 @@ import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
-import { attachReplay, isCopyShortcut, toXtermText, xtermScrollback } from '../terminal/terminal-config'
+import {
+  attachReplay,
+  createDataGate,
+  isCopyShortcut,
+  toXtermText,
+  xtermScrollback
+} from '../terminal/terminal-config'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -501,10 +507,42 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sentRows = term.rows
           transport.resize(sid, term.cols, term.rows)
         }
+        // Flow control: track xterm's unprocessed write backlog (bytes handed to
+        // term.write but not yet parsed, plus anything still queued in the gate below). Past a
+        // high watermark we pause the source so a flood can't grow this buffer without bound;
+        // we resume once it drains.
+        let pending = 0
+        let paused = false
+        const HIGH_WATER = 1 << 20 // 1 MB
+        const LOW_WATER = 1 << 18 //  256 KB
+        const writeChunk = (chunk: string): void => {
+          term.write(chunk, () => {
+            pending -= chunk.length
+            if (paused && pending < LOW_WATER) {
+              paused = false
+              transport.setFlow(sid, true)
+            }
+          })
+        }
+        // Subscribe BEFORE the seed below: main pushes pty data on a timer regardless of
+        // listeners and an IPC event with no listener is dropped, while tmux emits its attach
+        // redraw within tens of ms — i.e. inside the seed's subprocess/ssh round-trip. The gate
+        // queues those chunks until the seed is written, then drains them in order. Queued bytes
+        // still count towards `pending`, so a flood during the gap pauses the source.
+        const gate = createDataGate(writeChunk)
+        const offData = transport.onData(sid, (chunk) => {
+          pending += chunk.length
+          if (!paused && pending > HIGH_WATER) {
+            paused = true
+            transport.setFlow(sid, false)
+          }
+          gate.push(chunk)
+        })
+        cleanups.push(offData)
         // Seed the (fresh) emulator with the history it can't see: a cold restart replays the
         // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
-        // tmux's own scrollback above the visible screen. Parked terminals get neither — their
-        // buffer is still correct and seeding it would duplicate content.
+        // tmux's own scrollback. Parked terminals get neither — their buffer is still correct
+        // and seeding it would duplicate content.
         const replay = attachReplay({
           parked: !!parked,
           fresh,
@@ -513,23 +551,28 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (replay === 'cold-snapshot') {
           const snapshot = await scrollbackPromise
           if (disposed) {
+            offData()
             transport.kill(sid)
             return
           }
           if (snapshot) {
-            term.write(snapshot)
+            // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
+            // with convertEol:false, so writing it raw would render as a staircase.
+            term.write(toXtermText(snapshot))
             term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
           }
         } else if (replay === 'warm-history') {
           // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
-          // missing from this fresh xterm. `captureHistory` excludes that visible screen (`-E -1`),
-          // so hydrating cannot duplicate the redraw. This is the session's REAL history, not a
-          // restore boundary — it gets no separator line.
+          // missing from this fresh xterm. `captureHistory` includes the visible screen too —
+          // tmux's redraw (\x1b[H\x1b[2J) erases exactly those lines in place, so it overwrites
+          // the tail of what we write here instead of leaving a gap. This is the session's REAL
+          // history, not a restore boundary — it gets no separator line.
           // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
           // tmux is only reachable once `create()` has registered the session's ssh target — an
           // earlier call would silently fall through to the LOCAL tmux and return ''.
           const history = await window.nodeTerminal.pty.captureHistory(id).catch(() => '')
           if (disposed) {
+            offData()
             transport.kill(sid)
             return
           }
@@ -540,29 +583,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             term.write(toXtermText(history))
           }
         }
-        // Flow control: track xterm's unprocessed write backlog (bytes handed to
-        // term.write but not yet parsed). Past a high watermark we pause the source so
-        // a flood can't grow this buffer without bound; we resume once it drains.
-        let pending = 0
-        let paused = false
-        const HIGH_WATER = 1 << 20 // 1 MB
-        const LOW_WATER = 1 << 18 //  256 KB
-        cleanups.push(
-          transport.onData(sid, (chunk) => {
-            pending += chunk.length
-            if (!paused && pending > HIGH_WATER) {
-              paused = true
-              transport.setFlow(sid, false)
-            }
-            term.write(chunk, () => {
-              pending -= chunk.length
-              if (paused && pending < LOW_WATER) {
-                paused = false
-                transport.setFlow(sid, true)
-              }
-            })
-          })
-        )
+        // Seed written — release the PTY output that arrived while it was in flight.
+        gate.open()
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)

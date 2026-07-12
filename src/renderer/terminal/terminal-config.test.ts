@@ -5,6 +5,7 @@ import {
   isCopyShortcut,
   attachReplay,
   toXtermText,
+  createDataGate,
   type CopyShortcutEvent
 } from './terminal-config'
 
@@ -51,6 +52,47 @@ describe('toXtermText', () => {
 
   it('keeps escape sequences untouched', () => {
     expect(toXtermText('\x1b[31mred\x1b[0m\n')).toBe('\x1b[31mred\x1b[0m\r\n')
+  })
+})
+
+describe('createDataGate', () => {
+  it('queues chunks that arrive before the gate opens, then drains them in order', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.push('a')
+    gate.push('b')
+    expect(written).toEqual([]) // nothing reaches the emulator while the hydration is in flight
+    gate.open()
+    expect(written).toEqual(['a', 'b'])
+  })
+
+  it('writes straight through once open', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.open()
+    gate.push('a')
+    gate.push('b')
+    expect(written).toEqual(['a', 'b'])
+  })
+
+  it('is idempotent on open (a second open cannot replay the queue)', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.push('a')
+    gate.open()
+    gate.open()
+    expect(written).toEqual(['a'])
+  })
+
+  it('keeps ordering when a chunk arrives during the drain', () => {
+    const written: string[] = []
+    const gate: ReturnType<typeof createDataGate> = createDataGate((c) => {
+      written.push(c)
+      if (c === 'a') gate.push('b') // re-entrant push while draining
+    })
+    gate.push('a')
+    gate.open()
+    expect(written).toEqual(['a', 'b'])
   })
 })
 

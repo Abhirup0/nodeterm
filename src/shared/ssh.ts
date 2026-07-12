@@ -104,6 +104,10 @@ set -g destroy-unattached off
 setw -g aggressive-resize on
 set -g set-clipboard on
 set -ag terminal-overrides ',xterm*:Ms=\\E]52;%p1%s;%p2%s\\007'
+# Keep tmux on the NORMAL screen (see tmuxConf): the alternate screen has no scrollback, so the
+# emulator's scrollback + the hydrated history would be invisible. APPENDED (-ga), so the OSC 52
+# override above survives — a plain non-append set here would replace it.
+set -ga terminal-overrides ',*:smcup@:rmcup@'
 `
 }
 

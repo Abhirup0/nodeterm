@@ -65,6 +65,11 @@ setw -g aggressive-resize on
 # Not our copy path any more (the emulator owns selection), but kept so an app that emits
 # OSC 52 itself (vim "+y, gh, yazi) still reaches the local clipboard via the client's handler.
 set -g set-clipboard on
+# Keep tmux on the NORMAL screen. By default the client enters the alternate screen
+# (\\e[?1049h), which has NO scrollback — xterm's own scrollback and the history we hydrate on a
+# warm reattach would both be invisible. Blanking smcup/rmcup (@) makes tmux emit no ?1049 at
+# all, so its output flows into the emulator's scrollback and the mouse wheel scrolls it.
+set -ga terminal-overrides ',*:smcup@:rmcup@'
 `
 }
 
@@ -877,9 +882,14 @@ export class PtyManager {
   }
 
   /**
-   * Capture a session's scrollback ABOVE the visible screen, for hydrating a fresh emulator on a
-   * warm reattach (the app restarted; tmux kept running and only redraws the visible screen).
-   * `-E -1` excludes that visible screen, so the hydration cannot duplicate the redraw.
+   * Capture a session's scrollback for hydrating a fresh emulator on a warm reattach (the app
+   * restarted; tmux kept running and only redraws the visible screen).
+   *
+   * The capture INCLUDES the visible screen (no `-E -1`). tmux's attach redraw starts with
+   * `\x1b[H\x1b[2J`, and xterm's eraseInDisplay(2) resets the viewport lines IN PLACE — it does
+   * not push them into scrollback — so it erases exactly the newest `rows` lines of whatever we
+   * just hydrated. Excluding the visible screen would therefore guarantee a one-screenful gap at
+   * the seam; capturing it and letting the redraw overwrite it gives neither gap nor duplication.
    * Best-effort: returns '' when tmux/ssh is unavailable.
    */
   async captureHistory(persistKey: string, lines = HISTORY_LINES): Promise<string> {
@@ -905,7 +915,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${n}`, '-E', '-1'],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${n}`],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return trimToBytes(stdout, HISTORY_MAX_BYTES)

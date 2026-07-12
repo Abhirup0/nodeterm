@@ -160,6 +160,18 @@ describe('remoteTmuxConf', () => {
     expect(c).toContain('terminal-overrides')
     expect(c).toContain('Ms=')
   })
+  it('keeps tmux on the NORMAL screen (smcup@/rmcup@) so the emulator owns the scrollback', () => {
+    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@'`)
+  })
+  it('APPENDS both terminal-overrides (neither clobbers the other)', () => {
+    // Both lines must use the append form (`-a`), or the second `set` would replace the first
+    // and we would silently lose either OSC 52 or the alternate-screen suppression.
+    const lines = c.split('\n').filter((l) => l.includes('terminal-overrides'))
+    expect(lines).toHaveLength(2)
+    for (const l of lines) expect(l).toMatch(/^set -(ag|ga) terminal-overrides ',/)
+    expect(lines.some((l) => l.includes('Ms='))).toBe(true)
+    expect(lines.some((l) => l.includes('smcup@:rmcup@'))).toBe(true)
+  })
   it('floors history-limit at 1000', () => {
     expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')
     expect(remoteTmuxConf(50000)).toContain('set -g history-limit 50000')

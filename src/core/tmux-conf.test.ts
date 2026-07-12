@@ -27,6 +27,11 @@ describe('tmuxConf', () => {
   it('keeps OSC 52 as a safety net for apps that emit it themselves', () => {
     expect(c).toContain('set -g set-clipboard on')
   })
+  it('keeps tmux on the NORMAL screen (smcup@/rmcup@) so xterm owns the scrollback', () => {
+    // Without this, tmux enters the alternate screen (\x1b[?1049h), which has no scrollback:
+    // xterm's scrollback + the hydrated tmux history would both be invisible.
+    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@'`)
+  })
   it('floors history-limit at 1000', () => {
     expect(tmuxConf(10)).toContain('set -g history-limit 1000')
   })
@@ -127,6 +132,11 @@ describe('PtyManager.captureHistory (untrusted `lines`)', () => {
 
   it('keeps the exact capture command shape on the local path', async () => {
     await withTmux().captureHistory('n1', 200)
-    expect(execFileCalls[0].args.join(' ')).toContain('capture-pane -p -e -t nt-n1 -S -200 -E -1')
+    const argv = execFileCalls[0].args.join(' ')
+    expect(argv).toContain('capture-pane -p -e -t nt-n1 -S -200')
+    // The capture INCLUDES the visible screen: xterm's eraseInDisplay(2) (tmux's attach redraw)
+    // resets the viewport lines in place instead of scrolling them into scrollback, so an
+    // `-E -1` capture would leave a one-screenful gap. tmux's redraw overwrites them instead.
+    expect(argv).not.toContain('-E')
   })
 })
