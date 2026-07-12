@@ -1,10 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { ViewportPortal, useReactFlow } from '@xyflow/react'
+import { ViewportPortal, useReactFlow, useStore } from '@xyflow/react'
 import { CHAT_MAX_LEN } from '@shared/presence'
 import { selectVisible, usePresence } from '../state/presence'
 import { useProjects } from '../state/projects'
-import { CURSOR_MIN_INTERVAL_MS, canOpenCursorChat, type KeyTarget } from '../lib/presenceKeys'
+import {
+  CHAT_ANCHOR_OFFSET_PX,
+  CURSOR_HOTSPOT_PX,
+  CURSOR_MIN_INTERVAL_MS,
+  canOpenCursorChat,
+  counterScale,
+  type KeyTarget
+} from '../lib/presenceKeys'
 
 // A sent chat line lingers this long after Enter, then clears itself.
 const CHAT_LINGER_MS = 5000
@@ -20,8 +27,11 @@ const CHAT_LINGER_MS = 5000
  *
  * PERF: this is the only component subscribed to cursor traffic (see state/presence.ts). The
  * sampler is a single rAF loop throttled to ~20 Hz that runs ONLY while another peer shares this
- * canvas — alone, this component renders null and installs no listeners. Smoothing between the
- * 20 Hz updates is a CSS transition on `transform`, not a JS lerp loop.
+ * canvas AND the local pointer is actually moving (it stops itself when nothing is pending and the
+ * pointer-move handler restarts it) — alone, this component renders null and installs no
+ * listeners. Smoothing between the 20 Hz updates is a CSS transition on `transform`, not a JS lerp
+ * loop. Zoom is read via React Flow's own store, so a zoom tick re-renders THIS layer only, never
+ * Canvas.
  */
 export function PresenceLayer(): JSX.Element | null {
   const activeProjectId = useProjects((s) => s.activeProjectId)
@@ -32,12 +42,50 @@ export function PresenceLayer(): JSX.Element | null {
   const others = usePresence(useShallow((s) => selectVisible(s, activeProjectId || null)))
   const hasOthers = others.length > 0
   const { screenToFlowPosition } = useReactFlow()
+  // Live viewport zoom, straight from React Flow's store: this subscribes THIS component, so a
+  // zoom tick re-renders the cursor layer (cheap) and leaves Canvas.tsx untouched.
+  const zoom = useStore((s) => s.transform[2])
 
   // Cursor-chat input (local). `null` = closed.
   const [chat, setChat] = useState<string | null>(null)
-  // Where to anchor the local chat input on screen (client coords of the last pointer position).
+  // Where the input is pinned on screen: a SNAPSHOT of the pointer taken when the chat opened, not
+  // the live pointer. Read during render, so it must be state — reading the live pointer ref here
+  // would make the "anchor" chase the mouse whenever a peer's cursor happened to re-render us.
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null)
+  // The last pointer position (client coords), updated at pointer rate. Never read during render.
   const screenRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const lingerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // True while peers are showing a chat line of ours that we have not retracted yet — so we know
+  // whether a `chat(null)` is owed (on close, on the last peer leaving, on unmount).
+  const publishedRef = useRef(false)
+
+  const sendChat = useCallback((text: string | null): void => {
+    if (text === null && !publishedRef.current) return // nothing to retract — don't spam the wire
+    publishedRef.current = text !== null
+    window.nodeTerminal.presence.chat(text)
+  }, [])
+
+  /** Close the input and drop the local state. `linger`: keep the bubble up for the readers for a
+   *  few seconds (Enter), then retract it. Safe to call when nothing is open. */
+  const closeChat = useCallback(
+    (linger: boolean): void => {
+      setChat(null)
+      setAnchor(null)
+      if (lingerRef.current) {
+        clearTimeout(lingerRef.current)
+        lingerRef.current = null
+      }
+      if (linger && publishedRef.current) {
+        lingerRef.current = setTimeout(() => {
+          lingerRef.current = null
+          sendChat(null)
+        }, CHAT_LINGER_MS)
+      } else {
+        sendChat(null)
+      }
+    },
+    [sendChat]
+  )
 
   // ---- local cursor sampling (rAF + ~20 Hz), only while someone else is here ----
   useEffect(() => {
@@ -46,19 +94,19 @@ export function PresenceLayer(): JSX.Element | null {
     let last = 0
     let pending: { x: number; y: number } | null = null
 
-    const onPointerMove = (e: PointerEvent): void => {
-      pending = { x: e.clientX, y: e.clientY }
-      screenRef.current = pending
-    }
-    const onPointerLeave = (): void => {
-      pending = null
-      window.nodeTerminal.presence.cursor(null)
+    // The loop runs ONLY while a sample is pending: it stops itself when the pointer goes still
+    // (an idle canvas must not burn a 60 Hz rAF forever) and onPointerMove restarts it.
+    const schedule = (): void => {
+      if (!raf) raf = requestAnimationFrame(tick)
     }
     const tick = (): void => {
-      raf = requestAnimationFrame(tick)
-      if (!pending) return
+      raf = 0
+      if (!pending) return // idle — the next pointermove will restart the loop
       const now = performance.now()
-      if (now - last < CURSOR_MIN_INTERVAL_MS) return
+      if (now - last < CURSOR_MIN_INTERVAL_MS) {
+        schedule() // throttled: come back next frame, the sample is still pending
+        return
+      }
       last = now
       const p = pending
       pending = null
@@ -66,13 +114,22 @@ export function PresenceLayer(): JSX.Element | null {
       window.nodeTerminal.presence.cursor({ x: Math.round(flow.x), y: Math.round(flow.y) })
     }
 
+    const onPointerMove = (e: PointerEvent): void => {
+      pending = { x: e.clientX, y: e.clientY }
+      screenRef.current = pending
+      schedule()
+    }
+    const onPointerLeave = (): void => {
+      pending = null
+      window.nodeTerminal.presence.cursor(null)
+    }
+
     window.addEventListener('pointermove', onPointerMove)
     document.addEventListener('pointerleave', onPointerLeave)
-    raf = requestAnimationFrame(tick)
     return () => {
       window.removeEventListener('pointermove', onPointerMove)
       document.removeEventListener('pointerleave', onPointerLeave)
-      cancelAnimationFrame(raf)
+      if (raf) cancelAnimationFrame(raf)
       window.nodeTerminal.presence.cursor(null)
     }
   }, [hasOthers, screenToFlowPosition])
@@ -85,33 +142,42 @@ export function PresenceLayer(): JSX.Element | null {
       if (chat !== null) return
       if (!canOpenCursorChat(document.activeElement as unknown as KeyTarget | null)) return
       e.preventDefault()
-      if (lingerRef.current) clearTimeout(lingerRef.current)
+      if (lingerRef.current) {
+        clearTimeout(lingerRef.current)
+        lingerRef.current = null
+      }
+      // Snapshot the pointer NOW: the input is anchored where you opened it and stays there.
+      setAnchor({ ...screenRef.current })
       setChat('')
-      window.nodeTerminal.presence.chat('')
+      sendChat('')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [hasOthers, chat])
+  }, [hasOthers, chat, sendChat])
 
+  // The last peer left: below, this component renders null, so an open chat would become an
+  // INVISIBLE open chat — "/" would keep early-returning, the hub would keep our last line, and a
+  // peer joining later would re-mount the input (autoFocus!) with stale text. Close it for real.
+  useEffect(() => {
+    if (!hasOthers) closeChat(false)
+  }, [hasOthers, closeChat])
+
+  // Unmount: retract whatever peers can still see (an open input, or a lingering sent line) —
+  // the mirror of the sampler's cursor(null).
   useEffect(
     () => () => {
       if (lingerRef.current) clearTimeout(lingerRef.current)
+      if (publishedRef.current) window.nodeTerminal.presence.chat(null)
     },
     []
   )
 
   if (!hasOthers) return null
 
-  const closeChat = (linger: boolean): void => {
-    setChat(null)
-    if (lingerRef.current) clearTimeout(lingerRef.current)
-    if (linger) {
-      // Enter: the bubble stays up for the readers, then clears itself.
-      lingerRef.current = setTimeout(() => window.nodeTerminal.presence.chat(null), CHAT_LINGER_MS)
-    } else {
-      window.nodeTerminal.presence.chat(null)
-    }
-  }
+  // Cursors are positioned in FLOW space (inside the viewport transform) but sized in SCREEN
+  // space: the counter-scale cancels the zoom, pivoting on the arrow tip.
+  const scale = counterScale(zoom)
+  const hotspot = `${CURSOR_HOTSPOT_PX}px ${CURSOR_HOTSPOT_PX}px`
 
   return (
     <>
@@ -123,34 +189,39 @@ export function PresenceLayer(): JSX.Element | null {
               className="presence-cursor"
               style={{ transform: `translate(${p.cursor.x}px, ${p.cursor.y}px)`, color: p.color }}
             >
-              <svg className="presence-cursor__arrow" width="18" height="18" viewBox="0 0 18 18">
-                <path
-                  d="M2 2 L2 14 L5.5 10.6 L8 15.6 L10.4 14.4 L7.9 9.5 L12.6 9.5 Z"
-                  fill="currentColor"
-                  stroke="#000"
-                  strokeWidth="0.75"
-                />
-              </svg>
-              <span className="presence-cursor__name" style={{ background: p.color }}>
-                {p.name}
-              </span>
-              {p.chat ? <span className="presence-cursor__chat">{p.chat}</span> : null}
+              <div
+                className="presence-cursor__scale"
+                style={{ transform: scale, transformOrigin: hotspot }}
+              >
+                <svg className="presence-cursor__arrow" width="18" height="18" viewBox="0 0 18 18">
+                  <path
+                    d="M2 2 L2 14 L5.5 10.6 L8 15.6 L10.4 14.4 L7.9 9.5 L12.6 9.5 Z"
+                    fill="currentColor"
+                    stroke="#000"
+                    strokeWidth="0.75"
+                  />
+                </svg>
+                <span className="presence-cursor__name" style={{ background: p.color }}>
+                  {p.name}
+                </span>
+                {p.chat ? <span className="presence-cursor__chat">{p.chat}</span> : null}
+              </div>
             </div>
           ) : null
         )}
       </ViewportPortal>
 
-      {chat !== null && (
+      {chat !== null && anchor && (
         <input
           className="presence-chat-input nodrag nowheel"
           autoFocus
           value={chat}
           maxLength={CHAT_MAX_LEN}
           placeholder="Say something…"
-          style={{ left: screenRef.current.x + 16, top: screenRef.current.y + 16 }}
+          style={{ left: anchor.x + CHAT_ANCHOR_OFFSET_PX, top: anchor.y + CHAT_ANCHOR_OFFSET_PX }}
           onChange={(e) => {
             setChat(e.target.value)
-            window.nodeTerminal.presence.chat(e.target.value)
+            sendChat(e.target.value)
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {

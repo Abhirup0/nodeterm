@@ -5181,11 +5181,19 @@ body,
   left: 0;
   pointer-events: none;
   z-index: 4;
-  display: flex;
-  align-items: flex-start;
   /* Positions arrive at ~20 Hz — the transition is the "lerp" (no JS animation loop). */
   transition: transform 80ms linear;
   will-change: transform;
+}
+
+/* The cursor lives inside the viewport transform, so its POSITION follows the canvas — but its
+   SIZE must not (a name label at 0.2x is unreadable, at 2x it is huge). This wrapper carries the
+   1/zoom counter-scale (see counterScale in lib/presenceKeys.ts), pivoted on the arrow tip
+   (transform-origin, set inline from CURSOR_HOTSPOT_PX) so the tip keeps pointing at the peer's
+   exact flow coordinate. No transition here: zoom must apply instantly, only position lerps. */
+.presence-cursor__scale {
+  display: flex;
+  align-items: flex-start;
 }
 
 .presence-cursor__arrow {
