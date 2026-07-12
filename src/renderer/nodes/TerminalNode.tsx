@@ -40,6 +40,7 @@ import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
+import { useWorktrees } from '../state/worktrees'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -259,10 +260,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // is bound to a worktree AND its current cwd differs from that worktree path (i.e. it's still
   // running in the old folder). Reads the parent group from React Flow state (single source of
   // truth); `parentId` is set by the group reparenting transforms.
+  // A STALE group (its worktree directory was deleted outside the app) must NOT offer the move:
+  // "move" destroys this node's tmux session — killing whatever is running in it — and respawns it
+  // in the worktree path, which no longer exists. pty-manager would silently fall back to $HOME and
+  // `data.cwd` would persist the dead path forever, which not even Unbind undoes. The chip already
+  // says "· missing"; the ↪ must agree with it.
   const parentWtPath = parentId
     ? ((getNode(parentId) as CanvasNode | undefined)?.data.worktree?.path as string | undefined)
     : undefined
-  const canMoveIntoWorktree = !!parentWtPath && (data.cwd as string | undefined) !== parentWtPath
+  const parentWtStale = useWorktrees((s) => (parentId ? s.staleGroupIds.includes(parentId) : false))
+  const canMoveIntoWorktree =
+    !!parentWtPath && !parentWtStale && (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.

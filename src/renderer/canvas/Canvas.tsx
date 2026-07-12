@@ -1377,10 +1377,12 @@ export function Canvas() {
   // setNodes has not committed yet, so it is merged in by hand. Fire-and-forget: `refresh` is
   // epoch-guarded and fails open.
   const refreshWorktreeStore = useCallback(
-    (change?: { bind?: BoundGroup; unbound?: string }) => {
+    (change?: { bind?: BoundGroup; unbound?: string | string[] }) => {
       const project = useProjects.getState().getProject(activeProjectId ?? '')
       if (!project?.cwd || project.ssh) return
-      const touched = new Set([change?.bind?.groupId, change?.unbound].filter(Boolean))
+      const unbound =
+        typeof change?.unbound === 'string' ? [change.unbound] : (change?.unbound ?? [])
+      const touched = new Set([change?.bind?.groupId, ...unbound].filter(Boolean))
       const bound: BoundGroup[] = boundGroups(nodesRef.current).filter((b) => !touched.has(b.groupId))
       if (change?.bind) bound.push(change.bind)
       void useWorktrees.getState().refresh(project.cwd, bound)
@@ -1867,9 +1869,14 @@ export function Canvas() {
       })
       markDirty()
       // A deleted group takes its worktree BINDING with it while the worktree stays on disk — so
-      // re-reconcile, or the orphan would not be offered again until a project switch.
-      const boundGone = nodesRef.current.find((n) => set.has(n.id) && !!n.data.worktree)
-      if (boundGone) refreshWorktreeStore({ unbound: boundGone.id })
+      // re-reconcile, or the orphan would not be offered again until a project switch. EVERY
+      // deleted bound group must be passed: box-selecting two of them and hitting Delete used to
+      // unbind both but only tell the store about the first, leaving the second's worktree
+      // unofferable until a project switch.
+      const boundGone = nodesRef.current
+        .filter((n) => set.has(n.id) && !!n.data.worktree)
+        .map((n) => n.id)
+      if (boundGone.length) refreshWorktreeStore({ unbound: boundGone })
     },
     [setNodes, markDirty, refreshWorktreeStore]
   )
@@ -2122,8 +2129,8 @@ export function Canvas() {
     [setNodes, markDirty, refreshWorktreeStore]
   )
 
-  // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
-  // never touches a directory with live processes inside it, then act.
+  // Confirmed removal: git FIRST, then the child terminals' tmux sessions — a git that refuses must
+  // leave the user's running processes alone (see the numbered steps below).
   //
   // What "remove" means depends on WHO created the worktree (`createdByApp`, made truthful in the
   // bind path):
@@ -2147,20 +2154,26 @@ export function Canvas() {
       setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
-    // 1) Kill the group's terminals' sessions BEFORE git touches the directory.
-    const childIds = nodesRef.current
-      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
-      .map((n) => n.id)
-    for (const id of childIds) transport.destroy(id)
-    // 2) Remove the worktree; only delete the branch if the branch is ours (we created it).
+    // 1) Remove the worktree FIRST; only delete the branch if the branch is ours (we created it).
+    //    The sessions are killed after, not before: `worktreeRemove` can still REFUSE (a dangerous
+    //    path, a locked worktree, EPERM), and killing every child terminal's tmux session up front
+    //    meant the user's running processes were gone for good while the worktree was still there.
+    //    Removing the directory out from under a live session is safe on POSIX (open files and
+    //    cwds are unlinked, not blocked), and the sessions are ended a moment later anyway.
     const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
-    // 3) A failure that means "the worktree is already gone" must STILL clear the binding —
+    // 2) A failure that means "the worktree is already gone" must STILL clear the binding —
     //    returning early there is exactly what turns a deleted directory into an unrecoverable
     //    group (Remove keeps failing, and the dead path keeps being handed to new terminals).
     if (!res.ok && !res.worktreeGone) {
       setNotice({ kind: 'error', text: res.message })
-      return
+      return // sessions untouched: nothing was removed.
     }
+    // 3) The directory is gone — end the child terminals' tmux sessions, which are now sitting in
+    //    a directory that no longer exists.
+    const childIds = nodesRef.current
+      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
+      .map((n) => n.id)
+    for (const id of childIds) transport.destroy(id)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
   }, [removeTarget, deleteFromDisk, clearWorktreeBinding])
@@ -2191,7 +2204,14 @@ export function Canvas() {
           // directory that still exists is never touched, so a wrongly-stale group cannot delete a
           // live checkout.
           if (wt && useWorktrees.getState().staleGroupIds.includes(groupId)) {
-            void window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, false, true)
+            // AWAIT the prune before re-reconciling: `worktree list` racing an unfinished prune
+            // still lists the pruned path, and the worktree we just cleaned up would pop back as
+            // an orphan the dialog offers.
+            void window.nodeTerminal.git
+              .worktreeRemove(wt.repoPath, wt.path, false, true)
+              .catch(() => {}) // a failed prune must still unbind — the binding is the user's ask
+              .finally(() => clearWorktreeBinding(groupId))
+            break
           }
           // The worktree is now an ORPHAN (it stays on disk) — re-reconcile so the dialog offers
           // it again instead of waiting for a project switch.
@@ -2241,7 +2261,32 @@ export function Canvas() {
   // transient, non-persisted trigger) so TerminalNode's session-creation effect re-runs —
   // its cleanup kills the old tmux session (same node id = same target) and create() spawns a
   // fresh one with the new cwd. Changing cwd alone wouldn't re-run that `[respawnNonce]` effect.
-  const requestMoveIntoWorktree = useCallback((nodeId: string) => setMoveTarget(nodeId), [])
+  //
+  // Both the request and the confirm resolve the target cwd through `cwdForNewNodeIn`, the ONE
+  // place that knows a stale group's path is dead. Reading `parent.data.worktree.path` directly
+  // (as this used to) let a stale group's ↪ destroy a live session and respawn it into a directory
+  // that no longer exists — pty-manager falls back to $HOME, and `data.cwd` then persists the dead
+  // path forever. Nothing may reach `transport.destroy` for a stale group.
+  const requestMoveIntoWorktree = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      const parentId = node?.parentId
+      const wtPath = nodesRef.current.find((p) => p.id === parentId)?.data.worktree?.path as
+        | string
+        | undefined
+      if (!wtPath) return
+      if (cwdForNewNodeIn(parentId) !== wtPath) {
+        // Stale binding: the button should already be hidden, so this is the belt to that braces.
+        setNotice({
+          kind: 'error',
+          text: 'That worktree directory is missing. Remove or unbind the group first.'
+        })
+        return
+      }
+      setMoveTarget(nodeId)
+    },
+    [cwdForNewNodeIn]
+  )
 
   const confirmMoveIntoWorktree = useCallback(() => {
     const id = moveTarget
@@ -2251,6 +2296,15 @@ export function Canvas() {
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
     if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
+    // Re-check at confirm time: the directory can vanish (or the group go stale) while the dialog
+    // is open. `cwdForNewNodeIn` returns the worktree path only for a HEALTHY binding.
+    if (cwdForNewNodeIn(node.parentId) !== wtPath) {
+      setNotice({
+        kind: 'error',
+        text: 'That worktree directory is missing. The terminal was left where it is.'
+      })
+      return
+    }
     // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
     // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
     // (which would keep the old working directory). The node id / persistKey is unchanged.
@@ -2270,7 +2324,7 @@ export function Canvas() {
       )
     )
     markDirty()
-  }, [moveTarget, setNodes, markDirty])
+  }, [moveTarget, setNodes, markDirty, cwdForNewNodeIn])
 
   // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
   useEffect(() => {
