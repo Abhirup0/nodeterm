@@ -343,8 +343,10 @@ export function buildAgentApi(
 
 /**
  * Build the `canvas` namespace over an RpcClient: a cast out (`canvas:mut`) and a subscription in on
- * the same channel. The server reflects each mutation to every OTHER client, so the `ev` frames we
- * receive here are always a peer's — never our own echo. This is a REAL implementation, not a stub:
+ * the same channel. The server stamps each mutation with the total order (`seq`) and reflects it to
+ * every client, us included — our own frame coming back is the ACK that carries our place in that
+ * order (the renderer recognizes it by `src`; see src/shared/canvas-order.ts). This is a REAL
+ * implementation, not a stub:
  * the Server Edition (two browsers on one workspace) is the surface that needs canvas sync most.
  */
 export function buildCanvasApi(client: RpcClient): Pick<NodeTerminalApi, 'canvas'> {

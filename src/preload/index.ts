@@ -295,7 +295,9 @@ const api: NodeTerminalApi = {
       ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
   // Canvas sync: one channel in both directions. The cast goes to the reflector (src/core/canvas-sync),
-  // which fans it to every OTHER attached client — so what arrives here is always a peer's mutation.
+  // which stamps it with the total order (`seq`) and fans it to every attached client — INCLUDING us.
+  // Our own mutation coming back is the ACK that tells us where it landed in that order; the renderer
+  // recognizes it by `src` and does not re-apply it (src/shared/canvas-order.ts).
   canvas: {
     mutate: (projectId, mutation) => ipcRenderer.send(IPC.canvasMut, projectId, mutation),
     onMutation: (listener) => {

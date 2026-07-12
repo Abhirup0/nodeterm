@@ -9,9 +9,14 @@ browsers, the Electron window, cursorless relay phones), a real `window.nodeTerm
 **Stage 2** — terminal co-attach (the [Terminal co-attach](#terminal-co-attach) section): one pty,
 N subscribers; idempotent `pty:create`; smallest-subscriber-wins sizing; per-client backpressure with
 an 8 MB drop-and-redraw ceiling; typing attribution; and the delete/recycle split.
-**Stage 3** — canvas mutation sync (the [Canvas sync](#canvas-sync) section): a stateless `canvas:mut`
-reflector, a diff-based publisher with an `adopt()` loop guard, a real `window.nodeTerminal.canvas` on
-both surfaces, and per-project apply (including into a loaded-but-inactive project's serialized nodes).
+**Stage 3** — canvas mutation sync (the [Canvas sync](#canvas-sync) section): a `canvas:mut` reflector
+that stamps one total order (`seq`) and fans each mutation to every client, a diff-based publisher
+with an `adopt()` loop guard and a solo gate, per-node last-write-wins in that order
+(`canvas-order.ts`) so concurrent edits **converge** instead of splitting the canvas in two, an
+in-place apply into the live React Flow array, a real `window.nodeTerminal.canvas` on both surfaces,
+and per-project apply (including into a loaded-but-inactive project's serialized nodes). What it
+resolves and what it does not:
+[Concurrent-edit resolution](#concurrent-edit-resolution-what-converges-and-what-does-not).
 Deltas between this document and what actually shipped are recorded in
 [What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec),
 [What Stage 2 changed](#what-stage-2-changed-relative-to-this-spec) and
@@ -323,14 +328,35 @@ independently on each client from the already-broadcast `agent:status` stream; a
   against the last one it published (`diffToMutations`), so edits that never pass through
   `onNodesChange` (a rename, a color pick, a collapse, a direct `setNodes`) sync too. Position frames
   are throttled to ~20 Hz while dragging and flushed on drag-stop; everything else is a full upsert.
-  Ephemeral subagent/loop cards are filtered out (`publishableStates`).
-- **Reflector** (`src/core/canvas-sync.ts`) — stateless: it holds no canvas state, persists nothing,
-  and sends each mutation to every attached client except the sender (`CorePlatform.clientIds()` +
-  `onWithSender`). Echo suppression is by sender `ClientId`.
+  Ephemeral subagent/loop cards are filtered out (`publishableStates`). Every mutation is stamped
+  with `src`, this Canvas's publisher tag.
+- **Solo gate** — `shouldPublish` (fed by the presence peer table, read through a ref so it can never
+  re-render Canvas). With nobody else attached, `publish()` degrades to `adopt()`: it takes the
+  snapshot as the baseline and does **no** diff, no `stableStringify` of every node, no IPC cast. A
+  solo user pays nothing for team sync, and because the baseline still tracks the canvas, the first
+  edit after a peer joins diffs correctly — no resync step, no missed mutation.
+- **Reflector** (`src/core/canvas-sync.ts`) — holds no canvas state and persists nothing, but it is
+  **not** stateless: it stamps every mutation with a monotone **`seq`** and sends it to **every**
+  attached client, the sender included (`CorePlatform.clientIds()` + `onWithSender`). `seq` is
+  server-authoritative (a client-supplied one is overwritten at ingest).
+- **Ordering** (`src/shared/canvas-order.ts`) — the client half, and the reason concurrent edits
+  converge instead of splitting the canvas in two. Per node, the highest `seq` wins. Two rules: (1)
+  our own echo is an **ack**, not an edit — it carries the `seq` our mutation was given, and is never
+  re-applied (re-applying it would rubber-band a node we are still dragging); (2) while one of our
+  own mutations for a node is unacked, we ignore peers' mutations for that node — FIFO delivery means
+  ours is necessarily *later* in the total order, so it will win on every other client too. A pending
+  entry expires after `PENDING_TTL_MS` so a cast the reflector refused cannot deafen a node forever.
 - **Loop guard** — a mutation applied from a peer is `adopt()`ed into the publisher's baseline before
   the next diff runs, so it can never be re-published (no A→B→C→A ping-pong).
 - **Apply** — the vocabulary is single-sourced in `src/shared/canvas-mutations.ts` and used by both
-  ends. `window.nodeTerminal.canvas` is real on the preload **and** the ws-bridge.
+  ends. In the renderer, an incoming mutation is patched into the **live React Flow array**
+  (`applyMutationToFlow`, `src/renderer/state/workspace.ts`) — never round-tripped through the
+  (lossy) serializers, which would wipe your selection, delete your relay-remote nodes and re-render
+  every node component on every peer mutation. `window.nodeTerminal.canvas` is real on the preload
+  **and** the ws-bridge.
+- **Undo is rebased, not clobbered** — a peer's mutation is applied to the undo baseline
+  (`committedRef`) rather than replacing it, so a local edit still inside the 300 ms undo debounce
+  survives a peer's mutation landing on top of it.
 
 ## UI
 
@@ -510,20 +536,54 @@ here so the delta is legible.
    (`TOMBSTONE_MAX` / `TOMBSTONE_TTL_MS`), still exempting the destroyer so their own ⌘Z works.
 
 5. **What canvas sync does NOT cover** (all deliberate; none of it is fixed by this stage):
-   - **Edges are not in the mutation vocabulary** — only nodes are. A context-link edge or a
-     sticky→terminal note link drawn by one client does **not** appear on the other, and a peer's
-     node *delete* can leave a **dangling edge** on your canvas (an edge whose endpoint node is
-     gone). React Flow tolerates it and the next save/load drops it, but until then it renders.
-   - **A peer's node removal unmounts the node but PARKS the terminal** — it does not kill the tmux
-     session locally, and it does not run the local delete path's cleanup
-     (`disposeTerminalOnUnmount` / `useAgentStatus.remove`). The session itself is already dead (the
-     *deleting* client's `transport.destroy` killed it), so nothing leaks server-side; what remains
-     on the peer is a parked xterm holding a dead pty until the 5-minute park timer fires, plus a
-     stale `agentStatus` entry for a node id that no longer exists.
+   - **Edges are NOT in the mutation vocabulary** — only nodes are, and edges (`edges`, `bridges`,
+     `ropes`) ride the same whole-file `workspace.save`, which is last-write-wins. So this is worse
+     than a cosmetic gap: an edge you draw does not appear on your peer's canvas, **and their next
+     save — of a canvas that never had it — DELETES it**, because their file write is authoritative
+     for the whole project. (Same in reverse: their edge dies on your save.) A peer's node delete
+     also leaves a **dangling edge** on your canvas until the next save/load drops it. Edge sync is
+     the obvious next slice of this stage; until then, draw links when you are alone on the canvas.
+   - **A peer's node removal unmounts the node and disposes its terminal co-state**
+     (`disposeTerminalOnUnmount` — the module-level xterm/park/co-attach state), but it does **not**
+     run the rest of the local delete path (`useAgentStatus.remove`, chat-driver dispose). The
+     session itself is already dead (the *deleting* client's `transport.destroy` killed it), so
+     nothing leaks server-side; what remains on the peer is a stale `agentStatus` entry for a node id
+     that no longer exists. Disposing the co-state matters because the delete is undoable: if the
+     owner hits ⌘Z, the node comes back **alive**, and a peer that had kept the stale co-state would
+     be looking at a node stuck in "closed by another user" whose only obvious cure (clicking `×`)
+     would kill the owner's live session for real.
    - **Project lifecycle** (create / rename / close / delete / folder change) is **not** synced.
    - **Viewport, selection and undo** are not synced. Undo is local per user, by design.
-   - **No conflict resolution beyond node-level last-write-wins.** Two clients editing the same node
-     converge on whichever mutation landed last — never a merge, never a duplicate. No CRDT.
+   - **No conflict resolution beyond per-node last-write-wins.** See
+     [Concurrent-edit resolution](#concurrent-edit-resolution-what-converges-and-what-does-not).
+     No CRDT.
+
+## Concurrent-edit resolution: what converges, and what does not
+
+**Converges — guaranteed, on any interleaving.** Every client ends with the same **node set** and
+the same **value** for every node, because every mutation is ordered by the reflector's `seq` and the
+highest `seq` per node wins everywhere (`src/shared/canvas-order.ts`). This is the property
+persistence depends on: whichever client's whole-file `workspace.save` runs, it writes a canvas the
+others agree with. Proven end-to-end against an **asynchronous** bus (queued casts + FIFO deliveries,
+edits genuinely in flight) in `src/core/canvas-sync.convergence.test.ts`.
+
+**Does NOT converge — named, not hidden:**
+
+- **Array order after a resurrection.** If a delete *loses* the order race, the client that issued it
+  removed the node and then re-appended it, so it can sit in a different **slot** in the array than
+  on a client that never removed it. Node set, positions, sizes and data all agree; only the array
+  order (which drives the sidebar listing) can differ, and the next load normalizes it.
+- **Intent, on a contended node.** Two people dragging the same node fight: the node lands wherever
+  the last-ordered frame put it. Two people typing a title get one title. That is last-write-wins,
+  not a merge — by design (no CRDT).
+- **A delete that loses to a concurrent edit.** If A deletes a node while B is mid-drag, and B's next
+  frame is ordered after A's remove, the node **survives on both canvases** — the last write wins,
+  and it happened to be an upsert. A's `transport.destroy` already killed the tmux session, so the
+  surviving node is a shell: opening it starts a fresh session. The node is *consistent* everywhere
+  (no split-brain save, which was the whole point), it is simply not the outcome A wanted. Deleting a
+  node someone else is actively dragging is a race between two humans; nodeterm resolves it, it does
+  not arbitrate it.
+- **Anything outside the node vocabulary** — edges, project lifecycle (see item 5 above).
 
 ## Non-goals (v1)
 
@@ -554,19 +614,32 @@ read-only guests, per-user settings.
   it. → `src/core/pty-manager-platform.test.ts`
 - **Single-client regression** (delivered): min-size equals your own size and the spawn path is
   unchanged. → `src/core/pty-single-user.test.ts` (17 tests)
-- **Canvas sync** (delivered): the reflector fans a mutation to every client but the sender, refuses a
-  malformed/oversized cast, and registers exactly once per platform; the publisher diffs snapshots,
-  throttles drag frames, flushes on settle, and `adopt()`s without emitting. →
-  `src/core/canvas-sync.test.ts`, `src/shared/canvas-publish.test.ts`,
+- **Canvas sync** (delivered): the reflector stamps the total order (`seq`, monotone across senders
+  and projects, never trusted from the client) and fans a mutation to every client *including* the
+  sender, refuses a malformed/oversized cast, and registers exactly once per platform; the publisher
+  diffs snapshots, stamps `src`, throttles drag frames, flushes on settle, `adopt()`s without
+  emitting, and — while solo — emits and diffs **nothing** while still keeping its baseline current.
+  → `src/core/canvas-sync.test.ts`, `src/shared/canvas-publish.test.ts`,
   `src/shared/canvas-mutations.test.ts`
-- **Canvas convergence** (delivered): two clients running the **real** publisher against the **real**
-  reflector, with interleaved local edits, land on identical node sets — in every interleaving tried;
-  last-write-wins on the same node produces one value, not a merge or a duplicate; a peer's mutation
-  is applied exactly once and **re-published never** (the `adopt()` loop guard: one cast per local
-  edit, no counter-cast, even for a bulk delete across three clients); a client never receives its own
-  mutation back; ephemeral subagent/loop cards never go on the wire; a client that joins late
-  converges with the other two; and a peer's delete is not resurrected by the surviving client's next
-  save. → `src/core/canvas-sync.convergence.test.ts` (8 tests)
+- **Ordering** (delivered): an own echo is an ack and is never re-applied; a peer's edit loses to an
+  unacked local edit of the same node (per node, counted per in-flight frame); a superseded straggler
+  is dropped; an ack that never comes expires. → `src/shared/canvas-order.test.ts` (11 tests)
+- **Canvas convergence** (delivered): two clients running the **real** publisher and **real** ordering
+  against the **real** reflector, over an **ASYNCHRONOUS** bus (casts and deliveries queued, FIFO per
+  link — so several edits are genuinely in flight and the test chooses the interleaving). *The
+  earlier synchronous bus could not express concurrency at all, and therefore "passed" a design that
+  diverged permanently on the first concurrent drag.* Covered: a concurrent move of the same node
+  converges on the ordered winner (both orderings); a concurrent delete-vs-drag converges (both ways
+  round) — no split-brain save; 20 frames of two clients dragging one node converge; three clients
+  editing one node converge; every interleaving × every settle point of a six-edit set converges; a
+  peer's mutation is applied once and **re-published never** (one cast per local edit, no
+  counter-cast, even for a bulk delete across three clients); ephemeral cards never go on the wire; a
+  late joiner converges; and a peer's delete is not resurrected by the surviving client's next save.
+  → `src/core/canvas-sync.convergence.test.ts` (14 tests)
+- **Applying a peer's mutation** (delivered): patches the live React Flow array — keeps your
+  selection, keeps relay-remote nodes, keeps local-only node data, keeps every untouched node's
+  object identity, drops the stale `measured` size so a peer's resize is not fought back, and keeps
+  group parents before their children. → `src/renderer/state/workspace.mutation.test.ts` (10 tests)
 
 ### Manual smoke test (Stage 1)
 
@@ -718,15 +791,43 @@ logged in, named, and on the **same project**.
    loop guard has regressed.
 8. **A SOLO user sees no change whatsoever.** The regression that matters most. In the desktop app
    (`npm run dev`), alone: add, drag, rename, recolor, group, delete nodes; undo/redo; switch projects
-   and back. With one client `clientIds()` has one entry and the reflector sends **nothing** — the
-   canvas must look and behave exactly as on `main`, with no extra dirty marks, no undo-stack entries
-   you did not create, and no node ever moving on its own.
+   and back. With no peer attached the publisher does not even **diff** (the solo gate) — the canvas
+   must look and behave exactly as on `main`, with no extra dirty marks, no undo-stack entries you did
+   not create, and no node ever moving on its own.
+9. **Both drag the same node.** A and B grab the **same** node and drag it in opposite directions for
+   a few seconds, then both let go. It fights (expected — last write wins), but when the dust settles
+   **both canvases show it in the same place**. Reload both: still the same place. (Before the
+   ordering fix, A and B ended up holding the node at two different positions *permanently*, and
+   whoever saved last silently moved it for the other.)
+10. **Delete a node the other is dragging.** B drags a node; A deletes it mid-drag. Whatever happens
+    (it survives on both, or it dies on both — the total order decides), **A and B agree**, and after
+    a reload of both tabs the canvas is the same on each. What must never happen is one of them
+    holding a node the other does not.
+11. **Your selection survives a teammate's drag.** In B, box-select two nodes and hold the selection
+    while A drags a *third* node around. B's selection must stay selected (before the in-place apply,
+    each of A's ~20 Hz mutations wiped it). Likewise, B's relay-remote terminal nodes (if any) must
+    not vanish while A edits.
+12. **Your undo is not eaten.** In B, move a node, and within a moment have A move a *different* node
+    (so a peer mutation lands during B's undo debounce). Now press ⌘Z in **B**: it must undo **B's**
+    move — not skip past it to an older state (which would also revert A's edit).
 
 ## Known risks
 
 - **Weak identity** — anyone can claim any name.
 - **Concurrent typing garbles input** — accepted; the badge is the warning.
 - **Cross-user undo** — last-write-wins, no CRDT.
+- **Per-node last-write-wins is a resolution, not an arbitration.** Clients always converge, but a
+  delete can lose to a concurrent drag frame (the node survives everywhere, with a dead session), and
+  two people dragging one node fight over it. Named in full under
+  [Concurrent-edit resolution](#concurrent-edit-resolution-what-converges-and-what-does-not).
+- **A peer's edge (context link / note link) is deleted by your next save.** Edges are not synced but
+  they *are* persisted, in the same whole-file write. See item 5 of
+  [What Stage 3 changed](#what-stage-3-changed-relative-to-this-spec).
+- **The publisher's solo gate reads the presence peer table.** If a client's presence handshake never
+  completes, that client sees no peers and therefore publishes nothing (it still *applies* what it
+  receives, and the first mutation from a peer flips the gate on for good). Presence and canvas sync
+  ride the same transport, so a client that cannot say hello generally cannot cast either — but the
+  coupling is real and is the price of a solo user paying zero.
 - **Cursor traffic** is 20 Hz × peers: comfortable for a 5–10 person team, not for a public room.
 - **Plain-shell (no tmux) co-attach shows a joiner a blank-but-live terminal** until the next output
   arrives (pressing Enter paints it). A joiner gets `fresh:false`, so it skips the cold-restore

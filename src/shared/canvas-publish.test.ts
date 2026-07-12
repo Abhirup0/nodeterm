@@ -119,6 +119,56 @@ describe('createCanvasPublisher', () => {
   })
 })
 
+describe('src (the sender tag)', () => {
+  // The reflector echoes a mutation back to its sender too — that echo is the ack that carries the
+  // total order. `src` is how the sender recognizes it as its own rather than re-applying it.
+  it('stamps every emitted mutation with the publisher tag', () => {
+    const c = collect()
+    const p = createCanvasPublisher(c.send, { src: 'cv-1' })
+    p.publish([node('a')])
+    p.publish([])
+    expect(c.sent).toEqual([
+      { op: 'upsert', node: node('a'), src: 'cv-1' },
+      { op: 'remove', id: 'a', src: 'cv-1' }
+    ])
+  })
+})
+
+// A solo user must not pay for team sync: diffing stableStringifies every node twice (~1.4 ms at
+// 100 nodes) and the `nodes` array changes at 60 Hz during a drag, all to cast into a void.
+describe('shouldPublish (the solo gate)', () => {
+  it('publishes nothing while no peer is attached', () => {
+    const c = collect()
+    const p = createCanvasPublisher(c.send, { shouldPublish: () => false })
+    p.publish([node('a')])
+    p.publish([node('a', 5)], { throttle: true })
+    p.flush()
+    vi.advanceTimersByTime(PUBLISH_INTERVAL_MS * 4)
+    expect(c.sent).toEqual([])
+  })
+
+  it('does not even arm the drag throttle timer while solo', () => {
+    const c = collect()
+    const p = createCanvasPublisher(c.send, { shouldPublish: () => false })
+    p.publish([node('a')], { throttle: true })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('the baseline still tracks the canvas: the first edit after a peer joins diffs correctly', () => {
+    const c = collect()
+    let peers = false
+    const p = createCanvasPublisher(c.send, { shouldPublish: () => peers })
+    p.publish([node('a'), node('b')]) // solo: nothing sent…
+    p.publish([node('a', 7), node('b')]) // …and edits keep updating the baseline
+    expect(c.sent).toEqual([])
+
+    peers = true // a teammate opens the canvas
+    p.publish([node('a', 7), node('b', 3)])
+    // ONLY the node that actually changed — no whole-canvas replay, no stale re-send of `a`.
+    expect(c.sent).toEqual([{ op: 'upsert', node: node('b', 3) }])
+  })
+})
+
 describe('ephemeral nodes are never published', () => {
   it('isEphemeralNodeId matches subagent cards (by id set) and loop cards (by prefix)', () => {
     const eph = new Set(['sub-123'])

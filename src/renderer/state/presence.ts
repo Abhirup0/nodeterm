@@ -36,9 +36,12 @@ import {
  * facepile and chase our own ghost cursor.
  *
  * PERF CONTRACT: only the presence components (PresenceLayer / Facepile / PresenceChips) may
- * subscribe to this store. Canvas.tsx is ~4000 lines — if a cursor at 20 Hz re-rendered it, every
- * mouse move would redraw the whole canvas. Canvas mounts the components and calls
- * connectPresence(); it never reads the store.
+ * subscribe to this store REACTIVELY. Canvas.tsx is ~4000 lines — if a cursor at 20 Hz re-rendered
+ * it, every mouse move would redraw the whole canvas. Canvas mounts the components and calls
+ * connectPresence(); it never uses the `usePresence(selector)` hook. It does read the peer table
+ * IMPERATIVELY — `getState()` + a plain `subscribe()` into a ref — for the canvas-sync solo gate
+ * ("is anyone else attached?"). That is not a subscription React can re-render on: no hook, no
+ * selector, no component state. Keep it that way.
  */
 
 export const ME_KEY = 'nodeterm.presence.me'

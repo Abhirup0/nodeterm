@@ -1,18 +1,27 @@
-// Convergence: two clients, interleaved local edits, one stateless reflector → identical node sets.
+// Convergence: two clients, interleaved local edits, one ordering reflector → identical node sets.
 //
-// No CRDT: node-level last-write-wins is the whole contract. This is the property that makes
-// persistence safe — whichever client calls workspace.save writes the same bytes, so a peer's
-// delete can never be written back to disk by someone whose canvas still held the node.
+// No CRDT: per-node last-write-wins IN THE REFLECTOR'S TOTAL ORDER is the whole contract. That
+// property is what makes persistence safe — whichever client calls workspace.save writes the same
+// bytes, so a peer's delete can never be written back to disk by someone whose canvas still held
+// the node, and two people dragging one node cannot leave it at two different places forever.
 //
-// Everything here runs against the REAL pieces: the real reflector (initCanvasSync), the real
-// publisher (createCanvasPublisher, diff + adopt loop guard + ephemeral filter) and the real
-// apply vocabulary (applyCanvasMutation). Only the transport is simulated — a Bus that routes
-// `sendTo(id, …)` into the addressed client, exactly as CorePlatform does on both shells.
+// THE BUS IS ASYNCHRONOUS, deliberately. The first version of this suite delivered each mutation
+// into the peer inside the sender's own cast() call, so two edits could never be in flight at once
+// — which is the ONLY condition under which last-write-wins can diverge. It therefore "passed" a
+// design that diverged permanently on the very first concurrent drag. A synchronous bus cannot
+// catch this class of bug. Here, casts and deliveries are QUEUED (FIFO per link, exactly as IPC and
+// a WebSocket deliver), so a test can hold several edits in flight and choose the interleaving.
+//
+// Everything else runs against the REAL pieces: the real reflector (initCanvasSync — `seq` stamping
+// + fan-out to every client, sender included), the real publisher (createCanvasPublisher: diff,
+// `src` stamping, adopt loop guard, ephemeral filter), the real ordering state (createCanvasOrder)
+// and the real apply vocabulary (applyCanvasMutation). Only the transport is simulated.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { initPlatform, resetPlatformForTests, type CorePlatform } from './platform'
 import { initCanvasSync } from './canvas-sync'
 import { applyCanvasMutation } from '../shared/canvas-mutations'
+import { createCanvasOrder } from '../shared/canvas-order'
 import { createCanvasPublisher, publishableStates } from '../shared/canvas-publish'
 import { IPC } from '../shared/ipc'
 import type { CanvasMutation, CanvasNodeState } from '../shared/types'
@@ -30,14 +39,21 @@ const node = (id: string, x: number, title = 't', color = '#fff'): CanvasNodeSta
 
 const PROJECT = 'p1'
 
-/** The transport: routes sendTo(id, …) into the addressed client's deliver hook, and counts every
- *  cast that reaches the reflector — the number that would grow without bound in an echo loop. */
+/**
+ * The transport, ASYNC. Two FIFO queues — the two orderings a real deployment guarantees:
+ *   - `casts`: client → reflector. The order the reflector pops them in IS the total order.
+ *   - `inbox[clientId]`: reflector → that client. Per-connection FIFO (IPC and WS both give this,
+ *     and canvas-order's rule 2 depends on it).
+ * Nothing moves until the test says so, so several clients can hold edits in flight at once.
+ */
 class Bus {
-  deliver = new Map<number, (projectId: string, m: CanvasMutation) => void>()
-  private senderListeners = new Map<string, (senderId: number, ...args: any[]) => void>()
+  private readonly senderListeners = new Map<string, (senderId: number, ...args: any[]) => void>()
+  private readonly casts: Array<{ sender: number; projectId: string; m: CanvasMutation }> = []
+  private readonly inbox = new Map<number, Array<{ projectId: string; m: CanvasMutation }>>()
+  readonly deliver = new Map<number, (projectId: string, m: CanvasMutation) => void>()
   clients: number[] = []
   /** Total casts made BY clients (publisher → reflector). One per real local edit; never more. */
-  casts = 0
+  castCount = 0
 
   platform: CorePlatform = {
     userDataDir: '/tmp/nodeterm-convergence',
@@ -50,38 +66,85 @@ class Bus {
     clientIds: () => this.clients,
     sendTo: (to, channel, ...args) => {
       if (channel !== IPC.canvasMut) return
-      this.deliver.get(to)?.(args[0] as string, args[1] as CanvasMutation)
+      const q = this.inbox.get(to) ?? []
+      q.push({ projectId: args[0] as string, m: args[1] as CanvasMutation })
+      this.inbox.set(to, q)
     },
     broadcast: () => {},
     openExternal: async () => {}
   }
 
+  /** A client casts: the mutation is QUEUED, not reflected. It reaches the reflector on settle(). */
   cast(senderId: number, projectId: string, m: CanvasMutation): void {
-    this.casts++
-    this.senderListeners.get(IPC.canvasMut)?.(senderId, projectId, m)
+    this.castCount++
+    this.casts.push({ sender: senderId, projectId, m })
+  }
+
+  /** Pop one cast into the reflector — this is where a mutation gets its place in the total order. */
+  private stepCast(): boolean {
+    const c = this.casts.shift()
+    if (!c) return false
+    this.senderListeners.get(IPC.canvasMut)?.(c.sender, c.projectId, c.m)
+    return true
+  }
+
+  /** Pop one queued delivery into its addressed client (FIFO within that client's inbox). */
+  private stepDelivery(): boolean {
+    for (const id of this.clients) {
+      const q = this.inbox.get(id)
+      if (!q?.length) continue
+      const d = q.shift() as { projectId: string; m: CanvasMutation }
+      this.deliver.get(id)?.(d.projectId, d.m)
+      return true
+    }
+    return false
+  }
+
+  /** Run the network to quiescence: every queued cast reflected, every delivery delivered. */
+  settle(): void {
+    for (let i = 0; i < 10_000; i++) {
+      if (this.stepCast()) continue
+      if (this.stepDelivery()) continue
+      return
+    }
+    throw new Error('bus did not settle — mutation loop?')
   }
 }
 
-/** A simulated client: its own node list, its own publisher, wired to the reflector by ClientId.
- *  Mirrors the two Canvas effects — publish the diff of the settled snapshot, and adopt (never
- *  re-publish) whatever arrives from a peer. */
+/** A simulated client: its own node list, publisher and ordering state, wired by ClientId.
+ *  Mirrors the two Canvas effects — publish the diff of the settled snapshot; on an incoming
+ *  mutation ask the ordering state whether to apply it, then adopt (never re-publish) the result. */
 class Client {
   states: CanvasNodeState[] = []
   /** Ephemeral cards (subagent / loop) this client renders — derived locally, never published. */
   ephemeral = new Set<string>()
-  /** Mutations received FROM peers (echo suppression means: never one of our own). */
-  received = 0
-  private readonly pub = createCanvasPublisher((m) => this.bus.cast(this.id, PROJECT, m))
+  /** Mutations APPLIED from the wire (an own echo, or one the order supersedes, is not applied). */
+  applied = 0
+  private readonly order: ReturnType<typeof createCanvasOrder>
+  private readonly pub: ReturnType<typeof createCanvasPublisher>
 
   constructor(
     readonly id: number,
     private readonly bus: Bus
   ) {
+    // Built here, not as field initializers: a field initializer runs BEFORE the parameter
+    // properties are assigned, so `this.id` would still be undefined and both clients would stamp
+    // the same `src` — every peer mutation would then look like their own echo.
+    const src = `src-${id}`
+    this.order = createCanvasOrder(src)
+    this.pub = createCanvasPublisher(
+      (m) => {
+        this.order.onLocal(m)
+        bus.cast(id, PROJECT, m)
+      },
+      { src }
+    )
     bus.deliver.set(id, (projectId, m) => {
       if (projectId !== PROJECT) return
-      this.received++
+      if (!this.order.accept(m)) return
+      this.applied++
       this.states = applyCanvasMutation(this.states, m)
-      this.pub.adopt(this.publishable()) // loop guard — never re-publish a peer's change
+      this.pub.adopt(this.publishable()) // loop guard — never re-publish someone else's change
     })
   }
 
@@ -110,42 +173,141 @@ class Client {
   ids(): string[] {
     return this.states.map((n) => n.id).sort()
   }
+
+  x(id: string): number | undefined {
+    return this.states.find((n) => n.id === id)?.position.x
+  }
 }
+
+/**
+ * The convergence contract, canonically: the same NODE SET, and the same VALUE for every node.
+ *
+ * Array ORDER is deliberately NOT part of it. When a delete loses the order race, the client that
+ * issued it removed the node and then re-appended it (applyCanvasMutation appends an upsert of an
+ * absent node), so its array can end up carrying that node in a different SLOT than a client that
+ * never removed it. Array order drives only the sidebar listing — positions, sizes, data and the
+ * node set all agree, so either client's save writes a canvas the other agrees with. Documented as
+ * such in docs/team-presence.md; use this helper wherever a resurrection can happen.
+ */
+const canon = (c: Client): CanvasNodeState[] =>
+  [...c.persisted()].sort((x, y) => x.id.localeCompare(y.id))
 
 let bus: Bus
 let a: Client
 let b: Client
 
-beforeEach(() => {
+function boot(): void {
   bus = new Bus()
   initPlatform(bus.platform)
   initCanvasSync()
   a = new Client(1, bus)
   b = new Client(2, bus)
   bus.clients = [1, 2]
-})
+}
+
+beforeEach(boot)
 afterEach(() => resetPlatformForTests())
 
-describe('canvas convergence', () => {
+describe('canvas convergence (async bus)', () => {
+  // THE case a synchronous bus cannot express: both clients edit the SAME node before either has
+  // heard from the other. Two people dragging one node cross like this on every single frame.
+  it('concurrent move of the same node converges (both land on the ordered winner)', () => {
+    a.edit([node('n1', 0)])
+    bus.settle()
+
+    // In flight at the same time: A drags n1 to 200, B drags the same node to 100.
+    a.edit([node('n1', 200)])
+    b.edit([node('n1', 100)])
+    bus.settle()
+
+    expect(a.states).toEqual(b.states)
+    expect(a.x('n1')).toBe(b.x('n1'))
+    // The reflector popped A's cast first, so B's is the LATER write in the total order — B wins,
+    // on both canvases. (Before the ordering fix: A showed 200 and B showed 100, forever.)
+    expect(a.x('n1')).toBe(100)
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  it('converges whichever way the reflector orders the two concurrent writes', () => {
+    b.edit([node('n1', 100)]) // B's cast is queued first this time
+    a.edit([node('n1', 200)])
+    bus.settle()
+    expect(a.states).toEqual(b.states)
+    expect(a.x('n1')).toBe(200) // A's cast was popped last → A wins, on both
+  })
+
+  // The bug Stage 3 exists to kill, in its sharpest form: A deletes a node while B is dragging it.
+  // Divergence here is not cosmetic — A's next whole-file workspace.save would write the node
+  // straight back over B's canvas (or vice versa).
+  it('concurrent delete vs move of the same node converges (no split-brain save)', () => {
+    a.edit([node('n1', 0), node('n2', 0)])
+    bus.settle()
+
+    a.edit(a.states.filter((n) => n.id !== 'n1')) // A deletes n1…
+    b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 50) : n))) // …while B drags it
+    bus.settle()
+
+    // Whatever the total order decided, BOTH clients agree — that is the save-safety property.
+    // Here A's remove was ordered first, so B's later drag frame wins and the node survives on both
+    // (an honest last-write-wins outcome; see docs/team-presence.md). What can no longer happen is
+    // A holding the node while B does not — the split-brain that made A's save resurrect it on disk.
+    expect(a.ids()).toEqual(b.ids())
+    expect(a.ids()).toEqual(['n1', 'n2'])
+    expect(canon(a)).toEqual(canon(b)) // same node set, same values (A re-appended n1: see `canon`)
+    expect(a.x('n1')).toBe(50) // B's drag frame is the last write
+  })
+
+  it('delete wins when it is the later write, and stays deleted on both', () => {
+    a.edit([node('n1', 0), node('n2', 0)])
+    bus.settle()
+
+    b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 50) : n))) // B's move is cast first…
+    a.edit(a.states.filter((n) => n.id !== 'n1')) // …A's delete is ordered after it
+    bus.settle()
+
+    expect(a.ids()).toEqual(['n2'])
+    expect(b.ids()).toEqual(['n2'])
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  // A drag is a STREAM of concurrent writes: 20 Hz of frames from each side, all in flight at once.
+  it('two clients dragging the same node for many frames still converge', () => {
+    a.edit([node('n1', 0)])
+    bus.settle()
+    for (let i = 1; i <= 20; i++) {
+      a.edit([node('n1', i * 10)])
+      b.edit([node('n1', 1000 - i * 10)])
+      if (i % 3 === 0) bus.settle() // …with the network catching up only sometimes
+    }
+    bus.settle()
+
+    expect(a.states).toEqual(b.states)
+    expect(a.persisted()).toEqual(b.persisted())
+  })
+
   it('interleaved mutations from two clients leave identical node sets', () => {
     a.edit([node('n1', 0)]) // A adds n1
+    bus.settle()
     b.edit([...b.states, node('n2', 0)]) // B adds n2
+    bus.settle()
     a.edit(a.states.map((n) => (n.id === 'n1' ? node('n1', 40) : n))) // A drags n1
     b.edit(b.states.map((n) => (n.id === 'n2' ? node('n2', 0, 'B') : n))) // B renames n2
+    bus.settle()
     a.edit(a.states.filter((n) => n.id !== 'n2')) // A deletes B's node
+    bus.settle()
 
     expect(a.ids()).toEqual(b.ids())
     expect(a.ids()).toEqual(['n1'])
     expect(a.states).toEqual(b.states)
-    expect(a.states.find((n) => n.id === 'n1')!.position.x).toBe(40)
+    expect(a.x('n1')).toBe(40)
     // The whole point: whichever client saves, it writes the same bytes.
     expect(a.persisted()).toEqual(b.persisted())
   })
 
-  it('converges under EVERY interleaving of the same edit set', () => {
-    // Six independent edits, replayed in a batch of different orders. The reflector is stateless
-    // and the apply is deterministic, so every order must land on one node set — the only variable
-    // is WHICH value survives on a node both clients touched (last write wins, checked below).
+  it('converges under every interleaving AND every settle point of the same edit set', () => {
+    // Six edits, replayed in different orders AND with the network settling at different points —
+    // `settleEvery: 6` means all six are cast before a single one is delivered, i.e. maximum
+    // concurrency. Both clients must land on one node set every time.
     const orders = [
       [0, 1, 2, 3, 4, 5],
       [5, 4, 3, 2, 1, 0],
@@ -154,50 +316,72 @@ describe('canvas convergence', () => {
       [4, 2, 0, 3, 5, 1]
     ]
     for (const order of orders) {
-      bus = new Bus()
-      initPlatform(bus.platform)
-      initCanvasSync()
-      a = new Client(1, bus)
-      b = new Client(2, bus)
-      bus.clients = [1, 2]
+      for (const settleEvery of [1, 2, 6]) {
+        resetPlatformForTests()
+        boot()
 
-      const edits: Array<() => void> = [
-        () => a.edit([...a.states.filter((n) => n.id !== 'n1'), node('n1', 10)]),
-        () => b.edit([...b.states.filter((n) => n.id !== 'n2'), node('n2', 20)]),
-        () => a.edit(a.states.map((n) => (n.id === 'n2' ? node('n2', 99) : n))),
-        () => b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 10, 'renamed') : n))),
-        () => a.edit([...a.states.filter((n) => n.id !== 'n3'), node('n3', 30)]),
-        () => b.edit(b.states.filter((n) => n.id !== 'n3'))
-      ]
-      for (const i of order) edits[i]()
+        const edits: Array<() => void> = [
+          () => a.edit([...a.states.filter((n) => n.id !== 'n1'), node('n1', 10)]),
+          () => b.edit([...b.states.filter((n) => n.id !== 'n2'), node('n2', 20)]),
+          () => a.edit(a.states.map((n) => (n.id === 'n2' ? node('n2', 99) : n))),
+          () => b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 10, 'renamed') : n))),
+          () => a.edit([...a.states.filter((n) => n.id !== 'n3'), node('n3', 30)]),
+          () => b.edit(b.states.filter((n) => n.id !== 'n3'))
+        ]
+        let n = 0
+        for (const i of order) {
+          edits[i]()
+          if (++n % settleEvery === 0) bus.settle()
+        }
+        bus.settle()
 
-      expect(a.states, `order ${order.join('')}`).toEqual(b.states)
-      expect(a.ids(), `order ${order.join('')}`).toEqual(b.ids())
-      expect(a.persisted(), `order ${order.join('')}`).toEqual(b.persisted())
-      resetPlatformForTests()
+        const tag = `order ${order.join('')} settle/${settleEvery}`
+        // `canon`, not raw array equality: this set contains a delete that can lose the order race,
+        // and the client that issued it re-appends the node in a different slot (see `canon`).
+        expect(a.ids(), tag).toEqual(b.ids())
+        expect(canon(a), tag).toEqual(canon(b))
+      }
     }
+  })
+
+  it('three clients editing the same node concurrently converge on one value', () => {
+    const c = new Client(3, bus)
+    bus.clients = [1, 2, 3]
+    a.edit([node('n1', 0)])
+    bus.settle()
+
+    a.edit([node('n1', 1)])
+    b.edit([node('n1', 2)])
+    c.edit([node('n1', 3)])
+    bus.settle()
+
+    expect(a.states).toEqual(b.states)
+    expect(b.states).toEqual(c.states)
+    expect(a.x('n1')).toBe(3) // C's cast was ordered last
   })
 
   it('last write wins on a concurrent edit to the same node (no CRDT, no merge, no duplicate)', () => {
     a.edit([node('n1', 0)])
     a.edit([node('n1', 10)])
     b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 20) : n)))
+    bus.settle()
 
     expect(a.states).toEqual(b.states)
     expect(a.states).toHaveLength(1) // one node, not two — upsert replaces by id
-    expect(a.states[0].position.x).toBe(20) // B wrote last
   })
 
-  it('no infinite loop: a peer mutation is applied once and re-published NEVER', () => {
+  it('no infinite loop: an applied mutation is never re-published', () => {
     a.edit([node('n1', 0)])
-    expect(b.received).toBe(1)
-    expect(a.received).toBe(0) // echo suppression: A never gets its own mutation back
-    expect(bus.casts).toBe(1) // one local edit → exactly one cast; B did not re-emit it
+    bus.settle()
+    expect(b.applied).toBe(1)
+    expect(a.applied).toBe(0) // A's own echo is an ACK, not an edit — applied optimistically already
+    expect(bus.castCount).toBe(1) // one local edit → exactly one cast; B did not re-emit it
 
     b.edit(b.states.map((n) => (n.id === 'n1' ? node('n1', 5) : n)))
-    expect(a.received).toBe(1)
-    expect(b.received).toBe(1) // B's own edit did not come back, and A did not re-emit it
-    expect(bus.casts).toBe(2) // still one cast per local edit — the adopt() guard holds
+    bus.settle()
+    expect(a.applied).toBe(1)
+    expect(b.applied).toBe(1) // B did not apply its own echo, and A did not re-emit it
+    expect(bus.castCount).toBe(2) // still one cast per local edit — the adopt() guard holds
     expect(a.states).toEqual(b.states)
   })
 
@@ -205,26 +389,30 @@ describe('canvas convergence', () => {
     const c = new Client(3, bus)
     bus.clients = [1, 2, 3]
     a.edit([node('n1', 0), node('n2', 0), node('n3', 0)])
-    expect(bus.casts).toBe(3) // three upserts, from A only
+    bus.settle()
+    expect(bus.castCount).toBe(3) // three upserts, from A only
     a.edit([]) // bulk delete — three removes in one tick
-    expect(bus.casts).toBe(6) // three removes, from A only: B and C reflected nothing back
+    bus.settle()
+    expect(bus.castCount).toBe(6) // three removes, from A only: B and C reflected nothing back
     expect(b.states).toEqual([])
     expect(c.states).toEqual([])
-    expect(a.received + b.received + c.received).toBe(12) // 6 mutations × 2 peers each
+    expect(b.applied + c.applied).toBe(12) // 6 mutations × 2 peers each
   })
 
   it('ephemeral subagent / loop cards are never published', () => {
     a.ephemeral.add('subagent-abc')
     a.edit([node('n1', 0), node('subagent-abc', 5), node('loop-n1', 9)])
+    bus.settle()
 
     expect(a.ids()).toEqual(['loop-n1', 'n1', 'subagent-abc']) // A still renders its own cards
     expect(b.ids()).toEqual(['n1']) // …and the peer got only the real node
-    expect(b.received).toBe(1)
+    expect(b.applied).toBe(1)
 
     // Moving an ephemeral card emits nothing at all (it is not in the published baseline).
-    const casts = bus.casts
+    const casts = bus.castCount
     a.edit(a.states.map((n) => (n.id === 'subagent-abc' ? node('subagent-abc', 77) : n)))
-    expect(bus.casts).toBe(casts)
+    bus.settle()
+    expect(bus.castCount).toBe(casts)
     expect(b.ids()).toEqual(['n1'])
     // …and the real nodes still converge.
     expect(a.persisted()).toEqual(b.persisted())
@@ -234,16 +422,18 @@ describe('canvas convergence', () => {
     a.edit([node('n1', 0)])
     a.edit([...a.states, node('n2', 0)])
     a.edit(a.states.filter((n) => n.id !== 'n1')) // n1 deleted before C ever connects
+    bus.settle()
 
     const c = new Client(3, bus)
     bus.clients = [1, 2, 3]
     c.states = [...a.states] // a fresh client loads the canvas from disk/store on mount
     c.pubAdopt() // …and adopts it as the baseline, without republishing it
-    expect(bus.casts).toBe(3) // the join itself cast nothing
+    expect(bus.castCount).toBe(3) // the join itself cast nothing
 
     a.edit(a.states.map((n) => (n.id === 'n2' ? node('n2', 7) : n)))
     b.edit([...b.states, node('n4', 1)])
     c.edit(c.states.map((n) => (n.id === 'n2' ? node('n2', 7, 'from C') : n)))
+    bus.settle()
 
     expect(c.states).toEqual(a.states)
     expect(b.states).toEqual(a.states)
@@ -253,7 +443,9 @@ describe('canvas convergence', () => {
 
   it('a peer delete is not resurrected by the surviving client (the save-safety property)', () => {
     a.edit([node('n1', 0), node('n2', 0)])
+    bus.settle()
     b.edit(b.states.filter((n) => n.id !== 'n1')) // B deletes n1
+    bus.settle()
 
     // A's canvas — the one that would be written by ITS next whole-file workspace.save — no longer
     // carries n1. Before Stage 3, A's save would have written the deleted node straight back.
@@ -262,6 +454,7 @@ describe('canvas convergence', () => {
 
     // And A's subsequent edit does not reintroduce it either.
     a.edit(a.states.map((n) => (n.id === 'n2' ? node('n2', 3) : n)))
+    bus.settle()
     expect(b.ids()).toEqual(['n2'])
   })
 })

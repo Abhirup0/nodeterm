@@ -15,9 +15,9 @@
 // `adopt` is what stops an infinite echo: when a mutation arrives FROM a peer, Canvas applies it and
 // adopts the result, so the React effect that fires for the resulting `nodes` change diffs to nothing.
 // (Same shape as the existing `loadingRef` suppression that keeps a programmatic project load from
-// marking the project dirty.) The reflector already suppresses a client's OWN echo by ClientId; this
-// guard is the other half — without it, A's mutation applied on B would be re-published by B to C
-// (and back at A) forever.
+// marking the project dirty.) Without it, A's mutation applied on B would be re-published by B to C
+// (and back at A) forever. The other half of the anti-loop is canvas-order, which never *applies* a
+// client's own echoed-back mutation in the first place.
 //
 // Pure + DOM-free (vitest runs in the node environment): only setTimeout, no React, no window.
 
@@ -29,7 +29,9 @@ export const PUBLISH_INTERVAL_MS = 50
 
 export interface CanvasPublisher {
   /** Diff `next` against the last published snapshot and send the mutations.
-   *  `throttle` (drag frames) coalesces to at most one send per PUBLISH_INTERVAL_MS. */
+   *  `throttle` (drag frames) coalesces to at most one send per PUBLISH_INTERVAL_MS.
+   *  With no peer attached (`shouldPublish` false) this DEGRADES TO adopt(): the snapshot becomes
+   *  the baseline and nothing is diffed or sent — a solo user pays nothing for team sync. */
   publish(next: CanvasNodeState[], opts?: { throttle?: boolean }): void
   /** Take `next` as the new baseline WITHOUT sending — the loop guard (a peer's mutation, or a
    *  programmatic project load). The next diff against it is empty. */
@@ -39,19 +41,37 @@ export interface CanvasPublisher {
   dispose(): void
 }
 
+/**
+ * @param send        casts one mutation (already stamped with `src`).
+ * @param opts.src    this client's publisher tag, stamped onto every mutation it sends, so it can
+ *                    recognize its own echo coming back (see canvas-order). Omitted in tests that
+ *                    only care about the diff.
+ * @param opts.shouldPublish
+ *   THE SOLO GATE. When it returns false — nobody else is attached — publish() takes the snapshot
+ *   as the baseline and returns: no stableStringify of every node (~1.4 ms at 100 nodes, and the
+ *   `nodes` array changes at 60 Hz during a drag), no IPC cast, no work in the main process. A solo
+ *   user must not pay for a feature they cannot use. The baseline still tracks the canvas, so the
+ *   instant a peer joins the very next edit diffs correctly against what is actually on screen —
+ *   there is no resync step and no missed mutation. Default: always publish.
+ */
 export function createCanvasPublisher(
   send: (m: CanvasMutation) => void,
-  opts: { intervalMs?: number } = {}
+  opts: { intervalMs?: number; src?: string; shouldPublish?: () => boolean } = {}
 ): CanvasPublisher {
   const intervalMs = opts.intervalMs ?? PUBLISH_INTERVAL_MS
+  const shouldPublish = opts.shouldPublish ?? (() => true)
   let last: CanvasNodeState[] = []
   let pending: CanvasNodeState[] | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
 
   const emit = (next: CanvasNodeState[]): void => {
+    if (!shouldPublish()) {
+      last = next // solo: adopt as baseline, diff nothing, send nothing
+      return
+    }
     const mutations = diffToMutations(last, next)
     last = next
-    for (const m of mutations) send(m)
+    for (const m of mutations) send(opts.src ? { ...m, src: opts.src } : m)
   }
 
   const onTimer = (): void => {
@@ -64,6 +84,14 @@ export function createCanvasPublisher(
 
   return {
     publish(next, o) {
+      if (!shouldPublish()) {
+        // Solo: not even a throttle timer. Just keep the baseline current for the peer who joins.
+        if (timer) clearTimeout(timer)
+        timer = null
+        pending = null
+        last = next
+        return
+      }
       if (o?.throttle) {
         // Leading edge sends at once; further frames inside the window coalesce into one trailing send.
         if (timer) {

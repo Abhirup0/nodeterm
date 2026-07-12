@@ -44,8 +44,9 @@ export const IPC = {
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
-   *  (src/core/canvas-sync.ts) sends them back out on the SAME channel to every OTHER attached
-   *  client. Args (both directions): [projectId: string, CanvasMutation]. */
+   *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
+   *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see
+   *  src/shared/canvas-order.ts). Args (both directions): [projectId: string, CanvasMutation]. */
   canvasMut: 'canvas:mut',
   contextLinkSetLinks: 'context-link:set-links',
   contextLinkInfo: 'context-link:info',

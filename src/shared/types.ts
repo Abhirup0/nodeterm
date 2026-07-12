@@ -151,10 +151,19 @@ export interface CanvasState {
 /**
  * A minimal change to a canvas node list: replace-or-append a node by id, or drop one by id.
  * Used for the client's optimistic edits and host-side diffing (see `applyMutation`/`diffToMutations`).
+ *
+ * `src` and `seq` exist ONLY on the team canvas-sync path (`canvas:mut`), and they are what makes
+ * two people editing one node CONVERGE instead of splitting brain (see src/shared/canvas-order.ts):
+ *  - `src` is stamped by the sending client's publisher — a random per-Canvas tag, so a client can
+ *    recognize its OWN mutation coming back (the reflector echoes to everyone, sender included:
+ *    that echo is the ACK that tells the sender where its edit landed in the total order).
+ *  - `seq` is stamped by the reflector (src/core/canvas-sync.ts) and is the TOTAL ORDER. It is
+ *    server-authoritative: a client-supplied `seq` is overwritten at ingest, never trusted.
+ * The relay's host↔client mirror (src/main/remote) uses the same vocabulary and simply omits both.
  */
 export type CanvasMutation =
-  | { op: 'upsert'; node: CanvasNodeState }
-  | { op: 'remove'; id: string }
+  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number }
+  | { op: 'remove'; id: string; src?: string; seq?: number }
 
 /** Canvas pan/zoom state. */
 export interface Viewport {

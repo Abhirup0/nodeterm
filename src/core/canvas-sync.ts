@@ -1,16 +1,27 @@
 // Canvas sync — the reflector.
 //
 // Every attached client (an Electron renderer, a Server-Edition browser tab) casts its LOCAL node
-// mutations on `canvas:mut`. This service sends each one back out on the same channel to every
-// OTHER attached client, so all clients converge on the same node set — a teammate's cursor never
-// hovers over stale geometry, and a client whose canvas still held a node someone else deleted can
-// no longer write it back on the next whole-file workspace.save.
+// mutations on `canvas:mut`. This service stamps each one with a monotone `seq` and sends it back
+// out on the same channel to EVERY attached client, so all clients converge on the same node set —
+// a teammate's cursor never hovers over stale geometry, and a client whose canvas still held a node
+// someone else deleted can no longer write it back on the next whole-file workspace.save.
 //
-// It is a pipe, not a store: it holds NO canvas state, applies no policy, and persists nothing.
-// The canvas itself stays where it has always been — React Flow in each renderer — and the disk
-// write stays with WorkspaceStore. Echo suppression is by sender ClientId: a client must never
-// receive its own mutation back (it would fight its own optimistic state, and with the renderer's
-// diff-publisher it would loop).
+// THE `seq` IS THE POINT, and it is the one piece of state here. Without a total order, two clients
+// that edit the same node while each other's mutation is in flight apply them in OPPOSITE orders
+// and diverge permanently — see the derivation in src/shared/canvas-order.ts, which is the client
+// half of this contract. `seq` is server-authoritative: whatever the client put there is
+// overwritten at ingest, so a client cannot forge its way to the front of the order.
+//
+// IT ECHOES TO THE SENDER TOO — that is deliberate, and it replaced the earlier sender-suppression.
+// A sender's own echo is its ACK: it is the only way it learns where its edit landed in the total
+// order, which is what lets it decide whether a peer's mutation supersedes its own optimistic
+// state. The client drops the echo instead of re-applying it (canvas-order rule 1), so it does not
+// fight its own optimistic state, and the publisher's `adopt` guard still means nothing is
+// re-published: no loop.
+//
+// Beyond `seq` it is a pipe, not a store: it holds NO canvas state, applies no policy, and persists
+// nothing. The canvas itself stays where it has always been — React Flow in each renderer — and the
+// disk write stays with WorkspaceStore.
 //
 // NOT RATE-LIMITED, deliberately — unlike presence (see PRESENCE_RATE_BUDGETS). A presence cast is
 // a SAMPLED signal whose loss is self-correcting: the next cursor frame carries the current
@@ -38,9 +49,26 @@ import type { CanvasMutation } from '../shared/types'
  */
 export const MUTATION_MAX_BYTES = 256_000
 
-/** Every attached client except the sender. Pure — exported for the test. */
-export function reflectTargets(all: ClientId[], sender: ClientId): ClientId[] {
-  return all.filter((id) => id !== sender)
+/**
+ * Every attached client the mutation goes to — INCLUDING the sender, whose copy is its ack (see the
+ * header). Pure — exported for the test. `sender` is kept in the signature: it is the seam a policy
+ * would need, and dropping it would make "the sender is included" look accidental rather than
+ * chosen.
+ */
+export function reflectTargets(all: ClientId[], _sender: ClientId): ClientId[] {
+  return all.slice()
+}
+
+/**
+ * Stamp a client's mutation with its place in the total order, and BOUND the client-supplied `src`
+ * tag (it is echoed to every peer, and a client could otherwise plant a megabyte there — or forge
+ * another client's tag, which would only ever make that client ignore an edit meant for it, but is
+ * still not something to reflect unchecked). Pure — exported for the test.
+ */
+export function stampMutation(m: CanvasMutation, seq: number): CanvasMutation {
+  const stamped: CanvasMutation = { ...m, seq }
+  if (!isRefId(stamped.src)) delete stamped.src
+  return stamped
 }
 
 /** An id off the wire: non-empty and bounded by the shared ref cap (node ids and project ids are
@@ -87,17 +115,30 @@ function withinSizeLimit(m: unknown): boolean {
  *  boot (or a fresh test platform) registers again. */
 let registeredOn: CorePlatform | null = null
 
+/**
+ * The total order. One counter for the whole process (not per project): `seq` is only ever compared
+ * between mutations addressing the SAME node, and node ids are globally unique (a node id is a tmux
+ * session name), so a single counter orders every canvas correctly and cannot be confused by a
+ * client that switches projects. Reset with the registration, so a fresh boot starts from 0 — which
+ * is safe because a client's ordering state (canvas-order) is per Canvas mount and starts empty too.
+ */
+let seq = 0
+
 /** Install the `canvas:mut` reflector. Call once at boot, after initPlatform(). */
 export function initCanvasSync(): void {
   const p = platform()
   if (registeredOn === p) return
   registeredOn = p
+  seq = 0
   p.onWithSender(IPC.canvasMut, (senderId: number, projectId: unknown, mutation: unknown) => {
     // Which canvas the edit belongs to is client-supplied too, and it is reflected verbatim.
     if (!isRefId(projectId)) return
     if (!isCanvasMutation(mutation)) return
+    // Stamped ONCE, here: the order every client will agree on. The sender is in the target list —
+    // its copy is the ack that tells it where its own edit landed (see the header).
+    const stamped = stampMutation(mutation, ++seq)
     for (const id of reflectTargets(p.clientIds(), senderId)) {
-      p.sendTo(id, IPC.canvasMut, projectId, mutation)
+      p.sendTo(id, IPC.canvasMut, projectId, stamped)
     }
   })
 }
