@@ -24,9 +24,12 @@ export function effectiveSize(sizes: Iterable<PtySize>): PtySize | null {
     any = true
   }
   if (!any) return null
-  // node-pty throws on a 0 dimension, and a not-yet-measured subscriber can report 0.
+  // node-pty throws on a 0 dimension, and a not-yet-measured subscriber can report 0. It also
+  // wants INTEGERS — xterm's fit addon can report a fractional measurement on a zoomed/HiDPI
+  // canvas — so floor first (round down: never claim more columns than the smallest client has)
+  // and clamp to >= 1 after, so a sub-1 measurement still yields a 1-col pty rather than 0.
   return {
-    cols: Number.isFinite(cols) ? Math.max(1, cols) : 1,
-    rows: Number.isFinite(rows) ? Math.max(1, rows) : 1
+    cols: Number.isFinite(cols) ? Math.max(1, Math.floor(cols)) : 1,
+    rows: Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
   }
 }

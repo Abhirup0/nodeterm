@@ -37,7 +37,8 @@ function fakePty() {
     resize: (sessionId, cols, rows) =>
       calls.push({ method: 'resize', args: [sessionId, cols, rows] }),
     setFlow: (sessionId, resume) => calls.push({ method: 'setFlow', args: [sessionId, resume] }),
-    kill: (sessionId) => calls.push({ method: 'kill', args: [sessionId] })
+    // Relay-served ptys are killed with clientId null (they have no UI subscribers).
+    kill: (clientId, sessionId) => calls.push({ method: 'kill', args: [clientId, sessionId] })
   }
   return {
     mgr,
@@ -217,7 +218,7 @@ describe('createHostHandlers', () => {
     await openViaAttach(h)
     h.onRpc({ id: 'r2', method: 'pty.kill', params: { streamId: 1 } })
 
-    expect(pty.calls).toContainEqual({ method: 'kill', args: ['pty-1'] })
+    expect(pty.calls).toContainEqual({ method: 'kill', args: [null, 'pty-1'] })
     // After kill, input for the dropped stream is ignored.
     pty.calls.length = 0
     h.onFrame({ op: OP.Input, streamId: 1, seq: 0, payload: new TextEncoder().encode('x') })

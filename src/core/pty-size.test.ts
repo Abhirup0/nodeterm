@@ -28,6 +28,13 @@ describe('effectiveSize', () => {
   it('returns null for an empty subscriber set', () => {
     expect(effectiveSize([])).toBeNull()
   })
+
+  it('floors to integers (node-pty resize() rejects fractional cols/rows)', () => {
+    // xterm's fit addon can hand us a fractional measurement on a zoomed/HiDPI canvas.
+    expect(effectiveSize([{ cols: 80.7, rows: 24.9 }])).toEqual({ cols: 80, rows: 24 })
+    // Flooring must not undercut the >=1 clamp: 0.5 cols is still a 1-col pty, not 0.
+    expect(effectiveSize([{ cols: 0.5, rows: 0.5 }])).toEqual({ cols: 1, rows: 1 })
+  })
 })
 
 describe('per-session channels', () => {

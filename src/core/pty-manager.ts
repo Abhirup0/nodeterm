@@ -22,6 +22,7 @@ import {
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
+import { type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
@@ -224,11 +225,24 @@ export async function findInLoginPath(bin: string): Promise<string | null> {
   return null
 }
 
+/** A UI client: an Electron webContents id or a ServerPlatform uiId. */
+type ClientId = number
+
 interface Session {
   proc: pty.IPty
-  /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
-  webContentsId: number | null
-  /** Detached sinks: when set, output/exit go to these callbacks instead of IPC (relay host). */
+  /** Every UI watching this session. Co-attach: ONE pty and ONE tmux client, N subscribers —
+   *  a second client on the same persistKey joins this set instead of spawning a second tmux
+   *  client (whose `-D` would then kick the first one off). Empty for a purely detached
+   *  (relay-served) session. */
+  subscribers: Set<ClientId>
+  /** Each subscriber's last reported cols/rows. The pty runs at the min of these (Task 3). */
+  sizes: Map<ClientId, PtySize>
+  /** The node id this session was created for, whether or not it is tmux-persisted — the key of
+   *  the `byPersistKey` co-attach index (`persistKey` below is only set for PERSISTED sessions,
+   *  because it also gates scrollback snapshots). Undefined for a relay-served (detached) pty,
+   *  which is deliberately not indexed. */
+  indexKey?: string
+  /** Detached sinks: when set, output/exit ALSO go to these callbacks (relay host). */
   onData?: (data: string) => void
   onExit?: (exitCode: number) => void
   /** Pending output chunks, coalesced into one IPC message per flush. */
@@ -253,6 +267,20 @@ export interface DetachedSinks {
   onExit(exitCode: number): void
 }
 
+/**
+ * tmux attach flags. `-A` = attach-or-create. `-D` = detach OTHER clients on attach.
+ *
+ * `-D` STAYS for the app's own client, and co-attach does not change that: a second viewer
+ * subscribes to the existing `Session` in this process — it does NOT start a second tmux client.
+ * The app therefore always has exactly ONE tmux client per session, so tmux's own multi-client
+ * size negotiation never engages and "smallest subscriber wins" is decided by us (pty-size.ts).
+ * A relay-served (detached) pty is the one exception: the host's local client is already attached
+ * to the same session and must be mirrored, not kicked off.
+ */
+export function tmuxAttachFlags(detached: boolean): string[] {
+  return detached ? ['-A'] : ['-A', '-D']
+}
+
 // Output coalescing: a fast producer (e.g. `yes`, a verbose build, tmux full-screen
 // redraws) emits many small chunks. Buffering them for one short window collapses N
 // IPC messages + N xterm writes into one, which is the single hottest path in the app.
@@ -270,6 +298,9 @@ const MAX_BUF_BYTES = 256 * 1024
  */
 export class PtyManager {
   private sessions = new Map<string, Session>()
+  /** persistKey (node id) → live sessionId. The index that makes `pty:create` idempotent:
+   *  a second client asking for the same node subscribes to the running session. */
+  private byPersistKey = new Map<string, string>()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -349,7 +380,11 @@ export class PtyManager {
     platform().on(IPC.ptyFlow, (sessionId: string, resume: boolean) =>
       this.setFlow(sessionId, resume)
     )
-    platform().on(IPC.ptyKill, (sessionId: string) => this.kill(sessionId))
+    // Sender-aware: with co-attach a kill detaches just THAT client, and the pty (and the tmux
+    // session behind it) survives while any other subscriber is still watching.
+    platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) =>
+      this.kill(senderId, sessionId)
+    )
     platform().on(IPC.ptyDestroy, (persistKey: string) => this.destroySession(persistKey))
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
@@ -359,10 +394,23 @@ export class PtyManager {
     )
   }
 
-  private async create(
-    webContentsId: number,
-    options: PtyCreateOptions
-  ): Promise<PtyCreateResult> {
+  private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
+    // Co-attach: a live session for this node id already exists in THIS process (another client,
+    // or this client's own second view). Subscribe to it instead of spawning a second tmux client
+    // — `-D` would otherwise kick the first viewer off. `fresh:false` tells the renderer it joined
+    // a live session: no cold-restore scrollback replay, no agent resume (tmux redraws instead).
+    if (options.persistKey) {
+      const existingId = this.byPersistKey.get(options.persistKey)
+      const existing = existingId ? this.sessions.get(existingId) : undefined
+      if (existingId && existing) {
+        existing.subscribers.add(clientId)
+        existing.sizes.set(clientId, { cols: options.cols, rows: options.rows })
+        this.applySize(existingId, existing)
+        return existing.accountFallback
+          ? { sessionId: existingId, fresh: false, accountFallback: true }
+          : { sessionId: existingId, fresh: false }
+      }
+    }
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -385,7 +433,7 @@ export class PtyManager {
     // Ensure the login-shell PATH is resolved (prewarmed in init(); usually already settled)
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
-    const sessionId = this.spawnSession(options, webContentsId, undefined)
+    const sessionId = this.spawnSession(options, clientId, undefined)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
     const accountFallback = this.sessions.get(sessionId)?.accountFallback
     return accountFallback ? { sessionId, fresh, accountFallback } : { sessionId, fresh }
@@ -490,7 +538,8 @@ export class PtyManager {
 
   private spawnSession(
     options: PtyCreateOptions,
-    webContentsId: number | null,
+    /** The client this session is spawned for, or null for a relay-served (detached) pty. */
+    clientId: ClientId | null,
     sinks: DetachedSinks | undefined
   ): string {
     const sessionId = `pty-${++this.counter}`
@@ -644,7 +693,7 @@ export class PtyManager {
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
-      const attachFlags = sinks ? ['-A'] : ['-A', '-D']
+      const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',
         TMUX_SOCKET,
@@ -714,7 +763,12 @@ export class PtyManager {
     const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
     const session: Session = {
       proc,
-      webContentsId,
+      subscribers: clientId === null ? new Set<ClientId>() : new Set<ClientId>([clientId]),
+      sizes:
+        clientId === null
+          ? new Map<ClientId, PtySize>()
+          : new Map<ClientId, PtySize>([[clientId, { cols: options.cols, rows: options.rows }]]),
+      indexKey: options.persistKey && !sinks ? options.persistKey : undefined,
       onData: sinks?.onData,
       onExit: sinks?.onExit,
       buf: [],
@@ -727,21 +781,34 @@ export class PtyManager {
     }
     if (persisted) this.ensureSnapshotTimer()
     this.sessions.set(sessionId, session)
+    // Index by node id even when the session is NOT tmux-persisted (`persisted` only governs
+    // scrollback snapshots): co-attach must work for a plain-shell session too. Detached
+    // (relay-served) ptys are deliberately NOT indexed — the relay path keeps its own session,
+    // exactly as before, so this change cannot regress it.
+    if (session.indexKey) this.byPersistKey.set(session.indexKey, sessionId)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
-      if (session.onExit) {
-        session.onExit(exitCode)
-      } else if (webContentsId !== null) {
-        this.send(webContentsId, IPC.ptyExit(sessionId), exitCode)
-      }
-      this.sessions.delete(sessionId)
+      session.onExit?.(exitCode) // relay host sink (unchanged)
+      for (const sub of session.subscribers) this.send(sub, IPC.ptyExit(sessionId), exitCode)
+      this.forget(sessionId, session)
     })
 
     return sessionId
   }
+
+  /** Drop a dead/released session from both indexes. Keyed off `indexKey` (not `persistKey`,
+   *  which is only set for tmux-PERSISTED sessions) so a plain-shell node is un-indexed too. */
+  private forget(sessionId: string, session: Session): void {
+    this.sessions.delete(sessionId)
+    if (session.indexKey && this.byPersistKey.get(session.indexKey) === sessionId)
+      this.byPersistKey.delete(session.indexKey)
+  }
+
+  /** Resize the pty to the smallest subscriber's size and tell everyone (Task 3). */
+  private applySize(_sessionId: string, _session: Session): void {}
 
   /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
   private queueData(sessionId: string, session: Session, data: string): void {
@@ -755,7 +822,7 @@ export class PtyManager {
     }
   }
 
-  /** Send all buffered output for a session as a single IPC message. */
+  /** Send all buffered output for a session to every subscriber as a single IPC message. */
   private flush(sessionId: string, session: Session): void {
     if (session.flushTimer) {
       clearTimeout(session.flushTimer)
@@ -765,11 +832,9 @@ export class PtyManager {
     const data = session.buf.join('')
     session.buf = []
     session.bufBytes = 0
-    if (session.onData) {
-      session.onData(data)
-    } else if (session.webContentsId !== null) {
-      this.send(session.webContentsId, IPC.ptyData(sessionId), data)
-    }
+    session.onData?.(data) // relay host sink (unchanged)
+    const channel = IPC.ptyData(sessionId)
+    for (const sub of session.subscribers) this.send(sub, channel, data)
   }
 
   /**
@@ -801,12 +866,29 @@ export class PtyManager {
   }
 
   /**
-   * Detach the client. With tmux this only kills our client process; the tmux
-   * session keeps running so it can be reattached later.
+   * One client detaches (node unmount / tab close). With co-attach this is per-CLIENT: the pty
+   * (and the tmux session behind it) survives while anyone else is still watching. Only when the
+   * last subscriber leaves — and no relay sink is attached — do we release the pty client. With
+   * tmux the tmux session itself keeps running either way, as always.
+   *
+   * `clientId` is null for the relay host releasing its own detached (sink-served) pty: it drops
+   * the sinks, which are that session's only "subscriber".
    */
-  kill(sessionId: string): void {
+  kill(clientId: ClientId | null, sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    if (clientId === null) {
+      session.onData = undefined
+      session.onExit = undefined
+    } else {
+      session.subscribers.delete(clientId)
+      session.sizes.delete(clientId)
+    }
+    if (session.subscribers.size > 0 || session.onData) {
+      // Somebody is still watching: the departing client's size no longer constrains the pty.
+      this.applySize(sessionId, session)
+      return
+    }
     if (session.flushTimer) clearTimeout(session.flushTimer)
     // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
     // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
@@ -816,7 +898,7 @@ export class PtyManager {
     // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone leaks the
     // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
     releasePty(session.proc as ReleasablePty)
-    this.sessions.delete(sessionId)
+    this.forget(sessionId, session)
   }
 
   /**
@@ -945,6 +1027,16 @@ export class PtyManager {
     // destroy() is called (close button) while the session is still live, so its sshRemote is
     // known. Capture it synchronously before any await.
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    // Un-index NOW (synchronously): the node is gone for good, so a create() that races the
+    // kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
+    // session instead of co-attaching to the one we are about to destroy. The Session object
+    // itself is dropped by its own onExit / the client's kill().
+    const dyingId = this.byPersistKey.get(persistKey)
+    if (dyingId) {
+      this.byPersistKey.delete(persistKey)
+      const dying = this.sessions.get(dyingId)
+      if (dying) dying.indexKey = undefined
+    }
     // The node is gone for good — drop its cold-restore snapshot too.
     await deleteScrollback(persistKey)
     if (sshRemote) {
@@ -988,10 +1080,11 @@ export class PtyManager {
       releasePty(session.proc as ReleasablePty)
     }
     this.sessions.clear()
+    this.byPersistKey.clear()
     return Promise.all(finals).then(() => undefined)
   }
 
-  private send(webContentsId: number, channel: string, payload: unknown): void {
-    platform().sendTo(webContentsId, channel, payload)
+  private send(clientId: ClientId, channel: string, payload: unknown): void {
+    platform().sendTo(clientId, channel, payload)
   }
 }

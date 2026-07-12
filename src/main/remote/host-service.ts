@@ -11,7 +11,8 @@
 //     into an `OP.Error` frame (then the stream is dropped).
 //   - `OP.Input`  frame -> `write(sessionId, <utf-8 payload>)`
 //   - `OP.Resize` frame -> `resize(sessionId, cols, rows)` (payload = 2x uint16 LE)
-//   - RPC `pty.kill {streamId}` -> `kill(sessionId)`
+//   - RPC `pty.kill {streamId}` -> `kill(null, sessionId)` (null = the relay owns this pty; it has
+//     no UI subscribers, so dropping its sinks releases it)
 // Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
 // and resumes it on the next successful send.
 //
@@ -62,7 +63,8 @@ export interface HostPtyManager {
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
   setFlow(sessionId: string, resume: boolean): void
-  kill(sessionId: string): void
+  /** `clientId` is null for a relay-served (detached) pty: the sinks ARE its only subscriber. */
+  kill(clientId: number | null, sessionId: string): void
 }
 
 // The slice of RelaySocket the host needs to answer the client.
@@ -294,7 +296,7 @@ export function createHostHandlers(
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
     if (stream) {
-      pty.kill(stream.sessionId)
+      pty.kill(null, stream.sessionId)
       dropStream(streamId)
     }
     socket.respond(req.id, true, {})
@@ -354,7 +356,7 @@ export function createHostHandlers(
     },
     closeAll() {
       for (const stream of streams.values()) {
-        pty.kill(stream.sessionId)
+        pty.kill(null, stream.sessionId)
       }
       streams.clear()
     }
