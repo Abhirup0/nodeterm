@@ -301,12 +301,13 @@ export function buildFilesApi(
         branch,
         baseRef
       ) as ReturnType<GitApi['worktreeMerge']>,
-    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
+    worktreeRemove: (repoPath, wtPath, deleteBranch, pruneOnly) =>
       client.request(
         IPC.gitWorktreeRemove,
         repoPath,
         wtPath,
-        deleteBranch
+        deleteBranch,
+        pruneOnly
       ) as ReturnType<GitApi['worktreeRemove']>,
     setActiveRemote: (projectId) =>
       client.request(IPC.gitSetActiveRemote, projectId) as Promise<void>

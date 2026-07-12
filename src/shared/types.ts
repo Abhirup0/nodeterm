@@ -533,6 +533,9 @@ export interface GitStatus {
 export interface GitResult {
   ok: boolean
   message: string
+  /** worktreeRemove() only: the worktree is no longer on disk (registration pruned, or never
+   *  registered), so the caller must clear its binding even when `ok` is false. */
+  worktreeGone?: boolean
   /** Set by publish() when no usable GitHub credential was found, so the UI can
    *  fall back to an interactive `gh auth login` instead of just showing an error. */
   needsAuth?: boolean
@@ -605,7 +608,9 @@ export interface GitApi {
   worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
   worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
-  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
+  /** `pruneOnly`: clean up git's registration only — never delete a directory. Used to prune a
+   *  stale binding whose worktree was already deleted outside the app. */
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean): Promise<GitResult>
   /** Scope remote git routing to the active project: pass its id to route git over that SSH
    *  project's master, or null for a local project so all git ops run locally. */
   setActiveRemote(projectId: string | null): Promise<void>

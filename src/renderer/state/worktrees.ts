@@ -24,7 +24,14 @@ interface WorktreesState {
   staleGroupIds: string[]
   statusByPath: Record<string, WorktreeStatus>
   refresh(projectCwd: string, bound: BoundGroup[]): Promise<void>
-  refreshStatus(path: string): Promise<void>
+  /**
+   * Poll one bound worktree's status. Pass the bound group's id to also keep its staleness LIVE:
+   * `refresh()` only runs on project load / mutation, so without this a worktree deleted while the
+   * user watches would keep a healthy-looking chip (and a restored one would keep saying "missing")
+   * until a reload. `hasRepo === false` = the directory is gone → mark the group stale; a repo
+   * answering again un-marks it.
+   */
+  refreshStatus(path: string, groupId?: string): Promise<void>
   reset(): void
 }
 
@@ -90,7 +97,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     }
   },
 
-  async refreshStatus(path) {
+  async refreshStatus(path, groupId) {
     const mineEpoch = epoch
     const now = Date.now()
     const prev = lastStatusAt.get(path) ?? 0
@@ -107,9 +114,23 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     if (mineEpoch !== epoch) return
     // A deleted worktree does NOT reject: git-service answers with an empty status. Writing it
     // would render a dead worktree as a healthy one on a blank branch — `staleGroupIds` is what
-    // tells that story, so keep the last known status instead.
-    if (!status.hasRepo) return
+    // tells that story, so mark the group stale instead of keeping a lie on screen.
+    if (!status.hasRepo) {
+      if (groupId) {
+        set((s) =>
+          s.staleGroupIds.includes(groupId)
+            ? s
+            : { staleGroupIds: [...s.staleGroupIds, groupId] }
+        )
+      }
+      return
+    }
     set((s) => ({
+      // The directory answers again (restored, or a transient read failure passed) → not stale.
+      staleGroupIds:
+        groupId && s.staleGroupIds.includes(groupId)
+          ? s.staleGroupIds.filter((g) => g !== groupId)
+          : s.staleGroupIds,
       statusByPath: {
         ...s.statusByPath,
         [path]: {

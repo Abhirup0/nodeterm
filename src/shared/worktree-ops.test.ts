@@ -70,6 +70,19 @@ describe('worktreeMerge', () => {
     const r = await worktreeMerge(git, '/repo', 'feature/x', 'main')
     expect(r.ok).toBe(false)
   })
+  it('sends the user to the base checkout on an in-place merge conflict, not the worktree', async () => {
+    // The base branch IS checked out and clean → merge-in-place → the conflict is in the BASE dir.
+    const list = 'worktree /base\nHEAD aaa\nbranch refs/heads/main\n'
+    const { git } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      'status --porcelain': ok(''),
+      'merge --no-ff --no-edit feature/x': ko('CONFLICT (content): Merge conflict in a.ts')
+    })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('/base')
+    expect(r.message).not.toContain('worktree terminal')
+  })
 })
 
 describe('worktreeRemove', () => {
@@ -98,5 +111,41 @@ describe('worktreeRemove', () => {
     expect(calls.some((c) => c.join(' ') === 'worktree remove --force -- /wt/x')).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'branch -d feature/x')).toBe(true)
+  })
+  it('keeps the branch when the caller does not own it', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', false)
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c[0] === 'branch')).toBe(false)
+  })
+  it('prunes (and never removes) a worktree whose directory is already gone', async () => {
+    const list =
+      'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\nprunable gitdir file points to non-existent location\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true)
+    expect(r.ok).toBe(true)
+    expect(r.worktreeGone).toBe(true)
+    expect(calls.some((c) => c[1] === 'remove')).toBe(false)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
+  })
+  it('reports an unregistered worktree as gone (and prunes) so the caller can clear the binding', async () => {
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false)
+    expect(r.ok).toBe(false)
+    expect(r.worktreeGone).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
+    expect(calls.some((c) => c[1] === 'remove')).toBe(false)
+  })
+  it('pruneOnly never touches a worktree directory that still exists', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true, true)
+    expect(r.ok).toBe(false)
+    expect(calls.some((c) => c[1] === 'remove')).toBe(false)
+    expect(calls.some((c) => c[0] === 'branch')).toBe(false)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(false)
   })
 })

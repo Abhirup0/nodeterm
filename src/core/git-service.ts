@@ -222,8 +222,8 @@ export class GitService {
     platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string) =>
       this.worktreeMerge(repoPath, branch, baseRef)
     )
-    platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean) =>
-      this.worktreeRemove(repoPath, wtPath, deleteBranch)
+    platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean) =>
+      this.worktreeRemove(repoPath, wtPath, deleteBranch, pruneOnly)
     )
   }
 
@@ -239,8 +239,8 @@ export class GitService {
   worktreeMerge(repoPath: string, branch: string, baseRef: string) {
     return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef)
   }
-  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean) {
-    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch)
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly = false) {
+    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch, pruneOnly)
   }
 
   async status(cwd: string): Promise<GitStatus> {

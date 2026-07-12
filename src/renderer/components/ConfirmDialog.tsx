@@ -6,6 +6,9 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   cancelLabel?: string
   danger?: boolean
+  /** An explicit opt-in shown above the buttons (e.g. "Delete the worktree directory from disk
+   *  too"). The caller owns the value, so it can also swap the confirm label / danger styling. */
+  option?: { label: string; checked: boolean; onChange: (checked: boolean) => void }
   onConfirm: () => void
   onCancel: () => void
 }
@@ -16,6 +19,7 @@ export function ConfirmDialog({
   confirmLabel = 'Delete',
   cancelLabel = 'Cancel',
   danger = true,
+  option,
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
@@ -37,6 +41,16 @@ export function ConfirmDialog({
     <div className="confirm-overlay" onClick={onCancel}>
       <div className="confirm" onClick={(e) => e.stopPropagation()}>
         <p className="confirm__msg">{message}</p>
+        {option && (
+          <label className="confirm__option">
+            <input
+              type="checkbox"
+              checked={option.checked}
+              onChange={(e) => option.onChange(e.target.checked)}
+            />
+            {option.label}
+          </label>
+        )}
         <div className="confirm__actions">
           <button className="confirm__btn" onClick={onCancel}>
             {cancelLabel}

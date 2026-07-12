@@ -40,17 +40,41 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // when the node last happened to render (verified — it sat at "0 changed" until the canvas was
   // clicked). Hence a tick. It owns no cache and no `git status` of its own: it just pokes the
   // store, whose throttle still decides whether a real read happens (so N frames don't mean N
-  // reads, and a mid-window render still coalesces). A stale worktree has no directory left to
-  // stat, so it isn't polled.
+  // reads, and a mid-window render still coalesces).
+  //
+  // A STALE worktree is polled too (that is how a group un-stales when the directory comes back —
+  // e.g. the user restored it, or a git read failed transiently), and the poke carries the group id
+  // so the store can flip staleness live instead of only at project load.
+  //
+  // `git status` is the full Source-Control read (~10 git subprocesses), so it is gated on page
+  // visibility: a hidden tab / minimized window polls nothing, and a `visibilitychange` back to
+  // visible pokes immediately so the chip is correct the moment it is seen again. (Gating here
+  // rather than hoisting a single store-owned timer keeps the poll tied to the node's own
+  // mount/unmount lifecycle — no registry to leak — and the store's throttle already coalesces
+  // several groups on the same path.)
   useEffect(() => {
-    if (!wtPath || stale) return
-    const poke = () => void useWorktrees.getState().refreshStatus(wtPath)
+    if (!wtPath) return
+    const poke = (): void => {
+      if (document.visibilityState === 'hidden') return
+      void useWorktrees.getState().refreshStatus(wtPath, id)
+    }
     poke()
     const t = setInterval(poke, WORKTREE_STATUS_THROTTLE_MS)
-    return () => clearInterval(t)
-  }, [wtPath, stale])
+    document.addEventListener('visibilitychange', poke)
+    return () => {
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', poke)
+    }
+  }, [wtPath, id])
 
-  const ungroup = () => setNodes((ns) => ungroupNodes(ns as CanvasNode[], id))
+  // Dissolving the frame destroys the worktree binding (the frame IS the binding) while the
+  // worktree itself stays on disk. Route that through Canvas's `unbind` first, so the store
+  // re-reconciles (the worktree is offered as an orphan again, and a stale registration is
+  // pruned) instead of the binding silently vanishing until the next project switch.
+  const ungroup = (): void => {
+    if (wt) worktreeActionHandler?.(id, 'unbind')
+    setNodes((ns) => ungroupNodes(ns as CanvasNode[], id))
+  }
 
   // A bound frame must read as a checkout at a glance: solid border + a stronger tint of the
   // group's OWN color (no new palette). Stale drops the hue entirely and goes muted/warning.
@@ -156,7 +180,11 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
             )}
             <button
               className="group-node__wt-btn"
-              title="Unbind worktree (keeps the worktree on disk)"
+              title={
+                stale
+                  ? 'Unbind (the directory is gone — also prunes the stale git registration)'
+                  : 'Unbind worktree (keeps the worktree on disk)'
+              }
               onClick={() => worktreeActionHandler?.(id, 'unbind')}
             >
               Unbind

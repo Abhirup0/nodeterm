@@ -64,8 +64,10 @@ export function WorktreeDialog({
   }, [onCancel])
 
   // No writable base dir is known, so we refuse to *suggest* a path — an empty base would
-  // otherwise propose `/worktrees/…` at the filesystem root. The user can still type one.
-  const pathUnknown = !pathEdited && !path.trim()
+  // otherwise propose `/worktrees/…` at the filesystem root. The user can still type one. The hint
+  // tracks the FIELD, not `pathEdited`: clearing the box after editing it also leaves Create
+  // disabled, and a disabled button with no explanation is a dead end.
+  const pathUnknown = !path.trim()
   const valid = !!repoPath.trim() && !!branch.trim() && !!path.trim() && !busy
   const title = intent === 'bind' ? 'Bind to worktree' : 'New worktree'
   const createLabel = intent === 'bind' ? 'Create & bind' : 'Create'
@@ -83,14 +85,23 @@ export function WorktreeDialog({
           <div className="bind-existing">
             <div className="bind-existing__title">Existing worktrees</div>
             {existing.map((e) => (
+              // A detached-HEAD worktree cannot be bound (there is no branch to merge or name the
+              // group after), so the row is DISABLED and says why — clicking it used to be a
+              // silent no-op.
               <button
                 key={e.path}
                 className="bind-existing__row"
-                disabled={busy}
+                disabled={busy || !e.branch}
                 onClick={() => onBindExisting(e)}
-                title={e.path}
+                title={
+                  e.branch
+                    ? e.path
+                    : `${e.path}\nDetached HEAD — check out a branch in this worktree first.`
+                }
               >
-                <span className="bind-existing__branch">⎇ {e.branch ?? '(detached)'}</span>
+                <span className="bind-existing__branch">
+                  {e.branch ? `⎇ ${e.branch}` : '⎇ (detached HEAD — check out a branch first)'}
+                </span>
                 <span className="bind-existing__path">{e.path}</span>
               </button>
             ))}

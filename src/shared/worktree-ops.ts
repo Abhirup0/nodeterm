@@ -11,7 +11,17 @@ export interface GitExec { ok: boolean; out: string; err: string }
 /** Injected git runner: runs `git <args>` in `cwd`. */
 export type GitExecutor = (cwd: string, args: string[]) => Promise<GitExec>
 /** Renderer-facing result (structurally a `GitResult`). */
-export interface WorktreeOpResult { ok: boolean; message: string }
+export interface WorktreeOpResult {
+  ok: boolean
+  message: string
+  /**
+   * `worktreeRemove` only: the worktree is no longer on disk (its registration was pruned, or it
+   * was never registered). The caller MUST clear its binding even when `ok` is false — otherwise a
+   * group whose directory was deleted behind git's back can never be cleaned up: removal keeps
+   * failing and the dead path keeps being handed to new terminals.
+   */
+  worktreeGone?: boolean
+}
 
 export async function repoRoot(git: GitExecutor, cwd: string): Promise<string | null> {
   if (!cwd) return null
@@ -65,7 +75,12 @@ export async function worktreeMerge(
     const r = await git(plan.path, ['merge', '--no-ff', '--no-edit', branch])
     if (!r.ok) {
       await git(plan.path, ['merge', '--abort'])
-      return { ok: false, message: 'Merge conflict. Resolve it in the worktree terminal.' }
+      // The merge ran in the BASE checkout, so that is where the conflict is — sending the user to
+      // the worktree terminal (as this message used to) points at the wrong directory entirely.
+      return {
+        ok: false,
+        message: `Merge conflict in the base checkout (${plan.path}). Resolve it there, then try again.`
+      }
     }
   }
   // Best-effort push if a remote exists; ignore failure (offline / no remote).
@@ -74,8 +89,18 @@ export async function worktreeMerge(
   return { ok: true, message: `Merged ${branch} into ${baseRef}.` }
 }
 
+/**
+ * Remove a worktree (and optionally its branch).
+ *
+ * `pruneOnly` = clean up git's REGISTRATION only, never the filesystem. It is what a stale binding
+ * (directory deleted behind git's back) needs: without a prune, git keeps listing the path and a
+ * later `git worktree add` at the same place fails with "missing but already registered worktree".
+ * A directory that still exists is left completely alone in that mode — a wrongly-stale group must
+ * never be able to delete a live checkout.
+ */
 export async function worktreeRemove(
-  git: GitExecutor, repoPath: string, wtPath: string, homeDir: string, deleteBranch: boolean
+  git: GitExecutor, repoPath: string, wtPath: string, homeDir: string, deleteBranch: boolean,
+  pruneOnly = false
 ): Promise<WorktreeOpResult> {
   // Reject a path that could be parsed as an option flag (argv injection).
   if (!wtPath || wtPath.startsWith('-')) return { ok: false, message: 'Invalid worktree path.' }
@@ -84,8 +109,30 @@ export async function worktreeRemove(
   }
   const list = await worktreeList(git, repoPath)
   const entry = list.find((e) => e.path.replace(/\/+$/, '') === wtPath.replace(/\/+$/, ''))
-  if (!entry) return { ok: false, message: 'Worktree is not registered.' }
+  if (!entry) {
+    // Nothing to remove: git does not know this path (deleted + already pruned, or never a
+    // worktree of this repo). Prune anyway — a leftover registration elsewhere would block a
+    // future `worktree add` — and tell the caller the worktree is gone so it clears its binding.
+    if (!pruneOnly) await git(repoPath, ['worktree', 'prune'])
+    return { ok: false, worktreeGone: true, message: 'Worktree is not registered — it is already gone.' }
+  }
   const branch = entry.branch
+  if (entry.prunable) {
+    // git still lists it, but the directory is gone. `worktree remove` would fail; prune the
+    // registration instead and touch no files.
+    await git(repoPath, ['worktree', 'prune'])
+    if (!pruneOnly && deleteBranch && branch && isValidGitRef(branch)) {
+      await git(repoPath, ['branch', '-d', branch])
+    }
+    return {
+      ok: true,
+      worktreeGone: true,
+      message: 'The worktree directory was already gone; its registration was pruned.'
+    }
+  }
+  if (pruneOnly) {
+    return { ok: false, message: 'The worktree directory still exists; nothing was pruned.' }
+  }
   // `--` ends option parsing so wtPath can never be read as a flag (verified git ≥2.39).
   const rm = await git(repoPath, ['worktree', 'remove', '--force', '--', wtPath])
   if (!rm.ok) return { ok: false, message: rm.err }

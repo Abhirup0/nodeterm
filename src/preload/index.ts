@@ -170,8 +170,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.gitWorktreeAdd, repoPath, wtPath, branch, baseRef, isNew),
     worktreeMerge: (repoPath, branch, baseRef) =>
       ipcRenderer.invoke(IPC.gitWorktreeMerge, repoPath, branch, baseRef),
-    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
-      ipcRenderer.invoke(IPC.gitWorktreeRemove, repoPath, wtPath, deleteBranch),
+    worktreeRemove: (repoPath, wtPath, deleteBranch, pruneOnly) =>
+      ipcRenderer.invoke(IPC.gitWorktreeRemove, repoPath, wtPath, deleteBranch, pruneOnly),
     setActiveRemote: (projectId) => ipcRenderer.invoke(IPC.gitSetActiveRemote, projectId)
   },
   clipboard: {

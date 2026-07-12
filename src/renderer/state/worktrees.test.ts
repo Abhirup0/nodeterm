@@ -186,6 +186,41 @@ describe('useWorktrees.refreshStatus', () => {
     expect(useWorktrees.getState().statusByPath['/wt/gone']).toBeUndefined()
   })
 
+  // `refresh()` only runs on project load / mutation, so without this the chip of a worktree
+  // deleted WHILE THE USER WATCHES would keep claiming to be healthy until a reload.
+  it('marks the group stale when its worktree stops being a repo', async () => {
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+  })
+
+  it('un-marks a stale group once its worktree answers again', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+
+    // Restored (or the previous read failed transiently) — past the throttle window.
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    gitMock.status.mockResolvedValue(okStatus())
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+    expect(useWorktrees.getState().statusByPath['/wt/feat'].branch).toBe('feat')
+  })
+
+  it('leaves staleness alone when no group id is given', async () => {
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+
+    await useWorktrees.getState().refreshStatus('/wt/gone')
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+  })
+
   // Callers fire this from React effects; over the Server Edition's WS-RPC bridge a transport
   // error REJECTS, which would become an unhandled rejection.
   it('swallows an IPC rejection and leaves the previous status intact', async () => {
