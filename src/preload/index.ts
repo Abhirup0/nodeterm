@@ -10,6 +10,7 @@ import type {
   UpdateProgress,
   Workspace
 } from '../shared/types'
+import type { PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -371,6 +372,26 @@ const api: NodeTerminalApi = {
     },
     listDevices: () => ipcRenderer.invoke(IPC.pairingListDevices),
     revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
+  },
+  // Team presence. `hello` is the only request (its response is how this client learns its OWN
+  // ClientId, without which it would draw its own cursor as a peer's); the publishers are
+  // fire-and-forget sends, and the two event channels are subscriptions. Nothing is persisted.
+  presence: {
+    hello: (identity: PeerIdentity) => ipcRenderer.invoke(IPC.presenceHello, identity),
+    cursor: (cursor) => ipcRenderer.send(IPC.presenceCursor, cursor),
+    focus: (nodeId) => ipcRenderer.send(IPC.presenceFocus, nodeId),
+    chat: (text) => ipcRenderer.send(IPC.presenceChat, text),
+    project: (projectId) => ipcRenderer.send(IPC.presenceProject, projectId),
+    onSync: (listener) => {
+      const handler = (_e: unknown, peers: PeerState[]) => listener(peers)
+      ipcRenderer.on(IPC.presenceSync, handler)
+      return () => ipcRenderer.removeListener(IPC.presenceSync, handler)
+    },
+    onPeer: (listener) => {
+      const handler = (_e: unknown, diff: PeerDiff) => listener(diff)
+      ipcRenderer.on(IPC.presencePeer, handler)
+      return () => ipcRenderer.removeListener(IPC.presencePeer, handler)
+    }
   },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map),

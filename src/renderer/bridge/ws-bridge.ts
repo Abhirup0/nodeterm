@@ -14,6 +14,7 @@ import type {
   FsApi,
   GitApi,
   NodeTerminalApi,
+  PresenceApi,
   PtyApi,
   PtyCreateOptions,
   SettingsApi,
@@ -21,6 +22,7 @@ import type {
   Workspace,
   WorkspaceApi
 } from '../../shared/types'
+import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 
@@ -329,6 +331,27 @@ export function buildAgentApi(
   }
 }
 
+/**
+ * Build the `presence` namespace over an RpcClient, mirroring the preload's invoke(→request) /
+ * send(→cast) / on(→subscribe) split member-for-member: `hello` is the only request (its response
+ * is how a client learns its OWN clientId), cursor/focus/chat/project are casts, and the two event
+ * channels are subscriptions. Declared against its `NodeTerminalApi` slice so `satisfies` keeps
+ * the compiler as the completeness gate.
+ */
+export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'presence'> {
+  const presence: PresenceApi = {
+    hello: (identity: PeerIdentity) =>
+      client.request(IPC.presenceHello, identity) as ReturnType<PresenceApi['hello']>,
+    cursor: (cursor) => client.cast(IPC.presenceCursor, cursor),
+    focus: (nodeId) => client.cast(IPC.presenceFocus, nodeId),
+    chat: (text) => client.cast(IPC.presenceChat, text),
+    project: (projectId) => client.cast(IPC.presenceProject, projectId),
+    onSync: (listener) => client.subscribe(IPC.presenceSync, listener as Listener),
+    onPeer: (listener) => client.subscribe(IPC.presencePeer, listener as Listener)
+  }
+  return { presence }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -438,6 +461,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildRealApi(client),
     ...buildFilesApi(client),
     ...buildAgentApi(client),
+    ...buildPresenceApi(client),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
     // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
     dialog: (() => {

@@ -49,6 +49,7 @@ export function buildStubApi(): Omit<
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
+  | 'presence'
 > {
   const api = {
     ssh: {
@@ -225,6 +226,7 @@ export function buildStubApi(): Omit<
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
+    | 'presence'
   >
 
   return api

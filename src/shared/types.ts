@@ -4,6 +4,7 @@ import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
+import type { ClientId, PeerDiff, PeerIdentity, PeerState } from './presence'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -1015,6 +1016,26 @@ export interface PairingApi {
   revokeDevice(id: string): Promise<void>
 }
 
+/** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */
+export interface PresenceApi {
+  /** Announce {name, color}. Resolves with THIS client's own id (so it never draws its own
+   *  cursor) plus the current peer table. */
+  hello(identity: PeerIdentity): Promise<{ clientId: ClientId; peers: PeerState[] }>
+  /** Publish the local cursor in FLOW coordinates (null when it leaves the canvas). */
+  cursor(cursor: { x: number; y: number } | null): void
+  /** Publish the node the local user is working in (null = none). */
+  focus(nodeId: string | null): void
+  /** Publish live cursor-chat text (null closes the bubble). */
+  chat(text: string | null): void
+  /** Publish the project (canvas) we are looking at — peers on other projects are never drawn
+   *  on our canvas, and we are never drawn on theirs (null = no project open). */
+  project(projectId: string | null): void
+  /** Full peer-table snapshot (on join). Returns unsubscribe. */
+  onSync(listener: (peers: PeerState[]) => void): () => void
+  /** Single-peer diff (join / update / leave). Returns unsubscribe. */
+  onPeer(listener: (diff: PeerDiff) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -1044,6 +1065,7 @@ export interface NodeTerminalApi {
   remoteClient: RemoteClientApi
   handoff: HandoffApi
   pairing: PairingApi
+  presence: PresenceApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
