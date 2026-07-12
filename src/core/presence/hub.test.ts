@@ -1,9 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform, type FakePlatform } from '../platform-fake'
-import { PresenceHub, allocateRelayClientId, TYPING_THROTTLE_MS } from './hub'
+import {
+  PresenceHub,
+  allocateRelayClientId,
+  PRESENCE_RATE_BUDGETS,
+  TYPING_THROTTLE_MS
+} from './hub'
 import { IPC } from '../../shared/ipc'
-import { PRESENCE_COLORS, type PeerDiff, type PeerState } from '../../shared/presence'
+import { PRESENCE_COLORS, REF_MAX_LEN, type PeerDiff, type PeerState } from '../../shared/presence'
 
 let fake: FakePlatform
 
@@ -347,6 +352,160 @@ describe('PresenceHub noteTyping (Stage 2 caller; wired here)', () => {
     hub.noteTyping(1, 'node-a')
     hub.noteTyping(2, 'node-a')
     expect(diffs()).toHaveLength(before + 2)
+  })
+})
+
+describe('caps on client-supplied ids (focus / project)', () => {
+  // Focus and project ids come straight off the wire and are stored verbatim in the peer table and
+  // reflected to EVERY peer. Uncapped, a 10 MB `presence:focus` becomes 10 MB x N peers of egress
+  // down the very sink pty output rides — terminals would stall behind a hostile string.
+  it('caps focus and project at REF_MAX_LEN code points, in the table AND in the broadcast diff', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+
+    hub.setFocus(1, 'n'.repeat(REF_MAX_LEN + 5_000))
+    expect(hub.peers()[0].focus).toBe('n'.repeat(REF_MAX_LEN))
+    expect(diffs().at(-1)).toEqual({
+      op: 'update',
+      clientId: 1,
+      patch: { focus: 'n'.repeat(REF_MAX_LEN) }
+    })
+
+    hub.setProject(1, 'p'.repeat(REF_MAX_LEN + 5_000))
+    expect(hub.peers()[0].projectId).toBe('p'.repeat(REF_MAX_LEN))
+    expect(diffs().at(-1)).toMatchObject({
+      op: 'update',
+      clientId: 1,
+      patch: { projectId: 'p'.repeat(REF_MAX_LEN) }
+    })
+  })
+
+  it('caps by code point (the shared truncation rule), never splitting an emoji', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setFocus(1, '🙂'.repeat(REF_MAX_LEN + 100))
+    const focus = hub.peers()[0].focus as string
+    expect([...focus]).toHaveLength(REF_MAX_LEN)
+    expect(focus).not.toMatch(/[\uD800-\uDFFF]/u)
+  })
+
+  // Real ids are short (`term-ab12`, `web-3f9c`), so the cap can never truncate a legitimate one.
+  it('leaves a real node/project id untouched', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setFocus(1, 'term-ab12cd')
+    hub.setProject(1, 'proj-9f3a-2')
+    expect(hub.peers()[0]).toMatchObject({ focus: 'term-ab12cd', projectId: 'proj-9f3a-2' })
+  })
+})
+
+describe('rate limiting (a hostile tab must not degrade the room)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+
+  /** Fire `n` cursor casts through the CAST entry point (where the limiter lives), each with a
+   *  distinct position so the unchanged-value no-op can never be mistaken for a rate-limit drop. */
+  function floodCursor(clientId: number, n: number, from = 0): void {
+    for (let i = 0; i < n; i++) {
+      fake.senderListeners[IPC.presenceCursor](clientId, { x: from + i, y: 0 })
+    }
+  }
+
+  it('drops cursor casts past the burst budget, and refills at the sustained rate', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    const budget = PRESENCE_RATE_BUDGETS[IPC.presenceCursor]
+
+    const before = diffs().length
+    floodCursor(1, 1000) // a tight loop, all in the same millisecond
+    const passed = diffs().length - before
+    expect(passed).toBe(budget.burst) // the bucket, and not one cast more
+
+    // No time passed → still nothing gets through.
+    floodCursor(1, 100, 10_000)
+    expect(diffs().length - before).toBe(budget.burst)
+
+    // One second later the bucket has refilled by exactly the sustained rate.
+    vi.setSystemTime(1000)
+    floodCursor(1, 1000, 20_000)
+    expect(diffs().length - before).toBe(budget.burst + budget.perSec)
+  })
+
+  it('never drops an honest client: the renderer 20 Hz cursor stream passes in full', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+
+    const before = diffs().length
+    // 10 s of the renderer's own throttle (CURSOR_MIN_INTERVAL_MS = 50 → 20 Hz). The cursor budget
+    // is matched to it, so a well-behaved tab must never lose a sample.
+    for (let i = 0; i < 200; i++) {
+      vi.setSystemTime(i * 50)
+      fake.senderListeners[IPC.presenceCursor](1, { x: i, y: i })
+    }
+    expect(diffs().length - before).toBe(200)
+  })
+
+  it('the limit is per (client, channel): a flooding tab starves neither its peers nor its own other channels', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    hub.join(2, 'browser')
+
+    floodCursor(1, 1000) // client 1 exhausts its cursor bucket
+    const after = diffs().length
+
+    // Client 2's cursor is untouched…
+    fake.senderListeners[IPC.presenceCursor](2, { x: 1, y: 1 })
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 2, patch: { cursor: { x: 1, y: 1 } } })
+    // …and so is client 1's focus (a separate channel keeps a separate bucket).
+    fake.senderListeners[IPC.presenceFocus](1, 'node-a')
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { focus: 'node-a' } })
+    expect(diffs().length).toBe(after + 2)
+  })
+
+  it('throttles the chat, focus and project channels too', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+
+    for (const [channel, cast] of [
+      [IPC.presenceChat, (i: number) => fake.senderListeners[IPC.presenceChat](1, `msg ${i}`)],
+      [IPC.presenceFocus, (i: number) => fake.senderListeners[IPC.presenceFocus](1, `node-${i}`)],
+      [IPC.presenceProject, (i: number) => fake.senderListeners[IPC.presenceProject](1, `p-${i}`)]
+    ] as Array<[string, (i: number) => void]>) {
+      const before = diffs().length
+      for (let i = 0; i < 500; i++) cast(i)
+      expect(diffs().length - before).toBe(PRESENCE_RATE_BUDGETS[channel].burst)
+    }
+  })
+
+  it('a dropped cast changes nothing — the peer keeps the last state that got through', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    const budget = PRESENCE_RATE_BUDGETS[IPC.presenceCursor]
+
+    floodCursor(1, budget.burst + 50)
+    // The dropped casts must not be applied to the table either (silently ignored, not queued).
+    expect(hub.peers()[0].cursor).toEqual({ x: budget.burst - 1, y: 0 })
+  })
+
+  it('leaving frees the client\'s buckets, so a reconnecting id starts fresh', () => {
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    const budget = PRESENCE_RATE_BUDGETS[IPC.presenceCursor]
+    floodCursor(1, 1000)
+
+    hub.leave(1)
+    hub.join(1, 'browser')
+    const before = diffs().length
+    floodCursor(1, 1000, 50_000)
+    expect(diffs().length - before).toBe(budget.burst)
   })
 })
 

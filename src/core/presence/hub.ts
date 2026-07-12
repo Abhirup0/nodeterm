@@ -12,6 +12,7 @@ import { IPC } from '../../shared/ipc'
 import { platform } from '../platform'
 import {
   CHAT_MAX_LEN,
+  REF_MAX_LEN,
   capCodePoints,
   defaultNameFor,
   nextFreeColor,
@@ -24,6 +25,32 @@ import {
 
 /** A typing badge re-broadcasts at most this often per (client, node) — see noteTyping. */
 export const TYPING_THROTTLE_MS = 500
+
+/**
+ * Per-(client, channel) token buckets: `perSec` is the sustained rate, `burst` the bucket size
+ * (how far a client may run ahead of it). Everything the hub takes from a client fans out to every
+ * peer, so an unlimited ingest is an unlimited N-way amplifier: the ~20 Hz cursor throttle lives in
+ * the HONEST renderer only, and a tab that simply doesn't run it — or a scripted client on the
+ * shared Server Edition password — would otherwise be free to broadcast at loop speed and fill
+ * every peer's WS send buffer (the same sink pty output rides, so terminals stall behind it).
+ *
+ * The budgets are sized to the app's own behaviour, so a well-behaved client can never hit one:
+ *   - cursor: 20/s, exactly the renderer's CURSOR_MIN_INTERVAL_MS (50 ms) throttle, with 2 s of
+ *     burst for scheduling jitter,
+ *   - chat: one cast per keystroke — faster than any human types,
+ *   - focus / project: one per node hover / tab switch — orders of magnitude of headroom,
+ *   - hello: sent at connect (and once more when the user names themselves).
+ * Excess casts are DROPPED silently. Never disconnect: an honest client that hits a burst edge
+ * (a wedged event loop suddenly flushing) would lose a frame, not its session — and the next
+ * cursor sample carries the current position anyway, so a dropped one is invisible.
+ */
+export const PRESENCE_RATE_BUDGETS: Record<string, { perSec: number; burst: number }> = {
+  [IPC.presenceCursor]: { perSec: 20, burst: 40 },
+  [IPC.presenceChat]: { perSec: 25, burst: 50 },
+  [IPC.presenceFocus]: { perSec: 10, burst: 20 },
+  [IPC.presenceProject]: { perSec: 5, burst: 10 },
+  [IPC.presenceHello]: { perSec: 2, burst: 5 }
+}
 
 // Relay peers (phones) have no webContents id and no ServerPlatform uiId, so their ClientIds are
 // minted here from a high range that can never collide with either (both start small and count up).
@@ -49,6 +76,8 @@ export class PresenceHub {
   private table = new Map<ClientId, PeerState>()
   /** `${clientId}:${nodeId}` → last typing broadcast (throttle window). */
   private lastTyping = new Map<string, number>()
+  /** `${clientId}:${channel}` → its token bucket (see PRESENCE_RATE_BUDGETS / allow). */
+  private buckets = new Map<string, { tokens: number; at: number }>()
   private ipcRegistered = false
 
   /** A UI connected. Colors are assigned next-free; the name is a placeholder until hello. */
@@ -84,7 +113,41 @@ export class PresenceHub {
     for (const key of [...this.lastTyping.keys()]) {
       if (key.startsWith(`${clientId}:`)) this.lastTyping.delete(key)
     }
+    // Drop the rate-limit state too, or the maps would grow for the life of the process (a
+    // long-lived server sees every reconnect as a new ClientId).
+    for (const key of [...this.buckets.keys()]) {
+      if (key.startsWith(`${clientId}:`)) this.buckets.delete(key)
+    }
     this.emit({ op: 'leave', clientId })
+  }
+
+  /**
+   * Take one token from this client's bucket for `channel`, or report that it is empty.
+   *
+   * WHERE THIS LIVES, AND WHY: at the CAST/REQUEST entry point (registerIpc) — not inside the
+   * setters. The hub is a dumb reflector whose setters are also the API the shells and Stage 2's
+   * internal callers use (noteTyping from the pty:write path, a relay bridge patching a phone's
+   * peer); rate-limiting those would throttle the app's own trusted plumbing. The entry point is
+   * the exact seam where an untrusted client's message becomes hub state, which is what needs a
+   * budget — and it is the one place ALL shells funnel through, so no shell can forget it.
+   */
+  private allow(clientId: ClientId, channel: string): boolean {
+    const budget = PRESENCE_RATE_BUDGETS[channel]
+    if (!budget) return true
+    const key = `${clientId}:${channel}`
+    const now = Date.now()
+    const prev = this.buckets.get(key)
+    // A fresh client starts with a full bucket; an existing one refills at `perSec`, capped at
+    // `burst` (so an idle minute does not bank a minute's worth of casts).
+    const tokens = prev
+      ? Math.min(budget.burst, prev.tokens + ((now - prev.at) / 1000) * budget.perSec)
+      : budget.burst
+    if (tokens < 1) {
+      this.buckets.set(key, { tokens, at: now })
+      return false
+    }
+    this.buckets.set(key, { tokens: tokens - 1, at: now })
+    return true
   }
 
   /** The client claims an identity. Returns its own clientId (so it never draws its own cursor)
@@ -124,10 +187,12 @@ export class PresenceHub {
     this.emit({ op: 'update', clientId, patch: { cursor: next } })
   }
 
+  /** The node this client is working in. The id is client-supplied and reflected to every peer, so
+   *  it goes through the shared truncation rule (REF_MAX_LEN) exactly like chat — see presence.ts. */
   setFocus(clientId: ClientId, nodeId: string | null): void {
     const peer = this.table.get(clientId)
     if (!peer) return
-    const next = typeof nodeId === 'string' && nodeId ? nodeId : null
+    const next = typeof nodeId === 'string' && nodeId ? capCodePoints(nodeId, REF_MAX_LEN) : null
     if (peer.focus === next) return
     peer.focus = next
     this.emit({ op: 'update', clientId, patch: { focus: next } })
@@ -150,11 +215,14 @@ export class PresenceHub {
 
   /** Which project (canvas) this client is on. Everyone else uses it to decide whether this
    *  peer's cursor/focus belongs on THEIR screen (peersOnProject) — a project is a separate
-   *  canvas with its own nodes and its own flow coordinates. null = no project open. */
+   *  canvas with its own nodes and its own flow coordinates. null = no project open.
+   *  Client-supplied, so capped with the shared truncation rule (REF_MAX_LEN) like every other
+   *  string off the wire. */
   setProject(clientId: ClientId, projectId: string | null): void {
     const peer = this.table.get(clientId)
     if (!peer) return
-    const next = typeof projectId === 'string' && projectId ? projectId : null
+    const next =
+      typeof projectId === 'string' && projectId ? capCodePoints(projectId, REF_MAX_LEN) : null
     if (peer.projectId === next) return
     peer.projectId = next
     this.emit({ op: 'update', clientId, patch: { projectId: next } })
@@ -193,22 +261,33 @@ export class PresenceHub {
     if (this.ipcRegistered) return
     this.ipcRegistered = true
     const p = platform()
-    p.handleWithSender(IPC.presenceHello, (senderId: number, id: PeerIdentity) =>
-      this.hello(senderId, id)
-    )
+    // Every entry point is rate-limited here (see allow): this is the seam where an untrusted
+    // client's message becomes hub state — and every shell funnels through it.
+    p.handleWithSender(IPC.presenceHello, (senderId: number, id: PeerIdentity) => {
+      // A dropped hello still ANSWERS (the response is how a client learns its own ClientId, and
+      // silence would hang its promise); it just doesn't apply the identity or broadcast.
+      if (!this.allow(senderId, IPC.presenceHello)) return { clientId: senderId, peers: this.peers() }
+      return this.hello(senderId, id)
+    })
     p.onWithSender(
       IPC.presenceCursor,
-      (senderId: number, cursor: { x: number; y: number } | null) => this.setCursor(senderId, cursor)
+      (senderId: number, cursor: { x: number; y: number } | null) => {
+        if (!this.allow(senderId, IPC.presenceCursor)) return
+        this.setCursor(senderId, cursor)
+      }
     )
-    p.onWithSender(IPC.presenceFocus, (senderId: number, nodeId: string | null) =>
+    p.onWithSender(IPC.presenceFocus, (senderId: number, nodeId: string | null) => {
+      if (!this.allow(senderId, IPC.presenceFocus)) return
       this.setFocus(senderId, nodeId)
-    )
-    p.onWithSender(IPC.presenceChat, (senderId: number, text: string | null) =>
+    })
+    p.onWithSender(IPC.presenceChat, (senderId: number, text: string | null) => {
+      if (!this.allow(senderId, IPC.presenceChat)) return
       this.setChat(senderId, text)
-    )
-    p.onWithSender(IPC.presenceProject, (senderId: number, projectId: string | null) =>
+    })
+    p.onWithSender(IPC.presenceProject, (senderId: number, projectId: string | null) => {
+      if (!this.allow(senderId, IPC.presenceProject)) return
       this.setProject(senderId, projectId)
-    )
+    })
   }
 
   private emit(diff: PeerDiff): void {

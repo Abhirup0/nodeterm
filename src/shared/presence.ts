@@ -60,6 +60,12 @@ export const TYPING_DECAY_MS = 2000
 /** Caps: a peer cannot flood the wire with a giant name or chat line. */
 export const NAME_MAX_LEN = 32
 export const CHAT_MAX_LEN = 200
+/** Cap for the ids a client reports (focus node, active project). Real ones are short and
+ *  generated (`term-ab12`, `web-3f9c`), so this can never truncate a legitimate id — it exists
+ *  because these strings are taken verbatim off the wire and reflected to EVERY peer, down the
+ *  same sink pty output rides: an uncapped 10 MB `presence:focus` at cursor rate would fill every
+ *  peer's send buffer and stall their terminals behind it. */
+export const REF_MAX_LEN = 128
 
 /** First palette color not already in use; wraps by count once every color is taken.
  *  `taken` is `readonly` so callers stay unconstrained (a mutable `string[]` is accepted). */
@@ -89,7 +95,8 @@ export function peersOnProject(peers: PeerState[], projectId: string | null): Pe
 /** Cap a string at `max` *code points*, not UTF-16 code units: `slice` would cut a surrogate
  *  pair (emoji, CJK extensions) in half and leave a lone surrogate, which renders as "�" in
  *  every peer's facepile / chat bubble. The single truncation rule for the whole feature — the
- *  hub caps chat with it (CHAT_MAX_LEN) and capName caps names with it.
+ *  hub caps chat (CHAT_MAX_LEN) and the focus/project ids (REF_MAX_LEN) with it, and capName caps
+ *  names with it.
  *
  *  COST IS O(max), NOT O(text) — deliberately. This is a door for UNTRUSTED input (any client can
  *  cast a `presence:chat` / `presence:focus` of whatever size the socket accepts), and the obvious
