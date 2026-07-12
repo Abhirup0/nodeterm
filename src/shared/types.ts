@@ -608,7 +608,9 @@ export interface GitApi {
   /** Checkout a commit (detached HEAD). */
   checkoutCommit(cwd: string, oid: string): Promise<GitResult>
   repoRoot(cwd: string): Promise<string | null>
-  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
+  /** `{ ok: false, entries: [] }` when git itself could not be read — which is NOT the same fact as
+   *  "this repo has no worktrees", and no caller may treat it as one (see worktree-ops). */
+  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeListResult>
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
   /** `push`: also publish `baseRef` to origin after a successful merge (only if a remote exists).
    *  Opt-in — a merge must never publish to a shared remote the user was not told about. */

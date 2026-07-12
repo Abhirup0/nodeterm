@@ -12,6 +12,13 @@ const okStatus = (over: Partial<Record<string, unknown>> = {}): unknown => ({
   ...over
 })
 
+/**
+ * A SUCCESSFUL `git worktree list` (the `git:worktree-list` IPC answers `{ ok, entries }`). `ok` is
+ * the whole point: an `ok:false` reply carries the same empty `entries` as a repo with no worktrees,
+ * and the store must never read the first as the second.
+ */
+const listed = (entries: unknown[]): unknown => ({ ok: true, entries })
+
 const gitMock = {
   repoRoot: vi.fn(),
   worktreeList: vi.fn(),
@@ -31,10 +38,10 @@ beforeEach(() => {
 describe('useWorktrees.refresh', () => {
   it('resolves the repo root from the project cwd and lists that repo´s worktrees', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
-    ])
+    ]))
 
     await useWorktrees.getState().refresh('/repo/sub', [])
 
@@ -46,11 +53,11 @@ describe('useWorktrees.refresh', () => {
 
   it('keeps the entries in git´s order (the main checkout must stay first)', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/a', branch: 'a', head: 'b', isBare: false },
       { path: '/wt/b', branch: 'b', head: 'c', isBare: false }
-    ])
+    ]))
 
     await useWorktrees.getState().refresh('/repo', [])
 
@@ -61,10 +68,10 @@ describe('useWorktrees.refresh', () => {
 
   it('classifies stale bindings and orphans', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/loose', branch: 'loose', head: 'c', isBare: false }
-    ])
+    ]))
 
     await useWorktrees.getState().refresh('/repo', [
       {
@@ -88,9 +95,9 @@ describe('useWorktrees.refresh', () => {
   // terminals would stop inheriting the worktree path.
   it('does not mark a group bound to a different repo as stale', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false }
-    ])
+    ]))
 
     await useWorktrees.getState().refresh('/repo', [
       {
@@ -291,10 +298,10 @@ describe('useWorktrees.refreshStatus', () => {
     // git still lists the worktree as perfectly healthy (an old git that cannot say `prunable`, or
     // simply a `worktree list` that has not been re-read since). Reconcile therefore calls it live.
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/gone', branch: 'feat', head: 'b', isBare: false }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [
       { groupId: 'group-1', worktree: { path: '/wt/gone', repoPath: '/repo' } as never }
     ])
@@ -313,10 +320,10 @@ describe('useWorktrees.refreshStatus', () => {
 
     gitMock.repoRoot.mockResolvedValue('/repo')
     // git prunes /wt/gone away entirely (reconcile: stale) and marks /wt/dead prunable.
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/dead', branch: 'dead', head: 'c', isBare: false, prunable: true }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [
       { groupId: 'group-1', worktree: { path: '/wt/gone', repoPath: '/repo' } as never },
       { groupId: 'group-2', worktree: { path: '/wt/dead', repoPath: '/repo' } as never }
@@ -342,10 +349,10 @@ describe('useWorktrees.refreshStatus', () => {
     await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
 
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [
       { groupId: 'group-1', worktree: { path: '/wt/feat', repoPath: '/repo' } as never }
     ])
@@ -369,15 +376,15 @@ describe('useWorktrees.refreshStatus', () => {
     expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
 
     // Unbind: the group is gone from `bound`, and the dead worktree's registration was pruned.
-    gitMock.worktreeList.mockResolvedValue([{ path: '/repo', branch: 'main', head: 'a', isBare: false }])
+    gitMock.worktreeList.mockResolvedValue(listed([{ path: '/repo', branch: 'main', head: 'a', isBare: false }]))
     await useWorktrees.getState().refresh('/repo', [])
     expect(useWorktrees.getState().staleGroupIds).toEqual([])
 
     // The user creates a worktree for the same branch → git hands out the SAME path → a NEW group.
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [
       { groupId: 'group-2', worktree: { path: '/wt/feat', repoPath: '/repo' } as never }
     ])
@@ -399,12 +406,50 @@ describe('useWorktrees.refreshStatus', () => {
     expect(useWorktrees.getState().staleGroupIds).toEqual(['other'])
 
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([{ path: '/repo', branch: 'main', head: 'a', isBare: false }])
+    gitMock.worktreeList.mockResolvedValue(listed([{ path: '/repo', branch: 'main', head: 'a', isBare: false }]))
     await useWorktrees.getState().refresh('/repo', [
       { groupId: 'other', worktree: { path: '/other-wt/feat', repoPath: '/other-repo' } as never }
     ])
 
     expect(useWorktrees.getState().staleGroupIds).toEqual(['other'])
+  })
+
+  // A strike streak is a fact about a live binding, and a binding does not heal while the user looks
+  // at another tab. The streaks used to be wiped on every project switch (and purged by any refresh
+  // that did not own them), so switching to B and back to A gave A's struck-out group a clean slate:
+  // one poll window in which it read healthy — the very window in which `cwdForNewNodeIn` hands out
+  // a path that is gone.
+  it('keeps a project´s strike streak across a switch to another project and back', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    const boundA = [{ groupId: 'a1', worktree: { path: '/wt/a', repoPath: '/repo-a' } as never }]
+
+    // Project A: its group strikes out (the directory is gone).
+    useWorktrees.getState().reset('project-a')
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/a', 'a1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/a', 'a1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['a1'])
+
+    // Switch to project B (its own bindings; A's streaks are none of its business) …
+    useWorktrees.getState().reset('project-b')
+    gitMock.repoRoot.mockResolvedValue('/repo-b')
+    gitMock.worktreeList.mockResolvedValue(listed([{ path: '/repo-b', branch: 'main', head: 'a', isBare: false }]))
+    await useWorktrees.getState().refresh('/repo-b', [])
+
+    // … and back to A. git still lists /wt/a as healthy (an old git, or a not-yet-re-read list), so
+    // only the surviving streak knows the truth.
+    useWorktrees.getState().reset('project-a')
+    gitMock.repoRoot.mockResolvedValue('/repo-a')
+    gitMock.worktreeList.mockResolvedValue(listed([
+      { path: '/repo-a', branch: 'main', head: 'a', isBare: false },
+      { path: '/wt/a', branch: 'a', head: 'b', isBare: false }
+    ]))
+    await useWorktrees.getState().refresh('/repo-a', boundA)
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['a1'])
   })
 
   it('leaves staleness alone when no group id is given', async () => {
@@ -474,10 +519,10 @@ describe('useWorktrees cancellation on reset', () => {
   it('drops a refresh that resolves after a reset', async () => {
     let releaseRoot: (v: string) => void = () => {}
     gitMock.repoRoot.mockReturnValue(new Promise<string>((r) => (releaseRoot = r)))
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/old', branch: 'old', head: 'b', isBare: false }
-    ])
+    ]))
 
     const inFlight = useWorktrees.getState().refresh('/repo', [])
     useWorktrees.getState().reset()
@@ -491,9 +536,9 @@ describe('useWorktrees cancellation on reset', () => {
 
   it('drops the not-a-repo branch of a refresh that resolves after a reset', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [])
 
     let releaseRoot: (v: string | null) => void = () => {}
@@ -521,22 +566,75 @@ describe('useWorktrees cancellation on reset', () => {
 })
 
 describe('useWorktrees.refresh error handling', () => {
-  it('swallows an IPC rejection and empties the store (fail open)', async () => {
+  it('swallows a repo-root IPC rejection and empties the store (fail open)', async () => {
     gitMock.repoRoot.mockResolvedValue('/repo')
-    gitMock.worktreeList.mockResolvedValue([
+    gitMock.worktreeList.mockResolvedValue(listed([
       { path: '/repo', branch: 'main', head: 'a', isBare: false },
       { path: '/wt/a', branch: 'a', head: 'b', isBare: false }
-    ])
+    ]))
     await useWorktrees.getState().refresh('/repo', [])
     expect(useWorktrees.getState().entries).toHaveLength(2)
 
-    gitMock.worktreeList.mockRejectedValue(new Error('bridge closed'))
+    gitMock.repoRoot.mockRejectedValue(new Error('bridge closed'))
     await expect(useWorktrees.getState().refresh('/repo', [])).resolves.toBeUndefined()
 
     expect(useWorktrees.getState().repoRoot).toBeNull()
     expect(useWorktrees.getState().entries).toEqual([])
     expect(useWorktrees.getState().orphans).toEqual([])
     expect(useWorktrees.getState().staleGroupIds).toEqual([])
+  })
+})
+
+// The IMPORTANT half of this file: `git worktree list` can FAIL (spawn EAGAIN under load, a corrupt
+// index, an unmounted repo) — and a failure arrives with the same empty entry list as a repo that
+// genuinely has no worktrees. Reconciling against it would mark EVERY bound group stale in one read,
+// with none of the strike streak WORKTREE_STALE_STRIKES exists to require: the chip says "· missing",
+// `cwdForNewNodeIn` stops handing out a live worktree path (so a terminal made in that window
+// persists the wrong cwd forever), and Unbind — the only action a stale group offers — rewrites the
+// children's persisted cwds off a perfectly healthy worktree.
+describe('useWorktrees.refresh when the worktree LIST could not be read', () => {
+  const bound = [
+    { groupId: 'g1', worktree: { repoPath: '/repo', path: '/wt/feat', branch: 'feat', baseRef: 'main', createdByApp: true } }
+  ]
+  const healthy = listed([
+    { path: '/repo', branch: 'main', head: 'a', isBare: false },
+    { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
+  ])
+
+  it('does not stale a bound group when the list comes back ok:false', async () => {
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue(healthy)
+    await useWorktrees.getState().refresh('/repo', bound)
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+
+    // git could not be read — the SAME empty list a worktree-less repo would answer with.
+    gitMock.worktreeList.mockResolvedValue({ ok: false, entries: [] })
+    await useWorktrees.getState().refresh('/repo', bound)
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+    // The previous (successful) facts stand — a failed read changed nothing.
+    expect(useWorktrees.getState().entries.map((e) => e.path)).toEqual(['/repo', '/wt/feat'])
+    expect(useWorktrees.getState().repoRoot).toBe('/repo')
+  })
+
+  it('a REJECTED list is the same fact as ok:false — it must not empty the store either', async () => {
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue(healthy)
+    await useWorktrees.getState().refresh('/repo', bound)
+
+    gitMock.worktreeList.mockRejectedValue(new Error('bridge closed'))
+    await expect(useWorktrees.getState().refresh('/repo', bound)).resolves.toBeUndefined()
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+    expect(useWorktrees.getState().entries.map((e) => e.path)).toEqual(['/repo', '/wt/feat'])
+  })
+
+  it('an ok:true empty list still marks the group stale (a real absence IS evidence)', async () => {
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue(listed([{ path: '/repo', branch: 'main', head: 'a', isBare: false }]))
+    await useWorktrees.getState().refresh('/repo', bound)
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['g1'])
   })
 })
 
@@ -549,10 +647,10 @@ describe('useWorktrees.refresh interleaving without reset', () => {
 
   it('a newer refresh always supersedes an in-flight older one', async () => {
     let releaseRootA: (v: string) => void = () => {}
-    let releaseListA: (v: unknown[]) => void = () => {}
+    let releaseListA: (v: unknown) => void = () => {}
 
     const promiseRootA = new Promise<string>((r) => (releaseRootA = r))
-    const promiseListA = new Promise<unknown[]>((r) => (releaseListA = r))
+    const promiseListA = new Promise<unknown>((r) => (releaseListA = r))
 
     // Track which cwd/root is being queried and return appropriate promises.
     gitMock.repoRoot.mockImplementation((cwd: string) => {
@@ -562,10 +660,12 @@ describe('useWorktrees.refresh interleaving without reset', () => {
 
     gitMock.worktreeList.mockImplementation((root: string) => {
       if (root === '/repo-a') return promiseListA
-      return Promise.resolve([
-        { path: '/repo-b', branch: 'main', head: 'b1', isBare: false },
-        { path: '/wt/b-feat', branch: 'b-feat', head: 'b2', isBare: false }
-      ])
+      return Promise.resolve(
+        listed([
+          { path: '/repo-b', branch: 'main', head: 'b1', isBare: false },
+          { path: '/wt/b-feat', branch: 'b-feat', head: 'b2', isBare: false }
+        ])
+      )
     })
 
     // Start refresh for repo A (in flight, blocked on our controlled promises).
@@ -579,10 +679,12 @@ describe('useWorktrees.refresh interleaving without reset', () => {
     // Now let A finish. Even though A resolves after B, the epoch bump ensures A's older
     // epoch is stale and its write is dropped.
     releaseRootA('/repo-a')
-    releaseListA([
-      { path: '/repo-a', branch: 'main', head: 'a1', isBare: false },
-      { path: '/wt/a-old', branch: 'a-old', head: 'a2', isBare: false }
-    ])
+    releaseListA(
+      listed([
+        { path: '/repo-a', branch: 'main', head: 'a1', isBare: false },
+        { path: '/wt/a-old', branch: 'a-old', head: 'a2', isBare: false }
+      ])
+    )
     await refreshA
 
     // The store must hold B's facts, not A's. If the epoch is not bumped per-refresh, A's later

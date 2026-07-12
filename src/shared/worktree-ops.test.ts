@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { worktreeAdd, worktreeList, worktreeMerge, worktreeRemove, type GitExec } from './worktree-ops'
+import { worktreeAdd, listWorktrees, worktreeMerge, worktreeRemove, type GitExec } from './worktree-ops'
 
 const ok = (out = ''): GitExec => ({ ok: true, out, err: '' })
 const ko = (err = 'fail'): GitExec => ({ ok: false, out: '', err })
@@ -41,7 +41,7 @@ describe('worktreeAdd', () => {
   })
 })
 
-describe('worktreeList (the git < 2.36 blindness)', () => {
+describe('listWorktrees (the git < 2.36 blindness)', () => {
   // git only learned to print `prunable` in 2.36. Debian 11 / Ubuntu 20.04 — the Server Edition's
   // own target platform — ship 2.30, whose porcelain for a worktree whose directory was deleted
   // behind git's back is IDENTICAL to a healthy one (no tag at all). That is what these fixtures
@@ -52,7 +52,7 @@ describe('worktreeList (the git < 2.36 blindness)', () => {
 
   it('reports a deleted worktree as prunable even when git never tags it (old git)', async () => {
     const { git } = fakeGit({ 'worktree list --porcelain': ok(oldGitPorcelain) })
-    const entries = await worktreeList(git, '/repo', async (p) => p !== '/wt/gone')
+    const { entries } = await listWorktrees(git, '/repo', async (p) => p !== '/wt/gone')
     expect(entries.map((e) => [e.path, e.prunable])).toEqual([
       ['/repo', false],
       ['/wt/gone', true] // ← the stat fallback, not git
@@ -61,7 +61,7 @@ describe('worktreeList (the git < 2.36 blindness)', () => {
 
   it('leaves a worktree whose directory exists alone (no false staleness)', async () => {
     const { git } = fakeGit({ 'worktree list --porcelain': ok(oldGitPorcelain) })
-    const entries = await worktreeList(git, '/repo', async () => true)
+    const { entries } = await listWorktrees(git, '/repo', async () => true)
     expect(entries.every((e) => !e.prunable)).toBe(true)
   })
 
@@ -71,13 +71,26 @@ describe('worktreeList (the git < 2.36 blindness)', () => {
       'worktree /wt/gone\nHEAD bbb\nbranch refs/heads/feature/x\nprunable gitdir file points to non-existent location\n'
     const { git } = fakeGit({ 'worktree list --porcelain': ok(modern) })
     // Default pathExists = "everything exists" — the conservative answer; git's tag must still win.
-    const entries = await worktreeList(git, '/repo')
+    const { entries } = await listWorktrees(git, '/repo')
     expect(entries.find((e) => e.path === '/wt/gone')?.prunable).toBe(true)
   })
 
-  it('returns nothing when git itself fails (no invented entries)', async () => {
+  it('says ok:false when git itself fails — an empty list is NOT proof of absence', async () => {
     const { git } = fakeGit({ 'worktree list --porcelain': ko('not a repo') })
-    expect(await worktreeList(git, '/repo', async () => false)).toEqual([])
+    // The entries are empty EITHER WAY; `ok` is the only thing that can tell the two apart, and it
+    // is what stops one transient failure from marking every bound group missing.
+    expect(await listWorktrees(git, '/repo', async () => false)).toEqual({ ok: false, entries: [] })
+  })
+
+  it('says ok:true for a repo that genuinely has no worktrees listed', async () => {
+    const { git } = fakeGit({ 'worktree list --porcelain': ok('') })
+    expect(await listWorktrees(git, '/repo')).toEqual({ ok: true, entries: [] })
+  })
+
+  it('says ok:false without calling git when there is no repo path', async () => {
+    const { git, calls } = fakeGit({})
+    expect(await listWorktrees(git, '')).toEqual({ ok: false, entries: [] })
+    expect(calls.length).toBe(0)
   })
 })
 

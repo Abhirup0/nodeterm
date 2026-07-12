@@ -3,7 +3,7 @@ import {
   isDangerousWorktreeRemovalPath,
   decideMergeStrategy,
   isValidGitRef,
-  type WorktreeEntry
+  type WorktreeListResult
 } from './worktree'
 
 /** One git invocation's result (mirrors git-service.ts's internal `Exec`). */
@@ -50,33 +50,23 @@ const alwaysExists: PathExists = async () => true
  *
  * So we do not trust the tag alone: stat every entry and OR the result in. Same seam, same
  * conservative default as `worktreeRemove`'s.
+ *
+ * It also reports WHETHER GIT COULD BE READ AT ALL, and every caller — the ops below AND the
+ * renderer's worktrees store, which reaches this through the `git:worktree-list` IPC — must honour
+ * that flag. Collapsing both outcomes to `[]` ("git listed nothing" and "the git call failed": a
+ * spawn EAGAIN under load, an unmounted/NFS repo, a corrupt index) is what let a single transient
+ * failure escalate: `worktreeRemove` read the empty list as "this worktree is not registered — it is
+ * already gone", answered `worktreeGone`, and the renderer destroyed every descendant terminal's
+ * tmux session (running processes and all) while the directory sat untouched on disk; and
+ * `reconcileWorktrees([], …)` flipped EVERY healthy bound group to "missing" in one read, with none
+ * of the strike streak `WORKTREE_STALE_STRIKES` exists to require. A failed read is never evidence
+ * of absence — so it is never dressed up as one.
  */
-export async function worktreeList(
+export async function listWorktrees(
   git: GitExecutor,
   repoPath: string,
   pathExists: PathExists = alwaysExists
-): Promise<WorktreeEntry[]> {
-  return (await listWorktrees(git, repoPath, pathExists)).entries
-}
-
-/**
- * `worktreeList`, plus WHETHER GIT COULD BE READ AT ALL.
- *
- * `worktreeList` collapses both outcomes to `[]`: "git listed nothing" and "the git call failed"
- * (spawn EAGAIN under load, an unmounted/NFS repo, a corrupt index) are the same empty array. For a
- * chip that is fine — it just shows nothing. For the DESTRUCTIVE paths it is not: `worktreeRemove`
- * read the empty list as "this worktree is not registered — it is already gone", answered
- * `worktreeGone`, and the renderer then destroyed every descendant terminal's tmux session (running
- * processes and all), reset their persisted cwds and dropped the binding — while the directory and
- * its registration sat untouched on disk. One unverified read must never escalate to destruction
- * (the same principle as `WORKTREE_STALE_STRIKES`), so the ops that act on the answer take this
- * shape instead and refuse when `ok` is false.
- */
-async function listWorktrees(
-  git: GitExecutor,
-  repoPath: string,
-  pathExists: PathExists
-): Promise<{ ok: boolean; entries: WorktreeEntry[] }> {
+): Promise<WorktreeListResult> {
   if (!repoPath) return { ok: false, entries: [] }
   const r = await git(repoPath, ['worktree', 'list', '--porcelain'])
   if (!r.ok) return { ok: false, entries: [] }

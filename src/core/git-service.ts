@@ -234,7 +234,11 @@ export class GitService {
     // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops): without
     // it, an old git reports a deleted worktree directory as healthy and every consumer of
     // `prunable` (staleness, orphan adoption) believes it.
-    return worktreeOps.worktreeList(git, repoPath, async (p) => fs.existsSync(p))
+    //
+    // The `{ ok, entries }` shape rides all the way out to the renderer on purpose: an `entries: []`
+    // that came from a FAILED `git worktree list` is not "there are no worktrees", and the store on
+    // the other side of this IPC would otherwise mark every bound group missing on one bad read.
+    return worktreeOps.listWorktrees(git, repoPath, async (p) => fs.existsSync(p))
   }
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) {
     return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)

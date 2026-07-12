@@ -48,19 +48,46 @@ interface WorktreesState {
    * answering again un-marks it.
    */
   refreshStatus(path: string, groupId?: string): Promise<void>
-  reset(): void
+  /**
+   * Drop the previous project's worktree facts. `projectKey` (the project id) scopes the strike
+   * streaks that survive the switch — see `missStreak`. Call it on every project load, including the
+   * ones that never `refresh()` (SSH, or a project with no cwd), so no project can inherit another's
+   * scope.
+   */
+  reset(projectKey?: string): void
 }
 
 const lastStatusAt = new Map<string, number>()
 /**
  * Consecutive `hasRepo:false` reads per worktree path (see WORKTREE_STALE_STRIKES). Reset by any
- * success. Keyed by the NORMALIZED path so `refresh` can look a binding up in it.
+ * success. Keyed by the NORMALIZED path (so `refresh` can look a binding up in it) PREFIXED BY THE
+ * PROJECT the streak was observed in.
+ *
+ * The scope is what lets a streak outlive a project switch. It is a fact about a live binding, and
+ * bindings do not stop being dead while the user looks at another tab: without the prefix the map
+ * had to be wiped on every switch (and `refresh` purged every key its own project did not own), so
+ * switching to B and back to A forgot A's strikes and A's dead group rendered healthy for a poll
+ * window — the very window in which `cwdForNewNodeIn` hands out a path that is gone.
  */
 const missStreak = new Map<string, number>()
 
+/**
+ * The project the strikes below belong to. Set by `reset`, which the active-project effect fires on
+ * EVERY project load (a project that never refreshes — SSH, no cwd — must still get its own scope,
+ * or it would file its strikes under the last project that did). Only the ACTIVE project's groups
+ * ever poll, so one scope at a time is all this needs.
+ */
+let streakScope = ''
+
+/** Separates the scope from the path in a streak key. A project id and a path can both contain
+ *  most characters; a NUL cannot appear in either, so the key can never be ambiguous. */
+const STREAK_SEP = '\u0000'
+
+/** Streak key: the project that observed it + the normalized worktree path. */
+const streakKey = (p: string): string => `${streakScope}${STREAK_SEP}${normWorktreePath(p)}`
+
 /** Has this path been read as "not a repo" often enough in a row to count as gone? */
-const struckOut = (p: string): boolean =>
-  (missStreak.get(normWorktreePath(p)) ?? 0) >= WORKTREE_STALE_STRIKES
+const struckOut = (p: string): boolean => (missStreak.get(streakKey(p)) ?? 0) >= WORKTREE_STALE_STRIKES
 
 /**
  * Cancellation token for the in-flight async reads. `refresh`/`refreshStatus` are fired from React
@@ -103,8 +130,25 @@ export const useWorktrees = create<WorktreesState>((set) => ({
         return
       }
       // `entries` stays in git's order — reconcileWorktrees identifies the main checkout positionally.
-      const entries = await git.worktreeList(root)
+      // A REJECTION here (a dead WS bridge in the Server Edition) is the same fact as `ok:false` —
+      // the list could not be read — so it must not fall through to the catch below, which empties
+      // the store and would take every group's staleness (and every orphan) with it.
+      const listed = await git
+        .worktreeList(root)
+        .catch(() => ({ ok: false, entries: [] as WorktreeEntry[] }))
       if (mineEpoch !== epoch) return
+      if (!listed.ok) {
+        // git could not be READ (spawn EAGAIN under load, a corrupt index, an unmounted repo). That
+        // is not "this repo has no worktrees": reconciling against the empty list would mark EVERY
+        // bound group stale on one bad read — no strike streak, no second opinion — which is exactly
+        // the escalation WORKTREE_STALE_STRIKES exists to forbid, and it costs the user real things
+        // (`cwdForNewNodeIn` stops handing out a healthy worktree path, and the only action a stale
+        // group offers — Unbind — rewrites its children's persisted cwds off a live worktree).
+        // So: change nothing. The previous facts stand until a read actually succeeds.
+        set({ repoRoot: root })
+        return
+      }
+      const entries = listed.entries
       // A miss-streak is a fact about a BINDING, not about a path forever. It is keyed by path and
       // `computeWorktreePath` is deterministic, so a streak that outlives its binding comes back to
       // haunt the next one: delete a worktree dir → the group strikes out → Unbind (which prunes)
@@ -113,8 +157,14 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       // until the next successful poll. So the moment a path is no longer bound to any group
       // (unbind / remove / ungroup / delete — all of which re-refresh), forget its streak.
       // Only BOUND paths are ever consulted below, so nothing else can depend on it.
-      const boundPaths = new Set(bound.map((b) => normWorktreePath(b.worktree.path)))
-      for (const key of [...missStreak.keys()]) if (!boundPaths.has(key)) missStreak.delete(key)
+      //
+      // Scoped to THIS project's keys: another project's streaks are none of this refresh's
+      // business (its `bound` list does not describe them), and deleting them was what made a
+      // dead group read healthy again after a there-and-back project switch.
+      const boundKeys = new Set(bound.map((b) => streakKey(b.worktree.path)))
+      const mineKey = (k: string): boolean => k.startsWith(`${streakScope}${STREAK_SEP}`)
+      for (const key of [...missStreak.keys()])
+        if (mineKey(key) && !boundKeys.has(key)) missStreak.delete(key)
       // Reconcile only the groups bound to THIS repo. A group bound to another repo's worktree
       // (legacy binding, or hand-typed) would otherwise be compared against the wrong entry list
       // and falsely reported stale.
@@ -165,7 +215,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     // the reading REPEATS: a single failed read is as likely to be a transient git failure as a
     // deleted directory, and calling a live worktree missing has consequences of its own.
     if (!status.hasRepo) {
-      const key = normWorktreePath(path)
+      const key = streakKey(path)
       const strikes = (missStreak.get(key) ?? 0) + 1
       missStreak.set(key, strikes)
       if (groupId && strikes >= WORKTREE_STALE_STRIKES) {
@@ -177,7 +227,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       }
       return
     }
-    missStreak.delete(normWorktreePath(path))
+    missStreak.delete(streakKey(path))
     set((s) => ({
       // The directory answers again (restored, or a transient read failure passed) → not stale.
       staleGroupIds:
@@ -197,10 +247,14 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     }))
   },
 
-  reset() {
+  reset(projectKey = '') {
     epoch++
+    streakScope = projectKey
     lastStatusAt.clear()
-    missStreak.clear()
+    // `missStreak` is deliberately NOT cleared: it is scoped per project (see missStreak), and a
+    // switch away from a project does not resurrect its dead worktrees. Clearing it here handed a
+    // struck-out group a clean slate on every switch-back — one poll window in which it looked
+    // healthy. Its keys are pruned by `refresh` (per project), not by the switch.
     set({ ...empty(), statusByPath: {} })
   }
 }))
