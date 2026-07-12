@@ -4,6 +4,7 @@ import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
+import type { ClientId, PeerDiff, PeerIdentity, PeerState } from './presence'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -43,6 +44,41 @@ export interface PtyCreateResult {
   /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
+  /**
+   * The CURRENT SCREEN of a session this create JOINED (co-attach), captured from tmux — write it
+   * into the fresh xterm before the live stream starts.
+   *
+   * Only a co-attaching client ever gets it, and only when the join left the pty's grid unchanged.
+   * A joiner is `fresh:false`, so it skips the cold-restore scrollback replay; the only other thing
+   * that could paint its empty terminal is a tmux redraw, and tmux only redraws on SIGWINCH — i.e.
+   * when the joiner is strictly SMALLER and actually resizes the pty. Equal (the expected case: the
+   * node's persisted geometry and the font settings are the same on both clients) or larger resizes
+   * nothing, so without this the second viewer would sit on a blank-but-live terminal until the next
+   * byte of output. When the join DOES resize, this is deliberately absent: tmux paints it, and
+   * painting twice would splice two points in time.
+   *
+   * Guaranteed non-empty when present (an empty/failed capture is omitted, exactly like `pty:resync`
+   * — a plain-shell session has no tmux to capture and simply gets nothing).
+   */
+  screen?: string
+  /**
+   * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
+   * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
+   *
+   * This is the tombstone (PtyManager): `pty:closed` only reaches a session's SUBSCRIBERS, and a
+   * co-viewer whose project is inactive or closed is not one. Without this, the create it issues
+   * when it later opens that project would happily spawn a brand-new `nt-<id>` and resurrect a
+   * terminal its owner deliberately deleted. The client that DID the destroy is exempt (its ⌘Z
+   * must still restore the node), so the single-user delete→undo path is unchanged.
+   */
+  closed?: { by: number | null }
+}
+
+/** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
+export interface RecycledInfo {
+  /** A replacement session is registered for the node: restart onto it. False = the escape-hatch
+   *  timeout fired with no replacement (the recycler died mid-move) → do NOT respawn. */
+  ready: boolean
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
@@ -115,10 +151,19 @@ export interface CanvasState {
 /**
  * A minimal change to a canvas node list: replace-or-append a node by id, or drop one by id.
  * Used for the client's optimistic edits and host-side diffing (see `applyMutation`/`diffToMutations`).
+ *
+ * `src` and `seq` exist ONLY on the team canvas-sync path (`canvas:mut`), and they are what makes
+ * two people editing one node CONVERGE instead of splitting brain (see src/shared/canvas-order.ts):
+ *  - `src` is stamped by the sending client's publisher — a random per-Canvas tag, so a client can
+ *    recognize its OWN mutation coming back (the reflector echoes to everyone, sender included:
+ *    that echo is the ACK that tells the sender where its edit landed in the total order).
+ *  - `seq` is stamped by the reflector (src/core/canvas-sync.ts) and is the TOTAL ORDER. It is
+ *    server-authoritative: a client-supplied `seq` is overwritten at ingest, never trusted.
+ * The relay's host↔client mirror (src/main/remote) uses the same vocabulary and simply omits both.
  */
 export type CanvasMutation =
-  | { op: 'upsert'; node: CanvasNodeState }
-  | { op: 'remove'; id: string }
+  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number }
+  | { op: 'remove'; id: string; src?: string; seq?: number }
 
 /** Canvas pan/zoom state. */
 export interface Viewport {
@@ -205,14 +250,22 @@ export interface PtyApi {
   create(options: PtyCreateOptions): Promise<PtyCreateResult>
   /** Sends user input to the PTY. */
   write(sessionId: string, data: string): void
-  /** Updates the PTY when the terminal is resized. */
-  resize(sessionId: string, cols: number, rows: number): void
+  /** Updates the PTY when the terminal is resized. The pty runs at the SMALLEST subscriber's grid,
+   *  so this is a REPORT, not a command — the effective size comes back over `onSize`.
+   *  `cols`/`rows` null means "subscribed, but not viewing" (a parked terminal): the client leaves
+   *  the size set entirely, so a parked small window can't shrink everyone else's terminal. */
+  resize(sessionId: string, cols: number | null, rows: number | null): void
   /** Flow control: pause (false) or resume (true) reading the PTY when xterm is backed up. */
   setFlow(sessionId: string, resume: boolean): void
   /** Detaches/terminates the PTY client (the underlying tmux session survives). */
   kill(sessionId: string): void
-  /** Permanently ends the persistent session for a node (kills its tmux session). */
+  /** Permanently ends the persistent session for a node (kills its tmux session) because the node
+   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
   destroy(persistKey: string): void
+  /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
+   *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
+   *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
+  recycle(persistKey: string): void
   /** Suggest a terminal title from its recent output via the configured AI agent. */
   generateName(persistKey: string, cwd: string): Promise<GitResult>
   /** Suggest a group title from its member terminals' recent output via the configured AI agent. */
@@ -235,6 +288,27 @@ export interface PtyApi {
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
   onExit(sessionId: string, listener: (exitCode: number) => void): () => void
+  /** The authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers
+   *  ("smallest subscriber wins"). Broadcast whenever the subscriber set or any reported size
+   *  changes; the terminal renders at this size instead of its own fit. Returns an unsubscribe. */
+  onSize(sessionId: string, listener: (size: { cols: number; rows: number }) => void): () => void
+  /** Another client permanently destroyed this node while we were co-viewing it: the session is
+   *  gone for good (do not respawn — show a "closed by <peer>" state). `by` is the destroying
+   *  client's ClientId, or null when the destroy was not attributed to a client (a local desktop
+   *  destroy); resolve it to a name via the presence store. Returns an unsubscribe. */
+  onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
+  /** Another client RECYCLED this node (moved it into a worktree): this session id is dead. With
+   *  `ready:true` a replacement is already live under the same node id — restart the terminal (the
+   *  re-create co-attaches to it) instead of showing the closed state: nothing was deleted. With
+   *  `ready:false` no replacement ever came (the recycler died mid-move): do NOT respawn — the
+   *  terminal ends and offers a manual reopen. Returns an unsubscribe. */
+  onRecycled(sessionId: string, listener: (info: RecycledInfo) => void): () => void
+  /** We fell too far behind and the server dropped our queued output; this is the session's
+   *  CURRENT screen captured from tmux. Reset the emulator and repaint from it.
+   *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent). The
+   *  listener must STILL ignore an empty/falsy payload — never reset on one: a wrongly cleared
+   *  screen is unrecoverable, a skipped repaint is not. Returns an unsubscribe. */
+  onResync(sessionId: string, listener: (screen: string) => void): () => void
 }
 
 export interface WorkspaceApi {
@@ -769,6 +843,22 @@ export interface ContextApi {
   ensure(sessionId: string, cwd?: string, accountId?: string): void
 }
 
+/**
+ * Canvas sync: node mutations travel between the attached clients (an Electron renderer, a
+ * Server-Edition browser tab) so they converge on one node set — instead of each holding its own
+ * canvas until someone's whole-file `workspace.save` overwrites the other's edits.
+ */
+export interface CanvasApi {
+  /**
+   * Publish one local node mutation for `projectId` (a project IS a canvas — a mutation is only
+   * ever applied to the canvas it was made on). Fire-and-forget; the reflector fans it out to every
+   * OTHER attached client and never echoes it back to the sender.
+   */
+  mutate(projectId: string, mutation: CanvasMutation): void
+  /** Fires with each PEER's mutation (project id + mutation). Returns unsubscribe. */
+  onMutation(listener: (projectId: string, mutation: CanvasMutation) => void): () => void
+}
+
 /** One searchable line extracted from a Claude session transcript. */
 export interface TranscriptLine {
   role: 'user' | 'assistant' | 'tool'
@@ -1071,6 +1161,30 @@ export interface PairingApi {
   revokeDevice(id: string): Promise<void>
 }
 
+/** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */
+export interface PresenceApi {
+  /** Announce {name, color}. Resolves with THIS client's own id (so it never draws its own
+   *  cursor) plus the current peer table. */
+  hello(identity: PeerIdentity): Promise<{ clientId: ClientId; peers: PeerState[] }>
+  /** Publish the local cursor in FLOW coordinates (null when it leaves the canvas). */
+  cursor(cursor: { x: number; y: number } | null): void
+  /** Publish the node the local user is working in (null = none). */
+  focus(nodeId: string | null): void
+  /** Publish live cursor-chat text (null closes the bubble). */
+  chat(text: string | null): void
+  /** Publish the project (canvas) we are looking at — peers on other projects are never drawn
+   *  on our canvas, and we are never drawn on theirs (null = no project open). */
+  project(projectId: string | null): void
+  /** Full peer-table snapshot (on join). Returns unsubscribe.
+   *  Exactly one subscriber (the presence store, src/renderer/state/presence.ts): the browser
+   *  bridge drains its early-event buffer into the FIRST subscriber, so a second one gets nothing.
+   *  Components read the store; they never subscribe here. */
+  onSync(listener: (peers: PeerState[]) => void): () => void
+  /** Single-peer diff (join / update / leave). Returns unsubscribe.
+   *  Exactly one subscriber (the presence store) — same reason as onSync. */
+  onPeer(listener: (diff: PeerDiff) => void): () => void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -1092,6 +1206,7 @@ export interface NodeTerminalApi {
   contextLink: ContextLinkApi
   usage: UsageApi
   context: ContextApi
+  canvas: CanvasApi
   claude: ClaudeApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi
@@ -1100,6 +1215,7 @@ export interface NodeTerminalApi {
   remoteClient: RemoteClientApi
   handoff: HandoffApi
   pairing: PairingApi
+  presence: PresenceApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

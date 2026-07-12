@@ -15,7 +15,8 @@
 //     returning `{ output }` (tmux scrollback, so a re-entering client can hydrate its empty
 //     emulator scrollback). `lines`/`maxBytes` are SIZE hints only — clamped, and they can only
 //     SHRINK the reply (a phone on a mobile link asks for far less than the desktop caps).
-//   - RPC `pty.kill {streamId}` -> `kill(sessionId)`
+//   - RPC `pty.kill {streamId}` -> `kill(null, sessionId)` (null = the relay owns this pty; it has
+//     no UI subscribers, so dropping its sinks releases it)
 // Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
 // and resumes it on the next successful send.
 //
@@ -40,6 +41,7 @@ import { encodeOffer } from './pairing'
 import { sanitizeClientMutation } from './canvas-sync'
 import { connectRelay, type RelaySocket, type RpcRequest } from './relay-socket'
 import { initHostCanvasHub, currentCanvas, subscribeCanvas } from './host-canvas-hub'
+import { createPhonePresence, type PhonePresence } from './phone-presence'
 
 // Default relay endpoint; `NODETERM_RELAY_URL` overrides it (mirrors license.ts's API_BASE /
 // CHECKOUT_URL env-override pattern — used both as the dev gate and for local testing).
@@ -67,10 +69,21 @@ export interface HostPtyManager {
    *  emulator on re-entry — the client's own scrollback is empty on a warm reattach. `lines` is
    *  clamped by the pty-manager itself (it is interpolated into a tmux command). */
   captureHistory(persistKey: string, lines?: number): Promise<string>
-  write(sessionId: string, data: string): void
-  resize(sessionId: string, cols: number, rows: number): void
-  setFlow(sessionId: string, resume: boolean): void
-  kill(sessionId: string): void
+  /** `clientId` identifies WHO typed (the bridged phone's presence peer), so the keystroke can be
+   *  attributed to it — null when this session has no peer, which just means it is not badged. */
+  write(clientId: number | null, sessionId: string, data: string): void
+  /** `clientId` is null for a relay-served (detached) pty — see `kill` below. */
+  resize(
+    clientId: number | null,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null
+  ): void
+  /** `clientId` is null for a relay-served (detached) pty: the pause is owed by the host's sink,
+   *  which returns it on drain — see PtyManager.setFlow / Session.pausedBy. */
+  setFlow(clientId: number | null, sessionId: string, resume: boolean): void
+  /** `clientId` is null for a relay-served (detached) pty: the sinks ARE its only subscriber. */
+  kill(clientId: number | null, sessionId: string): void
 }
 
 // The slice of RelaySocket the host needs to answer the client.
@@ -152,7 +165,13 @@ export function createHostHandlers(
   // Produce the marker-delimited "projects" blob for the `projects.list` RPC (workspace.json +
   // live tmux session names + agent-status.json — the same bytes the iOS SSH browse path reads).
   // Read-only, takes no client params. Default = empty so the 4-arg security tests still compile.
-  listProjects: () => Promise<string> = async () => ''
+  listProjects: () => Promise<string> = async () => '',
+  // The presence ClientId of the phone this host serves (null until it bridges / if it has no
+  // presence slot). Read per frame, never captured: the slot is joined at onPeerReady, and the
+  // session's PhonePresence outlives none of it. It makes the phone's keystrokes attributable —
+  // the "X is typing" badge for a relay peer costs the iOS app exactly nothing, because the sender
+  // is the identified HostSession, not something the client claims.
+  getClientId: () => number | null = () => null
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -173,10 +192,10 @@ export function createHostHandlers(
         if (!ok && !stream.paused) {
           // Relay buffer is full — pause the PTY so the OS pipe backpressures the producer.
           stream.paused = true
-          pty.setFlow(stream.sessionId, false)
+          pty.setFlow(null, stream.sessionId, false)
         } else if (ok && stream.paused) {
           stream.paused = false
-          pty.setFlow(stream.sessionId, true)
+          pty.setFlow(null, stream.sessionId, true)
         }
       },
       onExit: (exitCode) => {
@@ -334,7 +353,7 @@ export function createHostHandlers(
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
     if (stream) {
-      pty.kill(stream.sessionId)
+      pty.kill(null, stream.sessionId)
       dropStream(streamId)
     }
     socket.respond(req.id, true, {})
@@ -380,7 +399,7 @@ export function createHostHandlers(
       const stream = streams.get(frame.streamId)
       if (!stream) return
       if (frame.op === OP.Input) {
-        pty.write(stream.sessionId, textDecoder.decode(frame.payload))
+        pty.write(getClientId(), stream.sessionId, textDecoder.decode(frame.payload))
         return
       }
       if (frame.op === OP.Resize) {
@@ -391,13 +410,15 @@ export function createHostHandlers(
             frame.payload.byteOffset,
             frame.payload.byteLength
           )
-          pty.resize(stream.sessionId, view.getUint16(0, true), view.getUint16(2, true))
+          // null clientId: this pty is relay-served (its sink is the only "subscriber"), so the
+          // mirrored client's size is recorded against the sink rather than a UI client id.
+          pty.resize(null, stream.sessionId, view.getUint16(0, true), view.getUint16(2, true))
         }
       }
     },
     closeAll() {
       for (const stream of streams.values()) {
-        pty.kill(stream.sessionId)
+        pty.kill(null, stream.sessionId)
       }
       streams.clear()
     }
@@ -619,6 +640,12 @@ export interface HostSessionOptions {
    */
   listProjects?: () => Promise<string>
   /**
+   * The presence ClientId of the phone this session bridges (its PhonePresence slot), so its
+   * keystrokes are attributed to it in the typing badge. Optional: a host session without a
+   * presence slot serves input exactly as before, unbadged.
+   */
+  getClientId?: () => number | null
+  /**
    * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
    * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
    * host human, later calling `approve()`.
@@ -731,7 +758,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     socket,
     fsOps,
     () => rootsFromCanvas(opts.getLatestCanvas()),
-    opts.listProjects ?? (async () => '')
+    opts.listProjects ?? (async () => ''),
+    opts.getClientId ?? (() => null)
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -753,6 +781,9 @@ export function initRemoteHost(
 ): void {
   initHostCanvasHub()
   let session: HostSession | null = null
+  // The live session's presence slot (the bridged phone's peer). Paired with `session` and replaced
+  // with it, so a superseded session's late callbacks can never touch the new session's peer.
+  let presence: PhonePresence | null = null
   // A fresh id per pending approval. The approve/reject IPC channels are SHARED with the standing
   // phone host, and a single "Approve" click broadcasts to both listeners — so each acts only on
   // an event carrying ITS OWN pending id, never on one meant for the other host.
@@ -760,6 +791,18 @@ export function initRemoteHost(
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
+  }
+
+  // Tear the live session down. Used by EVERY intentional end path (stop, reject, and a `start`
+  // that supersedes a live session): relay-socket treats close() as final and does NOT fire
+  // onClose, so the presence leave has to happen here as well as in onClose. PhonePresence.leave()
+  // is exactly-once, so whichever path runs second is a no-op and the peer never leaves twice.
+  function endSession(): void {
+    presence?.leave()
+    presence = null
+    session?.close()
+    session = null
+    pendingApprovalId = null
   }
 
   ipcMain.handle(IPC.remoteHostStart, async (): Promise<{ offer: string }> => {
@@ -775,12 +818,15 @@ export function initRemoteHost(
     }
 
     // Already hosting → tear the old session down before starting a fresh one.
-    session?.close()
-    session = null
+    endSession()
 
     const keys = await loadOrCreateKeyPair()
     const { pairingToken } = await mintPairingToken(entitlement)
 
+    // This session's presence slot, captured by its own callbacks (never read through `presence`,
+    // which by then may belong to a newer session).
+    const phone = createPhonePresence()
+    presence = phone
     session = connectHostSession({
       url: RELAY_URL,
       token: pairingToken,
@@ -790,12 +836,18 @@ export function initRemoteHost(
       subscribeCanvas,
       applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
       listProjects,
+      // Typing attribution: this session's input frames are this phone's keystrokes.
+      getClientId: () => phone.id(),
       // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.
       onPeerReady: (s) => {
+        // Team presence: a bridged relay client is a peer. It has no mouse, so it stays cursorless
+        // and appears in the facepile only — see docs/team-presence.md ("Peers may have no cursor").
+        phone.join()
         pendingApprovalId = randomUUID()
         send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pendingApprovalId })
       },
       onClose: () => {
+        phone.leave()
         pendingApprovalId = null
       }
     })
@@ -821,14 +873,10 @@ export function initRemoteHost(
   ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string } = {}) => {
     if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
     pendingApprovalId = null
-    if (session && !session.isApproved()) {
-      session.close()
-      session = null
-    }
+    if (session && !session.isApproved()) endSession()
   })
 
   ipcMain.handle(IPC.remoteHostStop, () => {
-    session?.close()
-    session = null
+    endSession()
   })
 }

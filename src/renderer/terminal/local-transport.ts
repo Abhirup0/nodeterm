@@ -1,4 +1,5 @@
-import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
+import type { PtyCreateOptions, PtyCreateResult, RecycledInfo } from '@shared/types'
+import type { ClientId } from '@shared/presence'
 import type { TerminalTransport } from './transport'
 
 /**
@@ -19,7 +20,7 @@ export class LocalTransport implements TerminalTransport {
     this.pty.write(sessionId, data)
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number | null, rows: number | null): void {
     this.pty.resize(sessionId, cols, rows)
   }
 
@@ -35,6 +36,10 @@ export class LocalTransport implements TerminalTransport {
     this.pty.destroy(persistKey)
   }
 
+  recycle(persistKey: string): void {
+    this.pty.recycle(persistKey)
+  }
+
   captureHistory(persistKey: string): Promise<string> {
     return this.pty.captureHistory(persistKey)
   }
@@ -45,6 +50,22 @@ export class LocalTransport implements TerminalTransport {
 
   onExit(sessionId: string, listener: (exitCode: number) => void): () => void {
     return this.pty.onExit(sessionId, listener)
+  }
+
+  onSize(sessionId: string, listener: (size: { cols: number; rows: number }) => void): () => void {
+    return this.pty.onSize(sessionId, listener)
+  }
+
+  onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void {
+    return this.pty.onClosed(sessionId, listener)
+  }
+
+  onRecycled(sessionId: string, listener: (info: RecycledInfo) => void): () => void {
+    return this.pty.onRecycled(sessionId, listener)
+  }
+
+  onResync(sessionId: string, listener: (screen: string) => void): () => void {
+    return this.pty.onResync(sessionId, listener)
   }
 }
 

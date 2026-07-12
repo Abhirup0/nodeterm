@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, type MainWindowLike } from './main-window'
+import {
+  setMainWindow,
+  getMainWindow,
+  sendToMain,
+  mainWindowClientIds,
+  shouldHideOnClose,
+  type MainWindowLike
+} from './main-window'
 
 function fakeWindow(): MainWindowLike & {
   sent: [string, ...unknown[]][]
@@ -21,6 +28,7 @@ function fakeWindow(): MainWindowLike & {
       if (event === 'closed') closedListeners.push(cb)
     },
     webContents: {
+      id: undefined as number | undefined,
       send: (channel: string, ...args: unknown[]) => {
         sent.push([channel, ...args])
       }
@@ -83,6 +91,15 @@ describe('main-window tracking', () => {
     setMainWindow(second)
     first.emitClosed() // old window's closed event arrives late
     expect(getMainWindow()).toBe(second)
+  })
+
+  it('mainWindowClientIds returns the live window webContents id, or [] when there is none', () => {
+    const w = fakeWindow()
+    w.webContents.id = 7
+    setMainWindow(w)
+    expect(mainWindowClientIds()).toEqual([7])
+    w.destroy()
+    expect(mainWindowClientIds()).toEqual([])
   })
 
   it('getMainWindow returns null when nothing was registered or after closed', () => {

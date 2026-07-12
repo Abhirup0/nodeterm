@@ -109,9 +109,11 @@ export function buildStubApi(): Omit<
   | 'git'
   | 'files'
   | 'context'
+  | 'canvas'
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
+  | 'presence'
 > {
   const api = {
     ssh: {
@@ -297,9 +299,11 @@ export function buildStubApi(): Omit<
     | 'git'
     | 'files'
     | 'context'
+    | 'canvas'
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
+    | 'presence'
   >
 
   return api

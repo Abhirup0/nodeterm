@@ -78,6 +78,11 @@ import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
+import { PresenceLayer } from '../components/PresenceLayer'
+import { Facepile } from '../components/Facepile'
+import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
+import { connectPresence, reportProject, usePresence } from '../state/presence'
+import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -123,9 +128,18 @@ import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
-import type { Project, SshProjectStatus, TranscriptHit } from '@shared/types'
+import type { CanvasNodeState, Project, SshProjectStatus, TranscriptHit } from '@shared/types'
+import {
+  createCanvasPublisher,
+  isEphemeralNodeId,
+  publishableStates,
+  type CanvasPublisher
+} from '@shared/canvas-publish'
+import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
+import { createMutationGuard } from '@shared/canvas-mutations'
 import {
   applyCanvasMutation,
+  applyMutationToFlow,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   alignNodes,
@@ -277,6 +291,11 @@ export function Canvas() {
   // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
   const [conflict, setConflict] = useState<Project | null>(null)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
+  // A local edit team-sync cannot carry (a node over MUTATION_MAX_BYTES — in practice a sticky
+  // whose body someone pasted a document into). The reflector refuses it SILENTLY, so the user is
+  // told here rather than being left with a note their teammates never see. Dismissible; re-armed
+  // by the next refused cast (the publisher keeps retrying that node, so it syncs once trimmed).
+  const [syncNote, setSyncNote] = useState<string | null>(null)
   // Copy-to-clipboard failure (browser build only): the bridge clipboard stub dispatches
   // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
   // non-secure context (plain http over a LAN). It must be seen, not swallowed.
@@ -383,6 +402,18 @@ export function Canvas() {
   const futureRef = useRef<CanvasNode[][]>([])
   const committedRef = useRef<CanvasNode[]>([])
   const draggingRef = useRef(false)
+  // Canvas sync (emitting side) — see the publish effect below.
+  const publisherRef = useRef<CanvasPublisher | null>(null)
+  // Canvas sync (ordering) — decides which incoming mutations to apply (see @shared/canvas-order).
+  const orderRef = useRef<CanvasOrder | null>(null)
+  /**
+   * Is anyone else attached? The solo gate for the publisher (a solo user must not pay to diff and
+   * cast a canvas nobody receives). A REF, fed by a non-reactive presence subscription: the peer
+   * table also carries cursors at 20 Hz, and Canvas is ~4000 lines — reading it reactively would
+   * re-render the whole canvas on every remote mouse move (docs/team-presence.md, PERF CONTRACT).
+   * Sticky once a peer mutation actually arrives: proof of a peer that outranks any table.
+   */
+  const hasPeersRef = useRef(false)
   const [, bumpHist] = useState(0)
   const { setViewport, getViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
     useReactFlow()
@@ -738,6 +769,12 @@ export function Canvas() {
 
   // 2) Whenever the active project changes, load its canvas into React Flow.
   useEffect(() => {
+    // Team presence: tell the hub which canvas we are on (this effect fires on load AND on every
+    // tab switch). Peers only draw each other's cursors and node chips when the project matches —
+    // each project is its own canvas with its own coordinate space. No project open (welcome
+    // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
+    // and Canvas deliberately never READS the presence store (see the connectPresence effect).
+    reportProject(activeProjectId || null)
     if (!activeProjectId) return
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
@@ -819,6 +856,13 @@ export function Canvas() {
 
   const markDirty = useCallback(() => {
     if (!loadingRef.current) setDirty(true)
+  }, [])
+
+  // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
+  // (subagent / loop), which every client derives for itself from the agent:status stream.
+  const publishableNow = useCallback((flow: CanvasNode[]): CanvasNodeState[] => {
+    const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
+    return publishableStates(flowToNodeStates(flow), ephIds)
   }, [])
 
   // ---- persistence helpers ----
@@ -946,6 +990,168 @@ export function Canvas() {
     return window.nodeTerminal.remoteHost.onPeerPending((info) => setPendingPeer(info))
   }, [])
 
+  // ---- canvas sync (team) ----
+  // Emitting side: diff each settled node snapshot against the last one we published and cast the
+  // mutations on `canvas:mut`. The core reflector (src/core/canvas-sync.ts) fans each one out to
+  // every OTHER attached client, so all clients converge on the same node set — no teammate's
+  // cursor hovering over stale geometry, and no client writing back a node someone else deleted on
+  // its next whole-file workspace.save. Declared BEFORE the [nodes] publish effect so the publisher
+  // exists by the time that one first runs on mount.
+  //
+  // The publisher stamps every mutation with `src` (this Canvas's tag) so the reflector's echo of
+  // our OWN mutation is recognizable as an ack rather than an edit, and `orderRef` turns those acks
+  // + the reflector's `seq` into the per-node total order that makes two clients editing one node
+  // CONVERGE (@shared/canvas-order). Cast → order.onLocal(m) → the mutation is "pending" until its
+  // ack returns; while it is, a peer's edit to that node loses to ours (it must — ours is later in
+  // the reflector's order, so it wins on every other client too).
+  useEffect(() => {
+    const src = `cv-${Math.random().toString(36).slice(2, 10)}`
+    const order = createCanvasOrder(src)
+    orderRef.current = order
+    // Solo gate: publish only once someone else is attached. The presence hub's peer table includes
+    // US, so >1 means a peer. Subscribed imperatively (no useStore selector) — this must never
+    // re-render Canvas.
+    //
+    // The same subscription watches our own clientId, because a NEW one means a NEW connection to the
+    // core — and if the core RESTARTED, its `seq` counter restarted at 0 while our `seen` map still
+    // holds the old (high) values, which would make us silently drop every mutation that follows as a
+    // straggler. So a genuine reconnect forgets the order state; correctness must not depend on
+    // ws-bridge happening to `location.reload()` the page.
+    //
+    // ONLY a genuine reconnect (`createReconnectWatch`). `id !== previous` also fired on the FIRST
+    // `null → myId`, which resolves asynchronously a few ms after mount — by which time a peer's
+    // mutation may already have arrived (that is itself proof of a peer, so we are publishing) and
+    // one of our own casts may be in flight. Resetting there threw away the `pending`/`superseded`
+    // record of that cast, so our own late echo was no longer recognizable as the REPAIR of a value a
+    // peer had overwritten: we stayed on the losing value, and our next whole-file save wrote it over
+    // everyone else's canvas. There is nothing to forget at the first hello — an empty `seen` map
+    // cannot be stale. (Nor on a project switch: this Canvas keeps applying mutations for
+    // loaded-but-inactive projects, so their order state has to survive a tab switch.)
+    const reconnected = createReconnectWatch(usePresence.getState().myId)
+    const readPresence = (): void => {
+      hasPeersRef.current =
+        hasPeersRef.current || Object.keys(usePresence.getState().peers).length > 1
+      if (reconnected(usePresence.getState().myId)) order.reset()
+    }
+    readPresence()
+    const unsub = usePresence.subscribe(readPresence)
+    // `isCanvasMutation`, with a refusal remembered per node: a refused node is re-emitted on every
+    // publish (that is what makes it sync the moment the sticky is trimmed) and a drag publishes at
+    // ~20 Hz, so the size check re-serialized the one oversized node 20×/s, at a cost proportional to
+    // its size. Same verdict, paid again only when the node actually changes (@shared/canvas-mutations).
+    const guard = createMutationGuard()
+    const pub = createCanvasPublisher(
+      (m) => {
+        const projectId = useProjects.getState().activeProjectId
+        if (!projectId) return false // no active canvas: nothing was cast — retry on the next publish
+        // The reflector REFUSES an oversized / malformed mutation at ingest, silently: no peer ever
+        // sees it and there is no negative ack. Ask the same predicate FIRST, so a refusal costs us
+        // neither a pending entry (which would deafen this node to its peers for the whole TTL — a
+        // peer's delete landing in that window would be lost, and our next whole-file save would
+        // resurrect their node) nor the retry (the publisher keeps the node in its baseline). The
+        // only thing that can legitimately blow the cap is free text, i.e. a sticky's body — so say
+        // so, instead of letting the note silently never sync.
+        if (!guard(m)) {
+          setSyncNote(
+            'This note is too large to share with your teammates (over 250 KB). It stays on your ' +
+              'canvas, but they will not see it until you shorten it.'
+          )
+          return false
+        }
+        order.onLocal(m)
+        window.nodeTerminal.canvas.mutate(projectId, m)
+        return true
+      },
+      { src, shouldPublish: () => hasPeersRef.current }
+    )
+    publisherRef.current = pub
+    return () => {
+      unsub()
+      pub.dispose()
+      publisherRef.current = null
+      orderRef.current = null
+    }
+  }, [])
+
+  // Publish on every settled node change. While dragging we throttle to ~20 Hz (position frames);
+  // the drag-stop handlers flush, and every other change (add / remove / color / title / collapse /
+  // resize) is a full upsert, because this effect diffs the whole serialized snapshot — so edits
+  // made through a direct setNodes(...) (which never reaches handleNodesChange) sync too.
+  //
+  // A programmatic project load (`loadingRef`) ADOPTS instead of publishing: the newly loaded
+  // project's nodes are not an edit, and republishing them would cast the entire canvas as N
+  // upserts to every peer on each tab switch. Same suppression precedent as `markDirty`.
+  useEffect(() => {
+    const pub = publisherRef.current
+    if (!pub) return
+    const states = publishableNow(nodes)
+    if (loadingRef.current) {
+      pub.adopt(states)
+      return
+    }
+    pub.publish(states, { throttle: draggingRef.current })
+  }, [nodes, publishableNow])
+
+  // Receiving side: apply an incoming mutation. Deliberately separate from the relay
+  // `remoteHost.onApplyMutation` effect above — that one is host↔client, this one is peer↔peer.
+  //
+  // `order.accept` is the gate, and it is what makes concurrent edits converge rather than split the
+  // canvas in two (@shared/canvas-order): it drops our OWN echo (already applied optimistically —
+  // re-applying it would rubber-band a node we are still dragging), drops a straggler the total
+  // order has superseded, and drops a peer's edit to a node whose newer edit of ours is still in
+  // flight. Everything it lets through is, by the reflector's `seq`, the current truth for that node.
+  //
+  // `adopt` is the loop guard: the publisher takes the resulting snapshot as its baseline BEFORE
+  // the [nodes] effect above can diff it, so the applied mutation diffs to nothing and cannot be
+  // re-published (A→B→C→A forever).
+  //
+  // A mutation for a project that is loaded but NOT active is applied to that project's SERIALIZED
+  // nodes in the projects store (React Flow only ever holds the active project's nodes). Dropping
+  // it would leave that canvas stale AND let our next whole-file save resurrect a node the peer
+  // deleted — the exact bug this stage exists to fix. Unknown project → nothing to apply.
+  //
+  // markDirty on both paths: a peer's mutation makes our in-memory canvas differ from disk, and a
+  // direct setNodes() bypasses handleNodesChange (which is where local edits mark dirty). Two
+  // clients saving the same converged state is harmless; never saving it is not.
+  useEffect(() => {
+    return window.nodeTerminal.canvas.onMutation((projectId, mutation) => {
+      hasPeersRef.current = true // proof of a peer, whatever the presence table says
+      if (!orderRef.current?.accept(mutation)) return
+      if (projectId !== useProjects.getState().activeProjectId) {
+        // Not on screen (a parked / background project): no terminal is mounted, but one may be
+        // PARKED from a recent project switch — dispose it, as an active-project remove does.
+        if (mutation.op === 'remove') disposeTerminalOnUnmount(mutation.id)
+        if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
+        return
+      }
+      // PATCH THE LIVE ARRAY — do not round-trip the canvas through the (lossy) serializers. That
+      // wiped your selection, deleted your relay-remote nodes and re-rendered every node component,
+      // ~20 times a second while a teammate dragged. See applyMutationToFlow.
+      const flow = applyMutationToFlow(nodesRef.current, mutation)
+      if (flow === nodesRef.current) return // nothing to do (a remove for a node we do not have)
+      if (mutation.op === 'remove') {
+        // The peer's delete must also dispose OUR terminal co-state for that node — otherwise the
+        // module-level state survives the node, and if the owner UNDOES the delete we are left
+        // holding a node that reads "closed by another user" while its session is alive again.
+        const gone = nodesRef.current.find((n) => n.id === mutation.id)
+        if (gone?.type === 'terminal') disposeTerminalOnUnmount(gone.id)
+      }
+      // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
+      // before React re-renders, and each mutation must build on the previous one.
+      nodesRef.current = flow
+      publisherRef.current?.adopt(publishableNow(flow))
+      // Undo stays LOCAL — but it must not EAT a local entry either. REBASE the committed baseline
+      // by applying the peer's mutation to it, rather than replacing it with the current nodes:
+      // replacing it made `nodes === committedRef.current`, so a local edit still inside the 300 ms
+      // undo debounce was silently dropped from the undo stack whenever a peer's mutation landed
+      // first (i.e. constantly, while anyone else was dragging). Rebasing keeps the difference that
+      // IS yours, and adds nothing that is theirs.
+      committedRef.current = applyMutationToFlow(committedRef.current, mutation)
+      setNodes(flow)
+      markDirty()
+    })
+  }, [setNodes, markDirty, publishableNow])
+
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
     if (loadingRef.current) {
@@ -1008,8 +1214,10 @@ export function Canvas() {
     (changes) => {
       // Ephemeral nodes (subagent / loop) live outside the managed state. Persist their drag
       // positions to the agent-nodes store; drop their other changes from the managed updater.
-      const eph = useAgentNodes.getState().byId
-      const isEph = (id: string) => id in eph || id.startsWith('loop-')
+      // One definition of "ephemeral", shared with the publisher (which must never put these on
+      // the wire — every client derives them from agent:status), so the two cannot drift.
+      const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
+      const isEph = (id: string) => isEphemeralNodeId(id, ephIds)
       const managed = changes.filter((c) => {
         if ('id' in c && isEph(c.id)) {
           if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
@@ -1982,10 +2190,16 @@ export function Canvas() {
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
     if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
-    // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
-    // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
-    // (which would keep the old working directory). The node id / persistKey is unchanged.
-    transport.destroy(id)
+    // End the old tmux session (recycle, not kill) so the respawned create() opens a fresh session
+    // in the new cwd instead of reattaching to the existing `nt-<id>` session (which would keep the
+    // old working directory). The node id / persistKey is unchanged.
+    //
+    // RECYCLE, not DESTROY: the tmux kill is the same, but this is not a deletion — the node stays
+    // on the canvas (here and on every co-viewer's) and keeps working. `destroy` would tell every
+    // co-viewer "closed by <name>", which is permanent and un-respawnable: their still-present node
+    // would be bricked until they deleted and re-added it. `recycle` tells them to restart onto the
+    // replacement session instead, so they follow the node into its new cwd.
+    transport.recycle(id)
     setNodes((ns) =>
       ns.map((n) =>
         n.id === id
@@ -2674,6 +2888,13 @@ export function Canvas() {
   )
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+
+  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session ([] deps —
+  // connectPresence is idempotent, but a second live connection whose teardown ran first would tear
+  // the shared one down under the survivor). Canvas deliberately does NOT read the presence store:
+  // only PresenceLayer / Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never
+  // re-renders this component (docs/team-presence.md → UI).
+  useEffect(() => connectPresence(), [])
 
   // A browser guest's new-window (target=_blank / window.open) request → open another browser node
   // (never a real popup; main denies the real one) roped below/right of the source. Reads the
@@ -3617,6 +3838,39 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  // ---- presence travel ("go to where my teammate is", from the facepile) ----
+  // A peer may be working in a project we have CLOSED — the facepile shows off-project peers on
+  // purpose. A closed project still lives in the store (`closed: true`), so `setActive` alone would
+  // activate a canvas the tab bar does not show: route it through reopenProject instead. An
+  // `unavailable` project (its file is unreadable) is not travelled to at all. See lib/presenceTravel.
+  const travelToProject = useCallback(
+    (projectId: string) => {
+      const { projects, activeProjectId: active } = useProjects.getState()
+      const travel = projectTravel(projects, active, projectId)
+      if (travel.kind === 'reopen') reopenProject(travel.projectId)
+      else if (travel.kind === 'switch') switchProject(travel.projectId)
+    },
+    [reopenProject, switchProject]
+  )
+
+  // Jump to the node a peer is focused on. focusNodeById already handles the same-project focus and
+  // the switch to another OPEN project; the closed-project case has to reopen the tab first and let
+  // the active-project effect finish the focus (pendingFocusRef, same mechanism as a notification).
+  const travelToNode = useCallback(
+    (nodeId: string) => {
+      const { projects, activeProjectId: active } = useProjects.getState()
+      const travel = nodeTravel(projects, active, nodeId)
+      if (travel.kind === 'blocked') return
+      if (travel.kind === 'reopen') {
+        pendingFocusRef.current = nodeId
+        reopenProject(travel.projectId)
+        return
+      }
+      focusNodeById(nodeId)
+    },
+    [focusNodeById, reopenProject]
+  )
+
   // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux
   // session, drop persisted agent status, tear down any SSH master, then delete it from disk.
   const deleteProject = useCallback(
@@ -3846,6 +4100,21 @@ export function Canvas() {
             </button>
           </div>
         )}
+        {syncNote && (
+          <div className="announce-banner announce-banner--info">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{syncNote}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setSyncNote(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {copyError && (
           <div className="announce-banner announce-banner--warning">
             <span className="announce-banner__dot" />
@@ -3974,11 +4243,14 @@ export function Canvas() {
           onNodeDragStart={() => (draggingRef.current = true)}
           onNodeDragStop={() => {
             draggingRef.current = false
+            // Send the final position now instead of waiting for the throttle's trailing timer.
+            publisherRef.current?.flush()
             markDirty()
           }}
           onSelectionDragStart={() => (draggingRef.current = true)}
           onSelectionDragStop={() => {
             draggingRef.current = false
+            publisherRef.current?.flush()
             markDirty()
           }}
           onPaneClick={() => setEphSel({})}
@@ -4008,8 +4280,17 @@ export function Canvas() {
           />
           <Controls showInteractive={false} position="bottom-left" />
           <UsageIndicator />
+          {/* Peer cursors live INSIDE <ReactFlow>: PresenceLayer uses ViewportPortal +
+              useReactFlow, which throw outside the provider — and cursors are flow coordinates. */}
+          <PresenceLayer />
           <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
+
+        {/* Mounted unconditionally, even when we are alone: the facepile renders null with no peers,
+            but it is also what prunes the presence store's face cache — gating its mount on a peer
+            count would leak departed peers' faces forever (state/presence.ts → selectFaces). */}
+        <Facepile onJump={travelToNode} onSwitchProject={travelToProject} />
+        <PresenceNamePrompt />
 
         {(!hasProjects || welcomeOpen) && (
           <WelcomeScreen

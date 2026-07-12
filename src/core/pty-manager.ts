@@ -6,6 +6,7 @@ import { promisify } from 'util'
 import { platform } from './platform'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
+import { REF_MAX_LEN } from '../shared/presence'
 import {
   DEFAULT_SETTINGS,
   type PtyCreateOptions,
@@ -24,10 +25,12 @@ import {
 import { HISTORY_LINES, HISTORY_MAX_BYTES, clampHistoryLines } from './history-limits'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
+import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import { presenceHub } from './presence/hub'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -250,23 +253,114 @@ export async function findInLoginPath(bin: string): Promise<string | null> {
   return null
 }
 
+/** A UI client: an Electron webContents id or a ServerPlatform uiId. */
+type ClientId = number
+
+/**
+ * WHO, within one client, owes us a resume (see `Session.pausedBy`).
+ *
+ * One client can be behind in TWO independent places, and only on the Server Edition does the
+ * second one exist:
+ *  - `renderer` — its xterm write-backlog crossed the high-water mark and it cast `pty:flow`.
+ *    This is the ONLY owner on the desktop, and it is EDGE-latched (TerminalNode: `if (!paused &&
+ *    pending > HIGH_WATER)`) — once it has pumped its pause it will not re-pause.
+ *  - `socket` — the server's own WS send buffer for that connection crossed WS_HIGH_WATER
+ *    (`ServerPlatform.sendTo`), which is a different queue with a different drain time: the socket
+ *    empties as fast as the browser READS bytes, while the renderer's backlog empties only as fast
+ *    as xterm PARSES them.
+ * They must be separate ledger entries: keyed by ClientId alone they collapse into one, and the
+ * socket's drain (the sweep) would hand back the pause the renderer still owes — permanently,
+ * because the renderer cannot re-pause. That is invariant (b) on `pausedBy`.
+ */
+export type FlowOwner = 'renderer' | 'socket'
+/** All the owners one client can owe a pause under — the sweep on any leave path. */
+const FLOW_OWNERS: readonly FlowOwner[] = ['renderer', 'socket']
+
+/** The ledger key for one (client, owner) pause. `null` is the relay host's detached sink, which
+ *  has no ClientId; it pauses on relay backpressure, i.e. as a `renderer`-side owner. */
+function flowTicket(clientId: ClientId | null, owner: FlowOwner): string {
+  return `${owner}#${clientId ?? 'relay'}`
+}
+
+/** One client's reported fit, run through the same floor/clamp the pty itself gets, so a size we
+ *  record for a client is comparable with the effective size we compute from all of them. */
+function normalizeSize(cols: number, rows: number): PtySize {
+  return effectiveSize([{ cols, rows }]) as PtySize // one entry in ⇒ never null out
+}
+
 interface Session {
   proc: pty.IPty
-  /** Renderer webContents to stream output to over IPC, or null for a detached (host) session. */
-  webContentsId: number | null
-  /** Detached sinks: when set, output/exit go to these callbacks instead of IPC (relay host). */
+  /** Every UI watching this session. Co-attach: ONE pty and ONE tmux client, N subscribers —
+   *  a second client on the same persistKey joins this set instead of spawning a second tmux
+   *  client (whose `-D` would then kick the first one off). Empty for a purely detached
+   *  (relay-served) session. */
+  subscribers: Set<ClientId>
+  /** Each VIEWING subscriber's last reported cols/rows — the pty runs at the min of these
+   *  (`effectiveSize`). A subscriber that is subscribed but NOT looking is ABSENT from this map:
+   *  it still gets output, it just doesn't constrain the size (see `resize`). `null` keys the
+   *  relay host's detached sink, which has no ClientId but does report a size. */
+  sizes: Map<ClientId | null, PtySize>
+  /** The size each subscriber's xterm is believed to be rendering: the last authoritative size we
+   *  sent it, or — if it has reported a fit since — its own fit (the renderer applies its own fit
+   *  locally, exactly as it always has). We only send `pty:size` to a subscriber whose view differs
+   *  from the effective size, which is what keeps a SOLO user's resize free of any extra IPC. */
+  shown: Map<ClientId, PtySize>
+  /** The size currently pushed into the pty (seeded from the spawn's cols/rows). Guards against
+   *  re-resizing the tmux client to the size it already has — that is a full-pane redraw. */
+  appliedSize?: PtySize
+  /**
+   * The node id (persistKey) this session was created for — set WHENEVER the caller supplied one,
+   * with no further conditions. It is not an index and it is not a persistence flag; it is just
+   * "which canvas node is this", which is exactly what a typing badge needs to point at (`write`).
+   *
+   * It exists because the two ids below are each conditional, and their conditions leave a hole:
+   * `indexKey` is unset for a DETACHED (relay-served) pty — a phone — and `persistKey` is unset
+   * when the session isn't persisted, which for a local session means tmux is off. Turn tmux off
+   * and a phone's session has NEITHER, so a phone's typing would be silently unbadgeable while a
+   * co-attached desktop peer's still lit up — a degenerate config, but a confusing, invisible
+   * degrade rather than an honest one. This field is unconditional, so it has no such hole.
+   */
+  nodeId?: string
+  /** The node id this session is CO-ATTACH-INDEXED under (`byPersistKey`) — set only for a session
+   *  a second client may join, i.e. NOT for a relay-served (detached) pty, which is deliberately
+   *  not indexed. See `nodeId` above for the plain "which node is this". */
+  indexKey?: string
+  /** Detached sinks: when set, output/exit ALSO go to these callbacks (relay host). */
   onData?: (data: string) => void
   onExit?: (exitCode: number) => void
   /** Pending output chunks, coalesced into one IPC message per flush. */
   buf: string[]
   bufBytes: number
   flushTimer: ReturnType<typeof setTimeout> | null
-  /** Node id this session persists under (when tmux-backed) — used for scrollback snapshots. */
+  /** Node id this session PERSISTS under (only when tmux-backed / remote) — it gates scrollback
+   *  snapshots and tmux kill/capture, so it must stay conditional. See `nodeId` above. */
   persistKey?: string
   /** When set, the session runs on a remote host via ssh; kill/capture target the REMOTE tmux. */
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
+  /**
+   * The (client, owner) pairs that currently OWE us a resume — a ledger of FLOW TICKETS
+   * (`flowTicket`), not of clients. The pty is paused while this set is non-empty and resumes only
+   * when it becomes empty (`setFlow` / `releaseFlow`).
+   *
+   * It has to be a SET, not a boolean, because both of these must hold at once:
+   *  (a) a pause owed by a client that LEFT is always returned (its renderer is gone and will
+   *      never send the matching resume — the co-attaching or remaining clients would stare at a
+   *      frozen, blank terminal forever). `kill` / `dropClient` / `join` return it — and `kill` /
+   *      `dropClient` return EVERY owner's ticket for that client, not just the renderer's.
+   *  (b) a pause owed by a client that is STILL HERE is never silently cancelled. That client's
+   *      flow control is EDGE-latched (`if (!paused && pending > HIGH_WATER)` in TerminalNode) —
+   *      once it has pumped the pause it will NOT re-pause, so resuming the pty behind its back is
+   *      permanent and its write queue then grows without bound for the rest of the flood.
+   * A single boolean can only ever satisfy one of the two (it cannot tell the cases apart).
+   *
+   * And the tickets are keyed by (client, OWNER), not by client, because a Server-Edition client
+   * has two independent pause owners with two different drain times (see `FlowOwner`): keyed by
+   * ClientId alone, the socket's drain would silently cancel the renderer's pause and break (b) —
+   * deterministically, for the whole rest of a flood.
+   */
+  pausedBy: Set<string>
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
@@ -279,11 +373,70 @@ export interface DetachedSinks {
   onExit(exitCode: number): void
 }
 
+/**
+ * tmux attach flags. `-A` = attach-or-create. `-D` = detach OTHER clients on attach.
+ *
+ * `-D` STAYS for the app's own client, and co-attach does not change that: a second viewer
+ * subscribes to the existing `Session` in this process — it does NOT start a second tmux client.
+ * The app therefore always has exactly ONE tmux client per session, so tmux's own multi-client
+ * size negotiation never engages and "smallest subscriber wins" is decided by us (pty-size.ts).
+ * A relay-served (detached) pty is the one exception: the host's local client is already attached
+ * to the same session and must be mirrored, not kicked off.
+ */
+export function tmuxAttachFlags(detached: boolean): string[] {
+  return detached ? ['-A'] : ['-A', '-D']
+}
+
 // Output coalescing: a fast producer (e.g. `yes`, a verbose build, tmux full-screen
 // redraws) emits many small chunks. Buffering them for one short window collapses N
 // IPC messages + N xterm writes into one, which is the single hottest path in the app.
 const FLUSH_MS = 8
 const MAX_BUF_BYTES = 256 * 1024
+
+/**
+ * How long a recycled node's co-viewers wait for the replacement session before they are told the
+ * session restarted anyway (see `recycleSession`). The notice normally fires the instant the new
+ * session is registered — milliseconds later. This is only the escape hatch for a recycler that
+ * never respawns (its app quit / crashed between the kill and the create): the co-viewers are
+ * still holding a dead pty, and being released late beats being frozen forever.
+ */
+const RECYCLE_NOTIFY_TIMEOUT_MS = 10_000
+
+/** Why a session is being ended — the ONE thing `destroySession` could not tell apart. Both kill
+ *  the tmux session; they differ entirely in what the OTHER viewers are told.
+ *  - `delete`: the × / node deletion. The node leaves the canvas: co-viewers get `pty:closed`
+ *    ("closed by <name>") and must never respawn it (that would resurrect a terminal its owner
+ *    deliberately killed, in a fresh shell, stranding a tmux session).
+ *  - `recycle`: "move into worktree". The node STAYS on the canvas under the same id and respawns
+ *    in the new cwd. Co-viewers get `pty:recycled` (restart + re-attach), never the closed state. */
+type EndIntent = 'delete' | 'recycle'
+
+/**
+ * How many deleted node ids we remember (see `tombstones`), and for how long.
+ *
+ * The map is keyed by a persistKey that comes VERBATIM off the wire, and `endSession('delete')`
+ * records one even when no live session exists — so without a bound, a client looping
+ * `pty:destroy(<random string>)` grows it forever. It is in-memory bookkeeping, not a promise: an
+ * LRU of the most recent deletions is exactly as much as the respawn guard actually needs (a
+ * co-viewer opens the deleted node's project minutes later, not next month). Stage 3's canvas-delete
+ * mutation covers the attached clients; this map still covers the ones it cannot reach (see
+ * `tombstones`). Eviction degrades to the pre-tombstone behavior (the co-viewer may respawn the
+ * node), never to something worse.
+ */
+export const TOMBSTONE_MAX = 200
+export const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Token budget for the session-ENDING casts (`pty:destroy` / `pty:recycle`), per client.
+ *
+ * These are the only pty casts that cost real resources per call — an `fs.rm` of the scrollback
+ * snapshot, a `tmux kill-session` subprocess, and a tombstone entry — and they were the only ones
+ * with no limit at all (the presence casts are all bucketed). The burst is sized to the loudest
+ * HONEST caller by a wide margin: a bulk delete (select N nodes → Delete) fires one cast per node
+ * in a single tick, and dropping one of those would silently leak a tmux session, so the bucket
+ * must never be the thing that fails a real user.
+ */
+export const PTY_END_BUDGET = { perSec: 20, burst: 200 }
 
 /**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
@@ -296,6 +449,53 @@ const MAX_BUF_BYTES = 256 * 1024
  */
 export class PtyManager {
   private sessions = new Map<string, Session>()
+  /** persistKey (node id) → live sessionId. The index that makes `pty:create` idempotent:
+   *  a second client asking for the same node subscribes to the running session. */
+  private byPersistKey = new Map<string, string>()
+  /** persistKey (node id) → the create() currently spawning it. Makes `pty:create` idempotent
+   *  ACROSS the awaits inside a spawn (see create()), not just after them. Entries are removed
+   *  as soon as the spawn settles, success or failure. */
+  private inflight = new Map<string, Promise<PtyCreateResult>>()
+  /** persistKey (node id) → the co-viewers of a session that was RECYCLED (moved into a worktree),
+   *  waiting to be told to restart onto the replacement session. Held — not sent — until that
+   *  session is registered (`spawnSession`), so a co-viewer's restart can never win the race and
+   *  spawn the node in its own stale cwd. See `recycleSession`. */
+  private pendingRecycle = new Map<
+    string,
+    { sessionId: string; clients: Set<ClientId>; timer: ReturnType<typeof setTimeout> }
+  >()
+  /**
+   * persistKey (node id) → the client that DELETED it. The respawn guard for clients the
+   * `pty:closed` event cannot reach.
+   *
+   * `pty:closed` fans out to the dying session's SUBSCRIBERS. A co-viewer whose project is
+   * inactive or closed has no mounted terminal, is not a subscriber, and is told nothing — yet the
+   * node is still on its canvas. When it opens that project, its `create` finds no session, `tmux
+   * has-session` fails, and it would SPAWN A BRAND-NEW `nt-<id>`: a terminal its owner deliberately
+   * deleted, resurrected as a fresh shell, plus a stray tmux session nobody asked for. The
+   * tombstone makes that create refuse (`PtyCreateResult.closed`) instead.
+   *
+   * Deliberate limits, because this is the smallest honest fix and not the real one:
+   *  - it is IN-MEMORY, so it dies with the core process. Co-attach means one core with N clients
+   *    (Server Edition / relay), so it covers every co-viewer for as long as that core lives — but
+   *    after a server restart the resurrection is back.
+   *  - it is BOUNDED, in size and in time (TOMBSTONE_MAX / TOMBSTONE_TTL_MS): the key comes verbatim
+   *    off the wire and an entry is recorded even when no live session exists, so an unbounded map
+   *    would grow with client input alone. Eviction degrades to the pre-tombstone behavior, never
+   *    worse.
+   *  - it is keyed by the DESTROYER, who is exempt: their own ⌘Z (undo of a delete) must still
+   *    restore the node, and a solo user is always the destroyer, so their path is untouched.
+   *  - a `recycle` (worktree move) explicitly CLEARS it: nothing was deleted there.
+   * Stage 3's canvas-delete mutation now removes the node from every ATTACHED client's canvas, so
+   * that client never asks to re-create it — but it did not retire this map. Two paths still reach
+   * `create` for a deleted node: a whole PROJECT deleted by one client is not synced (project
+   * lifecycle is not in the mutation vocabulary), and a client that was disconnected when the delete
+   * landed never receives it (no join snapshot, no replay). See docs/team-presence.md
+   * ("What Stage 3 changed", item 4).
+   */
+  private tombstones = new Map<string, { by: ClientId | null; at: number }>()
+  /** `${clientId}:${channel}` → token bucket for the session-ending casts (see PTY_END_BUDGET). */
+  private endBuckets = new Map<string, { tokens: number; at: number }>()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -366,17 +566,53 @@ export class PtyManager {
       (senderId, options: PtyCreateOptions): Promise<PtyCreateResult> =>
         this.create(senderId, options)
     )
-    platform().on(IPC.ptyWrite, (sessionId: string, data: string) =>
-      this.write(sessionId, data)
+    // Sender-aware: with co-attach, a keystroke arriving here is no longer self-evidently "the one
+    // user's" — WHO typed it is what lights the "X is typing" ring on everyone else's canvas (see
+    // `write`). Registered ONLY here: `on` and `onWithSender` compose on the same channel, so
+    // leaving the old plain listener in place would write every keystroke into the pty TWICE.
+    platform().onWithSender(IPC.ptyWrite, (senderId: number, sessionId: string, data: string) => {
+      if (!this.subscribes(senderId, sessionId)) return
+      this.write(senderId, sessionId, data)
+    })
+    // Sender-aware: a size is only meaningful with the client it belongs to — the pty runs at the
+    // smallest one (`resize`). Registered ONLY here: `on` and `onWithSender` compose on the same
+    // channel, so leaving the old plain listener in place would run the resize twice.
+    platform().onWithSender(
+      IPC.ptyResize,
+      (senderId: number, sessionId: string, cols: number | null, rows: number | null) => {
+        if (!this.subscribes(senderId, sessionId)) return
+        this.resize(senderId, sessionId, cols, rows)
+      }
     )
-    platform().on(IPC.ptyResize, (sessionId: string, cols: number, rows: number) =>
-      this.resize(sessionId, cols, rows)
+    // Sender-aware: a pause belongs to the client whose xterm backlog overflowed, and only that
+    // client (or its departure) can return it — see `Session.pausedBy`. Registered ONLY here:
+    // `on` and `onWithSender` compose on the same channel, so a leftover plain listener would
+    // run the flow change twice (and, with an unattributed sessionId, wrongly).
+    platform().onWithSender(
+      IPC.ptyFlow,
+      (senderId: number, sessionId: string, resume: boolean) => {
+        if (!this.subscribes(senderId, sessionId)) return
+        this.setFlow(senderId, sessionId, resume)
+      }
     )
-    platform().on(IPC.ptyFlow, (sessionId: string, resume: boolean) =>
-      this.setFlow(sessionId, resume)
+    // Sender-aware: with co-attach a kill detaches just THAT client, and the pty (and the tmux
+    // session behind it) survives while any other subscriber is still watching.
+    platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) => {
+      if (!this.subscribes(senderId, sessionId)) return
+      this.kill(senderId, sessionId)
+    })
+    // Sender-aware: the × permanently ends a session OTHER people may be watching, so the close
+    // event they get has to name WHO did it ("closed by <name>" — see `destroySession`).
+    // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
+    // plain listener would run the destroy — and its `tmux kill-session` — twice.
+    platform().onWithSender(IPC.ptyDestroy, (senderId: number, persistKey: string) =>
+      this.endFromClient(senderId, IPC.ptyDestroy, persistKey, 'delete')
     )
-    platform().on(IPC.ptyKill, (sessionId: string) => this.kill(sessionId))
-    platform().on(IPC.ptyDestroy, (persistKey: string) => this.destroySession(persistKey))
+    // Sender-aware for the opposite reason: the client that RECYCLED the node drives its own
+    // respawn, so it is the one client that must NOT be sent the restart notice.
+    platform().onWithSender(IPC.ptyRecycle, (senderId: number, persistKey: string) =>
+      this.endFromClient(senderId, IPC.ptyRecycle, persistKey, 'recycle')
+    )
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
     )
@@ -386,10 +622,206 @@ export class PtyManager {
     )
   }
 
-  private async create(
-    webContentsId: number,
-    options: PtyCreateOptions
-  ): Promise<PtyCreateResult> {
+  /**
+   * Does this client actually WATCH this session? The membership check every wire-facing pty cast
+   * (write / resize / flow / kill) is gated on.
+   *
+   * Session ids are sequential and guessable (`pty-1`, `pty-2`, …) and each of those casts takes the
+   * id straight off the wire. Ungated, ANY authenticated client could steer a terminal it never
+   * opened: `pty:flow(pty-3, false)` pauses the shared pty (the producing process then blocks on a
+   * full pipe and every real viewer's terminal freezes), `pty:resize(pty-3, 1, 1)` pins everyone's
+   * grid at 1x1, `pty:write` types into someone else's shell. The invariant this establishes —
+   * EVERYTHING IN `pausedBy` / `sizes` BELONGS TO A SUBSCRIBER — is what makes `dropClient` a
+   * complete cleanup: a client can only ever owe what it subscribed for.
+   *
+   * The gate lives HERE, at the IPC seam, not inside the methods: the relay host calls
+   * `write`/`resize`/`kill`/`setFlow` directly for its DETACHED (sink-served) ptys, which have no
+   * subscribers by design, and that path is not off the wire.
+   */
+  private subscribes(clientId: ClientId, sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.subscribers.has(clientId) ?? false
+  }
+
+  /**
+   * The wire-facing half of `destroySession` / `recycleSession`: validate the node id, spend a
+   * token, and only then end the session. Everything here is about the fact that `persistKey`
+   * arrives VERBATIM from a client and that a destroy costs real resources on every call (an
+   * `fs.rm`, a `tmux kill-session` subprocess, a tombstone entry) — including when the node has no
+   * live session in this process, which is precisely the call an attacker can make in a loop.
+   *
+   * The cap is the same one presence uses for every client-supplied reference (REF_MAX_LEN); a node
+   * id is a short generated string, so anything longer is not a node. It REFUSES rather than
+   * truncating — a truncated key would name a DIFFERENT node, and this call kills things.
+   *
+   * Internal callers (main's node-delete path, the worktree move) go straight to
+   * `destroySession`/`recycleSession` and are neither capped nor bucketed: they are not off the wire.
+   */
+  private endFromClient(
+    clientId: ClientId,
+    channel: string,
+    persistKey: string,
+    intent: EndIntent
+  ): Promise<void> {
+    if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN)
+      return Promise.resolve()
+    if (!this.allowEnd(clientId, channel)) return Promise.resolve()
+    return this.endSession(clientId, persistKey, intent)
+  }
+
+  /** Take one token from this client's bucket for a session-ending channel (see PTY_END_BUDGET).
+   *  Excess casts are dropped silently — never an error, never a disconnect. */
+  private allowEnd(clientId: ClientId, channel: string): boolean {
+    const key = `${clientId}:${channel}`
+    const now = Date.now()
+    const prev = this.endBuckets.get(key)
+    // A client starts with a full bucket and refills at `perSec`, capped at `burst`.
+    const tokens = prev
+      ? Math.min(
+          PTY_END_BUDGET.burst,
+          prev.tokens + ((now - prev.at) / 1000) * PTY_END_BUDGET.perSec
+        )
+      : PTY_END_BUDGET.burst
+    if (tokens < 1) {
+      this.endBuckets.set(key, { tokens, at: now })
+      return false
+    }
+    this.endBuckets.set(key, { tokens: tokens - 1, at: now })
+    return true
+  }
+
+  /** Remember that this node was DELETED, bounded in both size and time (see TOMBSTONE_MAX). The
+   *  Map is insertion-ordered, so re-inserting makes it a plain LRU. */
+  private tombstone(persistKey: string, by: ClientId | null): void {
+    this.tombstones.delete(persistKey)
+    this.tombstones.set(persistKey, { by, at: Date.now() })
+    while (this.tombstones.size > TOMBSTONE_MAX) {
+      const oldest = this.tombstones.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.tombstones.delete(oldest)
+    }
+  }
+
+  /** The tombstone for this node, if one is still in force (expired entries are dropped on read). */
+  private liveTombstone(persistKey: string): { by: ClientId | null } | undefined {
+    const tomb = this.tombstones.get(persistKey)
+    if (!tomb) return undefined
+    if (Date.now() - tomb.at > TOMBSTONE_TTL_MS) {
+      this.tombstones.delete(persistKey)
+      return undefined
+    }
+    return tomb
+  }
+
+  private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
+    const key = options.persistKey
+    if (!key) return this.spawnNew(clientId, options)
+    // Co-attach: a live session for this node id already exists in THIS process (another client,
+    // or this client's own second view). Subscribe to it instead of spawning a second tmux client
+    // — `-D` would otherwise kick the first viewer off.
+    const joined = this.join(clientId, options, key)
+    if (joined) return joined
+    // Same-tick race: spawnNew() awaits a `tmux has-session` SUBPROCESS (tens of ms, not a
+    // microtask) before spawnSession registers the session in `byPersistKey`, so two clients
+    // opening the same node in that window would BOTH miss the index and both spawn — and the
+    // second `tmux -A -D` detaches the first client, killing that user's terminal. So the spawn
+    // is published as an in-flight promise from the TOP of create(): a racing create awaits it
+    // and then takes the subscribe branch. (No locking primitive: the promise IS the barrier —
+    // the single-user path never sees an in-flight entry and behaves exactly as before.)
+    const inflight = this.inflight.get(key)
+    if (inflight) {
+      await inflight.catch(() => undefined) // the other spawn failed → fall through and try ourselves
+      const late = this.join(clientId, options, key)
+      if (late) return late
+      // The spawn we awaited REJECTED, so there is no session to join. With two clients queued
+      // behind that one failure, the first of them re-spawns — and the second must see THAT spawn
+      // (published below, synchronously) rather than fall through and spawn a second tmux client,
+      // whose `-D` would detach the first. Recurse: the in-flight guard is the barrier, so waiting
+      // on a *new* in-flight entry is exactly the same wait as the one we just did.
+      if (this.inflight.get(key)) return this.create(clientId, options)
+    }
+    // Another client DELETED this node (and there is no live session for it — `join` above already
+    // covers a resurrection by its owner). Refuse rather than spawn: see `tombstones`. Checked
+    // AFTER the in-flight barrier so a create racing the owner's own respawn joins it instead.
+    const tomb = this.liveTombstone(key)
+    if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
+    const spawn = this.spawnNew(clientId, options)
+    this.inflight.set(key, spawn)
+    // Clear on settle — INCLUDING on failure, or a single failed spawn would leave a rejected
+    // promise in the map and make the node permanently unopenable.
+    const clear = (): void => {
+      if (this.inflight.get(key) === spawn) this.inflight.delete(key)
+    }
+    spawn.then(clear, clear)
+    return spawn
+  }
+
+  /**
+   * Subscribe `clientId` to the live session for this node id, if there is one. Returns the
+   * create() result (`fresh:false` — the renderer joined a live session: no cold-restore
+   * scrollback replay, no agent resume), or undefined if none exists.
+   *
+   * WHAT PAINTS THE JOINER'S SCREEN. Its xterm is brand-new and empty, and `fresh:false` has just
+   * told it to skip the scrollback replay. The only other thing that could paint it is a tmux
+   * redraw — and tmux redraws on SIGWINCH, i.e. only when `applySize` below actually RESIZES the
+   * pty, which happens only for a joiner strictly SMALLER than the current grid. Equal is the
+   * EXPECTED case (the node's persisted geometry and the font settings are the same on both
+   * clients, and canvas zoom is a CSS transform that doesn't change `clientWidth`), and equal or
+   * larger resizes nothing — so the headline path of the whole feature, "open the same terminal in
+   * a second client", would land on a blank-but-live terminal until the next byte of output.
+   *
+   * So a join that did NOT resize carries the current screen (`PtyCreateResult.screen`), captured
+   * from tmux with the same `captureForResync` the drop-and-redraw path already uses. It rides the
+   * create RESULT rather than a `pty:resync` event on purpose: the renderer only subscribes to this
+   * session's channels AFTER create() resolves, so an event pushed here would land on no listener.
+   * A join that DID resize gets nothing — tmux paints it, and two paints would splice two different
+   * points in time onto one screen.
+   *
+   * The capture is skipped entirely (not just discarded) when the pty resized, so the solo paths
+   * pay nothing: a solo user never reaches `join` at all (a fresh spawn has nothing to paint, and a
+   * warm reattach spawns a tmux client, which redraws by itself).
+   */
+  private join(
+    clientId: ClientId,
+    options: PtyCreateOptions,
+    persistKey: string
+  ): Promise<PtyCreateResult> | undefined {
+    const existingId = this.byPersistKey.get(persistKey)
+    const existing = existingId ? this.sessions.get(existingId) : undefined
+    if (!existingId || !existing) return undefined
+    existing.subscribers.add(clientId)
+    // The joiner's xterm has fitted itself to its own window; that is what it renders until we
+    // tell it otherwise. applySize() then either shrinks the pty to it (it is the new smallest) or
+    // sends it the authoritative size to render + letterbox.
+    const size = normalizeSize(options.cols, options.rows)
+    existing.sizes.set(clientId, size)
+    existing.shown.set(clientId, size)
+    const before = existing.appliedSize
+    this.applySize(existingId, existing)
+    const resized =
+      before?.cols !== existing.appliedSize?.cols || before?.rows !== existing.appliedSize?.rows
+    // A (re)joining client's backlog is empty by definition, so its fresh page will never issue a
+    // resume its PREVIOUS page owed us — a renderer reload keeps the same ClientId, so without this
+    // the reloaded terminal would stay frozen forever with no data arriving to unstick it. Return
+    // only THIS client's RENDERER pause: a pause owed by a DIFFERENT client that is still here and
+    // still drowning stays in place, and so does this client's own SOCKET pause — a fresh page says
+    // nothing about the state of the WS send buffer under it (invariant (b) on `pausedBy`), and the
+    // server returns that one itself when the socket drains.
+    this.releaseFlow(existing, clientId, 'renderer')
+    const base: PtyCreateResult = existing.accountFallback
+      ? { sessionId: existingId, fresh: false, accountFallback: true }
+      : { sessionId: existingId, fresh: false }
+    if (resized) return Promise.resolve(base) // tmux is redrawing this client — do not paint twice
+    // An empty capture (plain shell — no tmux to capture; a tmux/ssh blip) is OMITTED, never sent
+    // as '': the renderer must not reset a terminal for nothing. A plain-shell joiner therefore
+    // still lands on a blank-but-live screen — there is no source of truth for its past output,
+    // which is exactly what "no tmux = no continuity" already means everywhere else here.
+    return this.captureForResync(existingId)
+      .catch(() => '')
+      .then((screen) => (screen ? { ...base, screen } : base))
+  }
+
+  /** Spawn a brand-new session for this client (the non-co-attach path). */
+  private async spawnNew(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -412,7 +844,7 @@ export class PtyManager {
     // Ensure the login-shell PATH is resolved (prewarmed in init(); usually already settled)
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
-    const sessionId = this.spawnSession(options, webContentsId, undefined)
+    const sessionId = this.spawnSession(options, clientId, undefined)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
     const accountFallback = this.sessions.get(sessionId)?.accountFallback
     return accountFallback ? { sessionId, fresh, accountFallback } : { sessionId, fresh }
@@ -517,7 +949,8 @@ export class PtyManager {
 
   private spawnSession(
     options: PtyCreateOptions,
-    webContentsId: number | null,
+    /** The client this session is spawned for, or null for a relay-served (detached) pty. */
+    clientId: ClientId | null,
     sinks: DetachedSinks | undefined
   ): string {
     const sessionId = `pty-${++this.counter}`
@@ -671,7 +1104,7 @@ export class PtyManager {
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
-      const attachFlags = sinks ? ['-A'] : ['-A', '-D']
+      const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',
         TMUX_SOCKET,
@@ -739,9 +1172,25 @@ export class PtyManager {
     const remote = options.sshRemote && options.persistKey && remoteSsh ? options.sshRemote : undefined
     const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
     const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
+    const spawnSize = normalizeSize(options.cols, options.rows)
     const session: Session = {
       proc,
-      webContentsId,
+      subscribers: clientId === null ? new Set<ClientId>() : new Set<ClientId>([clientId]),
+      sizes:
+        clientId === null
+          ? new Map<ClientId | null, PtySize>()
+          : new Map<ClientId | null, PtySize>([[clientId, spawnSize]]),
+      shown:
+        clientId === null
+          ? new Map<ClientId, PtySize>()
+          : new Map<ClientId, PtySize>([[clientId, spawnSize]]),
+      // node-pty was just spawned with these cols/rows, so the pty ALREADY has this size — record
+      // it so a co-attach (or a fit that reports the same numbers) doesn't ioctl it needlessly.
+      // A detached (relay-served) pty is left unseeded: its first `resize` must reach the pty,
+      // exactly as before, because its sink never reports a size at create time.
+      appliedSize: clientId === null ? undefined : spawnSize,
+      nodeId: options.persistKey,
+      indexKey: options.persistKey && !sinks ? options.persistKey : undefined,
       onData: sinks?.onData,
       onExit: sinks?.onExit,
       buf: [],
@@ -750,24 +1199,122 @@ export class PtyManager {
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
       outputSinceSnapshot: true, // capture the initial screen on the first tick
+      pausedBy: new Set<string>(),
       accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
     this.sessions.set(sessionId, session)
+    // Index by node id even when the session is NOT tmux-persisted (`persisted` only governs
+    // scrollback snapshots): co-attach must work for a plain-shell session too. Detached
+    // (relay-served) ptys are deliberately NOT indexed — the relay path keeps its own session,
+    // exactly as before, so this change cannot regress it.
+    if (session.indexKey) this.byPersistKey.set(session.indexKey, sessionId)
+    // This node has a live session again, so it is no longer deleted: drop any tombstone. Only the
+    // destroyer can even reach a spawn for a tombstoned node (create() refuses everyone else), so
+    // this is exactly "the owner brought the node back" (⌘Z) — and its co-viewers must be able to
+    // join the new session rather than stay refused.
+    if (session.indexKey) this.tombstones.delete(session.indexKey)
+    // The replacement session for a RECYCLED node (worktree move) is now live and indexed, so its
+    // co-viewers can safely be told to restart: their create() will `join` THIS session instead of
+    // spawning `nt-<nodeId>` from their own (stale) cwd. This is the whole reason the notice waits.
+    if (session.indexKey && this.pendingRecycle.has(session.indexKey))
+      this.fireRecycled(session.indexKey, true)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
     proc.onExit(({ exitCode }) => {
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
-      if (session.onExit) {
-        session.onExit(exitCode)
-      } else if (webContentsId !== null) {
-        this.send(webContentsId, IPC.ptyExit(sessionId), exitCode)
-      }
-      this.sessions.delete(sessionId)
+      session.onExit?.(exitCode) // relay host sink (unchanged)
+      for (const sub of session.subscribers) this.send(sub, IPC.ptyExit(sessionId), exitCode)
+      this.forget(sessionId, session)
     })
 
     return sessionId
+  }
+
+  /** Park a recycled session's co-viewers until the replacement session shows up (or the timeout
+   *  fires). One entry per node: a second recycle before the first resolved supersedes it — the
+   *  earlier waiters are folded in, since their session is just as dead. */
+  private armRecycle(persistKey: string, sessionId: string, clients: ClientId[]): void {
+    const prev = this.pendingRecycle.get(persistKey)
+    if (prev) {
+      clearTimeout(prev.timer)
+      for (const c of prev.clients) clients.push(c)
+    }
+    this.pendingRecycle.set(persistKey, {
+      sessionId,
+      clients: new Set(clients),
+      timer: setTimeout(() => this.fireRecycled(persistKey, false), RECYCLE_NOTIFY_TIMEOUT_MS)
+    })
+  }
+
+  /**
+   * Release a recycled node's co-viewers from the dead session. The event is keyed by the OLD
+   * session id — that is the one their listeners are subscribed to — and carries the ONE thing they
+   * cannot know and must not guess: whether there is a replacement session to restart onto.
+   *
+   * `ready` (fired the moment the replacement is registered) → restart: their create() joins it and
+   * they follow the node into its new cwd.
+   *
+   * `!ready` (the escape-hatch timeout: the recycler's app died between the kill and its create) →
+   * the terminal ENDS and offers a manual reopen. It must NOT auto-respawn: a co-viewer's create
+   * options still carry the node's OLD cwd (a cwd change is not broadcast to other clients on this
+   * branch), so it would spawn `nt-<id>` in the stale directory — and when the mover's app comes
+   * back, its own `new-session -A` REATTACHES that stale-cwd session (the cwd option is ignored on
+   * attach). Everyone's node would then claim the worktree path while the shell sits in the old
+   * folder: exactly the silent failure the withheld notice exists to prevent, just 10 s later. An
+   * ended terminal is honest, recoverable, and cannot lose the move.
+   */
+  private fireRecycled(persistKey: string, ready: boolean): void {
+    const entry = this.pendingRecycle.get(persistKey)
+    if (!entry) return
+    this.pendingRecycle.delete(persistKey)
+    clearTimeout(entry.timer)
+    const channel = IPC.ptyRecycled(entry.sessionId)
+    for (const client of entry.clients) this.send(client, channel, { ready })
+  }
+
+  /** Drop a dead/released session from both indexes. Keyed off `indexKey` (not `persistKey`,
+   *  which is only set for tmux-PERSISTED sessions) so a plain-shell node is un-indexed too. */
+  private forget(sessionId: string, session: Session): void {
+    this.sessions.delete(sessionId)
+    if (session.indexKey && this.byPersistKey.get(session.indexKey) === sessionId)
+      this.byPersistKey.delete(session.indexKey)
+  }
+
+  /**
+   * Push the effective (smallest-subscriber) size into the pty, then tell every subscriber whose
+   * xterm is NOT already rendering that grid what it actually is, so each one renders exactly the
+   * pty's grid (and letterboxes the leftover space) instead of its own `fit()` guess.
+   *
+   * Two separate idempotence guards, both load-bearing:
+   *  - the pty is only resized when the effective size CHANGED (a same-size ioctl makes the tmux
+   *    client redraw the whole pane for nothing);
+   *  - a subscriber is only messaged when the size differs from what it is showing. With exactly
+   *    one (viewing) subscriber the min of a one-element set is that subscriber's own fit, so a
+   *    solo user is never sent a `pty:size` at all — the single-user path is unchanged.
+   */
+  private applySize(sessionId: string, session: Session): void {
+    const size = effectiveSize(session.sizes.values())
+    // Nobody is looking (every subscriber is parked, or none has reported a fit yet): leave the
+    // pty at whatever size it has. Resizing it to a default here would garble the parked xterms'
+    // buffers and the tmux pane behind them for no viewer's benefit.
+    if (!size) return
+    if (session.appliedSize?.cols !== size.cols || session.appliedSize?.rows !== size.rows) {
+      session.appliedSize = size
+      try {
+        session.proc.resize(size.cols, size.rows)
+      } catch {
+        // resize can throw if the proc already exited; ignore.
+      }
+    }
+    const channel = IPC.ptySize(sessionId)
+    for (const sub of session.subscribers) {
+      const shown = session.shown.get(sub)
+      if (shown && shown.cols === size.cols && shown.rows === size.rows) continue
+      session.shown.set(sub, size)
+      this.send(sub, channel, size)
+    }
   }
 
   /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
@@ -782,7 +1329,7 @@ export class PtyManager {
     }
   }
 
-  /** Send all buffered output for a session as a single IPC message. */
+  /** Send all buffered output for a session to every subscriber as a single IPC message. */
   private flush(sessionId: string, session: Session): void {
     if (session.flushTimer) {
       clearTimeout(session.flushTimer)
@@ -792,48 +1339,197 @@ export class PtyManager {
     const data = session.buf.join('')
     session.buf = []
     session.bufBytes = 0
-    if (session.onData) {
-      session.onData(data)
-    } else if (session.webContentsId !== null) {
-      this.send(session.webContentsId, IPC.ptyData(sessionId), data)
-    }
+    session.onData?.(data) // relay host sink (unchanged)
+    const channel = IPC.ptyData(sessionId)
+    for (const sub of session.subscribers) this.send(sub, channel, data)
   }
 
   /**
-   * Flow control: the renderer pauses us when xterm's write backlog grows past a high
-   * watermark and resumes once it drains, so a flood can't grow the renderer buffer
-   * without bound. node-pty pause()/resume() stops/starts reading the pty fd; the OS
-   * pipe applies backpressure to the producing process.
+   * Flow control: a client pauses us when ITS xterm write backlog grows past a high watermark and
+   * resumes once it drains, so a flood can't grow that renderer's buffer without bound. node-pty
+   * pause()/resume() stops/starts reading the pty fd; the OS pipe applies backpressure to the
+   * producing process.
+   *
+   * Co-attach makes this per-client: there is ONE pty behind N subscribers, so it must be paused
+   * while ANY subscriber is behind (the slowest viewer sets the pace — the alternative, dropping
+   * output for the laggard, needs a per-client backlog and a redraw, which is Task 5) and resumed
+   * only when the LAST owed resume lands. `pausedBy` is that ledger.
+   *
+   * `clientId` is null for the relay host's detached pty, whose sink pauses on relay backpressure
+   * and returns the resume on drain — one more owner in the same ledger, no special casing.
+   *
+   * `owner` says WHICH of the client's two queues is behind (see `FlowOwner`). It defaults to
+   * `renderer` — the only owner that exists on the desktop and over the relay — so the Server
+   * Edition's socket backpressure is the one caller that passes anything (`src/server/index.ts`).
+   * A socket drain then returns the SOCKET's ticket only, never the pause the browser's own xterm
+   * still owes.
+   *
+   * Single user: the set holds exactly his one renderer ticket while paused and is empty when he
+   * resumes, so the actuator sees exactly the pause/resume pair it always saw.
    */
-  setFlow(sessionId: string, resume: boolean): void {
+  setFlow(
+    clientId: ClientId | null,
+    sessionId: string,
+    resume: boolean,
+    owner: FlowOwner = 'renderer'
+  ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    if (resume) {
+      this.releaseFlow(session, clientId, owner)
+      return
+    }
+    const wasPaused = session.pausedBy.size > 0
+    session.pausedBy.add(flowTicket(clientId, owner))
+    if (wasPaused) return // already paused by someone — pause() again would be a no-op
     try {
-      if (resume) session.proc.resume()
-      else session.proc.pause()
+      session.proc.pause()
     } catch {
-      // pause/resume can throw if the proc already exited; ignore.
+      // pause can throw if the proc already exited; ignore.
     }
   }
 
-  write(sessionId: string, data: string): void {
-    this.sessions.get(sessionId)?.proc.write(data)
+  /**
+   * Return a pause `clientId` owed us — because it resumed, or because it LEFT (kill /
+   * dropClient) or reloaded (join). The pty resumes only when the ledger empties: a pause still
+   * owed by a client that is here and behind must survive every other client's comings and goings,
+   * or that client's renderer queue grows without bound (its flow control is edge-latched and will
+   * never re-pause). No-op when this client owed nothing — the single-user resume path is then
+   * exactly the old `paused=false; proc.resume()`.
+   *
+   * `owner` scopes WHICH of that client's tickets is returned:
+   *  - a drain returns exactly the one that drained (invariant (b)): the socket emptying says
+   *    nothing about the browser's xterm backlog, and vice versa;
+   *  - omitting it returns ALL of them, which is what a client's DEPARTURE means (invariant (a)):
+   *    it receives nothing more on this session, so no owner of its can ever resume us again.
+   */
+  private releaseFlow(session: Session, clientId: ClientId | null, owner?: FlowOwner): void {
+    const owners = owner ? [owner] : FLOW_OWNERS
+    let released = false
+    for (const o of owners) {
+      if (session.pausedBy.delete(flowTicket(clientId, o))) released = true
+    }
+    if (!released) return
+    if (session.pausedBy.size > 0) return
+    try {
+      session.proc.resume()
+    } catch {
+      // resume can throw if the proc already exited; ignore.
+    }
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
-    const session = this.sessions.get(sessionId)
-    if (!session) return
-    // cols/rows must be at least 1, otherwise node-pty throws.
-    session.proc.resize(Math.max(1, cols), Math.max(1, rows))
+  /** Does this client owe a resume on this session under ANY owner? (dropClient's sweep gate.) */
+  private owesFlow(session: Session, clientId: ClientId | null): boolean {
+    return FLOW_OWNERS.some((o) => session.pausedBy.has(flowTicket(clientId, o)))
   }
 
   /**
-   * Detach the client. With tmux this only kills our client process; the tmux
-   * session keeps running so it can be reattached later.
+   * Input from ONE client into the (possibly shared) session.
+   *
+   * ATTRIBUTION IS SERVER-SIDE, never client-declared: the sender is already identified by the
+   * transport (Electron's webContents id, the Server Edition's uiId, the relay HostSession's
+   * peer ClientId), so nobody can type as somebody else — and a phone typing over the relay lights
+   * up the "X is typing" badge on every canvas with no client-side change at all. `clientId` is
+   * `null` for a client the transport cannot name (a relay-served pty whose session has no presence
+   * peer): its input still reaches the pty, it is just not badged.
+   *
+   * The badge is reported per NODE — the node id, which is what the canvas draws — never per
+   * sessionId. `session.nodeId` is that id, and it is unconditional (see the field): the two
+   * conditional ids next to it, `indexKey` and `persistKey`, each go missing in a case the other
+   * covers — but with tmux OFF a relay-served (phone) session has NEITHER, and reading them here
+   * would leave a phone's typing silently unbadgeable while a co-attached desktop peer's still lit.
+   * A session created with no persistKey (a scratch pty) has no node id at all, and so nothing to
+   * badge.
+   *
+   * The hub throttles the broadcast (1 per 500 ms per client+node), so PtyManager does no
+   * throttling of its own — but it does skip presence entirely when the user is ALONE: with one
+   * peer in the table the only recipient would be the typist, whose own badge is never drawn, so a
+   * solo keystroke burst must not cost a presence fan-out. The single-user path stays exactly the
+   * old `sessions.get(id)?.proc.write(data)`.
+   *
+   * No locking — concurrent writers interleave characters in the one tmux session. That is the
+   * documented v1 behavior (docs/team-presence.md, "No locking"); the badge IS the warning.
    */
-  kill(sessionId: string): void {
+  write(clientId: ClientId | null, sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    if (clientId !== null && session.nodeId && presenceHub.peerCount() > 1)
+      presenceHub.noteTyping(clientId, session.nodeId)
+    session.proc.write(data)
+  }
+
+  /**
+   * A subscriber reports the size IT can render. The pty runs at the smallest of them, so nobody
+   * is ever sent more columns than their xterm can draw (a subscriber with room to spare
+   * letterboxes the remainder). With exactly one subscriber, min(one) is that subscriber's own
+   * size — the single-user path resizes the pty to exactly what it asked for, as it always did.
+   *
+   * A `null` cols/rows means **"subscribed, but not looking"**: the client stays in the fan-out
+   * (it keeps consuming output) but drops out of the min. This is what a PARKED terminal reports —
+   * the renderer keeps an unmounted node's xterm+PTY alive for 5 minutes so a remount re-adopts
+   * them exactly, and without this a window somebody parked small would keep every other viewer's
+   * terminal shrunk for those 5 minutes even though nobody is looking at it. `null` (not 0) carries
+   * that meaning because 0 already has one: `effectiveSize` clamps a not-yet-measured VIEWING
+   * client's 0 up to 1 rather than letting it zero the pty.
+   *
+   * `clientId` is null for the relay host's detached pty (its sink reports the mirrored client's
+   * size); it constrains the size like any other viewer but is not in `subscribers`, so it gets no
+   * `pty:size` message — the relay has its own size channel.
+   */
+  resize(
+    clientId: ClientId | null,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null
+  ): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    if (cols === null || rows === null) {
+      session.sizes.delete(clientId)
+    } else {
+      const size = normalizeSize(cols, rows)
+      session.sizes.set(clientId, size)
+      // The client's own xterm fits itself locally (as it always has), so its fit — not the last
+      // authoritative size we sent it — is what it is rendering right now. If that fit isn't the
+      // effective size, applySize() below corrects it straight back.
+      if (clientId !== null) session.shown.set(clientId, size)
+    }
+    this.applySize(sessionId, session)
+  }
+
+  /**
+   * One client detaches (node unmount / tab close). With co-attach this is per-CLIENT: the pty
+   * (and the tmux session behind it) survives while anyone else is still watching. Only when the
+   * last subscriber leaves — and no relay sink is attached — do we release the pty client. With
+   * tmux the tmux session itself keeps running either way, as always.
+   *
+   * `clientId` is null for the relay host releasing its own detached (sink-served) pty: it drops
+   * the sinks, which are that session's only "subscriber".
+   */
+  kill(clientId: ClientId | null, sessionId: string): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    if (clientId === null) {
+      session.onData = undefined
+      session.onExit = undefined
+      session.sizes.delete(null)
+    } else {
+      session.subscribers.delete(clientId)
+      session.sizes.delete(clientId)
+      session.shown.delete(clientId)
+    }
+    // The departing client (or sink) may have been one of the ones that paused us, and it will
+    // never send the matching resume now — leaving that pause in place would freeze the terminal
+    // for everyone who stayed. EVERY owner it owed goes back (no `owner` argument): it stops
+    // receiving this session's output entirely, so neither its renderer nor its socket can ever
+    // resume us again. A pause owed by a client that is STILL here is untouched: the pty stays
+    // paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
+    this.releaseFlow(session, clientId)
+    if (session.subscribers.size > 0 || session.onData) {
+      // Somebody is still watching: the departing client's size no longer constrains the pty.
+      this.applySize(sessionId, session)
+      return
+    }
     if (session.flushTimer) clearTimeout(session.flushTimer)
     // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
     // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
@@ -843,7 +1539,42 @@ export class PtyManager {
     // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone leaks the
     // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
     releasePty(session.proc as ReleasablePty)
-    this.sessions.delete(sessionId)
+    this.forget(sessionId, session)
+  }
+
+  /**
+   * A client VANISHED (browser tab closed — the normal way to leave the Server Edition — or a
+   * destroyed/crashed renderer): unsubscribe it from every session it was watching, exactly as a
+   * `pty:kill` per session would. Sessions that fall to zero subscribers are released (final
+   * scrollback snapshot + pty client released). tmux sessions are NOT killed — releasing the pty
+   * client is the whole point: the terminal keeps running and the next open reattaches.
+   *
+   * Without this, a vanished client stays in `subscribers` forever: the pty is never released,
+   * its detach-time snapshot never taken, and — worse — a pty that client had PAUSED could never
+   * be resumed (the leave path is what returns the owed resume).
+   */
+  dropClient(clientId: ClientId): void {
+    // Snapshot the entries: kill() mutates `sessions` when a session falls to zero subscribers.
+    for (const [sessionId, session] of [...this.sessions]) {
+      if (session.subscribers.has(clientId)) {
+        this.kill(clientId, sessionId)
+        continue
+      }
+      // NOT a subscriber — and yet it may still hold state here. Sweeping only the sessions a client
+      // subscribes to made the departure an INCOMPLETE cleanup: anything it owed elsewhere (a pause,
+      // a size) could never be returned, so a single entry left behind froze or clamped a shared pty
+      // for every real viewer, for the life of the core process. The wire casts are now gated on
+      // membership (`subscribes`), so this should find nothing; sweep unconditionally anyway — the
+      // invariant "nothing outlives its client" must not depend on every future caller remembering
+      // the gate.
+      const hadSize = session.sizes.delete(clientId)
+      const hadShown = session.shown.delete(clientId)
+      if (!hadSize && !hadShown && !this.owesFlow(session, clientId)) continue
+      // Every owner's ticket, not just the renderer's: a vanished client's SOCKET pause is as
+      // unreturnable as its renderer's (invariant (a) — the pty would freeze for every co-viewer).
+      this.releaseFlow(session, clientId)
+      this.applySize(sessionId, session)
+    }
   }
 
   /**
@@ -879,6 +1610,23 @@ export class PtyManager {
     } catch {
       return ''
     }
+  }
+
+  /**
+   * The CURRENT screen of a live session, by sessionId — the redraw sent to a client that fell so
+   * far behind that its socket backlog was discarded (see ServerPlatform's WS_DROP_WATER). Reuses
+   * the existing `tmux capture-pane -e` paths (`captureSnapshot`, which the relay host already
+   * paints a joining mirror with; `captureSession` for an ssh-project node, whose tmux lives on the
+   * remote host) rather than adding a second capture. '' when the session or tmux is unavailable —
+   * the client then just clears and resumes streaming.
+   */
+  async captureForResync(sessionId: string): Promise<string> {
+    const session = this.sessions.get(sessionId)
+    if (!session) return ''
+    const key = session.persistKey ?? session.indexKey
+    if (!key) return ''
+    if (session.sshRemote) return this.captureSession(key)
+    return this.captureSnapshot(key)
   }
 
   /**
@@ -1010,12 +1758,115 @@ export class PtyManager {
     }
   }
 
-  /** Permanently end a node's persistent tmux session (called when the user closes it). */
-  async destroySession(persistKey: string): Promise<void> {
-    // destroy() is called (close button) while the session is still live, so its sshRemote is
-    // known. Capture it synchronously before any await.
-    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
-    // The node is gone for good — drop its cold-restore snapshot too.
+  /**
+   * Permanently end a node's persistent session — the user clicked ×, and that means "this
+   * terminal is gone, for everyone" (`tmux kill-session`), which is the whole meaning of the
+   * button. With co-attach the node may have OTHER viewers, and they must be told: each one gets
+   * `pty:closed:<sessionId>` carrying `{ by: <the ClientId that pressed ×> }`, so their terminal
+   * lands in a "closed by <name>" state.
+   *
+   * The payload names the CLIENT, not the person: names are unverified presence data and live in
+   * the renderer's presence table, so PtyManager needs no dependency on the peer table (and cannot
+   * be made to lie about a name it never sees).
+   *
+   * The close event is what STOPS the other viewers from quietly reopening the node: a respawn
+   * would resurrect a session its owner deliberately deleted — a fresh shell with none of the
+   * state, plus a stray tmux session nobody asked for. It only reaches SUBSCRIBERS, though, so the
+   * destroy also leaves a `tombstone`: a client that was never subscribed (its project is closed /
+   * inactive, so it has no mounted terminal) is refused at `create` time instead.
+   *
+   * `clientId` is null when nothing/no-one attributable did it (an internal caller).
+   */
+  destroySession(clientId: ClientId | null, persistKey: string): Promise<void> {
+    return this.endSession(clientId, persistKey, 'delete')
+  }
+
+  /**
+   * End a node's persistent session so the SAME node id can immediately respawn in a NEW cwd —
+   * "move into worktree". The tmux kill is identical to `destroySession` (without it, the respawn's
+   * `tmux new-session -A` would just reattach the old session, keeping the old working directory);
+   * the INTENT is the opposite: nothing was deleted. The node is still on every canvas and still
+   * works, so a co-viewer must not be pushed into the permanent, un-respawnable "closed by <name>"
+   * state — that used to strand them on a live node until they deleted and re-added it.
+   *
+   * What a co-viewer gets instead is `pty:recycled:<oldSessionId>`: restart your terminal, the node
+   * moved. Their re-create then CO-ATTACHES to the replacement session (`join`), so they follow the
+   * node into its new cwd and are never left holding the dead pty.
+   *
+   * The notice is deliberately WITHHELD until the replacement session is registered (see
+   * `spawnSession`). Sent any earlier, a co-viewer's restart could beat the recycler's own create
+   * and spawn `nt-<nodeId>` from ITS options — i.e. in the node's STALE cwd — silently undoing the
+   * move for everyone. `RECYCLE_NOTIFY_TIMEOUT_MS` is the escape hatch when no respawn ever comes.
+   *
+   * `clientId` is the recycler: it drives its own respawn (`respawnNonce`), so it is excluded from
+   * the notice. Solo user: there is no one else, so nothing is sent and nothing is armed — the path
+   * is the old destroy, minus a fan-out to an empty set.
+   */
+  recycleSession(clientId: ClientId | null, persistKey: string): Promise<void> {
+    return this.endSession(clientId, persistKey, 'recycle')
+  }
+
+  /**
+   * The shared teardown behind `destroySession` / `recycleSession`: drop the session (and its
+   * co-attach index entry, in-flight create, buffered output, flow-control ledger), drop the
+   * cold-restore snapshot, and `tmux kill-session`. Everything the two intents disagree about is
+   * the ONE branch below — what the other subscribers are told (see `EndIntent`).
+   */
+  private async endSession(
+    clientId: ClientId | null,
+    persistKey: string,
+    intent: EndIntent
+  ): Promise<void> {
+    // Both callers run while the session is still live, so its sshRemote is known. Capture it
+    // synchronously before any await. The index is the co-attach one (UI sessions); the scan is
+    // the fallback for a session that is live but not indexed.
+    const dyingId = this.byPersistKey.get(persistKey)
+    const dying = dyingId ? this.sessions.get(dyingId) : undefined
+    const sshRemote = dying?.sshRemote ?? this.sessionByPersistKey(persistKey)?.sshRemote
+    // Un-index NOW (synchronously): this session is finished either way, so a create() that races
+    // the kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
+    // session instead of co-attaching to the one we are about to end.
+    // Also drop any in-flight create for this node: a create racing the kill-session below must
+    // spawn a fresh session, not await (and then join) the one we are ending.
+    this.inflight.delete(persistKey)
+    // A DELETE is remembered (the respawn guard for clients `pty:closed` cannot reach — see
+    // `tombstones`); a RECYCLE explicitly forgets, because the node is not going anywhere and its
+    // replacement session must be spawnable. Recorded even when no live session exists in this
+    // process: the node may be deleted from a canvas whose terminal was never opened here.
+    if (intent === 'delete') this.tombstone(persistKey, clientId)
+    else this.tombstones.delete(persistKey)
+    if (dyingId && dying) {
+      this.byPersistKey.delete(persistKey)
+      dying.indexKey = undefined
+      const others = [...dying.subscribers].filter((sub) => sub !== clientId)
+      if (intent === 'delete') {
+        const channel = IPC.ptyClosed(dyingId)
+        for (const sub of others) this.send(sub, channel, { by: clientId })
+      } else if (others.length > 0) {
+        this.armRecycle(persistKey, dyingId, others)
+      }
+      // Tear the session down HERE rather than leaving it to the client's own `kill` / the pty's
+      // onExit: with N subscribers there is no single kill to wait for, and every one of them may
+      // be mid-anything — parked, paused (its owed resume will never come now), desynced past the
+      // drop ceiling. The Session object holds all of that state, so dropping it drops the lot: no
+      // leaked pause, no stray subscriber still in the fan-out, no timer. (The per-client
+      // backpressure bookkeeping on the Server Edition shell is pruned by the `pty:closed:` /
+      // `pty:recycled:` event itself — see ServerPlatform.forgetFlowState.)
+      if (dying.flushTimer) clearTimeout(dying.flushTimer)
+      dying.subscribers.clear()
+      dying.sizes.clear()
+      dying.shown.clear()
+      dying.pausedBy.clear()
+      // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone would leak the
+      // master fd — and a session destroyed while a drowning viewer had it paused is exactly that
+      // case (see pty-release.ts). It resumes the pty first, so the fd actually closes.
+      releasePty(dying.proc as ReleasablePty)
+      this.forget(dyingId, dying)
+    }
+    // This session is gone for good — drop its cold-restore snapshot too. A recycle drops it as
+    // well (and always did, when the worktree move went through `destroy`): the snapshot is of the
+    // OLD cwd's session, and the respawn is a cold start (`fresh`), so replaying it would paint the
+    // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: there is no local tmux session — end the REMOTE one.
@@ -1058,10 +1909,21 @@ export class PtyManager {
       releasePty(session.proc as ReleasablePty)
     }
     this.sessions.clear()
+    this.byPersistKey.clear()
+    // Pending recycle notices die with the sessions they were waiting on (their timers would
+    // otherwise fire into a manager that has released everything).
+    for (const entry of this.pendingRecycle.values()) clearTimeout(entry.timer)
+    this.pendingRecycle.clear()
+    // Clear the in-flight index with the other two, or a create still spawning at quit would leave
+    // a promise (and the session it resolves to) reachable from a manager that has released
+    // everything else — a later create would then co-attach to a session we already let go.
+    this.inflight.clear()
     return Promise.all(finals).then(() => undefined)
   }
 
-  private send(webContentsId: number, channel: string, payload: unknown): void {
-    platform().sendTo(webContentsId, channel, payload)
+  /** Variadic so a payload-less event (`pty:recycled`) sends no argument at all, rather than an
+   *  explicit `undefined` the shells would have to serialize and the renderer ignore. */
+  private send(clientId: ClientId, channel: string, ...args: unknown[]): void {
+    platform().sendTo(clientId, channel, ...args)
   }
 }

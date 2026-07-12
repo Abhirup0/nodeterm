@@ -17,6 +17,7 @@ import {
   type FsApi,
   type GitApi,
   type NodeTerminalApi,
+  type PresenceApi,
   type PtyApi,
   type PtyCreateOptions,
   type SettingsApi,
@@ -24,6 +25,7 @@ import {
   type Workspace,
   type WorkspaceApi
 } from '../../shared/types'
+import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 
@@ -165,6 +167,7 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     setFlow: (sessionId, resume) => client.cast(IPC.ptyFlow, sessionId, resume),
     kill: (sessionId) => client.cast(IPC.ptyKill, sessionId),
     destroy: (persistKey) => client.cast(IPC.ptyDestroy, persistKey),
+    recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
     // No server handler — degrade gracefully (never reject the boot path).
     generateName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
@@ -181,7 +184,16 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     onData: (sessionId, listener) =>
       client.subscribe(IPC.ptyData(sessionId), listener as Listener),
     onExit: (sessionId, listener) =>
-      client.subscribe(IPC.ptyExit(sessionId), listener as Listener)
+      client.subscribe(IPC.ptyExit(sessionId), listener as Listener),
+    // Co-attach channels: ordinary JSON `ev` frames (only pty:data is binary), so the frame
+    // decoder is unchanged — they just fan out through the generic channel subscription.
+    onSize: (sessionId, listener) => client.subscribe(IPC.ptySize(sessionId), listener as Listener),
+    onClosed: (sessionId, listener) =>
+      client.subscribe(IPC.ptyClosed(sessionId), listener as Listener),
+    onRecycled: (sessionId, listener) =>
+      client.subscribe(IPC.ptyRecycled(sessionId), listener as Listener),
+    onResync: (sessionId, listener) =>
+      client.subscribe(IPC.ptyResync(sessionId), listener as Listener)
   }
 
   const workspace: WorkspaceApi = {
@@ -335,6 +347,44 @@ export function buildAgentApi(
 }
 
 /**
+ * Build the `canvas` namespace over an RpcClient: a cast out (`canvas:mut`) and a subscription in on
+ * the same channel. The server stamps each mutation with the total order (`seq`) and reflects it to
+ * every client, us included — our own frame coming back is the ACK that carries our place in that
+ * order (the renderer recognizes it by `src`; see src/shared/canvas-order.ts). This is a REAL
+ * implementation, not a stub:
+ * the Server Edition (two browsers on one workspace) is the surface that needs canvas sync most.
+ */
+export function buildCanvasApi(client: RpcClient): Pick<NodeTerminalApi, 'canvas'> {
+  return {
+    canvas: {
+      mutate: (projectId, mutation) => client.cast(IPC.canvasMut, projectId, mutation),
+      onMutation: (listener) => client.subscribe(IPC.canvasMut, listener as Listener)
+    }
+  }
+}
+
+/**
+ * Build the `presence` namespace over an RpcClient, mirroring the preload's invoke(→request) /
+ * send(→cast) / on(→subscribe) split member-for-member: `hello` is the only request (its response
+ * is how a client learns its OWN clientId), cursor/focus/chat/project are casts, and the two event
+ * channels are subscriptions. Declared against its `NodeTerminalApi` slice so `satisfies` keeps
+ * the compiler as the completeness gate.
+ */
+export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'presence'> {
+  const presence: PresenceApi = {
+    hello: (identity: PeerIdentity) =>
+      client.request(IPC.presenceHello, identity) as ReturnType<PresenceApi['hello']>,
+    cursor: (cursor) => client.cast(IPC.presenceCursor, cursor),
+    focus: (nodeId) => client.cast(IPC.presenceFocus, nodeId),
+    chat: (text) => client.cast(IPC.presenceChat, text),
+    project: (projectId) => client.cast(IPC.presenceProject, projectId),
+    onSync: (listener) => client.subscribe(IPC.presenceSync, listener as Listener),
+    onPeer: (listener) => client.subscribe(IPC.presencePeer, listener as Listener)
+  }
+  return { presence }
+}
+
+/**
  * Build the `claude` namespace over an RpcClient. `cliCaps` is a REAL handler on the server
  * (`registerClaudeCliIpc` runs in the server shell too), so the browser resolves the very same
  * `--permission-mode auto` version gate as desktop instead of silently no-opping into "auto
@@ -462,6 +512,8 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildRealApi(client),
     ...buildFilesApi(client),
     ...buildAgentApi(client),
+    ...buildCanvasApi(client),
+    ...buildPresenceApi(client),
     // Only `cliCaps` is real here — the rest of the namespace stays stubbed (see buildClaudeApi).
     claude: buildClaudeApi(client, stubApi.claude),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over

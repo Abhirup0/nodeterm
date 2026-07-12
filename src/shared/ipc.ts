@@ -7,6 +7,11 @@ export const IPC = {
   ptyFlow: 'pty:flow',
   ptyKill: 'pty:kill',
   ptyDestroy: 'pty:destroy',
+  /** End a node's persistent session so the SAME node id can respawn in a new cwd ("move into
+   *  worktree"). Same tmux kill-session as `ptyDestroy`, but it is NOT a deletion: the node stays
+   *  on every canvas, so co-viewers get the restart notice (`ptyRecycled`) instead of the
+   *  permanent, un-respawnable `ptyClosed`. */
+  ptyRecycle: 'pty:recycle',
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
@@ -40,6 +45,11 @@ export const IPC = {
   agentSubagentActivity: 'agent:subagent-activity',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
+  /** Canvas sync: a client casts its local node mutations here; the core reflector
+   *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
+   *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see
+   *  src/shared/canvas-order.ts). Args (both directions): [projectId: string, CanvasMutation]. */
+  canvasMut: 'canvas:mut',
   contextLinkSetLinks: 'context-link:set-links',
   contextLinkInfo: 'context-link:info',
   appUpdateAvailable: 'app:update-available',
@@ -63,9 +73,44 @@ export const IPC = {
   usageUpdate: 'usage:update',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
+  // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the
+  // client its own clientId, so it never draws its own cursor. The rest are casts (client→server)
+  // and events (server→clients); the server is a dumb reflector and applies no policy.
+  presenceHello: 'presence:hello',
+  presenceCursor: 'presence:cursor',
+  presenceFocus: 'presence:focus',
+  presenceChat: 'presence:chat',
+  // Which project (canvas) the client is looking at. Cursors/focus are only meaningful to a
+  // viewer on the same project — each project has its own nodes and coordinate space.
+  presenceProject: 'presence:project',
+  presenceSync: 'presence:sync',
+  presencePeer: 'presence:peer',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,
+  /** Authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers.
+   *  Broadcast to every subscriber whenever the subscriber set or any reported size changes. */
+  ptySize: (sessionId: string) => `pty:size:${sessionId}`,
+  /** The node was permanently destroyed by another client (payload: { by: ClientId }). The
+   *  remaining subscribers show a "closed by <name>" state instead of respawning the session. */
+  ptyClosed: (sessionId: string) => `pty:closed:${sessionId}`,
+  /** The node's session was RECYCLED by another client (moved into a worktree): this session id is
+   *  dead, but a replacement is already live under the same node id — restart the terminal so it
+   *  co-attaches to it. Deliberately emitted only AFTER the replacement session exists (see
+   *  PtyManager.recycleSession), so a co-viewer's restart can never spawn the node in its own,
+   *  stale cwd.
+   *  Payload: `{ ready: boolean }`. `ready:true` = the replacement session is registered, restart
+   *  onto it. `ready:false` = the escape-hatch timeout fired and NO replacement ever came (the
+   *  recycler's app died mid-move): the terminal must NOT respawn — it would spawn `nt-<id>` in
+   *  its own stale cwd and silently undo the move — it ends and offers a manual reopen. */
+  ptyRecycled: (sessionId: string) => `pty:recycled:${sessionId}`,
+  /** Redraw for a client that fell too far behind: the session's CURRENT screen, captured from
+   *  tmux. Sent instead of the discarded backlog (payload: the capture text). The terminal clears
+   *  and repaints from it — see ServerPlatform's WS_DROP_WATER.
+   *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent — an
+   *  empty redraw would wipe a live terminal). The renderer must still IGNORE an empty payload
+   *  rather than reset on it. */
+  ptyResync: (sessionId: string) => `pty:resync:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
