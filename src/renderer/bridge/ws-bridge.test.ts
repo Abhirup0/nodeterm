@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import http from 'http'
 import { WebSocketServer } from 'ws'
 import WebSocket from 'ws'
-import { encodePtyData } from '../../shared/rpc'
+import { encodePtyData, E_DISCONNECTED } from '../../shared/rpc'
 
 // RpcClient is exported for tests
 import { RpcClient } from './ws-bridge'
@@ -59,5 +59,33 @@ describe('RpcClient', () => {
     const client = new RpcClient(`ws://127.0.0.1:${port}/`)
     await client.ready()
     await expect(client.request('missing')).rejects.toMatchObject({ code: 'E_NO_HANDLER' })
+  })
+
+  // A response can only ever arrive over the socket that carried the request. When that socket
+  // closes, every in-flight request is unanswerable — and a promise that neither resolves nor
+  // rejects is the worst of the three outcomes: the caller's `finally`/`setBusy(false)` never runs,
+  // so a dialog sits on "Creating…" with its Cancel button disabled forever, with no error and no
+  // way out. Fail closed: reject them, so `await` throws and every caller's error path can run.
+  it('rejects every in-flight request when the socket closes (never hangs them forever)', async () => {
+    wss.on('connection', (sock) => {
+      // Take the request, answer nothing, and drop the connection — the WS-drop-mid-call case.
+      sock.on('message', () => sock.close())
+    })
+    const client = new RpcClient(`ws://127.0.0.1:${port}/`)
+    await client.ready()
+    const a = client.request('git:worktree-add', '/repo')
+    const b = client.request('git:worktree-remove', '/repo')
+    await expect(a).rejects.toMatchObject({ code: E_DISCONNECTED })
+    await expect(b).rejects.toMatchObject({ code: E_DISCONNECTED })
+  })
+
+  it('still notifies the onClose hooks (the reconnect overlay) when it fails the pending requests', async () => {
+    wss.on('connection', (sock) => sock.on('message', () => sock.close()))
+    const client = new RpcClient(`ws://127.0.0.1:${port}/`)
+    await client.ready()
+    let closed = 0
+    client.onClose(() => closed++)
+    await expect(client.request('anything')).rejects.toThrow()
+    expect(closed).toBe(1)
   })
 })

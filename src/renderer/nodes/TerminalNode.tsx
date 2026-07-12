@@ -55,6 +55,8 @@ import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
+import { useWorktrees } from '../state/worktrees'
+import { isRemoteSessionNode } from '@shared/worktree'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -364,10 +366,29 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // is bound to a worktree AND its current cwd differs from that worktree path (i.e. it's still
   // running in the old folder). Reads the parent group from React Flow state (single source of
   // truth); `parentId` is set by the group reparenting transforms.
+  // A STALE group (its worktree directory was deleted outside the app) must NOT offer the move:
+  // "move" destroys this node's tmux session — killing whatever is running in it — and respawns it
+  // in the worktree path, which no longer exists. pty-manager would silently fall back to $HOME and
+  // `data.cwd` would persist the dead path forever, which not even Unbind undoes. The chip already
+  // says "· missing"; the ↪ must agree with it.
   const parentWtPath = parentId
     ? ((getNode(parentId) as CanvasNode | undefined)?.data.worktree?.path as string | undefined)
     : undefined
-  const canMoveIntoWorktree = !!parentWtPath && (data.cwd as string | undefined) !== parentWtPath
+  const parentWtStale = useWorktrees((s) => (parentId ? s.staleGroupIds.includes(parentId) : false))
+  // …and a session that runs on ANOTHER MACHINE must not offer it either. Worktrees are local-only
+  // in v1, so ↪ would end this node's REMOTE tmux session and respawn it in a local path that does
+  // not exist on the host. Both halves of "remote" are asked: the project (its terminals and its git
+  // run over ssh — a local project that LATER became an SSH one still carries the old binding, and
+  // its worktree directory may well still exist locally, so nothing else here would notice) and the
+  // node (`isRemoteSessionNode` — an SSH-project terminal carries `data.ssh`/`data.sshRemoteTmux`,
+  // never `data.remote`). The affordance is absent, not merely refused on click.
+  const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
+  const remoteSession = sshProject || isRemoteSessionNode(data)
+  const canMoveIntoWorktree =
+    !!parentWtPath &&
+    !parentWtStale &&
+    !remoteSession &&
+    (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.

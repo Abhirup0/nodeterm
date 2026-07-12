@@ -56,4 +56,9 @@ describe('registerCoreHandlers (git)', () => {
   it('fs handlers are registered too (delegated)', async () => {
     expect(await call(IPC.fsRead, path.join(repo, 'a.txt'))).toBe('two\n')
   })
+  it("app:user-data-dir answers the server's real data dir (never '')", async () => {
+    // The worktree dialog derives its default path from this: an empty answer would suggest
+    // `/worktrees/…` at the filesystem ROOT, which the (often root-run) server would create.
+    expect(await call(IPC.appUserDataDir)).toBe(repo)
+  })
 })

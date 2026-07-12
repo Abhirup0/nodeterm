@@ -113,6 +113,9 @@ export function buildStubApi(): Omit<
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
+  // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
+  // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
+  | 'userDataDir'
   | 'presence'
 > {
   const api = {
@@ -274,7 +277,6 @@ export function buildStubApi(): Omit<
     closeWindow: noop,
     setBadgeCount: noop,
     getPathForFile: (): string => '',
-    userDataDir: (): Promise<string> => Promise.resolve(''),
     notify: async (payload: NotifyPayload): Promise<'shown' | 'failed' | 'skipped'> => {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         try {
@@ -303,6 +305,7 @@ export function buildStubApi(): Omit<
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
+    | 'userDataDir'
     | 'presence'
   >
 

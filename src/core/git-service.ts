@@ -7,6 +7,7 @@ import { IPC } from '../shared/ipc'
 import type { GitFileChange, GitResult, GitStatus } from '../shared/types'
 import { loadGitHistoryFromExecutor } from '../shared/git-history'
 import * as worktreeOps from '../shared/worktree-ops'
+import type { WorktreeListResult } from '../shared/worktree'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 import { platform } from './platform'
@@ -96,6 +97,39 @@ async function git(cwd: string, args: string[]): Promise<Exec> {
     return { ok: false, out: (err.stdout ?? '').trim(), err: (err.stderr || err.message || '').trim() }
   }
 }
+
+/**
+ * Is this repo answered by a REMOTE git (the `git` executor above routes over the project's
+ * ControlMaster when `resolveGitRemote` claims the cwd)?
+ *
+ * It matters because the worktree ops are handed a `pathExists` — and the only `pathExists` this
+ * process has is `fs.existsSync`, which can answer about THIS MACHINE and nothing else. Pairing a
+ * remote git with a local stat is a loaded gun: every listed worktree's directory would come back
+ * missing, so every entry is `prunable: true` ("everything is gone"), and the callers act on that
+ * as fact — every bound group struck out as missing, `worktreeRemove` answering `worktreeGone` for
+ * a worktree that is alive and well on the host (and the renderer then destroying its terminals'
+ * tmux sessions and rewriting their persisted cwds).
+ *
+ * Worktrees are unsupported in SSH projects in v1 and the renderer gates all of these ops, so this
+ * is unreachable today — it is the tripwire for whoever lifts that restriction. Until a remote
+ * `pathExists` exists (a `test -e` over the ControlMaster), the ops REFUSE for a remote repo rather
+ * than answer about the wrong machine: a refusal is a failed op, which every caller already handles,
+ * and — crucially — is never dressed up as `worktreeGone`, so nothing is destroyed on a bad guess.
+ */
+const isRemoteRepo = (repoPath: string): boolean => !!resolveGitRemote(repoPath)
+
+/**
+ * What the worktree ops answer for a repo that lives on an SSH host. See `isRemoteRepo`.
+ *
+ * A plain failed op — and NEVER `worktreeGone`, which is the one field the renderer reads as proof
+ * that a directory is gone (it destroys the descendant terminals' tmux sessions and rewrites their
+ * persisted cwds on it). A refusal knows nothing about the host's filesystem, so it must not claim
+ * to.
+ */
+const REMOTE_WORKTREE_REFUSAL = (): worktreeOps.WorktreeOpResult => ({
+  ok: false,
+  message: 'Worktrees are not supported in SSH projects. Nothing was changed.'
+})
 
 function parseRepoName(url: string, fallback: string): string {
   const m = url.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)
@@ -219,28 +253,70 @@ export class GitService {
     platform().handle(IPC.gitWorktreeAdd, (repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) =>
       this.worktreeAdd(repoPath, wtPath, branch, baseRef, isNew)
     )
-    platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string) =>
-      this.worktreeMerge(repoPath, branch, baseRef)
+    platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string, push?: boolean) =>
+      this.worktreeMerge(repoPath, branch, baseRef, push)
     )
-    platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean) =>
-      this.worktreeRemove(repoPath, wtPath, deleteBranch)
+    platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean) =>
+      this.worktreeRemove(repoPath, wtPath, deleteBranch, pruneOnly)
     )
   }
 
   repoRoot(cwd: string) {
     return worktreeOps.repoRoot(git, cwd)
   }
-  worktreeList(repoPath: string) {
-    return worktreeOps.worktreeList(git, repoPath)
+  worktreeList(repoPath: string): Promise<WorktreeListResult> {
+    // A repo on an SSH host cannot be stat'd from here (see `isRemoteRepo`): answer "the read
+    // failed", which is exactly what it is — NOT an empty list, which every caller would read as
+    // "there are no worktrees".
+    if (isRemoteRepo(repoPath)) return Promise.resolve({ ok: false, entries: [] })
+    // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops): without
+    // it, an old git reports a deleted worktree directory as healthy and every consumer of
+    // `prunable` (staleness, orphan adoption) believes it. It answers about the LOCAL filesystem —
+    // hence the remote refusal above, since `git` itself would route over ssh.
+    //
+    // The `{ ok, entries }` shape rides all the way out to the renderer on purpose: an `entries: []`
+    // that came from a FAILED `git worktree list` is not "there are no worktrees", and the store on
+    // the other side of this IPC would otherwise mark every bound group missing on one bad read.
+    return worktreeOps.listWorktrees(git, repoPath, async (p) => fs.existsSync(p))
   }
-  worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) {
+  worktreeAdd(
+    repoPath: string,
+    wtPath: string,
+    branch: string,
+    baseRef: string,
+    isNew: boolean
+  ): Promise<worktreeOps.WorktreeOpResult> {
+    // `wtPath` is computed from the LOCAL data dir, so adding it through a remote git would create a
+    // worktree at a nonsense path on the host. Refuse (see `isRemoteRepo`).
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
     return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)
   }
-  worktreeMerge(repoPath: string, branch: string, baseRef: string) {
-    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef)
+  worktreeMerge(
+    repoPath: string,
+    branch: string,
+    baseRef: string,
+    push = false
+  ): Promise<worktreeOps.WorktreeOpResult> {
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
+    // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops) — and the
+    // only thing that stops a merge into a base checkout whose directory is gone. LOCAL-only: see
+    // `isRemoteRepo` for why a remote repo is refused above instead of stat'd here.
+    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef, push, async (p) => fs.existsSync(p))
   }
-  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean) {
-    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch)
+  worktreeRemove(
+    repoPath: string,
+    wtPath: string,
+    deleteBranch: boolean,
+    pruneOnly = false
+  ): Promise<worktreeOps.WorktreeOpResult> {
+    // Refuse — and note what the refusal does NOT say: `worktreeGone`. A local stat of a remote
+    // worktree would claim exactly that, and the renderer treats it as proof the directory is gone.
+    if (isRemoteRepo(repoPath)) return Promise.resolve(REMOTE_WORKTREE_REFUSAL())
+    // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops). LOCAL-only
+    // (see `isRemoteRepo`).
+    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch, pruneOnly, async (p) =>
+      fs.existsSync(p)
+    )
   }
 
   async status(cwd: string): Promise<GitStatus> {
@@ -252,6 +328,7 @@ export class GitService {
       ahead: 0,
       behind: 0,
       hasRemote: false,
+      hasOrigin: false,
       hasUpstream: false,
       ghAvailable: !!GH_PATH,
       ghAuthed: false,
@@ -289,6 +366,9 @@ export class GitService {
     const hasRemote = !!remotesR.out.trim()
     const hasUpstream = upstreamR.ok && !!upstreamR.out.trim()
     const originUrl = originR.out.trim()
+    // `hasRemote` is true for ANY remote — a fork whose only remote is `upstream` included. Anything
+    // that pushes to `origin` by name (the worktree merge does) must ask for origin itself.
+    const hasOrigin = originR.ok && !!originUrl
     const repoName = originUrl ? parseRepoName(originUrl, path.basename(cwd)) : path.basename(cwd)
 
     let ahead = 0
@@ -334,6 +414,7 @@ export class GitService {
       ahead,
       behind,
       hasRemote,
+      hasOrigin,
       hasUpstream,
       ghAvailable: !!GH_PATH,
       ghAuthed: gh,
@@ -376,9 +457,13 @@ export class GitService {
     return r.ok ? r.out : ''
   }
 
-  async history(cwd: string, options: GitHistoryOptions = {}): Promise<GitHistoryResult> {
+  async history(cwd: string, options?: GitHistoryOptions | null): Promise<GitHistoryResult> {
+    // A default parameter is not enough: over WS-RPC (Server Edition) the args array is
+    // JSON-round-tripped, so the renderer's trailing `undefined` arrives as `null` and the default
+    // never fires. Normalize explicitly, or every history call throws in the browser.
+    const opts = options ?? {}
     if (!cwd) {
-      return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: options.limit ?? 50 }
+      return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: opts.limit ?? 50 }
     }
     // Adapt the shared executor (throws on failure) onto our env-configured git runner.
     return loadGitHistoryFromExecutor(
@@ -387,7 +472,7 @@ export class GitService {
         return { stdout }
       },
       cwd,
-      options
+      opts
     )
   }
 

@@ -62,6 +62,15 @@ export interface NodeData {
   cwd?: string
   text?: string
   filePath?: string
+  /**
+   * editor/diff-only: true once this node's `filePath` was confirmed gone — e.g. a worktree
+   * that contained it was removed (`displacedByWorktree` in @shared/worktree sweeps these up
+   * alongside terminal/chat cwds). Unlike a terminal's cwd, there is nothing to re-point an
+   * editor/diff node AT — the file itself no longer exists — so instead of silently opening
+   * blank (editor) or failing a `git show` (diff), the node shows a persistent notice. Persisted:
+   * the fact is durable, not a one-shot event like `respawnNonce`.
+   */
+  fileMissing?: boolean
   /** web-only: live URL to load in the web (webview) node. */
   url?: string
   diffStaged?: boolean
@@ -918,6 +927,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         cwd: n.cwd,
         text: n.text,
         filePath: n.filePath,
+        fileMissing: n.fileMissing,
         url: n.url,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
@@ -985,6 +995,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         cwd: n.data.cwd,
         text: n.data.text,
         filePath: n.data.filePath,
+        fileMissing: n.data.fileMissing,
         url: n.data.url,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,

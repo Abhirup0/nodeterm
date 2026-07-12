@@ -128,6 +128,12 @@ export interface CanvasNodeState {
   highScore?: number
   // editor / diff
   filePath?: string
+  /**
+   * editor/diff-only: true once `filePath` was confirmed gone (e.g. its worktree was removed —
+   * see `displacedByWorktree` in `./worktree.ts`). There is nothing to re-point the node at, so
+   * it shows a persistent notice instead of silently opening blank / failing a `git show`.
+   */
+  fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
@@ -594,8 +600,11 @@ export interface GitStatus {
   branches: string[]
   ahead: number
   behind: number
-  /** The repo has at least one remote (origin). */
+  /** The repo has at least one remote — which may well not be named `origin` (a fork can have only
+   *  `upstream`). Never read this to decide whether a `git push origin …` can work: use `hasOrigin`. */
   hasRemote: boolean
+  /** A remote literally named `origin` exists — i.e. a hardcoded `push origin <ref>` has a target. */
+  hasOrigin: boolean
   /** The current branch has an upstream tracking ref (i.e. it has been published). */
   hasUpstream: boolean
   ghAvailable: boolean
@@ -607,6 +616,9 @@ export interface GitStatus {
 export interface GitResult {
   ok: boolean
   message: string
+  /** worktreeRemove() only: the worktree is no longer on disk (registration pruned, or never
+   *  registered), so the caller must clear its binding even when `ok` is false. */
+  worktreeGone?: boolean
   /** Set by publish() when no usable GitHub credential was found, so the UI can
    *  fall back to an interactive `gh auth login` instead of just showing an error. */
   needsAuth?: boolean
@@ -676,10 +688,16 @@ export interface GitApi {
   /** Checkout a commit (detached HEAD). */
   checkoutCommit(cwd: string, oid: string): Promise<GitResult>
   repoRoot(cwd: string): Promise<string | null>
-  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
+  /** `{ ok: false, entries: [] }` when git itself could not be read — which is NOT the same fact as
+   *  "this repo has no worktrees", and no caller may treat it as one (see worktree-ops). */
+  worktreeList(repoPath: string): Promise<import('./worktree').WorktreeListResult>
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
-  worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
-  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean): Promise<GitResult>
+  /** `push`: also publish `baseRef` to origin after a successful merge (only if a remote exists).
+   *  Opt-in — a merge must never publish to a shared remote the user was not told about. */
+  worktreeMerge(repoPath: string, branch: string, baseRef: string, push?: boolean): Promise<GitResult>
+  /** `pruneOnly`: clean up git's registration only — never delete a directory. Used to prune a
+   *  stale binding whose worktree was already deleted outside the app. */
+  worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean): Promise<GitResult>
   /** Scope remote git routing to the active project: pass its id to route git over that SSH
    *  project's master, or null for a local project so all git ops run locally. */
   setActiveRemote(projectId: string | null): Promise<void>

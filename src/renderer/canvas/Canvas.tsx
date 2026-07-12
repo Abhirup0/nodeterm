@@ -72,7 +72,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
-import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
+import { WorktreeDialog } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
@@ -96,7 +96,21 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import { computeWorktreePath, sanitizeWorktreeBranch } from '@shared/worktree'
+import {
+  computeWorktreePath,
+  displacedByWorktree,
+  isRemoteSessionNode,
+  resolveBaseRef,
+  sanitizeWorktreeBranch,
+  worktreeFromCreate,
+  worktreeFromEntry,
+  type GroupWorktree,
+  type WorktreeCreateValue,
+  type WorktreeEntry
+} from '@shared/worktree'
+import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
+import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
+import { useWorktrees } from '../state/worktrees'
 import {
   agentConfig,
   hasHooks,
@@ -153,6 +167,7 @@ import {
   createDinoNode,
   createDiffNode,
   createEditorNode,
+  createGroupNode,
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
@@ -172,6 +187,19 @@ import {
 } from '../state/workspace'
 
 const GRID = 24
+
+/** How long a successful worktree notice stays on screen before fading itself out. */
+const NOTICE_MS = 6000
+
+/**
+ * Worktrees are out of scope for SSH projects in v1, and being honestly absent beats being
+ * silently wrong: the default worktree path is computed from the LOCAL data dir while the git
+ * commands would run on the REMOTE host, and the removal safety guard checks the LOCAL home dir.
+ * So every affordance is shown DISABLED with this reason (a silently-missing row teaches nothing),
+ * and the paths that can still be reached (palette, a legacy binding's chip) say it out loud.
+ */
+const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
+const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
 
 // Group labels counter-scale when zoomed OUT so they stay readable/clickable from afar
 // (like map labels): full inverse of the zoom, capped so far-out labels don't get huge,
@@ -300,6 +328,15 @@ export function Canvas() {
   // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
   // non-secure context (plain http over a LAN). It must be seen, not swallowed.
   const [copyError, setCopyError] = useState<string | null>(null)
+  // Result of a worktree operation (merge / remove). These used to be `window.alert`s — a modal
+  // that blocks the whole app to say "Merged feat into main." Shown as a strip in the existing
+  // top-banner column instead; an 'info' one fades itself out, an 'error' stays until dismissed.
+  const [notice, setNotice] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
+  useEffect(() => {
+    if (notice?.kind !== 'info') return
+    const t = setTimeout(() => setNotice(null), NOTICE_MS)
+    return () => clearTimeout(t)
+  }, [notice])
   const [zoomPct, setZoomPct] = useState(100)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
@@ -365,15 +402,58 @@ export function Canvas() {
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
-  // Group id awaiting a worktree bind (drives BindWorktreeDialog).
-  const [bindTarget, setBindTarget] = useState<string | null>(null)
-  // Writable base dir for the default worktree path (Electron userData), fetched once on mount.
-  const userDataDirRef = useRef('')
+  // Drives WorktreeDialog. `groupId` null = create the group frame around the new worktree;
+  // set = bind an existing group (the group context menu). `at` is the pane cursor, if any.
+  const [worktreeDialog, setWorktreeDialog] = useState<{
+    groupId: string | null
+    at?: { x: number; y: number }
+    /** The project the dialog was opened for. `worktreeAdd` is awaited, and a project switch in
+     *  the meantime would otherwise bind the new worktree to a group on ANOTHER project's canvas
+     *  (a different repo entirely). */
+    projectId: string
+  } | null>(null)
+  const [worktreeBusy, setWorktreeBusy] = useState(false)
+  const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  // The store is filled asynchronously by the active-project effect, so the dialog subscribes
+  // (rather than reading getState() once) — the repo may resolve after it's already open.
+  const worktreeRepoRoot = useWorktrees((s) => s.repoRoot)
+  const worktreeOrphans = useWorktrees((s) => s.orphans)
+  // git's order — entries[0] is the repo's main checkout, i.e. the real default branch.
+  const worktreeEntries = useWorktrees((s) => s.entries)
+  // Writable base dir for the default worktree path (userData on desktop, the server's data dir
+  // in the browser), fetched once on mount. STATE, not a ref: a dialog opened before the promise
+  // resolves must re-render with the real base, or it would keep suggesting nothing.
+  const [userDataDir, setUserDataDir] = useState('')
   useEffect(() => {
-    void window.nodeTerminal.userDataDir().then((d) => {
-      userDataDirRef.current = d
-    })
+    void window.nodeTerminal.userDataDir().then(setUserDataDir)
   }, [])
+  // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
+  // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
+  // guard that stops the dialog from offering a worktree a second group could bind to.
+  // Every group on this canvas that owns a worktree — the one derivation the worktree dialog, the
+  // store refresh and the Source Control scope list all read.
+  const boundGroupList = useMemo(() => boundGroups(nodes), [nodes])
+  const boundWorktreePaths = useMemo(
+    () => new Set(boundGroupList.map((b) => normWorktreePath(b.worktree.path))),
+    [boundGroupList]
+  )
+  // The checkouts Source Control can act on: the project's own, plus every bound worktree on this
+  // canvas. Computed ONCE here so the default handed to the panel is an element of the very list
+  // the panel receives (a default from another array would name a scope it cannot select).
+  const activeProjectCwd = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.cwd
+  )
+  const activeProjectName = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.name
+  )
+  const scmScopeList = useMemo(
+    () => scmScopes({ cwd: activeProjectCwd, name: activeProjectName ?? 'repo' }, boundGroupList),
+    [activeProjectCwd, activeProjectName, boundGroupList]
+  )
+  // The group the selection points at (pure + tested in @shared/scm-scope). That group's scope is
+  // what Source Control opens on (same selection source — `n.selected` — the context-menu/delete
+  // paths read).
+  const selectedGroupIdForScm = useMemo(() => selectedScmGroupId(nodes), [nodes])
   // Clipboard failures reach us as a window event (the bridge stub has no React handle).
   useEffect(() => {
     const onToast = (e: Event): void => {
@@ -386,9 +466,25 @@ export function Canvas() {
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTarget] = useState<string | null>(null)
   // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
-  const [removeTarget, setRemoveTarget] = useState<{ groupId: string; warning: string } | null>(
-    null
-  )
+  // `canDelete` = nodeterm created this directory (`worktree.createdByApp`), so deleting it is
+  // ours to offer as the default. For a worktree the user made outside the app and merely bound,
+  // the default is Unbind and deleting from disk is an explicit opt-in (`deleteFromDisk`).
+  const [removeTarget, setRemoveTarget] = useState<{
+    groupId: string
+    warning: string
+    canDelete: boolean
+  } | null>(null)
+  const [deleteFromDisk, setDeleteFromDisk] = useState(false)
+  // Group awaiting confirmation to merge its worktree into the base branch. `hasOrigin` decides
+  // whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
+  // never be threatened with a publish that cannot happen.
+  const [mergeTarget, setMergeTarget] = useState<{
+    repoPath: string
+    branch: string
+    baseRef: string
+    hasOrigin: boolean
+  } | null>(null)
+  const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -429,6 +525,9 @@ export function Canvas() {
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
   )
+  /** The active project runs on a remote host → every worktree affordance is off (see
+   *  WORKTREE_SSH_HINT). Reactive, so the menus rebuild when the user switches projects. */
+  const isSshProject = !!activeSshServer
   nodesRef.current = nodes
   // Mirror the open-confirm state into a ref so the []-dep agent-control effect can see the
   // CURRENT dialog (it closes over a stale `confirm`), to reject overlapping destructive verbs.
@@ -803,6 +902,16 @@ export function Canvas() {
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
+    // Worktree facts are per project: drop the previous project's (reset also clears its
+    // statuses), then re-resolve from this project's cwd. SSH projects are skipped — local git
+    // cannot reason about a remote path. Fire-and-forget: the store is epoch-guarded + fails open.
+    // The project id scopes the strike streaks, which SURVIVE the switch (a dead worktree does not
+    // come back to life while the user works in another tab) — so it is passed even for the projects
+    // that never refresh (SSH, no cwd), which must not inherit the last project's scope.
+    useWorktrees.getState().reset(project.id)
+    if (project.cwd && !project.ssh) {
+      void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
+    }
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
     // Restore control ropes with the source agent's color (falls back to the browser blue).
     setControlEdges(
@@ -1472,13 +1581,59 @@ export function Canvas() {
     return screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
   }, [screenToFlowPosition])
 
+  /** The checkout a Source Control action refers to. The panel hands its ACTIVE SCOPE's cwd
+   *  (main checkout or a bound worktree) with every relative path, so the diff/agent node it opens
+   *  is rooted in the same checkout the panel is showing — reconstructing the project's own cwd here
+   *  would silently open the main checkout's file while a worktree scope is active. Falling back to
+   *  the project keeps callers that have no scope (none today) working.
+   *  SSH project: the exact `remoteCwd` (the git remote registry matches by exact string; same value
+   *  passed to connect) — SSH projects have no worktrees in v1, so the scope is always the project. */
+  const scmCwd = useCallback(
+    (scopeCwd?: string) => {
+      const project = useProjects.getState().getProject(activeProjectId)
+      return project?.ssh?.remoteCwd ?? scopeCwd ?? project?.cwd
+    },
+    [activeProjectId]
+  )
+
+  // Re-read git's facts after a mutation, so the store never lies: an adopted worktree must leave
+  // the orphan list (or the dialog would offer it again and a SECOND group could bind the same
+  // path) and a created one must enter `entries`. `extra` is the binding we just made — React's
+  // setNodes has not committed yet, so it is merged in by hand. Fire-and-forget: `refresh` is
+  // epoch-guarded and fails open.
+  const refreshWorktreeStore = useCallback(
+    (change?: { bind?: BoundGroup; unbound?: string | string[] }) => {
+      const project = useProjects.getState().getProject(activeProjectId ?? '')
+      if (!project?.cwd || project.ssh) return
+      const unbound =
+        typeof change?.unbound === 'string' ? [change.unbound] : (change?.unbound ?? [])
+      const touched = new Set([change?.bind?.groupId, ...unbound].filter(Boolean))
+      const bound: BoundGroup[] = boundGroups(nodesRef.current).filter((b) => !touched.has(b.groupId))
+      if (change?.bind) bound.push(change.bind)
+      void useWorktrees.getState().refresh(project.cwd, bound)
+    },
+    [activeProjectId]
+  )
+
   // cwd for a node being created INTO a group: prefer the group's bound worktree path,
   // then its default cwd, else undefined (caller falls back to the project cwd).
-  const cwdForNewNodeIn = useCallback((parentId: string | undefined): string | undefined => {
-    if (!parentId) return undefined
-    const parent = nodesRef.current.find((n) => n.id === parentId)
-    return parent?.data.worktree?.path || parent?.data.cwd || undefined
-  }, [])
+  // A STALE binding (the worktree directory was deleted outside the app) must never be handed out:
+  // the terminal would spawn into a directory that no longer exists and fail at launch. Fall back
+  // to the group's own cwd / the project instead, so the node still opens somewhere real.
+  // On an SSH project a worktree path is not handed out either: it was computed from the LOCAL data
+  // dir and means nothing on the host (only a legacy / hand-edited binding can even exist there —
+  // worktrees are unsupported in SSH projects in v1). This also keeps the two ↪ guards below honest,
+  // since both decide by comparing against what this returns.
+  const cwdForNewNodeIn = useCallback(
+    (parentId: string | undefined): string | undefined => {
+      if (!parentId) return undefined
+      const parent = nodesRef.current.find((n) => n.id === parentId)
+      const stale = useWorktrees.getState().staleGroupIds.includes(parentId)
+      if (parent?.data.worktree && !stale && !isSshProject) return parent.data.worktree.path
+      return parent?.data.cwd || undefined
+    },
+    [isSshProject]
+  )
 
   // Reparent a freshly-created node into a group (parentId + extent 'parent', position made
   // relative to the group frame). Mirrors how `groupSelectedNodes` parents its children.
@@ -1494,9 +1649,15 @@ export function Canvas() {
   }, [])
 
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
+    (
+      center?: { x: number; y: number },
+      initialCommand?: string,
+      groupId?: string,
+      /** Force the working directory (e.g. a Source Control action running in a worktree scope). */
+      cwdOverride?: string
+    ) => {
       const project = useProjects.getState().getProject(activeProjectId)
-      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
+      const cwd = cwdOverride ?? cwdForNewNodeIn(groupId) ?? project?.cwd
       setNodes((ns) => {
         // In an SSH project the node is stamped remote (runs over the project's master); the
         // factory takes the project's ssh and roots the terminal at its remoteCwd.
@@ -1508,8 +1669,14 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
-  /** Open a new terminal that runs a command on start (e.g. gh auth login). */
-  const runInTerminal = useCallback((cmd: string) => addTerminal(undefined, cmd), [addTerminal])
+  /** Open a new terminal that runs a command on start (e.g. gh auth login). `cwd` lets a caller
+   *  (Source Control) run it in the checkout it is scoped to instead of the project's own — routed
+   *  through `scmCwd` so an SSH project's remoteCwd wins and a missing scope still falls back to the
+   *  project, rather than depending on the panel having pre-resolved the value. */
+  const runInTerminal = useCallback(
+    (cmd: string, cwd?: string) => addTerminal(undefined, cmd, undefined, scmCwd(cwd)),
+    [addTerminal, scmCwd]
+  )
 
   /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
   // Tear down the active remote mirror: hide the view and disconnect the relay connection (ends
@@ -1598,33 +1765,30 @@ export function Canvas() {
 
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
-    (relPath: string, staged: boolean) => {
-      const project = useProjects.getState().getProject(activeProjectId)
-      // SSH project: the diff node operates on the remote repo, so its cwd must be the exact
-      // remoteCwd (the git remote registry matches by exact string; same value passed to connect).
-      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+    (relPath: string, staged: boolean, scopeCwd?: string) => {
+      const cwd = scmCwd(scopeCwd)
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, staged, viewCenter())])
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, scmCwd, viewCenter]
   )
 
   /** Open a parent↔commit diff node for a file from the history graph. */
   const openCommitDiff = useCallback(
-    (relPath: string, commitOid: string) => {
-      const project = useProjects.getState().getProject(activeProjectId)
-      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+    (relPath: string, commitOid: string, scopeCwd?: string) => {
+      const cwd = scmCwd(scopeCwd)
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, false, viewCenter(), commitOid)])
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, scmCwd, viewCenter]
   )
 
-  /** Open a Claude node seeded with a commit-explanation prompt. */
+  /** Open a Claude node seeded with a commit-explanation prompt, rooted in the panel's scope so
+   *  the `git show` it is told to run inspects the checkout the commit was read from. */
   const explainCommit = useCallback(
-    (prompt: string) => {
+    (prompt: string, scopeCwd?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const account = resolveNewNodeAccount(
         undefined,
@@ -1636,7 +1800,9 @@ export function Canvas() {
         createAgentNode(
           'claude',
           ns.length,
-          project?.cwd,
+          // Same scope resolution as every other Source Control action (`scmCwd`): the panel's
+          // active scope, an SSH project's remoteCwd, else the project's own checkout.
+          scmCwd(scopeCwd),
           viewCenter(),
           prompt,
           undefined,
@@ -1646,7 +1812,7 @@ export function Canvas() {
       ])
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, activeProjectId, viewCenter, scmCwd]
   )
 
   /** Pick a file via the native dialog and open it as an editor node. */
@@ -1874,6 +2040,129 @@ export function Canvas() {
     })
   }, [remoteConnId])
 
+  /**
+   * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
+   * group's own cwd, else the project's. `displacedByWorktree` decides who those are: descendants
+   * (nested groups included) whose cwd is inside the worktree, PLUS any editor/diff node anywhere
+   * on the canvas whose file was inside it.
+   *
+   * Leaving a dead `data.cwd` behind is the trap this whole task exists to remove — it is persisted
+   * to project.json, tmux hides it (a warm reattach ignores cwd), and the next machine reboot cold-
+   * starts the terminal into a directory that no longer exists, where pty-manager silently falls
+   * back to $HOME while the dead path stays in the project file forever.
+   *
+   * Editor/diff nodes get different treatment: unlike a terminal's cwd, there is no fallback to
+   * re-point a dead `filePath` AT — the file itself no longer exists — so they are marked
+   * `data.fileMissing` instead of rewritten. The node stays on the canvas (never auto-closed: it
+   * may hold unsaved Monaco edits the user hasn't copied out yet) and renders a persistent notice.
+   *
+   * `respawn` separates the two callers (terminal/chat only — editor/diff has no session to touch):
+   *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
+   *    destroyed and the terminals respawn straight into the fallback cwd.
+   *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
+   *    the node (and on disk); the running session keeps going until it is next cold-started, which
+   *    is precisely when the corrected cwd is needed.
+   *
+   * Declared HERE (above `deleteNodes`) rather than next to the other worktree code below, because
+   * `releaseWorktreeBinding` — which every binding-dropping path goes through, `deleteNodes`
+   * included — needs it, and a `const` further down would be in its TDZ.
+   */
+  const resetDisplacedCwd = useCallback(
+    (groupId: string, worktreePath: string, respawn: boolean) => {
+      const displaced = displacedByWorktree(nodesRef.current, groupId, worktreePath)
+      if (!displaced.size) return
+      const fallbackCwd =
+        (nodesRef.current.find((n) => n.id === groupId)?.data.cwd as string | undefined) ||
+        useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      if (respawn) {
+        for (const n of nodesRef.current) {
+          if (!displaced.has(n.id)) continue
+          // RECYCLE, not DESTROY: the node is NOT deleted — it stays on the canvas (here and on
+          // every co-viewer's) and respawns into the fallback cwd. `destroy` would cast "closed
+          // by <name>" to co-viewers, permanently bricking their still-present node.
+          if (n.type === 'terminal') transport.recycle(n.id)
+          // A chat node has no PTY, but it DOES have a live SDK driver — and that driver holds the
+          // deleted cwd. Fixing only the persisted `data.cwd` (below) left the running query rooted
+          // in a directory that no longer exists, where every tool call fails until the app is
+          // restarted: the node looked fine and was quietly broken, which is worse than looking
+          // broken. Recycling it is the exact same two steps the chat error bar's own "Reconnect"
+          // button takes — dispose the driver, then `ensure` a new one — except the cwd it comes
+          // back at is the fallback. `chatSessionId` is passed through, so the SDK RESUMES the same
+          // conversation (history intact, on both sides); the renderer's message store is
+          // deliberately NOT dropped, so the user sees no interruption at all.
+          if (n.type === 'chat') {
+            window.nodeTerminal.chat.dispose(n.id)
+            void window.nodeTerminal.chat.ensure(n.id, {
+              cwd: fallbackCwd,
+              sessionId: n.data.chatSessionId as string | undefined,
+              accountId: n.data.accountId as string | undefined
+            })
+          }
+        }
+      }
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (!displaced.has(n.id)) return n
+          if (n.type === 'editor' || n.type === 'diff') {
+            return { ...n, data: { ...n.data, fileMissing: true } }
+          }
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              cwd: fallbackCwd,
+              ...(respawn && n.type === 'terminal'
+                ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+                : {})
+            }
+          }
+        })
+      )
+      markDirty()
+    },
+    [setNodes, markDirty, activeProjectId]
+  )
+
+  /**
+   * Everything a group owes the world when its worktree BINDING is dropped — minus the dropping
+   * itself, which each caller does its own way (clear `data.worktree`, dissolve the frame, delete
+   * the node). THE one place that knowledge lives: every path that can drop a bound group routes
+   * through it, so none of them can quietly skip the two duties below again.
+   *
+   * For a STALE binding (the worktree directory was deleted behind git's back) that means:
+   *  a. displace the children (`resetDisplacedCwd`, no respawn — nothing here ends a process):
+   *     terminals/chats get `data.cwd` off the dead path (left behind, that dead path is persisted
+   *     to project.json and tmux hides it until the next machine reboot cold-starts the terminal
+   *     into a directory that is not there); editor/diff nodes get `data.fileMissing` instead,
+   *     since there is nothing to re-point a dead `filePath` at; and
+   *  b. prune git's stale REGISTRATION, or a later `git worktree add` at the same path fails with
+   *     git's raw "missing but already registered worktree". `pruneOnly` guarantees a directory that
+   *     still EXISTS is never touched, so a wrongly-stale group can never delete a live checkout.
+   *
+   * A healthy binding owes nothing: the worktree simply becomes an orphan the bind dialog can offer
+   * again (the caller's refresh does that). An SSH project owes nothing either — a legacy binding
+   * there points at a LOCAL path that means nothing on the host, so a local prune and a cwd rewrite
+   * from a local verdict are both lies; plain unbinding is the whole of what we can honestly do.
+   *
+   * The returned promise resolves once the prune (if any) is DONE, so the caller can re-reconcile
+   * after it: a `worktree list` racing an unfinished prune still lists the pruned path, and the
+   * worktree we just cleaned up would pop back as an orphan the dialog offers.
+   */
+  const releaseWorktreeBinding = useCallback(
+    async (groupId: string): Promise<void> => {
+      const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+      if (!wt || isSshProject) return
+      if (!useWorktrees.getState().staleGroupIds.includes(groupId)) return
+      resetDisplacedCwd(groupId, wt.path, false)
+      // A failed prune must still let the binding go — dropping it is the user's ask, and a
+      // registration we could not clean up is not a reason to trap them in a dead group.
+      await window.nodeTerminal.git
+        .worktreeRemove(wt.repoPath, wt.path, false, true)
+        .catch(() => {})
+    },
+    [isSshProject, resetDisplacedCwd]
+  )
+
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
     (ids: string[]) => {
@@ -1934,8 +2223,26 @@ export function Canvas() {
           )
       })
       markDirty()
+      // A deleted group takes its worktree BINDING with it — and the frame is the only thing that
+      // goes: its children SURVIVE (freed to absolute positions above), dead `data.cwd` and all. So
+      // this is a binding-dropping path like Unbind, and it owes exactly what Unbind owes:
+      // `releaseWorktreeBinding` (children's cwd off a dead worktree + git's stale registration
+      // pruned). Then re-reconcile, or the orphan would not be offered again until a project switch.
+      // EVERY deleted bound group must be passed: box-selecting two of them and hitting Delete used
+      // to unbind both but only tell the store about the first, leaving the second's worktree
+      // unofferable until a project switch. The refresh waits for the prunes (see
+      // `releaseWorktreeBinding`) and is ONE call for the whole batch — one per group would race,
+      // and the last one to land would re-list the others as still bound.
+      const boundGone = nodesRef.current
+        .filter((n) => set.has(n.id) && !!n.data.worktree)
+        .map((n) => n.id)
+      if (boundGone.length) {
+        void Promise.all(boundGone.map((id) => releaseWorktreeBinding(id))).finally(() =>
+          refreshWorktreeStore({ unbound: boundGone })
+        )
+      }
     },
-    [setNodes, markDirty]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
   // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
@@ -2045,10 +2352,25 @@ export function Canvas() {
 
   const ungroup = useCallback(
     (groupId: string) => {
+      // Dissolving the frame destroys its worktree binding (the frame IS the binding) while the
+      // children — and their `data.cwd` — stay. That makes Ungroup (and the group menu's "Delete
+      // (keeps nodes)", which is the same call) a binding-dropping path, so it goes through
+      // `releaseWorktreeBinding` exactly like Unbind does: a STALE group's children get their dead
+      // cwd corrected and git's stale registration is pruned. Skipping that was the whole trap —
+      // right-clicking a "· missing" frame and picking Ungroup left the dead worktree path in every
+      // child's persisted cwd and left git still registering the path (so a later `worktree add`
+      // there failed).
+      //
+      // Order matters: release FIRST (it resolves the children through the group's `parentId`, which
+      // `ungroupNodes` is about to clear), then dissolve. The refresh waits for the prune, so the
+      // pruned path cannot come back as an orphan the bind dialog offers.
+      const wasBound = !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+      const released = wasBound ? releaseWorktreeBinding(groupId) : null
       setNodes((ns) => ungroupNodes(ns as CanvasNode[], groupId))
       markDirty()
+      if (released) void released.finally(() => refreshWorktreeStore({ unbound: groupId }))
     },
-    [setNodes, markDirty]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
   const groupHasWorktree = useCallback(
@@ -2056,58 +2378,158 @@ export function Canvas() {
     []
   )
 
-  const bindGroupToWorktree = useCallback((groupId: string) => setBindTarget(groupId), [])
-
-  const confirmBind = useCallback(
-    async (v: BindWorktreeValue) => {
-      const git = window.nodeTerminal.git
-      const res = await git.worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
-      if (!res.ok) {
-        window.alert(res.message)
+  const openWorktreeDialog = useCallback(
+    (groupId: string | null, at?: { x: number; y: number }) => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      // The single choke point for opening the dialog — the menus already render their rows
+      // disabled on an SSH project, but the command palette has no disabled state, so refuse HERE
+      // and say why. Silently doing nothing is the one outcome that is not allowed.
+      if (useProjects.getState().getProject(projectId)?.ssh) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
         return
       }
-      setNodes((ns) =>
-        ns.map((n) =>
-          n.id === bindTarget
-            ? {
-                ...n,
-                data: {
-                  ...n.data,
-                  worktree: {
-                    repoPath: v.repoPath,
-                    branch: v.branch,
-                    baseRef: v.baseRef,
-                    path: v.path,
-                    createdByApp: true
-                  }
-                }
-              }
-            : n
-        )
-      )
-      setBindTarget(null)
-      markDirty()
+      setWorktreeError(null)
+      setWorktreeDialog({ groupId, at, projectId })
     },
-    [bindTarget, setNodes, markDirty]
+    []
   )
 
-  // Ask-first worktree removal (Task 9). Gather any uncommitted-work info, then open a safety
-  // dialog before doing anything destructive. GitStatus has no `files` field — the dirty count
-  // is staged + unstaged changes.
+  // Bind the worktree to an EXISTING group, or create a group around a new one. A group node
+  // carries no cwd of its own — the worktree's path is what its children inherit
+  // (`cwdForNewNodeIn`), so the frame IS the binding.
+  const attachWorktree = useCallback(
+    (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree) => {
+      let groupId = target.groupId
+      if (groupId) {
+        setNodes((ns) =>
+          ns.map((n) => (n.id === groupId ? { ...n, data: { ...n.data, worktree: wt } } : n))
+        )
+      } else {
+        const group = createGroupNode(
+          target.at ?? viewCenter() ?? { x: 0, y: 0 },
+          undefined,
+          nodesRef.current.length
+        )
+        group.data = { ...group.data, title: wt.branch, worktree: wt }
+        groupId = group.id
+        // Parents must come first — React Flow requires a group before its children.
+        setNodes((ns) => [group, ...(ns as CanvasNode[])])
+      }
+      markDirty()
+      refreshWorktreeStore({ bind: { groupId, worktree: wt } })
+    },
+    [setNodes, markDirty, viewCenter, refreshWorktreeStore]
+  )
+
+  const createWorktreeAndGroup = useCallback(
+    async (v: WorktreeCreateValue) => {
+      const target = worktreeDialog
+      if (!target) return
+      setWorktreeBusy(true)
+      setWorktreeError(null)
+      // A REJECTED ipc is not the same as a failed op, and both have to land here. The Server
+      // Edition reaches git over WS-RPC, and a socket that drops mid-create rejects this promise
+      // (`E_DISCONNECTED`) — without the catch the `await` threw straight out of the callback,
+      // `setWorktreeBusy(false)` never ran, and the dialog sat on "Creating…" with its own Cancel
+      // button disabled by `busy`: no error, no way out but Escape. Fail closed — clear busy, say so
+      // inline, and leave the dialog open so the user can retry. (The sibling READS in this feature
+      // catch for exactly this reason; the three destructive calls did not.)
+      const res = await window.nodeTerminal.git
+        .worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
+        .catch((e: unknown) => ({
+          ok: false as const,
+          message: `Could not create the worktree: ${e instanceof Error ? e.message : String(e)}`
+        }))
+      setWorktreeBusy(false)
+      if (!res.ok) {
+        setWorktreeError(res.message) // inline, never window.alert
+        return
+      }
+      // The worktree exists now, but the canvas may have moved on during the await: binding it to
+      // whatever is on screen would attach ANOTHER repo's worktree to this project. Leave it as an
+      // orphan (the dialog will offer it again on its own project) and say so.
+      if (useProjects.getState().activeProjectId !== target.projectId) {
+        setWorktreeDialog(null)
+        setNotice({
+          kind: 'info',
+          text: `Created worktree ${v.branch} at ${v.path}. The project changed, so no group was bound to it.`
+        })
+        return
+      }
+      // We created this directory, so `createdByApp` is true — Remove may delete it.
+      attachWorktree(target, worktreeFromCreate(v))
+      setWorktreeDialog(null)
+    },
+    [attachWorktree, worktreeDialog]
+  )
+
+  const bindExistingWorktree = useCallback(
+    (e: WorktreeEntry) => {
+      const target = worktreeDialog
+      const { repoRoot, entries } = useWorktrees.getState()
+      if (!target || !repoRoot) return
+      if (useProjects.getState().activeProjectId !== target.projectId) {
+        setWorktreeDialog(null)
+        return
+      }
+      // The user (or a previous Unbind) made this one — `createdByApp` is false, so Remove must
+      // not delete it by default. The base ref is the MAIN checkout's branch, not a hardcoded
+      // 'main' (a master/trunk repo would later merge at a ref that does not exist).
+      const wt = worktreeFromEntry(e, repoRoot, resolveBaseRef(entries))
+      if (!wt) {
+        // Detached HEAD (the row is disabled, but never fail silently if it is ever reachable).
+        setWorktreeError('That worktree has a detached HEAD. Check out a branch in it first.')
+        return
+      }
+      attachWorktree(target, wt)
+      setWorktreeDialog(null)
+    },
+    [attachWorktree, worktreeDialog]
+  )
+
+  // Ask-first worktree removal. Gather any uncommitted-work info, then open a safety dialog
+  // before doing anything destructive. GitStatus has no `files` field — the dirty count is
+  // staged + unstaged changes.
   const requestRemoveWorktree = useCallback(async (groupId: string) => {
     const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
     if (!wt) return
-    const status = await window.nodeTerminal.git.status(wt.path)
+    // The probe is a courtesy (it only enriches the warning), so a rejected IPC (WS-RPC transport
+    // error on the Server Edition) must not swallow the whole action: without this catch the dialog
+    // silently never opens and Remove looks broken. Fail open — ask without the dirty-file count.
+    const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
     const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
     const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
-    setRemoveTarget({ groupId, warning })
+    // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
+    // and deleting it from disk is an opt-in checkbox. One we created may be deleted (still behind
+    // the confirm).
+    setDeleteFromDisk(wt.createdByApp)
+    setRemoveTarget({ groupId, warning, canDelete: wt.createdByApp })
   }, [])
 
-  // Confirmed removal: process BEFORE git. End each child terminal's tmux session first so git
-  // never touches a directory with live processes inside it, then remove the worktree + branch.
-  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; that failure
-  // is swallowed, so the worktree directory is removed, the branch is kept, and res.ok is still
-  // true — the binding is cleared either way (res.ok is false only if the worktree remove fails).
+  /** Clear a group's worktree binding and re-read git's facts (the worktree, if it still exists,
+   *  becomes an orphan the dialog can offer again). The one place a binding is dropped. */
+  const clearWorktreeBinding = useCallback(
+    (groupId: string) => {
+      setNodes((ns) =>
+        ns.map((n) => (n.id === groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
+      )
+      markDirty()
+      refreshWorktreeStore({ unbound: groupId })
+    },
+    [setNodes, markDirty, refreshWorktreeStore]
+  )
+
+  // Confirmed removal: git FIRST, then the child terminals' tmux sessions — a git that refuses must
+  // leave the user's running processes alone (see the numbered steps below).
+  //
+  // What "remove" means depends on WHO created the worktree (`createdByApp`, made truthful in the
+  // bind path):
+  //  - we created it            → delete the directory AND the branch (today's behavior).
+  //  - the user created it      → unbind only, unless they ticked "Delete from disk too"; even
+  //                               then the BRANCH is theirs and is kept.
+  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; it no longer
+  // swallows that — the result message says whether the branch actually went.
   const confirmRemoveWorktree = useCallback(async () => {
     const t = removeTarget
     if (!t) return
@@ -2116,47 +2538,144 @@ export function Canvas() {
       setRemoveTarget(null)
       return
     }
-    // 1) Kill the group's terminals' sessions BEFORE git touches the directory.
-    const childIds = nodesRef.current
-      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
-      .map((n) => n.id)
-    for (const id of childIds) transport.destroy(id)
-    // 2) Remove the worktree (and try to delete its branch). The branch delete uses `git -d`,
-    //    which refuses unmerged branches; that refusal is swallowed (branch kept), so res.ok is
-    //    false only when the worktree-directory removal itself fails.
-    const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, true)
-    if (!res.ok) {
-      window.alert(res.message)
-      setRemoveTarget(null)
+    setRemoveTarget(null)
+    // Unbind-only: touch no disk at all — but route it through `releaseWorktreeBinding` like every
+    // OTHER path that drops a bound group (Unbind, Ungroup, Delete). Calling `clearWorktreeBinding`
+    // directly was the one hole left in that invariant, and it is reachable: adopt an existing
+    // worktree, `rm -rf` it from a shell, hit ✕ before the chip goes stale, let the 4 s poll strike
+    // the group out WHILE the confirm is open, then confirm with the delete box unticked. The
+    // binding went, but the children kept `data.cwd = <dead path>` — persisted into project.json,
+    // invisible until the next reboot cold-starts them into a directory that is not there — and
+    // git kept the stale registration, so a later `worktree add` at the same path failed with
+    // "missing but already registered".
+    //
+    // `releaseWorktreeBinding` no-ops unless the group is actually STALE, so unbinding a healthy
+    // adopted worktree still touches nothing: its directory is right there, and its children's cwd
+    // is still valid.
+    if (!deleteFromDisk) {
+      void releaseWorktreeBinding(t.groupId).finally(() => clearWorktreeBinding(t.groupId))
+      setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
-    // 3) Clear the binding from the group node.
-    setNodes((ns) =>
-      ns.map((n) => (n.id === t.groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n))
-    )
-    setRemoveTarget(null)
-    markDirty()
-  }, [removeTarget, setNodes, markDirty])
+    // 1) Remove the worktree FIRST; only delete the branch if the branch is ours (we created it).
+    //    The sessions are killed after, not before: `worktreeRemove` can still REFUSE (a dangerous
+    //    path, a locked worktree, EPERM), and killing every child terminal's tmux session up front
+    //    meant the user's running processes were gone for good while the worktree was still there.
+    //    Removing the directory out from under a live session is safe on POSIX (open files and
+    //    cwds are unlinked, not blocked), and the sessions are ended a moment later anyway.
+    //    A REJECTED ipc (the Server Edition's WS dropping mid-removal) is not a `worktreeGone` and
+    //    must never be read as one: `ok:false` with no `worktreeGone` is precisely "nothing was
+    //    removed, touch no sessions" — the same fail-closed answer a refusal gets. Without the catch
+    //    the rejection escaped the callback and the whole action became a silent no-op: no notice
+    //    ever appeared, so the user could not tell it from a removal that quietly worked.
+    const res = await window.nodeTerminal.git
+      .worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
+      .catch((e: unknown) => ({
+        ok: false as const,
+        worktreeGone: false,
+        message: `Could not remove the worktree: ${e instanceof Error ? e.message : String(e)}`
+      }))
+    // 2) A failure that means "the worktree is already gone" must STILL clear the binding —
+    //    returning early there is exactly what turns a deleted directory into an unrecoverable
+    //    group (Remove keeps failing, and the dead path keeps being handed to new terminals).
+    if (!res.ok && !res.worktreeGone) {
+      setNotice({ kind: 'error', text: res.message })
+      return // sessions untouched: nothing was removed.
+    }
+    // 3) The directory is gone. Every node that was living in it owes a cleanup — and "every node"
+    //    means ALL DESCENDANTS, not just direct children (a terminal inside a nested group was
+    //    missed), plus editor/diff nodes anywhere on the canvas whose file was inside it:
+    //      a. terminals: end the tmux session, which is now sitting in a directory that no longer
+    //         exists;
+    //      b. terminals AND chats: reset `data.cwd` off the deleted path. Leaving it there is the
+    //         exact trap this whole task exists to remove — on the next mount the node spawns into
+    //         a path that is gone, pty-manager silently falls back to $HOME, and the dead cwd is
+    //         persisted forever — only reached through the SANCTIONED Remove path.
+    //      c. editor/diff: mark `data.fileMissing`. There is no fallback path to re-point a dead
+    //         `filePath` at — the file is genuinely gone — so unlike terminals/chats these are
+    //         flagged, not rewritten, and the node shows a persistent notice instead of silently
+    //         opening blank or failing a `git show`.
+    //    The respawn (nonce bump) puts the terminal straight back in the fallback cwd rather than
+    //    leaving a dead pane behind; its session was destroyed a line earlier either way.
+    //    Nodes whose cwd/filePath was NOT inside the worktree are left alone: they were never
+    //    affected.
+    resetDisplacedCwd(t.groupId, wt.path, true)
+    clearWorktreeBinding(t.groupId)
+    setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
+  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd, releaseWorktreeBinding])
+
+  // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
+  // what the dialog said is exactly what runs — and the result banner names the push either way.
+  const confirmMergeWorktree = useCallback(() => {
+    const t = mergeTarget
+    setMergeTarget(null)
+    if (!t) return
+    const push = t.hasOrigin && mergePush
+    void window.nodeTerminal.git
+      .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
+      .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
+      // A rejected ipc (a WS drop mid-merge) otherwise produced NO notice at all — the merge looked
+      // like a silent no-op, which is the one thing a destructive git action must never look like.
+      // The merge either happened or it did not, and we cannot tell from here: say exactly that.
+      .catch((e: unknown) =>
+        setNotice({
+          kind: 'error',
+          text: `The merge could not be confirmed: ${e instanceof Error ? e.message : String(e)}. Check ${t.baseRef} before retrying.`
+        })
+      )
+  }, [mergeTarget, mergePush])
 
   // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
-    async (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+      // A binding can only predate the SSH gate (hand-edited project file, or a project that became
+      // an SSH project), but it can still exist — and merge/remove would run against the LOCAL
+      // filesystem for a project whose git and terminals live on the remote host. Refuse them, out
+      // loud. `unbind` stays allowed: it touches no disk at all (it only drops the binding, and
+      // resets the children's cwd off a path that means nothing here), so it is exactly the escape
+      // hatch such a group needs — and the ONLY worktree action an SSH project offers.
+      const sshProject = !!useProjects.getState().getProject(activeProjectId ?? '')?.ssh
+      if (action !== 'unbind' && sshProject) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
       switch (action) {
-        case 'unbind':
-          setNodes((ns) =>
-            ns.map((n) =>
-              n.id === groupId ? { ...n, data: { ...n.data, worktree: undefined } } : n
-            )
-          )
-          markDirty()
+        case 'unbind': {
+          // Unbind is the DOCUMENTED RECOVERY PATH for a worktree deleted outside the app (the only
+          // action a stale group still offers), and everything it owes beyond forgetting the binding
+          // — the children's cwd off the dead path, git's stale registration pruned, nothing at all
+          // on an SSH project — lives in `releaseWorktreeBinding`, which Ungroup and Delete go
+          // through too. AWAIT it before clearing: `clearWorktreeBinding` re-reconciles, and a
+          // `worktree list` racing an unfinished prune still lists the pruned path (the worktree we
+          // just cleaned up would pop back as an orphan the bind dialog offers).
+          // A healthy worktree simply becomes an ORPHAN — it stays on disk and the dialog can adopt
+          // it again.
+          void releaseWorktreeBinding(groupId).finally(() => clearWorktreeBinding(groupId))
           break
+        }
         case 'merge': {
           const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
           if (!wt) return
-          const res = await window.nodeTerminal.git.worktreeMerge(wt.repoPath, wt.branch, wt.baseRef)
-          window.alert(res.message) // success or the blocked/conflict reason
+          // NEVER merge on a single click of a small header button: `worktreeMerge` merges into the
+          // base checkout when that base is checked out somewhere — i.e. straight into the user's
+          // main working tree — AND (if asked) pushes the base branch to origin, which publishes it
+          // to every teammate. Ask first, and say BOTH of those out loud.
+          //
+          // `hasOrigin` comes from the store's status poll (the chip that carries this very button
+          // has been polling it), so no extra git IPC is fired here. Unknown → assume no origin:
+          // the merge then does not push, which is the only safe way to be wrong.
+          const hasOrigin = !!useWorktrees.getState().statusByPath[wt.path]?.hasOrigin
+          // Publishing to other people's machines is a DECISION, not a side effect of merging — and
+          // a push to origin/<base> cannot be politely undone. The box is offered, ticked by nobody.
+          setMergePush(false)
+          setMergeTarget({
+            repoPath: wt.repoPath,
+            branch: wt.branch,
+            baseRef: wt.baseRef,
+            hasOrigin
+          })
           break
         }
         case 'remove':
@@ -2166,7 +2685,7 @@ export function Canvas() {
           break
       }
     },
-    [setNodes, markDirty, requestRemoveWorktree]
+    [requestRemoveWorktree, clearWorktreeBinding, releaseWorktreeBinding, activeProjectId]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -2180,19 +2699,87 @@ export function Canvas() {
   // transient, non-persisted trigger) so TerminalNode's session-creation effect re-runs —
   // its cleanup kills the old tmux session (same node id = same target) and create() spawns a
   // fresh one with the new cwd. Changing cwd alone wouldn't re-run that `[respawnNonce]` effect.
-  const requestMoveIntoWorktree = useCallback((nodeId: string) => setMoveTarget(nodeId), [])
+  //
+  // Both the request and the confirm resolve the target cwd through `cwdForNewNodeIn`, the ONE
+  // place that knows a stale group's path is dead. Reading `parent.data.worktree.path` directly
+  // (as this used to) let a stale group's ↪ destroy a live session and respawn it into a directory
+  // that no longer exists — pty-manager falls back to $HOME, and `data.cwd` then persists the dead
+  // path forever. Nothing may reach `transport.destroy` for a stale group.
+  const requestMoveIntoWorktree = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      const parentId = node?.parentId
+      const wtPath = nodesRef.current.find((p) => p.id === parentId)?.data.worktree?.path as
+        | string
+        | undefined
+      if (!wtPath) return
+      // Never open the confirm for a session that does not live on this machine (see the confirm).
+      if (isSshProject || isRemoteSessionNode(node?.data)) {
+        setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
+      if (cwdForNewNodeIn(parentId) !== wtPath) {
+        // Stale binding: the button should already be hidden, so this is the belt to that braces.
+        setNotice({
+          kind: 'error',
+          text: 'That worktree directory is missing. Remove or unbind the group first.'
+        })
+        return
+      }
+      setMoveTarget(nodeId)
+    },
+    [cwdForNewNodeIn, isSshProject]
+  )
 
-  const confirmMoveIntoWorktree = useCallback(() => {
+  const confirmMoveIntoWorktree = useCallback(async () => {
     const id = moveTarget
     setMoveTarget(null)
     if (!id) return
     const node = nodesRef.current.find((n) => n.id === id)
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
-    if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
-    // End the old tmux session (recycle, not kill) so the respawned create() opens a fresh session
-    // in the new cwd instead of reattaching to the existing `nt-<id>` session (which would keep the
-    // old working directory). The node id / persistKey is unchanged.
+    if (!node || !wtPath || node.data.cwd === wtPath) return
+    // A session that runs on another machine must never be moved into a LOCAL worktree: `destroy`
+    // would end its REMOTE tmux session (running processes and all) and respawn it in a directory
+    // that does not exist on that host — pty-manager falls back to the host's $HOME and the dead
+    // path is persisted to project.json. Worktrees are local-only in v1; say so instead of failing
+    // silently (the confirm closing with nothing happening reads as a bug).
+    //
+    // The question is the PROJECT's (does its git — and its tmux — run over ssh?) and the NODE's
+    // (`isRemoteSessionNode`: relay `data.remote` OR an SSH project's `data.ssh`/`data.sshRemoteTmux`).
+    // Guarding `data.remote` alone asked only about relay nodes, which cannot occur in an SSH project
+    // at all — so the one node kind this exists to protect walked straight through it.
+    if (isSshProject || isRemoteSessionNode(node.data)) {
+      setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+      return
+    }
+    // Re-check at confirm time: the directory can vanish (or the group go stale) while the dialog
+    // is open. `cwdForNewNodeIn` returns the worktree path only for a HEALTHY binding.
+    if (cwdForNewNodeIn(node.parentId) !== wtPath) {
+      setNotice({
+        kind: 'error',
+        text: 'That worktree directory is missing. The terminal was left where it is.'
+      })
+      return
+    }
+    // …and staleness itself only ever arrives by POLL (a 4 s poke against a 4 s throttle, twice
+    // over — so ↪ can still be live ~8-16 s after an external `rm -rf`). Everywhere else that window
+    // is cosmetic; HERE it costs the user a running process. So probe the directory once, right
+    // before the irreversible step. This is the second (and last) sanctioned direct git read outside
+    // the worktrees store — cheap, one-shot, and only on an explicit destructive confirm.
+    const probe = await window.nodeTerminal.git.status(wtPath).catch(() => null)
+    if (!probe?.hasRepo) {
+      setNotice({
+        kind: 'error',
+        text: 'That worktree directory is missing. The terminal was left where it is.'
+      })
+      // Nudge the store (throttled, best effort) so the chip catches up with what we just saw.
+      void useWorktrees.getState().refreshStatus(wtPath, node.parentId)
+      return
+    }
+    // End the old tmux session so the respawned create() opens a fresh session in the new cwd
+    // instead of reattaching to the existing `nt-<id>` session (which would keep the old working
+    // directory). The node id / persistKey is unchanged.
     //
     // RECYCLE, not DESTROY: the tmux kill is the same, but this is not a deletion — the node stays
     // on the canvas (here and on every co-viewer's) and keeps working. `destroy` would tell every
@@ -2215,7 +2802,7 @@ export function Canvas() {
       )
     )
     markDirty()
-  }, [moveTarget, setNodes, markDirty])
+  }, [moveTarget, setNodes, markDirty, cwdForNewNodeIn, isSshProject])
 
   // Bridge the move-into-worktree handler to TerminalNode (React Flow owns the instances).
   useEffect(() => {
@@ -2666,7 +3253,11 @@ export function Canvas() {
             {
               label: 'Bind to worktree…',
               icon: <IconBranch />,
-              onClick: () => bindGroupToWorktree(groupId)
+              // On an SSH project the row stays, greyed, with the reason: the user learns the
+              // feature exists and why it is off, instead of wondering where it went.
+              disabled: isSshProject,
+              hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
+              onClick: () => openWorktreeDialog(groupId)
             } as MenuItem
           ]),
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
@@ -2676,7 +3267,8 @@ export function Canvas() {
       setNodesColor,
       ungroup,
       groupHasWorktree,
-      bindGroupToWorktree,
+      openWorktreeDialog,
+      isSshProject,
       addTerminal,
       agentCreationItems,
       addSticky
@@ -2706,6 +3298,16 @@ export function Canvas() {
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
+          // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
+          // Disabled (with the reason) on an SSH project — see WORKTREE_SSH_HINT.
+          {
+            label: 'New worktree…',
+            icon: <IconBranch />,
+            disabled: isSshProject,
+            hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
+            onClick: () => openWorktreeDialog(null, at)
+          },
+          { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
@@ -2721,6 +3323,8 @@ export function Canvas() {
       addBrowser,
       openFileDialog,
       openRemotePicker,
+      openWorktreeDialog,
+      isSshProject,
       selectAll,
       fitView
     ]
@@ -3982,6 +4586,17 @@ export function Canvas() {
             )
         })
       ),
+      {
+        id: 'worktree-new',
+        label: 'New worktree…',
+        icon: <IconBranch />,
+        // The palette has no disabled row, so the reason rides along and `openWorktreeDialog`
+        // refuses with a banner — the command never silently does nothing. `note`, not `hint`:
+        // a hint is part of the search corpus, and "Not supported in SSH projects yet" made this
+        // row answer queries like "ssh" or "supported".
+        note: isSshProject ? WORKTREE_SSH_HINT : undefined,
+        run: () => openWorktreeDialog(null)
+      },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       { id: 'clone-repo', label: 'Clone repository…', icon: <IconProject />, run: () => setCloneDialogOpen(true) },
       {
@@ -4050,6 +4665,8 @@ export function Canvas() {
     addWebView,
     addBrowser,
     openFileDialog,
+    openWorktreeDialog,
+    isSshProject,
     addProject,
     fitView,
     persist,
@@ -4125,6 +4742,25 @@ export function Canvas() {
               className="announce-banner__close"
               title="Dismiss"
               onClick={() => setCopyError(null)}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div
+            className={`announce-banner announce-banner--${
+              notice.kind === 'error' ? 'warning' : 'success'
+            }`}
+          >
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{notice.text}</span>
+            </div>
+            <button
+              className="announce-banner__close"
+              title="Dismiss"
+              onClick={() => setNotice(null)}
             >
               ✕
             </button>
@@ -4371,6 +5007,9 @@ export function Canvas() {
           onOpenDiff={openDiff}
           onOpenCommitDiff={openCommitDiff}
           onExplainCommit={explainCommit}
+          scopes={scmScopeList}
+          defaultScope={defaultScmScope(scmScopeList, selectedGroupIdForScm)}
+          onNewWorktree={() => openWorktreeDialog(null)}
         />
       )}
 
@@ -4459,20 +5098,29 @@ export function Canvas() {
         />
       )}
 
-      {bindTarget && (
-        <BindWorktreeDialog
-          initialRepoPath={
-            (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
-          }
+      {worktreeDialog && (
+        <WorktreeDialog
+          // Opened from a group's "Bind to worktree…" (groupId set) vs. the pane/palette's
+          // "New worktree…" — the header and the primary button say which.
+          intent={worktreeDialog.groupId ? 'bind' : 'create'}
+          repoPath={worktreeRepoRoot ?? ''}
+          existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
+          defaultBaseRef={resolveBaseRef(worktreeEntries)}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
-              userDataDirRef.current,
+              userDataDir,
               repoPath.split('/').pop() || 'repo',
               sanitizeWorktreeBranch(branch)
             )
           }
-          onConfirm={confirmBind}
-          onCancel={() => setBindTarget(null)}
+          busy={worktreeBusy}
+          error={worktreeError}
+          onCreate={createWorktreeAndGroup}
+          onBindExisting={bindExistingWorktree}
+          onCancel={() => {
+            setWorktreeDialog(null)
+            setWorktreeError(null)
+          }}
         />
       )}
 
@@ -4486,13 +5134,65 @@ export function Canvas() {
         />
       )}
 
+      {mergeTarget && (
+        <ConfirmDialog
+          message={
+            `Merge ${mergeTarget.branch} into ${mergeTarget.baseRef}?\n\n` +
+            `If ${mergeTarget.baseRef} is checked out somewhere, this merges into that working tree.` +
+            (mergeTarget.hasOrigin && mergePush
+              ? `\n\n⚠ ${mergeTarget.baseRef} is also pushed to origin — everyone on the remote gets this merge.`
+              : '')
+          }
+          confirmLabel="Merge"
+          danger={false}
+          option={
+            // No `origin` → no push to offer (the push is `git push origin <base>`; a fork whose
+            // only remote is `upstream` would be promised a publish that then fails). With an
+            // origin, the push is offered UNTICKED: it lands on other people's machines and cannot
+            // be politely undone, so it is the user's decision, never a side effect of merging.
+            mergeTarget.hasOrigin
+              ? {
+                  label: `Also push ${mergeTarget.baseRef} to origin`,
+                  checked: mergePush,
+                  onChange: setMergePush
+                }
+              : undefined
+          }
+          onConfirm={confirmMergeWorktree}
+          onCancel={() => setMergeTarget(null)}
+        />
+      )}
+
       {removeTarget && (
         <ConfirmDialog
-          message={`Remove this worktree and delete its branch?${
-            removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : ''
-          }`}
-          confirmLabel="Remove"
-          danger
+          message={
+            (removeTarget.canDelete
+              ? // Promise only what we will actually do. `git branch -d` REFUSES an unmerged branch
+                // (and we never escalate to -D), so "its branch is deleted" was a promise the op
+                // could not keep — the removal now reports which way it went, and the confirm says
+                // up front that the branch survives if it still holds unmerged work.
+                'Remove this worktree? Its directory is deleted, and its branch too — unless the ' +
+                'branch still has unmerged commits, in which case it is kept.'
+              : 'This worktree was not created by nodeterm.\n\nUnbind detaches this group and ' +
+                'leaves the worktree untouched on disk.') +
+            (deleteFromDisk && !removeTarget.canDelete
+              ? '\n\n⚠ The worktree directory will be DELETED. Its branch is kept.'
+              : '') +
+            (removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : '')
+          }
+          confirmLabel={deleteFromDisk ? 'Delete' : 'Unbind'}
+          danger={deleteFromDisk}
+          option={
+            // We created it → deletion is the point of the action, no opt-in to make. The user
+            // created it → deleting from disk is a deliberate extra choice, never the default.
+            removeTarget.canDelete
+              ? undefined
+              : {
+                  label: 'Delete the worktree directory from disk too',
+                  checked: deleteFromDisk,
+                  onChange: setDeleteFromDisk
+                }
+          }
           onConfirm={confirmRemoveWorktree}
           onCancel={() => setRemoveTarget(null)}
         />

@@ -6,7 +6,14 @@ import { IconEditor } from './icons'
 export interface Command {
   id: string
   label: string
+  /** Right-aligned metadata that IS part of the search corpus (e.g. a file's directory). */
   hint?: string
+  /**
+   * Right-aligned metadata that is NOT searchable — a reason, not a key. A disabled affordance still
+   * has to say why (worktrees on an SSH project), and putting that sentence in `hint` fed it to the
+   * fuzzy matcher, so the row answered queries like "ssh" or "supported". Shown when `hint` is unset.
+   */
+  note?: string
   section?: string
   icon?: ReactNode
   /** Searchable body text (e.g. a terminal's visible output) — matched by substring. */
@@ -151,7 +158,9 @@ export function CommandPalette({
                 {!labelHit(c) && contentHit(c) ? (
                   <span className="palette__hint">found in output</span>
                 ) : (
-                  c.hint && <span className="palette__hint">{c.hint}</span>
+                  (c.hint ?? c.note) && (
+                    <span className="palette__hint">{c.hint ?? c.note}</span>
+                  )
                 )}
                 {c.onSecondary && (
                   <span

@@ -31,6 +31,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements } = useReactFlow()
   const bodyRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
+  const modelRef = useRef<monaco.editor.ITextModel | null>(null)
   const savedRef = useRef<string>('')
   const hoveredRef = useRef(false)
   const [dirty, setDirty] = useState(false)
@@ -41,6 +42,9 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [imageError, setImageError] = useState('')
   const [loadError, setLoadError] = useState('')
   const filePath = (data.filePath as string) ?? ''
+  // Set by a worktree removal sweep (`displacedByWorktree` / `resetDisplacedCwd` in Canvas.tsx):
+  // this file no longer exists, and unlike a terminal's cwd there is nothing to re-point it at.
+  const fileMissing = !!data.fileMissing
   // Backend pick (the `FsApi` shape is identical across all three, so the rest of the component is
   // unchanged): a relay session operates on the HOST's filesystem via the relay; an SSH-project
   // editor (`data.sshFs`) on the project's remote fs over the ControlMaster; otherwise the local fs.
@@ -68,7 +72,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   const save = () => {
     const editor = editorRef.current
-    if (!editor) return
+    if (!editor || fileMissing) return
     const value = editor.getValue()
     fs.write(filePath, value).then((ok) => {
       if (ok) {
@@ -80,8 +84,24 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const saveRef = useRef(save)
   saveRef.current = save
 
+  // A worktree removal can mark `fileMissing` on a node that is ALREADY mounted (open, live
+  // Monaco instance). The main effect below only runs once on mount, so it can't react to that —
+  // free the editor/model here instead. The div swaps out of the JSX below too, but React does not
+  // dispose Monaco's own resources just because its container left the tree.
   useEffect(() => {
-    if (!filePath) return
+    if (!fileMissing) return
+    editorRef.current?.dispose()
+    modelRef.current?.dispose()
+    editorRef.current = null
+    modelRef.current = null
+  }, [fileMissing])
+
+  useEffect(() => {
+    // Nothing to read: no path, or the file is already known gone (a worktree sweep can mark a
+    // node before it ever mounts too — e.g. a reload after the removal). Attempting the read would
+    // either open a silently-blank buffer (text) or chase a "couldn't read" error we already know
+    // the reason for (image).
+    if (!filePath || fileMissing) return
 
     // Images: load as a data URL and render an <img> preview (no Monaco).
     if (isImage) {
@@ -127,6 +147,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       // Unique model per node (fragment), language still inferred from the path extension.
       const uri = monaco.Uri.file(filePath).with({ fragment: id })
       model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(content, undefined, uri)
+      modelRef.current = model
       editor = monaco.editor.create(el, {
         model,
         theme: 'vs-dark',
@@ -149,6 +170,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       editor?.dispose()
       model?.dispose()
       editorRef.current = null
+      modelRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -181,7 +203,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           {!isImage && dirty ? ' ●' : ''}
         </span>
         <span className="term-node__spacer" />
-        {isImage ? (
+        {fileMissing ? null : isImage ? (
           imageDims && <span className="editor-node__dims">{imageDims}</span>
         ) : (
           <>
@@ -212,7 +234,13 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       </div>
 
       <div className="editor-node__body">
-        {isImage ? (
+        {fileMissing ? (
+          <div className="editor-node__image nodrag">
+            <span className="editor-node__loading">
+              This file’s worktree was removed — it no longer exists.
+            </span>
+          </div>
+        ) : isImage ? (
           <div className="editor-node__image nodrag nowheel">
             {imageSrc ? (
               <img

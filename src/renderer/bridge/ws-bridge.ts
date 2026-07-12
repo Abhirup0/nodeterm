@@ -6,7 +6,7 @@
 // namespaces (`pty`, `workspace`, `settings`) over that socket. Every other namespace comes from
 // `buildStubApi()` (Task 7) so the renderer boots without a full Electron preload.
 
-import { parseRpcMessage, decodePtyData, type RpcMessage } from '../../shared/rpc'
+import { parseRpcMessage, decodePtyData, E_DISCONNECTED, type RpcMessage } from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
@@ -57,7 +57,32 @@ export class RpcClient {
       ws.addEventListener('error', () => reject(new Error('WebSocket error')))
     })
     ws.addEventListener('message', (ev: MessageEvent) => this.onMessage(ev.data))
-    ws.addEventListener('close', () => this.closeCbs.forEach((cb) => cb()))
+    ws.addEventListener('close', () => {
+      // Fail the in-flight requests BEFORE the overlay hooks: a response can only arrive over the
+      // socket that carried the request, so once it is gone they are unanswerable.
+      this.failPending()
+      this.closeCbs.forEach((cb) => cb())
+    })
+  }
+
+  /**
+   * Reject every in-flight request, because the socket that could have answered them is gone.
+   *
+   * A promise that never settles is the worst of the three outcomes. The caller's cleanup —
+   * `setBusy(false)`, a `finally`, an error banner — is all downstream of the `await`, so it simply
+   * never runs: a dialog sits on "Creating…" with its own Cancel button disabled by `busy`, showing
+   * no error and offering no way out but Escape; a Merge or Remove looks like a silent no-op. Every
+   * caller that handles a rejection at all handles this correctly the moment we actually reject, so
+   * failing closed here protects features that have not been written yet, not just this one.
+   */
+  private failPending(): void {
+    if (this.pending.size === 0) return
+    const waiting = [...this.pending.values()]
+    this.pending.clear() // clear first: a reject handler that fires another request must not see stale ids
+    const err = Object.assign(new Error('The connection to the server was lost.'), {
+      code: E_DISCONNECTED
+    })
+    for (const p of waiting) p.reject(err)
   }
 
   /** Resolves once the socket is open; rejects if it errors before opening. */
@@ -156,9 +181,11 @@ const AI_NAMING_UNAVAILABLE = {
   message: 'AI naming is not available in the server edition yet'
 }
 
-/** Build the three real namespaces (`pty`, `workspace`, `settings`) over an RpcClient, mirroring
- *  the preload's invoke(→request)/send(→cast) split exactly. */
-function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings'> {
+/** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
+ *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
+function buildRealApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'userDataDir'> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -211,7 +238,12 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
   }
 
-  return { pty, workspace, settings }
+  // The server's data dir, over the SAME channel the desktop preload uses. It is the writable base
+  // the worktree dialog derives its default path from — a stub returning '' would suggest
+  // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
+  const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
+
+  return { pty, workspace, settings, userDataDir }
 }
 
 /**
@@ -299,19 +331,21 @@ export function buildFilesApi(
         baseRef,
         isNew
       ) as ReturnType<GitApi['worktreeAdd']>,
-    worktreeMerge: (repoPath, branch, baseRef) =>
+    worktreeMerge: (repoPath, branch, baseRef, push) =>
       client.request(
         IPC.gitWorktreeMerge,
         repoPath,
         branch,
-        baseRef
+        baseRef,
+        push
       ) as ReturnType<GitApi['worktreeMerge']>,
-    worktreeRemove: (repoPath, wtPath, deleteBranch) =>
+    worktreeRemove: (repoPath, wtPath, deleteBranch, pruneOnly) =>
       client.request(
         IPC.gitWorktreeRemove,
         repoPath,
         wtPath,
-        deleteBranch
+        deleteBranch,
+        pruneOnly
       ) as ReturnType<GitApi['worktreeRemove']>,
     setActiveRemote: (projectId) =>
       client.request(IPC.gitSetActiveRemote, projectId) as Promise<void>
