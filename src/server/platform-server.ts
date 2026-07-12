@@ -20,6 +20,9 @@ const PTY_DATA_PREFIX = 'pty:data:'
 /** Session-death channels — the point where a (client, session)'s backpressure state is pruned. */
 const PTY_EXIT_PREFIX = 'pty:exit:'
 const PTY_CLOSED_PREFIX = 'pty:closed:'
+/** A recycled session id is dead too (the node respawns under a NEW session id), so its
+ *  backpressure bookkeeping must be pruned exactly like an exited/closed one. */
+const PTY_RECYCLED_PREFIX = 'pty:recycled:'
 /** Watermarks match the renderer terminal's own flow control. */
 const WS_HIGH_WATER = 1_000_000
 const WS_LOW_WATER = 256_000
@@ -185,7 +188,9 @@ export class ServerPlatform implements CorePlatform {
       // alive for a session that no longer exists. Both channels are per-subscriber, so this prunes
       // exactly the (this client, that session) entries. Costs the healthy path nothing — pty:data
       // never reaches this branch.
-      const deadPrefix = [PTY_EXIT_PREFIX, PTY_CLOSED_PREFIX].find((p) => channel.startsWith(p))
+      const deadPrefix = [PTY_EXIT_PREFIX, PTY_CLOSED_PREFIX, PTY_RECYCLED_PREFIX].find((p) =>
+        channel.startsWith(p)
+      )
       if (deadPrefix) this.forgetFlowState(ServerPlatform.flowKey(uiId, channel.slice(deadPrefix.length)))
       sink.sendText(JSON.stringify({ t: 'ev', channel, args }))
     }

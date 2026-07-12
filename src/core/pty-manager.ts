@@ -336,6 +336,24 @@ const FLUSH_MS = 8
 const MAX_BUF_BYTES = 256 * 1024
 
 /**
+ * How long a recycled node's co-viewers wait for the replacement session before they are told the
+ * session restarted anyway (see `recycleSession`). The notice normally fires the instant the new
+ * session is registered — milliseconds later. This is only the escape hatch for a recycler that
+ * never respawns (its app quit / crashed between the kill and the create): the co-viewers are
+ * still holding a dead pty, and being released late beats being frozen forever.
+ */
+const RECYCLE_NOTIFY_TIMEOUT_MS = 10_000
+
+/** Why a session is being ended — the ONE thing `destroySession` could not tell apart. Both kill
+ *  the tmux session; they differ entirely in what the OTHER viewers are told.
+ *  - `delete`: the × / node deletion. The node leaves the canvas: co-viewers get `pty:closed`
+ *    ("closed by <name>") and must never respawn it (that would resurrect a terminal its owner
+ *    deliberately killed, in a fresh shell, stranding a tmux session).
+ *  - `recycle`: "move into worktree". The node STAYS on the canvas under the same id and respawns
+ *    in the new cwd. Co-viewers get `pty:recycled` (restart + re-attach), never the closed state. */
+type EndIntent = 'delete' | 'recycle'
+
+/**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
  *
  * On macOS/Linux with tmux available, each terminal node attaches to a persistent
@@ -353,6 +371,14 @@ export class PtyManager {
    *  ACROSS the awaits inside a spawn (see create()), not just after them. Entries are removed
    *  as soon as the spawn settles, success or failure. */
   private inflight = new Map<string, Promise<PtyCreateResult>>()
+  /** persistKey (node id) → the co-viewers of a session that was RECYCLED (moved into a worktree),
+   *  waiting to be told to restart onto the replacement session. Held — not sent — until that
+   *  session is registered (`spawnSession`), so a co-viewer's restart can never win the race and
+   *  spawn the node in its own stale cwd. See `recycleSession`. */
+  private pendingRecycle = new Map<
+    string,
+    { sessionId: string; clients: Set<ClientId>; timer: ReturnType<typeof setTimeout> }
+  >()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -459,6 +485,11 @@ export class PtyManager {
     // plain listener would run the destroy — and its `tmux kill-session` — twice.
     platform().onWithSender(IPC.ptyDestroy, (senderId: number, persistKey: string) =>
       this.destroySession(senderId, persistKey)
+    )
+    // Sender-aware for the opposite reason: the client that RECYCLED the node drives its own
+    // respawn, so it is the one client that must NOT be sent the restart notice.
+    platform().onWithSender(IPC.ptyRecycle, (senderId: number, persistKey: string) =>
+      this.recycleSession(senderId, persistKey)
     )
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
@@ -936,6 +967,11 @@ export class PtyManager {
     // (relay-served) ptys are deliberately NOT indexed — the relay path keeps its own session,
     // exactly as before, so this change cannot regress it.
     if (session.indexKey) this.byPersistKey.set(session.indexKey, sessionId)
+    // The replacement session for a RECYCLED node (worktree move) is now live and indexed, so its
+    // co-viewers can safely be told to restart: their create() will `join` THIS session instead of
+    // spawning `nt-<nodeId>` from their own (stale) cwd. This is the whole reason the notice waits.
+    if (session.indexKey && this.pendingRecycle.has(session.indexKey))
+      this.fireRecycled(session.indexKey)
 
     proc.onData((data) => this.queueData(sessionId, session, data))
 
@@ -947,6 +983,35 @@ export class PtyManager {
     })
 
     return sessionId
+  }
+
+  /** Park a recycled session's co-viewers until the replacement session shows up (or the timeout
+   *  fires). One entry per node: a second recycle before the first resolved supersedes it — the
+   *  earlier waiters are folded in, since their session is just as dead. */
+  private armRecycle(persistKey: string, sessionId: string, clients: ClientId[]): void {
+    const prev = this.pendingRecycle.get(persistKey)
+    if (prev) {
+      clearTimeout(prev.timer)
+      for (const c of prev.clients) clients.push(c)
+    }
+    this.pendingRecycle.set(persistKey, {
+      sessionId,
+      clients: new Set(clients),
+      timer: setTimeout(() => this.fireRecycled(persistKey), RECYCLE_NOTIFY_TIMEOUT_MS)
+    })
+  }
+
+  /** Tell a recycled node's co-viewers to restart their terminal. Fired the moment the replacement
+   *  session is registered — or, if none ever is, on the timeout, so nobody is left holding a dead
+   *  pty forever (their restart then spawns the node itself, which is the best available outcome).
+   *  The event is keyed by the OLD session id: that is the one their listeners are subscribed to. */
+  private fireRecycled(persistKey: string): void {
+    const entry = this.pendingRecycle.get(persistKey)
+    if (!entry) return
+    this.pendingRecycle.delete(persistKey)
+    clearTimeout(entry.timer)
+    const channel = IPC.ptyRecycled(entry.sessionId)
+    for (const client of entry.clients) this.send(client, channel)
   }
 
   /** Drop a dead/released session from both indexes. Keyed off `indexKey` (not `persistKey`,
@@ -1358,39 +1423,79 @@ export class PtyManager {
    *
    * The close event is what STOPS the other viewers from quietly reopening the node: a respawn
    * would resurrect a session its owner deliberately deleted — a fresh shell with none of the
-   * state, plus a stray tmux session nobody asked for. Everything below therefore also makes a
-   * respawn structurally impossible from THIS process: the co-attach index entry, the in-flight
-   * create, and the Session itself all go away synchronously, before the kill-session lands.
+   * state, plus a stray tmux session nobody asked for.
    *
    * `clientId` is null when nothing/no-one attributable did it (an internal caller).
    */
-  async destroySession(clientId: ClientId | null, persistKey: string): Promise<void> {
-    // destroy() is called (close button) while the session is still live, so its sshRemote is
-    // known. Capture it synchronously before any await. The index is the co-attach one (UI
-    // sessions); the scan is the fallback for a session that is live but not indexed.
+  destroySession(clientId: ClientId | null, persistKey: string): Promise<void> {
+    return this.endSession(clientId, persistKey, 'delete')
+  }
+
+  /**
+   * End a node's persistent session so the SAME node id can immediately respawn in a NEW cwd —
+   * "move into worktree". The tmux kill is identical to `destroySession` (without it, the respawn's
+   * `tmux new-session -A` would just reattach the old session, keeping the old working directory);
+   * the INTENT is the opposite: nothing was deleted. The node is still on every canvas and still
+   * works, so a co-viewer must not be pushed into the permanent, un-respawnable "closed by <name>"
+   * state — that used to strand them on a live node until they deleted and re-added it.
+   *
+   * What a co-viewer gets instead is `pty:recycled:<oldSessionId>`: restart your terminal, the node
+   * moved. Their re-create then CO-ATTACHES to the replacement session (`join`), so they follow the
+   * node into its new cwd and are never left holding the dead pty.
+   *
+   * The notice is deliberately WITHHELD until the replacement session is registered (see
+   * `spawnSession`). Sent any earlier, a co-viewer's restart could beat the recycler's own create
+   * and spawn `nt-<nodeId>` from ITS options — i.e. in the node's STALE cwd — silently undoing the
+   * move for everyone. `RECYCLE_NOTIFY_TIMEOUT_MS` is the escape hatch when no respawn ever comes.
+   *
+   * `clientId` is the recycler: it drives its own respawn (`respawnNonce`), so it is excluded from
+   * the notice. Solo user: there is no one else, so nothing is sent and nothing is armed — the path
+   * is the old destroy, minus a fan-out to an empty set.
+   */
+  recycleSession(clientId: ClientId | null, persistKey: string): Promise<void> {
+    return this.endSession(clientId, persistKey, 'recycle')
+  }
+
+  /**
+   * The shared teardown behind `destroySession` / `recycleSession`: drop the session (and its
+   * co-attach index entry, in-flight create, buffered output, flow-control ledger), drop the
+   * cold-restore snapshot, and `tmux kill-session`. Everything the two intents disagree about is
+   * the ONE branch below — what the other subscribers are told (see `EndIntent`).
+   */
+  private async endSession(
+    clientId: ClientId | null,
+    persistKey: string,
+    intent: EndIntent
+  ): Promise<void> {
+    // Both callers run while the session is still live, so its sshRemote is known. Capture it
+    // synchronously before any await. The index is the co-attach one (UI sessions); the scan is
+    // the fallback for a session that is live but not indexed.
     const dyingId = this.byPersistKey.get(persistKey)
     const dying = dyingId ? this.sessions.get(dyingId) : undefined
     const sshRemote = dying?.sshRemote ?? this.sessionByPersistKey(persistKey)?.sshRemote
-    // Un-index NOW (synchronously): the node is gone for good, so a create() that races the
-    // kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
-    // session instead of co-attaching to the one we are about to destroy.
+    // Un-index NOW (synchronously): this session is finished either way, so a create() that races
+    // the kill-session below — the worktree-move respawn does exactly that — must spawn a fresh
+    // session instead of co-attaching to the one we are about to end.
     // Also drop any in-flight create for this node: a create racing the kill-session below must
-    // spawn a fresh session, not await (and then join) the one we are destroying.
+    // spawn a fresh session, not await (and then join) the one we are ending.
     this.inflight.delete(persistKey)
     if (dyingId && dying) {
       this.byPersistKey.delete(persistKey)
       dying.indexKey = undefined
-      const channel = IPC.ptyClosed(dyingId)
-      for (const sub of dying.subscribers) {
-        if (sub !== clientId) this.send(sub, channel, { by: clientId })
+      const others = [...dying.subscribers].filter((sub) => sub !== clientId)
+      if (intent === 'delete') {
+        const channel = IPC.ptyClosed(dyingId)
+        for (const sub of others) this.send(sub, channel, { by: clientId })
+      } else if (others.length > 0) {
+        this.armRecycle(persistKey, dyingId, others)
       }
       // Tear the session down HERE rather than leaving it to the client's own `kill` / the pty's
       // onExit: with N subscribers there is no single kill to wait for, and every one of them may
       // be mid-anything — parked, paused (its owed resume will never come now), desynced past the
       // drop ceiling. The Session object holds all of that state, so dropping it drops the lot: no
       // leaked pause, no stray subscriber still in the fan-out, no timer. (The per-client
-      // backpressure bookkeeping on the Server Edition shell is pruned by the `pty:closed:` event
-      // itself — see ServerPlatform.forgetFlowState.)
+      // backpressure bookkeeping on the Server Edition shell is pruned by the `pty:closed:` /
+      // `pty:recycled:` event itself — see ServerPlatform.forgetFlowState.)
       if (dying.flushTimer) clearTimeout(dying.flushTimer)
       dying.subscribers.clear()
       dying.sizes.clear()
@@ -1402,7 +1507,10 @@ export class PtyManager {
       releasePty(dying.proc as ReleasablePty)
       this.forget(dyingId, dying)
     }
-    // The node is gone for good — drop its cold-restore snapshot too.
+    // This session is gone for good — drop its cold-restore snapshot too. A recycle drops it as
+    // well (and always did, when the worktree move went through `destroy`): the snapshot is of the
+    // OLD cwd's session, and the respawn is a cold start (`fresh`), so replaying it would paint the
+    // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: there is no local tmux session — end the REMOTE one.
@@ -1446,6 +1554,10 @@ export class PtyManager {
     }
     this.sessions.clear()
     this.byPersistKey.clear()
+    // Pending recycle notices die with the sessions they were waiting on (their timers would
+    // otherwise fire into a manager that has released everything).
+    for (const entry of this.pendingRecycle.values()) clearTimeout(entry.timer)
+    this.pendingRecycle.clear()
     // Clear the in-flight index with the other two, or a create still spawning at quit would leave
     // a promise (and the session it resolves to) reachable from a manager that has released
     // everything else — a later create would then co-attach to a session we already let go.
@@ -1453,7 +1565,9 @@ export class PtyManager {
     return Promise.all(finals).then(() => undefined)
   }
 
-  private send(clientId: ClientId, channel: string, payload: unknown): void {
-    platform().sendTo(clientId, channel, payload)
+  /** Variadic so a payload-less event (`pty:recycled`) sends no argument at all, rather than an
+   *  explicit `undefined` the shells would have to serialize and the renderer ignore. */
+  private send(clientId: ClientId, channel: string, ...args: unknown[]): void {
+    platform().sendTo(clientId, channel, ...args)
   }
 }

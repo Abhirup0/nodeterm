@@ -1967,10 +1967,16 @@ export function Canvas() {
     const parent = nodesRef.current.find((p) => p.id === node?.parentId)
     const wtPath = parent?.data.worktree?.path as string | undefined
     if (!node || node.data.remote || !wtPath || node.data.cwd === wtPath) return
-    // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens
-    // a fresh session in the new cwd instead of reattaching to the existing `nt-<id>` session
-    // (which would keep the old working directory). The node id / persistKey is unchanged.
-    transport.destroy(id)
+    // End the old tmux session (recycle, not kill) so the respawned create() opens a fresh session
+    // in the new cwd instead of reattaching to the existing `nt-<id>` session (which would keep the
+    // old working directory). The node id / persistKey is unchanged.
+    //
+    // RECYCLE, not DESTROY: the tmux kill is the same, but this is not a deletion — the node stays
+    // on the canvas (here and on every co-viewer's) and keeps working. `destroy` would tell every
+    // co-viewer "closed by <name>", which is permanent and un-respawnable: their still-present node
+    // would be bricked until they deleted and re-added it. `recycle` tells them to restart onto the
+    // replacement session instead, so they follow the node into its new cwd.
+    transport.recycle(id)
     setNodes((ns) =>
       ns.map((n) =>
         n.id === id

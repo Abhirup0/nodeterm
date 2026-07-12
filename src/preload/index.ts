@@ -49,6 +49,7 @@ const api: NodeTerminalApi = {
     setFlow: (sessionId, resume) => ipcRenderer.send(IPC.ptyFlow, sessionId, resume),
     kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
+    recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
     generateGroupName: (memberKeys, cwd) =>
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
@@ -78,6 +79,12 @@ const api: NodeTerminalApi = {
     onClosed: (sessionId, listener) => {
       const channel = IPC.ptyClosed(sessionId)
       const handler = (_e: unknown, info: { by: ClientId | null }) => listener(info)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onRecycled: (sessionId, listener) => {
+      const channel = IPC.ptyRecycled(sessionId)
+      const handler = (): void => listener()
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     },

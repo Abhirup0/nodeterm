@@ -636,6 +636,114 @@ describe('node destroyed while co-viewed', () => {
   })
 })
 
+// ── A node RECYCLED (moved into a worktree) while somebody else is watching it ────────────────
+// "Move into worktree" ends the node's tmux session so the SAME node id respawns in the new cwd.
+// The node never leaves anybody's canvas and it keeps working — so a co-viewer must NOT be told
+// "closed by <name>" (which is permanent and un-respawnable). They are told the session RESTARTED,
+// and only once the replacement session exists: notify them any earlier and their own re-create
+// could win the race and spawn the tmux session in their STALE cwd, silently undoing the move.
+describe('node recycled (worktree move) while co-viewed', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  const create = (clientId: number, persistKey = 'node-1') =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols: 80, rows: 24, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+    }>
+  // pty:recycle is sender-aware: the client that recycled drives its OWN respawn, so it must be
+  // excluded from the restart notice (it would otherwise respawn twice).
+  const recycle = (clientId: number, persistKey = 'node-1') =>
+    fake.senderListeners[IPC.ptyRecycle](clientId, persistKey) as unknown as Promise<void>
+  const closed = (sessionId: string) =>
+    fake.sent.filter((s) => s.channel === IPC.ptyClosed(sessionId))
+  const recycled = (sessionId: string) =>
+    fake.sent.filter((s) => s.channel === IPC.ptyRecycled(sessionId))
+
+  it('never tells a co-viewer the node was CLOSED — it is still on their canvas', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    fake.sent.length = 0
+    await recycle(ALICE)
+    expect(closed(sessionId)).toEqual([]) // the un-respawnable "closed by <name>" state must NOT fire
+    expect(spawned[0].killed).toBe(true) // the old pty is still released with its session
+  })
+
+  it('holds the restart notice until the replacement session exists, then joins the co-viewer to it', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    fake.sent.length = 0
+    await recycle(ALICE)
+    // Nothing yet: notifying Bob here would let his re-create spawn `nt-node-1` in his stale cwd.
+    expect(recycled(sessionId)).toEqual([])
+
+    const fresh = await create(ALICE) // Alice respawns the node in the worktree cwd
+    expect(spawned).toHaveLength(2)
+    expect(fresh.sessionId).not.toBe(sessionId)
+    expect(recycled(sessionId).map((s) => s.to)).toEqual([BOB]) // only now is Bob told
+
+    const bob = await create(BOB) // Bob's terminal restarts…
+    expect(bob.sessionId).toBe(fresh.sessionId) // …onto the LIVE new session
+    expect(bob.fresh).toBe(false) // a co-attach, not a resurrection
+    expect(spawned).toHaveLength(2) // and nothing extra was spawned
+  })
+
+  it('never sends the restart notice to the client that recycled', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+    await recycle(ALICE)
+    await create(ALICE)
+    expect(recycled(sessionId).map((s) => s.to)).not.toContain(ALICE)
+  })
+
+  it('a co-viewer is never left on a dead pty: the notice fires even if nobody respawns', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    fake.sent.length = 0
+    await recycle(ALICE)
+    expect(recycled(sessionId)).toEqual([])
+    // Alice's app quit / crashed mid-move: no replacement session is ever registered. Bob still
+    // has to be released from the dead session, so the notice fires on a timeout.
+    vi.advanceTimersByTime(15_000)
+    expect(recycled(sessionId).map((s) => s.to)).toEqual([BOB])
+  })
+
+  it('a recycle with no other subscriber notifies nobody (the solo path is untouched)', async () => {
+    await manager()
+    await create(ALICE)
+    fake.sent.length = 0
+    await recycle(ALICE)
+    await create(ALICE)
+    vi.advanceTimersByTime(15_000)
+    expect(fake.sent.filter((s) => s.channel.startsWith('pty:recycled:'))).toEqual([])
+    expect(fake.sent.filter((s) => s.channel.startsWith('pty:closed:'))).toEqual([])
+  })
+})
+
 describe('tmuxAttachFlags', () => {
   it("keeps -D for the app's own client: exactly ONE tmux client per session", async () => {
     const { tmuxAttachFlags } = await import('./pty-manager')

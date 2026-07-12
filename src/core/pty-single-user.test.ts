@@ -351,4 +351,27 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     expect(kills).toHaveLength(1)
     expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))
   })
+
+  // ── recycle (move into worktree) = destroy, minus the "someone closed it" fan-out ─────────
+  // The solo user's node keeps its id and respawns in the new cwd: the tmux session must die
+  // exactly as the × kills it (otherwise `new-session -A` reattaches the OLD working directory),
+  // and — with nobody else watching — not a single extra message may go out.
+  it('recycle (move into worktree) kills the tmux session exactly like the × does', async () => {
+    await tmuxManager()
+    const { sessionId } = await create(80, 24)
+    fake.sent.length = 0
+    await (fake.senderListeners[IPC.ptyRecycle](SOLO, 'solo-1') as unknown as Promise<void>)
+
+    const kills = tmuxCalls('kill-session')
+    expect(kills).toHaveLength(1)
+    expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))
+    expect(spawned[0].killed).toBe(true) // the old pty client is released
+    expect(fake.sent).toEqual([]) // solo: nobody to tell, so nothing is sent
+
+    // …and the respawn under the same node id gets a BRAND-NEW session (it never joins the dead one).
+    const again = await create(80, 24)
+    expect(spawned).toHaveLength(2)
+    expect(again.sessionId).not.toBe(sessionId)
+    expect(again.fresh).toBe(true)
+  })
 })

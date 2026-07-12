@@ -212,8 +212,13 @@ export interface PtyApi {
   setFlow(sessionId: string, resume: boolean): void
   /** Detaches/terminates the PTY client (the underlying tmux session survives). */
   kill(sessionId: string): void
-  /** Permanently ends the persistent session for a node (kills its tmux session). */
+  /** Permanently ends the persistent session for a node (kills its tmux session) because the node
+   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
   destroy(persistKey: string): void
+  /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
+   *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
+   *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
+  recycle(persistKey: string): void
   /** Suggest a terminal title from its recent output via the configured AI agent. */
   generateName(persistKey: string, cwd: string): Promise<GitResult>
   /** Suggest a group title from its member terminals' recent output via the configured AI agent. */
@@ -242,6 +247,11 @@ export interface PtyApi {
    *  client's ClientId, or null when the destroy was not attributed to a client (a local desktop
    *  destroy); resolve it to a name via the presence store. Returns an unsubscribe. */
   onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
+  /** Another client RECYCLED this node (moved it into a worktree): this session id is dead, but a
+   *  replacement is already live under the same node id. Restart the terminal — the re-create
+   *  co-attaches to it — instead of showing the closed state: nothing was deleted. No payload.
+   *  Returns an unsubscribe. */
+  onRecycled(sessionId: string, listener: () => void): () => void
   /** We fell too far behind and the server dropped our queued output; this is the session's
    *  CURRENT screen captured from tmux. Reset the emulator and repaint from it.
    *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent). The

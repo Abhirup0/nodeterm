@@ -847,10 +847,14 @@ app.whenReady().then(async () => {
     }
   })
 
-  // Releasing tails on node close: pty:destroy fires when the user clicks × (persistKey = node
-  // id). pty-manager already handles the same channel to kill the tmux session; this extra
-  // listener tears down the per-node file tailers so they stop polling a now-dead session.
-  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => {
+  // Releasing tails when a node's session ENDS — whichever way it ends. pty-manager handles the
+  // same two channels to kill the tmux session; this extra listener tears down the per-node file
+  // tailers so they stop polling a now-dead session:
+  //  - pty:destroy — the user clicked × (the node is gone);
+  //  - pty:recycle — "move into worktree" (the node stays, but its session is replaced, so the
+  //    tails of the OLD session's transcript are just as dead; the respawned agent re-registers
+  //    them under its new session id via the hook events).
+  const releaseNodeTails = (nodeId: string): void => {
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
       // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
@@ -871,7 +875,9 @@ app.whenReady().then(async () => {
       }
       nodeSubagents.delete(nodeId)
     }
-  })
+  }
+  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => releaseNodeTails(nodeId))
+  ipcMain.on(IPC.ptyRecycle, (_e, nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
   // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.

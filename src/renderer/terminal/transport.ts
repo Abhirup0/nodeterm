@@ -22,8 +22,19 @@ export interface TerminalTransport {
   setFlow(sessionId: string, resume: boolean): void
   /** Detaches the client; with tmux the underlying session survives. */
   kill(sessionId: string): void
-  /** Permanently ends a node's persistent session. */
+  /**
+   * Permanently ends a node's persistent session because the node is being DELETED (× / delete).
+   * Co-viewers are told "closed by <name>" and must never respawn it.
+   */
   destroy(persistKey: string): void
+  /**
+   * Ends a node's persistent session so the SAME node id can respawn in a new cwd ("move into
+   * worktree"). The tmux kill is identical to `destroy` — without it the respawn would just
+   * reattach the old session, keeping the old working directory — but the INTENT is the opposite:
+   * the node is not going anywhere. Co-viewers therefore get `onRecycled` (restart, re-attach to
+   * the replacement session), never the permanent, un-respawnable closed state.
+   */
+  recycle(persistKey: string): void
   /** Listens for output; returns an unsubscribe function. */
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the session closes; returns an unsubscribe function. */
@@ -45,6 +56,14 @@ export interface TerminalTransport {
    * OPTIONAL for the same reason as onSize. Returns an unsubscribe function.
    */
   onClosed?(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
+  /**
+   * Another client RECYCLED this node (moved it into a worktree): this session id is dead, but a
+   * replacement is already live under the same node id — so restart the terminal (its re-create
+   * co-attaches to the new session) rather than showing the closed state. Nothing was deleted; the
+   * node is still on the canvas and still working.
+   * OPTIONAL for the same reason as onSize. Returns an unsubscribe function.
+   */
+  onRecycled?(sessionId: string, listener: () => void): () => void
   /**
    * This client fell so far behind that the server discarded its queued output (WS_DROP_WATER)
    * and is redrawing it from tmux: clear the emulator and write this capture — it is the CURRENT

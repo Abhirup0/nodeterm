@@ -7,6 +7,11 @@ export const IPC = {
   ptyFlow: 'pty:flow',
   ptyKill: 'pty:kill',
   ptyDestroy: 'pty:destroy',
+  /** End a node's persistent session so the SAME node id can respawn in a new cwd ("move into
+   *  worktree"). Same tmux kill-session as `ptyDestroy`, but it is NOT a deletion: the node stays
+   *  on every canvas, so co-viewers get the restart notice (`ptyRecycled`) instead of the
+   *  permanent, un-respawnable `ptyClosed`. */
+  ptyRecycle: 'pty:recycle',
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
@@ -82,6 +87,12 @@ export const IPC = {
   /** The node was permanently destroyed by another client (payload: { by: ClientId }). The
    *  remaining subscribers show a "closed by <name>" state instead of respawning the session. */
   ptyClosed: (sessionId: string) => `pty:closed:${sessionId}`,
+  /** The node's session was RECYCLED by another client (moved into a worktree): this session id is
+   *  dead, but a replacement is already live under the same node id — restart the terminal so it
+   *  co-attaches to it. Deliberately emitted only AFTER the replacement session exists (see
+   *  PtyManager.recycleSession), so a co-viewer's restart can never spawn the node in its own,
+   *  stale cwd. No payload. */
+  ptyRecycled: (sessionId: string) => `pty:recycled:${sessionId}`,
   /** Redraw for a client that fell too far behind: the session's CURRENT screen, captured from
    *  tmux. Sent instead of the discarded backlog (payload: the capture text). The terminal clears
    *  and repaints from it — see ServerPlatform's WS_DROP_WATER.

@@ -199,6 +199,24 @@ v2.
 If a node is deleted while others are attached, `destroy(persistKey)` kills the tmux session and
 the remaining subscribers enter a "closed by <name>" state rather than respawning it.
 
+### Deletion vs recycling
+
+Killing a node's tmux session is used for two opposite intents, and PtyManager keeps them apart:
+
+- **Deletion** (× / delete node) → `destroy(persistKey)`. The node leaves the canvas. Co-viewers get
+  `pty:closed:<sid> { by }` and must never respawn it — a respawn would resurrect a terminal its
+  owner deliberately killed, in a fresh shell, and strand a tmux session.
+- **Recycling** ("move into worktree") → `recycle(persistKey)`. Same `tmux kill-session` (otherwise
+  `new-session -A` would just reattach the old working directory), but the node **stays** on every
+  canvas and keeps working. Co-viewers get `pty:recycled:<sid>` (no payload): restart the terminal,
+  the node moved. Their re-create **co-attaches** to the replacement session, so they follow the node
+  into its new cwd and are never left holding the dead pty.
+
+The recycled notice is **withheld until the replacement session is registered** (and, as an escape
+hatch for a recycler that never respawns, after a 10 s timeout). Sent any earlier, a co-viewer's
+restart could beat the mover's own `create()` and spawn `nt-<nodeId>` from *its* options — i.e. in
+the node's stale cwd — silently undoing the move for everyone.
+
 ## Canvas sync
 
 Node edits broadcast as mutations so cursors don't hover over stale geometry.

@@ -164,6 +164,7 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     setFlow: (sessionId, resume) => client.cast(IPC.ptyFlow, sessionId, resume),
     kill: (sessionId) => client.cast(IPC.ptyKill, sessionId),
     destroy: (persistKey) => client.cast(IPC.ptyDestroy, persistKey),
+    recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
     // No server handler — degrade gracefully (never reject the boot path).
     generateName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
@@ -184,6 +185,8 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     onSize: (sessionId, listener) => client.subscribe(IPC.ptySize(sessionId), listener as Listener),
     onClosed: (sessionId, listener) =>
       client.subscribe(IPC.ptyClosed(sessionId), listener as Listener),
+    onRecycled: (sessionId, listener) =>
+      client.subscribe(IPC.ptyRecycled(sessionId), listener as Listener),
     onResync: (sessionId, listener) =>
       client.subscribe(IPC.ptyResync(sessionId), listener as Listener)
   }

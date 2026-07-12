@@ -13,12 +13,13 @@ import type { TerminalTransport } from './transport'
  * LocalTransport's kill/destroy split, but the client never owns the lifecycle of the host's
  * persistent session.
  *
- * The co-attach members (`onSize` / `onClosed` / `onResync`) are deliberately NOT implemented:
- * the relay frame protocol carries no size, closed or resync frame, and a relay client is a
- * mirror of the host's own terminal rather than an equal subscriber of the pty. Omitting the
- * optional members makes TerminalNode fall back to today's behavior for relay-backed nodes
- * (local FitAddon sizing, no closed overlay, no server-driven repaint) instead of silently
- * doing nothing behind an implemented-looking method. See CLAUDE.md, "Three surfaces".
+ * The co-attach members (`onSize` / `onClosed` / `onRecycled` / `onResync`) are deliberately NOT
+ * implemented: the relay frame protocol carries no size, closed, recycled or resync frame, and a
+ * relay client is a mirror of the host's own terminal rather than an equal subscriber of the pty.
+ * Omitting the optional members makes TerminalNode fall back to today's behavior for relay-backed
+ * nodes (local FitAddon sizing, no closed overlay, no restart-on-recycle, no server-driven repaint)
+ * instead of silently doing nothing behind an implemented-looking method. See CLAUDE.md, "Three
+ * surfaces".
  */
 export class RemoteTransport implements TerminalTransport {
   constructor(private readonly connectionId: string) {}
@@ -56,6 +57,11 @@ export class RemoteTransport implements TerminalTransport {
 
   destroy(_persistKey: string): void {
     // No-op: the client doesn't own the host's persistent (tmux) session lifecycle.
+  }
+
+  recycle(_persistKey: string): void {
+    // No-op, for the same reason as `destroy` — and unreachable anyway: "move into worktree" is
+    // refused for a relay-backed node (Canvas.confirmMoveIntoWorktree), whose cwd lives on the host.
   }
 
   onData(sessionId: string, listener: (data: string) => void): () => void {

@@ -163,6 +163,7 @@ export function disposeTerminalOnUnmount(id: string): void {
   noParkIds.add(id)
   disposeParkedTerminal(id)
   coStates.delete(id)
+  recycledIds.delete(id)
 }
 
 /**
@@ -188,6 +189,26 @@ interface CoState {
 const NO_CO: CoState = { letterbox: false, closed: null }
 const coStates = new Map<string, CoState>()
 const coSubs = new Map<string, (s: CoState) => void>()
+
+/**
+ * Restart hooks for a RECYCLED node — the other half of the destroy/recycle split.
+ *
+ * "Move into worktree" ends a node's tmux session so the same node id respawns in the new cwd. It
+ * is NOT a deletion: the node stays on every canvas. A co-viewer therefore must not land in the
+ * `closed` state above (permanent, un-respawnable) — it has to RESTART its terminal onto the
+ * replacement session, which core has already spawned by the time it tells us (so our re-create
+ * co-attaches to it rather than spawning the node in our own, stale cwd).
+ *
+ * The mounted instance publishes its respawn trigger here, for the same reason as `coSubs`: the
+ * transport listener is wired once, survives a park, and cannot hold a `setState` of a component
+ * that may since have unmounted. No entry = nobody is mounted, and the park (if any) is disposed
+ * instead — a parked terminal is holding the dead pty, and the next mount creates fresh.
+ */
+const restartSubs = new Map<string, () => void>()
+/** Node ids whose next spawn is a recycle restart — the new xterm prints a one-line reason (the
+ *  replacement session is a fresh shell in a different folder, so the screen legitimately changes
+ *  under the co-viewer and a silent reset would just look like a glitch). */
+const recycledIds = new Set<string>()
 
 function getCo(id: string): CoState {
   return coStates.get(id) ?? NO_CO
@@ -313,6 +334,19 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       if (coSubs.get(id) === setCo_) coSubs.delete(id)
     }
   }, [id])
+  // Publish this instance's restart trigger for the (park-surviving) onRecycled listener — see
+  // restartSubs. Bumping `respawnNonce` re-runs the lifecycle effect below, which is exactly what
+  // the mover's own canvas does; the transient nonce is never persisted.
+  useEffect(() => {
+    const restart = (): void =>
+      updateNodeData(id, (n) => ({
+        respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+      }))
+    restartSubs.set(id, restart)
+    return () => {
+      if (restartSubs.get(id) === restart) restartSubs.delete(id)
+    }
+  }, [id, updateNodeData])
   // The name of the peer who closed this node. Read NON-reactively (getState, not a selector): the
   // presence store is written at cursor rate and its perf contract reserves subscriptions for the
   // presence components — a per-terminal subscriber would run on every one of those writes. The
@@ -611,6 +645,30 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             })
           )
         }
+        // Someone else RECYCLED this node (moved it into a worktree): our session id is dead, but a
+        // replacement is already live under the same node id. Restart onto it — the node is still
+        // on our canvas and still working, so the closed state above would be a lie, and parking
+        // this now-dead pty would hand a corpse to the next mount.
+        if (transport.onRecycled) {
+          cleanups.push(
+            transport.onRecycled(sid, () => {
+              const restart = restartSubs.get(id)
+              if (!restart) {
+                disposeParkedTerminal(id) // unmounted: drop the park, the next mount creates fresh
+                return
+              }
+              recycledIds.add(id)
+              restart()
+            })
+          )
+        }
+        // A restart we did not ask for: say why once, before the new session's output lands. (We
+        // JOIN the replacement session, so tmux — which already has a client — does not redraw for
+        // us; the first thing on this screen is whatever the new shell prints next.)
+        if (recycledIds.delete(id))
+          term.write(
+            '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
+          )
         // We fell so far behind that the server discarded our queued output and redrew us from
         // tmux. The capture IS the current screen, so reset the emulator and write it — writing it
         // on top of a stale buffer would splice two different points in time. An EMPTY payload is

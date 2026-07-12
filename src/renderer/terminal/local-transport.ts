@@ -36,6 +36,10 @@ export class LocalTransport implements TerminalTransport {
     this.pty.destroy(persistKey)
   }
 
+  recycle(persistKey: string): void {
+    this.pty.recycle(persistKey)
+  }
+
   onData(sessionId: string, listener: (data: string) => void): () => void {
     return this.pty.onData(sessionId, listener)
   }
@@ -50,6 +54,10 @@ export class LocalTransport implements TerminalTransport {
 
   onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void {
     return this.pty.onClosed(sessionId, listener)
+  }
+
+  onRecycled(sessionId: string, listener: () => void): () => void {
+    return this.pty.onRecycled(sessionId, listener)
   }
 
   onResync(sessionId: string, listener: (screen: string) => void): () => void {
