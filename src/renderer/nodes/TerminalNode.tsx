@@ -25,7 +25,8 @@ import {
   isCopyShortcut,
   stripTrailingNewline,
   toXtermText,
-  xtermScrollback
+  xtermScrollback,
+  type SessionLife
 } from '../terminal/terminal-config'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
@@ -134,6 +135,13 @@ interface ParkedTerminal {
   sentRows: number
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
+  /**
+   * Lifetime of the session itself, SHARED with the effect that created it (and with the effect
+   * that later adopts this entry). `dead` flips on the final dispose, `killed` guards the PTY kill
+   * so a session is killed at most once even when a still-in-flight spawn continuation, the effect
+   * cleanup and the park dispose all race for it.
+   */
+  life: SessionLife & { killed: boolean }
   timer: ReturnType<typeof setTimeout>
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
@@ -141,8 +149,15 @@ const TERM_PARK_MS = 5 * 60 * 1000
 
 function disposeParked(p: ParkedTerminal): void {
   clearTimeout(p.timer)
+  // Mark the session dead BEFORE tearing it down: a spawn continuation still awaiting its history
+  // seed reads this to see that the session it handed off no longer exists (→ teardown, not
+  // continue-parked), instead of wiring listeners onto a killed session.
+  p.life.dead = true
   p.cleanups.forEach((fn) => fn())
-  p.transport.kill(p.sessionId)
+  if (!p.life.killed) {
+    p.life.killed = true
+    p.transport.kill(p.sessionId)
+  }
   p.term.dispose()
 }
 
@@ -420,6 +435,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
     let sessionId: string | null = parked ? parked.sessionId : null
     let disposed = false
+    // Shared with the park entry this session travels through: an adopted terminal keeps the very
+    // same PTY session, so its lifetime (and its kill-once guard) must be the same record.
+    const life: SessionLife & { killed: boolean } = parked
+      ? parked.life
+      : { dead: false, killed: false }
+    // The park entry THIS effect's cleanup handed the session off to, if it parked one. Closure
+    // state on purpose: the parked-terminals MAP cannot answer "was this session handed off?" —
+    // an adoption deletes the entry, so park-then-adopt would read as "never parked".
+    let handedOff: ParkedTerminal | null = null
+    // Kill the PTY client at most once per session: the effect cleanup, a park dispose and a
+    // still-in-flight spawn continuation can all reach for it. `PtyManager.kill` tolerates a
+    // repeat, but `RemoteTransport.kill` forwards to the relay unconditionally.
+    const killSession = (sid: string): void => {
+      if (life.killed) return
+      life.killed = true
+      transport.kill(sid)
+    }
     // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
     // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
     // mount) must not send one — on a bulk project load that redraw doubles per node.
@@ -498,19 +530,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
         // Disposal while the spawn/seed was in flight is NOT necessarily a teardown: an unmount
         // with a live session PARKS it (same xterm, same PTY client, same `cleanups` array), and
-        // killing it here would leave the node permanently dead once it is re-adopted. Only a real
-        // unmount/delete (nothing parked for this session) kills. Here `sessionId` was still null
-        // when the cleanup ran, so it could not have parked — but the same helper keeps both
-        // early-returns honest.
+        // killing it here would leave the node permanently dead. That holds even if the user
+        // switched straight BACK: the remount adopts the entry and deliberately re-wires nothing —
+        // it relies on this continuation to finish the wiring (gate.open / onExit / onData). So the
+        // question is the closure's `handedOff`, not the (already emptied) parked-terminals map.
         const onDisposed = (): boolean => {
-          const action = disposalAction({
-            disposed,
-            sessionId: sid,
-            parkedSessionId: parkedTerminals.get(id)?.sessionId
-          })
+          const action = disposalAction({ disposed, handedOff: handedOff?.life })
           if (action !== 'teardown') return false
           offData?.()
-          transport.kill(sid)
+          killSession(sid)
           return true
         }
         // Assigned below, once the data listener exists; before that there is nothing to detach.
@@ -700,6 +728,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sentCols,
           sentRows,
           cleanups,
+          life,
           timer: setTimeout(() => {
             if (parkedTerminals.get(id) === entry) {
               parkedTerminals.delete(id)
@@ -709,10 +738,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         }
         disposeParkedTerminal(id) // defensive: never stack two entries for one node
         parkedTerminals.set(id, entry)
+        // A spawn continuation still awaiting its history seed reads this to know the session
+        // survived this unmount (parked, or adopted by a remount) and must be finished, not killed.
+        handedOff = entry
         return
       }
+      // Real teardown (respawn / permanent delete). `life` is shared, so a spawn continuation of an
+      // EARLIER effect (this terminal may have been adopted from a park) sees the session die here
+      // and tears down instead of wiring listeners onto it; `killSession` keeps the kill single.
+      life.dead = true
       cleanups.forEach((fn) => fn())
-      if (sessionId) transport.kill(sessionId)
+      if (sessionId) killSession(sessionId)
       term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

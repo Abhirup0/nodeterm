@@ -73,16 +73,33 @@ export function stripTrailingNewline(text: string): string {
  */
 export type DisposalAction = 'proceed' | 'continue-parked' | 'teardown'
 
+/**
+ * The lifetime of one PTY session as seen by the effect that created it. It is SHARED with the
+ * park entry the effect's cleanup hands the session off to (and with the effect that later adopts
+ * that entry), so `dead` means "this session's xterm/PTY have been torn down for good" no matter
+ * who did it.
+ */
+export interface SessionLife {
+  dead: boolean
+}
+
+/**
+ * The question is NOT "is something parked under this node id?" — an adoption removes the park
+ * entry from the map, so a park followed by a remount looks exactly like "never parked", and
+ * killing there would detach the PTY client of the terminal the user is looking at.
+ * The right question is closure state: "did THIS effect's cleanup hand the session off to a park
+ * entry that is still alive?". If it did, the session lives on (parked, or already re-adopted by a
+ * remount that deliberately re-wires nothing and relies on this continuation to finish the job) —
+ * so the setup must simply complete.
+ */
 export function disposalAction(opts: {
   /** The effect cleanup has run. */
   disposed: boolean
-  /** The session this continuation is wiring up. */
-  sessionId: string
-  /** sessionId of the node's parked entry, if the cleanup parked one. */
-  parkedSessionId: string | null | undefined
+  /** The park entry THIS effect's cleanup created, if it parked the session (else null). */
+  handedOff: SessionLife | null | undefined
 }): DisposalAction {
   if (!opts.disposed) return 'proceed'
-  return opts.parkedSessionId === opts.sessionId ? 'continue-parked' : 'teardown'
+  return opts.handedOff && !opts.handedOff.dead ? 'continue-parked' : 'teardown'
 }
 
 /** A gate that holds PTY chunks back until the emulator has been seeded. */
