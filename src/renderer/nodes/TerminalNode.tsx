@@ -21,7 +21,6 @@ import { parseOsc52 } from '../terminal/osc52'
 import {
   attachReplay,
   closedByLabel,
-  copyKeyAction,
   createDataGate,
   disposalAction,
   forgetNodeTermState,
@@ -36,7 +35,9 @@ import {
   shouldApplyResync,
   stripTrailingNewline,
   takeRecycled,
+  terminalKeyAction,
   toXtermText,
+  SHIFT_ENTER_SEQ,
   xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
@@ -615,11 +616,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // preventDefault() ourselves. Note that in Chromium (Server Edition, or `npm run dev` with
     // DevTools attached) Ctrl+Shift+C is ALSO the browser's inspect-element picker and that one is
     // NOT preventable by a page — hence Ctrl+Insert, which no browser reserves.
+    // Shift+Enter is also intercepted here: xterm would send a plain \r (submit), so we remap it to
+    // ESC+CR (`SHIFT_ENTER_SEQ`) — agent CLIs read that as "insert newline" (see terminal-config.ts).
     term.attachCustomKeyEventHandler((e) => {
-      const action = copyKeyAction(e, term.hasSelection())
+      const action = terminalKeyAction(e, term.hasSelection())
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
+      // Shift+Enter → ESC+CR so agent CLIs insert a newline instead of submitting
+      // (see SHIFT_ENTER_SEQ in terminal-config.ts for the tmux rationale).
+      else if (action === 'shift-enter' && sessionId) transport.write(sessionId, SHIFT_ENTER_SEQ)
       return false
     })
 
