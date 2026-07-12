@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import {
-  PRESENCE_COLORS,
   nextFreeColor,
   peersOnProject,
   type ClientId,
@@ -15,10 +14,18 @@ import {
  * reload is the local user's own {name, color} (ME_KEY below).
  *
  * SOLE SUBSCRIBER: this module is the ONLY place that may call presence.onSync / presence.onPeer,
- * and connectPresence() is called exactly once (Canvas, []-effect). The browser bridge buffers the
- * events that arrive before the first subscriber and drains that buffer into it — a SECOND
- * subscriber on the same channel would get nothing, so components must read this store and never
- * subscribe themselves.
+ * and connectPresence() subscribes AT MOST ONCE (the module-level `live` handle below makes that
+ * structural, not a convention — a second call is inert). The browser bridge buffers the events
+ * that arrive before the first subscriber and drains that buffer into it — a SECOND subscriber on
+ * the same channel would get nothing, so components must read this store and never subscribe
+ * themselves.
+ *
+ * NEVER MY OWN PEER: the hub's table includes us, so every selector filters on `myId` — and while
+ * `myId` is null (hello in flight, or a failed handshake) they return NOTHING at all. That null
+ * window is real: the browser bridge drains its buffer — the join-time `presence:sync`, which
+ * contains our own peer, and our own join diff — into the first subscriber synchronously, i.e.
+ * before hello can possibly have resolved. Without the gate we would list ourselves in the
+ * facepile and chase our own ghost cursor.
  *
  * PERF CONTRACT: only the presence components (PresenceLayer / Facepile / PresenceChips) may
  * subscribe to this store. Canvas.tsx is ~4000 lines — if a cursor at 20 Hz re-rendered it, every
@@ -52,7 +59,7 @@ export function saveIdentity(id: PeerIdentity): void {
 /** A starting point for the name prompt: empty name, an unused-looking color. */
 export function suggestIdentity(): PeerIdentity {
   const taken = Object.values(usePresence.getState().peers).map((p) => p.color)
-  return { name: '', color: nextFreeColor(taken) || PRESENCE_COLORS[0] }
+  return { name: '', color: nextFreeColor(taken) }
 }
 
 export interface PresenceStore {
@@ -106,8 +113,12 @@ export const usePresence = create<PresenceStore>((set) => ({
   reset: () => set({ myId: null, peers: {}, needsName: false })
 }))
 
-/** Everyone except me, on ANY project — the facepile list (it shows who is working where). */
+/** Everyone except me, on ANY project — the base of every other selector (the facepile shows who
+ *  is working where, so it does NOT filter by project).
+ *  While `myId` is null we cannot tell our own peer from a teammate's, so we return NOBODY: an
+ *  empty facepile for one round-trip is right; listing yourself as your own teammate never is. */
 export function selectOthers(s: PresenceStore): PeerState[] {
+  if (s.myId === null) return []
   return Object.values(s.peers).filter((p) => p.clientId !== s.myId)
 }
 
@@ -128,27 +139,105 @@ export function selectFocused(
   return selectVisible(s, projectId).filter((p) => p.focus === nodeId)
 }
 
+/** What the facepile draws — and NOTHING else. `applyDiff` replaces the whole PeerState object on
+ *  every cursor patch (~20/s per peer), so a facepile subscribed to PeerState would re-render at
+ *  cursor rate even under useShallow. selectFaces projects these five fields and reuses the
+ *  previous object when they are unchanged, so cursor traffic is invisible to it. */
+export interface PeerFace {
+  clientId: ClientId
+  name: string
+  color: string
+  projectId: string | null
+  kind: PeerState['kind']
+}
+
+/** clientId → the last face we handed out, so an unchanged face keeps its object identity. */
+const faceCache = new Map<ClientId, PeerFace>()
+
+/** The facepile projection: everyone but me, cursor-immune (see PeerFace). Pair it with
+ *  `useShallow` — the array is fresh each call, its ELEMENTS are not. */
+export function selectFaces(s: PresenceStore): PeerFace[] {
+  const faces: PeerFace[] = []
+  const fresh = new Map<ClientId, PeerFace>()
+  for (const p of selectOthers(s)) {
+    const prev = faceCache.get(p.clientId)
+    const same =
+      prev &&
+      prev.name === p.name &&
+      prev.color === p.color &&
+      prev.projectId === p.projectId &&
+      prev.kind === p.kind
+    const face: PeerFace = same
+      ? prev
+      : { clientId: p.clientId, name: p.name, color: p.color, projectId: p.projectId, kind: p.kind }
+    fresh.set(p.clientId, face)
+    faces.push(face)
+  }
+  // Rebuild rather than accumulate: a peer that left must not linger in the cache.
+  faceCache.clear()
+  for (const [id, face] of fresh) faceCache.set(id, face)
+  return faces
+}
+
+/** Sent when the user has not named themselves yet. It claims NOTHING — sanitizeIdentity falls
+ *  back to the peer's current name on an empty string, and to its current color on an off-palette
+ *  one — so the hub keeps the "Someone" + next-free color it assigned at join. Its only job is to
+ *  hand us our own ClientId immediately (see NEVER MY OWN PEER above); the name prompt then just
+ *  renames us with a second hello. */
+const PROVISIONAL_IDENTITY: PeerIdentity = { name: '', color: '' }
+
+/** A failed handshake logs once per session, not once per retry. */
+let helloWarned = false
+
 /**
  * Say hello and seed the peer table from the RESPONSE — not from the presence:sync push. On
  * desktop the hub joins the window at createWindow(), i.e. before the renderer has loaded, so
  * that join-time sync is always lost. The hello response is the only snapshot that is reliable
  * on BOTH surfaces, and it is also how we learn our OWN clientId (so we never draw our cursor).
+ *
+ * The seed REPLACES the table wholesale, and that is only safe because of two properties — do not
+ * move this seed onto an unordered path (a fan-out event, a second channel, a retry queue):
+ *   1. the hub snapshots peers() INSIDE the hello handler, so the response is a consistent table
+ *      as of that moment, and
+ *   2. hello's response and the presence:peer diffs share one FIFO transport (ipcRenderer /
+ *      the single ws), so every diff we already applied is included in that snapshot and every
+ *      diff we apply after it happened after it.
+ * Break either one and a peer who joins mid-handshake gets silently overwritten out of the table.
+ *
+ * A rejection (ws dropped mid-handshake, a host without the channel) must never become an
+ * unhandled rejection: we log once and leave myId null, which the selectors read as "presence is
+ * off" — degraded, but never "I am my own peer".
  */
 async function sayHello(id: PeerIdentity): Promise<void> {
-  const res = await window.nodeTerminal.presence.hello(id)
-  const table: Record<ClientId, PeerState> = {}
-  for (const p of res.peers) table[p.clientId] = p
-  usePresence.setState({ myId: res.clientId, peers: table })
+  try {
+    const res = await window.nodeTerminal.presence.hello(id)
+    const table: Record<ClientId, PeerState> = {}
+    for (const p of res.peers) table[p.clientId] = p
+    usePresence.setState({ myId: res.clientId, peers: table })
+  } catch (err) {
+    if (!helloWarned) {
+      helloWarned = true
+      console.warn('[presence] hello failed — presence is off for this session', err)
+    }
+  }
 }
 
+/** The live connection, or null. Makes the single-subscriber invariant STRUCTURAL: a second
+ *  connect (Fast Refresh, a stray double mount) is inert, and a teardown only tears down the
+ *  connection IT created — otherwise the stale teardown would reset() the store (dropping myId
+ *  and the whole table) while the live subscription, which will never re-seed, kept running. */
+let live: { stop: () => void } | null = null
+
 /**
- * Subscribe to the presence stream and announce ourselves. Called EXACTLY ONCE, from Canvas in a
- * []-effect; returns a teardown. Subscribing BEFORE hello matters: any diff that lands while
- * hello is in flight must be applied on top of the snapshot, not dropped. With no stored identity
- * we subscribe but stay anonymous (`needsName`) until the prompt resolves — the hub still knows
- * us as "Someone", so nothing is lost either way.
+ * Subscribe to the presence stream and announce ourselves; returns a teardown. Called from Canvas
+ * in a []-effect — but calling it twice is safe (the second call is a no-op returning a no-op).
+ * Subscribing BEFORE hello matters: any diff that lands while hello is in flight must be applied
+ * on top of the snapshot, not dropped. We say hello even with no stored identity (see
+ * PROVISIONAL_IDENTITY): the prompt (`needsName`) then only renames us.
  */
 export function connectPresence(): () => void {
+  if (live) return () => {}
+
   const unSync = window.nodeTerminal.presence.onSync((peers) =>
     usePresence.getState().applySync(peers)
   )
@@ -156,16 +245,24 @@ export function connectPresence(): () => void {
     usePresence.getState().applyDiff(diff)
   )
   const me = usePresence.getState().me
-  if (me) void sayHello(me)
-  else usePresence.setState({ needsName: true })
-  return () => {
-    unSync()
-    unPeer()
-    usePresence.getState().reset()
-    // Forget what we published, so a reconnect re-announces focus + project from scratch.
-    lastFocus = null
-    lastProject = null
+  if (!me) usePresence.setState({ needsName: true })
+  void sayHello(me ?? PROVISIONAL_IDENTITY)
+
+  const handle = {
+    stop: () => {
+      if (live !== handle) return // already torn down, or superseded — touch nothing
+      live = null
+      unSync()
+      unPeer()
+      usePresence.getState().reset()
+      faceCache.clear()
+      // Forget what we published, so a reconnect re-announces focus + project from scratch.
+      lastFocus = null
+      lastProject = null
+    }
   }
+  live = handle
+  return handle.stop
 }
 
 // The last focus/project we published — a terminal re-focusing the same node, or a tab switch

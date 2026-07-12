@@ -32,36 +32,70 @@ function peer(clientId: number, over: Partial<PeerState> = {}): PeerState {
   }
 }
 
-/** A recording window.nodeTerminal.presence. */
-function fakePresenceApi(hello = { clientId: 7, peers: [peer(7)] }) {
+type HelloRes = { clientId: number; peers: PeerState[] }
+
+/** A recording window.nodeTerminal.presence. `hello` may be a canned response or a function (so a
+ *  test can defer or reject it). The unsubscribes are spies: a store that forgot to call them must
+ *  FAIL, so we never rely on the fake nulling its own callbacks. */
+function fakePresenceApi(
+  hello: HelloRes | (() => Promise<HelloRes>) = { clientId: 7, peers: [peer(7)] }
+) {
   const calls: Array<[string, unknown]> = []
+  const unSync = vi.fn()
+  const unPeer = vi.fn()
+  const subs = { sync: 0, peer: 0 }
   let syncCb: ((peers: PeerState[]) => void) | null = null
   let peerCb: ((diff: unknown) => void) | null = null
   const presence = {
     hello: vi.fn(async (id: unknown) => {
       calls.push(['hello', id])
-      return hello
+      return typeof hello === 'function' ? await hello() : hello
     }),
     cursor: (c: unknown) => calls.push(['cursor', c]),
     focus: (n: unknown) => calls.push(['focus', n]),
     chat: (t: unknown) => calls.push(['chat', t]),
     project: (p: unknown) => calls.push(['project', p]),
     onSync: (cb: (peers: PeerState[]) => void) => {
+      subs.sync++
       syncCb = cb
-      return () => (syncCb = null)
+      return () => {
+        unSync()
+        syncCb = null
+      }
     },
     onPeer: (cb: (diff: unknown) => void) => {
+      subs.peer++
       peerCb = cb
-      return () => (peerCb = null)
+      return () => {
+        unPeer()
+        peerCb = null
+      }
     }
   }
   vi.stubGlobal('window', { nodeTerminal: { presence } })
   return {
     calls,
     presence,
+    subs,
+    unSync,
+    unPeer,
     emitSync: (p: PeerState[]) => syncCb?.(p),
     emitPeer: (d: unknown) => peerCb?.(d)
   }
+}
+
+function deferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+const STORED_ME = {
+  'nodeterm.presence.me': JSON.stringify({ name: 'Enes', color: PRESENCE_COLORS[1] })
 }
 
 beforeEach(() => vi.resetModules())
@@ -105,14 +139,108 @@ describe('connectPresence', () => {
     stop()
   })
 
-  it('flags needsName (and does not say hello) when no identity is stored', async () => {
+  it('says hello with a provisional identity when none is stored (so myId is known on first run)', async () => {
     vi.stubGlobal('localStorage', memStorage())
     const api = fakePresenceApi()
     const { connectPresence, usePresence } = await import('./presence')
     const stop = connectPresence()
+    // We still need a name from the user…
     expect(usePresence.getState().needsName).toBe(true)
-    expect(api.presence.hello).not.toHaveBeenCalled()
+    // …but we must NOT stay anonymous on the wire: without a hello we never learn our own
+    // ClientId, and every selector would hand our own peer back to us as a teammate.
+    expect(api.presence.hello).toHaveBeenCalledTimes(1)
+    // The provisional identity claims nothing: the hub keeps the name/color it assigned at join.
+    expect(api.calls[0]).toEqual(['hello', { name: '', color: '' }])
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
     stop()
+  })
+
+  it('never surfaces my own peer while hello is in flight (browser buffer-drain ordering)', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const d = deferred<HelloRes>()
+    const api = fakePresenceApi(() => d.promise)
+    const { connectPresence, usePresence, selectOthers, selectVisible, selectFocused, selectFaces } =
+      await import('./presence')
+    const stop = connectPresence()
+
+    // The ws-bridge drains its early buffer into the first subscriber SYNCHRONOUSLY: the hub's
+    // join-time sync (which contains MY OWN peer) and my own join diff land before hello resolves.
+    api.emitSync([peer(7, { name: 'Enes', focus: 'node-a' }), peer(8, { name: 'Ada' })])
+    api.emitPeer({ op: 'join', peer: peer(7, { name: 'Enes', focus: 'node-a' }) })
+    expect(usePresence.getState().myId).toBeNull()
+
+    // No selector may hand back a peer while we do not know which one is us — a ghost of myself
+    // in the facepile, and (next task) a ghost cursor chasing my real one.
+    const s = usePresence.getState()
+    expect(selectOthers(s)).toEqual([])
+    expect(selectVisible(s, 'web')).toEqual([])
+    expect(selectFocused(s, 'node-a', 'web')).toEqual([])
+    expect(selectFaces(s)).toEqual([])
+
+    d.resolve({ clientId: 7, peers: [peer(7, { name: 'Enes' }), peer(8, { name: 'Ada' })] })
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+    expect(selectOthers(usePresence.getState()).map((p) => p.clientId)).toEqual([8])
+    stop()
+  })
+
+  it('is idempotent: a second connect is inert and its teardown tears nothing down', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [peer(7), peer(8)] })
+    const { connectPresence, usePresence, selectOthers } = await import('./presence')
+
+    const stop1 = connectPresence()
+    const stop2 = connectPresence() // Fast Refresh / a stray double mount
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    // One subscription pair, one hello — a second pair would double-apply every diff.
+    expect(api.subs).toEqual({ sync: 1, peer: 1 })
+    expect(api.presence.hello).toHaveBeenCalledTimes(1)
+
+    // The inert connect's teardown must not reset the store out from under the live one.
+    stop2()
+    expect(api.unSync).not.toHaveBeenCalled()
+    expect(api.unPeer).not.toHaveBeenCalled()
+    expect(usePresence.getState().myId).toBe(7)
+    expect(selectOthers(usePresence.getState()).map((p) => p.clientId)).toEqual([8])
+
+    // The real teardown actually unsubscribes (the fake nulls its callbacks either way, so the
+    // spies — not the silence afterwards — are what proves it).
+    stop1()
+    expect(api.unSync).toHaveBeenCalledTimes(1)
+    expect(api.unPeer).toHaveBeenCalledTimes(1)
+    expect(usePresence.getState().myId).toBeNull()
+    expect(usePresence.getState().peers).toEqual({})
+
+    // …and after a teardown, connecting again works (the guard is released, not sticky).
+    const stop3 = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+    expect(api.subs).toEqual({ sync: 2, peer: 2 })
+    stop3()
+  })
+
+  it('survives a hello rejection (no unhandled rejection, defined state, logged once)', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const api = fakePresenceApi(() => Promise.reject(new Error('ws closed')))
+    const { connectPresence, usePresence, selectOthers } = await import('./presence')
+
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(api.presence.hello).toHaveBeenCalledTimes(1))
+    await Promise.resolve()
+
+    // Defined state: no id, so no selector claims anyone is here (never me as my own peer).
+    expect(usePresence.getState().myId).toBeNull()
+    api.emitSync([peer(7), peer(8)])
+    expect(selectOthers(usePresence.getState())).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // A retry that also fails does not spam the log.
+    usePresence.getState().setMe({ name: 'Ada', color: PRESENCE_COLORS[2] })
+    await vi.waitFor(() => expect(api.presence.hello).toHaveBeenCalledTimes(2))
+    await Promise.resolve()
+    expect(warn).toHaveBeenCalledTimes(1)
+    stop()
+    warn.mockRestore()
   })
 
   it('setMe persists the identity, clears needsName and says hello', async () => {
@@ -123,7 +251,40 @@ describe('connectPresence', () => {
     usePresence.getState().setMe({ name: 'Ada', color: PRESENCE_COLORS[2] })
     await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
     expect(usePresence.getState().needsName).toBe(false)
-    expect(api.calls[0]).toEqual(['hello', { name: 'Ada', color: PRESENCE_COLORS[2] }])
+    // The name submit is a SECOND hello (the first was the provisional one at connect) — it just
+    // renames us on the hub.
+    expect(api.calls.filter((c) => c[0] === 'hello')).toEqual([
+      ['hello', { name: '', color: '' }],
+      ['hello', { name: 'Ada', color: PRESENCE_COLORS[2] }]
+    ])
+    stop()
+  })
+})
+
+describe('selectFaces (the facepile projection — cursor traffic must not re-render it)', () => {
+  it('projects only the facepile fields and keeps object identity across cursor updates', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [peer(7), peer(8, { name: 'Ada' })] })
+    const { connectPresence, usePresence, selectFaces } = await import('./presence')
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    const before = selectFaces(usePresence.getState())
+    expect(before).toEqual([
+      { clientId: 8, name: 'Ada', color: PRESENCE_COLORS[0], projectId: 'web', kind: 'browser' }
+    ])
+
+    // A cursor patch replaces the PeerState object; the projected face must stay the SAME object,
+    // so useShallow sees no change and the facepile does not re-render at 20 Hz.
+    api.emitPeer({ op: 'update', clientId: 8, patch: { cursor: { x: 1, y: 2 } } })
+    const after = selectFaces(usePresence.getState())
+    expect(after[0]).toBe(before[0])
+
+    // A field the facepile DOES show changes → a new object (the pill actually updates).
+    api.emitPeer({ op: 'update', clientId: 8, patch: { name: 'Ada L.' } })
+    const renamed = selectFaces(usePresence.getState())
+    expect(renamed[0]).not.toBe(before[0])
+    expect(renamed[0].name).toBe('Ada L.')
     stop()
   })
 })
