@@ -31,6 +31,7 @@ export class ServerPlatform implements CorePlatform {
 
   private handlers = new Map<string, Handler>()
   private listeners = new Map<string, Set<(...args: any[]) => void>>()
+  private senderListeners = new Map<string, Set<(senderId: number, ...args: any[]) => void>>()
   private sinks = new Map<number, UiSink>()
   private nextUiId = 1
 
@@ -61,6 +62,15 @@ export class ServerPlatform implements CorePlatform {
     if (!set) {
       set = new Set()
       this.listeners.set(channel, set)
+    }
+    set.add(fn)
+  }
+
+  onWithSender(channel: string, fn: (senderId: number, ...args: any[]) => void): void {
+    let set = this.senderListeners.get(channel)
+    if (!set) {
+      set = new Set()
+      this.senderListeners.set(channel, set)
     }
     set.add(fn)
   }
@@ -134,7 +144,8 @@ export class ServerPlatform implements CorePlatform {
   }
 
   cast(uiId: number, method: string, args: unknown[]): void {
-    void uiId
+    const withSender = this.senderListeners.get(method)
+    if (withSender) for (const fn of withSender) fn(uiId, ...args)
     const set = this.listeners.get(method)
     if (!set) return
     for (const fn of set) fn(...args)

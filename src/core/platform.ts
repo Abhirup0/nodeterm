@@ -14,6 +14,9 @@ export interface CorePlatform {
   on(channel: string, fn: (...args: any[]) => void): void
   /** Like handle, but fn receives the calling UI's numeric id first (Electron: event.sender.id). */
   handleWithSender(channel: string, fn: (senderId: number, ...args: any[]) => unknown): void
+  /** Like on, but fn receives the calling UI's numeric id first (Electron: event.sender.id).
+   *  The seam presence (and, later, typing attribution) needs: a cast must say WHO sent it. */
+  onWithSender(channel: string, fn: (senderId: number, ...args: any[]) => void): void
   /** Send to one attached UI by id (Electron: webContents.fromId). Silently drops if gone. */
   sendTo(uiId: number, channel: string, ...args: any[]): void
   /** Send to every attached UI (Electron: the main window). */

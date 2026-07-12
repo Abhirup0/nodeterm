@@ -45,6 +45,22 @@ describe('ServerPlatform', () => {
     expect(got).toEqual(['hello'])
   })
 
+  it('cast delivers the sending uiId to onWithSender listeners (and still runs plain on)', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const withSender: Array<[number, unknown]> = []
+    const plain: unknown[] = []
+    p.onWithSender('presence:cursor', (senderId: number, cursor: unknown) =>
+      withSender.push([senderId, cursor])
+    )
+    p.on('presence:cursor', (cursor: unknown) => plain.push(cursor))
+    const ui = p.attach(fakeSink().sink)
+    p.cast(ui, 'presence:cursor', [{ x: 1, y: 2 }])
+    expect(withSender).toEqual([[ui, { x: 1, y: 2 }]])
+    expect(plain).toEqual([{ x: 1, y: 2 }])
+    // Unknown method: silent no-op, never throws.
+    expect(() => p.cast(ui, 'nope', [])).not.toThrow()
+  })
+
   it('on() supports multiple listeners per channel; cast fires all of them', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     const hits: string[] = []

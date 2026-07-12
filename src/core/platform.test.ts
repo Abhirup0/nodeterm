@@ -28,4 +28,12 @@ describe('core platform accessor', () => {
     ])
     expect(fake.opened).toEqual(['https://example.com'])
   })
+
+  it('fake records onWithSender listeners and passes the sender id through', () => {
+    const fake = fakePlatform()
+    const seen: Array<[number, string]> = []
+    fake.onWithSender('a:cast', (senderId: number, text: string) => seen.push([senderId, text]))
+    fake.senderListeners['a:cast'](7, 'hi')
+    expect(seen).toEqual([[7, 'hi']])
+  })
 })

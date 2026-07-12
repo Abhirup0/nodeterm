@@ -17,6 +17,7 @@ export function electronPlatform(): CorePlatform {
     handle: (ch, fn) => ipcMain.handle(ch, (_e, ...args) => fn(...args)),
     on: (ch, fn) => ipcMain.on(ch, (_e, ...args) => fn(...args)),
     handleWithSender: (ch, fn) => ipcMain.handle(ch, (e, ...args) => fn(e.sender.id, ...args)),
+    onWithSender: (ch, fn) => ipcMain.on(ch, (e, ...args) => fn(e.sender.id, ...args)),
     sendTo: (id, ch, ...args) => {
       const wc = webContents.fromId(id)
       if (wc && !wc.isDestroyed()) wc.send(ch, ...args)

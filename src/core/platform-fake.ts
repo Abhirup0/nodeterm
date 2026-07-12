@@ -3,6 +3,7 @@ import type { CorePlatform } from './platform'
 export interface FakePlatform extends CorePlatform {
   handlers: Record<string, (...args: any[]) => unknown>
   listeners: Record<string, (...args: any[]) => void>
+  senderListeners: Record<string, (senderId: number, ...args: any[]) => void>
   sent: Array<{ to: number | 'broadcast'; channel: string; args: any[] }>
   opened: string[]
 }
@@ -15,6 +16,7 @@ export function fakePlatform(overrides: Partial<CorePlatform> = {}): FakePlatfor
     isPackaged: false,
     handlers: {},
     listeners: {},
+    senderListeners: {},
     sent: [],
     opened: [],
     handle(ch, fn) {
@@ -25,6 +27,9 @@ export function fakePlatform(overrides: Partial<CorePlatform> = {}): FakePlatfor
     },
     handleWithSender(ch, fn) {
       f.handlers[ch] = fn as (...args: any[]) => unknown
+    },
+    onWithSender(ch, fn) {
+      f.senderListeners[ch] = fn
     },
     sendTo(to, channel, ...args) {
       f.sent.push({ to, channel, args })
