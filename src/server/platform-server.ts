@@ -21,6 +21,7 @@ const WS_HIGH_WATER = 1_000_000
 const WS_LOW_WATER = 256_000
 
 type Handler = { fn: (...args: any[]) => unknown; withSender: boolean }
+type Listener = { fn: (...args: any[]) => void; withSender: boolean }
 
 /** The Linux-server CorePlatform: RPC registries + a WS-connection (UiSink) registry.
  *  One instance per server process; each authenticated WebSocket attaches as one UI. */
@@ -30,8 +31,9 @@ export class ServerPlatform implements CorePlatform {
   readonly isPackaged = true
 
   private handlers = new Map<string, Handler>()
-  private listeners = new Map<string, Set<(...args: any[]) => void>>()
-  private senderListeners = new Map<string, Set<(senderId: number, ...args: any[]) => void>>()
+  // One registry for both on() and onWithSender(), so cast fires listeners in REGISTRATION
+  // order across the two — same as Electron's ipcMain.on. A Set preserves insertion order.
+  private listeners = new Map<string, Set<Listener>>()
   private sinks = new Map<number, UiSink>()
   private nextUiId = 1
 
@@ -58,21 +60,20 @@ export class ServerPlatform implements CorePlatform {
   }
 
   on(channel: string, fn: (...args: any[]) => void): void {
+    this.addListener(channel, { fn, withSender: false })
+  }
+
+  onWithSender(channel: string, fn: (senderId: number, ...args: any[]) => void): void {
+    this.addListener(channel, { fn, withSender: true })
+  }
+
+  private addListener(channel: string, listener: Listener): void {
     let set = this.listeners.get(channel)
     if (!set) {
       set = new Set()
       this.listeners.set(channel, set)
     }
-    set.add(fn)
-  }
-
-  onWithSender(channel: string, fn: (senderId: number, ...args: any[]) => void): void {
-    let set = this.senderListeners.get(channel)
-    if (!set) {
-      set = new Set()
-      this.senderListeners.set(channel, set)
-    }
-    set.add(fn)
+    set.add(listener)
   }
 
   sendTo(uiId: number, channel: string, ...args: any[]): void {
@@ -144,10 +145,21 @@ export class ServerPlatform implements CorePlatform {
   }
 
   cast(uiId: number, method: string, args: unknown[]): void {
-    const withSender = this.senderListeners.get(method)
-    if (withSender) for (const fn of withSender) fn(uiId, ...args)
     const set = this.listeners.get(method)
     if (!set) return
-    for (const fn of set) fn(...args)
+    for (const l of set) {
+      // A cast has no reply channel (unlike dispatch, which returns E_HANDLER), so isolate each
+      // listener: one throw must not skip the rest — e.g. a broken pty:write attribution listener
+      // would otherwise swallow the user's keystrokes. Log it, keep going.
+      try {
+        if (l.withSender) l.fn(uiId, ...args)
+        else l.fn(...args)
+      } catch (err) {
+        console.warn(
+          `[nodeterm-server] cast listener for ${method} threw`,
+          err instanceof Error ? err.message : String(err)
+        )
+      }
+    }
   }
 }

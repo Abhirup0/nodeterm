@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ServerPlatform, type UiSink } from './platform-server'
 import { E_NO_HANDLER } from '../shared/rpc'
 import { decodePtyData } from '../shared/rpc'
@@ -71,6 +71,32 @@ describe('ServerPlatform', () => {
     expect(hits).toEqual(['A:x', 'B:x'])
     p.cast(ui, 'unknown', ['ignored']) // no listener → silent no-op
     expect(hits).toEqual(['A:x', 'B:x'])
+  })
+
+  it('cast isolates a throwing listener: the others on the channel still run', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const hits: string[] = []
+    p.onWithSender('pty:write', () => { throw new Error('attribution blew up') })
+    p.onWithSender('pty:write', (_sender: number, a: string) => hits.push(`S:${a}`))
+    p.on('pty:write', () => { throw new Error('plain blew up') })
+    p.on('pty:write', (a: string) => hits.push(`P:${a}`))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    expect(() => p.cast(ui, 'pty:write', ['keystroke'])).not.toThrow()
+    expect(hits).toEqual(['S:keystroke', 'P:keystroke'])
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it('cast fires listeners in registration order across on() and onWithSender()', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const order: string[] = []
+    p.on('c', () => order.push('plain-1'))
+    p.onWithSender('c', () => order.push('sender-1'))
+    p.on('c', () => order.push('plain-2'))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    p.cast(ui, 'c', [])
+    expect(order).toEqual(['plain-1', 'sender-1', 'plain-2'])
   })
 
   it('sendTo routes pty:data as binary, other channels as JSON events, drops when detached', () => {
