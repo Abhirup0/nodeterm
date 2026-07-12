@@ -93,6 +93,8 @@ import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
+  descendantIds,
+  isInsideDir,
   resolveBaseRef,
   sanitizeWorktreeBranch,
   worktreeFromCreate,
@@ -2105,7 +2107,10 @@ export function Canvas() {
   const requestRemoveWorktree = useCallback(async (groupId: string) => {
     const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
     if (!wt) return
-    const status = await window.nodeTerminal.git.status(wt.path)
+    // The probe is a courtesy (it only enriches the warning), so a rejected IPC (WS-RPC transport
+    // error on the Server Edition) must not swallow the whole action: without this catch the dialog
+    // silently never opens and Remove looks broken. Fail open — ask without the dirty-file count.
+    const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
     const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
     const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
     // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
@@ -2167,15 +2172,47 @@ export function Canvas() {
       setNotice({ kind: 'error', text: res.message })
       return // sessions untouched: nothing was removed.
     }
-    // 3) The directory is gone — end the child terminals' tmux sessions, which are now sitting in
-    //    a directory that no longer exists.
-    const childIds = nodesRef.current
-      .filter((n) => n.parentId === t.groupId && n.type === 'terminal')
-      .map((n) => n.id)
-    for (const id of childIds) transport.destroy(id)
+    // 3) The directory is gone. Two things must happen to every node that was living in it —
+    //    and "every node" means ALL DESCENDANTS, not just direct children (a terminal inside a
+    //    nested group was missed), and chat nodes as well as terminals (a chat's cwd is just as
+    //    dead):
+    //      a. terminals: end the tmux session, which is now sitting in a directory that no longer
+    //         exists;
+    //      b. terminals AND chats: reset `data.cwd` off the deleted path. Leaving it there is the
+    //         exact trap this whole task exists to remove — on the next mount the node spawns into
+    //         a path that is gone, pty-manager silently falls back to $HOME, and the dead cwd is
+    //         persisted forever — only reached through the SANCTIONED Remove path.
+    //    The respawn (nonce bump) puts the terminal straight back in the fallback cwd rather than
+    //    leaving a dead pane behind; its session was destroyed a line earlier either way.
+    //    Nodes whose cwd was NOT inside the worktree are left alone: they were never affected.
+    const under = descendantIds(nodesRef.current, t.groupId)
+    const fallbackCwd =
+      (nodesRef.current.find((n) => n.id === t.groupId)?.data.cwd as string | undefined) ||
+      useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+    const displaced = (n: CanvasNode): boolean =>
+      under.has(n.id) &&
+      (n.type === 'terminal' || n.type === 'chat') &&
+      isInsideDir(n.data.cwd as string | undefined, wt.path)
+    for (const n of nodesRef.current) if (displaced(n) && n.type === 'terminal') transport.destroy(n.id)
+    setNodes((ns) =>
+      ns.map((n) =>
+        displaced(n as CanvasNode)
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                cwd: fallbackCwd,
+                ...(n.type === 'terminal'
+                  ? { respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+                  : {})
+              }
+            }
+          : n
+      )
+    )
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding])
+  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, setNodes, activeProjectId])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -2288,7 +2325,7 @@ export function Canvas() {
     [cwdForNewNodeIn]
   )
 
-  const confirmMoveIntoWorktree = useCallback(() => {
+  const confirmMoveIntoWorktree = useCallback(async () => {
     const id = moveTarget
     setMoveTarget(null)
     if (!id) return
@@ -2303,6 +2340,21 @@ export function Canvas() {
         kind: 'error',
         text: 'That worktree directory is missing. The terminal was left where it is.'
       })
+      return
+    }
+    // …and staleness itself only ever arrives by POLL (a 4 s poke against a 4 s throttle, twice
+    // over — so ↪ can still be live ~8-16 s after an external `rm -rf`). Everywhere else that window
+    // is cosmetic; HERE it costs the user a running process. So probe the directory once, right
+    // before the irreversible step. This is the second (and last) sanctioned direct git read outside
+    // the worktrees store — cheap, one-shot, and only on an explicit destructive confirm.
+    const probe = await window.nodeTerminal.git.status(wtPath).catch(() => null)
+    if (!probe?.hasRepo) {
+      setNotice({
+        kind: 'error',
+        text: 'That worktree directory is missing. The terminal was left where it is.'
+      })
+      // Nudge the store (throttled, best effort) so the chip catches up with what we just saw.
+      void useWorktrees.getState().refreshStatus(wtPath, node.parentId)
       return
     }
     // Permanently end the old tmux session (destroy, not kill) so the respawned create() opens

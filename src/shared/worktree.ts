@@ -151,10 +151,44 @@ export function parseWorktreePorcelain(out: string): WorktreeEntry[] {
   return entries
 }
 
-const isAncestorPath = (parent: string, child: string): boolean => {
+/** Is `child` the directory `parent` itself, or somewhere inside it? (Trailing slashes ignored.) */
+export const isAncestorPath = (parent: string, child: string): boolean => {
   const p = parent.replace(/\/+$/, '')
   const c = child.replace(/\/+$/, '')
   return c === p || c.startsWith(p + '/')
+}
+
+/** `isAncestorPath` for an optional cwd: "does this node live in that directory?" */
+export const isInsideDir = (cwd: string | undefined, dir: string): boolean =>
+  !!cwd && !!dir && isAncestorPath(dir, cwd)
+
+/**
+ * Every node under `rootId` — children, grandchildren, … — not just the direct children.
+ *
+ * Worktree teardown has to reach ALL of them: a terminal inside a nested group is living in the
+ * worktree directory just as much as a direct child, and a removal that only walked one level left
+ * it holding a session (and a cwd) in a directory that no longer exists.
+ */
+export function descendantIds(
+  nodes: readonly { id: string; parentId?: string }[],
+  rootId: string
+): Set<string> {
+  const byParent = new Map<string, string[]>()
+  for (const n of nodes) {
+    if (!n.parentId) continue
+    const siblings = byParent.get(n.parentId) ?? []
+    siblings.push(n.id)
+    byParent.set(n.parentId, siblings)
+  }
+  const out = new Set<string>()
+  const stack = [...(byParent.get(rootId) ?? [])]
+  while (stack.length) {
+    const id = stack.pop() as string
+    if (out.has(id)) continue // cycle guard: a corrupt parentId chain must not hang the app
+    out.add(id)
+    stack.push(...(byParent.get(id) ?? []))
+  }
+  return out
 }
 
 /** Refuse removals that would nuke the repo, home, or filesystem root. */

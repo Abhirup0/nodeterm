@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
+  descendantIds,
+  isInsideDir,
   sanitizeWorktreeBranch,
   computeWorktreePath,
   parseWorktreePorcelain,
@@ -183,5 +185,52 @@ describe('decideMergeStrategy', () => {
   it('blocks when base checkout is dirty', () => {
     const r = decideMergeStrategy({ baseCheckedOutPath: '/repo', baseDirty: true })
     expect(r.kind).toBe('blocked')
+  })
+})
+
+// Removing a worktree has to reach every node that was living in its directory — a terminal inside
+// a NESTED group is in that directory just as much as a direct child, and a chat node's cwd dies
+// with it too. A one-level filter left them holding a dead cwd, which is the exact trap the
+// destructive-edges work exists to remove.
+describe('descendantIds', () => {
+  const nodes = [
+    { id: 'g' },
+    { id: 't1', parentId: 'g' },
+    { id: 'inner', parentId: 'g' },
+    { id: 't2', parentId: 'inner' }, // two levels down
+    { id: 'deep', parentId: 't2' },
+    { id: 'outside' }
+  ]
+
+  it('collects children AND grandchildren, never a node outside the group', () => {
+    expect([...descendantIds(nodes, 'g')].sort()).toEqual(['deep', 'inner', 't1', 't2'])
+  })
+
+  it('is empty for a group with no children', () => {
+    expect(descendantIds(nodes, 'outside').size).toBe(0)
+  })
+
+  it('terminates on a corrupt parent cycle instead of hanging', () => {
+    const cyclic = [
+      { id: 'a', parentId: 'g' },
+      { id: 'b', parentId: 'a' },
+      { id: 'g', parentId: 'b' } // g is its own descendant
+    ]
+    expect([...descendantIds(cyclic, 'g')].sort()).toEqual(['a', 'b', 'g'])
+  })
+})
+
+describe('isInsideDir', () => {
+  it('matches the directory itself and anything under it', () => {
+    expect(isInsideDir('/wt/feat', '/wt/feat')).toBe(true)
+    expect(isInsideDir('/wt/feat/src', '/wt/feat')).toBe(true)
+    expect(isInsideDir('/wt/feat/', '/wt/feat')).toBe(true)
+  })
+  it('does not match a sibling that merely shares a prefix', () => {
+    expect(isInsideDir('/wt/feature', '/wt/feat')).toBe(false)
+  })
+  it('is false for an unset cwd (nothing to displace)', () => {
+    expect(isInsideDir(undefined, '/wt/feat')).toBe(false)
+    expect(isInsideDir('', '/wt/feat')).toBe(false)
   })
 })
