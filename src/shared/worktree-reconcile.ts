@@ -23,6 +23,10 @@ const norm = (p: string): string => p.trim().replace(/\/+$/, '')
  * Compare the persisted bindings against `git worktree list`. The FIRST entry git prints is the
  * main checkout — it is never an orphan (offering it as one would invite deleting the repo), and
  * bare entries are not worktrees a group can own.
+ *
+ * Caller contract: `entries` must be `git worktree list`'s output in git's order (the main checkout
+ * is identified positionally — never sort/filter it first), and `bound` must contain only groups
+ * bound to THAT one repo (groups of another repo would be falsely reported stale).
  */
 export function reconcileWorktrees(bound: BoundGroup[], entries: WorktreeEntry[]): Reconciliation {
   const usable = entries.filter((e) => !e.isBare)
