@@ -6,6 +6,7 @@ import { promisify } from 'util'
 import { platform } from './platform'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
+import { REF_MAX_LEN } from '../shared/presence'
 import {
   DEFAULT_SETTINGS,
   type PtyCreateOptions,
@@ -354,6 +355,32 @@ const RECYCLE_NOTIFY_TIMEOUT_MS = 10_000
 type EndIntent = 'delete' | 'recycle'
 
 /**
+ * How many deleted node ids we remember (see `tombstones`), and for how long.
+ *
+ * The map is keyed by a persistKey that comes VERBATIM off the wire, and `endSession('delete')`
+ * records one even when no live session exists — so without a bound, a client looping
+ * `pty:destroy(<random string>)` grows it forever. It is in-memory bookkeeping, not a promise: an
+ * LRU of the most recent deletions is exactly as much as the respawn guard actually needs (a
+ * co-viewer opens the deleted node's project minutes later, not next month), and Stage 3's
+ * canvas-delete mutation is its real replacement. Eviction degrades to the pre-tombstone behavior
+ * (the co-viewer may respawn the node), never to something worse.
+ */
+export const TOMBSTONE_MAX = 200
+export const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Token budget for the session-ENDING casts (`pty:destroy` / `pty:recycle`), per client.
+ *
+ * These are the only pty casts that cost real resources per call — an `fs.rm` of the scrollback
+ * snapshot, a `tmux kill-session` subprocess, and a tombstone entry — and they were the only ones
+ * with no limit at all (the presence casts are all bucketed). The burst is sized to the loudest
+ * HONEST caller by a wide margin: a bulk delete (select N nodes → Delete) fires one cast per node
+ * in a single tick, and dropping one of those would silently leak a tmux session, so the bucket
+ * must never be the thing that fails a real user.
+ */
+export const PTY_END_BUDGET = { perSec: 20, burst: 200 }
+
+/**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
  *
  * On macOS/Linux with tmux available, each terminal node attaches to a persistent
@@ -394,13 +421,19 @@ export class PtyManager {
    *  - it is IN-MEMORY, so it dies with the core process. Co-attach means one core with N clients
    *    (Server Edition / relay), so it covers every co-viewer for as long as that core lives — but
    *    after a server restart the resurrection is back.
+   *  - it is BOUNDED, in size and in time (TOMBSTONE_MAX / TOMBSTONE_TTL_MS): the key comes verbatim
+   *    off the wire and an entry is recorded even when no live session exists, so an unbounded map
+   *    would grow with client input alone. Eviction degrades to the pre-tombstone behavior, never
+   *    worse.
    *  - it is keyed by the DESTROYER, who is exempt: their own ⌘Z (undo of a delete) must still
    *    restore the node, and a solo user is always the destroyer, so their path is untouched.
    *  - a `recycle` (worktree move) explicitly CLEARS it: nothing was deleted there.
    * The real fix is Stage 3's canvas-delete mutation, which removes the node from every canvas so
    * no client is left holding one to re-create. See docs/team-presence.md (Known risks).
    */
-  private tombstones = new Map<string, { by: ClientId | null }>()
+  private tombstones = new Map<string, { by: ClientId | null; at: number }>()
+  /** `${clientId}:${channel}` → token bucket for the session-ending casts (see PTY_END_BUDGET). */
+  private endBuckets = new Map<string, { tokens: number; at: number }>()
   private counter = 0
   private tmuxPath: string | null = null
   private confPath = ''
@@ -511,12 +544,12 @@ export class PtyManager {
     // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
     // plain listener would run the destroy — and its `tmux kill-session` — twice.
     platform().onWithSender(IPC.ptyDestroy, (senderId: number, persistKey: string) =>
-      this.destroySession(senderId, persistKey)
+      this.endFromClient(senderId, IPC.ptyDestroy, persistKey, 'delete')
     )
     // Sender-aware for the opposite reason: the client that RECYCLED the node drives its own
     // respawn, so it is the one client that must NOT be sent the restart notice.
     platform().onWithSender(IPC.ptyRecycle, (senderId: number, persistKey: string) =>
-      this.recycleSession(senderId, persistKey)
+      this.endFromClient(senderId, IPC.ptyRecycle, persistKey, 'recycle')
     )
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
@@ -544,6 +577,76 @@ export class PtyManager {
    */
   private subscribes(clientId: ClientId, sessionId: string): boolean {
     return this.sessions.get(sessionId)?.subscribers.has(clientId) ?? false
+  }
+
+  /**
+   * The wire-facing half of `destroySession` / `recycleSession`: validate the node id, spend a
+   * token, and only then end the session. Everything here is about the fact that `persistKey`
+   * arrives VERBATIM from a client and that a destroy costs real resources on every call (an
+   * `fs.rm`, a `tmux kill-session` subprocess, a tombstone entry) — including when the node has no
+   * live session in this process, which is precisely the call an attacker can make in a loop.
+   *
+   * The cap is the same one presence uses for every client-supplied reference (REF_MAX_LEN); a node
+   * id is a short generated string, so anything longer is not a node. It REFUSES rather than
+   * truncating — a truncated key would name a DIFFERENT node, and this call kills things.
+   *
+   * Internal callers (main's node-delete path, the worktree move) go straight to
+   * `destroySession`/`recycleSession` and are neither capped nor bucketed: they are not off the wire.
+   */
+  private endFromClient(
+    clientId: ClientId,
+    channel: string,
+    persistKey: string,
+    intent: EndIntent
+  ): Promise<void> {
+    if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN)
+      return Promise.resolve()
+    if (!this.allowEnd(clientId, channel)) return Promise.resolve()
+    return this.endSession(clientId, persistKey, intent)
+  }
+
+  /** Take one token from this client's bucket for a session-ending channel (see PTY_END_BUDGET).
+   *  Excess casts are dropped silently — never an error, never a disconnect. */
+  private allowEnd(clientId: ClientId, channel: string): boolean {
+    const key = `${clientId}:${channel}`
+    const now = Date.now()
+    const prev = this.endBuckets.get(key)
+    // A client starts with a full bucket and refills at `perSec`, capped at `burst`.
+    const tokens = prev
+      ? Math.min(
+          PTY_END_BUDGET.burst,
+          prev.tokens + ((now - prev.at) / 1000) * PTY_END_BUDGET.perSec
+        )
+      : PTY_END_BUDGET.burst
+    if (tokens < 1) {
+      this.endBuckets.set(key, { tokens, at: now })
+      return false
+    }
+    this.endBuckets.set(key, { tokens: tokens - 1, at: now })
+    return true
+  }
+
+  /** Remember that this node was DELETED, bounded in both size and time (see TOMBSTONE_MAX). The
+   *  Map is insertion-ordered, so re-inserting makes it a plain LRU. */
+  private tombstone(persistKey: string, by: ClientId | null): void {
+    this.tombstones.delete(persistKey)
+    this.tombstones.set(persistKey, { by, at: Date.now() })
+    while (this.tombstones.size > TOMBSTONE_MAX) {
+      const oldest = this.tombstones.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.tombstones.delete(oldest)
+    }
+  }
+
+  /** The tombstone for this node, if one is still in force (expired entries are dropped on read). */
+  private liveTombstone(persistKey: string): { by: ClientId | null } | undefined {
+    const tomb = this.tombstones.get(persistKey)
+    if (!tomb) return undefined
+    if (Date.now() - tomb.at > TOMBSTONE_TTL_MS) {
+      this.tombstones.delete(persistKey)
+      return undefined
+    }
+    return tomb
   }
 
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
@@ -576,7 +679,7 @@ export class PtyManager {
     // Another client DELETED this node (and there is no live session for it — `join` above already
     // covers a resurrection by its owner). Refuse rather than spawn: see `tombstones`. Checked
     // AFTER the in-flight barrier so a create racing the owner's own respawn joins it instead.
-    const tomb = this.tombstones.get(key)
+    const tomb = this.liveTombstone(key)
     if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
     const spawn = this.spawnNew(clientId, options)
     this.inflight.set(key, spawn)
@@ -1591,7 +1694,7 @@ export class PtyManager {
     // `tombstones`); a RECYCLE explicitly forgets, because the node is not going anywhere and its
     // replacement session must be spawnable. Recorded even when no live session exists in this
     // process: the node may be deleted from a canvas whose terminal was never opened here.
-    if (intent === 'delete') this.tombstones.set(persistKey, { by: clientId })
+    if (intent === 'delete') this.tombstone(persistKey, clientId)
     else this.tombstones.delete(persistKey)
     if (dyingId && dying) {
       this.byPersistKey.delete(persistKey)

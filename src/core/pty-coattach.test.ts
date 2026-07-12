@@ -753,6 +753,101 @@ describe('node destroyed while co-viewed', () => {
   })
 })
 
+// ── The destroy path takes a node id straight off the wire ────────────────────────────────────
+// `endSession('delete')` records a tombstone EVEN WHEN NO LIVE SESSION EXISTS, keyed by a string
+// the client chose, in a map nothing ever prunes — and it runs an fs.rm + a `tmux kill-session`
+// subprocess per call, on channels that (unlike the presence casts) had no rate limit at all.
+describe('destroy/recycle: bounded, validated, rate-limited', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  const create = (clientId: number, persistKey: string) =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols: 80, rows: 24, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+      closed?: { by: number | null }
+    }>
+  const destroy = (clientId: number, persistKey: string) =>
+    fake.senderListeners[IPC.ptyDestroy](clientId, persistKey) as unknown as Promise<void>
+
+  it('refuses a persistKey longer than REF_MAX_LEN (no tombstone, no subprocess)', async () => {
+    const { REF_MAX_LEN } = await import('../shared/presence')
+    await manager()
+    const huge = 'x'.repeat(REF_MAX_LEN + 1)
+
+    await destroy(ALICE, huge)
+    // Nothing was recorded, so this is not a node anyone can be locked out of.
+    const other = await create(BOB, huge)
+    expect(other.closed).toBeUndefined()
+  })
+
+  it('bounds the tombstone map: the oldest entries are evicted, the newest still refuse', async () => {
+    const { TOMBSTONE_MAX } = await import('./pty-manager')
+    const m = await manager()
+    // Straight through the internal API: the bound must hold on its own, not because the rate limit
+    // happens to run out first (the two are independent defences and their numbers may diverge).
+    for (let i = 0; i < TOMBSTONE_MAX + 1; i++) await m.destroySession(ALICE, `node-${i}`)
+
+    // The first delete has been evicted — the map is bounded, it cannot grow with client input.
+    const evicted = await create(BOB, 'node-0')
+    expect(evicted.closed).toBeUndefined()
+    // …and the guard still does its job for everything still in it.
+    const kept = await create(BOB, `node-${TOMBSTONE_MAX}`)
+    expect(kept.closed).toEqual({ by: ALICE })
+  })
+
+  it('expires a tombstone after its TTL (the map cannot hold entries for the life of the core)', async () => {
+    const { TOMBSTONE_TTL_MS } = await import('./pty-manager')
+    await manager()
+    await create(ALICE, 'node-1')
+    await destroy(ALICE, 'node-1')
+    expect((await create(BOB, 'node-1')).closed).toEqual({ by: ALICE })
+
+    vi.advanceTimersByTime(TOMBSTONE_TTL_MS + 1)
+    expect((await create(CAROL, 'node-1')).closed).toBeUndefined()
+  })
+
+  it('rate-limits the destroy cast, and the burst still covers a bulk delete', async () => {
+    const { PTY_END_BUDGET } = await import('./pty-manager')
+    await manager()
+    // A real bulk delete (select N nodes → Delete) fires one cast per node in a single tick: every
+    // one of them must land, or a solo user silently leaks tmux sessions.
+    for (let i = 0; i < PTY_END_BUDGET.burst; i++) await destroy(ALICE, `node-${i}`)
+    expect((await create(BOB, 'node-0')).closed).toEqual({ by: ALICE })
+
+    // Past the burst the flood is dropped: no tombstone entry, no fs.rm, no tmux subprocess.
+    await destroy(ALICE, 'flood-1')
+    expect((await create(BOB, 'flood-1')).closed).toBeUndefined()
+  })
+
+  it('the SOLO delete → undo path is untouched', async () => {
+    await manager()
+    await create(ALICE, 'node-1')
+    await destroy(ALICE, 'node-1')
+
+    const undone = await create(ALICE, 'node-1') // ⌘Z
+    expect(undone.closed).toBeUndefined()
+    expect(undone.fresh).toBe(true)
+  })
+})
+
 // ── A node RECYCLED (moved into a worktree) while somebody else is watching it ────────────────
 // "Move into worktree" ends the node's tmux session so the SAME node id respawns in the new cwd.
 // The node never leaves anybody's canvas and it keeps working — so a co-viewer must NOT be told
