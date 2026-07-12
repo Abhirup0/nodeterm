@@ -1030,9 +1030,13 @@ export interface PresenceApi {
   /** Publish the project (canvas) we are looking at — peers on other projects are never drawn
    *  on our canvas, and we are never drawn on theirs (null = no project open). */
   project(projectId: string | null): void
-  /** Full peer-table snapshot (on join). Returns unsubscribe. */
+  /** Full peer-table snapshot (on join). Returns unsubscribe.
+   *  Exactly one subscriber (the presence store, src/renderer/state/presence.ts): the browser
+   *  bridge drains its early-event buffer into the FIRST subscriber, so a second one gets nothing.
+   *  Components read the store; they never subscribe here. */
   onSync(listener: (peers: PeerState[]) => void): () => void
-  /** Single-peer diff (join / update / leave). Returns unsubscribe. */
+  /** Single-peer diff (join / update / leave). Returns unsubscribe.
+   *  Exactly one subscriber (the presence store) — same reason as onSync. */
   onPeer(listener: (diff: PeerDiff) => void): () => void
 }
 
