@@ -13,6 +13,30 @@ export type RpcMessage = RpcRequest | RpcCast | RpcOk | RpcErr | RpcEvent
 export const E_UNSUPPORTED = 'E_UNSUPPORTED'
 export const E_UNAUTHORIZED = 'E_UNAUTHORIZED'
 export const E_NO_HANDLER = 'E_NO_HANDLER'
+/** The socket closed with requests still in flight — they can never be answered. Client-side only:
+ *  no server ever sends this, the client synthesises it so an `await` fails instead of hanging. */
+export const E_DISCONNECTED = 'E_DISCONNECTED'
+
+/**
+ * Undo JSON's `undefined` → `null` mangling on the TOP-LEVEL argument slots.
+ *
+ * `JSON.stringify([a, undefined])` is `[a, null]`: the wire has no `undefined`. So a caller that
+ * simply omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`)
+ * hands the handler an explicit `null` — and an explicit `null` does NOT trigger a default
+ * parameter. `worktreeMerge(…, push = false)` would run with `push === null`.
+ *
+ * Every such default in the API today is falsy (`push = false`, `pruneOnly = false`, `full = false`),
+ * so `null` coerces to the same behavior and nothing breaks — safe BY LUCK. The first `= true`
+ * default, or any handler that tests `arg === undefined`, silently reintroduces the bug (`git.history`
+ * already broke this way once). Restoring `undefined` here fixes it for every handler at once,
+ * instead of asking each new one to remember.
+ *
+ * Only the top-level slots are touched: a `null` nested inside an object or array is data the sender
+ * genuinely meant to send (`{cwd: null}` is not `{}`), and no method in the preload API surface takes
+ * a meaningful top-level `null` — which is what makes the substitution safe. Arity is preserved: the
+ * slot stays, it just holds `undefined` again.
+ */
+const decodeArgs = (args: unknown[]): unknown[] => args.map((a) => (a === null ? undefined : a))
 
 export function parseRpcMessage(text: string): RpcMessage | null {
   let m: unknown
@@ -26,10 +50,11 @@ export function parseRpcMessage(text: string): RpcMessage | null {
   switch (o.t) {
     case 'req':
       if (typeof o.id === 'number' && typeof o.method === 'string' && Array.isArray(o.args))
-        return o as RpcRequest
+        return { ...(o as RpcRequest), args: decodeArgs(o.args) }
       return null
     case 'cast':
-      if (typeof o.method === 'string' && Array.isArray(o.args)) return o as RpcCast
+      if (typeof o.method === 'string' && Array.isArray(o.args))
+        return { ...(o as RpcCast), args: decodeArgs(o.args) }
       return null
     case 'res':
       if (typeof o.id !== 'number') return null
@@ -37,7 +62,8 @@ export function parseRpcMessage(text: string): RpcMessage | null {
       if (o.ok === false && typeof o.error === 'object' && o.error !== null) return o as RpcErr
       return null
     case 'ev':
-      if (typeof o.channel === 'string' && Array.isArray(o.args)) return o as RpcEvent
+      if (typeof o.channel === 'string' && Array.isArray(o.args))
+        return { ...(o as RpcEvent), args: decodeArgs(o.args) }
       return null
     default:
       return null
