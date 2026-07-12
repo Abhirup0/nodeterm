@@ -26,7 +26,7 @@ const SSH_SERVER = { id: 's1', label: 'box', host: 'box', user: 'me' } as unknow
 beforeEach(() => {
   useProjects.getState().hydrate({ version: 2, activeProjectId: '', projects: [] })
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS }, hydrated: false })
-  useSshConn.setState({ byProject: {} })
+  useSshConn.setState({ byProject: {}, autoPermByProject: {} })
   resetClaudeCliCapsForTests()
   mockCliCaps(MODERN)
 })
@@ -184,5 +184,24 @@ describe('ensureActivePermissionMode', () => {
 
     await expect(ensureActivePermissionMode()).resolves.toBe('manual')
     expect(await ensureClaudeCliCaps()).toEqual(UNKNOWN_CLAUDE_CLI_CAPS)
+  })
+
+  it('never hangs on a probe that never answers (Server Edition: WS-RPC has no timeout)', async () => {
+    // A dropped socket between send and response leaves the RPC promise unsettled forever. The
+    // relaunch awaits this, so it must time out into the fail-open bare command instead.
+    vi.useFakeTimers()
+    try {
+      ;(globalThis as { window?: unknown }).window = {
+        nodeTerminal: { claude: { cliCaps: () => new Promise<never>(() => {}) } }
+      }
+      resetClaudeCliCapsForTests()
+      activeProject()
+
+      const pending = ensureActivePermissionMode()
+      await vi.advanceTimersByTimeAsync(3000)
+      await expect(pending).resolves.toBe('manual')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

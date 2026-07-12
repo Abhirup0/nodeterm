@@ -42,17 +42,12 @@ async function probe(): Promise<ClaudeCliCaps> {
 
 /**
  * The local Claude CLI's capabilities. Memoized for the process lifetime: `claude --version`
- * spawns a login shell + node, and the answer only changes when the user upgrades the CLI (a
- * relaunch — or a manual `refresh` — picks that up). Never rejects.
+ * spawns a login shell + node, and the answer only changes when the user upgrades the CLI (which a
+ * relaunch picks up). Never rejects.
  */
 export function claudeCliCaps(): Promise<ClaudeCliCaps> {
   if (!cached) cached = probe()
   return cached
-}
-
-/** Drop the memo so the next call re-probes (used by the tests; also survives a CLI upgrade). */
-export function resetClaudeCliCaps(): void {
-  cached = null
 }
 
 /** Wire the probe onto the platform's RPC surface (Electron ipcMain / server WS-RPC alike). */

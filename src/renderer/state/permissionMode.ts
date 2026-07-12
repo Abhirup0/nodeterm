@@ -16,14 +16,32 @@ import { useSshConn } from './sshConn'
 let caps: ClaudeCliCaps = UNKNOWN_CLAUDE_CLI_CAPS
 let capsPromise: Promise<ClaudeCliCaps> | null = null
 
-/** Kick off (or join) the local CLI probe. Never rejects. Called once at boot; awaited by any
- *  launch path that can run before boot settles (a cold-restored agent node). */
+/** How long a launch may wait on the probe before giving up on it and using the bare command. */
+const CAPS_WAIT_MS = 3000
+
+/**
+ * Kick off (or join) the local CLI probe. Never rejects, and never takes longer than
+ * `CAPS_WAIT_MS`. Called once at boot; awaited by any launch path that can run before boot settles
+ * (a cold-restored agent node).
+ *
+ * The timeout is what makes "a launch is never blocked on the probe" true BY CONSTRUCTION. On the
+ * desktop the IPC round-trip is bounded by the main-process probe, but in the Server Edition the
+ * call goes over WS-RPC, which neither times out nor rejects its pending requests when the socket
+ * drops — a drop between send and response would leave this promise (and the memo) unsettled
+ * forever, and with it the agent relaunch that awaits it. On timeout we resolve to the caps we
+ * have (unknown ⇒ no `auto` flag ⇒ bare command); a late answer still lands in `caps`, so the
+ * NEXT launch picks it up.
+ */
 export function ensureClaudeCliCaps(): Promise<ClaudeCliCaps> {
   if (!capsPromise) {
-    capsPromise = Promise.resolve()
+    const probe = Promise.resolve()
       .then(() => window.nodeTerminal.claude.cliCaps())
       .then((c) => (caps = c ?? UNKNOWN_CLAUDE_CLI_CAPS))
       .catch(() => UNKNOWN_CLAUDE_CLI_CAPS)
+    const timeout = new Promise<ClaudeCliCaps>((resolve) =>
+      setTimeout(() => resolve(caps), CAPS_WAIT_MS)
+    )
+    capsPromise = Promise.race([probe, timeout])
   }
   return capsPromise
 }
