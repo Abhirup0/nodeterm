@@ -118,8 +118,57 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
  * `--permission-mode` flag does.
  *
  * `dontAsk` is deliberately not exposed: from the user's point of view it overlaps `auto`.
+ *
+ * VERSION GATE: `auto` is the one value here that older Claude CLIs do NOT accept — see
+ * AUTO_PERMISSION_MODE_MIN_VERSION / gatePermissionMode below. Never hand a raw `auto` to a
+ * launch command without running it through `gatePermissionMode` first.
  */
 export type AgentPermissionMode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
+/**
+ * First Claude Code version whose `--permission-mode` accepts `auto`. Earlier CLIs validate the
+ * value against their own choices list and EXIT 1:
+ *   error: option '--permission-mode <mode>' argument 'auto' is invalid.
+ *          Allowed choices are acceptEdits, bypassPermissions, default, dontAsk, plan.
+ * Since `auto` is our default, an ungated flag would break every Claude launch on an older CLI.
+ * The other four modes are accepted by every CLI we support, so ONLY `auto` is gated.
+ */
+export const AUTO_PERMISSION_MODE_MIN_VERSION = '2.1.90'
+
+const MIN_AUTO_VERSION: readonly number[] = AUTO_PERMISSION_MODE_MIN_VERSION.split('.').map(Number)
+
+/**
+ * Does this `claude --version` output know `--permission-mode auto`? Pure (the probe that feeds it
+ * lives in core/claude-cli.ts). FAILS OPEN to `false` on anything unreadable — an unknown version
+ * means we omit the flag and launch the bare command (today's behavior), never a failed launch.
+ */
+export function supportsAutoPermissionMode(versionOutput: string | null | undefined): boolean {
+  const m = (versionOutput ?? '').match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return false
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])]
+  for (let i = 0; i < MIN_AUTO_VERSION.length; i++) {
+    if (v[i] > MIN_AUTO_VERSION[i]) return true
+    if (v[i] < MIN_AUTO_VERSION[i]) return false
+  }
+  return true // exactly the minimum
+}
+
+/**
+ * The mode a session can ACTUALLY start in on the CLI that will run it. `auto` degrades to
+ * `manual` — which emits no flag at all, i.e. the bare `claude` command nodeterm shipped before
+ * this setting existed — when that CLI is too old to know the value (or the probe never
+ * answered). Every other mode passes through untouched, so a failed probe can never strip
+ * `plan` / `acceptEdits` / `bypassPermissions`.
+ *
+ * The user's SETTING stays `auto`: only the emitted command line changes, and it changes back
+ * the moment they upgrade the CLI.
+ */
+export function gatePermissionMode(
+  mode: AgentPermissionMode,
+  autoSupported: boolean
+): AgentPermissionMode {
+  return mode === 'auto' && !autoSupported ? 'manual' : mode
+}
 
 // Declared first: its `Record<AgentPermissionMode, string>` type forces every member of the
 // union to be present, which is what makes ALL_PERMISSION_MODES below impossible to desync.
