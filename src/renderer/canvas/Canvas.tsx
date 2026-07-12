@@ -1598,6 +1598,25 @@ export function Canvas() {
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
 
+  // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
+  // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
+  useEffect(() => {
+    const onOpen = (e: Event): void => {
+      const d = (e as CustomEvent<{ path: string; ssh?: boolean }>).detail
+      if (d?.path) openFile(d.path, undefined, d.ssh)
+    }
+    const onReveal = (e: Event): void => {
+      const d = (e as CustomEvent<{ path: string }>).detail
+      if (d?.path) revealProjectFile(d.path)
+    }
+    window.addEventListener('nodeterm:open-file', onOpen)
+    window.addEventListener('nodeterm:reveal-file', onReveal)
+    return () => {
+      window.removeEventListener('nodeterm:open-file', onOpen)
+      window.removeEventListener('nodeterm:reveal-file', onReveal)
+    }
+  }, [openFile, revealProjectFile])
+
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
     (relPath: string, staged: boolean) => {

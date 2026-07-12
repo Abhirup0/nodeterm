@@ -11,6 +11,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
 import { transport as localTransport } from '../terminal/local-transport'
@@ -18,6 +19,9 @@ import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
+import { createFileLinkProvider, makeDirListingLookup } from '../terminal/file-links'
+import { sshFs } from '../terminal/ssh-fs'
+import type { FsApi } from '@shared/types'
 import {
   attachReplay,
   closedByLabel,
@@ -604,6 +608,36 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (text !== null) window.nodeTerminal.clipboard.writeText(text)
         return true
       })
+      // Cmd (mac) / Ctrl+click link opening. URLs → default browser via the WebLinksAddon;
+      // file paths → editor node / Explorer reveal via the custom provider. Both are
+      // modifier-gated inside their activate handlers, so plain clicks stay selections.
+      term.loadAddon(
+        new WebLinksAddon((event, uri) => {
+          if (event.metaKey || event.ctrlKey) window.nodeTerminal.shell.openExternal(uri)
+        })
+      )
+      // Relay-remote nodes have no client-side fs to verify paths against — URLs only.
+      if (!data.remote) {
+        const projectFs = (): { fs: FsApi; ssh: boolean } => {
+          const st = useProjects.getState()
+          const project = st.projects.find((p) => p.id === st.activeProjectId)
+          return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: window.nodeTerminal.fs, ssh: false }
+        }
+        const lookup = makeDirListingLookup(async (dir) => projectFs().fs.list(dir))
+        term.registerLinkProvider(
+          createFileLinkProvider(term, {
+            getCwd: () => (data.cwd as string | undefined) || undefined,
+            lookup,
+            activate: (abs, isDir) => {
+              if (isDir) window.dispatchEvent(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } }))
+              else
+                window.dispatchEvent(
+                  new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: projectFs().ssh } })
+                )
+            }
+          })
+        )
+      }
     }
 
     // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
