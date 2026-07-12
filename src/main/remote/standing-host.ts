@@ -23,6 +23,8 @@ import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, Settings } from '../../shared/types'
 import { PtyManager } from '../../core/pty-manager'
 import { getStoredEntitlement, isPremium } from '../../core/license'
+import { allocateRelayClientId, presenceHub } from '../../core/presence/hub'
+import type { ClientId } from '../../shared/presence'
 import { publicKeyToB64 } from './e2ee'
 import {
   API_BASE,
@@ -106,6 +108,8 @@ export function initStandingHost(
     session: HostSession
     /** True once a client completed the handshake on this listener (it now serves that client). */
     bridged: boolean
+    /** This peer's presence ClientId, minted when it bridges (null while the listener is idle). */
+    presenceId: ClientId | null
     /** Per-session pending approval (unknown device awaiting the human's SAS decision). */
     approvalPub: string | null
     approvalId: string | null
@@ -130,6 +134,17 @@ export function initStandingHost(
     return n
   }
 
+  // Drop this session's presence peer, exactly once. Called from BOTH end paths, because they are
+  // genuinely different: `onClose` fires when the relay socket drops on its own (client gone, relay
+  // dropped us), while an INTENTIONAL `session.close()` (reject / idle-token refresh / stop()) is
+  // final in relay-socket and deliberately does NOT fire onClose. Nulling the id makes the second
+  // call a no-op, so a peer never leaves twice (and its color is never freed for someone else).
+  function leavePresence(p: Pooled): void {
+    if (p.presenceId === null) return
+    presenceHub.leave(p.presenceId)
+    p.presenceId = null
+  }
+
   function clearApproval(p: Pooled): void {
     if (p.approvalTimer) {
       clearTimeout(p.approvalTimer)
@@ -141,6 +156,7 @@ export function initStandingHost(
 
   function removeFromPool(p: Pooled): void {
     clearApproval(p)
+    leavePresence(p)
     if (p.refreshTimer) {
       clearTimeout(p.refreshTimer)
       p.refreshTimer = null
@@ -196,6 +212,10 @@ export function initStandingHost(
   async function onPeerReady(pooled: Pooled): Promise<void> {
     if (!pooled.bridged) {
       pooled.bridged = true
+      // Team presence: a bridged relay client is a peer. It has no mouse, so it stays cursorless
+      // and appears in the facepile only — see docs/team-presence.md ("Peers may have no cursor").
+      pooled.presenceId = allocateRelayClientId()
+      presenceHub.join(pooled.presenceId, 'phone')
       ensurePool() // this listener now serves a client → restore a warm one
     }
     const s = pooled.session
@@ -245,6 +265,7 @@ export function initStandingHost(
       const pooled: Pooled = {
         session: null as unknown as HostSession,
         bridged: false,
+        presenceId: null,
         approvalPub: null,
         approvalId: null,
         approvalTimer: null,
@@ -262,6 +283,7 @@ export function initStandingHost(
         onPeerReady: () => void onPeerReady(pooled),
         onClose: () => {
           clearApproval(pooled)
+          leavePresence(pooled)
           if (pooled.refreshTimer) {
             clearTimeout(pooled.refreshTimer)
             pooled.refreshTimer = null

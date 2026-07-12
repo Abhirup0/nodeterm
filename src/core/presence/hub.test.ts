@@ -396,6 +396,29 @@ describe('registerIpc', () => {
   })
 })
 
+describe('shell adapters (desktop window + relay phone)', () => {
+  it('a desktop window and a relay phone coexist as peers with distinct ids and colors', () => {
+    const hub = new PresenceHub()
+    const windowId = 1 // Electron webContents.id
+    const phoneId = allocateRelayClientId()
+    hub.join(windowId, 'desktop')
+    hub.join(phoneId, 'phone')
+
+    expect(phoneId).not.toBe(windowId)
+    const [desk, phone] = hub.peers()
+    expect(desk).toMatchObject({ kind: 'desktop', name: 'Someone', cursor: null })
+    expect(phone).toMatchObject({ kind: 'phone', name: 'Phone', cursor: null })
+    expect(desk.color).not.toBe(phone.color)
+
+    // sendTo for a relay peer targets an id no shell can resolve — it must be a silent drop,
+    // never a throw (Electron's webContents.fromId returns null; ServerPlatform has no sink).
+    expect(() => hub.setChat(phoneId, 'from the phone')).not.toThrow()
+
+    hub.leave(phoneId)
+    expect(hub.peers().map((p) => p.kind)).toEqual(['desktop'])
+  })
+})
+
 describe('allocateRelayClientId', () => {
   it('mints monotonic ids from a range that cannot collide with a UI id', () => {
     const a = allocateRelayClientId()

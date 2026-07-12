@@ -9,6 +9,7 @@ import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
+import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
@@ -237,6 +238,16 @@ function createWindow(): BrowserWindow {
   // Register as the live main window (send-time resolution via getMainWindow/sendToMain).
   setMainWindow(win)
 
+  // Team presence: this window is one peer. With nobody else connected the renderer draws nothing
+  // (≤1 peer = zero cost); it matters when a phone joins over the relay, or when this desktop
+  // hosts. Its ClientId is the webContents id — the same id space sendTo/handleWithSender use.
+  // `closed` (not `close` — which only hides the window on macOS) is the real departure.
+  // (The id is captured up front: reading `win.webContents` after 'closed' throws — the window and
+  // its webContents are destroyed by then.)
+  const presenceId = win.webContents.id
+  presenceHub.join(presenceId, 'desktop')
+  win.on('closed', () => presenceHub.leave(presenceId))
+
   win.on('ready-to-show', () => win.show())
 
   // macOS: closing the window hides it instead of destroying it. The app deliberately
@@ -324,6 +335,7 @@ app.whenReady().then(async () => {
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   gitService.registerIpc()
+  presenceHub.registerIpc()
 
   ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())
