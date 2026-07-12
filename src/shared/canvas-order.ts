@@ -191,3 +191,52 @@ export function createCanvasOrder(
     }
   }
 }
+
+/**
+ * WHEN the ordering state may be reset — the lifecycle half of the contract above.
+ *
+ * `reset()` exists for exactly ONE reason: if the core RESTARTS, its `seq` counter restarts at 0
+ * while a surviving client's `seen` map still holds the old (high) values — that client would then
+ * drop every mutation the new core stamps as a straggler and drift away from its peers for the rest
+ * of the session, with no way back. A NEW presence clientId is the observable signal of exactly that:
+ * a new connection, possibly to a new core.
+ *
+ * But reset() is far from free: it also drops `pending` and `superseded`, the record of our own casts
+ * that are still in flight. Drop those and rule 1 (our own echo is an ack) is left with no way to
+ * tell an ack from a REPAIR — so if a peer's edit has overwritten our optimistic value, our late echo
+ * is thrown away and we stay on the LOSING value forever, and the next whole-file workspace.save
+ * writes those bytes over everyone else's canvas. That is the permanent split-brain rule 3 exists to
+ * prevent, and a mistimed reset reopens it.
+ *
+ * So it must fire on a GENUINE reconnect and nowhere else. The trap: presence resolves our clientId
+ * ASYNCHRONOUSLY, so a naive `id !== previous` also fires on the very first `null → myId` at mount —
+ * and by then we may already be publishing (a peer's mutation is itself proof of a peer), i.e. our
+ * own casts can already be in flight. There is nothing to forget at the first hello: an empty `seen`
+ * map cannot be stale. This watch therefore reports a reconnect only when a NEW non-null id REPLACES
+ * a previously seen one, and ignores the `null`s in between (a dropped socket must not throw away
+ * state the reconnect to the SAME core would still need).
+ *
+ * Returns a predicate to be fed every presence update: `true` ⇒ call `order.reset()`.
+ *
+ * The id is whatever the presence hub calls a connection (a numeric clientId on the desktop, a string
+ * elsewhere) — it is only ever compared, never parsed.
+ */
+export type ConnectionId = string | number
+
+export function createReconnectWatch(
+  initialId: ConnectionId | null = null
+): (id: ConnectionId | null) => boolean {
+  let known = initialId
+  return (id) => {
+    // `null` (and nothing else — a clientId of 0 is a real connection): not resolved yet, or the
+    // socket dropped. Keep the state: reconnecting to the SAME core still needs it.
+    if (id === null || id === undefined) return false
+    if (known === null) {
+      known = id // the FIRST hello — there is no older connection whose `seq` could be stale
+      return false
+    }
+    if (id === known) return false
+    known = id
+    return true // a new connection replaced the old one: the core may have restarted at seq 0
+  }
+}

@@ -60,6 +60,82 @@ function withinSizeLimit(m: unknown): boolean {
 }
 
 /**
+ * Same top-level VALUE? A shallow compare, deliberately: it never reads the CONTENT of a string
+ * field, which is the whole point (the free text is what makes an oversized node expensive).
+ *
+ * Sound because of how the snapshot is built: `flowToNodeStates` rebuilds the node object on every
+ * publish but passes each field through BY REFERENCE (`text: n.data.text`, `tags: n.data.tags`, …),
+ * so an untouched field is the SAME reference and `Object.is` settles it in O(1). `position` and
+ * `size` are freshly built objects of numbers, so they are compared field-wise.
+ *
+ * Conservative in the only direction that matters: equal references ⇒ equal content, so it can never
+ * report "unchanged" for a node that changed (which would strand an edit). The reverse (an equal
+ * value rebuilt as a new reference) merely costs one honest re-validation — what happens today.
+ */
+function sameNodeValue(a: CanvasNodeState, b: CanvasNodeState): boolean {
+  if (a === b) return true
+  const ka = Object.keys(a)
+  if (ka.length !== Object.keys(b).length) return false
+  const ra = a as unknown as Record<string, unknown>
+  const rb = b as unknown as Record<string, unknown>
+  for (const k of ka) {
+    const va = ra[k]
+    const vb = rb[k]
+    if (Object.is(va, vb)) continue
+    if (k !== 'position' && k !== 'size') return false
+    // The two geometry objects: plain records of numbers, rebuilt on every snapshot.
+    const oa = va as Record<string, number> | undefined
+    const ob = vb as Record<string, number> | undefined
+    if (!oa || !ob) return false
+    const gk = Object.keys(oa)
+    if (gk.length !== Object.keys(ob).length) return false
+    for (const g of gk) if (!Object.is(oa[g], ob[g])) return false
+  }
+  return true
+}
+
+/**
+ * The PUBLISHER's guard: `isCanvasMutation`'s verdict, with a refusal REMEMBERED per node.
+ *
+ * `isCanvasMutation` answers the size question by serializing the whole node, and a refused node is
+ * deliberately re-emitted on every publish (that is what makes the sticky sync the instant the user
+ * trims it — see `rebaseRefused` in canvas-publish). A drag publishes at ~20 Hz. So the ONE node that
+ * is already pathological — a sticky someone pasted a document into — was being stringified 20 times
+ * a second, at a cost proportional to its size, for as long as it stayed oversized. The pathological
+ * case must not also be the expensive one.
+ *
+ * The memo holds the refused node itself and re-checks only when that node's value actually changes
+ * (`sameNodeValue`: reference-shallow, so it never touches the big string). Behaviour is unchanged:
+ * the same verdict for every input, the refusal is re-paid the moment the node is edited, and the
+ * trimmed sticky casts immediately (its entry is dropped as soon as it passes). Bounded by the number
+ * of oversized nodes on the canvas — in practice zero or one, and their memory is the node the canvas
+ * already holds.
+ *
+ * The REFLECTOR keeps calling the plain `isCanvasMutation`: its input is untrusted, freshly decoded
+ * off the wire for every client, so nothing there would ever hit a memo and the map would grow with
+ * whatever ids a client cared to invent. One predicate, one verdict, both ends — this only caches the
+ * one end that asks the same question about the same node over and over.
+ */
+export function createMutationGuard(): (m: CanvasMutation) => boolean {
+  const refused = new Map<string, CanvasNodeState>()
+  return (m) => {
+    // A `remove` is a couple of dozen bytes: nothing to amortize, and nothing that can grow.
+    if (!m || typeof m !== 'object' || (m as { op?: unknown }).op !== 'upsert')
+      return isCanvasMutation(m)
+    const node = (m as { node?: CanvasNodeState }).node
+    if (!node || typeof node !== 'object' || typeof node.id !== 'string') return isCanvasMutation(m)
+
+    const last = refused.get(node.id)
+    if (last && sameNodeValue(last, node)) return false // already refused, and nothing has changed
+
+    const ok = isCanvasMutation(m)
+    if (ok) refused.delete(node.id)
+    else refused.set(node.id, node)
+    return ok
+  }
+}
+
+/**
  * Apply a single mutation to a node list, returning a NEW array (the input is never mutated).
  * `upsert` replaces the node with the matching id, or appends it if absent; `remove` filters
  * out the node with the given id.

@@ -132,8 +132,8 @@ import {
   publishableStates,
   type CanvasPublisher
 } from '@shared/canvas-publish'
-import { createCanvasOrder, type CanvasOrder } from '@shared/canvas-order'
-import { isCanvasMutation } from '@shared/canvas-mutations'
+import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
+import { createMutationGuard } from '@shared/canvas-mutations'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
@@ -996,25 +996,34 @@ export function Canvas() {
     // US, so >1 means a peer. Subscribed imperatively (no useStore selector) — this must never
     // re-render Canvas.
     //
-    // The same subscription watches our own clientId. A NEW one means a NEW connection to the core —
-    // and if the core RESTARTED, its `seq` counter restarted at 0 while our `seen` map still holds
-    // the old (high) values, which would make us silently drop every mutation that follows as a
-    // straggler. Forget the order state on every (re)connect: correctness must not depend on
-    // ws-bridge happening to `location.reload()` the page. (NOT on a project switch: this Canvas
-    // keeps applying mutations for loaded-but-inactive projects, so their order state has to
-    // survive a tab switch.)
-    let myId = usePresence.getState().myId
+    // The same subscription watches our own clientId, because a NEW one means a NEW connection to the
+    // core — and if the core RESTARTED, its `seq` counter restarted at 0 while our `seen` map still
+    // holds the old (high) values, which would make us silently drop every mutation that follows as a
+    // straggler. So a genuine reconnect forgets the order state; correctness must not depend on
+    // ws-bridge happening to `location.reload()` the page.
+    //
+    // ONLY a genuine reconnect (`createReconnectWatch`). `id !== previous` also fired on the FIRST
+    // `null → myId`, which resolves asynchronously a few ms after mount — by which time a peer's
+    // mutation may already have arrived (that is itself proof of a peer, so we are publishing) and
+    // one of our own casts may be in flight. Resetting there threw away the `pending`/`superseded`
+    // record of that cast, so our own late echo was no longer recognizable as the REPAIR of a value a
+    // peer had overwritten: we stayed on the losing value, and our next whole-file save wrote it over
+    // everyone else's canvas. There is nothing to forget at the first hello — an empty `seen` map
+    // cannot be stale. (Nor on a project switch: this Canvas keeps applying mutations for
+    // loaded-but-inactive projects, so their order state has to survive a tab switch.)
+    const reconnected = createReconnectWatch(usePresence.getState().myId)
     const readPresence = (): void => {
       hasPeersRef.current =
         hasPeersRef.current || Object.keys(usePresence.getState().peers).length > 1
-      const id = usePresence.getState().myId
-      if (id !== myId) {
-        myId = id
-        order.reset()
-      }
+      if (reconnected(usePresence.getState().myId)) order.reset()
     }
     readPresence()
     const unsub = usePresence.subscribe(readPresence)
+    // `isCanvasMutation`, with a refusal remembered per node: a refused node is re-emitted on every
+    // publish (that is what makes it sync the moment the sticky is trimmed) and a drag publishes at
+    // ~20 Hz, so the size check re-serialized the one oversized node 20×/s, at a cost proportional to
+    // its size. Same verdict, paid again only when the node actually changes (@shared/canvas-mutations).
+    const guard = createMutationGuard()
     const pub = createCanvasPublisher(
       (m) => {
         const projectId = useProjects.getState().activeProjectId
@@ -1026,7 +1035,7 @@ export function Canvas() {
         // resurrect their node) nor the retry (the publisher keeps the node in its baseline). The
         // only thing that can legitimately blow the cap is free text, i.e. a sticky's body — so say
         // so, instead of letting the note silently never sync.
-        if (!isCanvasMutation(m)) {
+        if (!guard(m)) {
           setSyncNote(
             'This note is too large to share with your teammates (over 250 KB). It stays on your ' +
               'canvas, but they will not see it until you shorten it.'

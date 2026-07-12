@@ -3,7 +3,12 @@
 // (two clients, async bus); this pins the rules one at a time.
 
 import { describe, it, expect } from 'vitest'
-import { createCanvasOrder, mutationNodeId, PENDING_TTL_MS } from './canvas-order'
+import {
+  createCanvasOrder,
+  createReconnectWatch,
+  mutationNodeId,
+  PENDING_TTL_MS
+} from './canvas-order'
 import type { CanvasMutation, CanvasNodeState } from './types'
 
 const node = (id: string, x = 0): CanvasNodeState =>
@@ -173,5 +178,48 @@ describe('createCanvasOrder', () => {
     expect(o.accept(up('n1', 5, 'peer', 9))).toBe(false)
     o.reset()
     expect(o.accept(up('n1', 5, 'peer', 1))).toBe(true) // pending gone AND the seq floor gone
+  })
+})
+
+// WHEN to call reset(). It exists for ONE reason — a core restart puts `seq` back at 0 while our
+// `seen` map still holds the old (high) values, and we would then drop every new mutation as a
+// straggler — and it is EXPENSIVE to call when that reason does not hold: it drops `pending` and
+// `superseded`, i.e. the in-flight casts whose late echo is the only thing that can repair a node a
+// peer overwrote. So it must fire on a genuine reconnect and NOWHERE else.
+describe('createReconnectWatch', () => {
+  it('does not reset on the first hello (null → myId): there is no older connection to forget', () => {
+    const w = createReconnectWatch(null)
+    expect(w(null)).toBe(false) // still no id (presence has not answered yet)
+    expect(w('cl-1')).toBe(false) // our FIRST clientId — nothing was ever seen from an older core
+    expect(w('cl-1')).toBe(false) // idle presence updates (a peer's cursor) are not reconnects
+  })
+
+  it('resets when a NEW clientId replaces an old one (a genuine reconnect)', () => {
+    const w = createReconnectWatch(null)
+    expect(w('cl-1')).toBe(false)
+    expect(w('cl-2')).toBe(true) // reconnected: the core may have restarted with seq back at 0
+    expect(w('cl-2')).toBe(false)
+  })
+
+  it('survives the null in the middle of a reconnect (id → null → new id still resets)', () => {
+    const w = createReconnectWatch('cl-1')
+    expect(w(null)).toBe(false) // the socket dropped: keep the state, wait for the new id
+    expect(w('cl-1')).toBe(false) // …the SAME connection came back: nothing to forget
+    expect(w(null)).toBe(false)
+    expect(w('cl-3')).toBe(true) // a different one: reset
+  })
+
+  it('an id already known at mount is not a reconnect', () => {
+    const w = createReconnectWatch('cl-1')
+    expect(w('cl-1')).toBe(false)
+  })
+
+  // The desktop presence hub's clientId is a NUMBER (the Electron sender id) — and 0 is a perfectly
+  // real connection, so only `null` may mean "no id yet".
+  it('treats a numeric clientId of 0 as a real connection, not as "not resolved yet"', () => {
+    const w = createReconnectWatch(null)
+    expect(w(0)).toBe(false) // the first hello…
+    expect(w(0)).toBe(false)
+    expect(w(1)).toBe(true) // …and a genuine reconnect after it
   })
 })

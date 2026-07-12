@@ -21,7 +21,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { initPlatform, resetPlatformForTests, type CorePlatform } from './platform'
 import { initCanvasSync, MUTATION_MAX_BYTES } from './canvas-sync'
 import { applyCanvasMutation, isCanvasMutation } from '../shared/canvas-mutations'
-import { createCanvasOrder, PENDING_TTL_MS } from '../shared/canvas-order'
+import { createCanvasOrder, createReconnectWatch, PENDING_TTL_MS } from '../shared/canvas-order'
 import { createCanvasPublisher, publishableStates } from '../shared/canvas-publish'
 import { IPC } from '../shared/ipc'
 import type { CanvasMutation, CanvasNodeState } from '../shared/types'
@@ -147,6 +147,8 @@ class Client {
   refused = 0
   private readonly order: ReturnType<typeof createCanvasOrder>
   private readonly pub: ReturnType<typeof createCanvasPublisher>
+  /** Mirrors Canvas's presence subscription: reset the order state only on a GENUINE reconnect. */
+  private readonly reconnected = createReconnectWatch(null)
 
   constructor(
     readonly id: number,
@@ -192,6 +194,13 @@ class Client {
   edit(next: CanvasNodeState[]): void {
     this.states = next
     this.pub.publish(this.publishable())
+  }
+
+  /** Our presence clientId resolved (or changed). What Canvas's presence subscription does: the
+   *  ordering state is forgotten ONLY when a NEW clientId replaces an OLD one — a fresh connection
+   *  to a core whose `seq` may have restarted at 0. The first `null → myId` hello is not that. */
+  presence(id: string | null): void {
+    if (this.reconnected(id)) this.order.reset()
   }
 
   /** Adopt the freshly loaded canvas as the publisher baseline without publishing it — what Canvas
@@ -504,6 +513,48 @@ describe('canvas convergence (async bus)', () => {
     expect(a.x('n1')).toBe(100)
     expect(a.x('n1')).toBe(b.x('n1'))
     expect(a.persisted()).toEqual(b.persisted())
+  })
+
+  // THE FIRST HELLO IS NOT A RECONNECT. Canvas resets the ordering state whenever its presence
+  // clientId changes — including the very first `null → myId`, which lands a few ms after mount.
+  // A peer's mutation can arrive before that (it is proof of a peer, so we publish), which means one
+  // of OUR casts can already be in flight when the reset fires. The reset drops `pending` — so the
+  // peer's mutation is no longer suppressed, and our own echo is no longer recognizable as the
+  // repair of a value that already won everywhere else. It was dropped, and this client stayed on
+  // the LOSING value forever (its whole-file save then wrote those bytes over everyone's canvas):
+  // the permanent split-brain the ordering state exists to prevent, reopened by a lifecycle event.
+  it('our first presence hello does not lose a cast in flight (the late echo still repairs)', () => {
+    a.edit([node('n1', 0)])
+    bus.settle()
+
+    b.edit([node('n1', 50)]) // B's edit is cast (and ordered) first…
+    a.edit([node('n1', 100)]) // …ours is ordered AFTER it, so 100 wins on every other client.
+    a.presence('cl-a') // …and NOW our own presence hello resolves, with that cast still unacked.
+    bus.settle()
+
+    expect(b.x('n1')).toBe(100) // B lands on the ordered winner…
+    expect(a.x('n1')).toBe(100) // …and so must we (was: 50 — our echo was thrown away).
+    expect(a.persisted()).toEqual(b.persisted()) // whoever saves writes the same bytes
+  })
+
+  // …but a GENUINE reconnect must still reset. The core restarting puts its `seq` counter back at 0
+  // while our `seen` map still holds the old (high) values — every mutation that follows would look
+  // like a straggler and be silently dropped, and this client would drift away from its peers with
+  // no way back. (Here: a new clientId, and a peer mutation stamped with a LOW seq from the restarted
+  // reflector.)
+  it('a genuine reconnect forgets the stale seq floor (a restarted core starts at seq 1 again)', () => {
+    a.presence('cl-a')
+    a.edit([node('n1', 0)])
+    b.edit([node('n1', 1)])
+    b.edit([node('n1', 2)])
+    bus.settle()
+    expect(a.x('n1')).toBe(2) // a few mutations in: A's `seen` floor for n1 is now high
+
+    a.presence('cl-a2') // the core restarted → new connection, new clientId, `seq` back at 0
+    // The restarted reflector stamps from 1 again. Without the reset this is a straggler and is
+    // dropped — A would sit on the old value for the rest of the session.
+    bus.deliver.get(a.id)?.(PROJECT, { op: 'upsert', node: node('n1', 9), src: 'src-2', seq: 1 })
+    expect(a.x('n1')).toBe(9)
   })
 
   // A REFUSED CAST. The reflector drops a malformed / oversized mutation at ingest (silently — there

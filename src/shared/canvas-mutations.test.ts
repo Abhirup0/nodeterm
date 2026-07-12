@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest'
-import { applyCanvasMutation, diffToMutations } from './canvas-mutations'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import {
+  applyCanvasMutation,
+  createMutationGuard,
+  diffToMutations,
+  isCanvasMutation,
+  MUTATION_MAX_BYTES
+} from './canvas-mutations'
 import type { CanvasNodeState } from './types'
 
 const n = (id: string, x = 0, title = 't'): CanvasNodeState =>
@@ -57,5 +63,89 @@ describe('diffToMutations', () => {
     expect(diffToMutations([n('1')], [n('1', 0, 'renamed')])).toEqual([
       { op: 'upsert', node: n('1', 0, 'renamed') }
     ])
+  })
+})
+
+// The publisher's guard: the same verdict as `isCanvasMutation`, but it must not PAY for it twice on
+// an unchanged node. The size check serializes the whole node, the publisher re-emits a refused node
+// on every publish (that is what makes it sync the moment the user trims it), and a drag publishes at
+// 20 Hz — so the one node that is already pathological (a sticky holding a pasted document) was being
+// stringified 20×/s, at a cost proportional to its size.
+describe('createMutationGuard', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  /** A sticky over the size cap. `text` is the SAME string on every rebuild — exactly what
+   *  flowToNodeStates does: it rebuilds the node object each publish but passes `data.text` through
+   *  by reference. */
+  const bigText = 'x'.repeat(MUTATION_MAX_BYTES)
+  const fat = (x = 0, text = bigText): CanvasNodeState =>
+    ({ ...n('sticky-1', x), kind: 'sticky', text }) as CanvasNodeState
+
+  /** Count only the serializations of a NODE (the expensive path) — not vitest's own internals. */
+  const countSerializations = (): { calls: () => number } => {
+    const spy = vi.spyOn(JSON, 'stringify')
+    return {
+      calls: () =>
+        spy.mock.calls.filter((c) => {
+          const v = c[0] as { node?: { id?: unknown } } | undefined
+          return !!v && typeof v === 'object' && !!v.node
+        }).length
+    }
+  }
+
+  it('serializes an unchanged oversized node ONCE, however many times it is re-published', () => {
+    const guard = createMutationGuard()
+    const { calls } = countSerializations()
+
+    // 40 publishes of the SAME (still oversized) sticky — two seconds of a 20 Hz drag.
+    for (let i = 0; i < 40; i++) {
+      expect(guard({ op: 'upsert', node: fat(), src: 'me' })).toBe(false)
+    }
+    expect(calls()).toBe(1) // was: 40 — one full serialization of a 256 KB node per publish
+  })
+
+  it('re-validates the moment the node actually changes (and the trimmed sticky syncs)', () => {
+    const guard = createMutationGuard()
+    expect(guard({ op: 'upsert', node: fat() })).toBe(false)
+
+    // Still too big, but MOVED: a changed node is a new verdict, so it is paid for again…
+    const { calls } = countSerializations()
+    expect(guard({ op: 'upsert', node: fat(7) })).toBe(false)
+    expect(calls()).toBe(1)
+
+    // …and the user trims it → it is within the cap → it CASTS. (The refusal must not be sticky:
+    // the whole point of retrying a refused node is that it syncs as soon as it fits.)
+    expect(guard({ op: 'upsert', node: fat(7, 'short') })).toBe(true)
+    // …and stays castable afterwards, without re-consulting a stale refusal.
+    expect(guard({ op: 'upsert', node: fat(7, 'short') })).toBe(true)
+  })
+
+  it('gives exactly the verdict of isCanvasMutation (shape, ids, geometry, size)', () => {
+    const guard = createMutationGuard()
+    const cases: unknown[] = [
+      { op: 'upsert', node: n('1') },
+      { op: 'remove', id: '1' },
+      { op: 'remove', id: '' },
+      { op: 'upsert', node: { ...n('1'), id: '' } },
+      { op: 'upsert', node: { ...n('1'), position: { x: NaN, y: 0 } } },
+      { op: 'upsert', node: fat() },
+      { op: 'nope' },
+      null
+    ]
+    for (const c of cases) {
+      expect(guard(c as never), JSON.stringify(c).slice(0, 40)).toBe(isCanvasMutation(c))
+    }
+  })
+
+  it('remembers a refusal per node — one fat sticky does not mask another', () => {
+    const guard = createMutationGuard()
+    const other = (): CanvasNodeState =>
+      ({ ...n('sticky-2'), kind: 'sticky', text: bigText }) as CanvasNodeState
+    expect(guard({ op: 'upsert', node: fat() })).toBe(false)
+    expect(guard({ op: 'upsert', node: other() })).toBe(false)
+    const { calls } = countSerializations()
+    expect(guard({ op: 'upsert', node: fat() })).toBe(false)
+    expect(guard({ op: 'upsert', node: other() })).toBe(false)
+    expect(calls()).toBe(0) // both refusals are remembered, neither is re-serialized
   })
 })
