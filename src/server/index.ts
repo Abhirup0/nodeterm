@@ -82,11 +82,19 @@ export async function startServer(
   // output, pause that tmux client so the OS pipe applies real backpressure (resumes below
   // the low-water mark). See platform-server.ts sendTo.
   //
-  // The pause is attributed to the UI whose socket is backed up (`uiId`), exactly like the pause
-  // that UI's own renderer casts over `pty:flow` — so PtyManager's per-client ledger (Session
-  // .pausedBy) returns it when that UI drains OR when it disconnects, and one backed-up browser
-  // can no longer be un-paused by another browser's join/leave.
-  platform.setFlowController((uiId, sid, resume) => ptyManager.setFlow(uiId, sid, resume))
+  // The pause is attributed to the UI whose socket is backed up (`uiId`) — so PtyManager's ledger
+  // (Session.pausedBy) returns it when that UI drains OR when it disconnects, and one backed-up
+  // browser can no longer be un-paused by another browser's join/leave.
+  //
+  // It is booked under the 'socket' OWNER, not the same ticket as the pause that UI's own renderer
+  // casts over `pty:flow`. The two queues are different and drain at different times — the socket
+  // empties as fast as the browser reads bytes, the renderer's xterm backlog only as fast as it
+  // parses them — so sharing one ticket would let the socket's drain (sweepPaused) hand back the
+  // pause the renderer still owes. The renderer's flow control is edge-latched and would never
+  // re-pause: its backlog would then grow at network speed for the rest of the flood.
+  platform.setFlowController((uiId, sid, resume, owner) =>
+    ptyManager.setFlow(uiId, sid, resume, owner)
+  )
 
   // Bounded memory: a client whose socket backlog we discarded (WS_DROP_WATER) is REDRAWN from
   // tmux — the current screen — rather than replayed. See platform-server.ts dropOrDesync.

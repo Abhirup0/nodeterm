@@ -284,6 +284,87 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(spawned[0].paused).toBe(false)
   })
 
+  // ── One client, TWO pause owners (Server Edition) ────────────────────────────────────────
+  // On the Server Edition a single uiId has two INDEPENDENT reasons to pause the same session:
+  // its browser's own xterm backlog (`pty:flow` cast → owner 'renderer') and the server's WS
+  // send-buffer backpressure (ServerPlatform → owner 'socket'). They drain at different times
+  // (the socket empties as fast as the browser reads bytes; xterm parses them far slower), so a
+  // ledger keyed by ClientId alone would let one hand back the other's pause — and the renderer's
+  // flow control is EDGE-latched, so a resume behind its back is permanent (invariant (b)).
+  it('a socket drain does NOT release the pause that client\'s RENDERER still owes', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+
+    flow(ALICE, sessionId, false) // Alice's xterm is 1 MB behind the flood
+    m.setFlow(ALICE, sessionId, false, 'socket') // ...and her WS socket is backed up too
+    expect(spawned[0].paused).toBe(true)
+
+    m.setFlow(ALICE, sessionId, true, 'socket') // the socket drains into her browser
+    expect(spawned[0].paused).toBe(true) // her xterm is STILL drowning — must stay paused
+
+    flow(ALICE, sessionId, true) // her renderer finally drains
+    expect(spawned[0].paused).toBe(false)
+  })
+
+  it('a socket-owed pause IS released when only the socket owed it', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+
+    m.setFlow(ALICE, sessionId, false, 'socket') // her renderer never paused (slow link, small xterm backlog)
+    expect(spawned[0].paused).toBe(true)
+
+    m.setFlow(ALICE, sessionId, true, 'socket')
+    expect(spawned[0].paused).toBe(false)
+  })
+
+  it('a renderer resume does NOT release the pause that client\'s SOCKET still owes', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+
+    m.setFlow(ALICE, sessionId, false, 'socket')
+    flow(ALICE, sessionId, true) // a stray/late renderer resume — the socket is still jammed
+    expect(spawned[0].paused).toBe(true)
+  })
+
+  it('a client that disconnects owing BOTH kinds of pause returns both', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB) // Bob stays: the pty must keep streaming for him
+
+    flow(ALICE, sessionId, false)
+    m.setFlow(ALICE, sessionId, false, 'socket')
+    expect(spawned[0].paused).toBe(true)
+
+    m.dropClient(ALICE) // her tab vanished — neither pause can ever be returned by her
+    expect(spawned[0].paused).toBe(false) // invariant (a): nobody is frozen forever
+    expect(spawned[0].killed).toBe(false)
+  })
+
+  it('a client that KILLS a session while owing BOTH kinds of pause returns both', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    flow(ALICE, sessionId, false)
+    m.setFlow(ALICE, sessionId, false, 'socket')
+    kill(ALICE, sessionId) // Alice unmounts the node; she gets no more output for it
+    expect(spawned[0].paused).toBe(false)
+    expect(spawned[0].killed).toBe(false)
+  })
+
+  it('one client\'s socket drain leaves ANOTHER client\'s socket pause in place', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE)
+    await create(BOB)
+
+    m.setFlow(ALICE, sessionId, false, 'socket')
+    m.setFlow(BOB, sessionId, false, 'socket')
+    m.setFlow(ALICE, sessionId, true, 'socket')
+    expect(spawned[0].paused).toBe(true) // Bob's socket is still jammed
+    m.setFlow(BOB, sessionId, true, 'socket')
+    expect(spawned[0].paused).toBe(false)
+  })
+
   // ── Finding 2: a client that vanishes (WS close / destroyed webContents) is dropped ──────
   it('dropClient unsubscribes the client from EVERY session and releases the empty ones', async () => {
     const m = await manager()

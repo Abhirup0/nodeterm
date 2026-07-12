@@ -1,4 +1,5 @@
 import type { CorePlatform } from '../core/platform'
+import type { FlowOwner } from '../core/pty-manager'
 import { IPC } from '../shared/ipc'
 import {
   E_NO_HANDLER,
@@ -84,7 +85,17 @@ export class ServerPlatform implements CorePlatform {
   // sending to it and redraw it from tmux when it recovers (see `dropOrDesync`), so the pause it
   // owes is bounded in time and the producer is never throttled indefinitely by one bad link.
   private paused = new Set<string>()
-  private flowController?: (uiId: number, sessionId: string, resume: boolean) => void
+  private flowController?: (
+    uiId: number,
+    sessionId: string,
+    resume: boolean,
+    owner: FlowOwner
+  ) => void
+  /** Every pause this class books is owed by the SOCKET, never by the browser's xterm — a separate
+   *  owner in PtyManager's ledger, because the two queues drain at different times and must not
+   *  cancel each other (see `Session.pausedBy` / `FlowOwner`). Passed on every call so the tag is
+   *  type-enforced at this seam and cannot be dropped by the wiring in index.ts. */
+  private static readonly OWNER: FlowOwner = 'socket'
 
   /**
    * The (client, session) pairs whose backlog we discarded; each gets a tmux redraw once its
@@ -109,7 +120,9 @@ export class ServerPlatform implements CorePlatform {
   private sweepTimer?: ReturnType<typeof setInterval>
   private resyncProvider?: (sessionId: string) => Promise<string>
 
-  setFlowController(fn: (uiId: number, sessionId: string, resume: boolean) => void): void {
+  setFlowController(
+    fn: (uiId: number, sessionId: string, resume: boolean, owner: FlowOwner) => void
+  ): void {
     this.flowController = fn
   }
 
@@ -169,12 +182,13 @@ export class ServerPlatform implements CorePlatform {
         const key = ServerPlatform.flowKey(uiId, sessionId)
         const isPaused = this.paused.has(key)
         if (buffered > WS_HIGH_WATER) {
-          // Re-assert the pause on EVERY high send (not just the rising edge). This connection's
-          // browser runs the SAME flow control on its xterm backlog and casts pty:flow under the
-          // same uiId, so it may have handed back the pause underneath us; an edge-latched
-          // `!isPaused` guard would then never re-pause until the buffer drained to LOW.
-          // proc.pause() is idempotent, and this branch only runs when data actually arrived (the
-          // pty was running), so it self-limits — no spamming.
+          // Re-assert the pause on EVERY high send (not just the rising edge), so this set can
+          // never disagree with the pty-side ledger about a pause we still owe. It is booked under
+          // the 'socket' owner there (see server/index.ts), i.e. a DIFFERENT ticket from the one
+          // this connection's browser casts over pty:flow for its own xterm backlog — the two
+          // queues drain at different times and must not cancel each other. pause() is idempotent,
+          // and this branch only runs when data actually arrived (the pty was running), so it
+          // self-limits — no spamming.
           this.paused.add(key)
           // A flood that ENDS is the normal case, and the resume check below only runs when the
           // NEXT chunk for this session is sent. If this is the last chunk, nothing else would ever
@@ -182,10 +196,10 @@ export class ServerPlatform implements CorePlatform {
           // full pipe — and with co-attach that freezes the terminal for EVERY viewer. So the same
           // drain sweep the desync path uses watches the socket for us (see sweepDesynced).
           this.armSweep()
-          this.flowController(uiId, sessionId, false)
+          this.flowController(uiId, sessionId, false, ServerPlatform.OWNER)
         } else if (isPaused && buffered <= WS_LOW_WATER) {
           this.paused.delete(key)
-          this.flowController(uiId, sessionId, true)
+          this.flowController(uiId, sessionId, true, ServerPlatform.OWNER)
         }
       }
     } else {
@@ -232,7 +246,7 @@ export class ServerPlatform implements CorePlatform {
     // owes could never be returned (it receives nothing, so it can never drain and re-report), and
     // PtyManager keeps the pty paused while ANY client owes a resume — the other viewers' terminal
     // would freeze forever. Hand the pause back here; the clients still being served decide alone.
-    if (this.paused.delete(key)) this.flowController?.(uiId, sessionId, true)
+    if (this.paused.delete(key)) this.flowController?.(uiId, sessionId, true, ServerPlatform.OWNER)
     return true
   }
 
@@ -351,7 +365,7 @@ export class ServerPlatform implements CorePlatform {
       }
       if ((sink.bufferedAmount?.() ?? 0) > WS_LOW_WATER) continue
       this.paused.delete(key)
-      this.flowController(uiId, key.slice(sep + 1), true)
+      this.flowController(uiId, key.slice(sep + 1), true, ServerPlatform.OWNER)
     }
   }
 

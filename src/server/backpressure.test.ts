@@ -34,6 +34,38 @@ describe('ws backpressure', () => {
     ])
   })
 
+  it('books every pause/resume under the SOCKET owner, never the renderer\'s', () => {
+    // The whole point of the owner tag: this connection's browser casts its OWN pty:flow pauses
+    // under the same uiId, from a different queue (its xterm backlog) that drains at a different
+    // time. If the socket's pauses shared that ledger ticket, the drain below — and the sweep —
+    // would hand back a pause the renderer still owes, and the renderer is edge-latched: it would
+    // never re-pause. So EVERY call this class makes must carry 'socket'.
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const flow: Array<{ resume: boolean; owner: string }> = []
+    p.setFlowController((_uiId, _sid, resume, owner) => flow.push({ resume, owner }))
+    let buffered = 1_500_000
+    const ui = p.attach(sink(() => buffered))
+
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // pause
+    buffered = 100_000
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // drain → resume
+    expect(flow).toEqual([
+      { resume: false, owner: 'socket' },
+      { resume: true, owner: 'socket' }
+    ])
+
+    // ...and so must the one the drop-and-redraw ceiling hands back.
+    flow.length = 0
+    buffered = 1_500_000
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // over high-water: pause again
+    buffered = 9_000_000
+    p.sendTo(ui, 'pty:data:s1', 'chunk') // over WS_DROP_WATER: desync → hand the pause back
+    expect(flow).toEqual([
+      { resume: false, owner: 'socket' },
+      { resume: true, owner: 'socket' }
+    ])
+  })
+
   it('re-asserts pause on every high send so a renderer-side resume cannot latch it off', () => {
     // The renderer's own xterm flow control drives the SAME ptyManager.setFlow actuator.
     // If it resumes the pty underneath us while the socket buffer is still full, the

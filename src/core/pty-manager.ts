@@ -230,6 +230,32 @@ export async function findInLoginPath(bin: string): Promise<string | null> {
 /** A UI client: an Electron webContents id or a ServerPlatform uiId. */
 type ClientId = number
 
+/**
+ * WHO, within one client, owes us a resume (see `Session.pausedBy`).
+ *
+ * One client can be behind in TWO independent places, and only on the Server Edition does the
+ * second one exist:
+ *  - `renderer` — its xterm write-backlog crossed the high-water mark and it cast `pty:flow`.
+ *    This is the ONLY owner on the desktop, and it is EDGE-latched (TerminalNode: `if (!paused &&
+ *    pending > HIGH_WATER)`) — once it has pumped its pause it will not re-pause.
+ *  - `socket` — the server's own WS send buffer for that connection crossed WS_HIGH_WATER
+ *    (`ServerPlatform.sendTo`), which is a different queue with a different drain time: the socket
+ *    empties as fast as the browser READS bytes, while the renderer's backlog empties only as fast
+ *    as xterm PARSES them.
+ * They must be separate ledger entries: keyed by ClientId alone they collapse into one, and the
+ * socket's drain (the sweep) would hand back the pause the renderer still owes — permanently,
+ * because the renderer cannot re-pause. That is invariant (b) on `pausedBy`.
+ */
+export type FlowOwner = 'renderer' | 'socket'
+/** All the owners one client can owe a pause under — the sweep on any leave path. */
+const FLOW_OWNERS: readonly FlowOwner[] = ['renderer', 'socket']
+
+/** The ledger key for one (client, owner) pause. `null` is the relay host's detached sink, which
+ *  has no ClientId; it pauses on relay backpressure, i.e. as a `renderer`-side owner. */
+function flowTicket(clientId: ClientId | null, owner: FlowOwner): string {
+  return `${owner}#${clientId ?? 'relay'}`
+}
+
 /** One client's reported fit, run through the same floor/clamp the pty itself gets, so a size we
  *  record for a client is comparable with the effective size we compute from all of them. */
 function normalizeSize(cols: number, rows: number): PtySize {
@@ -288,22 +314,27 @@ interface Session {
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
   /**
-   * The clients that currently OWE us a resume: each has cast `pty:flow(sessionId,false)` because
-   * ITS OWN xterm write-backlog crossed the high-water mark. The pty is paused while this set is
-   * non-empty and resumes only when it becomes empty (`setFlow` / `releaseFlow`). `null` keys the
-   * relay host's detached sink, which pauses on relay backpressure and has no ClientId.
+   * The (client, owner) pairs that currently OWE us a resume — a ledger of FLOW TICKETS
+   * (`flowTicket`), not of clients. The pty is paused while this set is non-empty and resumes only
+   * when it becomes empty (`setFlow` / `releaseFlow`).
    *
    * It has to be a SET, not a boolean, because both of these must hold at once:
    *  (a) a pause owed by a client that LEFT is always returned (its renderer is gone and will
    *      never send the matching resume — the co-attaching or remaining clients would stare at a
-   *      frozen, blank terminal forever). `kill` / `dropClient` / `join` return it.
+   *      frozen, blank terminal forever). `kill` / `dropClient` / `join` return it — and `kill` /
+   *      `dropClient` return EVERY owner's ticket for that client, not just the renderer's.
    *  (b) a pause owed by a client that is STILL HERE is never silently cancelled. That client's
    *      flow control is EDGE-latched (`if (!paused && pending > HIGH_WATER)` in TerminalNode) —
    *      once it has pumped the pause it will NOT re-pause, so resuming the pty behind its back is
    *      permanent and its write queue then grows without bound for the rest of the flood.
    * A single boolean can only ever satisfy one of the two (it cannot tell the cases apart).
+   *
+   * And the tickets are keyed by (client, OWNER), not by client, because a Server-Edition client
+   * has two independent pause owners with two different drain times (see `FlowOwner`): keyed by
+   * ClientId alone, the socket's drain would silently cancel the renderer's pause and break (b) —
+   * deterministically, for the whole rest of a flood.
    */
-  pausedBy: Set<ClientId | null>
+  pausedBy: Set<string>
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
@@ -739,9 +770,11 @@ export class PtyManager {
     // A (re)joining client's backlog is empty by definition, so its fresh page will never issue a
     // resume its PREVIOUS page owed us — a renderer reload keeps the same ClientId, so without this
     // the reloaded terminal would stay frozen forever with no data arriving to unstick it. Return
-    // only THIS client's owed pause: a pause owed by a DIFFERENT client that is still here and
-    // still drowning stays in place (invariant (b) on `pausedBy`).
-    this.releaseFlow(existing, clientId)
+    // only THIS client's RENDERER pause: a pause owed by a DIFFERENT client that is still here and
+    // still drowning stays in place, and so does this client's own SOCKET pause — a fresh page says
+    // nothing about the state of the WS send buffer under it (invariant (b) on `pausedBy`), and the
+    // server returns that one itself when the socket drains.
+    this.releaseFlow(existing, clientId, 'renderer')
     const base: PtyCreateResult = existing.accountFallback
       ? { sessionId: existingId, fresh: false, accountFallback: true }
       : { sessionId: existingId, fresh: false }
@@ -1134,7 +1167,7 @@ export class PtyManager {
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
       outputSinceSnapshot: true, // capture the initial screen on the first tick
-      pausedBy: new Set<ClientId | null>(),
+      pausedBy: new Set<string>(),
       accountFallback
     }
     if (persisted) this.ensureSnapshotTimer()
@@ -1293,18 +1326,29 @@ export class PtyManager {
    * `clientId` is null for the relay host's detached pty, whose sink pauses on relay backpressure
    * and returns the resume on drain — one more owner in the same ledger, no special casing.
    *
-   * Single user: the set holds exactly his ClientId while paused and is empty when he resumes, so
-   * the actuator sees exactly the pause/resume pair it always saw.
+   * `owner` says WHICH of the client's two queues is behind (see `FlowOwner`). It defaults to
+   * `renderer` — the only owner that exists on the desktop and over the relay — so the Server
+   * Edition's socket backpressure is the one caller that passes anything (`src/server/index.ts`).
+   * A socket drain then returns the SOCKET's ticket only, never the pause the browser's own xterm
+   * still owes.
+   *
+   * Single user: the set holds exactly his one renderer ticket while paused and is empty when he
+   * resumes, so the actuator sees exactly the pause/resume pair it always saw.
    */
-  setFlow(clientId: ClientId | null, sessionId: string, resume: boolean): void {
+  setFlow(
+    clientId: ClientId | null,
+    sessionId: string,
+    resume: boolean,
+    owner: FlowOwner = 'renderer'
+  ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
     if (resume) {
-      this.releaseFlow(session, clientId)
+      this.releaseFlow(session, clientId, owner)
       return
     }
     const wasPaused = session.pausedBy.size > 0
-    session.pausedBy.add(clientId)
+    session.pausedBy.add(flowTicket(clientId, owner))
     if (wasPaused) return // already paused by someone — pause() again would be a no-op
     try {
       session.proc.pause()
@@ -1314,21 +1358,37 @@ export class PtyManager {
   }
 
   /**
-   * Return the pause `clientId` owed us — because it resumed, or because it LEFT (kill /
+   * Return a pause `clientId` owed us — because it resumed, or because it LEFT (kill /
    * dropClient) or reloaded (join). The pty resumes only when the ledger empties: a pause still
    * owed by a client that is here and behind must survive every other client's comings and goings,
    * or that client's renderer queue grows without bound (its flow control is edge-latched and will
    * never re-pause). No-op when this client owed nothing — the single-user resume path is then
    * exactly the old `paused=false; proc.resume()`.
+   *
+   * `owner` scopes WHICH of that client's tickets is returned:
+   *  - a drain returns exactly the one that drained (invariant (b)): the socket emptying says
+   *    nothing about the browser's xterm backlog, and vice versa;
+   *  - omitting it returns ALL of them, which is what a client's DEPARTURE means (invariant (a)):
+   *    it receives nothing more on this session, so no owner of its can ever resume us again.
    */
-  private releaseFlow(session: Session, clientId: ClientId | null): void {
-    if (!session.pausedBy.delete(clientId)) return
+  private releaseFlow(session: Session, clientId: ClientId | null, owner?: FlowOwner): void {
+    const owners = owner ? [owner] : FLOW_OWNERS
+    let released = false
+    for (const o of owners) {
+      if (session.pausedBy.delete(flowTicket(clientId, o))) released = true
+    }
+    if (!released) return
     if (session.pausedBy.size > 0) return
     try {
       session.proc.resume()
     } catch {
       // resume can throw if the proc already exited; ignore.
     }
+  }
+
+  /** Does this client owe a resume on this session under ANY owner? (dropClient's sweep gate.) */
+  private owesFlow(session: Session, clientId: ClientId | null): boolean {
+    return FLOW_OWNERS.some((o) => session.pausedBy.has(flowTicket(clientId, o)))
   }
 
   /**
@@ -1428,8 +1488,10 @@ export class PtyManager {
     }
     // The departing client (or sink) may have been one of the ones that paused us, and it will
     // never send the matching resume now — leaving that pause in place would freeze the terminal
-    // for everyone who stayed. A pause owed by a client that is STILL here is untouched: the pty
-    // stays paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
+    // for everyone who stayed. EVERY owner it owed goes back (no `owner` argument): it stops
+    // receiving this session's output entirely, so neither its renderer nor its socket can ever
+    // resume us again. A pause owed by a client that is STILL here is untouched: the pty stays
+    // paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
     this.releaseFlow(session, clientId)
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.
@@ -1475,7 +1537,9 @@ export class PtyManager {
       // the gate.
       const hadSize = session.sizes.delete(clientId)
       const hadShown = session.shown.delete(clientId)
-      if (!hadSize && !hadShown && !session.pausedBy.has(clientId)) continue
+      if (!hadSize && !hadShown && !this.owesFlow(session, clientId)) continue
+      // Every owner's ticket, not just the renderer's: a vanished client's SOCKET pause is as
+      // unreturnable as its renderer's (invariant (a) — the pty would freeze for every co-viewer).
       this.releaseFlow(session, clientId)
       this.applySize(sessionId, session)
     }
