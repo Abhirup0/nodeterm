@@ -219,8 +219,8 @@ export class GitService {
     platform().handle(IPC.gitWorktreeAdd, (repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) =>
       this.worktreeAdd(repoPath, wtPath, branch, baseRef, isNew)
     )
-    platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string) =>
-      this.worktreeMerge(repoPath, branch, baseRef)
+    platform().handle(IPC.gitWorktreeMerge, (repoPath: string, branch: string, baseRef: string, push?: boolean) =>
+      this.worktreeMerge(repoPath, branch, baseRef, push)
     )
     platform().handle(IPC.gitWorktreeRemove, (repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean) =>
       this.worktreeRemove(repoPath, wtPath, deleteBranch, pruneOnly)
@@ -236,11 +236,14 @@ export class GitService {
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean) {
     return worktreeOps.worktreeAdd(git, repoPath, wtPath, branch, baseRef, isNew)
   }
-  worktreeMerge(repoPath: string, branch: string, baseRef: string) {
-    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef)
+  worktreeMerge(repoPath: string, branch: string, baseRef: string, push = false) {
+    return worktreeOps.worktreeMerge(git, repoPath, branch, baseRef, push)
   }
   worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly = false) {
-    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch, pruneOnly)
+    // `pathExists` is git's `prunable` flag's fallback for git < 2.36 (see worktree-ops).
+    return worktreeOps.worktreeRemove(git, repoPath, wtPath, os.homedir(), deleteBranch, pruneOnly, async (p) =>
+      fs.existsSync(p)
+    )
   }
 
   async status(cwd: string): Promise<GitStatus> {

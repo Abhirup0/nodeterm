@@ -83,6 +83,57 @@ describe('worktreeMerge', () => {
     expect(r.message).toContain('/base')
     expect(r.message).not.toContain('worktree terminal')
   })
+
+  // The push is what the user is asked to consent to (Task 6): merging must NEVER publish to a
+  // shared remote unless the caller explicitly said so.
+  it('never pushes unless the caller asks for it', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list), remote: ok('origin\n') })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main')
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c[0] === 'push')).toBe(false)
+    expect(r.message).not.toMatch(/push/i)
+  })
+  it('pushes the base branch to origin when asked, and says so', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list), remote: ok('origin\n') })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'push origin main')).toBe(true)
+    expect(r.message).toMatch(/pushed main to origin/i)
+  })
+  it('does not push when the repo has no remote (and does not claim it did)', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list), remote: ok('') })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c[0] === 'push')).toBe(false)
+    expect(r.message).not.toMatch(/push/i)
+  })
+  it('reports a failed push instead of swallowing it', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      remote: ok('origin\n'),
+      'push origin main': ko('rejected')
+    })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    // The merge itself succeeded — only the publish failed, and the user must be told.
+    expect(r.ok).toBe(true)
+    expect(r.message).toMatch(/push.*failed/i)
+  })
+  it('does not merge again when only the push is requested — a failed merge never pushes', async () => {
+    const list = 'worktree /base\nHEAD aaa\nbranch refs/heads/main\n'
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      'status --porcelain': ok(''),
+      'merge --no-ff --no-edit feature/x': ko('CONFLICT'),
+      remote: ok('origin\n')
+    })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    expect(r.ok).toBe(false)
+    expect(calls.some((c) => c[0] === 'push')).toBe(false)
+  })
 })
 
 describe('worktreeRemove', () => {
@@ -146,6 +197,32 @@ describe('worktreeRemove', () => {
     expect(r.ok).toBe(false)
     expect(calls.some((c) => c[1] === 'remove')).toBe(false)
     expect(calls.some((c) => c[0] === 'branch')).toBe(false)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(false)
+  })
+  it('prunes an unregistered path even in pruneOnly mode (pruning IS the mode)', async () => {
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false, true)
+    expect(r.worktreeGone).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
+  })
+  // git < 2.36 does not emit `prunable` in `worktree list --porcelain`, so a deleted directory
+  // looks perfectly healthy in the listing. Stat the path instead of believing the flag.
+  it('treats a missing directory as gone even when git never flagged it prunable', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', false, true, async () => false)
+    expect(r.ok).toBe(true)
+    expect(r.worktreeGone).toBe(true)
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
+    expect(calls.some((c) => c[1] === 'remove')).toBe(false)
+  })
+  it('still refuses to prune a directory that exists (a wrongly-stale group cannot delete it)', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', false, true, async () => true)
+    expect(r.ok).toBe(false)
     expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(false)
   })
 })

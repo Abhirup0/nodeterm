@@ -12,10 +12,24 @@ export interface WorktreeStatus {
   dirty: number
   ahead: number
   behind: number
+  /** The repo has a remote — i.e. a merge CAN publish the base branch to origin. The merge confirm
+   *  reads this to say so (and to not threaten a push that could never happen). */
+  hasRemote: boolean
 }
 
 /** The chip re-renders constantly; without this, every render would spawn a `git status`. */
 export const WORKTREE_STATUS_THROTTLE_MS = 4000
+
+/**
+ * How many CONSECUTIVE "this is not a repo" reads it takes to declare a bound worktree missing.
+ *
+ * `git.status()` answers `hasRepo:false` whenever `git rev-parse --is-inside-work-tree` merely
+ * FAILS — a spawn EAGAIN under load, an NFS/FUSE hiccup — not only when the directory is gone. One
+ * such read used to flip a perfectly healthy group to "missing"; it self-heals on the next poll,
+ * but in that window `cwdForNewNodeIn` refuses the worktree path and hands out the project cwd, and
+ * a terminal created then persists the WRONG cwd forever. Two reads in a row is the stronger signal.
+ */
+export const WORKTREE_STALE_STRIKES = 2
 
 interface WorktreesState {
   repoRoot: string | null
@@ -36,6 +50,8 @@ interface WorktreesState {
 }
 
 const lastStatusAt = new Map<string, number>()
+/** Consecutive `hasRepo:false` reads per path (see WORKTREE_STALE_STRIKES). Reset by any success. */
+const missStreak = new Map<string, number>()
 
 /**
  * Cancellation token for the in-flight async reads. `refresh`/`refreshStatus` are fired from React
@@ -114,9 +130,13 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     if (mineEpoch !== epoch) return
     // A deleted worktree does NOT reject: git-service answers with an empty status. Writing it
     // would render a dead worktree as a healthy one on a blank branch — `staleGroupIds` is what
-    // tells that story, so mark the group stale instead of keeping a lie on screen.
+    // tells that story, so mark the group stale instead of keeping a lie on screen. But only once
+    // the reading REPEATS: a single failed read is as likely to be a transient git failure as a
+    // deleted directory, and calling a live worktree missing has consequences of its own.
     if (!status.hasRepo) {
-      if (groupId) {
+      const strikes = (missStreak.get(path) ?? 0) + 1
+      missStreak.set(path, strikes)
+      if (groupId && strikes >= WORKTREE_STALE_STRIKES) {
         set((s) =>
           s.staleGroupIds.includes(groupId)
             ? s
@@ -125,6 +145,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       }
       return
     }
+    missStreak.delete(path)
     set((s) => ({
       // The directory answers again (restored, or a transient read failure passed) → not stale.
       staleGroupIds:
@@ -137,7 +158,8 @@ export const useWorktrees = create<WorktreesState>((set) => ({
           branch: status.branch,
           dirty: status.staged.length + status.changes.length,
           ahead: status.ahead,
-          behind: status.behind
+          behind: status.behind,
+          hasRemote: !!status.hasRemote
         }
       }
     }))
@@ -146,6 +168,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
   reset() {
     epoch++
     lastStatusAt.clear()
+    missStreak.clear()
     set({ ...empty(), statusByPath: {} })
   }
 }))

@@ -141,7 +141,8 @@ describe('useWorktrees.refreshStatus', () => {
       branch: 'feat',
       dirty: 3,
       ahead: 3,
-      behind: 1
+      behind: 1,
+      hasRemote: false
     })
   })
 
@@ -188,12 +189,51 @@ describe('useWorktrees.refreshStatus', () => {
 
   // `refresh()` only runs on project load / mutation, so without this the chip of a worktree
   // deleted WHILE THE USER WATCHES would keep claiming to be healthy until a reload.
-  it('marks the group stale when its worktree stops being a repo', async () => {
+  it('marks the group stale when its worktree stops being a repo (after a second read agrees)', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
     gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
 
     await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
 
     expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+  })
+
+  // `git rev-parse --is-inside-work-tree` merely FAILING (spawn EAGAIN under load, an NFS/FUSE
+  // hiccup) also answers hasRepo:false. Flipping a healthy worktree to "missing" on one such read
+  // is not cosmetic: while it lasts, cwdForNewNodeIn hands out the project cwd instead of the
+  // worktree path, and a terminal created in that window persists the WRONG cwd forever.
+  it('does not flip a healthy worktree to stale on a single hasRepo:false read', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+  })
+
+  it('forgets the miss when the next read succeeds (a transient failure never accumulates)', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    gitMock.status.mockResolvedValue(okStatus())
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+
+    // A LATER isolated miss must start counting from scratch, not tip the group over.
+    vi.setSystemTime(t0 + 2 * WORKTREE_STATUS_THROTTLE_MS + 2)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
   })
 
   it('un-marks a stale group once its worktree answers again', async () => {
@@ -202,15 +242,27 @@ describe('useWorktrees.refreshStatus', () => {
     vi.setSystemTime(t0)
     gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
     await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
     expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
 
-    // Restored (or the previous read failed transiently) — past the throttle window.
-    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    // Restored — past the throttle window.
+    vi.setSystemTime(t0 + 2 * WORKTREE_STATUS_THROTTLE_MS + 2)
     gitMock.status.mockResolvedValue(okStatus())
     await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
 
     expect(useWorktrees.getState().staleGroupIds).toEqual([])
     expect(useWorktrees.getState().statusByPath['/wt/feat'].branch).toBe('feat')
+  })
+
+  // The merge confirm has to tell the user whether merging also PUBLISHES to origin, and it reads
+  // that fact from here (the store is the only caller of the status IPC).
+  it('carries hasRemote into the chip status (the merge confirm reads it)', async () => {
+    gitMock.status.mockResolvedValue(okStatus({ hasRemote: true }))
+
+    await useWorktrees.getState().refreshStatus('/wt/feat')
+
+    expect(useWorktrees.getState().statusByPath['/wt/feat'].hasRemote).toBe(true)
   })
 
   it('leaves staleness alone when no group id is given', async () => {
@@ -235,7 +287,8 @@ describe('useWorktrees.refreshStatus', () => {
       branch: 'feat',
       dirty: 0,
       ahead: 2,
-      behind: 0
+      behind: 0,
+      hasRemote: false
     })
   })
 

@@ -294,12 +294,13 @@ export function buildFilesApi(
         baseRef,
         isNew
       ) as ReturnType<GitApi['worktreeAdd']>,
-    worktreeMerge: (repoPath, branch, baseRef) =>
+    worktreeMerge: (repoPath, branch, baseRef, push) =>
       client.request(
         IPC.gitWorktreeMerge,
         repoPath,
         branch,
-        baseRef
+        baseRef,
+        push
       ) as ReturnType<GitApi['worktreeMerge']>,
     worktreeRemove: (repoPath, wtPath, deleteBranch, pruneOnly) =>
       client.request(

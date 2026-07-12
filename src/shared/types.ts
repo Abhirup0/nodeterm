@@ -607,7 +607,9 @@ export interface GitApi {
   repoRoot(cwd: string): Promise<string | null>
   worktreeList(repoPath: string): Promise<import('./worktree').WorktreeEntry[]>
   worktreeAdd(repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean): Promise<GitResult>
-  worktreeMerge(repoPath: string, branch: string, baseRef: string): Promise<GitResult>
+  /** `push`: also publish `baseRef` to origin after a successful merge (only if a remote exists).
+   *  Opt-in — a merge must never publish to a shared remote the user was not told about. */
+  worktreeMerge(repoPath: string, branch: string, baseRef: string, push?: boolean): Promise<GitResult>
   /** `pruneOnly`: clean up git's registration only — never delete a directory. Used to prune a
    *  stale binding whose worktree was already deleted outside the app. */
   worktreeRemove(repoPath: string, wtPath: string, deleteBranch: boolean, pruneOnly?: boolean): Promise<GitResult>

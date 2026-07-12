@@ -444,6 +444,17 @@ export function Canvas() {
     canDelete: boolean
   } | null>(null)
   const [deleteFromDisk, setDeleteFromDisk] = useState(false)
+  // Group awaiting confirmation to merge its worktree into the base branch. `hasRemote` decides
+  // whether the dialog offers (and warns about) the push to origin — a repo with no remote must
+  // never be threatened with a publish that cannot happen.
+  const [mergeTarget, setMergeTarget] = useState<{
+    groupId: string
+    repoPath: string
+    branch: string
+    baseRef: string
+    hasRemote: boolean
+  } | null>(null)
+  const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
@@ -2154,6 +2165,18 @@ export function Canvas() {
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
   }, [removeTarget, deleteFromDisk, clearWorktreeBinding])
 
+  // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
+  // what the dialog said is exactly what runs — and the result banner names the push either way.
+  const confirmMergeWorktree = useCallback(() => {
+    const t = mergeTarget
+    setMergeTarget(null)
+    if (!t) return
+    const push = t.hasRemote && mergePush
+    void window.nodeTerminal.git
+      .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
+      .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
+  }, [mergeTarget, mergePush])
+
   // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
@@ -2180,19 +2203,20 @@ export function Canvas() {
           if (!wt) return
           // NEVER merge on a single click of a small header button: `worktreeMerge` merges into the
           // base checkout when that base is checked out somewhere — i.e. straight into the user's
-          // main working tree. Ask first, and say so.
-          setConfirm({
-            message:
-              `Merge ${wt.branch} into ${wt.baseRef}?\n\n` +
-              `If ${wt.baseRef} is checked out somewhere, this merges into that working tree.`,
-            confirmLabel: 'Merge',
-            danger: false,
-            onConfirm: () => {
-              setConfirm(null)
-              void window.nodeTerminal.git
-                .worktreeMerge(wt.repoPath, wt.branch, wt.baseRef)
-                .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
-            }
+          // main working tree — AND (if asked) pushes the base branch to origin, which publishes it
+          // to every teammate. Ask first, and say BOTH of those out loud.
+          //
+          // `hasRemote` comes from the store's status poll (the chip that carries this very button
+          // has been polling it), so no extra git IPC is fired here. Unknown → assume no remote:
+          // the merge then does not push, which is the only safe way to be wrong.
+          const hasRemote = !!useWorktrees.getState().statusByPath[wt.path]?.hasRemote
+          setMergePush(hasRemote) // pushing is the default when a remote exists — but opt-out.
+          setMergeTarget({
+            groupId,
+            repoPath: wt.repoPath,
+            branch: wt.branch,
+            baseRef: wt.baseRef,
+            hasRemote
           })
           break
         }
@@ -4489,6 +4513,34 @@ export function Canvas() {
           danger={false}
           onConfirm={confirmMoveIntoWorktree}
           onCancel={() => setMoveTarget(null)}
+        />
+      )}
+
+      {mergeTarget && (
+        <ConfirmDialog
+          message={
+            `Merge ${mergeTarget.branch} into ${mergeTarget.baseRef}?\n\n` +
+            `If ${mergeTarget.baseRef} is checked out somewhere, this merges into that working tree.` +
+            (mergeTarget.hasRemote && mergePush
+              ? `\n\n⚠ ${mergeTarget.baseRef} is also pushed to origin — everyone on the remote gets this merge.`
+              : '')
+          }
+          confirmLabel="Merge"
+          danger={false}
+          option={
+            // No remote → no push to offer. With a remote, the push stays the default (it is what
+            // the user almost always wants after merging a finished worktree) but is now visible
+            // and switch-offable, instead of happening silently behind a dialog that never said so.
+            mergeTarget.hasRemote
+              ? {
+                  label: `Also push ${mergeTarget.baseRef} to origin`,
+                  checked: mergePush,
+                  onChange: setMergePush
+                }
+              : undefined
+          }
+          onConfirm={confirmMergeWorktree}
+          onCancel={() => setMergeTarget(null)}
         />
       )}
 

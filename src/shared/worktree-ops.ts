@@ -52,8 +52,17 @@ export async function worktreeAdd(
   return r.ok ? { ok: true, message: `Worktree ready at ${wtPath}.` } : { ok: false, message: r.err }
 }
 
+/**
+ * Merge `branch` into `baseRef`, and — only when `push` is true AND the repo has a remote — publish
+ * the base branch to origin.
+ *
+ * The push is OPT-IN by design. It used to run "best effort" on every merge: one click on a small
+ * header chip published to `origin/main` (CI, teammates, protected-branch noise) without the confirm
+ * dialog ever mentioning it. Nothing here may do more than the caller disclosed to the user, so the
+ * default is not to push, and the result message states exactly what happened.
+ */
 export async function worktreeMerge(
-  git: GitExecutor, repoPath: string, branch: string, baseRef: string
+  git: GitExecutor, repoPath: string, branch: string, baseRef: string, push = false
 ): Promise<WorktreeOpResult> {
   if (!isValidGitRef(branch) || !isValidGitRef(baseRef)) return { ok: false, message: 'Invalid ref.' }
   const list = await worktreeList(git, repoPath)
@@ -83,10 +92,17 @@ export async function worktreeMerge(
       }
     }
   }
-  // Best-effort push if a remote exists; ignore failure (offline / no remote).
+  const merged = `Merged ${branch} into ${baseRef}.`
+  if (!push) return { ok: true, message: merged }
+  // Only push if a remote actually exists — never claim (or attempt) a publish that cannot happen.
   const hasRemote = (await git(repoPath, ['remote'])).out.trim().length > 0
-  if (hasRemote) await git(repoPath, ['push', 'origin', baseRef])
-  return { ok: true, message: `Merged ${branch} into ${baseRef}.` }
+  if (!hasRemote) return { ok: true, message: merged }
+  const p = await git(repoPath, ['push', 'origin', baseRef])
+  // A failed push does not undo the merge, so this stays `ok` — but it is reported, not swallowed:
+  // the user must know whether origin has the merge.
+  return p.ok
+    ? { ok: true, message: `Merged ${branch} into ${baseRef} and pushed ${baseRef} to origin.` }
+    : { ok: true, message: `${merged} The push to origin failed — push ${baseRef} manually.` }
 }
 
 /**
@@ -100,7 +116,15 @@ export async function worktreeMerge(
  */
 export async function worktreeRemove(
   git: GitExecutor, repoPath: string, wtPath: string, homeDir: string, deleteBranch: boolean,
-  pruneOnly = false
+  pruneOnly = false,
+  /**
+   * Does this path exist on disk? Injected (the shared layer has no fs). It is the fallback for
+   * git's `prunable` flag, which only exists from git 2.36: on an older git a deleted worktree is
+   * listed as perfectly healthy, so `prunable` alone would leave stale bindings unrecoverable and
+   * answer the user with a flatly untrue "the worktree directory still exists".
+   * Defaults to "it exists" — the conservative answer, which never deletes anything.
+   */
+  pathExists: (p: string) => Promise<boolean> = async () => true
 ): Promise<WorktreeOpResult> {
   // Reject a path that could be parsed as an option flag (argv injection).
   if (!wtPath || wtPath.startsWith('-')) return { ok: false, message: 'Invalid worktree path.' }
@@ -113,13 +137,18 @@ export async function worktreeRemove(
     // Nothing to remove: git does not know this path (deleted + already pruned, or never a
     // worktree of this repo). Prune anyway — a leftover registration elsewhere would block a
     // future `worktree add` — and tell the caller the worktree is gone so it clears its binding.
-    if (!pruneOnly) await git(repoPath, ['worktree', 'prune'])
+    // (Unconditionally: pruning is the whole point of `pruneOnly`, so skipping it there was
+    // exactly backwards.)
+    await git(repoPath, ['worktree', 'prune'])
     return { ok: false, worktreeGone: true, message: 'Worktree is not registered — it is already gone.' }
   }
   const branch = entry.branch
-  if (entry.prunable) {
-    // git still lists it, but the directory is gone. `worktree remove` would fail; prune the
-    // registration instead and touch no files.
+  // git still lists it, but is the directory actually there? `prunable` is git's own answer
+  // (≥ 2.36); the stat is the fallback for older gits, which never set the flag.
+  const dirGone = entry.prunable || !(await pathExists(wtPath))
+  if (dirGone) {
+    // The directory is gone. `worktree remove` would fail; prune the registration instead and
+    // touch no files.
     await git(repoPath, ['worktree', 'prune'])
     if (!pruneOnly && deleteBranch && branch && isValidGitRef(branch)) {
       await git(repoPath, ['branch', '-d', branch])
