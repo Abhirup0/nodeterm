@@ -4,17 +4,42 @@ import {
   setAgentEnabled,
   setDefaultAgent
 } from '../../../state/agentAvailability'
-import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import {
+  AGENT_CONFIG,
+  ALL_PERMISSION_MODES,
+  BUILTIN_AGENT_IDS,
+  PERMISSION_MODE_LABELS,
+  type AgentId,
+  type AgentPermissionMode
+} from '@shared/agents/config'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
+import { Select } from '@renderer/ui/Select'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
+import { FieldRow } from '../FieldRow'
 
 const ROWS = {
   agents: {
     title: 'Agents',
     keywords: ['agent', 'claude', 'codex', 'gemini', 'enable', 'disable', 'default']
+  },
+  permissionMode: {
+    title: 'Permission mode',
+    keywords: [
+      'permission',
+      'mode',
+      'auto',
+      'auto mode',
+      'accept edits',
+      'plan',
+      'bypass',
+      'approve',
+      'ask',
+      'claude',
+      'shift tab'
+    ]
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -65,6 +90,29 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             )
           })}
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.permissionMode}>
+        <FieldRow
+          label="Permission mode"
+          description="The mode Claude sessions start in. Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
+          control={
+            <Select
+              aria-label="Claude permission mode"
+              value={settings.claudePermissionMode}
+              onChange={(e) =>
+                update({ claudePermissionMode: e.target.value as AgentPermissionMode })
+              }
+            >
+              {ALL_PERMISSION_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {m === 'bypassPermissions'
+                    ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
+                    : PERMISSION_MODE_LABELS[m]}
+                </option>
+              ))}
+            </Select>
+          }
+        />
       </SearchableRow>
     </SettingsSection>
   )
