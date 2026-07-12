@@ -11,6 +11,8 @@
 //     into an `OP.Error` frame (then the stream is dropped).
 //   - `OP.Input`  frame -> `write(sessionId, <utf-8 payload>)`
 //   - `OP.Resize` frame -> `resize(sessionId, cols, rows)` (payload = 2x uint16 LE)
+//   - RPC `pty.captureHistory {streamId}` -> `captureHistory(persistKey)`, returning `{ output }`
+//     (tmux scrollback, so a re-entering client can hydrate its empty emulator scrollback)
 //   - RPC `pty.kill {streamId}` -> `kill(sessionId)`
 // Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
 // and resumes it on the next successful send.
@@ -58,6 +60,9 @@ export interface HostPtyManager {
   ): string
   /** Current visible screen of a node's tmux session, for the attach snapshot. */
   captureSnapshot(persistKey: string): Promise<string>
+  /** Scrollback (history + visible screen) of a node's tmux session, for hydrating a fresh
+   *  emulator on re-entry — the client's own scrollback is empty on a warm reattach. */
+  captureHistory(persistKey: string): Promise<string>
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
   setFlow(sessionId: string, resume: boolean): void
@@ -89,6 +94,9 @@ export interface HostFsOps {
 
 interface Stream {
   sessionId: string
+  /** The node id (tmux persistKey) this stream attached to. The ONLY tmux target a client can
+   *  reach: every session-scoped RPC resolves it from the streamId, never from client params. */
+  persistKey: string
   /** Outbound OP.Output sequence counter. */
   seq: number
   /** True while the PTY is paused due to relay backpressure. */
@@ -216,7 +224,7 @@ export function createHostHandlers(
     const rows = Math.max(1, num(p.rows, 24))
 
     const streamId = ++streamCounter
-    const stream: Stream = { sessionId: '', seq: 0, paused: false }
+    const stream: Stream = { sessionId: '', persistKey: nodeId, seq: 0, paused: false }
     const sinks = makeSinks(streamId, stream)
 
     // Reserve the stream and respond up front so the client can route Input/Resize frames; the
@@ -289,6 +297,25 @@ export function createHostHandlers(
     }
   }
 
+  /**
+   * Scrollback of the session this stream is ALREADY attached to, so the client can hydrate its
+   * (empty) emulator scrollback on re-entry. Deliberately keyed by `streamId`, never by a
+   * client-supplied tmux session name / persistKey: a client may only read the history of a
+   * session `pty.attach` already granted it. An unknown stream degrades to an empty result.
+   */
+  function handleCaptureHistory(req: RpcRequest): void {
+    const streamId = num(asRecord(req.params).streamId, -1)
+    const stream = streams.get(streamId)
+    if (!stream) {
+      socket.respond(req.id, true, { output: '' })
+      return
+    }
+    void pty
+      .captureHistory(stream.persistKey)
+      .then((output) => socket.respond(req.id, true, { output }))
+      .catch(() => socket.respond(req.id, true, { output: '' }))
+  }
+
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
@@ -310,6 +337,9 @@ export function createHostHandlers(
           break
         case 'pty.attach':
           handleAttach(req)
+          break
+        case 'pty.captureHistory':
+          handleCaptureHistory(req)
           break
         case 'pty.kill':
           handleKill(req)

@@ -33,6 +33,7 @@ function makeHostFakes() {
     createDetached: vi.fn(() => 'sess'),
     attachDetached: vi.fn(() => 'sess'),
     captureSnapshot: vi.fn(async () => ''),
+    captureHistory: vi.fn(async () => 'HISTORY'),
     write: vi.fn(),
     resize: vi.fn(),
     setFlow: vi.fn(),
@@ -89,6 +90,47 @@ describe('R1: fs.* is confined to the shared roots', () => {
     await Promise.resolve()
     expect(reads).toEqual([])
     expect(responses[0]).toEqual({ id: '1', ok: true, body: { entries: [] } })
+  })
+})
+
+// --- pty.captureHistory: scoped to an already-attached stream ----------------
+
+describe('pty.captureHistory is scoped to the client\'s own streams', () => {
+  it('captures the history of the session the streamId is attached to', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+    await Promise.resolve()
+    await Promise.resolve()
+    const streamId = (responses[0].body as { streamId: number }).streamId
+
+    handlers.onRpc({ id: '2', method: 'pty.captureHistory', params: { streamId } })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).toHaveBeenCalledWith('node-a')
+    expect(responses[1]).toEqual({ id: '2', ok: true, body: { output: 'HISTORY' } })
+  })
+
+  it('degrades to an empty result for an unknown streamId (never reads another session)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({ id: '1', method: 'pty.captureHistory', params: { streamId: 42 } })
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    expect(responses).toEqual([{ id: '1', ok: true, body: { output: '' } }])
+  })
+
+  it('ignores a client-supplied session name / persistKey', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => [])
+    handlers.onRpc({
+      id: '1',
+      method: 'pty.captureHistory',
+      params: { session: 'nt-victim', persistKey: 'victim', nodeId: 'victim' }
+    })
+    await Promise.resolve()
+    expect(pty.captureHistory as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    expect(responses).toEqual([{ id: '1', ok: true, body: { output: '' } }])
   })
 })
 
