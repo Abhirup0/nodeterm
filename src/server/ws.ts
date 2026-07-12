@@ -18,6 +18,7 @@ import type { Auth } from './auth'
 import type { ServerPlatform } from './platform-server'
 import { sessionTokenFromCookie } from './http'
 import { parseRpcMessage } from '../shared/rpc'
+import { presenceHub } from '../core/presence/hub'
 
 export interface WsServerOpts {
   platform: ServerPlatform
@@ -77,6 +78,10 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
       sendBinary: (buf) => ws.send(buf, { binary: true }),
       bufferedAmount: () => ws.bufferedAmount
     })
+    // Team presence: each authenticated socket is one peer. Joining AFTER attach means the hub's
+    // `presence:sync` sendTo lands on a live sink; the browser bridge buffers it until the app
+    // subscribes. The peer stays nameless ("Someone") until it sends `presence:hello`.
+    presenceHub.join(uiId, 'browser')
 
     ws.on('message', (data: unknown, isBinary: boolean) => {
       // Binary client→server frames are ignored in Phase 2 (pty input rides JSON casts).
@@ -105,6 +110,7 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
     })
 
     ws.on('close', () => {
+      presenceHub.leave(uiId)
       platform.detach(uiId)
     })
   })

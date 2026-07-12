@@ -8,6 +8,7 @@ import { Auth } from './auth'
 import { ServerPlatform } from './platform-server'
 import { attachWsServer } from './ws'
 import { SESSION_COOKIE } from './http'
+import { initPlatform } from '../core/platform'
 
 let dir: string, server: http.Server, port: number, auth: Auth, platform: ServerPlatform, cookie: string
 
@@ -15,6 +16,9 @@ beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-ws-'))
   auth = new Auth(dir)
   platform = new ServerPlatform({ userDataDir: dir, appVersion: '0.0.0' })
+  // The connection handler joins the presence hub, and the hub reaches its shell through the
+  // core platform singleton — so this unit test must install the platform, exactly as boot does.
+  initPlatform(platform)
   server = http.createServer((_q, s) => { s.statusCode = 404; s.end() })
   attachWsServer(server, { platform, auth })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
@@ -23,6 +27,10 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   await new Promise((r) => server.close(r))
+  // Deliberately NOT resetPlatformForTests(): a socket's 'close' can fire a tick after
+  // server.close() resolves, and that handler leaves the presence hub — with the platform torn
+  // out from under it, that async callback would throw as an uncaught exception. The next
+  // beforeEach replaces the singleton anyway.
   fs.rmSync(dir, { recursive: true, force: true })
 })
 

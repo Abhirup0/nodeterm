@@ -16,6 +16,7 @@ import { registerCoreHandlers } from './handlers'
 import { hookServer } from '../core/agents/hook-server'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { initAgentStatusMirror } from '../core/agent-status-mirror'
+import { presenceHub } from '../core/presence/hub'
 import { wireAgentStatus } from './agent-status'
 import { IPC } from '@shared/ipc'
 
@@ -73,6 +74,9 @@ export async function startServer(
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
+  // Team presence (hello / cursor / focus / chat). The hub itself is joined per WebSocket in
+  // ws.ts; this only registers the RPC surface. Presence is transient — nothing is persisted.
+  presenceHub.registerIpc()
 
   // WS backpressure: when a connection's socket send buffer fills while streaming pty
   // output, pause that tmux client so the OS pipe applies real backpressure (resumes below
