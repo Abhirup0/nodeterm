@@ -62,6 +62,10 @@ export const RENAME_CAPABLE = ['claude'] as const
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill, codex/gemini a
 // marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md (see canvas-control.ts).
 export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini'] as const
+// Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
+// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
+// (--approval-mode) join by being added here with their own flag mapping.
+export const PERMISSION_MODE_CAPABLE = ['claude'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
@@ -76,6 +80,7 @@ export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
+export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
 
 // Returns the builtin config for an id, or undefined for custom/unknown agents.
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>
@@ -116,14 +121,8 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
  */
 export type AgentPermissionMode = 'manual' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
 
-export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = [
-  'manual',
-  'auto',
-  'acceptEdits',
-  'plan',
-  'bypassPermissions'
-]
-
+// Declared first: its `Record<AgentPermissionMode, string>` type forces every member of the
+// union to be present, which is what makes ALL_PERMISSION_MODES below impossible to desync.
 export const PERMISSION_MODE_LABELS: Record<AgentPermissionMode, string> = {
   manual: 'Ask each time',
   auto: 'Auto',
@@ -132,22 +131,29 @@ export const PERMISSION_MODE_LABELS: Record<AgentPermissionMode, string> = {
   bypassPermissions: 'Bypass all'
 }
 
+// Derived, never hand-maintained: add a mode to the union and the compiler makes you label it,
+// which lands it here (and so in the settings dropdown + isPermissionMode) automatically.
+export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = Object.keys(
+  PERMISSION_MODE_LABELS
+) as AgentPermissionMode[]
+
 /** Fallback whenever a persisted mode is missing or unrecognized. */
 export const DEFAULT_PERMISSION_MODE: AgentPermissionMode = 'auto'
 
 const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
   typeof v === 'string' && (ALL_PERMISSION_MODES as readonly string[]).includes(v)
 
-// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
-// (--approval-mode) join by being added here with their own flag mapping.
-export const PERMISSION_MODE_CAPABLE = ['claude'] as const
-
-export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
-
 /** CLI flags for a mode. `manual` yields NO flags, so the command stays bare — the exact
- *  command nodeterm shipped before this setting existed. */
+ *  command nodeterm shipped before this setting existed.
+ *
+ *  The mode is re-validated HERE even though the parameter is typed: AgentPermissionMode is
+ *  compile-time only, and the value comes from hand-editable, git-shared JSON (settings.json /
+ *  project.json) before being interpolated into a shell command line. Same rule as
+ *  SAFE_SESSION_ID above — validate at the interpolation site. An unrecognized mode yields the
+ *  safe bare command rather than a flag carrying an unvalidated value. */
 export function permissionModeFlag(mode: AgentPermissionMode): string[] {
-  return mode === 'manual' ? [] : ['--permission-mode', mode]
+  if (!isPermissionMode(mode) || mode === 'manual') return []
+  return ['--permission-mode', mode]
 }
 
 /** Appends the permission-mode flag to a launch command, if the agent supports one. The single

