@@ -7,12 +7,15 @@ export interface BoundGroup {
 }
 
 /**
- * live    — group ids whose bound worktree is still registered with git.
  * stale   — group ids whose worktree is gone from disk (deleted outside the app).
  * orphans — worktrees on disk that no group is bound to (every Unbind makes one).
+ *
+ * There is deliberately no `live` list: it is the exact complement of `stale` over the bindings the
+ * caller passed in, and nothing ever read it. A second, derived source of the same truth is a
+ * standing invitation for the two to disagree — the UI asks "is this group stale?", so `stale` is
+ * the only answer that needs to exist.
  */
 export interface Reconciliation {
-  live: string[]
   stale: string[]
   orphans: WorktreeEntry[]
 }
@@ -42,15 +45,11 @@ export function reconcileWorktrees(bound: BoundGroup[], entries: WorktreeEntry[]
   const onDisk = new Set(present.map((e) => norm(e.path)))
   const boundPaths = new Set(bound.map((b) => norm(b.worktree.path)))
 
-  const live: string[] = []
-  const stale: string[] = []
-  for (const b of bound) {
-    ;(onDisk.has(norm(b.worktree.path)) ? live : stale).push(b.groupId)
-  }
+  const stale = bound.filter((b) => !onDisk.has(norm(b.worktree.path))).map((b) => b.groupId)
 
   const orphans = present.filter(
     (e) => norm(e.path) !== norm(mainCheckout ?? '') && !boundPaths.has(norm(e.path))
   )
 
-  return { live, stale, orphans }
+  return { stale, orphans }
 }

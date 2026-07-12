@@ -15,21 +15,21 @@ const bound = (groupId: string, path: string, branch: string): BoundGroup => ({
 })
 
 describe('reconcileWorktrees', () => {
-  it('reports a binding whose worktree still exists as live', () => {
+  it('does not report a binding whose worktree still exists as stale', () => {
     const r = reconcileWorktrees([bound('g1', '/wt/feat', 'feat')], [wt('/repo', 'main'), wt('/wt/feat', 'feat')])
-    expect(r.live).toEqual(['g1'])
     expect(r.stale).toEqual([])
   })
 
   it('reports a binding whose worktree is gone from disk as stale', () => {
     const r = reconcileWorktrees([bound('g1', '/wt/feat', 'feat')], [wt('/repo', 'main')])
     expect(r.stale).toEqual(['g1'])
-    expect(r.live).toEqual([])
   })
 
   it('ignores a trailing slash when matching paths', () => {
+    // The persisted path has a trailing slash, git's does not: if that difference were not
+    // normalised away, the binding would be reported stale even though its worktree is right there.
     const r = reconcileWorktrees([bound('g1', '/wt/feat/', 'feat')], [wt('/repo', 'main'), wt('/wt/feat', 'feat')])
-    expect(r.live).toEqual(['g1'])
+    expect(r.stale).toEqual([])
   })
 
   it('reports a worktree on disk that no group is bound to as an orphan', () => {
@@ -57,7 +57,6 @@ describe('reconcileWorktrees', () => {
     const gone: WorktreeEntry = { ...wt('/wt/feat', 'feat'), prunable: true }
     const r = reconcileWorktrees([bound('g1', '/wt/feat', 'feat')], [wt('/repo', 'main'), gone])
     expect(r.stale).toEqual(['g1'])
-    expect(r.live).toEqual([])
   })
 
   it('never offers a prunable worktree as an adoptable orphan', () => {
@@ -71,7 +70,6 @@ describe('reconcileWorktrees', () => {
       [bound('g1', '/wt/a', 'a'), bound('g2', '/wt/gone', 'gone')],
       [wt('/repo', 'main'), wt('/wt/a', 'a'), wt('/wt/loose', 'loose')]
     )
-    expect(r.live).toEqual(['g1'])
     expect(r.stale).toEqual(['g2'])
     expect(r.orphans.map((o) => o.path)).toEqual(['/wt/loose'])
   })

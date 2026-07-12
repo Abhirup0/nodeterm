@@ -1,13 +1,18 @@
 import type { GroupWorktree } from './worktree'
 import type { BoundGroup } from './worktree-reconcile'
 
-/** One checkout the Source Control panel can operate on. */
+/**
+ * One checkout the Source Control panel can operate on.
+ *
+ * There is deliberately no `kind: 'main' | 'worktree'` field: `id === 'main'` already IS that
+ * distinction (it is the one id no group node can have), and the label already says "(worktree)".
+ * A third encoding of the same fact is one more thing that can drift out of step with the other two.
+ */
 export interface ScmScope {
   /** 'main' for the project's own checkout, else the bound group's node id. */
   id: string
   label: string
   cwd: string
-  kind: 'main' | 'worktree'
 }
 
 /**
@@ -35,12 +40,11 @@ export function boundGroups(nodes: ScmScopeNode[]): BoundGroup[] {
 export function scmScopes(project: { cwd?: string; name: string }, bound: BoundGroup[]): ScmScope[] {
   if (!project.cwd) return []
   return [
-    { id: 'main', label: `${project.name} (main checkout)`, cwd: project.cwd, kind: 'main' },
+    { id: 'main', label: `${project.name} (main checkout)`, cwd: project.cwd },
     ...bound.map((b) => ({
       id: b.groupId,
       label: `${b.worktree.branch} (worktree)`,
-      cwd: b.worktree.path,
-      kind: 'worktree' as const
+      cwd: b.worktree.path
     }))
   ]
 }

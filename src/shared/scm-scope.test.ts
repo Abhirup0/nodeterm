@@ -32,12 +32,12 @@ describe('boundGroups', () => {
 describe('scmScopes', () => {
   it('always puts the main checkout first', () => {
     const scopes = scmScopes(project, [bound('g1', 'feat', '/wt/feat')])
-    expect(scopes[0]).toEqual({ id: 'main', label: 'nodeterm (main checkout)', cwd: '/repo', kind: 'main' })
+    expect(scopes[0]).toEqual({ id: 'main', label: 'nodeterm (main checkout)', cwd: '/repo' })
   })
 
   it('adds one scope per bound worktree, keyed by group id', () => {
     const scopes = scmScopes(project, [bound('g1', 'feat', '/wt/feat')])
-    expect(scopes[1]).toEqual({ id: 'g1', label: 'feat (worktree)', cwd: '/wt/feat', kind: 'worktree' })
+    expect(scopes[1]).toEqual({ id: 'g1', label: 'feat (worktree)', cwd: '/wt/feat' })
   })
 
   it('returns nothing when the project has no cwd', () => {
