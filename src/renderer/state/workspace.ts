@@ -1,9 +1,14 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
+import type { CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
 import type { AgentId } from '@shared/agents/config'
 import { agentConfig } from '@shared/agents/config'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
+
+// Re-exported so Canvas (and anything else in the renderer) keeps importing it from here, while the
+// single implementation lives in src/shared and is shared with the relay host + the canvas-sync
+// reflector.
+export { applyCanvasMutation } from '@shared/canvas-mutations'
 
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
@@ -880,24 +885,6 @@ export function reorderNodeBefore(
 }
 
 /** Converts persisted node states into live React Flow nodes (parents first). */
-/**
- * Apply a single canvas mutation to a list of node states (renderer mirror of
- * `main/remote/canvas-sync`'s `applyMutation`, kept here to keep the renderer off the main-process
- * boundary). `upsert` replaces-or-appends by id; `remove` filters by id. Returns a NEW array
- * (the input is never mutated).
- */
-export function applyCanvasMutation(
-  states: CanvasNodeState[],
-  m: CanvasMutation
-): CanvasNodeState[] {
-  if (m.op === 'remove') return states.filter((n) => n.id !== m.id)
-  const idx = states.findIndex((n) => n.id === m.node.id)
-  if (idx === -1) return [...states, m.node]
-  const next = states.slice()
-  next[idx] = m.node
-  return next
-}
-
 export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
   // React Flow requires a parent node to appear before its children in the array.
   const ordered = [...states].sort((a, b) => {
