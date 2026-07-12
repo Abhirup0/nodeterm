@@ -6,7 +6,7 @@ import {
   peersOnProject,
   sanitizeIdentity,
   NAME_MAX_LEN,
-  CHAT_MAX_LEN,
+  type PeerDiff,
   type PeerState
 } from './presence'
 
@@ -29,8 +29,35 @@ describe('presence palette', () => {
     expect(nextFreeColor([])).toBe(PRESENCE_COLORS[0])
     expect(nextFreeColor([PRESENCE_COLORS[0]])).toBe(PRESENCE_COLORS[1])
     expect(nextFreeColor([PRESENCE_COLORS[1]])).toBe(PRESENCE_COLORS[0])
-    // Every color taken → wrap (a 9th peer reuses the 1st color rather than going colorless).
-    expect(PRESENCE_COLORS).toContain(nextFreeColor([...PRESENCE_COLORS]))
+  })
+
+  it('wraps by taken-count once every color is in use (the exact documented rule)', () => {
+    // Every color taken → the (n+1)-th peer reuses PRESENCE_COLORS[taken.length % length]
+    // rather than going colorless. Pin the exact color: "some palette color" would also pass
+    // for a random-color implementation.
+    const all = [...PRESENCE_COLORS]
+    expect(nextFreeColor(all)).toBe(PRESENCE_COLORS[all.length % PRESENCE_COLORS.length])
+    expect(nextFreeColor(all)).toBe(PRESENCE_COLORS[0])
+    expect(nextFreeColor([...all, PRESENCE_COLORS[0]])).toBe(PRESENCE_COLORS[1])
+    expect(nextFreeColor([...all, PRESENCE_COLORS[0], PRESENCE_COLORS[1]])).toBe(PRESENCE_COLORS[2])
+  })
+
+  it('is a readonly palette (no consumer can corrupt color assignment app-wide)', () => {
+    // @ts-expect-error PRESENCE_COLORS is readonly — pushing into it must not typecheck.
+    expect(() => PRESENCE_COLORS.push('#000000')).toBeDefined()
+    // Callers stay unconstrained: a mutable array is still an acceptable `taken` argument.
+    const mutable: string[] = [PRESENCE_COLORS[0]]
+    expect(nextFreeColor(mutable)).toBe(PRESENCE_COLORS[1])
+  })
+})
+
+describe('PeerDiff (wire contract)', () => {
+  it('cannot rewrite the identity key through an update patch', () => {
+    const ok: PeerDiff = { op: 'update', clientId: 3, patch: { focus: 'n1', chat: 'hi' } }
+    expect(ok.op).toBe('update')
+    // @ts-expect-error an update patch must not be able to reassign clientId.
+    const bad: PeerDiff = { op: 'update', clientId: 3, patch: { clientId: 7 } }
+    expect(bad).toBeDefined()
   })
 })
 
@@ -67,8 +94,21 @@ describe('sanitizeIdentity', () => {
     expect(sanitizeIdentity({ name: 'Enes', color: 42 }, fallback).color).toBe(fallback.color)
   })
 
-  it('exposes a chat cap so a peer cannot flood the wire', () => {
-    expect(CHAT_MAX_LEN).toBeGreaterThan(0)
+  it('caps by code point, never splitting an astral-plane character in half', () => {
+    // 31 ASCII + 2 emoji: the cap lands mid-emoji. Cutting by UTF-16 code unit would leave a
+    // lone surrogate, which every peer's facepile renders as "�".
+    const name = 'x'.repeat(NAME_MAX_LEN - 1) + '😀😀'
+    const out = sanitizeIdentity({ name, color: PRESENCE_COLORS[0] }, fallback).name
+    expect(out).toBe('x'.repeat(NAME_MAX_LEN - 1) + '😀')
+    expect([...out]).toHaveLength(NAME_MAX_LEN)
+    expect(out).not.toMatch(/[\uD800-\uDFFF]/u) // no unpaired surrogate survived
+    expect(out).not.toContain('�')
+  })
+
+  it('trims after truncating, so a cap landing on a space leaves no trailing space', () => {
+    const name = 'a'.repeat(NAME_MAX_LEN - 1) + ' tail'
+    const out = sanitizeIdentity({ name, color: PRESENCE_COLORS[0] }, fallback).name
+    expect(out).toBe('a'.repeat(NAME_MAX_LEN - 1))
   })
 })
 

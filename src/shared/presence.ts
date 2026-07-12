@@ -37,11 +37,14 @@ export interface PeerState {
 
 export type PeerDiff =
   | { op: 'join'; peer: PeerState }
-  | { op: 'update'; clientId: ClientId; patch: Partial<PeerState> }
+  /** `clientId` is the identity key and is carried by the diff itself — a patch can never
+   *  rewrite it (that would silently reassign the peer). */
+  | { op: 'update'; clientId: ClientId; patch: Partial<Omit<PeerState, 'clientId'>> }
   | { op: 'leave'; clientId: ClientId }
 
-/** Peer colors, assigned next-free on join. Picked for contrast on the black canvas. */
-export const PRESENCE_COLORS: string[] = [
+/** Peer colors, assigned next-free on join. Picked for contrast on the black canvas.
+ *  `readonly`: color assignment is app-wide state, so no consumer may push/sort/assign into it. */
+export const PRESENCE_COLORS: readonly string[] = [
   '#5ac8fa', // blue
   '#ff9f0a', // orange
   '#30d158', // green
@@ -58,8 +61,9 @@ export const TYPING_DECAY_MS = 2000
 export const NAME_MAX_LEN = 32
 export const CHAT_MAX_LEN = 200
 
-/** First palette color not already in use; wraps by count once every color is taken. */
-export function nextFreeColor(taken: string[]): string {
+/** First palette color not already in use; wraps by count once every color is taken.
+ *  `taken` is `readonly` so callers stay unconstrained (a mutable `string[]` is accepted). */
+export function nextFreeColor(taken: readonly string[]): string {
   const used = new Set(taken)
   const free = PRESENCE_COLORS.find((c) => !used.has(c))
   return free ?? PRESENCE_COLORS[taken.length % PRESENCE_COLORS.length]
@@ -82,12 +86,20 @@ export function peersOnProject(peers: PeerState[], projectId: string | null): Pe
   return peers.filter((p) => p.projectId === projectId)
 }
 
+/** Cap a name at NAME_MAX_LEN *code points*, not UTF-16 code units: `slice` would cut a
+ *  surrogate pair (emoji, CJK extensions) in half and leave a lone surrogate, which renders as
+ *  "�" in every peer's facepile. Trim runs again AFTER the cut, so a truncation landing on a
+ *  space doesn't leave a trailing one. */
+function capName(name: string): string {
+  return [...name.trim()].slice(0, NAME_MAX_LEN).join('').trim()
+}
+
 /** Coerce an untrusted {name, color} off the wire into a safe identity. Names are unverified
  *  (anyone can claim any name — documented trade-off) but they are length-capped, and the color
  *  must be one of ours so it can never be injected into a style attribute as arbitrary text. */
 export function sanitizeIdentity(raw: unknown, fallback: PeerIdentity): PeerIdentity {
   const r = (raw ?? {}) as Partial<PeerIdentity>
-  const name = typeof r.name === 'string' ? r.name.trim().slice(0, NAME_MAX_LEN) : ''
+  const name = typeof r.name === 'string' ? capName(r.name) : ''
   const color =
     typeof r.color === 'string' && PRESENCE_COLORS.includes(r.color) ? r.color : fallback.color
   return { name: name || fallback.name, color }
