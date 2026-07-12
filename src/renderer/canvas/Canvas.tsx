@@ -736,11 +736,11 @@ export function Canvas() {
       requireProOr('SSH Remote Projects', () => {
         window.nodeTerminal.sshProject
           .connect(project.id, ssh.server, ssh.remoteCwd)
-          .then(async ({ controlPath, hookEndpointPath, tmuxConfPath, remoteHome }) => {
+          .then(async (info) => {
             // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
             // Source Control panel's re-fetch (which keys off that entry) already hits the master.
             await window.nodeTerminal.git.setActiveRemote(project.id)
-            useSshConn.getState().setConn(project.id, { controlPath, hookEndpointPath, tmuxConfPath, remoteHome })
+            useSshConn.getState().setConn(project.id, info)
           })
           .catch(() => {
             /* status surfaced via onStatus → the connection banner */

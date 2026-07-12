@@ -13,6 +13,10 @@ export interface SshConnInfo {
   /** The connection's resolved remote `$HOME`. Used to build an ABSOLUTE remote
    *  `CLAUDE_CONFIG_DIR` for a managed remote account. Optional: absent if it couldn't resolve. */
   remoteHome?: string
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.90)? Probed on the
+   *  host at connect — the local CLI's answer says nothing about the remote one. Absent/false ⇒
+   *  this project's Claude nodes launch with the bare command (no `auto` flag). */
+  claudeAutoPermissionMode?: boolean
 }
 
 /**
@@ -29,6 +33,9 @@ interface SshConnState {
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
   getRemoteHome(projectId: string): string | undefined
+  /** True ONLY when the remote CLI was probed and is known to accept `--permission-mode auto`.
+   *  Not connected / never probed / older CLI all answer false (conservative — omit the flag). */
+  supportsAutoPermissionMode(projectId: string): boolean
   clear(projectId: string): void
 }
 
@@ -48,6 +55,9 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   getRemoteHome(projectId) {
     return get().byProject[projectId]?.remoteHome
+  },
+  supportsAutoPermissionMode(projectId) {
+    return get().byProject[projectId]?.claudeAutoPermissionMode === true
   },
   clear(projectId) {
     set((s) => {

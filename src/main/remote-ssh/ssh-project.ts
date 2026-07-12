@@ -6,6 +6,7 @@ import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatus } from '../../shared/types'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
+import { supportsAutoPermissionMode } from '../../shared/agents/config'
 import {
   controlPathFor,
   masterArgs,
@@ -50,6 +51,11 @@ interface Conn {
   /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
    * connection's master. Undefined when the project has no folder selected. */
   remoteCwd?: string
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.90)? Probed once at
+   * connect: the remote CLI can be older than the local one, and the local answer must never be
+   * applied to a remote launch. Undefined/false ⇒ the renderer omits the flag for this project's
+   * Claude nodes (bare command — today's behavior), never a failed launch. */
+  claudeAutoPermissionMode?: boolean
 }
 
 /**
@@ -121,7 +127,13 @@ export class SshProjectManager {
     projectId: string,
     conn: SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }> {
+  ): Promise<{
+    controlPath: string
+    hookEndpointPath?: string
+    tmuxConfPath?: string
+    remoteHome?: string
+    claudeAutoPermissionMode?: boolean
+  }> {
     const existing = this.conns.get(projectId)
     if (existing) {
       // Verify the cached master is still alive before reusing it — a dropped/timed-out master
@@ -132,7 +144,13 @@ export class SshProjectManager {
         // Keep the remote git cwd current even on an idempotent reuse (the folder may have changed).
         // Guard against a later connect without remoteCwd clearing a known cwd.
         existing.remoteCwd = remoteCwd ?? existing.remoteCwd
-        return { controlPath: existing.controlPath, hookEndpointPath: existing.hookEndpointPath, tmuxConfPath: existing.tmuxConfPath, remoteHome: existing.remoteHome }
+        return {
+          controlPath: existing.controlPath,
+          hookEndpointPath: existing.hookEndpointPath,
+          tmuxConfPath: existing.tmuxConfPath,
+          remoteHome: existing.remoteHome,
+          claudeAutoPermissionMode: existing.claudeAutoPermissionMode
+        }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
       existing.master.kill()
@@ -192,14 +210,21 @@ export class SshProjectManager {
             /* fail-open: no conf → remote tmux uses host defaults */
           }
         }
+        // Probe the REMOTE claude CLI once per connect: `--permission-mode auto` only exists in
+        // >= 2.1.90 and the host's CLI may be older than the local one. Unknown ⇒ false ⇒ the
+        // renderer launches this project's Claude nodes with the bare command (fail-open).
+        const claudeAutoPermissionMode = supportsAutoPermissionMode(
+          await this.remoteClaudeVersion(conn, controlPath)
+        )
         const entry = this.conns.get(projectId)
         if (entry) {
           entry.hookEndpointPath = hookEndpointPath
           entry.remoteHome = remoteHome
           entry.tmuxConfPath = tmuxConfPath
+          entry.claudeAutoPermissionMode = claudeAutoPermissionMode
         }
         this.r.onStatus({ projectId, status: 'connected' })
-        return { controlPath, hookEndpointPath, tmuxConfPath, remoteHome }
+        return { controlPath, hookEndpointPath, tmuxConfPath, remoteHome, claudeAutoPermissionMode }
       }
       await new Promise((res) => setTimeout(res, 100))
     }
@@ -369,16 +394,32 @@ export class SshProjectManager {
     await this.r.run(childArgs(c.conn, c.controlPath, `rm -rf ${quoteRemotePath(dir)}`))
   }
 
-  /** Best-effort remote `claude --version` check. Returns true when it can't be determined (a
-   *  non-login ssh shell may lack claude on PATH) so remote add is never blocked on detection. */
-  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
+  /**
+   * Best-effort `claude --version` ON THE REMOTE HOST. Null when it can't be determined.
+   *
+   * An ssh EXEC channel gets a non-interactive, non-login shell, whose rc file usually bails out
+   * early — so a claude installed via nvm/asdf/homebrew-on-PATH may be invisible to a plain
+   * `claude --version`. The remote tmux session that actually RUNS the node uses a login shell, so
+   * we try that first and only then the bare command.
+   */
+  private async remoteClaudeVersion(conn: SshConnection, controlPath: string): Promise<string | null> {
     try {
-      const { code, stdout } = await this.r.run(childArgs(c.conn, c.controlPath, 'claude --version'))
-      if (code !== 0) return true
-      return isSupportedClaudeVersion(stdout.trim())
+      const { code, stdout } = await this.r.run(
+        childArgs(conn, controlPath, `$SHELL -lc 'claude --version' 2>/dev/null || claude --version 2>/dev/null`)
+      )
+      const out = stdout.trim()
+      return code === 0 && out ? out : null
     } catch {
-      return true
+      return null
     }
+  }
+
+  /** Is the remote claude new enough to scope credentials per config dir? Returns true when it
+   *  can't be determined so remote account add is never blocked on detection (fail-open). */
+  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
+    const version = await this.remoteClaudeVersion(c.conn, c.controlPath)
+    if (!version) return true
+    return isSupportedClaudeVersion(version)
   }
 
   async disconnect(projectId: string): Promise<void> {

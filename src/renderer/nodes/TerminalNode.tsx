@@ -32,7 +32,7 @@ import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
-import { activePermissionMode } from '../state/permissionMode'
+import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
@@ -556,8 +556,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           // Re-resolve the mode at relaunch: it's a property of how a session is launched, not
           // a persisted property of the node, so the current setting wins after a reboot. `base`
           // is always freshly built here — never a command string read back from node data — so
-          // it can never end up double-flagged.
-          const cmd = base && withPermissionMode(base, agentId, activePermissionMode())
+          // it can never end up double-flagged. Awaited (not the sync `activePermissionMode`)
+          // because this fires on mount: right after a machine reboot it can beat the CLI version
+          // probe, and an unanswered probe would conservatively drop `auto`.
+          const cmd = base && withPermissionMode(base, agentId, await ensureActivePermissionMode())
           if (cmd) transport.write(sid, `${cmd}\n`)
         }
       })
