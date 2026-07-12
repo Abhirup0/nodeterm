@@ -2218,6 +2218,9 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
         e.preventDefault()
         setExplorerOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        setScOpen(true)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault()
         toggleSessionsPin()
@@ -3900,8 +3903,8 @@ export function Canvas() {
         <button title="Explorer (⌘⇧E)" onClick={() => setExplorerOpen(true)}>
           🗂
         </button>
-        <button title="Source Control" onClick={() => setScOpen(true)}>
-          ⎇
+        <button title="Source Control (⌘⇧G)" onClick={() => setScOpen(true)}>
+          <IconBranch />
         </button>
         <button
           title="Settings (⌘,)"
