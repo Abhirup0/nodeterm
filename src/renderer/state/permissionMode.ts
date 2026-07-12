@@ -11,9 +11,6 @@ import { useSettings } from './settings'
  */
 export function activePermissionMode(): AgentPermissionMode {
   const { settings } = useSettings.getState()
-  const { projects, activeProjectId } = useProjects.getState()
-  return resolvePermissionMode(
-    projects.find((p) => p.id === activeProjectId),
-    settings
-  )
+  const { getProject, activeProjectId } = useProjects.getState()
+  return resolvePermissionMode(getProject(activeProjectId), settings)
 }
