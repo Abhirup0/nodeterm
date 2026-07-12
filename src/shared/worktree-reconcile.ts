@@ -17,7 +17,10 @@ export interface Reconciliation {
   orphans: WorktreeEntry[]
 }
 
-const norm = (p: string): string => p.trim().replace(/\/+$/, '')
+/** Compare worktree paths as git prints them vs. as we persisted them: trailing slashes differ. */
+export const normWorktreePath = (p: string): string => p.trim().replace(/\/+$/, '')
+
+const norm = normWorktreePath
 
 /**
  * Compare the persisted bindings against `git worktree list`. The FIRST entry git prints is the
