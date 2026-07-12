@@ -30,6 +30,12 @@ export function sshReadBinaryArgs(conn: SshConnection, cp: string, path: string)
 export function sshWriteArgs(conn: SshConnection, cp: string, path: string): string[] {
   return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(dirname(path))} && cat > ${quoteRemotePath(path)}`)
 }
+export function sshMkdirArgs(conn: SshConnection, cp: string, path: string): string[] {
+  return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(path)}`)
+}
+export function sshExistsArgs(conn: SshConnection, cp: string, path: string): string[] {
+  return childArgs(conn, cp, `test -e ${quoteRemotePath(path)}`)
+}
 export function sshCheckIgnoreArgs(conn: SshConnection, cp: string, dir: string, names: string[]): string[] {
   // The dir is a remote path (may be tilde-prefixed) → quoteRemotePath; the entry NAMES are bare
   // filenames with no tilde → posixQuote literally (and inject-safe).
@@ -92,6 +98,24 @@ export class SshFs {
   async writeText(ref: SshFsRef, path: string, content: string): Promise<boolean> {
     try {
       const { code } = await this.run(sshWriteArgs(ref.conn, ref.controlPath, path), content)
+      return code === 0
+    } catch {
+      return false
+    }
+  }
+
+  async mkdir(ref: SshFsRef, path: string): Promise<boolean> {
+    try {
+      const { code } = await this.run(sshMkdirArgs(ref.conn, ref.controlPath, path))
+      return code === 0
+    } catch {
+      return false
+    }
+  }
+
+  async exists(ref: SshFsRef, path: string): Promise<boolean> {
+    try {
+      const { code } = await this.run(sshExistsArgs(ref.conn, ref.controlPath, path))
       return code === 0
     } catch {
       return false

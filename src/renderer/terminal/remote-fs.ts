@@ -16,6 +16,12 @@ export function remoteFs(connectionId: string): FsApi {
     list: (dirPath) => client.fsList(connectionId, dirPath),
     read: (filePath) => client.fsRead(connectionId, filePath),
     readBinary: (filePath) => client.fsReadBinary(connectionId, filePath),
-    write: (filePath, content) => client.fsWrite(connectionId, filePath, content)
+    write: (filePath, content) => client.fsWrite(connectionId, filePath, content),
+    // mkdir/exists are not yet plumbed through the E2EE relay RPC (RemoteClientApi has no
+    // fsMkdir/fsExists). Until the host-service surface gains them, degrade gracefully: a relay
+    // Explorer reports "does not exist" and cannot create dirs, rather than throwing. See the
+    // fs.mkdir/exists task follow-up.
+    mkdir: () => Promise.resolve(false),
+    exists: () => Promise.resolve(false)
   }
 }

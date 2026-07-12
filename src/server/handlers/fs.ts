@@ -11,5 +11,7 @@ export function registerFsHandlers(platform: ServerPlatform): void {
   platform.handle(IPC.fsRead, (filePath: string) => fsOps.readText(filePath))
   platform.handle(IPC.fsReadBinary, (filePath: string) => fsOps.readBinary(filePath))
   platform.handle(IPC.fsWrite, (filePath: string, content: string) => fsOps.writeText(filePath, content))
+  platform.handle(IPC.fsMkdir, (dirPath: string) => fsOps.makeDir(dirPath))
+  platform.handle(IPC.fsExists, (p: string) => fsOps.pathExists(p))
   platform.handle(IPC.filesQuickOpen, (cwd: string) => fsOps.listQuickOpenFiles(cwd))
 }

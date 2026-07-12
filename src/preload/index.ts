@@ -148,7 +148,9 @@ const api: NodeTerminalApi = {
     readBinary: (projectId: string, path: string) =>
       ipcRenderer.invoke(IPC.sshFsReadBinary, projectId, path),
     write: (projectId: string, path: string, content: string) =>
-      ipcRenderer.invoke(IPC.sshFsWrite, projectId, path, content)
+      ipcRenderer.invoke(IPC.sshFsWrite, projectId, path, content),
+    mkdir: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsMkdir, projectId, p),
+    exists: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsExists, projectId, p)
   },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
@@ -213,7 +215,9 @@ const api: NodeTerminalApi = {
     list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),
     read: (filePath: string) => ipcRenderer.invoke(IPC.fsRead, filePath),
     readBinary: (filePath: string) => ipcRenderer.invoke(IPC.fsReadBinary, filePath),
-    write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content)
+    write: (filePath: string, content: string) => ipcRenderer.invoke(IPC.fsWrite, filePath, content),
+    mkdir: (dirPath: string) => ipcRenderer.invoke(IPC.fsMkdir, dirPath),
+    exists: (p: string) => ipcRenderer.invoke(IPC.fsExists, p)
   },
   media: {
     allow: (absPath: string) => ipcRenderer.invoke(IPC.mediaAllow, absPath),

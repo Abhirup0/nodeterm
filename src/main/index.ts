@@ -498,6 +498,8 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.fsWrite, (_e, filePath: string, content: string) =>
     fsOps.writeText(filePath, content)
   )
+  ipcMain.handle(IPC.fsMkdir, (_e, dirPath: string) => fsOps.makeDir(dirPath))
+  ipcMain.handle(IPC.fsExists, (_e, p: string) => fsOps.pathExists(p))
   ipcMain.handle(IPC.filesQuickOpen, (_e, cwd: string) => fsOps.listQuickOpenFiles(cwd))
 
   // SSH-project Explorer/Editor fs: the remote analog of the fs:* handlers above, scoped to a
@@ -524,6 +526,14 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.sshFsWrite, (_e, projectId: string, p: string, content: string) => {
     const ref = sshFsRefFor(projectId)
     return ref ? sshFs.writeText(ref, p, content) : Promise.resolve(false)
+  })
+  ipcMain.handle(IPC.sshFsMkdir, (_e, projectId: string, p: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.mkdir(ref, p) : Promise.resolve(false)
+  })
+  ipcMain.handle(IPC.sshFsExists, (_e, projectId: string, p: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.exists(ref, p) : Promise.resolve(false)
   })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
