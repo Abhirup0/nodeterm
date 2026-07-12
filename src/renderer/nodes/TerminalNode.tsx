@@ -819,7 +819,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // Bytes left the backlog (parsed by xterm, or dropped by a resync — see below). Both must
         // return the flow ticket, or a discarded queue would leave `pending` permanently high and
         // the source paused forever.
+        // Both callers are DEFERRED (an xterm write callback, or a resync's gate reset), so both
+        // can land after teardown — the write loop still runs the callbacks it holds even though
+        // `cleanups` has unsubscribed everything and the session is killed. `life.dead` (flipped
+        // before the teardown in BOTH paths: the effect cleanup and the park dispose) is the
+        // authority: past it there is no session left to un-pause, and `transport.setFlow` would
+        // address a dead one (RemoteTransport forwards to the relay unconditionally).
         const relieve = (bytes: number): void => {
+          if (life.dead) return
           pending -= bytes
           if (paused && pending < LOW_WATER) {
             paused = false
@@ -862,7 +869,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         //
         // `repaintResync` sequences the reset behind a write callback: writes already handed to
         // xterm (up to a megabyte of history seed) are parsed asynchronously, and an inline
-        // `term.reset()` would clear the buffer before they land — see terminal-config.
+        // `term.reset()` would clear the buffer before they land — see terminal-config. That
+        // deferral outlives teardown, so the repaint is gated on `!life.dead`: this listener is
+        // unsubscribed and the xterm disposed, but a callback already inside xterm's write loop
+        // still fires and would reset/write a disposed core. `life` is the session-scoped record
+        // (shared with the park entry), so a PARK — which keeps the xterm and the PTY alive — does
+        // not trip the guard and a resync arriving at a parked terminal still repaints it.
         let superseded = false
         if (transport.onResync) {
           cleanups.push(
@@ -870,7 +882,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
               if (!shouldApplyResync(resyncScreen)) return
               superseded = true
               relieve(gate.reset())
-              repaintResync(term, resyncScreen)
+              repaintResync(term, resyncScreen, () => !life.dead)
             })
           )
         }

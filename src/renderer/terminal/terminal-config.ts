@@ -213,6 +213,13 @@ export interface ResyncTarget {
 export const RESYNC_NOTICE = '\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n'
 
 /**
+ * The capture generation of the LAST repaint issued for a terminal, so a deferred repaint can tell
+ * that a newer capture has superseded it (see `repaintResync`). Weak, and keyed by the xterm itself:
+ * a disposed terminal takes its counter with it, and no node id has to be threaded through.
+ */
+const resyncGeneration = new WeakMap<ResyncTarget, number>()
+
+/**
  * Repaint a terminal from a `pty:resync` capture (the server dropped our backlog and redrew us from
  * tmux, so the capture IS the current screen and must REPLACE the buffer, not stack on top of it).
  *
@@ -223,9 +230,26 @@ export const RESYNC_NOTICE = '\r\n\x1b[90m── reconnected — earlier output 
  * the stale history parse onto the cleared screen, and append the fresh capture BELOW a full screen
  * of stale content — the exact splice the reset exists to prevent. Deferring the reset to a write
  * callback puts it after everything already queued has been parsed.
+ *
+ * Deferring it also hands the repaint to xterm's write loop, which outlives us in two ways the
+ * inline reset never could — hence the two guards inside the callback:
+ * - `alive` — teardown unsubscribes the resync listener and then DISPOSES the terminal, but a
+ *   callback already queued in the write loop still fires: reset()/write() would then run against a
+ *   disposed core and throw inside xterm's async loop. Pass the session's own liveness (`!life.dead`
+ *   in TerminalNode, the record shared with the park entry) — omitted, the repaint is unguarded, as
+ *   for a caller that owns the terminal outright.
+ * - generation — back-to-back resyncs (a second backlog drop before the first repaint parsed) would
+ *   otherwise each reset and paint: capture #2's reset clears a buffer that #1's capture has not
+ *   parsed into yet, so #1 parses onto the fresh screen and #2 stacks below it. Only the LATEST
+ *   capture is painted; superseded ones write nothing (they are strictly older screens of the same
+ *   terminal, so there is nothing in them to lose).
  */
-export function repaintResync(term: ResyncTarget, screen: string): void {
+export function repaintResync(term: ResyncTarget, screen: string, alive?: () => boolean): void {
+  const generation = (resyncGeneration.get(term) ?? 0) + 1
+  resyncGeneration.set(term, generation)
   term.write('', () => {
+    if (alive && !alive()) return
+    if (resyncGeneration.get(term) !== generation) return // a newer capture supersedes this one
     term.reset()
     term.write(toXtermText(screen))
     term.write(RESYNC_NOTICE)

@@ -536,4 +536,51 @@ describe('repaintResync', () => {
     term.parse()
     expect(term.ops).toContain('write:a\r\nb')
   })
+
+  it('touches NOTHING once the terminal is dead (the deferred reset outlives teardown)', () => {
+    const term = fakeTerm()
+    let dead = false
+    repaintResync(term, 'FRESH', () => !dead)
+    // Teardown: the node is destroyed while the zero-length write is still queued. The listener is
+    // unsubscribed and the xterm disposed — but xterm's write loop still owns the callback.
+    dead = true
+    term.parse()
+    // Only the zero-length probe write, which happened before teardown. No reset()/write() on a
+    // disposed core (which throws inside xterm's async write loop).
+    expect(term.ops).toEqual(['write:'])
+  })
+
+  it('still repaints while the terminal is alive (the guard is not a blanket no-op)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'FRESH', () => true)
+    term.parse()
+    expect(term.ops).toEqual(['write:', 'reset', 'write:FRESH', `write:${RESYNC_NOTICE}`])
+  })
+
+  it('coalesces back-to-back resyncs: only the LATEST capture is painted, once', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'OLD')
+    repaintResync(term, 'NEW') // lands before OLD's callback ran
+    term.parse()
+    // A stacked repaint would reset, paint OLD, reset, paint NEW — leaving OLD's parse output
+    // spliced above NEW. Superseded captures are dropped instead: one reset, the newest screen.
+    expect(term.ops).toEqual([
+      'write:',
+      'write:',
+      'reset',
+      'write:NEW',
+      `write:${RESYNC_NOTICE}`
+    ])
+  })
+
+  it('coalescing is per terminal and per round (a later, separate resync still paints)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'ONE')
+    term.parse()
+    repaintResync(term, 'TWO')
+    term.parse()
+    expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
+    expect(term.ops).toContain('write:ONE')
+    expect(term.ops).toContain('write:TWO')
+  })
 })
