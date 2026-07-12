@@ -145,13 +145,18 @@ describe('remoteTmuxCommand', () => {
 
 describe('remoteTmuxConf', () => {
   const c = remoteTmuxConf(50000)
-  it('enables mouse + clipboard and uses OSC 52 (no pbcopy)', () => {
-    expect(c).toContain('set -g mouse on')
-    expect(c).toContain('set -g set-clipboard on')
-    expect(c).toContain('copy-pipe-and-cancel')
-    expect(c).not.toContain('pbcopy')
+  it('leaves the mouse off so drags are the emulator\'s own selection', () => {
+    expect(c).toContain('set -g mouse off')
+    expect(c).not.toContain('set -g mouse on')
   })
-  it('advertises the OSC 52 clipboard-set capability via terminal-overrides (Ms)', () => {
+  it('binds no mouse keys (dead with the mouse off)', () => {
+    expect(c).not.toContain('MouseDragEnd1Pane')
+    expect(c).not.toContain('DoubleClick1Pane')
+    expect(c).not.toContain('TripleClick1Pane')
+    expect(c).not.toContain('copy-pipe-and-cancel')
+  })
+  it('keeps OSC 52 as a safety net for apps that emit it themselves', () => {
+    expect(c).toContain('set -g set-clipboard on')
     expect(c).toContain('terminal-overrides')
     expect(c).toContain('Ms=')
   })
