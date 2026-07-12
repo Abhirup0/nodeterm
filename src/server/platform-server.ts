@@ -176,6 +176,12 @@ export class ServerPlatform implements CorePlatform {
           // proc.pause() is idempotent, and this branch only runs when data actually arrived (the
           // pty was running), so it self-limits — no spamming.
           this.paused.add(key)
+          // A flood that ENDS is the normal case, and the resume check below only runs when the
+          // NEXT chunk for this session is sent. If this is the last chunk, nothing else would ever
+          // re-evaluate the pause: the pty would stay paused, the producing process blocked on a
+          // full pipe — and with co-attach that freezes the terminal for EVERY viewer. So the same
+          // drain sweep the desync path uses watches the socket for us (see sweepDesynced).
+          this.armSweep()
           this.flowController(uiId, sessionId, false)
         } else if (isPaused && buffered <= WS_LOW_WATER) {
           this.paused.delete(key)
@@ -295,19 +301,57 @@ export class ServerPlatform implements CorePlatform {
     }
   }
 
-  /** The drain trigger. A flood that ends leaves no further pty output to hang a redraw off, so a
-   *  low-frequency sweep watches the socket instead. It exists ONLY while something is desynced. */
+  /** The drain trigger, for BOTH backpressure states. A flood that ends leaves no further pty output
+   *  to hang a redraw — or a resume — off, so a low-frequency sweep watches the socket instead. It
+   *  exists ONLY while something is paused or desynced, so the healthy path (every solo user, and
+   *  every client that keeps up) never spins a timer. */
   private armSweep(): void {
-    if (this.sweepTimer || this.desynced.size === 0) return
-    this.sweepTimer = setInterval(() => this.sweepDesynced(), RESYNC_SWEEP_MS)
+    if (this.sweepTimer || (this.desynced.size === 0 && this.paused.size === 0)) return
+    this.sweepTimer = setInterval(() => this.sweep(), RESYNC_SWEEP_MS)
     // Must never hold the process (or a vitest run) open.
     this.sweepTimer.unref?.()
   }
 
   private stopSweepIfIdle(): void {
-    if (this.sweepTimer && this.desynced.size === 0) {
+    if (this.sweepTimer && this.desynced.size === 0 && this.paused.size === 0) {
       clearInterval(this.sweepTimer)
       this.sweepTimer = undefined
+    }
+  }
+
+  private sweep(): void {
+    this.sweepPaused()
+    this.sweepDesynced()
+    this.stopSweepIfIdle()
+  }
+
+  /**
+   * Hand back a pause whose socket has drained, when no further output will do it for us.
+   *
+   * This is the ONLY thing that unsticks the pause a last-chunk-of-a-flood send left behind: the
+   * pty is paused, so no data arrives, so the `pty:data` branch never runs again — and the browser's
+   * own flow control cannot rescue it either (it is edge-latched, and on a slow link its xterm
+   * backlog never crossed its own high-water mark, so it has no pause to return). With ONE pty and
+   * N subscribers, that stuck pause is not one dead UI: it is a dead terminal for everybody.
+   *
+   * Released at the LOW-water mark, exactly like the in-band check, so a socket that is merely
+   * "less full" does not flap the pty.
+   */
+  private sweepPaused(): void {
+    if (!this.flowController) return
+    for (const key of [...this.paused]) {
+      const sep = key.indexOf(' ')
+      const uiId = Number(key.slice(0, sep))
+      const sink = this.sinks.get(uiId)
+      // Client gone (belt and braces: detach prunes, and PtyManager.dropClient returns the pause
+      // it owed on the pty side).
+      if (!sink) {
+        this.paused.delete(key)
+        continue
+      }
+      if ((sink.bufferedAmount?.() ?? 0) > WS_LOW_WATER) continue
+      this.paused.delete(key)
+      this.flowController(uiId, key.slice(sep + 1), true)
     }
   }
 
@@ -324,7 +368,6 @@ export class ServerPlatform implements CorePlatform {
       // client that never drains costs one bufferedAmount read per tick — it cannot spin.
       this.maybeResync(uiId, key.slice(sep + 1), sink.bufferedAmount?.() ?? 0)
     }
-    this.stopSweepIfIdle()
   }
 
   broadcast(channel: string, ...args: any[]): void {

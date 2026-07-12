@@ -105,6 +105,80 @@ describe('ws backpressure', () => {
     ])
   })
 
+  // ── A pause with NO further output must not wedge the shared pty ─────────────────────────────
+  // The resume check lives in the pty:data branch, so it only ever runs when the NEXT chunk for
+  // that session is sent. A socket that crosses the high-water mark on the LAST chunk of a flood
+  // — but never reaches WS_DROP_WATER, so nothing desyncs — had nothing left to re-evaluate it:
+  // the pty stayed paused, the producing process blocked on a full pipe, and with co-attach that
+  // freezes the terminal for EVERY viewer of that session. The renderer's own flow control cannot
+  // save it (edge-latched: its backlog never crosses its own high-water mark on a slow link, so it
+  // never pauses and never resumes). The drain sweep is the mechanism that re-evaluates it.
+  it('releases a pause on the drain sweep when no further output ever arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+      const flow: Array<{ uiId: number; sid: string; resume: boolean }> = []
+      p.setFlowController((uiId, sid, resume) => flow.push({ uiId, sid, resume }))
+      let buffered = 0
+      const ui = p.attach(sink(() => buffered))
+
+      buffered = 1_500_000
+      p.sendTo(ui, 'pty:data:s1', 'the last chunk of the flood')
+      expect(flow).toEqual([{ uiId: ui, sid: 's1', resume: false }])
+
+      // Output has ENDED. The socket drains on its own; nothing will ever call sendTo again.
+      buffered = 100_000
+      await vi.advanceTimersByTimeAsync(300)
+      expect(flow).toEqual([
+        { uiId: ui, sid: 's1', resume: false },
+        { uiId: ui, sid: 's1', resume: true }
+      ])
+      // Nothing paused, nothing desynced → the sweep must not keep spinning.
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the sweep leaves a pause in place while the socket is still backed up', async () => {
+    vi.useFakeTimers()
+    try {
+      const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+      const flow: Array<{ sid: string; resume: boolean }> = []
+      p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
+      const ui = p.attach(sink(() => 900_000)) // above LOW_WATER, below HIGH — still behind
+
+      p.sendTo(ui, 'pty:data:s1', 'x') // 900k < HIGH → no pause yet
+      expect(flow).toEqual([])
+      // Force the pause the honest way: cross the high-water mark.
+      const p2 = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+      const flow2: Array<{ sid: string; resume: boolean }> = []
+      p2.setFlowController((_uiId, sid, resume) => flow2.push({ sid, resume }))
+      const ui2 = p2.attach(sink(() => 1_500_000)) // stays jammed
+      p2.sendTo(ui2, 'pty:data:s1', 'x')
+      expect(flow2).toEqual([{ sid: 's1', resume: false }])
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(flow2).toEqual([{ sid: 's1', resume: false }]) // still jammed → no resume
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a disconnected client leaves no sweep behind', async () => {
+    vi.useFakeTimers()
+    try {
+      const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+      p.setFlowController(() => {})
+      const ui = p.attach(sink(() => 1_500_000))
+      p.sendTo(ui, 'pty:data:s1', 'x') // paused → the sweep is armed
+      p.detach(ui)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('does no flow control when no controller is set (and non-pty channels are unaffected)', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     const ui = p.attach(sink(() => 5_000_000))
