@@ -1,0 +1,124 @@
+// Canvas sync — the emitting side.
+//
+// The renderer holds its nodes in React Flow (the single live source of truth). This publisher turns
+// successive serialized snapshots of that list into the minimal CanvasMutation stream for the peers:
+//
+//   publish(states)                  → diff vs the last published snapshot, send each mutation
+//   publish(states, {throttle:true}) → a drag frame: at most one send per PUBLISH_INTERVAL_MS
+//   adopt(states)                    → LOOP GUARD: take the snapshot as baseline, send NOTHING
+//
+// Snapshots, NOT React Flow change-lists: a rename, a color pick, a collapse and an add all reach the
+// nodes array through direct setNodes(...) calls that never pass through onNodesChange, so a
+// change-list-driven publisher would silently fail to sync half the edits. Diffing the serialized
+// snapshot catches every one of them, whatever path produced it.
+//
+// `adopt` is what stops an infinite echo: when a mutation arrives FROM a peer, Canvas applies it and
+// adopts the result, so the React effect that fires for the resulting `nodes` change diffs to nothing.
+// (Same shape as the existing `loadingRef` suppression that keeps a programmatic project load from
+// marking the project dirty.) The reflector already suppresses a client's OWN echo by ClientId; this
+// guard is the other half — without it, A's mutation applied on B would be re-published by B to C
+// (and back at A) forever.
+//
+// Pure + DOM-free (vitest runs in the node environment): only setTimeout, no React, no window.
+
+import { diffToMutations } from './canvas-mutations'
+import type { CanvasMutation, CanvasNodeState } from './types'
+
+/** ~20 Hz while dragging — the same budget the presence cursor stream uses. */
+export const PUBLISH_INTERVAL_MS = 50
+
+export interface CanvasPublisher {
+  /** Diff `next` against the last published snapshot and send the mutations.
+   *  `throttle` (drag frames) coalesces to at most one send per PUBLISH_INTERVAL_MS. */
+  publish(next: CanvasNodeState[], opts?: { throttle?: boolean }): void
+  /** Take `next` as the new baseline WITHOUT sending — the loop guard (a peer's mutation, or a
+   *  programmatic project load). The next diff against it is empty. */
+  adopt(next: CanvasNodeState[]): void
+  /** Send any coalesced drag frame immediately (drag settle / unmount). */
+  flush(): void
+  dispose(): void
+}
+
+export function createCanvasPublisher(
+  send: (m: CanvasMutation) => void,
+  opts: { intervalMs?: number } = {}
+): CanvasPublisher {
+  const intervalMs = opts.intervalMs ?? PUBLISH_INTERVAL_MS
+  let last: CanvasNodeState[] = []
+  let pending: CanvasNodeState[] | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  const emit = (next: CanvasNodeState[]): void => {
+    const mutations = diffToMutations(last, next)
+    last = next
+    for (const m of mutations) send(m)
+  }
+
+  const onTimer = (): void => {
+    timer = null
+    if (!pending) return
+    const next = pending
+    pending = null
+    emit(next)
+  }
+
+  return {
+    publish(next, o) {
+      if (o?.throttle) {
+        // Leading edge sends at once; further frames inside the window coalesce into one trailing send.
+        if (timer) {
+          pending = next
+          return
+        }
+        emit(next)
+        timer = setTimeout(onTimer, intervalMs)
+        return
+      }
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      pending = null
+      emit(next)
+    },
+    adopt(next) {
+      last = next
+      pending = null
+    },
+    flush() {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      if (pending) {
+        const next = pending
+        pending = null
+        emit(next)
+      }
+    },
+    dispose() {
+      if (timer) clearTimeout(timer)
+      timer = null
+      pending = null
+    }
+  }
+}
+
+/**
+ * Ephemeral canvas nodes — subagent cards (ids tracked in the agentNodes store) and /loop, /schedule
+ * and /cron cards (`loop-<parentId>`). They are DERIVED on every client from the already-broadcast
+ * `agent:status` stream, live outside React Flow's managed `nodes` array, and are never persisted.
+ * Publishing them would render each card twice on a peer. They are never published — full stop.
+ * This is the one definition of "ephemeral"; Canvas's own change-list filter uses it too.
+ */
+export function isEphemeralNodeId(id: string, ephemeralIds: ReadonlySet<string>): boolean {
+  return ephemeralIds.has(id) || id.startsWith('loop-')
+}
+
+/** The node states that may go on the wire: everything except the ephemeral cards. */
+export function publishableStates(
+  states: CanvasNodeState[],
+  ephemeralIds: ReadonlySet<string>
+): CanvasNodeState[] {
+  return states.filter((n) => !isEphemeralNodeId(n.id, ephemeralIds))
+}
