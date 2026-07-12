@@ -297,6 +297,150 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   })
 })
 
+describe('size negotiation: smallest subscriber wins', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  const create = (clientId: number, cols: number, rows: number, persistKey = 'node-1') =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+    }>
+  // pty:resize is sender-aware now (a size must be attributed to the client that reported it).
+  const resize = (
+    clientId: number,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null
+  ) => fake.senderListeners[IPC.ptyResize](clientId, sessionId, cols, rows)
+  const kill = (clientId: number, sessionId: string) =>
+    fake.senderListeners[IPC.ptyKill](clientId, sessionId)
+  const sizes = (sessionId: string) =>
+    fake.sent.filter((s) => s.channel === IPC.ptySize(sessionId))
+
+  it('runs the pty at min(cols) x min(rows) and broadcasts it to every subscriber', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 120, 40)
+    fake.sent.length = 0
+    await create(BOB, 80, 60) // narrower but taller
+
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 40 })
+    const sent = sizes(sessionId)
+    expect(sent.map((s) => s.to).sort()).toEqual([ALICE, BOB])
+    expect(sent.every((s) => s.args[0].cols === 80 && s.args[0].rows === 40)).toBe(true)
+  })
+
+  it('a joiner bigger than the pty is told the authoritative size (nothing is resized)', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    fake.sent.length = 0
+    await create(BOB, 120, 40)
+
+    // The pty already runs at 80x24 (Alice spawned it there) — do not make tmux redraw for nothing.
+    expect(spawned[0].resizes).toEqual([])
+    // Bob's xterm fitted itself to 120x40, so he MUST be told to render 80x24 and letterbox.
+    const sent = sizes(sessionId)
+    expect(sent.map((s) => s.to)).toEqual([BOB]) // Alice already renders 80x24 — no message for her
+    expect(sent[0].args[0]).toEqual({ cols: 80, rows: 24 })
+  })
+
+  it('a subscriber growing its window does not grow the pty past the smaller peer', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    await create(BOB, 120, 40)
+    fake.sent.length = 0
+    resize(BOB, sessionId, 200, 80) // Bob maximizes
+
+    expect(spawned[0].resizes.every((r) => r.cols <= 80 && r.rows <= 24)).toBe(true)
+    // Bob's own fit is not authoritative: he is told (again) to render Alice's size.
+    const sent = sizes(sessionId)
+    expect(sent.map((s) => s.to)).toEqual([BOB])
+    expect(sent[0].args[0]).toEqual({ cols: 80, rows: 24 })
+  })
+
+  it('when the smallest subscriber leaves, the pty grows back to the remaining one', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    await create(BOB, 120, 40)
+
+    fake.sent.length = 0
+    kill(ALICE, sessionId)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 120, rows: 40 })
+    const sent = sizes(sessionId)
+    expect(sent.map((s) => s.to)).toEqual([BOB])
+    expect(sent[0].args[0]).toEqual({ cols: 120, rows: 40 })
+  })
+
+  // ── The single-user path must stay bit-for-bit identical ─────────────────────────────────
+  it('a solo subscriber resizes the pty to its own size, with no pty:size traffic at all', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    fake.sent.length = 0
+
+    resize(ALICE, sessionId, 100, 30)
+    expect(spawned[0].resizes).toEqual([{ cols: 100, rows: 30 }]) // min(one) is Alice's own size
+    // Alice already renders what she asked for: telling her would be pure round-trip noise.
+    expect(sizes(sessionId)).toEqual([])
+
+    // Same fit reported twice (a ResizeObserver tick that changed nothing) → no second ioctl.
+    resize(ALICE, sessionId, 100, 30)
+    expect(spawned[0].resizes).toHaveLength(1)
+  })
+
+  // ── A PARKED terminal is subscribed but not looking ──────────────────────────────────────
+  // The renderer keeps a node's xterm+PTY alive for 5 minutes after unmount (TERM_PARK_MS), so a
+  // parked client stays a subscriber. Its (possibly tiny) last fit must NOT shrink the terminal
+  // for the people still watching — it reports a null size instead: "listening, not viewing".
+  it('a parked subscriber (null size) stops constraining the shared pty but keeps its output', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    await create(BOB, 120, 40)
+    fake.sent.length = 0
+
+    resize(ALICE, sessionId, null, null) // Alice's node unmounted → parked
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 120, rows: 40 }) // Bob gets his full size back
+    expect(sizes(sessionId).map((s) => s.to).sort()).toEqual([ALICE, BOB])
+
+    // Parked ≠ gone: the parked xterm keeps consuming output (that is what makes re-adoption exact).
+    fake.sent.length = 0
+    spawned[0].onDataCb?.('still streaming')
+    vi.advanceTimersByTime(20)
+    const data = fake.sent.filter((s) => s.channel === IPC.ptyData(sessionId))
+    expect(data.map((s) => s.to).sort()).toEqual([ALICE, BOB])
+
+    // Un-parking (re-adopt → fresh fit) makes her constrain again.
+    resize(ALICE, sessionId, 80, 24)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 })
+  })
+
+  it('a parked SOLO subscriber leaves the pty size alone (nobody is left to size it)', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    fake.sent.length = 0
+
+    resize(ALICE, sessionId, null, null)
+    expect(spawned[0].resizes).toEqual([]) // no viewers → keep the last size, never resize to 1x1
+    expect(sizes(sessionId)).toEqual([])
+  })
+})
+
 describe('tmuxAttachFlags', () => {
   it("keeps -D for the app's own client: exactly ONE tmux client per session", async () => {
     const { tmuxAttachFlags } = await import('./pty-manager')

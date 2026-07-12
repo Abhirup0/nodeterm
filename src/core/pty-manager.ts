@@ -22,7 +22,7 @@ import {
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
-import { type PtySize } from './pty-size'
+import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
@@ -228,6 +228,12 @@ export async function findInLoginPath(bin: string): Promise<string | null> {
 /** A UI client: an Electron webContents id or a ServerPlatform uiId. */
 type ClientId = number
 
+/** One client's reported fit, run through the same floor/clamp the pty itself gets, so a size we
+ *  record for a client is comparable with the effective size we compute from all of them. */
+function normalizeSize(cols: number, rows: number): PtySize {
+  return effectiveSize([{ cols, rows }]) as PtySize // one entry in ⇒ never null out
+}
+
 interface Session {
   proc: pty.IPty
   /** Every UI watching this session. Co-attach: ONE pty and ONE tmux client, N subscribers —
@@ -235,8 +241,19 @@ interface Session {
    *  client (whose `-D` would then kick the first one off). Empty for a purely detached
    *  (relay-served) session. */
   subscribers: Set<ClientId>
-  /** Each subscriber's last reported cols/rows. The pty runs at the min of these (Task 3). */
-  sizes: Map<ClientId, PtySize>
+  /** Each VIEWING subscriber's last reported cols/rows — the pty runs at the min of these
+   *  (`effectiveSize`). A subscriber that is subscribed but NOT looking is ABSENT from this map:
+   *  it still gets output, it just doesn't constrain the size (see `resize`). `null` keys the
+   *  relay host's detached sink, which has no ClientId but does report a size. */
+  sizes: Map<ClientId | null, PtySize>
+  /** The size each subscriber's xterm is believed to be rendering: the last authoritative size we
+   *  sent it, or — if it has reported a fit since — its own fit (the renderer applies its own fit
+   *  locally, exactly as it always has). We only send `pty:size` to a subscriber whose view differs
+   *  from the effective size, which is what keeps a SOLO user's resize free of any extra IPC. */
+  shown: Map<ClientId, PtySize>
+  /** The size currently pushed into the pty (seeded from the spawn's cols/rows). Guards against
+   *  re-resizing the tmux client to the size it already has — that is a full-pane redraw. */
+  appliedSize?: PtySize
   /** The node id this session was created for, whether or not it is tmux-persisted — the key of
    *  the `byPersistKey` co-attach index (`persistKey` below is only set for PERSISTED sessions,
    *  because it also gates scrollback snapshots). Undefined for a relay-served (detached) pty,
@@ -384,8 +401,13 @@ export class PtyManager {
     platform().on(IPC.ptyWrite, (sessionId: string, data: string) =>
       this.write(sessionId, data)
     )
-    platform().on(IPC.ptyResize, (sessionId: string, cols: number, rows: number) =>
-      this.resize(sessionId, cols, rows)
+    // Sender-aware: a size is only meaningful with the client it belongs to — the pty runs at the
+    // smallest one (`resize`). Registered ONLY here: `on` and `onWithSender` compose on the same
+    // channel, so leaving the old plain listener in place would run the resize twice.
+    platform().onWithSender(
+      IPC.ptyResize,
+      (senderId: number, sessionId: string, cols: number | null, rows: number | null) =>
+        this.resize(senderId, sessionId, cols, rows)
     )
     platform().on(IPC.ptyFlow, (sessionId: string, resume: boolean) =>
       this.setFlow(sessionId, resume)
@@ -450,7 +472,12 @@ export class PtyManager {
     const existing = existingId ? this.sessions.get(existingId) : undefined
     if (!existingId || !existing) return undefined
     existing.subscribers.add(clientId)
-    existing.sizes.set(clientId, { cols: options.cols, rows: options.rows })
+    // The joiner's xterm has fitted itself to its own window; that is what it renders until we
+    // tell it otherwise. applySize() then either shrinks the pty to it (it is the new smallest) or
+    // sends it the authoritative size to render + letterbox.
+    const size = normalizeSize(options.cols, options.rows)
+    existing.sizes.set(clientId, size)
+    existing.shown.set(clientId, size)
     this.applySize(existingId, existing)
     // A joiner's backlog is empty by definition, so it will never issue the resume that a
     // previous (now gone) client's flow control owed us — and no data would ever arrive to
@@ -824,13 +851,23 @@ export class PtyManager {
     const remote = options.sshRemote && options.persistKey && remoteSsh ? options.sshRemote : undefined
     const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
     const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
+    const spawnSize = normalizeSize(options.cols, options.rows)
     const session: Session = {
       proc,
       subscribers: clientId === null ? new Set<ClientId>() : new Set<ClientId>([clientId]),
       sizes:
         clientId === null
+          ? new Map<ClientId | null, PtySize>()
+          : new Map<ClientId | null, PtySize>([[clientId, spawnSize]]),
+      shown:
+        clientId === null
           ? new Map<ClientId, PtySize>()
-          : new Map<ClientId, PtySize>([[clientId, { cols: options.cols, rows: options.rows }]]),
+          : new Map<ClientId, PtySize>([[clientId, spawnSize]]),
+      // node-pty was just spawned with these cols/rows, so the pty ALREADY has this size — record
+      // it so a co-attach (or a fit that reports the same numbers) doesn't ioctl it needlessly.
+      // A detached (relay-served) pty is left unseeded: its first `resize` must reach the pty,
+      // exactly as before, because its sink never reports a size at create time.
+      appliedSize: clientId === null ? undefined : spawnSize,
       indexKey: options.persistKey && !sinks ? options.persistKey : undefined,
       onData: sinks?.onData,
       onExit: sinks?.onExit,
@@ -871,8 +908,40 @@ export class PtyManager {
       this.byPersistKey.delete(session.indexKey)
   }
 
-  /** Resize the pty to the smallest subscriber's size and tell everyone (Task 3). */
-  private applySize(_sessionId: string, _session: Session): void {}
+  /**
+   * Push the effective (smallest-subscriber) size into the pty, then tell every subscriber whose
+   * xterm is NOT already rendering that grid what it actually is, so each one renders exactly the
+   * pty's grid (and letterboxes the leftover space) instead of its own `fit()` guess.
+   *
+   * Two separate idempotence guards, both load-bearing:
+   *  - the pty is only resized when the effective size CHANGED (a same-size ioctl makes the tmux
+   *    client redraw the whole pane for nothing);
+   *  - a subscriber is only messaged when the size differs from what it is showing. With exactly
+   *    one (viewing) subscriber the min of a one-element set is that subscriber's own fit, so a
+   *    solo user is never sent a `pty:size` at all — the single-user path is unchanged.
+   */
+  private applySize(sessionId: string, session: Session): void {
+    const size = effectiveSize(session.sizes.values())
+    // Nobody is looking (every subscriber is parked, or none has reported a fit yet): leave the
+    // pty at whatever size it has. Resizing it to a default here would garble the parked xterms'
+    // buffers and the tmux pane behind them for no viewer's benefit.
+    if (!size) return
+    if (session.appliedSize?.cols !== size.cols || session.appliedSize?.rows !== size.rows) {
+      session.appliedSize = size
+      try {
+        session.proc.resize(size.cols, size.rows)
+      } catch {
+        // resize can throw if the proc already exited; ignore.
+      }
+    }
+    const channel = IPC.ptySize(sessionId)
+    for (const sub of session.subscribers) {
+      const shown = session.shown.get(sub)
+      if (shown && shown.cols === size.cols && shown.rows === size.rows) continue
+      session.shown.set(sub, size)
+      this.send(sub, channel, size)
+    }
+  }
 
   /** Buffer a chunk; flush immediately past the byte cap, otherwise on a short timer. */
   private queueData(sessionId: string, session: Session, data: string): void {
@@ -935,11 +1004,43 @@ export class PtyManager {
     this.sessions.get(sessionId)?.proc.write(data)
   }
 
-  resize(sessionId: string, cols: number, rows: number): void {
+  /**
+   * A subscriber reports the size IT can render. The pty runs at the smallest of them, so nobody
+   * is ever sent more columns than their xterm can draw (a subscriber with room to spare
+   * letterboxes the remainder). With exactly one subscriber, min(one) is that subscriber's own
+   * size — the single-user path resizes the pty to exactly what it asked for, as it always did.
+   *
+   * A `null` cols/rows means **"subscribed, but not looking"**: the client stays in the fan-out
+   * (it keeps consuming output) but drops out of the min. This is what a PARKED terminal reports —
+   * the renderer keeps an unmounted node's xterm+PTY alive for 5 minutes so a remount re-adopts
+   * them exactly, and without this a window somebody parked small would keep every other viewer's
+   * terminal shrunk for those 5 minutes even though nobody is looking at it. `null` (not 0) carries
+   * that meaning because 0 already has one: `effectiveSize` clamps a not-yet-measured VIEWING
+   * client's 0 up to 1 rather than letting it zero the pty.
+   *
+   * `clientId` is null for the relay host's detached pty (its sink reports the mirrored client's
+   * size); it constrains the size like any other viewer but is not in `subscribers`, so it gets no
+   * `pty:size` message — the relay has its own size channel.
+   */
+  resize(
+    clientId: ClientId | null,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null
+  ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    // cols/rows must be at least 1, otherwise node-pty throws.
-    session.proc.resize(Math.max(1, cols), Math.max(1, rows))
+    if (cols === null || rows === null) {
+      session.sizes.delete(clientId)
+    } else {
+      const size = normalizeSize(cols, rows)
+      session.sizes.set(clientId, size)
+      // The client's own xterm fits itself locally (as it always has), so its fit — not the last
+      // authoritative size we sent it — is what it is rendering right now. If that fit isn't the
+      // effective size, applySize() below corrects it straight back.
+      if (clientId !== null) session.shown.set(clientId, size)
+    }
+    this.applySize(sessionId, session)
   }
 
   /**
@@ -957,9 +1058,11 @@ export class PtyManager {
     if (clientId === null) {
       session.onData = undefined
       session.onExit = undefined
+      session.sizes.delete(null)
     } else {
       session.subscribers.delete(clientId)
       session.sizes.delete(clientId)
+      session.shown.delete(clientId)
     }
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.

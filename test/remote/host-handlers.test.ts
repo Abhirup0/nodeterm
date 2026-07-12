@@ -34,8 +34,8 @@ function fakePty() {
       return snapshot
     },
     write: (sessionId, data) => calls.push({ method: 'write', args: [sessionId, data] }),
-    resize: (sessionId, cols, rows) =>
-      calls.push({ method: 'resize', args: [sessionId, cols, rows] }),
+    resize: (clientId, sessionId, cols, rows) =>
+      calls.push({ method: 'resize', args: [clientId, sessionId, cols, rows] }),
     setFlow: (sessionId, resume) => calls.push({ method: 'setFlow', args: [sessionId, resume] }),
     // Relay-served ptys are killed with clientId null (they have no UI subscribers).
     kill: (clientId, sessionId) => calls.push({ method: 'kill', args: [clientId, sessionId] })
@@ -177,7 +177,8 @@ describe('createHostHandlers', () => {
     h.onFrame({ op: OP.Resize, streamId: 1, seq: 0, payload: resizePayload(120, 40) })
 
     expect(pty.calls).toContainEqual({ method: 'write', args: ['pty-1', 'ls\n'] })
-    expect(pty.calls).toContainEqual({ method: 'resize', args: ['pty-1', 120, 40] })
+    // clientId null: the relay-served pty's size is recorded against its sink, not a UI client.
+    expect(pty.calls).toContainEqual({ method: 'resize', args: [null, 'pty-1', 120, 40] })
   })
 
   it('ignores frames for unknown streams', () => {

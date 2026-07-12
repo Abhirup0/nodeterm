@@ -61,7 +61,13 @@ export interface HostPtyManager {
   /** Current visible screen of a node's tmux session, for the attach snapshot. */
   captureSnapshot(persistKey: string): Promise<string>
   write(sessionId: string, data: string): void
-  resize(sessionId: string, cols: number, rows: number): void
+  /** `clientId` is null for a relay-served (detached) pty — see `kill` below. */
+  resize(
+    clientId: number | null,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null
+  ): void
   setFlow(sessionId: string, resume: boolean): void
   /** `clientId` is null for a relay-served (detached) pty: the sinks ARE its only subscriber. */
   kill(clientId: number | null, sessionId: string): void
@@ -350,7 +356,9 @@ export function createHostHandlers(
             frame.payload.byteOffset,
             frame.payload.byteLength
           )
-          pty.resize(stream.sessionId, view.getUint16(0, true), view.getUint16(2, true))
+          // null clientId: this pty is relay-served (its sink is the only "subscriber"), so the
+          // mirrored client's size is recorded against the sink rather than a UI client id.
+          pty.resize(null, stream.sessionId, view.getUint16(0, true), view.getUint16(2, true))
         }
       }
     },
