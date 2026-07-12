@@ -11,8 +11,10 @@
 //     into an `OP.Error` frame (then the stream is dropped).
 //   - `OP.Input`  frame -> `write(sessionId, <utf-8 payload>)`
 //   - `OP.Resize` frame -> `resize(sessionId, cols, rows)` (payload = 2x uint16 LE)
-//   - RPC `pty.captureHistory {streamId}` -> `captureHistory(persistKey)`, returning `{ output }`
-//     (tmux scrollback, so a re-entering client can hydrate its empty emulator scrollback)
+//   - RPC `pty.captureHistory {streamId, lines?, maxBytes?}` -> `captureHistory(persistKey, lines)`,
+//     returning `{ output }` (tmux scrollback, so a re-entering client can hydrate its empty
+//     emulator scrollback). `lines`/`maxBytes` are SIZE hints only — clamped, and they can only
+//     SHRINK the reply (a phone on a mobile link asks for far less than the desktop caps).
 //   - RPC `pty.kill {streamId}` -> `kill(sessionId)`
 // Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
 // and resumes it on the next successful send.
@@ -28,7 +30,8 @@ import { app, ipcMain, safeStorage, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
-import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
+import { PtyManager, trimToBytes, type DetachedSinks } from '../../core/pty-manager'
+import { HISTORY_LINES, HISTORY_MAX_BYTES, clampHistoryLines } from '../../core/history-limits'
 import * as fsOps from '../../core/fs-ops'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
@@ -61,8 +64,9 @@ export interface HostPtyManager {
   /** Current visible screen of a node's tmux session, for the attach snapshot. */
   captureSnapshot(persistKey: string): Promise<string>
   /** Scrollback (history + visible screen) of a node's tmux session, for hydrating a fresh
-   *  emulator on re-entry — the client's own scrollback is empty on a warm reattach. */
-  captureHistory(persistKey: string): Promise<string>
+   *  emulator on re-entry — the client's own scrollback is empty on a warm reattach. `lines` is
+   *  clamped by the pty-manager itself (it is interpolated into a tmux command). */
+  captureHistory(persistKey: string, lines?: number): Promise<string>
   write(sessionId: string, data: string): void
   resize(sessionId: string, cols: number, rows: number): void
   setFlow(sessionId: string, resume: boolean): void
@@ -302,17 +306,27 @@ export function createHostHandlers(
    * (empty) emulator scrollback on re-entry. Deliberately keyed by `streamId`, never by a
    * client-supplied tmux session name / persistKey: a client may only read the history of a
    * session `pty.attach` already granted it. An unknown stream degrades to an empty result.
+   *
+   * `lines` / `maxBytes` are size hints, not targets: both are clamped to the desktop caps, so a
+   * client can only ever ask for LESS than `HISTORY_LINES` / `HISTORY_MAX_BYTES` of the session it
+   * already holds. A phone uses them to keep the (E2EE, base64-inflated) reply small enough to fit
+   * comfortably in one WebSocket message.
    */
   function handleCaptureHistory(req: RpcRequest): void {
-    const streamId = num(asRecord(req.params).streamId, -1)
-    const stream = streams.get(streamId)
+    const p = asRecord(req.params)
+    const stream = streams.get(num(p.streamId, -1))
     if (!stream) {
       socket.respond(req.id, true, { output: '' })
       return
     }
+    const lines = clampHistoryLines(num(p.lines, HISTORY_LINES))
+    const maxBytes = Math.min(
+      HISTORY_MAX_BYTES,
+      Math.max(1, Math.floor(num(p.maxBytes, HISTORY_MAX_BYTES)))
+    )
     void pty
-      .captureHistory(stream.persistKey)
-      .then((output) => socket.respond(req.id, true, { output }))
+      .captureHistory(stream.persistKey, lines)
+      .then((output) => socket.respond(req.id, true, { output: trimToBytes(output, maxBytes) }))
       .catch(() => socket.respond(req.id, true, { output: '' }))
   }
 
