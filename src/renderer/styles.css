@@ -3371,6 +3371,13 @@ body,
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
+  /* Confirm messages are composed as paragraphs separated by `\n\n` — the safety disclosures most
+     of all ("⚠ The worktree directory will be DELETED", "⚠ N uncommitted file(s)", "⚠ … is also
+     pushed to origin", the device-approval SAS code). Without this they collapse into one run-on
+     paragraph and the warning the user most needs to see is buried mid-sentence. `pre-line` keeps
+     the newlines and still collapses runs of spaces, exactly as `normal` did — so the messages that
+     carry no newlines at all are unchanged. */
+  white-space: pre-line;
 }
 
 /* Explicit opt-in inside a confirm dialog (e.g. "also delete the directory from disk"). */
