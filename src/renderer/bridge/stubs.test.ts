@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { buildStubApi, unsupported } from './stubs'
 import { E_UNSUPPORTED } from '../../shared/rpc'
 
@@ -58,5 +58,58 @@ describe('bridge stubs', () => {
       s.contextLink.setLinks({} as never)
       s.sendAgentControlResult({} as never)
     }).not.toThrow()
+  })
+})
+
+/** A minimal `document` for the hidden-textarea copy fallback: vitest runs in the node
+ *  environment, so there is no DOM to lean on. `execCommand` is the knob each test turns. */
+function fakeDocument(execCommand: () => boolean) {
+  const textarea = {
+    value: '',
+    style: {} as Record<string, string>,
+    setAttribute: vi.fn(),
+    select: vi.fn()
+  }
+  const doc = {
+    createElement: vi.fn(() => textarea),
+    body: { appendChild: vi.fn(), removeChild: vi.fn() },
+    execCommand: vi.fn(execCommand)
+  }
+  return { doc, textarea }
+}
+
+describe('bridge clipboard', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('uses the Clipboard API when it is available', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    buildStubApi().clipboard.writeText('hi')
+    expect(writeText).toHaveBeenCalledWith('hi')
+  })
+
+  it('falls back to execCommand when there is no Clipboard API (plain http)', () => {
+    const { doc, textarea } = fakeDocument(() => true)
+    vi.stubGlobal('navigator', {})
+    vi.stubGlobal('document', doc)
+    buildStubApi().clipboard.writeText('hi')
+    expect(doc.execCommand).toHaveBeenCalledWith('copy')
+    expect(textarea.value).toBe('hi')
+    // the scratch textarea must not be left behind in the DOM
+    expect(doc.body.removeChild).toHaveBeenCalledWith(textarea)
+  })
+
+  it('surfaces a toast when even execCommand cannot copy (never silent)', () => {
+    const { doc } = fakeDocument(() => false)
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('navigator', {})
+    vi.stubGlobal('document', doc)
+    vi.stubGlobal('window', { dispatchEvent })
+    buildStubApi().clipboard.writeText('hi')
+    expect(dispatchEvent).toHaveBeenCalledTimes(1)
+    const ev = dispatchEvent.mock.calls[0][0] as CustomEvent<{ kind: string; message: string }>
+    expect(ev.type).toBe('nodeterm:toast')
+    expect(ev.detail.kind).toBe('error')
+    expect(ev.detail.message).toMatch(/http/i)
   })
 })

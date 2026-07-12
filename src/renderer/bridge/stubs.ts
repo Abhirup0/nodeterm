@@ -37,6 +37,38 @@ const noop = (): void => {}
 /** Promise<void> member: a resolved no-op. */
 const pnoop = (): Promise<void> => Promise.resolve()
 
+/** Copy without the Clipboard API (non-secure context): a hidden textarea + execCommand('copy').
+ *  Only works inside a user gesture — which is exactly where copy is triggered from (keydown).
+ *  Returns false when even that fails, so the caller can surface it rather than swallow it. */
+function copyViaExecCommand(text: string): boolean {
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (!ok) throw new Error('execCommand returned false')
+    return true
+  } catch {
+    // Surfacing beats silence: over plain http there is no way to copy, and the user needs to know
+    // why nothing landed in their clipboard. Canvas listens for this event and shows a banner.
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:toast', {
+        detail: {
+          kind: 'error',
+          message:
+            'Copy failed — the browser blocks clipboard access over plain http. Use https or localhost.'
+        }
+      })
+    )
+    return false
+  }
+}
+
 export function buildStubApi(): Omit<
   NodeTerminalApi,
   | 'pty'
@@ -73,11 +105,16 @@ export function buildStubApi(): Omit<
       write: U('sshFs.write')
     },
     clipboard: {
-      // The one browser-native member: use the Clipboard API when present, swallow failures.
+      // Clipboard API → execCommand → visible error. `navigator.clipboard` only exists in a SECURE
+      // context (https or localhost); over plain http on a LAN it is undefined, and the old
+      // optional-chained call copied nothing and told nobody. execCommand('copy') is deprecated but
+      // is the only thing that works there.
       writeText: (text: string): void => {
-        if (typeof navigator !== 'undefined') {
-          void navigator.clipboard?.writeText(text).catch(() => {})
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          void navigator.clipboard.writeText(text).catch(() => copyViaExecCommand(text))
+          return
         }
+        copyViaExecCommand(text)
       }
     },
     shell: {
