@@ -23,6 +23,35 @@ export interface WorktreeOpResult {
   worktreeGone?: boolean
 }
 
+/**
+ * Delete the worktree's branch — and report what git ACTUALLY did.
+ *
+ * `git branch -d` refuses a branch that is not fully merged, and that refusal is the safety: an
+ * unmerged branch is unpublished work, and `-D` would throw it away. We keep the refusal (we never
+ * escalate to `-D`) but we no longer SWALLOW it. The confirm dialog tells the user the branch is
+ * deleted; when git declines, the result has to say so, or the user walks away believing a branch
+ * is gone while it is still sitting in `git branch` — the one thing worse than not deleting it.
+ *
+ * The refusal is hedged in the wording ("git would not delete it") rather than asserted as
+ * "unmerged": -d also refuses for other reasons (the branch is checked out in another worktree), and
+ * claiming a specific cause we did not verify is the same sin in the other direction.
+ *
+ * Returns a sentence to append to the caller's message, or '' when no branch deletion was asked for.
+ */
+async function deleteWorktreeBranch(
+  git: GitExecutor,
+  repoPath: string,
+  /** `null` = the worktree has a detached HEAD, so there is no branch to delete. */
+  branch: string | null | undefined,
+  deleteBranch: boolean
+): Promise<string> {
+  if (!deleteBranch || !branch || !isValidGitRef(branch)) return ''
+  const r = await git(repoPath, ['branch', '-d', branch])
+  return r.ok
+    ? ` Branch ${branch} deleted.`
+    : ` Branch ${branch} was kept — git would not delete it (it may have unmerged commits).`
+}
+
 export async function repoRoot(git: GitExecutor, cwd: string): Promise<string | null> {
   if (!cwd) return null
   const r = await git(cwd, ['rev-parse', '--show-toplevel'])
@@ -232,13 +261,11 @@ export async function worktreeRemove(
     // The directory is gone. `worktree remove` would fail; prune the registration instead and
     // touch no files.
     await git(repoPath, ['worktree', 'prune'])
-    if (!pruneOnly && deleteBranch && branch && isValidGitRef(branch)) {
-      await git(repoPath, ['branch', '-d', branch])
-    }
+    const branchNote = await deleteWorktreeBranch(git, repoPath, branch, !pruneOnly && deleteBranch)
     return {
       ok: true,
       worktreeGone: true,
-      message: 'The worktree directory was already gone; its registration was pruned.'
+      message: `The worktree directory was already gone; its registration was pruned.${branchNote}`
     }
   }
   if (pruneOnly) {
@@ -248,9 +275,6 @@ export async function worktreeRemove(
   const rm = await git(repoPath, ['worktree', 'remove', '--force', '--', wtPath])
   if (!rm.ok) return { ok: false, message: rm.err }
   await git(repoPath, ['worktree', 'prune'])
-  if (deleteBranch && branch && isValidGitRef(branch)) {
-    // -d refuses unmerged; the renderer decides whether to escalate to -D.
-    await git(repoPath, ['branch', '-d', branch])
-  }
-  return { ok: true, message: 'Worktree removed.' }
+  const branchNote = await deleteWorktreeBranch(git, repoPath, branch, deleteBranch)
+  return { ok: true, message: `Worktree removed.${branchNote}` }
 }

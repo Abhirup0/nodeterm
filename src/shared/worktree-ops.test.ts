@@ -279,6 +279,47 @@ describe('worktreeRemove', () => {
     expect(r.ok).toBe(true)
     expect(calls.some((c) => c[0] === 'branch')).toBe(false)
   })
+  // The confirm dialog promises the branch is deleted. `git branch -d` REFUSES an unmerged branch
+  // (deliberately — we never escalate to -D), and that refusal used to be swallowed: the removal
+  // reported plain "Worktree removed." and the user walked away believing a branch was gone while it
+  // was still sitting in `git branch`. The result must report what git actually did.
+  it('says the branch was deleted when git deletes it', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true)
+    expect(r.ok).toBe(true)
+    expect(r.message).toContain('Branch feature/x deleted.')
+  })
+  it('says the branch was KEPT when `git branch -d` refuses it, and never claims it was deleted', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      'branch -d feature/x': ko('error: the branch is not fully merged')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true)
+    // The worktree itself DID go — the failure is the branch's alone, and must not fail the removal.
+    expect(r.ok).toBe(true)
+    expect(r.message).toContain('kept')
+    expect(r.message).not.toContain('Branch feature/x deleted.')
+    // Never escalated to -D: an unmerged branch is unpublished work.
+    expect(calls.some((c) => c.join(' ') === 'branch -D feature/x')).toBe(false)
+  })
+  it('reports the branch outcome on the already-gone path too', async () => {
+    const list =
+      'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\nprunable gitdir file points to non-existent location\n'
+    const { git } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      'branch -d feature/x': ko('error: the branch is not fully merged')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true)
+    expect(r.message).toContain('kept')
+  })
+  it('says nothing about a branch it was never asked to delete', async () => {
+    const list = 'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\n'
+    const { git } = fakeGit({ 'worktree list --porcelain': ok(list) })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', false)
+    expect(r.message).toBe('Worktree removed.')
+  })
   it('prunes (and never removes) a worktree whose directory is already gone', async () => {
     const list =
       'worktree /repo\nbranch refs/heads/main\n\nworktree /wt/x\nbranch refs/heads/feature/x\nprunable gitdir file points to non-existent location\n'
