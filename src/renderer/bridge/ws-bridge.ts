@@ -342,6 +342,21 @@ export function buildAgentApi(
 }
 
 /**
+ * Build the `canvas` namespace over an RpcClient: a cast out (`canvas:mut`) and a subscription in on
+ * the same channel. The server reflects each mutation to every OTHER client, so the `ev` frames we
+ * receive here are always a peer's — never our own echo. This is a REAL implementation, not a stub:
+ * the Server Edition (two browsers on one workspace) is the surface that needs canvas sync most.
+ */
+export function buildCanvasApi(client: RpcClient): Pick<NodeTerminalApi, 'canvas'> {
+  return {
+    canvas: {
+      mutate: (projectId, mutation) => client.cast(IPC.canvasMut, projectId, mutation),
+      onMutation: (listener) => client.subscribe(IPC.canvasMut, listener as Listener)
+    }
+  }
+}
+
+/**
  * Build the `presence` namespace over an RpcClient, mirroring the preload's invoke(→request) /
  * send(→cast) / on(→subscribe) split member-for-member: `hello` is the only request (its response
  * is how a client learns its OWN clientId), cursor/focus/chat/project are casts, and the two event
@@ -471,6 +486,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildRealApi(client),
     ...buildFilesApi(client),
     ...buildAgentApi(client),
+    ...buildCanvasApi(client),
     ...buildPresenceApi(client),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
     // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).

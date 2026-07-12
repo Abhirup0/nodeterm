@@ -800,6 +800,22 @@ export interface ContextApi {
   ensure(sessionId: string, cwd?: string, accountId?: string): void
 }
 
+/**
+ * Canvas sync: node mutations travel between the attached clients (an Electron renderer, a
+ * Server-Edition browser tab) so they converge on one node set — instead of each holding its own
+ * canvas until someone's whole-file `workspace.save` overwrites the other's edits.
+ */
+export interface CanvasApi {
+  /**
+   * Publish one local node mutation for `projectId` (a project IS a canvas — a mutation is only
+   * ever applied to the canvas it was made on). Fire-and-forget; the reflector fans it out to every
+   * OTHER attached client and never echoes it back to the sender.
+   */
+  mutate(projectId: string, mutation: CanvasMutation): void
+  /** Fires with each PEER's mutation (project id + mutation). Returns unsubscribe. */
+  onMutation(listener: (projectId: string, mutation: CanvasMutation) => void): () => void
+}
+
 /** One searchable line extracted from a Claude session transcript. */
 export interface TranscriptLine {
   role: 'user' | 'assistant' | 'tool'
@@ -1125,6 +1141,7 @@ export interface NodeTerminalApi {
   contextLink: ContextLinkApi
   usage: UsageApi
   context: ContextApi
+  canvas: CanvasApi
   claude: ClaudeApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi

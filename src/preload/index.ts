@@ -294,6 +294,20 @@ const api: NodeTerminalApi = {
     ensure: (sessionId, cwd, accountId) =>
       ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
+  // Canvas sync: one channel in both directions. The cast goes to the reflector (src/core/canvas-sync),
+  // which fans it to every OTHER attached client — so what arrives here is always a peer's mutation.
+  canvas: {
+    mutate: (projectId, mutation) => ipcRenderer.send(IPC.canvasMut, projectId, mutation),
+    onMutation: (listener) => {
+      const handler = (
+        _e: unknown,
+        projectId: string,
+        mutation: Parameters<typeof listener>[1]
+      ): void => listener(projectId, mutation)
+      ipcRenderer.on(IPC.canvasMut, handler)
+      return () => ipcRenderer.removeListener(IPC.canvasMut, handler)
+    }
+  },
   claude: {
     readTranscript: (sessionId, cwd, accountId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
