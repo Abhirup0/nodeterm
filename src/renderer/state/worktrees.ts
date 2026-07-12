@@ -50,8 +50,15 @@ interface WorktreesState {
 }
 
 const lastStatusAt = new Map<string, number>()
-/** Consecutive `hasRepo:false` reads per path (see WORKTREE_STALE_STRIKES). Reset by any success. */
+/**
+ * Consecutive `hasRepo:false` reads per worktree path (see WORKTREE_STALE_STRIKES). Reset by any
+ * success. Keyed by the NORMALIZED path so `refresh` can look a binding up in it.
+ */
 const missStreak = new Map<string, number>()
+
+/** Has this path been read as "not a repo" often enough in a row to count as gone? */
+const struckOut = (p: string): boolean =>
+  (missStreak.get(normWorktreePath(p)) ?? 0) >= WORKTREE_STALE_STRIKES
 
 /**
  * Cancellation token for the in-flight async reads. `refresh`/`refreshStatus` are fired from React
@@ -103,7 +110,15 @@ export const useWorktrees = create<WorktreesState>((set) => ({
         (b) => normWorktreePath(b.worktree.repoPath) === normWorktreePath(root)
       )
       const { stale, orphans } = reconcileWorktrees(mine, entries)
-      set({ repoRoot: root, entries, orphans, staleGroupIds: stale })
+      // UNION, never replace. Staleness has two sources: git's own facts (`reconcileWorktrees`, via
+      // `prunable`) and the status poll's miss-streak. `refresh()` runs on a project switch, on
+      // binding another worktree, on deleting a node, on ungrouping — and setting `staleGroupIds`
+      // to reconcile's answer alone would ERASE, on any of those, a group the poll had already
+      // proven dead: the chip goes healthy again and "↪ Move into worktree" reopens the very window
+      // in which it kills a live session into a directory that no longer exists.
+      const struck = mine.filter((b) => struckOut(b.worktree.path)).map((b) => b.groupId)
+      const staleIds = [...new Set([...stale, ...struck])]
+      set({ repoRoot: root, entries, orphans, staleGroupIds: staleIds })
     } catch {
       // Fail open: the IPC rejects on a transport error (WS-RPC, Server Edition) and callers are
       // fire-and-forget effects, so throwing here would only become an unhandled rejection. An
@@ -134,8 +149,9 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     // the reading REPEATS: a single failed read is as likely to be a transient git failure as a
     // deleted directory, and calling a live worktree missing has consequences of its own.
     if (!status.hasRepo) {
-      const strikes = (missStreak.get(path) ?? 0) + 1
-      missStreak.set(path, strikes)
+      const key = normWorktreePath(path)
+      const strikes = (missStreak.get(key) ?? 0) + 1
+      missStreak.set(key, strikes)
       if (groupId && strikes >= WORKTREE_STALE_STRIKES) {
         set((s) =>
           s.staleGroupIds.includes(groupId)
@@ -145,7 +161,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
       }
       return
     }
-    missStreak.delete(path)
+    missStreak.delete(normWorktreePath(path))
     set((s) => ({
       // The directory answers again (restored, or a transient read failure passed) → not stale.
       staleGroupIds:

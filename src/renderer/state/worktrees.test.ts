@@ -265,6 +265,86 @@ describe('useWorktrees.refreshStatus', () => {
     expect(useWorktrees.getState().statusByPath['/wt/feat'].hasRemote).toBe(true)
   })
 
+
+  // `refresh()` runs on a project switch, on binding another worktree, on deleting a node, on
+  // ungrouping. If it SET `staleGroupIds` from reconcile alone, every one of those would erase a
+  // group the poll had already proven dead — the chip goes healthy again and "↪ Move into worktree"
+  // reopens the window in which it destroys a live session into a directory that no longer exists.
+  it('a refresh does not erase staleness the strike counter established', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+
+    // git still lists the worktree as perfectly healthy (an old git that cannot say `prunable`, or
+    // simply a `worktree list` that has not been re-read since). Reconcile therefore calls it live.
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue([
+      { path: '/repo', branch: 'main', head: 'a', isBare: false },
+      { path: '/wt/gone', branch: 'feat', head: 'b', isBare: false }
+    ])
+    await useWorktrees.getState().refresh('/repo', [
+      { groupId: 'group-1', worktree: { path: '/wt/gone', repoPath: '/repo' } as never }
+    ])
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+  })
+
+  it('a refresh adds git´s own stale verdict to the struck-out ones (union, no duplicates)', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/gone', 'group-1')
+
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    // git prunes /wt/gone away entirely (reconcile: stale) and marks /wt/dead prunable.
+    gitMock.worktreeList.mockResolvedValue([
+      { path: '/repo', branch: 'main', head: 'a', isBare: false },
+      { path: '/wt/dead', branch: 'dead', head: 'c', isBare: false, prunable: true }
+    ])
+    await useWorktrees.getState().refresh('/repo', [
+      { groupId: 'group-1', worktree: { path: '/wt/gone', repoPath: '/repo' } as never },
+      { groupId: 'group-2', worktree: { path: '/wt/dead', repoPath: '/repo' } as never }
+    ])
+
+    expect([...useWorktrees.getState().staleGroupIds].sort()).toEqual(['group-1', 'group-2'])
+  })
+
+  it('a restored worktree is no longer stale after a refresh (the streak is cleared, not sticky)', async () => {
+    const t0 = 1_700_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(t0)
+    gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    vi.setSystemTime(t0 + WORKTREE_STATUS_THROTTLE_MS + 1)
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+    expect(useWorktrees.getState().staleGroupIds).toEqual(['group-1'])
+
+    // The directory answers again → the streak is forgotten, so the next refresh must not resurrect
+    // the staleness out of the strike map.
+    vi.setSystemTime(t0 + 2 * WORKTREE_STATUS_THROTTLE_MS + 2)
+    gitMock.status.mockResolvedValue(okStatus())
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'group-1')
+
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue([
+      { path: '/repo', branch: 'main', head: 'a', isBare: false },
+      { path: '/wt/feat', branch: 'feat', head: 'b', isBare: false }
+    ])
+    await useWorktrees.getState().refresh('/repo', [
+      { groupId: 'group-1', worktree: { path: '/wt/feat', repoPath: '/repo' } as never }
+    ])
+
+    expect(useWorktrees.getState().staleGroupIds).toEqual([])
+  })
+
   it('leaves staleness alone when no group id is given', async () => {
     gitMock.status.mockResolvedValue(okStatus({ hasRepo: false, branch: '' }))
 

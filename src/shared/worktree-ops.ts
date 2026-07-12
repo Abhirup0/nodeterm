@@ -29,10 +29,40 @@ export async function repoRoot(git: GitExecutor, cwd: string): Promise<string | 
   return r.ok ? r.out.trim() : null
 }
 
-export async function worktreeList(git: GitExecutor, repoPath: string): Promise<WorktreeEntry[]> {
+/**
+ * Does this path exist on disk? Injected (the shared layer has no fs) — the real one is wired in
+ * `git-service`. Defaults to "it exists": the conservative answer, which never deletes anything and
+ * never calls a live worktree missing.
+ */
+export type PathExists = (p: string) => Promise<boolean>
+
+const alwaysExists: PathExists = async () => true
+
+/**
+ * List a repo's worktrees, with `prunable` made TRUE for any entry whose directory is not on disk.
+ *
+ * git only emits the `prunable` tag from **2.36**. Debian 11 / Ubuntu 20.04 — the Server Edition's
+ * own target platform — ship git 2.30, where a worktree whose directory was deleted behind git's
+ * back is listed as perfectly healthy. Everything downstream reads `prunable` as "the directory is
+ * gone": `reconcileWorktrees` would call a dead binding live (chip healthy, "↪ Move into worktree"
+ * still clickable → it kills a running session and respawns it into a directory that no longer
+ * exists) and the bind dialog would offer the vanished directory as an adoptable orphan.
+ *
+ * So we do not trust the tag alone: stat every entry and OR the result in. Same seam, same
+ * conservative default as `worktreeRemove`'s.
+ */
+export async function worktreeList(
+  git: GitExecutor,
+  repoPath: string,
+  pathExists: PathExists = alwaysExists
+): Promise<WorktreeEntry[]> {
   if (!repoPath) return []
   const r = await git(repoPath, ['worktree', 'list', '--porcelain'])
-  return r.ok ? parseWorktreePorcelain(r.out) : []
+  if (!r.ok) return []
+  const entries = parseWorktreePorcelain(r.out)
+  return Promise.all(
+    entries.map(async (e) => ({ ...e, prunable: e.prunable || !(await pathExists(e.path)) }))
+  )
 }
 
 export async function worktreeAdd(
@@ -117,21 +147,16 @@ export async function worktreeMerge(
 export async function worktreeRemove(
   git: GitExecutor, repoPath: string, wtPath: string, homeDir: string, deleteBranch: boolean,
   pruneOnly = false,
-  /**
-   * Does this path exist on disk? Injected (the shared layer has no fs). It is the fallback for
-   * git's `prunable` flag, which only exists from git 2.36: on an older git a deleted worktree is
-   * listed as perfectly healthy, so `prunable` alone would leave stale bindings unrecoverable and
-   * answer the user with a flatly untrue "the worktree directory still exists".
-   * Defaults to "it exists" — the conservative answer, which never deletes anything.
-   */
-  pathExists: (p: string) => Promise<boolean> = async () => true
+  /** See `PathExists` / `worktreeList`: git's `prunable` flag needs git ≥ 2.36; the stat is the
+   *  fallback that makes every older git tell the truth about a deleted directory. */
+  pathExists: PathExists = alwaysExists
 ): Promise<WorktreeOpResult> {
   // Reject a path that could be parsed as an option flag (argv injection).
   if (!wtPath || wtPath.startsWith('-')) return { ok: false, message: 'Invalid worktree path.' }
   if (isDangerousWorktreeRemovalPath(wtPath, repoPath, homeDir)) {
     return { ok: false, message: 'Refusing to remove that path.' }
   }
-  const list = await worktreeList(git, repoPath)
+  const list = await worktreeList(git, repoPath, pathExists)
   const entry = list.find((e) => e.path.replace(/\/+$/, '') === wtPath.replace(/\/+$/, ''))
   if (!entry) {
     // Nothing to remove: git does not know this path (deleted + already pruned, or never a
