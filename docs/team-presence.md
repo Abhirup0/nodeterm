@@ -1,7 +1,15 @@
 # Team presence — design
 
 **Date:** 2026-07-12
-**Status:** approved, not yet implemented
+**Status:** **Stage 1 landed** — the `PresenceHub` (`src/core/presence/hub.ts`), both shells joining
+it (Server Edition browsers, the Electron window, cursorless relay phones), a real
+`window.nodeTerminal.presence` on **both** surfaces, and the three UI surfaces: project-scoped live
+cursors + cursor chat (`PresenceLayer`), the `Facepile` (off-project peers included), and per-node
+focused-avatar chips. **Stage 2** (terminal co-attach + typing attribution — the
+[Terminal co-attach](#terminal-co-attach) section) and **Stage 3** (canvas mutation sync — the
+[Canvas sync](#canvas-sync) section) are **not implemented**; each gets its own plan. Deltas between
+this document and what Stage 1 actually shipped are recorded in
+[What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec).
 **Scope:** live cursors with names, ephemeral cursor chat, per-node "who is active here",
 and the terminal co-attach that makes those indicators mean something.
 
@@ -93,6 +101,7 @@ peer table and fans out, and applies no policy.
 | client→server | `presence:cursor` | `{x, y}` — **flow coordinates**, sampled on rAF, throttled to ~20 Hz |
 | client→server | `presence:focus` | `{nodeId \| null}` |
 | client→server | `presence:chat` | `{text \| null}` — live per-keystroke; `null` closes |
+| client→server | `presence:project` | `{projectId \| null}` — which canvas we are looking at |
 | server→clients (`ev`) | `presence:sync` | full snapshot on join |
 | server→clients | `presence:peer` | single-peer diff (join / update / leave) |
 
@@ -214,6 +223,30 @@ re-render `Canvas`, every mouse move would redraw a 4000-line component.
   that repo:** send `presence:hello` + `presence:focus`, and render received cursor chat as a
   banner (it has no cursor to anchor a bubble to). Mobile does not *send* cursor chat in v1.
 
+## What Stage 1 changed relative to this spec
+
+The sections above are the design as approved. Stage 1 implemented them faithfully with three
+deviations, recorded here so this document does not lie to the next reader:
+
+1. **Presence is scoped to a project, and the facepile deliberately breaks that scope.** The peer
+   table carries `PeerState.projectId`, fed by a `presence:project` channel that was not in the
+   original wire table (it is now, above). Cursors, chat bubbles and node chips are filtered
+   through the single pure selector `peersOnProject(peers, projectId)`; the facepile intentionally
+   does *not* filter, showing off-project peers dimmed and labelled with the project they are in,
+   clickable to travel there. This was designed in as the feature described under
+   [Presence is scoped to a project](#presence-is-scoped-to-a-project) — it is called out again
+   here because it is the one place where "presence is per-canvas" is deliberately violated.
+2. **A WebSocket heartbeat was added.** Not in the original design: a browser tab that *vanished*
+   (killed, laptop slept, network dropped) never triggered a WS `close`, so its peer stayed in the
+   table forever — a permanent ghost cursor. The Server Edition now runs a 30 s ping/pong heartbeat
+   and reaps sockets that miss a pong, so a vanished client leaves within ~60 s. A cleanly closed
+   tab still leaves immediately, on `close`.
+3. **`PeerState.typing` exists but is always `null` in Stage 1.** The field, the `noteTyping()`
+   throttle on the hub (`src/core/presence/hub.ts`) and the renderer's badge decay are all in
+   place, but **nothing calls `noteTyping()`** — attribution needs the sender-aware `pty:write`
+   handler, which is Stage 2 work (see [Typing attribution](#typing-attribution--and-why-it-is-server-side)).
+   Until then no peer ever reports typing, and the UI simply never shows the badge.
+
 ## Non-goals (v1)
 
 Roles/permissions, follow/spotlight mode, persistent chat history, comment threads, write
@@ -229,6 +262,51 @@ read-only guests, per-user settings.
   resize; one client's backpressure does not stall the other.
 - Canvas convergence: interleaved mutations from two clients → identical node sets.
 - **Single-client regression:** min-size equals your own size and the spawn path is unchanged.
+
+### Manual smoke test (Stage 1)
+
+Presence needs two clients, which no unit test gives you. The cheapest two-client rig is the Server
+Edition in two browser tabs (see docs/SERVER.md):
+
+```bash
+npm run server:dev     # then open the printed URL in TWO browser windows
+```
+
+Use one **normal** window and one **private** window (or two profiles): a second tab in the *same*
+profile shares `localStorage`, so it would not re-prompt for a name and both peers would carry the
+same identity. Call them **A** and **B**; log both in with the shared password.
+
+1. **Name prompt, once.** B prompts for a name on first connect. Enter one. It does **not** prompt
+   again on reload (it is remembered in `localStorage` under `nodeterm.presence.me`). Do the same in
+   A with a different name.
+2. **Names propagate.** Each tab shows the other's avatar in the facepile (top right) in its color,
+   with the name entered in step 1 — not "Someone".
+3. **Cursors, in flow coordinates.** Move the mouse over A's canvas: B draws A's cursor with a name
+   label, tracking it. Now **zoom and pan B** (trackpad pinch / two-finger scroll). A's cursor stays
+   pinned to the same *canvas* point — the same node, the same corner of it — at every zoom level.
+   Neither tab ever draws its own cursor.
+4. **Cursor chat opens on `/`.** With the pointer over A's empty canvas, press `/`. An input opens
+   beside A's cursor; type — the text streams into A's bubble in B *per keystroke*. Enter leaves the
+   bubble up and it fades after ~5 s; Escape clears it at once.
+5. **`/` inside a terminal does NOT open cursor chat.** (The most important negative case.) In A,
+   hover into a terminal node until the hover guard releases and the terminal takes focus, then type
+   `/`. The `/` must reach the **shell** — it appears at the prompt — and **no chat input opens**.
+   Repeat inside an editor node (Monaco) and inside the rename box in a node header: same result.
+6. **Node focus chips.** While A is focused in that terminal, B shows A's avatar chip in **that
+   node's header**. Click A onto a different node → the chip moves. Click A onto empty canvas → the
+   chip disappears.
+7. **Off-project peers: dimmed, labelled, travelable.** In A, switch to (or create) a second project
+   tab. In B: A's cursor and node chip vanish from the canvas **immediately**, and A's facepile
+   avatar goes **dimmed**, labelled with the project A is in ("Ada · api"). Click that avatar in B →
+   B switches to that project and centers on A's focused node. Switch A back → A's cursor reappears
+   on B's canvas.
+8. **Clean close leaves at once.** Close tab A normally → its cursor, chip and avatar disappear from
+   B within a moment (the WS `close`).
+9. **Vanished client leaves on the heartbeat.** Reopen A, then **kill** it without a clean close
+   (kill the browser process, or pull the network). B keeps showing A briefly, then reaps it
+   **within ~60 s** — this is the 30 s ping/pong, and is the expected worst case, not a bug.
+10. **Desktop alone is silent.** Launch the Electron app with no other client: no facepile, no
+    cursors, no name prompt — presence costs nothing when you are the only peer.
 
 ## Known risks
 
