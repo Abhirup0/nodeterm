@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { AgentPermissionMode } from '@shared/agents/config'
 import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '@shared/types'
 import { createProject } from './workspace'
 
@@ -26,6 +27,9 @@ interface ProjectsState {
   setProjectCwd(id: string, cwd: string): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
+  /** Sets (or clears, with undefined = fall back to the global setting) the project's default
+   *  permission mode for new Claude/chat sessions. */
+  setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void
   /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
@@ -161,6 +165,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectDefaultAccount(id, accountId) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, defaultAccountId: accountId } : p))
+    }))
+  },
+
+  setProjectDefaultPermissionMode(id, mode) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, defaultPermissionMode: mode } : p))
     }))
   },
 

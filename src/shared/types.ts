@@ -2,7 +2,7 @@
 
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
-import type { AgentId, PromptInjectionMode } from './agents/config'
+import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
 
 export interface PtyCreateOptions {
@@ -147,6 +147,8 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Default managed Claude account for new Claude/chat nodes in this project. */
   defaultAccountId?: string
+  /** Permission mode for new Claude/chat sessions in this project. Unset = use the global setting. */
+  defaultPermissionMode?: AgentPermissionMode
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
@@ -372,6 +374,9 @@ export interface Settings {
   disabledAgents: AgentId[]
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
+  /** The permission mode Claude sessions START in (Shift+Tab still cycles modes at runtime).
+   *  Overridable per project via Project.defaultPermissionMode. */
+  claudePermissionMode: AgentPermissionMode
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
    *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
   telemetryEnabled: boolean
@@ -407,6 +412,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: ['codex', 'gemini'],
   defaultAgent: 'claude',
+  // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
+  // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
+  claudePermissionMode: 'auto',
   telemetryEnabled: false,
   phoneAccessEnabled: false
 }
