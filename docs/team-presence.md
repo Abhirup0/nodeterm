@@ -60,6 +60,19 @@ The server does not verify names. Anyone can claim to be anyone. This is suffici
 is typing in this shell" and insufficient for audit or permissions — an accepted, documented
 trade-off. Two tabs from one person show as two peers (as in Figma).
 
+### Presence is scoped to a project
+
+A project *is* a canvas, with its own node set and its own flow coordinate space. A peer's
+cursor, chat bubble and node chips are therefore rendered **only for peers on the same
+project** (`PeerState.projectId`, filtered through the single pure selector
+`peersOnProject(peers, projectId)`). Without that filter, a teammate looking at project "api"
+while you look at "web" would have their cursor drawn on your canvas at meaningless
+coordinates.
+
+The facepile deliberately does *not* filter: off-project peers appear dimmed, labelled with the
+project they are in, and clicking one switches you to that project and centers on their focused
+node. What would have been a bug becomes the "who is working where" view.
+
 ### Peers may have no cursor
 
 `PeerState = { clientId, name, color, cursor: {x,y} | null, focus: nodeId | null, chat: string | null }`
@@ -116,7 +129,17 @@ Changes:
    (`platform-server.ts:39`) and `detach()` clears the *entire* map on any disconnect — a bug
    already confessed in a "v1 is single-UI" comment (`:110`). Left alone, one slow phone would
    stall everyone's output. Rekey to `(clientId, sessionId)`; detach clears only that client's
-   entries.
+   entries. The shared PTY is paused only when *every* client of that session is over
+   high-water, so the slowest link no longer sets the pace for the team.
+
+   That alone would let a slow client's send buffer grow without bound, so it is capped:
+   at `WS_DROP_WATER` (8 MB buffered for one client on one session) we **drop that client's
+   queued output** rather than pause the others, and when its buffer drains we **resynchronise
+   it by redrawing the current screen from tmux** (reusing the existing `capture-pane` path)
+   with a "reconnected — earlier output skipped" separator. For a terminal the current screen
+   is what matters, not the 8 MB of scrollback a bad link missed; tmux is the authoritative
+   source of that screen. Drop-and-redraw is per `(client, session)`: a desynced phone affects
+   neither the other clients of that session nor its own other sessions.
 
 ### Typing attribution — and why it is server-side
 
