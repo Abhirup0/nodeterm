@@ -46,6 +46,7 @@ import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
 import { initClaudeAccounts } from './claude-accounts'
+import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { installClaudeHooksInto } from '../core/agents/hooks/claude'
@@ -324,6 +325,11 @@ app.whenReady().then(async () => {
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   gitService.registerIpc()
+  registerClaudeCliIpc()
+  // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
+  // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
+  // node — resolves from cache instead of racing the probe into a conservative "no auto".
+  void claudeCliCaps()
 
   ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())

@@ -440,7 +440,14 @@ export interface SshProjectApi {
     projectId: string,
     server: import('./ssh').SshConnection,
     remoteCwd?: string
-  ): Promise<{ controlPath: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }>
+  ): Promise<{
+    controlPath: string
+    hookEndpointPath?: string
+    tmuxConfPath?: string
+    remoteHome?: string
+    /** Whether the REMOTE host's claude CLI accepts `--permission-mode auto` (probed on connect). */
+    claudeAutoPermissionMode?: boolean
+  }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>
   /**
@@ -856,7 +863,22 @@ export interface TranscriptsApi {
   search(query: string): Promise<TranscriptHit[]>
 }
 
+/** What the Claude CLI on THIS machine can do. Fed by the `claude --version` probe in
+ *  core/claude-cli.ts; every field fails open to the conservative answer when the version
+ *  is unknown (missing CLI, timeout, unreadable output). */
+export interface ClaudeCliCaps {
+  version: string | null
+  /** `--permission-mode auto` is only accepted by Claude Code >= 2.1.90. */
+  autoPermissionMode: boolean
+}
+
+/** The answer whenever the CLI version can't be determined: no `auto` flag → bare command. */
+export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = { version: null, autoPermissionMode: false }
+
 export interface ClaudeApi {
+  /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).
+   *  Never rejects — an unknown version resolves to the fail-open caps. */
+  cliCaps(): Promise<ClaudeCliCaps>
   /**
    * Reads a Claude session's full transcript as flat searchable lines ([] if unavailable).
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —

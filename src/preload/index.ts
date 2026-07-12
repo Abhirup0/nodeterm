@@ -268,6 +268,7 @@ const api: NodeTerminalApi = {
       ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
   claude: {
+    cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
   },
