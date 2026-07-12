@@ -5,6 +5,11 @@ import { agentConfig, withPermissionMode } from '@shared/agents/config'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
+// Re-exported so Canvas (and anything else in the renderer) keeps importing it from here, while the
+// single implementation lives in src/shared and is shared with the relay host + the canvas-sync
+// reflector.
+export { applyCanvasMutation } from '@shared/canvas-mutations'
+
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
   '#0a84ff', // systemBlue
@@ -877,24 +882,6 @@ export function reorderNodeBefore(
 }
 
 /** Converts persisted node states into live React Flow nodes (parents first). */
-/**
- * Apply a single canvas mutation to a list of node states (renderer mirror of
- * `main/remote/canvas-sync`'s `applyMutation`, kept here to keep the renderer off the main-process
- * boundary). `upsert` replaces-or-appends by id; `remove` filters by id. Returns a NEW array
- * (the input is never mutated).
- */
-export function applyCanvasMutation(
-  states: CanvasNodeState[],
-  m: CanvasMutation
-): CanvasNodeState[] {
-  if (m.op === 'remove') return states.filter((n) => n.id !== m.id)
-  const idx = states.findIndex((n) => n.id === m.node.id)
-  if (idx === -1) return [...states, m.node]
-  const next = states.slice()
-  next[idx] = m.node
-  return next
-}
-
 export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
   // React Flow requires a parent node to appear before its children in the array.
   const ordered = [...states].sort((a, b) => {
@@ -1011,4 +998,51 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         chatSessionId: n.data.chatSessionId
       }
     })
+}
+
+/**
+ * Apply ONE peer mutation (canvas sync) to the LIVE React Flow node array — patch/append/remove
+ * just that node, and leave every other node object untouched.
+ *
+ * NOT `nodeStatesToFlow(applyCanvasMutation(flowToNodeStates(nodes), m))`. That whole-canvas round
+ * trip was the first cut, and the serializers are lossy BY DESIGN, so it destroyed live state on
+ * every peer mutation — 20 times a second while a teammate drags:
+ *   - SELECTION. `nodeStatesToFlow` never sets `selected`, so a teammate's drag wiped your
+ *     box-select / shift-click / select-then-group the instant it landed.
+ *   - REMOTE NODES. `flowToNodeStates` filters `!n.data.remote` (they are transient to a relay
+ *     connection and must never persist), so round-tripping DELETED every relay terminal on your
+ *     canvas.
+ *   - LOCAL-ONLY DATA. `initialCommand`, `respawnNonce`, `forkFrom` never survive a serialize.
+ *   - IDENTITY. Every node object was rebuilt → every node component re-rendered, per mutation.
+ * Patching in place keeps all four: untouched nodes keep their object identity (React.memo holds),
+ * and the touched one keeps `selected` and its local-only data.
+ *
+ * `measured` is deliberately NOT carried over on the patched node: React Flow's measured size wins
+ * over `width`/`height` in flowToNodeStates, so keeping a stale one would make us serialize the OLD
+ * size after a peer resized the node — and re-publish it, fighting the peer. Dropping it lets React
+ * Flow re-measure from the incoming `style`, which is what the peer sent.
+ */
+export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): CanvasNode[] {
+  if (m.op === 'remove') {
+    if (!nodes.some((n) => n.id === m.id)) return nodes // already gone — keep identity, skip render
+    return nodes.filter((n) => n.id !== m.id)
+  }
+  const incoming = nodeStatesToFlow([m.node])[0]
+  const idx = nodes.findIndex((n) => n.id === m.node.id)
+  if (idx === -1) {
+    // Append, then re-sort: React Flow requires a parent to appear BEFORE its children, and a peer
+    // grouping nodes sends the new group frame and its (already present) children in one burst.
+    return groupsFirst([...nodes, incoming])
+  }
+  const prev = nodes[idx]
+  const next = nodes.slice()
+  next[idx] = {
+    ...incoming,
+    selected: prev.selected,
+    // Local-only data (initialCommand / respawnNonce / remote / forkFrom) is not serialized, so it
+    // is not in `incoming` — carry it. Every serialized key IS present on incoming.data (as a value
+    // or an explicit undefined), so the spread still applies the peer's clears.
+    data: { ...prev.data, ...incoming.data }
+  }
+  return prev.parentId === incoming.parentId ? next : groupsFirst(next)
 }

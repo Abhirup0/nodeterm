@@ -1,7 +1,14 @@
 import { create } from 'zustand'
 import type { AgentPermissionMode } from '@shared/agents/config'
-import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '@shared/types'
-import { createProject } from './workspace'
+import type {
+  BridgeLink,
+  CanvasMutation,
+  CanvasNodeState,
+  Project,
+  Viewport,
+  Workspace
+} from '@shared/types'
+import { applyCanvasMutation, createProject } from './workspace'
 
 interface ProjectsState {
   projects: Project[]
@@ -40,6 +47,16 @@ interface ProjectsState {
     bridges?: BridgeLink[],
     ropes?: BridgeLink[]
   ): void
+  /**
+   * Applies ONE peer canvas mutation to a project's serialized nodes — the path for a project
+   * that is loaded but NOT active (React Flow only holds the active project's nodes). Returns
+   * false if the project is unknown here (nothing applied, nothing created).
+   *
+   * This must not be skipped for background projects: their serialized nodes are what the next
+   * whole-file `workspace.save` writes, so dropping a peer's `remove` would resurrect the node
+   * they deleted on the very next save — the data-loss shape canvas sync exists to fix.
+   */
+  applyNodeMutation(projectId: string, mutation: CanvasMutation): boolean
   /** Renames a node within a project (source of truth for inactive projects). */
   renameNode(projectId: string, nodeId: string, title: string): void
   /** Recolors a node within a project. */
@@ -191,6 +208,16 @@ export const useProjects = create<ProjectsState>((set, get) => ({
           : p
       )
     }))
+  },
+
+  applyNodeMutation(projectId, mutation) {
+    if (!get().projects.some((p) => p.id === projectId)) return false
+    set((s) => ({
+      projects: mapProjectNodes(s.projects, projectId, (nodes) =>
+        applyCanvasMutation(nodes, mutation)
+      )
+    }))
+    return true
   },
 
   renameNode(projectId, nodeId, title) {

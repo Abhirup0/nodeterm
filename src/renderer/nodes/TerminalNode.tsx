@@ -20,10 +20,22 @@ import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
 import {
   attachReplay,
+  closedByLabel,
   copyKeyAction,
   createDataGate,
   disposalAction,
+  forgetNodeTermState,
+  letterboxFor,
+  markRecycled,
+  recycleAction,
+  repaintResync,
+  reportedSize,
+  seedPaint,
+  warmSeed,
+  setFittedSize,
+  shouldApplyResync,
   stripTrailingNewline,
+  takeRecycled,
   toXtermText,
   xtermScrollback,
   type SessionLife
@@ -37,6 +49,9 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
+import { reportFocus, releaseFocus, usePresence } from '../state/presence'
+import type { ClientId } from '@shared/presence'
+import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
@@ -134,8 +149,6 @@ interface ParkedTerminal {
   search: SearchAddon
   transport: TerminalTransport
   sessionId: string
-  sentCols: number
-  sentRows: number
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
   /**
@@ -182,6 +195,95 @@ const noParkIds = new Set<string>()
 export function disposeTerminalOnUnmount(id: string): void {
   noParkIds.add(id)
   disposeParkedTerminal(id)
+  coStates.delete(id)
+  forgetNodeTermState(id)
+}
+
+/**
+ * Resize the emulator the way `FitAddon.fit()` does — clearing the render service FIRST.
+ *
+ * We drive `term.resize()` ourselves (the pty, not the fit, is the authority on the grid under
+ * co-attach), and the `clear()` is not decoration: it forces a full repaint, without which
+ * shrinking a terminal can leave stale glyph rows behind in the area that was cut. That is a
+ * regression EVERY user would hit on a plain drag-resize, solo included — so we keep the addon's
+ * behavior byte for byte. Private API (`_core._renderService`), exactly as addon-fit uses it, so it
+ * is fail-soft: if xterm ever renames it, we still resize.
+ */
+function resizeTerm(term: Terminal, cols: number, rows: number): void {
+  if (term.cols === cols && term.rows === rows) return
+  try {
+    ;(term as unknown as { _core: { _renderService: { clear(): void } } })._core._renderService.clear()
+  } catch {
+    // private API moved — the resize below still happens (worst case: a stale row until the next paint)
+  }
+  term.resize(cols, rows)
+}
+
+/**
+ * Co-attach UI state per node — kept OUTSIDE React on purpose.
+ *
+ * The transport listeners (onSize / onClosed / onResync) are wired ONCE, in the spawn
+ * continuation, and they SURVIVE a park: an adopted terminal carries its `cleanups` over and never
+ * re-subscribes. A remounted node is a NEW React instance, so a `setState` captured by those
+ * listeners would update a component that no longer exists. They publish here instead, and
+ * whichever instance is currently mounted subscribes.
+ *
+ * `closed` is also the respawn guard: once another client has DESTROYED this node's session
+ * (tmux kill-session — gone for everyone), a remount must NOT call `transport.create` again. Core
+ * can only make that respawn fresh, not impossible — it would resurrect a terminal its owner
+ * deliberately killed. Cleared only on permanent deletion (disposeTerminalOnUnmount).
+ */
+interface CoState {
+  /** The pty runs at a SMALLER subscriber's grid than we could fit → center + letterbox. */
+  letterbox: boolean
+  /** Set once the session was destroyed by someone else. `by` is null for an unattributed destroy. */
+  closed: { by: ClientId | null } | null
+  /**
+   * The session ENDED under us and there is nothing to re-attach to, but the node is NOT deleted:
+   * the client that recycled it (moved it into a worktree) never registered a replacement session
+   * — its app quit or crashed mid-move — so core released us on the escape-hatch timeout.
+   *
+   * We must not respawn: our create options still carry the node's OLD cwd (the mover's cwd change
+   * is not broadcast to us), so we would spawn `nt-<id>` in the stale folder and the mover's own
+   * `new-session -A` would then reattach it — everyone's node claiming the worktree path with a
+   * shell sitting somewhere else. So the terminal ends and the user reopens it deliberately, which
+   * is recoverable and, unlike a silent stale-cwd respawn, honest. Cleared by that reopen.
+   */
+  ended: boolean
+}
+const NO_CO: CoState = { letterbox: false, closed: null, ended: false }
+const coStates = new Map<string, CoState>()
+const coSubs = new Map<string, (s: CoState) => void>()
+
+/**
+ * Restart hooks for a RECYCLED node — the other half of the destroy/recycle split.
+ *
+ * "Move into worktree" ends a node's tmux session so the same node id respawns in the new cwd. It
+ * is NOT a deletion: the node stays on every canvas. A co-viewer therefore must not land in the
+ * `closed` state above (permanent, un-respawnable) — it has to RESTART its terminal onto the
+ * replacement session, which core has already spawned by the time it tells us (so our re-create
+ * co-attaches to it rather than spawning the node in our own, stale cwd).
+ *
+ * The mounted instance publishes its respawn trigger here, for the same reason as `coSubs`: the
+ * transport listener is wired once, survives a park, and cannot hold a `setState` of a component
+ * that may since have unmounted. No entry = nobody is mounted, and the park (if any) is disposed
+ * instead — a parked terminal is holding the dead pty, and the next mount creates fresh.
+ */
+const restartSubs = new Map<string, () => void>()
+
+function getCo(id: string): CoState {
+  return coStates.get(id) ?? NO_CO
+}
+
+function setCo(id: string, patch: Partial<CoState>): void {
+  const prev = getCo(id)
+  const next = { ...prev, ...patch }
+  // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
+  // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
+  if (next.letterbox === prev.letterbox && next.closed === prev.closed && next.ended === prev.ended)
+    return
+  coStates.set(id, next)
+  coSubs.get(id)?.(next)
 }
 
 /**
@@ -215,6 +317,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
+  // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
+  // effect), so effects outside that closure (font/cursor changes) resize through the same path.
+  const applyFitRef = useRef<(() => void) | null>(null)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
@@ -302,6 +407,42 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // Set when the session fell back to the system account because this node's account folder was
   // missing at spawn (Task 3 fallback) — flags the account chip with a warning tint + tooltip.
   const [accountFallback, setAccountFallback] = useState(false)
+  // Co-attach state published by the (park-surviving) transport listeners — see CoState.
+  const [co, setCo_] = useState<CoState>(() => getCo(id))
+  useEffect(() => {
+    coSubs.set(id, setCo_)
+    setCo_(getCo(id)) // catch up anything published while this instance was mounting
+    return () => {
+      if (coSubs.get(id) === setCo_) coSubs.delete(id)
+    }
+  }, [id])
+  // Publish this instance's restart trigger for the (park-surviving) onRecycled listener — see
+  // restartSubs. Bumping `respawnNonce` re-runs the lifecycle effect below, which is exactly what
+  // the mover's own canvas does; the transient nonce is never persisted.
+  useEffect(() => {
+    const restart = (): void =>
+      updateNodeData(id, (n) => ({
+        respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+      }))
+    restartSubs.set(id, restart)
+    return () => {
+      if (restartSubs.get(id) === restart) restartSubs.delete(id)
+    }
+  }, [id, updateNodeData])
+  // The name of the peer who closed this node. Read NON-reactively (getState, not a selector): the
+  // presence store is written at cursor rate and its perf contract reserves subscriptions for the
+  // presence components — a per-terminal subscriber would run on every one of those writes. The
+  // overlay is terminal state anyway, so resolving the name when `co.closed` appears is enough.
+  const closedName = co.closed ? closedByLabel(co.closed.by, usePresence.getState().peers) : ''
+
+  // "Session ended" (a recycle whose replacement never came — see CoState.ended): the user asks for
+  // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
+  const reopenEnded = (): void => {
+    setCo(id, { ended: false })
+    updateNodeData(id, (n) => ({
+      respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+    }))
+  }
 
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
   const readBuffer = useCallback(() => {
@@ -411,22 +552,65 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
     }
 
+    let sessionId: string | null = parked ? parked.sessionId : null
+    let disposed = false
+    // Last cols/rows REPORTED to the pty (seeded at create): a resize IPC makes tmux redraw the
+    // whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after mount)
+    // must not send one — on a bulk project load that redraw doubles per node.
+    // NOT carried over from the park entry: parking REPORTS "not viewing" (null, null), which drops
+    // this client out of the pty's size set. Keeping the old values would make the common same-size
+    // adopt send nothing at all — we would never re-enter the set, while still being told to render
+    // the other viewer's (larger) grid. Zeroed here, so an adopting client always re-reports.
+    let sentCols = 0
+    let sentRows = 0
+    // What we last REPORTED — the reference the letterbox is measured against — is published to a
+    // module-level registry (`setFittedSize`), NOT held here: the `onSize` listener that reads it is
+    // wired once and SURVIVES a park, so a closure variable would leave it comparing the pty's size
+    // against a previous mount's grid (see terminal-config's fittedByNode).
+
+    /**
+     * Co-attach sizing: we REPORT what we could render (`proposeDimensions`) and the pty tells us
+     * what it actually runs at — the smallest subscriber's grid (`onSize`).
+     *
+     * Two rules, both load-bearing:
+     *  - a REPORTED fit is also applied locally, because that is exactly what the pty assumes we
+     *    are showing (PtyManager.resize → `session.shown`). If it is not the effective size, the
+     *    broadcast corrects us right back; solo, the min of a one-element set IS our fit, so no
+     *    broadcast is ever sent and this is the old `fit.fit()` + report, unchanged.
+     *  - an UNCHANGED fit resizes nothing. A sub-cell container change re-runs this with the same
+     *    cols/rows, and resizing the emulator back up to our fit here would undo a letterbox with
+     *    no report to correct it — the pty's state didn't change, so no `pty:size` would follow.
+     */
+    const applyFit = () => {
+      try {
+        const size = reportedSize(fit.proposeDimensions())
+        if (!size) return
+        if (size.cols === sentCols && size.rows === sentRows) return
+        setFittedSize(id, size)
+        sentCols = size.cols
+        sentRows = size.rows
+        resizeTerm(term, size.cols, size.rows)
+        setCo(id, { letterbox: false })
+        // Before the session exists we are the only voice: the size rides the initial `create()`.
+        if (sessionId) transport.resize(sessionId, size.cols, size.rows)
+      } catch {
+        // proposeDimensions can throw when the element is 0-sized (collapsed); ignore.
+      }
+    }
+    applyFitRef.current = applyFit
+
     if (parked) {
       // Reattach the parked xterm's DOM element: the PTY never detached, so the screen is
       // already current — no spawn, no tmux redraw, no terminal-mode re-negotiation.
       if (term.element) container.appendChild(term.element)
       loadWebgl()
-      try {
-        fit.fit()
-      } catch {
-        // zero-size (collapsed) — the ResizeObserver below refits when it grows
-      }
+      applyFit()
     } else {
       term.loadAddon(fit)
       term.loadAddon(searchAddon)
       term.open(container)
       loadWebgl()
-      fit.fit()
+      applyFit()
       patchTerminalScale(term, getZoom)
       // OSC 52 clipboard write: route the decoded text to the local clipboard. tmux's mouse is off,
       // so tmux copy-mode no longer emits OSC 52 on our behalf — this handler is now the ONLY
@@ -460,8 +644,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       return false
     })
 
-    let sessionId: string | null = parked ? parked.sessionId : null
-    let disposed = false
     // Shared with the park entry this session travels through: an adopted terminal keeps the very
     // same PTY session, so its lifetime (and its kill-once guard) must be the same record.
     const life: SessionLife & { killed: boolean } = parked
@@ -479,11 +661,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       life.killed = true
       transport.kill(sid)
     }
-    // Last cols/rows actually sent to the PTY (seeded at create): a resize IPC makes tmux redraw
-    // the whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after
-    // mount) must not send one — on a bulk project load that redraw doubles per node.
-    let sentCols = parked ? parked.sentCols : 0
-    let sentRows = parked ? parked.sentRows : 0
     // Session-scoped teardown. An adopted terminal carries its listeners over (they were wired
     // to the still-live session on first mount); everything below that pushes here is gated on
     // `!parked` so nothing is wired twice.
@@ -525,11 +702,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const scrollbackPromise = parked
-      ? Promise.resolve('')
-      : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    const noSpawn = !!getCo(id).closed || getCo(id).ended
+    const scrollbackPromise =
+      parked || noSpawn
+        ? Promise.resolve('')
+        : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+    // Consume the recycle-restart flag HERE, at the start of the spawn it belongs to — not in the
+    // create() continuation, which returns early when the node unmounted mid-spawn and would leave
+    // the flag set for some unrelated mount hours later ("session restarted by another user" out of
+    // nowhere). The banner is printed below once the session resolves.
+    const wasRecycled = takeRecycled(id)
     void (async () => {
       if (parked) return // adopted a live session — nothing to spawn or replay
+      // Another client DESTROYED this node's session (tmux kill-session — for everyone), or it was
+      // recycled with no replacement to re-attach to. Never spawn: `create(persistKey)` would
+      // happily start a brand-new tmux session — resurrecting a terminal its owner deliberately
+      // killed, or reviving this node in our STALE cwd. The overlay explains the state instead.
+      if (noSpawn) return
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
@@ -554,7 +743,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen }) => {
+        // REFUSED: core's tombstone says another client deleted this node while we weren't
+        // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
+        // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
+        // BEFORE `onDisposed()`: there is no session here, so there is nothing to kill or unwire.
+        if (closed) {
+          setCo(id, { closed })
+          if (!disposed) term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
+          return
+        }
         // Disposal while the spawn/seed was in flight is NOT necessarily a teardown: an unmount
         // with a live session PARKS it (same xterm, same PTY client, same `cleanups` array), and
         // killing it here would leave the node permanently dead. That holds even if the user
@@ -573,13 +771,65 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (onDisposed()) return
         sessionId = sid
         if (fellBack) setAccountFallback(true)
-        // Catch up a size change that landed while the spawn was in flight (resize() skips the
+        // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
-        if (term.cols !== sentCols || term.rows !== sentRows) {
-          sentCols = term.cols
-          sentRows = term.rows
-          transport.resize(sid, term.cols, term.rows)
+        applyFit()
+        // The pty is the authority on the grid: it runs at the SMALLEST subscriber's size, so
+        // render exactly that and letterbox the leftover space. With one subscriber the min is our
+        // own proposal, so a solo user is never sent this at all — nothing re-fits, nothing repaints.
+        if (transport.onSize) {
+          cleanups.push(
+            transport.onSize(sid, (size) => {
+              resizeTerm(term, size.cols, size.rows)
+              // Measured against the CURRENT mount's fit (the registry, not a closure): this
+              // listener outlives the mount that wired it — see terminal-config's fittedByNode.
+              setCo(id, { letterbox: letterboxFor(id, size) })
+            })
+          )
         }
+        // Someone else permanently destroyed this node (tmux kill-session): show who, and make sure
+        // this component never respawns the session — see CoState.
+        if (transport.onClosed) {
+          cleanups.push(
+            transport.onClosed(sid, ({ by }) => {
+              setCo(id, { closed: { by } })
+              term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
+            })
+          )
+        }
+        // Someone else RECYCLED this node (moved it into a worktree): our session id is dead. If a
+        // replacement is already live under the same node id (`ready`), restart onto it — the node
+        // is still on our canvas and still working, so the closed state above would be a lie, and
+        // parking this now-dead pty would hand a corpse to the next mount. If NO replacement ever
+        // came (the mover's app died mid-move), we must NOT respawn: our options still carry the
+        // node's stale cwd, and spawning it would silently undo the worktree move for everyone —
+        // the terminal ends instead, with a reopen (see CoState.ended / recycleAction).
+        if (transport.onRecycled) {
+          cleanups.push(
+            transport.onRecycled(sid, (info) => {
+              if (recycleAction(info) === 'ended') {
+                disposeParkedTerminal(id) // the park holds a dead pty either way
+                setCo(id, { ended: true })
+                term.write('\r\n\x1b[90m[session ended — reopen to restart]\x1b[0m\r\n')
+                return
+              }
+              const restart = restartSubs.get(id)
+              if (!restart) {
+                disposeParkedTerminal(id) // unmounted: drop the park, the next mount creates fresh
+                return
+              }
+              markRecycled(id)
+              restart()
+            })
+          )
+        }
+        // A restart we did not ask for: say why once, before the new session's output lands. (We
+        // JOIN the replacement session, so tmux — which already has a client — does not redraw for
+        // us; the first thing on this screen is whatever the new shell prints next.)
+        if (wasRecycled)
+          term.write(
+            '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
+          )
         // Flow control: track xterm's unprocessed write backlog (bytes handed to
         // term.write but not yet parsed, plus anything still queued in the gate below). Past a
         // high watermark we pause the source so a flood can't grow this buffer without bound;
@@ -588,14 +838,25 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         let paused = false
         const HIGH_WATER = 1 << 20 // 1 MB
         const LOW_WATER = 1 << 18 //  256 KB
+        // Bytes left the backlog (parsed by xterm, or dropped by a resync — see below). Both must
+        // return the flow ticket, or a discarded queue would leave `pending` permanently high and
+        // the source paused forever.
+        // Both callers are DEFERRED (an xterm write callback, or a resync's gate reset), so both
+        // can land after teardown — the write loop still runs the callbacks it holds even though
+        // `cleanups` has unsubscribed everything and the session is killed. `life.dead` (flipped
+        // before the teardown in BOTH paths: the effect cleanup and the park dispose) is the
+        // authority: past it there is no session left to un-pause, and `transport.setFlow` would
+        // address a dead one (RemoteTransport forwards to the relay unconditionally).
+        const relieve = (bytes: number): void => {
+          if (life.dead) return
+          pending -= bytes
+          if (paused && pending < LOW_WATER) {
+            paused = false
+            transport.setFlow(sid, true)
+          }
+        }
         const writeChunk = (chunk: string): void => {
-          term.write(chunk, () => {
-            pending -= chunk.length
-            if (paused && pending < LOW_WATER) {
-              paused = false
-              transport.setFlow(sid, true)
-            }
-          })
+          term.write(chunk, () => relieve(chunk.length))
         }
         // Subscribe BEFORE the seed below: main pushes pty data on a timer regardless of
         // listeners and an IPC event with no listener is dropped, while tmux emits its attach
@@ -612,6 +873,41 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           gate.push(chunk)
         })
         cleanups.push(offData)
+        // We fell so far behind that the server discarded our queued output and redrew us from
+        // tmux. The capture IS the current screen, so reset the emulator and write it — writing it
+        // on top of a stale buffer would splice two different points in time. An EMPTY payload is
+        // ignored outright (shouldApplyResync): a wrongly cleared screen is unrecoverable, a
+        // skipped repaint is not. The separator mirrors the cold-restore one.
+        //
+        // It must go THROUGH THE GATE, not around it. A resync can land while the seed below is
+        // still awaiting its capture (both are exactly the "this client is slow" case), and the
+        // gate is holding chunks that PREDATE this redraw: draining them on top of it would splice
+        // the stale flood right back over the screen we just repainted, and the pending history
+        // seed would then write an even older screen over that. So the redraw SUPERSEDES both —
+        // `gate.reset()` drops the queue (returning its bytes to the flow accounting) and switches
+        // to pass-through, and `superseded` tells the seed its capture is now stale and to write
+        // nothing (it still wires the rest of the session — see seedPaint). Everything arriving
+        // after the capture streams straight through, in order.
+        //
+        // `repaintResync` sequences the reset behind a write callback: writes already handed to
+        // xterm (up to a megabyte of history seed) are parsed asynchronously, and an inline
+        // `term.reset()` would clear the buffer before they land — see terminal-config. That
+        // deferral outlives teardown, so the repaint is gated on `!life.dead`: this listener is
+        // unsubscribed and the xterm disposed, but a callback already inside xterm's write loop
+        // still fires and would reset/write a disposed core. `life` is the session-scoped record
+        // (shared with the park entry), so a PARK — which keeps the xterm and the PTY alive — does
+        // not trip the guard and a resync arriving at a parked terminal still repaints it.
+        let superseded = false
+        if (transport.onResync) {
+          cleanups.push(
+            transport.onResync(sid, (resyncScreen) => {
+              if (!shouldApplyResync(resyncScreen)) return
+              superseded = true
+              relieve(gate.reset())
+              repaintResync(term, resyncScreen, () => !life.dead)
+            })
+          )
+        }
         // Seed the (fresh) emulator with the history it can't see: a cold restart replays the
         // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
         // tmux's own scrollback. Parked terminals get neither — their buffer is still correct
@@ -630,7 +926,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           if (replay === 'cold-snapshot') {
             const snapshot = await scrollbackPromise
             if ((toreDown = onDisposed())) return
-            if (snapshot) {
+            if (seedPaint({ replay, superseded, snapshot }) === 'snapshot') {
               // The snapshot comes from `capture-pane -p`: LF-separated, no CR bytes. xterm runs
               // with convertEol:false, so writing it raw would render as a staircase.
               term.write(toXtermText(snapshot))
@@ -650,14 +946,20 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             // node would come up with an empty scrollback.
             const history = await transport.captureHistory(id).catch(() => '')
             if ((toreDown = onDisposed())) return
-            if (history) {
-              // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
-              // start the block from a known-clean SGR state rather than an arbitrary one.
-              term.write('\x1b[0m')
-              // capture-pane ends with a trailing newline: writing it would drop the cursor one
-              // row below the last captured row, xterm would scroll, and tmux's redraw would
-              // repaint that row again — one duplicated line at the seam.
-              term.write(toXtermText(stripTrailingNewline(history)))
+            // A resync that landed while we awaited the capture is strictly newer than what we just
+            // fetched, so `seedPaint` says 'none' and we write nothing. It is a CONDITION, never a
+            // `return`: everything below this try/finally — the onExit notice, `term.onData` (the
+            // KEYBOARD INPUT path) and the initialCommand / agent-resume — must still be wired, or
+            // the terminal streams output, looks alive, and silently accepts no input forever.
+            const paint = seedPaint({ replay, superseded, history, screen })
+            if (paint !== 'none') {
+              // `warmSeed` owns the exact bytes: the history, pushed `term.rows` lines above the
+              // fold so tmux's in-place redraw cannot leave a second copy of it behind (see its
+              // doc), plus — for a CO-ATTACH JOINER — the visible `screen` from `create()`, which
+              // is the one thing the history no longer carries (the capture excludes the visible
+              // screen, because tmux is about to paint it) and which a joiner never gets a redraw
+              // for. A joiner whose history capture failed still opens on its teammate's screen.
+              term.write(warmSeed({ history, screen, rows: term.rows }))
             }
           }
         } catch (err) {
@@ -705,18 +1007,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     })()
 
-    const resize = () => {
-      try {
-        fit.fit()
-        if (sessionId && (term.cols !== sentCols || term.rows !== sentRows)) {
-          sentCols = term.cols
-          sentRows = term.rows
-          transport.resize(sessionId, term.cols, term.rows)
-        }
-      } catch {
-        // fit can throw when the size is 0 (e.g. collapsed); ignore.
-      }
-    }
     // Coalesce observer bursts: dragging the NodeResizer fires per animation frame, and every
     // call is a full cell-geometry measure + a resize IPC → node-pty → tmux (which redraws the
     // whole pane). One trailing fit per settle is enough — the canvas node frame itself still
@@ -724,7 +1014,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const observer = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(resize, 80)
+      resizeTimer = setTimeout(applyFit, 80)
     })
     observer.observe(container)
 
@@ -734,6 +1024,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       useAgentStatus.getState().setActive(id, false)
+      // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
+      // project switch every node unmounts, and an unconditional clear could undo the focus the
+      // node we just moved into already published.
+      releaseFocus(id)
       // Unmount happens on a project switch (a detach — the tmux session keeps running) as
       // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
       // persisted status (that would drop the sessionId the context meter looks up on remount,
@@ -744,6 +1038,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
+      if (applyFitRef.current === applyFit) applyFitRef.current = null
       // Free the GPU context while hidden either way (live WebGL contexts are capped ~16).
       try {
         webgl?.dispose()
@@ -752,9 +1047,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
-      // the xterm (element detached) and its PTY stay alive so a remount re-adopts them.
+      // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session
+      // another client destroyed — or ended under us with no replacement — is gone: nothing to park
+      // (and nothing left to keep alive).
       const isRespawn = respawnNonceRef.current !== myNonce
-      if (sessionId && !isRespawn && !noParkIds.delete(id)) {
+      const co = getCo(id)
+      if (sessionId && !isRespawn && !co.closed && !co.ended && !noParkIds.delete(id)) {
+        // Park = "subscribed, but not viewing": report no size at all, so this window's (possibly
+        // small) grid stops clamping every other subscriber's terminal for the next five minutes.
+        // The subscription itself stays — output keeps streaming into the parked xterm — and the
+        // adopting mount re-reports its size (sentCols/sentRows are NOT carried over; see above).
+        transport.resize(sessionId, null, null)
         term.element?.remove()
         const entry: ParkedTerminal = {
           term,
@@ -762,8 +1065,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           search: searchAddon,
           transport,
           sessionId,
-          sentCols,
-          sentRows,
           cleanups,
           life,
           timer: setTimeout(() => {
@@ -793,6 +1094,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
   // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
   // reaches the terminals already on the canvas instead of only the next fresh one.
+  //
+  // A new font size means new cell geometry, i.e. a different grid — route it through applyFit
+  // (not a bare fit.fit()) so the pty is told the new size like any other resize, instead of
+  // running at a grid nobody renders. Under co-attach applyFit is also what REPORTS our size, so
+  // a font change must go through it or this client would silently keep clamping the shared pty
+  // to its pre-change grid.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
@@ -800,11 +1107,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.options.fontFamily = fontFamily
     term.options.cursorBlink = cursorBlink
     term.options.scrollback = xtermScrollback(tmuxScrollback)
-    try {
-      fitRef.current?.fit()
-    } catch {
-      // ignore
-    }
+    applyFitRef.current?.()
   }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
 
   const toggleCollapse = () =>
@@ -838,6 +1141,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       termRef.current?.focus()
       useAgentStatus.getState().setActive(id, true)
       useAgentStatus.getState().clearUnread(id)
+      // "I am working in this node" — the same signal the agent-status active flag uses, i.e. the
+      // dwell has elapsed and the terminal actually took the keyboard (a mouse merely passing over
+      // never gets here). Deduped in the store, so re-entering the same node costs nothing.
+      reportFocus(id)
     }
     dwellRef.current = setTimeout(enter, panHoverDelay)
   }
@@ -846,6 +1153,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     setArmed(true)
     termRef.current?.blur()
     useAgentStatus.getState().setActive(id, false)
+    releaseFocus(id)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
   // terminal doesn't grab focus mid-drag; restart it on release.
@@ -898,6 +1206,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.focus()
     term.paste(paths.join(' ') + ' ')
     useAgentStatus.getState().setActive(id, true)
+    reportFocus(id)
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
@@ -1168,6 +1477,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           </span>
         ) : null}
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
+        {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
+        <PresenceChips nodeId={id} />
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
             <span className="term-node__status-dot" />
@@ -1283,7 +1594,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         onDragLeave={onBodyDragLeave}
         onDrop={onBodyDrop}
       >
-        <div className="term-node__xterm nodrag nowheel" ref={bodyRef} />
+        <div
+          className={`term-node__xterm nodrag nowheel${co.letterbox ? ' letterboxed' : ''}`}
+          ref={bodyRef}
+        />
+        {co.closed && (
+          <div className="term-node__closed nodrag">
+            Closed by {closedName} — this session was ended.
+          </div>
+        )}
+        {!co.closed && co.ended && (
+          <div className="term-node__closed nodrag">
+            <span>Session ended — the node was moved and never came back.</span>
+            <button className="term-node__reopen" onClick={reopenEnded}>
+              Reopen
+            </button>
+          </div>
+        )}
         {armed && !mdMode && (
           <div
             className="term-hover-guard"

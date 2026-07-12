@@ -14,7 +14,9 @@ export interface MainWindowLike {
   show(): void
   focus(): void
   on(event: 'closed', cb: () => void): void
-  webContents: { send(channel: string, ...args: unknown[]): void }
+  // `id` is Electron's webContents id — the same number CorePlatform addresses a UI by
+  // (sendTo / the sender id of an ipcMain event). Optional so a test double may omit it.
+  webContents: { id?: number; send(channel: string, ...args: unknown[]): void }
 }
 
 let current: MainWindowLike | null = null
@@ -33,6 +35,14 @@ export function getMainWindow(): MainWindowLike | null {
 
 export function sendToMain(channel: string, ...args: unknown[]): void {
   getMainWindow()?.webContents.send(channel, ...args)
+}
+
+/** The attached renderer client ids — Electron has exactly one (the main window's webContents),
+ *  or none while the window is closed on macOS. Resolved AT CALL TIME, like sendToMain, so a
+ *  recreated window is picked up. Feeds CorePlatform.clientIds(). */
+export function mainWindowClientIds(): number[] {
+  const id = getMainWindow()?.webContents.id
+  return typeof id === 'number' ? [id] : []
 }
 
 // macOS convention: closing the window hides it (the app — and its tmux sessions,

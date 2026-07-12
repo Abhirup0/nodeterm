@@ -1,7 +1,124 @@
+import type { ClientId } from '@shared/presence'
+
 /**
- * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be
- * tested without an xterm/DOM harness.
+ * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be tested
+ * without an xterm/DOM harness (vitest runs in the node environment; there is no jsdom).
+ *
+ * Everything here belongs to co-attach: one pty, N subscribers. The pty runs at the SMALLEST
+ * subscriber's grid, so a terminal no longer owns its own size — it REPORTS what it could render
+ * and RENDERS what the pty broadcasts back.
  */
+
+/** A terminal grid. `null` cols/rows on the wire means "subscribed, but not viewing" (parked). */
+export interface TermSize {
+  cols: number
+  rows: number
+}
+
+/**
+ * The size a terminal REPORTS to the pty. Under co-attach the renderer proposes what it could
+ * render (`FitAddon.proposeDimensions()`); the pty then broadcasts the min over all subscribers.
+ * `null` means "unmeasurable right now" (a collapsed / zero-size node) — report NOTHING rather
+ * than a bogus 0×0, which would clamp every other viewer's terminal to nothing.
+ */
+export function reportedSize(proposed: Partial<TermSize> | undefined | null): TermSize | null {
+  if (!proposed) return null
+  const { cols, rows } = proposed
+  if (typeof cols !== 'number' || typeof rows !== 'number') return null
+  if (!Number.isFinite(cols) || !Number.isFinite(rows)) return null
+  return { cols: Math.max(1, Math.floor(cols)), rows: Math.max(1, Math.floor(rows)) }
+}
+
+/**
+ * Are we rendering someone else's (smaller) grid? True when the authoritative size the pty
+ * broadcast is smaller than what this node could fit — then the leftover space is letterboxed.
+ * A solo user is always the min of a one-element set, so this is ALWAYS false for them and the
+ * letterbox styling never engages: their terminal looks exactly as it did before co-attach.
+ */
+export function isLetterboxed(effective: TermSize, fitted: TermSize | null): boolean {
+  if (!fitted) return false
+  return effective.cols < fitted.cols || effective.rows < fitted.rows
+}
+
+/**
+ * Per-node terminal state that must OUTLIVE a mount — because the transport listeners that read it
+ * do. `TerminalNode` wires `onSize` / `onClosed` / `onRecycled` ONCE, in the spawn continuation,
+ * and an adopted (parked) terminal carries those listeners into the next mount without
+ * re-subscribing. Anything they read therefore cannot live in the mounting effect's closure: the
+ * live listener would keep reading MOUNT A's variables while mount B updates its own.
+ *
+ * `fitted` is exactly that: the last size THIS client reported, and the reference the letterbox is
+ * measured against (`letterboxFor`). Park, change the font size, come back — mount B fits a
+ * different grid, and a closure-captured `fitted` would leave the surviving `onSize` listener
+ * comparing the pty's size against the pre-park one, permanently letterboxing a terminal that
+ * should fill its node (or un-letterboxing one that shouldn't).
+ */
+const fittedByNode = new Map<string, TermSize>()
+
+/** Record what this client last REPORTED it can render (called from every applyFit). */
+export function setFittedSize(nodeId: string, size: TermSize): void {
+  fittedByNode.set(nodeId, size)
+}
+
+/** `isLetterboxed` against the CURRENT mount's fit — see `fittedByNode`. */
+export function letterboxFor(nodeId: string, effective: TermSize): boolean {
+  return isLetterboxed(effective, fittedByNode.get(nodeId) ?? null)
+}
+
+/**
+ * Node ids whose next spawn is a recycle RESTART: the co-viewer's session was replaced under it
+ * (someone moved the node into a worktree), and the new xterm prints a one-line reason — the
+ * replacement is a fresh shell in a different folder, so the screen legitimately changes and a
+ * silent reset would just look like a glitch.
+ *
+ * `takeRecycled` consumes the flag, and the spawn path consumes it BEFORE `create()` resolves: a
+ * node that unmounts while its create is in flight abandons that spawn, and a flag left behind
+ * would print "session restarted by another user" on some unrelated mount hours later.
+ */
+const recycledIds = new Set<string>()
+
+export function markRecycled(nodeId: string): void {
+  recycledIds.add(nodeId)
+}
+
+/** Consume the recycle flag: true exactly once per `markRecycled`. */
+export function takeRecycled(nodeId: string): boolean {
+  return recycledIds.delete(nodeId)
+}
+
+/** Drop every cross-mount trace of a node — called when it is permanently deleted. */
+export function forgetNodeTermState(nodeId: string): void {
+  fittedByNode.delete(nodeId)
+  recycledIds.delete(nodeId)
+}
+
+/**
+ * What a `pty:recycled` notice means for this terminal.
+ *
+ * `ready` says a REPLACEMENT session is already registered for the node, so restarting is safe:
+ * our re-create co-attaches to it and we follow the node into its new cwd.
+ *
+ * Without one — the recycler's app died between the `tmux kill-session` and its own `create()`, so
+ * the notice fired on the escape-hatch timeout — a restart would be actively harmful: our create
+ * options still carry the node's OLD cwd (a cwd change is not broadcast to other clients), so we
+ * would spawn `nt-<id>` in the stale directory, and the mover's app, on its return, would
+ * `new-session -A` straight into it. Everyone's node would then claim the worktree path while the
+ * shell sits in the old folder — the exact silent failure the withheld notice exists to prevent.
+ * So we DON'T spawn: the terminal ends, and the user reopens it deliberately if they want a shell.
+ */
+export function recycleAction(info: { ready: boolean } | undefined): 'restart' | 'ended' {
+  return info?.ready ? 'restart' : 'ended'
+}
+
+/**
+ * Should a `pty:resync` payload be painted? The server promises never to send an empty capture,
+ * but the renderer guards anyway: a resync RESETS the emulator, and a screen reset on an empty
+ * payload is unrecoverable (the user loses the screen for nothing), while a skipped repaint is
+ * not (the next byte of output redraws through tmux anyway).
+ */
+export function shouldApplyResync(screen: string | null | undefined): screen is string {
+  return typeof screen === 'string' && screen.length > 0
+}
 
 /** Hard cap on xterm's in-memory scrollback: the cost is per node and one canvas holds many. */
 export const XTERM_SCROLLBACK_MAX = 10000
@@ -50,12 +167,150 @@ export function attachReplay(opts: {
 }
 
 /**
+ * What a resolved seed PAINTS into the emulator:
+ * - `snapshot`      — the persisted cold-restore scrollback (with the "session restored" separator).
+ * - `history`       — tmux's own scrollback, pulled by `transport.captureHistory`.
+ * - `create-screen` — the joiner fallback: the screen captured server-side inside `create()`, used
+ *   only when the history capture came back empty (tmux/ssh unavailable) — see "Painting the
+ *   joiner" in docs/team-presence.md.
+ * - `none`          — paint NOTHING.
+ *
+ * The decision is deliberately about PAINTING ONLY, and the type has no "abort" member, because the
+ * spawn continuation that calls this must go on to do the rest of its job no matter what comes back:
+ * subscribe `onExit`, subscribe `term.onData` (**the keyboard input path**) and send
+ * `initialCommand` / the cold-start agent resume. A `superseded` seed (a `pty:resync` repainted this
+ * screen from tmux while we awaited the capture, so our capture is now stale) therefore means "write
+ * nothing", NOT "return": returning from the continuation would leave a terminal that streams output
+ * and looks perfectly alive while silently accepting no input, forever.
+ */
+export type SeedPaint = 'snapshot' | 'history' | 'create-screen' | 'none'
+
+/** What (if anything) the resolved seed should write. Never an instruction to stop. */
+export function seedPaint(opts: {
+  replay: AttachReplay
+  /** A `pty:resync` landed while the seed was in flight — its screen is strictly newer than ours. */
+  superseded: boolean
+  /** The persisted scrollback snapshot (`cold-snapshot`), '' when there is none. */
+  snapshot?: string | null
+  /** tmux's scrollback (`warm-history`), '' when the capture failed or tmux was unreachable. */
+  history?: string | null
+  /** `PtyCreateResult.screen`: present (and non-empty) only for a joiner that did not resize. */
+  screen?: string | null
+}): SeedPaint {
+  if (opts.replay === 'none' || opts.superseded) return 'none'
+  if (opts.replay === 'cold-snapshot') return opts.snapshot ? 'snapshot' : 'none'
+  if (opts.history) return 'history'
+  return shouldApplyResync(opts.screen) ? 'create-screen' : 'none'
+}
+
+/**
+ * The exact bytes a warm reattach writes into a fresh xterm, from tmux's scrollback (`history`) and,
+ * for a joiner, the visible screen (`screen`).
+ *
+ * The subtle part is the padding. tmux's attach redraw is `\x1b[H\x1b[2J` + a repaint, and
+ * `eraseInDisplay(2)` clears the viewport rows **in place** — it does not scroll them into
+ * scrollback. So whatever we leave sitting in the viewport SURVIVES the redraw, above the screen
+ * tmux then paints. The capture is hard-wrapped at the HOST pane's width, so it re-wraps to a
+ * different number of rows here, and the leftover can never line up with what the redraw overwrites:
+ * on a narrow client (a phone) the tail of the history reappears as a second copy the moment you
+ * scroll back. Emitting `rows` newlines pushes the history entirely above the fold, so the redraw
+ * lands on blank lines and overwrites nothing of ours. (The capture excludes the visible screen —
+ * `capture-pane -E -1` — precisely because tmux is about to paint it.)
+ *
+ * A **joiner** gets no redraw (it did not resize, so tmux never repaints for it), which is why its
+ * `screen` is painted here instead.
+ */
+export function warmSeed(opts: {
+  history?: string | null
+  screen?: string | null
+  /** The xterm's row count — how far the history has to be pushed to clear the viewport. */
+  rows: number
+}): string {
+  const out: string[] = []
+  const history = opts.history ? stripTrailingNewline(opts.history) : ''
+  const screen = shouldApplyResync(opts.screen) ? stripTrailingNewline(opts.screen) : ''
+  if (history) {
+    // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence — start from a
+    // known-clean SGR state rather than an arbitrary one.
+    out.push('\x1b[0m', toXtermText(history), '\r\n'.repeat(Math.max(1, opts.rows)))
+  }
+  if (screen) out.push('\x1b[0m', toXtermText(screen))
+  return out.join('')
+}
+
+/** The slice of xterm the resync repaint drives (so it can be tested without a DOM). */
+export interface ResyncTarget {
+  write(data: string, done?: () => void): void
+  reset(): void
+}
+
+/** The banner that marks the seam where a slow client's backlog was dropped. */
+export const RESYNC_NOTICE = '\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n'
+
+/**
+ * The capture generation of the LAST repaint issued for a terminal, so a deferred repaint can tell
+ * that a newer capture has superseded it (see `repaintResync`). Weak, and keyed by the xterm itself:
+ * a disposed terminal takes its counter with it, and no node id has to be threaded through.
+ */
+const resyncGeneration = new WeakMap<ResyncTarget, number>()
+
+/**
+ * Repaint a terminal from a `pty:resync` capture (the server dropped our backlog and redrew us from
+ * tmux, so the capture IS the current screen and must REPLACE the buffer, not stack on top of it).
+ *
+ * The `reset()` is sequenced behind a zero-length write callback rather than called inline, because
+ * `term.write()` is PARSED ASYNCHRONOUSLY while `reset()` clears the buffer IMMEDIATELY. The warm
+ * reattach seed can hand xterm up to a megabyte of tmux history in one write; a resync landing after
+ * those writes are issued but before the parser reaches them would reset an almost-empty buffer, let
+ * the stale history parse onto the cleared screen, and append the fresh capture BELOW a full screen
+ * of stale content — the exact splice the reset exists to prevent. Deferring the reset to a write
+ * callback puts it after everything already queued has been parsed.
+ *
+ * Deferring it also hands the repaint to xterm's write loop, which outlives us in two ways the
+ * inline reset never could — hence the two guards inside the callback:
+ * - `alive` — teardown unsubscribes the resync listener and then DISPOSES the terminal, but a
+ *   callback already queued in the write loop still fires: reset()/write() would then run against a
+ *   disposed core and throw inside xterm's async loop. Pass the session's own liveness (`!life.dead`
+ *   in TerminalNode, the record shared with the park entry) — omitted, the repaint is unguarded, as
+ *   for a caller that owns the terminal outright.
+ * - generation — back-to-back resyncs (a second backlog drop before the first repaint parsed) would
+ *   otherwise each reset and paint: capture #2's reset clears a buffer that #1's capture has not
+ *   parsed into yet, so #1 parses onto the fresh screen and #2 stacks below it. Only the LATEST
+ *   capture is painted; superseded ones write nothing (they are strictly older screens of the same
+ *   terminal, so there is nothing in them to lose).
+ */
+export function repaintResync(term: ResyncTarget, screen: string, alive?: () => boolean): void {
+  const generation = (resyncGeneration.get(term) ?? 0) + 1
+  resyncGeneration.set(term, generation)
+  term.write('', () => {
+    if (alive && !alive()) return
+    if (resyncGeneration.get(term) !== generation) return // a newer capture supersedes this one
+    term.reset()
+    term.write(toXtermText(screen))
+    term.write(RESYNC_NOTICE)
+  })
+}
+
+/**
  * Make text captured from tmux (`capture-pane`, LF-separated lines) safe to `term.write()`.
  * xterm runs with `convertEol: false` — a bare LF moves down but keeps the column, so raw capture
  * output would render as a staircase. Lone LFs become CRLF; existing CRLFs are left alone.
  */
 export function toXtermText(text: string): string {
   return text.replace(/\r?\n/g, '\r\n')
+}
+
+/**
+ * Who closed this node, for the "closed by …" overlay. `by` is null when the destroy was not
+ * attributed to a client (a local desktop destroy), and an id we have never seen is a peer who
+ * already left — both degrade to a neutral label rather than blocking the overlay on presence.
+ */
+export function closedByLabel(
+  by: ClientId | null,
+  peers: Record<ClientId, { name: string }>
+): string {
+  if (by === null) return 'another user'
+  return peers[by]?.name || 'another user'
 }
 
 /**
@@ -117,6 +372,15 @@ export interface DataGate {
   push(chunk: string): void
   /** Drain the queue in arrival order and switch to pass-through. Idempotent. */
   open(): void
+  /**
+   * DISCARD the queue and switch to pass-through, returning the number of characters dropped.
+   *
+   * For a redraw that supersedes everything queued: a `pty:resync` repaints the CURRENT screen
+   * from tmux, so every chunk still sitting in the gate predates it — draining them would splice a
+   * stale flood back on top of the fresh screen. The caller returns the dropped bytes to its flow
+   * accounting (they will never reach xterm's write callback, so nothing else would).
+   */
+  reset(): number
 }
 
 /**
@@ -138,6 +402,11 @@ export function createDataGate(write: (chunk: string) => void): DataGate {
       const pendingChunks = queued
       queued = null // pass-through first, so a re-entrant push during the drain stays in order
       pendingChunks?.forEach(write)
+    },
+    reset() {
+      const dropped = queued?.reduce((n, c) => n + c.length, 0) ?? 0
+      queued = null
+      return dropped
     }
   }
 }

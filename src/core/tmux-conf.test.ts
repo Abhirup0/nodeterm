@@ -27,10 +27,14 @@ describe('tmuxConf', () => {
   it('keeps OSC 52 as a safety net for apps that emit it themselves', () => {
     expect(c).toContain('set -g set-clipboard on')
   })
-  it('keeps tmux on the NORMAL screen (smcup@/rmcup@) so xterm owns the scrollback', () => {
+  it('blanks smcup/rmcup AND indn — either one alone leaves nothing to scroll', () => {
     // Without this, tmux enters the alternate screen (\x1b[?1049h), which has no scrollback:
     // xterm's scrollback + the hydrated tmux history would both be invisible.
-    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@'`)
+    // smcup@/rmcup@: the alternate screen has no scrollback at all.
+    // indn@: with `indn` advertised tmux scrolls the pane with CSI S (SU), and xterm.js DISCARDS
+    // the lines SU pushes off the top instead of saving them — 80 lines of output left baseY=0
+    // (nothing to scroll). Blanked, tmux uses plain line feeds, which xterm does save.
+    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@:indn@'`)
   })
   it('floors history-limit at 1000', () => {
     expect(tmuxConf(10)).toContain('set -g history-limit 1000')
@@ -133,10 +137,9 @@ describe('PtyManager.captureHistory (untrusted `lines`)', () => {
   it('keeps the exact capture command shape on the local path', async () => {
     await withTmux().captureHistory('n1', 200)
     const argv = execFileCalls[0].args.join(' ')
-    expect(argv).toContain('capture-pane -p -e -t nt-n1 -S -200')
-    // The capture INCLUDES the visible screen: xterm's eraseInDisplay(2) (tmux's attach redraw)
-    // resets the viewport lines in place instead of scrolling them into scrollback, so an
-    // `-E -1` capture would leave a one-screenful gap. tmux's redraw overwrites them instead.
-    expect(argv).not.toContain('-E')
+    // `-J` unwraps the host pane's hard wrap (a narrower client re-wraps the fragments into
+    // ragged nonsense otherwise); `-E -1` excludes the visible screen, which tmux repaints itself
+    // on attach — the seed pushes the history above the fold so the redraw overwrites nothing.
+    expect(argv).toContain('capture-pane -p -e -J -t nt-n1 -S -200 -E -1')
   })
 })

@@ -3,7 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const h: {
   handlers: Record<string, (...a: any[]) => unknown>
   sent: Array<{ id?: number; channel: string; args: any[] }>
-} = { handlers: {}, sent: [] }
+  clientIds: number[]
+} = { handlers: {}, sent: [], clientIds: [] }
 
 vi.mock('electron', () => ({
   app: {
@@ -30,6 +31,7 @@ vi.mock('electron', () => ({
 
 vi.mock('./main-window', () => ({
   sendToMain: (ch: string, ...args: any[]) => h.sent.push({ channel: ch, args }),
+  mainWindowClientIds: () => h.clientIds,
 }))
 
 import { electronPlatform } from './platform-electron'
@@ -37,6 +39,7 @@ import { electronPlatform } from './platform-electron'
 beforeEach(() => {
   h.handlers = {}
   h.sent = []
+  h.clientIds = []
 })
 
 describe('electronPlatform', () => {
@@ -53,6 +56,13 @@ describe('electronPlatform', () => {
     expect(await h.handlers['c1']({ sender: { id: 1 } }, 41)).toBe(42)
     p.handleWithSender('c2', (senderId: number, a: string) => `${senderId}:${a}`)
     expect(await h.handlers['c2']({ sender: { id: 7 } }, 'x')).toBe('7:x')
+  })
+
+  it('clientIds reports the live main window (empty while there is no window)', () => {
+    const p = electronPlatform()
+    expect(p.clientIds()).toEqual([])
+    h.clientIds = [5]
+    expect(p.clientIds()).toEqual([5])
   })
 
   it('sendTo drops silently when the webContents is gone', () => {

@@ -1034,6 +1034,55 @@ body,
   height: 100%;
 }
 
+/* Co-attach: the pty runs at the SMALLEST subscriber's grid, so the terminal can be smaller than
+   this node's body. Center the leftover space instead of stretching — letterboxing, not
+   distortion. Only applied while a smaller peer is actually clamping us: a solo user's grid IS the
+   effective size, so their terminal keeps the plain (stretched, top-left) layout it always had. */
+.term-node__xterm.letterboxed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.term-node__xterm.letterboxed .xterm {
+  height: auto;
+}
+
+/* Another client permanently destroyed this node's session (tmux kill-session): the terminal is
+   dead and must never respawn — say so over the last screen. */
+.term-node__closed {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(30, 30, 30, 0.88);
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* "Session ended — reopen to restart": the ONLY way a terminal whose session was recycled without
+   a replacement gets a shell back. Deliberately a manual action — an automatic respawn would use
+   this client's stale cwd and silently undo the worktree move (see CoState.ended). */
+.term-node__reopen {
+  padding: 4px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.term-node__reopen:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 /* Markdown view overlay (Cmd/Ctrl+M) */
 .term-md {
   position: absolute;
@@ -5319,4 +5368,277 @@ body,
   flex: 1 1 100%;
   font-size: 11px;
   color: var(--label-secondary, rgba(255, 255, 255, 0.55));
+}
+
+/* ---- team presence: cursors, chat bubbles (docs/team-presence.md) ---- */
+.presence-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 4;
+  /* Positions arrive at ~20 Hz — the transition is the "lerp" (no JS animation loop). */
+  transition: transform 80ms linear;
+  will-change: transform;
+}
+
+/* The cursor lives inside the viewport transform, so its POSITION follows the canvas — but its
+   SIZE must not (a name label at 0.2x is unreadable, at 2x it is huge). This wrapper carries the
+   1/zoom counter-scale (see counterScale in lib/presenceKeys.ts), pivoted on the arrow tip
+   (transform-origin, set inline from CURSOR_HOTSPOT_PX) so the tip keeps pointing at the peer's
+   exact flow coordinate. No transition here: zoom must apply instantly, only position lerps. */
+.presence-cursor__scale {
+  display: flex;
+  align-items: flex-start;
+}
+
+.presence-cursor__arrow {
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+
+.presence-cursor__name {
+  margin: 12px 0 0 -2px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #000;
+  white-space: nowrap;
+}
+
+.presence-cursor__chat {
+  margin: 12px 0 0 6px;
+  padding: 4px 8px;
+  max-width: 320px;
+  border-radius: 10px;
+  background: rgba(28, 28, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.presence-chat-input {
+  position: fixed;
+  z-index: 20;
+  width: 240px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: rgba(28, 28, 30, 0.96);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+/* ---- facepile: who is connected (the one surface that shows off-project peers) ---- */
+.presence-facepile {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+}
+
+.presence-face {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(0, 0, 0, 0.45);
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Non-actionable (a peer on a canvas we do not have, or one sitting on ours with no node focused):
+   inert, but NOT the `disabled` attribute — Chromium eats mouse events on those, tooltip and all. */
+.presence-face[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* On another project (canvas): dimmed, with the project name pinned under the avatar. Their
+   cursor is deliberately NOT drawn here — see PresenceLayer. */
+.presence-face--away {
+  opacity: 0.45;
+  position: relative;
+  overflow: visible;
+}
+
+.presence-face--away:not([aria-disabled='true']):hover {
+  opacity: 0.75;
+}
+
+.presence-face__where {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translate(-50%, 2px);
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.presence-face__phone {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* ---- per-node chips: who else is in THIS terminal (components/PresenceChips.tsx) ---- */
+.presence-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+.presence-chip {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #000;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+}
+
+/* Co-attach: this peer's keystrokes are landing in THIS terminal right now. One PTY, N subscribers
+   and no locking — two people typing into one shell interleave their characters, so the ring IS the
+   warning. It decays ~2s after the last keystroke (TYPING_DECAY_MS, swept in state/presence.ts). */
+.presence-chip--typing {
+  animation: nt-typing-pulse 1.1s ease-out infinite;
+}
+
+@keyframes nt-typing-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--peer-color, #fff);
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* Respect the OS setting: a ring that pulses forever is exactly the motion this asks us to drop.
+   The signal must survive it, so it becomes a static halo instead of an animation. */
+@media (prefers-reduced-motion: reduce) {
+  .presence-chip--typing {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--peer-color, #fff);
+  }
+}
+
+/* The "+N" bubble: neutral, so it never reads as one more person's color. */
+.presence-chip--more {
+  width: auto;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--label);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* ---- first-connect name/color prompt ---- */
+.presence-prompt {
+  position: absolute;
+  top: 46px;
+  right: 12px;
+  z-index: 14;
+  width: 260px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.presence-prompt__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.presence-prompt__body {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.presence-prompt__input {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-header);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.presence-prompt__colors {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.presence-prompt__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.presence-prompt__swatch--on {
+  border-color: var(--text);
+}
+
+.presence-prompt__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.presence-prompt__ok,
+.presence-prompt__skip {
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.presence-prompt__ok {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+}
+
+.presence-prompt__ok:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.presence-prompt__skip {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
 }

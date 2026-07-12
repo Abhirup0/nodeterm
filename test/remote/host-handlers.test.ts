@@ -33,11 +33,15 @@ function fakePty() {
       calls.push({ method: 'captureSnapshot', args: [persistKey] })
       return snapshot
     },
-    write: (sessionId, data) => calls.push({ method: 'write', args: [sessionId, data] }),
-    resize: (sessionId, cols, rows) =>
-      calls.push({ method: 'resize', args: [sessionId, cols, rows] }),
-    setFlow: (sessionId, resume) => calls.push({ method: 'setFlow', args: [sessionId, resume] }),
-    kill: (sessionId) => calls.push({ method: 'kill', args: [sessionId] })
+    write: (clientId, sessionId, data) =>
+      calls.push({ method: 'write', args: [clientId, sessionId, data] }),
+    resize: (clientId, sessionId, cols, rows) =>
+      calls.push({ method: 'resize', args: [clientId, sessionId, cols, rows] }),
+    // A relay-served (detached) pty has no ClientId: its pause is owed by the host's sink (null).
+    setFlow: (clientId, sessionId, resume) =>
+      calls.push({ method: 'setFlow', args: [clientId, sessionId, resume] }),
+    // Relay-served ptys are killed with clientId null (they have no UI subscribers).
+    kill: (clientId, sessionId) => calls.push({ method: 'kill', args: [clientId, sessionId] })
   }
   return {
     mgr,
@@ -175,8 +179,23 @@ describe('createHostHandlers', () => {
     h.onFrame({ op: OP.Input, streamId: 1, seq: 0, payload: new TextEncoder().encode('ls\n') })
     h.onFrame({ op: OP.Resize, streamId: 1, seq: 0, payload: resizePayload(120, 40) })
 
-    expect(pty.calls).toContainEqual({ method: 'write', args: ['pty-1', 'ls\n'] })
-    expect(pty.calls).toContainEqual({ method: 'resize', args: ['pty-1', 120, 40] })
+    // No presence slot wired (getClientId defaults to null) → the input still reaches the pty, it
+    // is simply not attributed to a typing peer.
+    expect(pty.calls).toContainEqual({ method: 'write', args: [null, 'pty-1', 'ls\n'] })
+    // clientId null: the relay-served pty's size is recorded against its sink, not a UI client.
+    expect(pty.calls).toContainEqual({ method: 'resize', args: [null, 'pty-1', 120, 40] })
+  })
+
+  it('attributes an OP.Input frame to the bridged phone (typing badge, no iOS change needed)', async () => {
+    const pty = fakePty()
+    const sock = fakeSocket()
+    // The phone's presence ClientId, read per frame from its PhonePresence slot (joined on bridge).
+    const h = createHostHandlers(pty.mgr, sock.socket, undefined, undefined, undefined, () => 1_000_001)
+    await openViaAttach(h)
+
+    h.onFrame({ op: OP.Input, streamId: 1, seq: 0, payload: new TextEncoder().encode('ls\n') })
+
+    expect(pty.calls).toContainEqual({ method: 'write', args: [1_000_001, 'pty-1', 'ls\n'] })
   })
 
   it('ignores frames for unknown streams', () => {
@@ -194,12 +213,12 @@ describe('createHostHandlers', () => {
     await openViaAttach(h)
 
     pty.sinks().onData('a') // send fails → pause
-    expect(pty.calls).toContainEqual({ method: 'setFlow', args: ['pty-1', false] })
+    expect(pty.calls).toContainEqual({ method: 'setFlow', args: [null, 'pty-1', false] })
 
     // Flip the socket to succeed, then deliver more output → resume.
     sock.socket.sendFrame = vi.fn(() => true)
     pty.sinks().onData('b')
-    expect(pty.calls).toContainEqual({ method: 'setFlow', args: ['pty-1', true] })
+    expect(pty.calls).toContainEqual({ method: 'setFlow', args: [null, 'pty-1', true] })
   })
 
   it('rejects unknown RPC methods', () => {
@@ -217,7 +236,7 @@ describe('createHostHandlers', () => {
     await openViaAttach(h)
     h.onRpc({ id: 'r2', method: 'pty.kill', params: { streamId: 1 } })
 
-    expect(pty.calls).toContainEqual({ method: 'kill', args: ['pty-1'] })
+    expect(pty.calls).toContainEqual({ method: 'kill', args: [null, 'pty-1'] })
     // After kill, input for the dropped stream is ignored.
     pty.calls.length = 0
     h.onFrame({ op: OP.Input, streamId: 1, seq: 0, payload: new TextEncoder().encode('x') })

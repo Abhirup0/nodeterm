@@ -1,17 +1,32 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
+  attachReplay,
+  closedByLabel,
+  copyKeyAction,
+  createDataGate,
+  disposalAction,
+  forgetNodeTermState,
+  isCopyShortcut,
+  isLetterboxed,
+  letterboxFor,
+  markRecycled,
+  recycleAction,
+  repaintResync,
+  reportedSize,
+  seedPaint,
+  warmSeed,
+  setFittedSize,
+  shouldApplyResync,
+  stripTrailingNewline,
+  takeRecycled,
+  toXtermText,
   xtermScrollback,
+  RESYNC_NOTICE,
   XTERM_SCROLLBACK_MAX,
   XTERM_SCROLLBACK_MIN,
-  isCopyShortcut,
-  copyKeyAction,
-  attachReplay,
-  toXtermText,
-  stripTrailingNewline,
-  disposalAction,
-  createDataGate,
   type CopyShortcutEvent
 } from './terminal-config'
+import type { ClientId } from '@shared/presence'
 
 const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   type: 'keydown',
@@ -22,6 +37,48 @@ const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   altKey: false,
   shiftKey: false,
   ...p
+})
+
+describe('reportedSize', () => {
+  it('reports the fit proposal, floored at 1 (a collapsed node can propose 0)', () => {
+    expect(reportedSize({ cols: 132, rows: 43 })).toEqual({ cols: 132, rows: 43 })
+    expect(reportedSize({ cols: 0, rows: 0 })).toEqual({ cols: 1, rows: 1 })
+  })
+
+  it('returns null when the fit cannot be measured (hidden / zero-size node)', () => {
+    expect(reportedSize(undefined)).toBeNull()
+    expect(reportedSize(null)).toBeNull()
+    expect(reportedSize({ cols: NaN, rows: 24 })).toBeNull()
+    expect(reportedSize({ cols: 80, rows: Infinity })).toBeNull()
+    expect(reportedSize({ cols: 80 })).toBeNull()
+  })
+})
+
+describe('isLetterboxed', () => {
+  it('is false for a solo user: the effective size IS their own fit', () => {
+    expect(isLetterboxed({ cols: 100, rows: 30 }, { cols: 100, rows: 30 })).toBe(false)
+  })
+
+  it('is true when the pty runs at a smaller subscriber s grid', () => {
+    expect(isLetterboxed({ cols: 80, rows: 30 }, { cols: 100, rows: 30 })).toBe(true)
+    expect(isLetterboxed({ cols: 100, rows: 24 }, { cols: 100, rows: 30 })).toBe(true)
+  })
+
+  it('is false while our own fit is unknown (nothing to letterbox against)', () => {
+    expect(isLetterboxed({ cols: 80, rows: 24 }, null)).toBe(false)
+  })
+})
+
+describe('shouldApplyResync', () => {
+  it('paints a non-empty capture', () => {
+    expect(shouldApplyResync('$ ls\nfoo\n')).toBe(true)
+  })
+
+  it('IGNORES an empty/absent payload — a wrongly reset screen is unrecoverable', () => {
+    expect(shouldApplyResync('')).toBe(false)
+    expect(shouldApplyResync(null)).toBe(false)
+    expect(shouldApplyResync(undefined)).toBe(false)
+  })
 })
 
 describe('attachReplay', () => {
@@ -46,6 +103,11 @@ describe('attachReplay', () => {
 })
 
 describe('toXtermText', () => {
+  it('turns tmux capture LFs into CRLFs, leaving existing CRLFs alone', () => {
+    expect(toXtermText('a\nb')).toBe('a\r\nb')
+    expect(toXtermText('a\r\nb')).toBe('a\r\nb')
+  })
+
   it('turns tmux capture-pane LFs into CRLFs (xterm runs with convertEol off)', () => {
     expect(toXtermText('one\ntwo\n')).toBe('one\r\ntwo\r\n')
   })
@@ -56,6 +118,92 @@ describe('toXtermText', () => {
 
   it('keeps escape sequences untouched', () => {
     expect(toXtermText('\x1b[31mred\x1b[0m\n')).toBe('\x1b[31mred\x1b[0m\r\n')
+  })
+})
+
+describe('closedByLabel', () => {
+  const peers = { 7: { name: 'Ada' } } as Record<ClientId, { name: string }>
+
+  it('names the peer who destroyed the node', () => {
+    expect(closedByLabel(7 as ClientId, peers)).toBe('Ada')
+  })
+
+  it('degrades to a neutral label for an unattributed destroy or an unknown/departed peer', () => {
+    expect(closedByLabel(null, peers)).toBe('another user')
+    expect(closedByLabel(99 as ClientId, peers)).toBe('another user')
+  })
+})
+
+// The fitted size is read by the pty:size listener, which is wired ONCE and SURVIVES a park
+// (the terminal is adopted by a later mount with its listeners intact). It therefore may not
+// live in the mounting effect's closure: after a park/adopt, the listener would keep measuring
+// the letterbox against the PRE-PARK grid — so a co-viewer who parks, changes the font size and
+// comes back gets a letterbox he shouldn't have (or loses one he should).
+describe('fitted-size registry (survives a park, like the listeners that read it)', () => {
+  beforeEach(() => forgetNodeTermState('n1'))
+
+  it('measures the letterbox against the fit of the CURRENTLY mounted terminal', () => {
+    // Mount A fits 120×40 and wires the pty:size listener.
+    setFittedSize('n1', { cols: 120, rows: 40 })
+    const onSize = (size: { cols: number; rows: number }): boolean => letterboxFor('n1', size)
+    expect(onSize({ cols: 80, rows: 24 })).toBe(true) // a smaller co-viewer clamps us → letterbox
+
+    // Park + adopt: the SAME listener lives on, but the user bumped the font size, so mount B
+    // fits a smaller grid — which is now exactly the pty's size. No letterbox.
+    setFittedSize('n1', { cols: 80, rows: 24 })
+    expect(onSize({ cols: 80, rows: 24 })).toBe(false)
+  })
+
+  it('reports no letterbox for a node that has never reported a fit', () => {
+    expect(letterboxFor('never-fitted', { cols: 80, rows: 24 })).toBe(false)
+  })
+
+  it('forgets a node on permanent deletion (a recycled node id must not inherit a stale fit)', () => {
+    setFittedSize('n1', { cols: 200, rows: 60 })
+    forgetNodeTermState('n1')
+    expect(letterboxFor('n1', { cols: 80, rows: 24 })).toBe(false)
+  })
+})
+
+// The "session restarted by another user" banner is armed when the recycle notice lands and must
+// be CONSUMED by the spawn it belongs to — even when that spawn is abandoned (the node unmounted
+// while create() was in flight). A flag left behind would print the banner on some unrelated
+// mount hours later.
+describe('recycle banner flag', () => {
+  beforeEach(() => forgetNodeTermState('n1'))
+
+  it('is consumed exactly once', () => {
+    markRecycled('n1')
+    expect(takeRecycled('n1')).toBe(true)
+    expect(takeRecycled('n1')).toBe(false)
+  })
+
+  it('is false for a node that was never recycled', () => {
+    expect(takeRecycled('n1')).toBe(false)
+  })
+
+  it('is dropped with the node (no stale banner on a much later mount)', () => {
+    markRecycled('n1')
+    forgetNodeTermState('n1')
+    expect(takeRecycled('n1')).toBe(false)
+  })
+})
+
+// The recycle notice carries whether a REPLACEMENT session is already live. Without one (the
+// recycler crashed between the kill and the create), restarting would spawn `nt-<id>` from this
+// client's own — stale — cwd, silently undoing the worktree move for everybody. So: only restart
+// when there is something to restart onto.
+describe('recycleAction', () => {
+  it('restarts onto the replacement session when it is live', () => {
+    expect(recycleAction({ ready: true })).toBe('restart')
+  })
+
+  it('ends the terminal (reopen to restart) when no replacement was ever registered', () => {
+    expect(recycleAction({ ready: false })).toBe('ended')
+  })
+
+  it('treats a payload-less/legacy notice as "no replacement" (never spawn in a stale cwd)', () => {
+    expect(recycleAction(undefined)).toBe('ended')
   })
 })
 
@@ -153,6 +301,37 @@ describe('createDataGate', () => {
     gate.push('a')
     gate.open()
     expect(written).toEqual(['a', 'b'])
+  })
+
+  // A `pty:resync` repaints the CURRENT screen from tmux. Anything the gate is still holding
+  // predates that capture, so draining it would splice the stale flood back over the fresh screen —
+  // the terminal would end up showing output the redraw exists to skip.
+  it('DISCARDS the queue on reset (a resync supersedes everything that predates it)', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.push('stale-1')
+    gate.push('stale-2')
+    expect(gate.reset()).toBe('stale-1'.length + 'stale-2'.length) // bytes owed back to flow control
+    gate.open() // the seed's `finally` still runs — it must not resurrect the dropped chunks
+    expect(written).toEqual([])
+  })
+
+  it('passes through after a reset (post-capture output must keep streaming)', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.push('stale')
+    gate.reset()
+    gate.push('fresh')
+    expect(written).toEqual(['fresh'])
+  })
+
+  it('reports nothing dropped when the gate is already open', () => {
+    const written: string[] = []
+    const gate = createDataGate((c) => written.push(c))
+    gate.open()
+    gate.push('a')
+    expect(gate.reset()).toBe(0)
+    expect(written).toEqual(['a'])
   })
 })
 
@@ -252,5 +431,196 @@ describe('copyKeyAction', () => {
   it('passes plain Ctrl+C through to the pty (SIGINT), selection or not', () => {
     expect(copyKeyAction(ev({ ctrlKey: true }), true)).toBe('pass')
     expect(copyKeyAction(ev({ ctrlKey: true }), false)).toBe('pass')
+  })
+})
+
+describe('seedPaint', () => {
+  it('paints the snapshot on a cold restore, and nothing when there is none', () => {
+    expect(seedPaint({ replay: 'cold-snapshot', superseded: false, snapshot: 'old' })).toBe(
+      'snapshot'
+    )
+    expect(seedPaint({ replay: 'cold-snapshot', superseded: false, snapshot: '' })).toBe('none')
+  })
+
+  it('paints tmux history on a warm reattach', () => {
+    expect(seedPaint({ replay: 'warm-history', superseded: false, history: 'scrollback' })).toBe(
+      'history'
+    )
+  })
+
+  it('falls back to the create-result screen for a joiner whose history capture came back empty', () => {
+    expect(
+      seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: 'live screen' })
+    ).toBe('create-screen')
+    // Both available: the seed is still driven by the history (`warmSeed` paints the joiner's
+    // screen underneath it — the capture EXCLUDES the visible screen, so the two don't overlap).
+    expect(
+      seedPaint({ replay: 'warm-history', superseded: false, history: 'hist', screen: 'scr' })
+    ).toBe('history')
+    // Neither: a blank-but-live terminal beats a wrongly painted one.
+    expect(seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: '' })).toBe(
+      'none'
+    )
+  })
+
+  it('paints nothing for a parked terminal (its buffer is already correct)', () => {
+    expect(
+      seedPaint({ replay: 'none', superseded: false, snapshot: 'old', history: 'hist' })
+    ).toBe('none')
+  })
+
+  it('a resync SUPERSEDES every seed: the decision is "write nothing", never "abort"', () => {
+    // The whole point of the helper: a superseded seed still returns a PAINT decision, so the spawn
+    // continuation carries on to wire onExit, term.onData (the keyboard input path) and the
+    // initialCommand / agent resume. `none` is not a signal to return.
+    for (const replay of ['cold-snapshot', 'warm-history', 'none'] as const) {
+      expect(
+        seedPaint({
+          replay,
+          superseded: true,
+          snapshot: 'old snapshot',
+          history: 'old history',
+          screen: 'old screen'
+        })
+      ).toBe('none')
+    }
+  })
+})
+
+/** An xterm stand-in: `write` is PARSED ASYNCHRONOUSLY (callbacks fire on `parse()`). */
+function fakeTerm(): {
+  ops: string[]
+  parse: () => void
+  write(data: string, done?: () => void): void
+  reset(): void
+} {
+  const queue: Array<() => void> = []
+  return {
+    ops: [] as string[],
+    write(data: string, done?: () => void) {
+      this.ops.push(`write:${data}`)
+      if (done) queue.push(done)
+    },
+    reset() {
+      this.ops.push('reset')
+    },
+    parse() {
+      while (queue.length) queue.shift()!()
+    }
+  }
+}
+
+describe('repaintResync', () => {
+  it('resets only AFTER the writes already queued have been parsed (never mid-flight)', () => {
+    const term = fakeTerm()
+    term.write('STALE HISTORY') // a warm-history seed, handed to xterm but not yet parsed
+    repaintResync(term, 'FRESH')
+    // Nothing repainted yet: an inline reset() would have cleared an almost-empty buffer and the
+    // stale history would then parse on top of the cleared screen.
+    expect(term.ops).toEqual(['write:STALE HISTORY', 'write:'])
+    term.parse()
+    expect(term.ops).toEqual([
+      'write:STALE HISTORY',
+      'write:',
+      'reset',
+      'write:FRESH',
+      `write:${RESYNC_NOTICE}`
+    ])
+    const reset = term.ops.indexOf('reset')
+    expect(reset).toBeGreaterThan(term.ops.indexOf('write:STALE HISTORY'))
+    expect(reset).toBeLessThan(term.ops.indexOf('write:FRESH'))
+  })
+
+  it('CRLF-converts the capture (tmux emits bare LFs; xterm runs convertEol:false)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'a\nb')
+    term.parse()
+    expect(term.ops).toContain('write:a\r\nb')
+  })
+
+  it('touches NOTHING once the terminal is dead (the deferred reset outlives teardown)', () => {
+    const term = fakeTerm()
+    let dead = false
+    repaintResync(term, 'FRESH', () => !dead)
+    // Teardown: the node is destroyed while the zero-length write is still queued. The listener is
+    // unsubscribed and the xterm disposed — but xterm's write loop still owns the callback.
+    dead = true
+    term.parse()
+    // Only the zero-length probe write, which happened before teardown. No reset()/write() on a
+    // disposed core (which throws inside xterm's async write loop).
+    expect(term.ops).toEqual(['write:'])
+  })
+
+  it('still repaints while the terminal is alive (the guard is not a blanket no-op)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'FRESH', () => true)
+    term.parse()
+    expect(term.ops).toEqual(['write:', 'reset', 'write:FRESH', `write:${RESYNC_NOTICE}`])
+  })
+
+  it('coalesces back-to-back resyncs: only the LATEST capture is painted, once', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'OLD')
+    repaintResync(term, 'NEW') // lands before OLD's callback ran
+    term.parse()
+    // A stacked repaint would reset, paint OLD, reset, paint NEW — leaving OLD's parse output
+    // spliced above NEW. Superseded captures are dropped instead: one reset, the newest screen.
+    expect(term.ops).toEqual([
+      'write:',
+      'write:',
+      'reset',
+      'write:NEW',
+      `write:${RESYNC_NOTICE}`
+    ])
+  })
+
+  it('coalescing is per terminal and per round (a later, separate resync still paints)', () => {
+    const term = fakeTerm()
+    repaintResync(term, 'ONE')
+    term.parse()
+    repaintResync(term, 'TWO')
+    term.parse()
+    expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
+    expect(term.ops).toContain('write:ONE')
+    expect(term.ops).toContain('write:TWO')
+  })
+})
+
+describe('warmSeed', () => {
+  const rows = 20
+
+  it('pushes the history above the fold so tmux\'s in-place redraw cannot leave a second copy', () => {
+    const seed = warmSeed({ history: 'line1\nline2\n', rows })
+    // The history itself, CRLF-converted, with its trailing newline consumed by the padding.
+    expect(seed).toContain('line1\r\nline2')
+    // Exactly `rows` newlines after it: the viewport is blank when tmux repaints it, so nothing of
+    // ours survives in the viewport to reappear in the scrollback.
+    const padding = seed.slice(seed.indexOf('line2') + 'line2'.length)
+    expect(padding).toBe('\r\n'.repeat(rows))
+  })
+
+  it('starts the block from a clean SGR state (the capture can begin mid-escape)', () => {
+    expect(warmSeed({ history: 'x\n', rows }).startsWith('\x1b[0m')).toBe(true)
+  })
+
+  it('writes nothing at all when there is no history and no screen', () => {
+    expect(warmSeed({ history: '', screen: '', rows })).toBe('')
+    expect(warmSeed({ history: null, screen: null, rows })).toBe('')
+  })
+
+  it('emits no padding when there is no history (nothing to push above the fold)', () => {
+    expect(warmSeed({ screen: 'live\n', rows })).toBe('\x1b[0m' + 'live')
+  })
+
+  it("paints a joiner's screen after the history — it gets no tmux redraw of its own", () => {
+    const seed = warmSeed({ history: 'old\n', screen: 'now\n', rows })
+    expect(seed.indexOf('old')).toBeLessThan(seed.indexOf('now'))
+    expect(seed.endsWith('now')).toBe(true)
+    // …and the history is still pushed above the fold, so the screen lands on blank lines.
+    expect(seed).toContain('\r\n'.repeat(rows))
+  })
+
+  it('never divides by a zero-row terminal', () => {
+    expect(warmSeed({ history: 'x\n', rows: 0 })).toBe('\x1b[0m' + 'x' + '\r\n')
   })
 })

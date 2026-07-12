@@ -6,10 +6,12 @@ import type {
   NodeTerminalApi,
   Project,
   PtyCreateOptions,
+  RecycledInfo,
   UpdateInfo,
   UpdateProgress,
   Workspace
 } from '../shared/types'
+import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -48,6 +50,7 @@ const api: NodeTerminalApi = {
     setFlow: (sessionId, resume) => ipcRenderer.send(IPC.ptyFlow, sessionId, resume),
     kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
+    recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
     generateGroupName: (memberKeys, cwd) =>
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
@@ -66,6 +69,30 @@ const api: NodeTerminalApi = {
     onExit: (sessionId, listener) => {
       const channel = IPC.ptyExit(sessionId)
       const handler = (_e: unknown, code: number) => listener(code)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onSize: (sessionId, listener) => {
+      const channel = IPC.ptySize(sessionId)
+      const handler = (_e: unknown, size: { cols: number; rows: number }) => listener(size)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onClosed: (sessionId, listener) => {
+      const channel = IPC.ptyClosed(sessionId)
+      const handler = (_e: unknown, info: { by: ClientId | null }) => listener(info)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onRecycled: (sessionId, listener) => {
+      const channel = IPC.ptyRecycled(sessionId)
+      const handler = (_e: unknown, info: RecycledInfo): void => listener(info)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onResync: (sessionId, listener) => {
+      const channel = IPC.ptyResync(sessionId)
+      const handler = (_e: unknown, screen: string) => listener(screen)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     }
@@ -268,6 +295,22 @@ const api: NodeTerminalApi = {
     ensure: (sessionId, cwd, accountId) =>
       ipcRenderer.send(IPC.contextEnsure, sessionId, cwd, accountId)
   },
+  // Canvas sync: one channel in both directions. The cast goes to the reflector (src/core/canvas-sync),
+  // which stamps it with the total order (`seq`) and fans it to every attached client — INCLUDING us.
+  // Our own mutation coming back is the ACK that tells us where it landed in that order; the renderer
+  // recognizes it by `src` and does not re-apply it (src/shared/canvas-order.ts).
+  canvas: {
+    mutate: (projectId, mutation) => ipcRenderer.send(IPC.canvasMut, projectId, mutation),
+    onMutation: (listener) => {
+      const handler = (
+        _e: unknown,
+        projectId: string,
+        mutation: Parameters<typeof listener>[1]
+      ): void => listener(projectId, mutation)
+      ipcRenderer.on(IPC.canvasMut, handler)
+      return () => ipcRenderer.removeListener(IPC.canvasMut, handler)
+    }
+  },
   claude: {
     cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId) =>
@@ -375,6 +418,26 @@ const api: NodeTerminalApi = {
     },
     listDevices: () => ipcRenderer.invoke(IPC.pairingListDevices),
     revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
+  },
+  // Team presence. `hello` is the only request (its response is how this client learns its OWN
+  // ClientId, without which it would draw its own cursor as a peer's); the publishers are
+  // fire-and-forget sends, and the two event channels are subscriptions. Nothing is persisted.
+  presence: {
+    hello: (identity: PeerIdentity) => ipcRenderer.invoke(IPC.presenceHello, identity),
+    cursor: (cursor) => ipcRenderer.send(IPC.presenceCursor, cursor),
+    focus: (nodeId) => ipcRenderer.send(IPC.presenceFocus, nodeId),
+    chat: (text) => ipcRenderer.send(IPC.presenceChat, text),
+    project: (projectId) => ipcRenderer.send(IPC.presenceProject, projectId),
+    onSync: (listener) => {
+      const handler = (_e: unknown, peers: PeerState[]) => listener(peers)
+      ipcRenderer.on(IPC.presenceSync, handler)
+      return () => ipcRenderer.removeListener(IPC.presenceSync, handler)
+    },
+    onPeer: (listener) => {
+      const handler = (_e: unknown, diff: PeerDiff) => listener(diff)
+      ipcRenderer.on(IPC.presencePeer, handler)
+      return () => ipcRenderer.removeListener(IPC.presencePeer, handler)
+    }
   },
   contextLink: {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map),

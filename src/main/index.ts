@@ -9,6 +9,7 @@ import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
+import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
@@ -17,6 +18,7 @@ import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import { initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
+import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
@@ -240,6 +242,28 @@ function createWindow(): BrowserWindow {
   // Register as the live main window (send-time resolution via getMainWindow/sendToMain).
   setMainWindow(win)
 
+  // Team presence: this window is one peer. With nobody else connected the renderer draws nothing
+  // (≤1 peer = zero cost); it matters when a phone joins over the relay, or when this desktop
+  // hosts. Its ClientId is the webContents id — the same id space sendTo/handleWithSender use.
+  // `closed` (not `close` — which only hides the window on macOS) is the real departure.
+  // (The id is captured up front: reading `win.webContents` after 'closed' throws — the window and
+  // its webContents are destroyed by then.)
+  const presenceId = win.webContents.id
+  presenceHub.join(presenceId, 'desktop')
+  win.on('closed', () => {
+    presenceHub.leave(presenceId)
+    // This webContents is a pty SUBSCRIBER (co-attach: one pty, N subscribers, keyed by the
+    // webContents id). A destroyed window sends no `pty:kill`, so without this it would stay
+    // subscribed forever: the pty client is never released, the detach-time scrollback snapshot
+    // is skipped, and a session it had paused via flow control could never be resumed — the next
+    // client to co-attach to that node would inherit a frozen terminal. The tmux sessions
+    // themselves keep running, exactly as they do on quit (killAll).
+    ptyManager.dropClient(presenceId)
+  })
+  // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
+  // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
+  win.webContents.on('render-process-gone', () => ptyManager.dropClient(presenceId))
+
   win.on('ready-to-show', () => win.show())
 
   // macOS: closing the window hides it instead of destroying it. The app deliberately
@@ -327,6 +351,7 @@ app.whenReady().then(async () => {
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   gitService.registerIpc()
+  presenceHub.registerIpc()
   registerClaudeCliIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
@@ -519,6 +544,10 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+  // Canvas sync: the same reflector the Server Edition boots. With a single window clientIds()
+  // returns one id, so on the desktop today it is a no-op — wired for parity (and for the
+  // relay-host / multi-window futures), not because Electron needs it right now.
+  initCanvasSync()
 
   // Agent hooks: install the managed hook script into each agent's config, then start the
   // local HTTP server that receives hook posts and forwards normalized events to the renderer.
@@ -841,10 +870,14 @@ app.whenReady().then(async () => {
     }
   })
 
-  // Releasing tails on node close: pty:destroy fires when the user clicks × (persistKey = node
-  // id). pty-manager already handles the same channel to kill the tmux session; this extra
-  // listener tears down the per-node file tailers so they stop polling a now-dead session.
-  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => {
+  // Releasing tails when a node's session ENDS — whichever way it ends. pty-manager handles the
+  // same two channels to kill the tmux session; this extra listener tears down the per-node file
+  // tailers so they stop polling a now-dead session:
+  //  - pty:destroy — the user clicked × (the node is gone);
+  //  - pty:recycle — "move into worktree" (the node stays, but its session is replaced, so the
+  //    tails of the OLD session's transcript are just as dead; the respawned agent re-registers
+  //    them under its new session id via the hook events).
+  const releaseNodeTails = (nodeId: string): void => {
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
       // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
@@ -865,7 +898,9 @@ app.whenReady().then(async () => {
       }
       nodeSubagents.delete(nodeId)
     }
-  })
+  }
+  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => releaseNodeTails(nodeId))
+  ipcMain.on(IPC.ptyRecycle, (_e, nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
   // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.

@@ -160,8 +160,8 @@ describe('remoteTmuxConf', () => {
     expect(c).toContain('terminal-overrides')
     expect(c).toContain('Ms=')
   })
-  it('keeps tmux on the NORMAL screen (smcup@/rmcup@) so the emulator owns the scrollback', () => {
-    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@'`)
+  it('blanks smcup/rmcup AND indn so the emulator actually accumulates a scrollback', () => {
+    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@:indn@'`)
   })
   it('APPENDS both terminal-overrides (neither clobbers the other)', () => {
     // Both lines must use the append form (`-a`), or the second `set` would replace the first

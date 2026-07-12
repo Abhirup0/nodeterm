@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ServerPlatform, type UiSink } from './platform-server'
 import { E_NO_HANDLER } from '../shared/rpc'
 import { decodePtyData } from '../shared/rpc'
@@ -45,6 +45,22 @@ describe('ServerPlatform', () => {
     expect(got).toEqual(['hello'])
   })
 
+  it('cast delivers the sending uiId to onWithSender listeners (and still runs plain on)', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const withSender: Array<[number, unknown]> = []
+    const plain: unknown[] = []
+    p.onWithSender('presence:cursor', (senderId: number, cursor: unknown) =>
+      withSender.push([senderId, cursor])
+    )
+    p.on('presence:cursor', (cursor: unknown) => plain.push(cursor))
+    const ui = p.attach(fakeSink().sink)
+    p.cast(ui, 'presence:cursor', [{ x: 1, y: 2 }])
+    expect(withSender).toEqual([[ui, { x: 1, y: 2 }]])
+    expect(plain).toEqual([{ x: 1, y: 2 }])
+    // Unknown method: silent no-op, never throws.
+    expect(() => p.cast(ui, 'nope', [])).not.toThrow()
+  })
+
   it('on() supports multiple listeners per channel; cast fires all of them', () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     const hits: string[] = []
@@ -55,6 +71,32 @@ describe('ServerPlatform', () => {
     expect(hits).toEqual(['A:x', 'B:x'])
     p.cast(ui, 'unknown', ['ignored']) // no listener → silent no-op
     expect(hits).toEqual(['A:x', 'B:x'])
+  })
+
+  it('cast isolates a throwing listener: the others on the channel still run', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const hits: string[] = []
+    p.onWithSender('pty:write', () => { throw new Error('attribution blew up') })
+    p.onWithSender('pty:write', (_sender: number, a: string) => hits.push(`S:${a}`))
+    p.on('pty:write', () => { throw new Error('plain blew up') })
+    p.on('pty:write', (a: string) => hits.push(`P:${a}`))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    expect(() => p.cast(ui, 'pty:write', ['keystroke'])).not.toThrow()
+    expect(hits).toEqual(['S:keystroke', 'P:keystroke'])
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it('cast fires listeners in registration order across on() and onWithSender()', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
+    const order: string[] = []
+    p.on('c', () => order.push('plain-1'))
+    p.onWithSender('c', () => order.push('sender-1'))
+    p.on('c', () => order.push('plain-2'))
+    const ui = p.attach({ sendText: () => {}, sendBinary: () => {} })
+    p.cast(ui, 'c', [])
+    expect(order).toEqual(['plain-1', 'sender-1', 'plain-2'])
   })
 
   it('sendTo routes pty:data as binary, other channels as JSON events, drops when detached', () => {
@@ -79,19 +121,29 @@ describe('ServerPlatform', () => {
     expect(b.texts).toHaveLength(1)
   })
 
-  it('detach clears the backpressure paused map', () => {
+  it("detach clears the departing connection's backpressure entries", () => {
     const p = new ServerPlatform({ userDataDir: '/tmp', appVersion: '0' })
     p.setFlowController(() => {})
     const ui = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 2_000_000 })
-    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → session s1 marked paused
+    p.sendTo(ui, 'pty:data:s1', 'x') // buffered > high → (ui, s1) marked paused
     p.detach(ui)
-    // After detach the paused entry is gone: a fresh attach + low-buffer send does not emit a
-    // spurious resume.
+    // The entry is gone with the connection: a fresh attach + low-buffer send does not emit a
+    // spurious resume for a pause the NEW connection never issued.
     const flow: Array<{ sid: string; resume: boolean }> = []
-    p.setFlowController((sid, resume) => flow.push({ sid, resume }))
+    p.setFlowController((_uiId, sid, resume) => flow.push({ sid, resume }))
     const ui2 = p.attach({ sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 0 })
     p.sendTo(ui2, 'pty:data:s1', 'x')
-    expect(flow).toEqual([]) // not paused (map was cleared) → no resume fired
+    expect(flow).toEqual([]) // ui2 owes nothing → no resume fired
+  })
+
+  it('clientIds lists every attached sink and drops detached ones', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    expect(p.clientIds()).toEqual([])
+    const a = p.attach(fakeSink().sink)
+    const b = p.attach(fakeSink().sink)
+    expect(p.clientIds()).toEqual([a, b])
+    p.detach(a)
+    expect(p.clientIds()).toEqual([b])
   })
 
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {

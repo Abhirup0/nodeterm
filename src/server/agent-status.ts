@@ -142,12 +142,15 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
     }
   })
 
-  // Node close → tear down its tails and clear the maps (server parity with desktop
+  // Session end → tear down its tails and clear the maps (server parity with desktop
   // `src/main/index.ts`'s local `ipcMain.on(IPC.ptyDestroy, …)` branch; the remote/SSH lines are
-  // dropped — the server has no SSH-project manager). Coexists with PtyManager's own ptyDestroy
-  // listener via the multi-listener `on`: that one kills the tmux session, this untracks the
-  // tails. Untracking a non-tracked session/subagent is a no-op, so re-destroy is harmless.
-  platform.on(IPC.ptyDestroy, (nodeId: string) => {
+  // dropped — the server has no SSH-project manager). Coexists with PtyManager's own listeners via
+  // the multi-listener `on`: those kill the tmux session, these untrack the tails. Untracking a
+  // non-tracked session/subagent is a no-op, so a repeat is harmless.
+  //  - pty:destroy — the node was deleted;
+  //  - pty:recycle — the node was moved into a worktree: it stays, but this session is replaced, so
+  //    the old session's tails are dead either way (the respawned agent re-registers its own).
+  const releaseNodeTails = (nodeId: string): void => {
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
       contextTail.untrack(sessionId)
@@ -158,5 +161,7 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
       for (const toolUseId of subs) subagentTail.finish(toolUseId)
       nodeSubagents.delete(nodeId)
     }
-  })
+  }
+  platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
+  platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
 }

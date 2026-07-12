@@ -14,10 +14,17 @@ export interface CorePlatform {
   on(channel: string, fn: (...args: any[]) => void): void
   /** Like handle, but fn receives the calling UI's numeric id first (Electron: event.sender.id). */
   handleWithSender(channel: string, fn: (senderId: number, ...args: any[]) => unknown): void
+  /** Like on, but fn receives the calling UI's numeric id first (Electron: event.sender.id).
+   *  The seam presence (and, later, typing attribution) needs: a cast must say WHO sent it. */
+  onWithSender(channel: string, fn: (senderId: number, ...args: any[]) => void): void
   /** Send to one attached UI by id (Electron: webContents.fromId). Silently drops if gone. */
   sendTo(uiId: number, channel: string, ...args: any[]): void
   /** Send to every attached UI (Electron: the main window). */
   broadcast(channel: string, ...args: any[]): void
+  /** Ids of every attached UI, in attach order (Server: each authenticated WS connection;
+   *  Electron: the main window, or none while it is closed). Lets a service address "everyone
+   *  EXCEPT the sender", which broadcast() cannot express — see src/core/canvas-sync.ts. */
+  clientIds(): number[]
   /** Open a URL in the user's default browser. */
   openExternal(url: string): Promise<void>
 }

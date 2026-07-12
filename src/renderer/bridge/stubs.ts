@@ -109,12 +109,14 @@ export function buildStubApi(): Omit<
   | 'git'
   | 'files'
   | 'context'
+  | 'canvas'
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
+  | 'presence'
 > {
   const api = {
     ssh: {
@@ -299,10 +301,12 @@ export function buildStubApi(): Omit<
     | 'git'
     | 'files'
     | 'context'
+    | 'canvas'
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
     | 'userDataDir'
+    | 'presence'
   >
 
   return api
