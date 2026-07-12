@@ -89,9 +89,24 @@ export function peersOnProject(peers: PeerState[], projectId: string | null): Pe
 /** Cap a string at `max` *code points*, not UTF-16 code units: `slice` would cut a surrogate
  *  pair (emoji, CJK extensions) in half and leave a lone surrogate, which renders as "�" in
  *  every peer's facepile / chat bubble. The single truncation rule for the whole feature — the
- *  hub caps chat with it (CHAT_MAX_LEN) and capName caps names with it. */
+ *  hub caps chat with it (CHAT_MAX_LEN) and capName caps names with it.
+ *
+ *  COST IS O(max), NOT O(text) — deliberately. This is a door for UNTRUSTED input (any client can
+ *  cast a `presence:chat` / `presence:focus` of whatever size the socket accepts), and the obvious
+ *  `[...text].slice(0, max)` spreads the WHOLE string into an array of code points BEFORE capping:
+ *  a multi-MB frame would block the event loop for seconds and balloon the heap — a trivial remote
+ *  DoS on the shared Server Edition process. A code point is at most 2 UTF-16 code units, so the
+ *  first `max` code points always live inside the first `max * 2` code units: bound the input with
+ *  a (O(1), no-copy) `slice` first, and only spread that. The bounded slice may end on a lone high
+ *  surrogate, but that surrogate can only ever land at index >= max in the spread, so the cap
+ *  drops it — no half-emoji can survive. */
 export function capCodePoints(text: string, max: number): string {
-  return [...text].slice(0, max).join('')
+  if (max <= 0) return ''
+  // Fewer code units than the cap ⇒ fewer code points than the cap. Nothing to do.
+  if (text.length <= max) return text
+  const bounded = [...text.slice(0, max * 2)]
+  if (bounded.length <= max) return bounded.join('')
+  return bounded.slice(0, max).join('')
 }
 
 /** Cap a name at NAME_MAX_LEN code points. Trim runs again AFTER the cut, so a truncation

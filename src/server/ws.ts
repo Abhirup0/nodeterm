@@ -31,6 +31,27 @@ import { presenceHub } from '../core/presence/hub'
  */
 export const WS_HEARTBEAT_MS = 30_000
 
+/**
+ * Largest client→server frame the receiver will accept (8 MiB). `ws` defaults to 100 MiB, which is
+ * a remote DoS on a process that is shared by every user of the box: one client holding the single
+ * Server Edition password can loop 100 MB frames and OOM the server, taking down everyone's ptys,
+ * the hook server and the workspace store. The receiver drops an oversized frame with close code
+ * 1009 before it ever reaches dispatch, so nothing buffers it.
+ *
+ * Why 8 MiB — what actually rides this socket, client→server:
+ *   - `pty:write` casts: keystrokes and clipboard pastes (kilobytes; a giant paste is not a thing
+ *     a terminal survives anyway),
+ *   - presence casts: cursor points, and chat/name/focus strings the hub itself caps at 200 / 32 /
+ *     128 code points,
+ *   - RPC requests, of which the biggest by far is `fs:write` — an editor node saving its file,
+ *     JSON-escaped. 8 MiB comfortably covers any text file a Monaco editor is usable on (a 1 MB
+ *     source file is already an outlier, and JSON escaping roughly doubles it in the worst case),
+ *     plus `workspace:save` (a whole canvas: nodes + sticky text, tens of KB).
+ * That leaves ~an order of magnitude of headroom over the largest legitimate frame while cutting
+ * the worst case a single frame can cost the process by ~12×.
+ */
+export const WS_MAX_PAYLOAD = 8 * 1024 * 1024
+
 export interface WsServerOpts {
   platform: ServerPlatform
   auth: Auth
@@ -63,7 +84,7 @@ function upgradeAllowed(req: http.IncomingMessage, auth: Auth): boolean {
 
 export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
   const { platform, auth, heartbeatMs = WS_HEARTBEAT_MS } = opts
-  const wss = new WebSocketServer({ noServer: true })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
 
   // Liveness heartbeat. Node enables no TCP keepalive on an upgraded socket, so a browser that
   // simply VANISHES (laptop asleep, wifi dropped, NAT idle-reap) leaves a half-open socket: no FIN

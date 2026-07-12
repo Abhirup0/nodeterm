@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
   PRESENCE_COLORS,
+  capCodePoints,
   defaultNameFor,
   nextFreeColor,
   peersOnProject,
   sanitizeIdentity,
+  CHAT_MAX_LEN,
   NAME_MAX_LEN,
   type PeerDiff,
   type PeerState
@@ -109,6 +111,48 @@ describe('sanitizeIdentity', () => {
     const name = 'a'.repeat(NAME_MAX_LEN - 1) + ' tail'
     const out = sanitizeIdentity({ name, color: PRESENCE_COLORS[0] }, fallback).name
     expect(out).toBe('a'.repeat(NAME_MAX_LEN - 1))
+  })
+})
+
+describe('capCodePoints (the one truncation rule — and the one untrusted-length door)', () => {
+  it('caps by code point and leaves a short string alone', () => {
+    expect(capCodePoints('hello', 10)).toBe('hello')
+    expect(capCodePoints('hello', 3)).toBe('hel')
+    expect(capCodePoints('', 3)).toBe('')
+    expect(capCodePoints('abc', 0)).toBe('')
+  })
+
+  it('never cuts a surrogate pair in half, wherever the cap lands', () => {
+    // Every code point is astral: the cap in code UNITS would be 2× the cap in code POINTS, so an
+    // implementation that bounds the input by code units must still not hand back half a pair.
+    const emoji = '😀'.repeat(500)
+    const out = capCodePoints(emoji, 200)
+    expect([...out]).toHaveLength(200)
+    expect(out).toBe('😀'.repeat(200))
+    expect(out).not.toMatch(/[\uD800-\uDFFF]/u)
+
+    // A pair straddling the max*2 code-unit boundary of a bounded implementation.
+    const straddle = 'a' + '😀'.repeat(500)
+    const cut = capCodePoints(straddle, 200)
+    expect([...cut]).toHaveLength(200)
+    expect(cut).toBe('a' + '😀'.repeat(199))
+    expect(cut).not.toMatch(/[\uD800-\uDFFF]/u)
+  })
+
+  it('caps a huge hostile string WITHOUT materializing it (cost is O(max), not O(input))', () => {
+    // A client can cast a `presence:chat` of whatever size the socket accepts. The old
+    // `[...text].slice(0, max)` spread the WHOLE string into an array of code points first: for a
+    // 40 MB frame that is ~20M array elements — seconds of blocked event loop and ~1 GB of heap,
+    // i.e. a trivial remote DoS on the shared Server Edition process. Bounding the input first
+    // makes the work proportional to `max`, so this is milliseconds.
+    const hostile = 'a'.repeat(40_000_000)
+    const started = performance.now()
+    const out = capCodePoints(hostile, CHAT_MAX_LEN)
+    const elapsed = performance.now() - started
+    expect(out).toBe('a'.repeat(CHAT_MAX_LEN))
+    // Generous by two orders of magnitude: the bounded implementation runs in µs, while the
+    // spreading one cannot get near this even on a fast machine.
+    expect(elapsed).toBeLessThan(200)
   })
 })
 

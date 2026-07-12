@@ -6,7 +6,7 @@ import path from 'path'
 import WebSocket from 'ws'
 import { Auth } from './auth'
 import { ServerPlatform } from './platform-server'
-import { attachWsServer } from './ws'
+import { attachWsServer, WS_MAX_PAYLOAD } from './ws'
 import { SESSION_COOKIE } from './http'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { presenceHub } from '../core/presence/hub'
@@ -157,6 +157,24 @@ describe('ws endpoint', () => {
       'presence:sync on connect'
     )
     ws.close()
+  })
+
+  it('refuses an oversized frame instead of buffering it (maxPayload), and never dispatches it', async () => {
+    // Without an explicit maxPayload, `ws` defaults to 100 MiB: any client holding the single
+    // shared password could push 100 MB frames in a loop and OOM the process, killing every
+    // user's ptys. The cap must be enforced by the receiver, before the frame reaches dispatch.
+    const casts: unknown[] = []
+    platform.on('fire', (v: unknown) => casts.push(v))
+    const ws = await connect({ cookie })
+    ws.on('error', () => {}) // the server closes the socket under us — expected
+
+    const huge = 'a'.repeat(WS_MAX_PAYLOAD + 1024)
+    ws.send(JSON.stringify({ t: 'cast', method: 'fire', args: [huge] }))
+
+    // 1009 = "message too big" — the protocol-level refusal.
+    const code = await new Promise<number>((resolve) => ws.on('close', resolve))
+    expect(code).toBe(1009)
+    expect(casts).toEqual([])
   })
 
   it('heartbeat: terminates a socket that never answers a ping, dropping its presence peer', async () => {
