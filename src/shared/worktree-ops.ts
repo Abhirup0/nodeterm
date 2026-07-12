@@ -56,14 +56,44 @@ export async function worktreeList(
   repoPath: string,
   pathExists: PathExists = alwaysExists
 ): Promise<WorktreeEntry[]> {
-  if (!repoPath) return []
-  const r = await git(repoPath, ['worktree', 'list', '--porcelain'])
-  if (!r.ok) return []
-  const entries = parseWorktreePorcelain(r.out)
-  return Promise.all(
-    entries.map(async (e) => ({ ...e, prunable: e.prunable || !(await pathExists(e.path)) }))
-  )
+  return (await listWorktrees(git, repoPath, pathExists)).entries
 }
+
+/**
+ * `worktreeList`, plus WHETHER GIT COULD BE READ AT ALL.
+ *
+ * `worktreeList` collapses both outcomes to `[]`: "git listed nothing" and "the git call failed"
+ * (spawn EAGAIN under load, an unmounted/NFS repo, a corrupt index) are the same empty array. For a
+ * chip that is fine — it just shows nothing. For the DESTRUCTIVE paths it is not: `worktreeRemove`
+ * read the empty list as "this worktree is not registered — it is already gone", answered
+ * `worktreeGone`, and the renderer then destroyed every descendant terminal's tmux session (running
+ * processes and all), reset their persisted cwds and dropped the binding — while the directory and
+ * its registration sat untouched on disk. One unverified read must never escalate to destruction
+ * (the same principle as `WORKTREE_STALE_STRIKES`), so the ops that act on the answer take this
+ * shape instead and refuse when `ok` is false.
+ */
+async function listWorktrees(
+  git: GitExecutor,
+  repoPath: string,
+  pathExists: PathExists
+): Promise<{ ok: boolean; entries: WorktreeEntry[] }> {
+  if (!repoPath) return { ok: false, entries: [] }
+  const r = await git(repoPath, ['worktree', 'list', '--porcelain'])
+  if (!r.ok) return { ok: false, entries: [] }
+  const entries = await Promise.all(
+    parseWorktreePorcelain(r.out).map(async (e) => ({
+      ...e,
+      prunable: e.prunable || !(await pathExists(e.path))
+    }))
+  )
+  return { ok: true, entries }
+}
+
+/** What every op says when git itself could not be read. Never `worktreeGone` — see `listWorktrees`. */
+const UNREADABLE = (repoPath: string): WorktreeOpResult => ({
+  ok: false,
+  message: `Could not read the worktrees of ${repoPath || 'this repository'}. Nothing was changed — try again.`
+})
 
 export async function worktreeAdd(
   git: GitExecutor, repoPath: string, wtPath: string, branch: string, baseRef: string, isNew: boolean
@@ -100,8 +130,12 @@ export async function worktreeMerge(
   pathExists: PathExists = alwaysExists
 ): Promise<WorktreeOpResult> {
   if (!isValidGitRef(branch) || !isValidGitRef(baseRef)) return { ok: false, message: 'Invalid ref.' }
-  const list = await worktreeList(git, repoPath, pathExists)
-  const baseEntry = list.find((e) => e.branch === baseRef) ?? null
+  const listed = await listWorktrees(git, repoPath, pathExists)
+  // A listing that FAILED is not "the base is checked out nowhere": planning `fetch-update` on it
+  // would try to move a ref that IS checked out elsewhere and die with something obscure. Decide
+  // nothing on a read that did not happen.
+  if (!listed.ok) return UNREADABLE(repoPath)
+  const baseEntry = listed.entries.find((e) => e.branch === baseRef) ?? null
   // The base branch is checked out in a worktree whose directory is GONE. Do not merge in place
   // (nothing to merge into) and do not quietly fall through to `fetch-update` either: git still has
   // the registration and refuses to update a ref that is checked out elsewhere, so that would fail
@@ -175,14 +209,28 @@ export async function worktreeRemove(
   if (isDangerousWorktreeRemovalPath(wtPath, repoPath, homeDir)) {
     return { ok: false, message: 'Refusing to remove that path.' }
   }
-  const list = await worktreeList(git, repoPath, pathExists)
-  const entry = list.find((e) => e.path.replace(/\/+$/, '') === wtPath.replace(/\/+$/, ''))
+  const listed = await listWorktrees(git, repoPath, pathExists)
+  // git could not be read. This is NOT evidence that the worktree is gone — and answering
+  // `worktreeGone` here is destruction on a guess: the renderer would kill every descendant
+  // terminal's tmux session and rewrite their persisted cwds while the directory is still there.
+  // Report the failure; a removal the user can retry beats a removal that destroys the wrong thing.
+  if (!listed.ok) return UNREADABLE(repoPath)
+  const entry = listed.entries.find((e) => e.path.replace(/\/+$/, '') === wtPath.replace(/\/+$/, ''))
   if (!entry) {
-    // Nothing to remove: git does not know this path (deleted + already pruned, or never a
-    // worktree of this repo). Prune anyway — a leftover registration elsewhere would block a
-    // future `worktree add` — and tell the caller the worktree is gone so it clears its binding.
-    // (Unconditionally: pruning is the whole point of `pruneOnly`, so skipping it there was
-    // exactly backwards.)
+    // git answered, and it does not know this path. Only the DIRECTORY's absence proves the
+    // worktree is gone: a path git does not list but that still EXISTS is a binding pointing
+    // somewhere else (another repo's worktree, a hand-edited project file) — its sessions are alive
+    // and must not be torn down. Say so and touch nothing; Unbind is the way out of that binding.
+    if (await pathExists(wtPath)) {
+      return {
+        ok: false,
+        message: `${wtPath} is not a registered worktree of this repository, and it still exists. Nothing was removed — unbind the group instead.`
+      }
+    }
+    // Deleted AND already pruned (or never registered): the worktree really is gone. Prune anyway —
+    // a leftover registration elsewhere would block a future `worktree add` — and tell the caller,
+    // so it can clear the binding. (Unconditionally: pruning is the whole point of `pruneOnly`, so
+    // skipping it there was exactly backwards.)
     await git(repoPath, ['worktree', 'prune'])
     return { ok: false, worktreeGone: true, message: 'Worktree is not registered — it is already gone.' }
   }

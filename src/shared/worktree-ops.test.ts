@@ -139,6 +139,16 @@ describe('worktreeMerge', () => {
     expect(calls.some((c) => c[0] === 'merge' || c[0] === 'fetch')).toBe(false)
   })
 
+  // Same class of lie as the removal path's: a failed listing is not "the base is checked out
+  // nowhere". Planning `fetch-update` on it would try to move a ref that IS checked out elsewhere
+  // and fail with something obscure — decide nothing on a read that did not happen.
+  it('refuses to plan a merge when the worktree listing itself failed', async () => {
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ko('fatal: index file corrupt') })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', false, async () => true)
+    expect(r.ok).toBe(false)
+    expect(r.message).toMatch(/could not read/i)
+    expect(calls.some((c) => c[0] === 'merge' || c[0] === 'fetch' || c[0] === 'push')).toBe(false)
+  })
   it('still merges in place when the base checkout is really there (pathExists says so)', async () => {
     const list = 'worktree /base\nHEAD aaa\nbranch refs/heads/main\n'
     const { git, calls } = fakeGit({
@@ -270,7 +280,7 @@ describe('worktreeRemove', () => {
     const { git, calls } = fakeGit({
       'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
     })
-    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false)
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false, false, async () => false)
     expect(r.ok).toBe(false)
     expect(r.worktreeGone).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
@@ -289,9 +299,50 @@ describe('worktreeRemove', () => {
     const { git, calls } = fakeGit({
       'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
     })
-    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false, true)
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false, true, async () => false)
     expect(r.worktreeGone).toBe(true)
     expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(true)
+  })
+  // `worktreeGone` is what the renderer reads as "the removal got far enough": it then destroys
+  // every displaced descendant's tmux session (ending running processes), resets their persisted
+  // cwd, and drops the binding. So it may only ever be set on PROOF that the worktree is gone. A
+  // git call that merely FAILED — spawn EAGAIN under load, an unmounted/NFS repo, a corrupt index —
+  // is not proof of anything, and used to be indistinguishable from "git listed nothing".
+  it('never reads a FAILED `worktree list` as "the worktree is gone"', async () => {
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ko('fatal: not a git repository') })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', true, false, async () => true)
+    expect(r.ok).toBe(false)
+    expect(r.worktreeGone).toBeFalsy()
+    expect(r.message).toMatch(/could not read/i)
+    // …and nothing at all was touched: the only git call made was the failed listing.
+    expect(calls.map((c) => c.join(' '))).toEqual(['worktree list --porcelain'])
+  })
+  it('never reads a failed list as gone in pruneOnly mode either', async () => {
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ko('fatal: index file corrupt') })
+    const r = await worktreeRemove(git, '/repo', '/wt/x', '/home', false, true, async () => false)
+    expect(r.ok).toBe(false)
+    expect(r.worktreeGone).toBeFalsy()
+    expect(calls.some((c) => c.join(' ') === 'worktree prune')).toBe(false)
+  })
+  // git answered, and it does not list the path — but the DIRECTORY is still there. That is not a
+  // dead worktree (it is a binding pointing at another repo's worktree, or a hand-edited one), and
+  // the sessions living in it are healthy: nothing may declare them displaced.
+  it('does not call an unregistered path gone while its directory still exists', async () => {
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false, false, async () => true)
+    expect(r.ok).toBe(false)
+    expect(r.worktreeGone).toBeFalsy()
+    expect(calls.some((c) => c[1] === 'remove')).toBe(false)
+  })
+  // The conservative default ("everything exists") must never declare anything gone.
+  it('declares nothing gone under the default pathExists', async () => {
+    const { git } = fakeGit({
+      'worktree list --porcelain': ok('worktree /repo\nbranch refs/heads/main\n')
+    })
+    const r = await worktreeRemove(git, '/repo', '/wt/ghost', '/home', false)
+    expect(r.worktreeGone).toBeFalsy()
   })
   // git < 2.36 does not emit `prunable` in `worktree list --porcelain`, so a deleted directory
   // looks perfectly healthy in the listing. Stat the path instead of believing the flag.
