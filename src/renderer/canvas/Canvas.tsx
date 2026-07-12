@@ -102,7 +102,7 @@ import {
   type WorktreeEntry
 } from '@shared/worktree'
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
-import { scmScopes, defaultScmScope } from '@shared/scm-scope'
+import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
 import { useWorktrees } from '../state/worktrees'
 import {
   agentConfig,
@@ -383,14 +383,12 @@ export function Canvas() {
   // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
   // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
   // guard that stops the dialog from offering a worktree a second group could bind to.
+  // Every group on this canvas that owns a worktree — the one derivation the worktree dialog, the
+  // store refresh and the Source Control scope list all read.
+  const boundGroupList = useMemo(() => boundGroups(nodes), [nodes])
   const boundWorktreePaths = useMemo(
-    () =>
-      new Set(
-        nodes
-          .filter((n) => n.type === 'group' && n.data.worktree)
-          .map((n) => normWorktreePath((n.data.worktree as GroupWorktree).path))
-      ),
-    [nodes]
+    () => new Set(boundGroupList.map((b) => normWorktreePath(b.worktree.path))),
+    [boundGroupList]
   )
   // The checkouts Source Control can act on: the project's own, plus every bound worktree on this
   // canvas. Computed ONCE here so the default handed to the panel is an element of the very list
@@ -402,23 +400,13 @@ export function Canvas() {
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.name
   )
   const scmScopeList = useMemo(
-    () =>
-      scmScopes(
-        { cwd: activeProjectCwd, name: activeProjectName ?? 'repo' },
-        nodes
-          .filter((n) => n.type === 'group' && n.data.worktree)
-          .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
-      ),
-    [activeProjectCwd, activeProjectName, nodes]
+    () => scmScopes({ cwd: activeProjectCwd, name: activeProjectName ?? 'repo' }, boundGroupList),
+    [activeProjectCwd, activeProjectName, boundGroupList]
   )
-  // The group the selection points at: a selected group node itself, else a selected node's parent
-  // group. That group's scope is what Source Control opens on (same selection source — `n.selected`
-  // — the context-menu/delete paths read).
-  const selectedGroupIdForScm = useMemo(() => {
-    const sel = nodes.find((n) => n.selected)
-    if (!sel) return null
-    return sel.type === 'group' ? sel.id : (sel.parentId ?? null)
-  }, [nodes])
+  // The group the selection points at (pure + tested in @shared/scm-scope). That group's scope is
+  // what Source Control opens on (same selection source — `n.selected` — the context-menu/delete
+  // paths read).
+  const selectedGroupIdForScm = useMemo(() => selectedScmGroupId(nodes), [nodes])
   // Clipboard failures reach us as a window event (the bridge stub has no React handle).
   useEffect(() => {
     const onToast = (e: Event): void => {
@@ -835,12 +823,7 @@ export function Canvas() {
     // cannot reason about a remote path. Fire-and-forget: the store is epoch-guarded + fails open.
     useWorktrees.getState().reset()
     if (project.cwd && !project.ssh) {
-      void useWorktrees.getState().refresh(
-        project.cwd,
-        flow
-          .filter((n) => n.type === 'group' && n.data.worktree)
-          .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
-      )
+      void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
     }
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
     // Restore control ropes with the source agent's color (falls back to the browser blue).
@@ -1362,9 +1345,15 @@ export function Canvas() {
   }, [])
 
   const addTerminal = useCallback(
-    (center?: { x: number; y: number }, initialCommand?: string, groupId?: string) => {
+    (
+      center?: { x: number; y: number },
+      initialCommand?: string,
+      groupId?: string,
+      /** Force the working directory (e.g. a Source Control action running in a worktree scope). */
+      cwdOverride?: string
+    ) => {
       const project = useProjects.getState().getProject(activeProjectId)
-      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
+      const cwd = cwdOverride ?? cwdForNewNodeIn(groupId) ?? project?.cwd
       setNodes((ns) => {
         // In an SSH project the node is stamped remote (runs over the project's master); the
         // factory takes the project's ssh and roots the terminal at its remoteCwd.
@@ -1376,8 +1365,12 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
   )
 
-  /** Open a new terminal that runs a command on start (e.g. gh auth login). */
-  const runInTerminal = useCallback((cmd: string) => addTerminal(undefined, cmd), [addTerminal])
+  /** Open a new terminal that runs a command on start (e.g. gh auth login). `cwd` lets a caller
+   *  (Source Control) run it in the checkout it is scoped to instead of the project's own. */
+  const runInTerminal = useCallback(
+    (cmd: string, cwd?: string) => addTerminal(undefined, cmd, undefined, cwd),
+    [addTerminal]
+  )
 
   /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
   // Tear down the active remote mirror: hide the view and disconnect the relay connection (ends
@@ -1464,35 +1457,47 @@ export function Canvas() {
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
 
+  /** The checkout a Source Control action refers to. The panel hands its ACTIVE SCOPE's cwd
+   *  (main checkout or a bound worktree) with every relative path, so the diff/agent node it opens
+   *  is rooted in the same checkout the panel is showing — reconstructing the project's own cwd here
+   *  would silently open the main checkout's file while a worktree scope is active. Falling back to
+   *  the project keeps callers that have no scope (none today) working.
+   *  SSH project: the exact `remoteCwd` (the git remote registry matches by exact string; same value
+   *  passed to connect) — SSH projects have no worktrees in v1, so the scope is always the project. */
+  const scmCwd = useCallback(
+    (scopeCwd?: string) => {
+      const project = useProjects.getState().getProject(activeProjectId)
+      return project?.ssh?.remoteCwd ?? scopeCwd ?? project?.cwd
+    },
+    [activeProjectId]
+  )
+
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
-    (relPath: string, staged: boolean) => {
-      const project = useProjects.getState().getProject(activeProjectId)
-      // SSH project: the diff node operates on the remote repo, so its cwd must be the exact
-      // remoteCwd (the git remote registry matches by exact string; same value passed to connect).
-      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+    (relPath: string, staged: boolean, scopeCwd?: string) => {
+      const cwd = scmCwd(scopeCwd)
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, staged, viewCenter())])
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, scmCwd, viewCenter]
   )
 
   /** Open a parent↔commit diff node for a file from the history graph. */
   const openCommitDiff = useCallback(
-    (relPath: string, commitOid: string) => {
-      const project = useProjects.getState().getProject(activeProjectId)
-      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+    (relPath: string, commitOid: string, scopeCwd?: string) => {
+      const cwd = scmCwd(scopeCwd)
       if (!cwd) return
       setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, false, viewCenter(), commitOid)])
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter]
+    [setNodes, markDirty, scmCwd, viewCenter]
   )
 
-  /** Open a Claude node seeded with a commit-explanation prompt. */
+  /** Open a Claude node seeded with a commit-explanation prompt, rooted in the panel's scope so
+   *  the `git show` it is told to run inspects the checkout the commit was read from. */
   const explainCommit = useCallback(
-    (prompt: string) => {
+    (prompt: string, scopeCwd?: string) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const account = resolveNewNodeAccount(
         undefined,
@@ -1504,7 +1509,9 @@ export function Canvas() {
         createAgentNode(
           'claude',
           ns.length,
-          project?.cwd,
+          // A worktree scope is local-only (SSH projects have none in v1), so the scope's cwd is
+          // safe to take verbatim; without one the project's own checkout stands.
+          scopeCwd ?? project?.cwd,
           viewCenter(),
           prompt,
           undefined,
@@ -1942,9 +1949,7 @@ export function Canvas() {
       const project = useProjects.getState().getProject(activeProjectId ?? '')
       if (!project?.cwd || project.ssh) return
       const touched = new Set([change?.bind?.groupId, change?.unbound].filter(Boolean))
-      const bound: BoundGroup[] = nodesRef.current
-        .filter((n) => n.type === 'group' && n.data.worktree && !touched.has(n.id))
-        .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
+      const bound: BoundGroup[] = boundGroups(nodesRef.current).filter((b) => !touched.has(b.groupId))
       if (change?.bind) bound.push(change.bind)
       void useWorktrees.getState().refresh(project.cwd, bound)
     },
