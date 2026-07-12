@@ -80,6 +80,25 @@ describe('typing attribution', () => {
     expect(noteTyping).not.toHaveBeenCalled()
   })
 
+  // A phone's session is DETACHED (relay-served): it is deliberately absent from the co-attach
+  // index, so it has no `indexKey`. With tmux ALSO off it isn't persisted either, so it has no
+  // `persistKey` — and reading only those two would leave the phone with no node id at all, i.e.
+  // its typing silently unbadgeable while a co-attached desktop peer's ring still lit. The session
+  // carries an unconditional `nodeId` precisely so that degenerate config degrades honestly.
+  it('attributes a DETACHED (relay/phone) session with tmux off — it still has a node id', async () => {
+    presenceHub.join(ALICE, 'desktop')
+    presenceHub.join(BOB, 'phone')
+    const noteTyping = vi.spyOn(presenceHub, 'noteTyping')
+    const { PtyManager } = await import('./pty-manager')
+    const mgr = new PtyManager() // never init()'d → tmuxPath null → tmux off
+    const sessionId = mgr.createDetached(
+      { cols: 80, rows: 24, persistKey: 'node-phone' },
+      { onData: () => {}, onExit: () => {} }
+    )
+    mgr.write(BOB, sessionId, 'x')
+    expect(noteTyping.mock.calls).toEqual([[BOB, 'node-phone']])
+  })
+
   // The single-user path pays NOTHING for a feature that exists for a second person: with one peer
   // in the table the only recipient of a typing badge is the typist, whose own badge is never drawn.
   // Calling noteTyping anyway would fan a presence:peer diff out to the renderer twice a second, for

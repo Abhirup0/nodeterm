@@ -277,20 +277,27 @@ export class PresenceHub {
   /** Someone wrote into a node's terminal. Throttled to 1 broadcast / TYPING_THROTTLE_MS per
    *  (client, node) — a keystroke storm must not become a broadcast storm. The badge's ~2s decay
    *  is the renderer's job (TYPING_DECAY_MS): the hub keeps no timers.
-   *  Stage 2 calls this from the sender-aware pty:write handler; nothing calls it in Stage 1. */
+   *  Stage 2 calls this from the sender-aware pty:write handler; nothing calls it in Stage 1.
+   *
+   *  `nodeId` is a REFLECTED ref like focus/projectId — it is re-broadcast to every peer (up to
+   *  twice a second, per node) — and it is no more trusted than they are: it is the session's
+   *  persistKey, which the client chose at `pty:create`. So it goes through the same truncation
+   *  rule (capCodePoints/REF_MAX_LEN). Capping is done FIRST, so the throttle key and the
+   *  broadcast payload can never disagree about which node this is. */
   noteTyping(clientId: ClientId, nodeId: string): void {
     const peer = this.table.get(clientId)
     if (!peer || !nodeId) return
+    const id = capCodePoints(nodeId, REF_MAX_LEN)
     const now = Date.now()
     // The throttle key is (client, node) ALONE — never the peer's *current* typing badge. Someone
     // writing alternately into two nodes (agent + shell) would never match `peer.typing.nodeId`,
     // so every keystroke would broadcast to every peer. Each node keeps its own window; a
     // different node is a different key and so still re-fires immediately.
-    const key = `${clientId}:${nodeId}`
+    const key = `${clientId}:${id}`
     const last = this.lastTyping.get(key) ?? 0
     if (last && now - last < TYPING_THROTTLE_MS) return
     this.lastTyping.set(key, now)
-    const typing = { nodeId, at: now }
+    const typing = { nodeId: id, at: now }
     peer.typing = typing
     this.emit({ op: 'update', clientId, patch: { typing } })
   }

@@ -408,6 +408,23 @@ describe('caps on client-supplied ids (focus / project)', () => {
     })
   })
 
+  // The typing badge's nodeId is reflected exactly like focus — and it is just as client-supplied:
+  // it is the session's persistKey, which the client chose at `pty:create`. Uncapped, a scripted
+  // client could open a session under a multi-KB node id and have the hub re-broadcast that string
+  // to every peer twice a second, for as long as it holds a key down.
+  it('caps the typing nodeId at REF_MAX_LEN code points, in the table AND in the broadcast diff', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+
+    hub.noteTyping(1, 'x'.repeat(REF_MAX_LEN + 5_000))
+    expect(hub.peers()[0].typing?.nodeId).toBe('x'.repeat(REF_MAX_LEN))
+    expect(diffs().at(-1)).toMatchObject({
+      op: 'update',
+      clientId: 1,
+      patch: { typing: { nodeId: 'x'.repeat(REF_MAX_LEN) } }
+    })
+  })
+
   it('caps by code point (the shared truncation rule), never splitting an emoji', () => {
     const hub = new PresenceHub()
     hub.join(1, 'browser')

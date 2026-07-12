@@ -255,10 +255,22 @@ interface Session {
   /** The size currently pushed into the pty (seeded from the spawn's cols/rows). Guards against
    *  re-resizing the tmux client to the size it already has — that is a full-pane redraw. */
   appliedSize?: PtySize
-  /** The node id this session was created for, whether or not it is tmux-persisted — the key of
-   *  the `byPersistKey` co-attach index (`persistKey` below is only set for PERSISTED sessions,
-   *  because it also gates scrollback snapshots). Undefined for a relay-served (detached) pty,
-   *  which is deliberately not indexed. */
+  /**
+   * The node id (persistKey) this session was created for — set WHENEVER the caller supplied one,
+   * with no further conditions. It is not an index and it is not a persistence flag; it is just
+   * "which canvas node is this", which is exactly what a typing badge needs to point at (`write`).
+   *
+   * It exists because the two ids below are each conditional, and their conditions leave a hole:
+   * `indexKey` is unset for a DETACHED (relay-served) pty — a phone — and `persistKey` is unset
+   * when the session isn't persisted, which for a local session means tmux is off. Turn tmux off
+   * and a phone's session has NEITHER, so a phone's typing would be silently unbadgeable while a
+   * co-attached desktop peer's still lit up — a degenerate config, but a confusing, invisible
+   * degrade rather than an honest one. This field is unconditional, so it has no such hole.
+   */
+  nodeId?: string
+  /** The node id this session is CO-ATTACH-INDEXED under (`byPersistKey`) — set only for a session
+   *  a second client may join, i.e. NOT for a relay-served (detached) pty, which is deliberately
+   *  not indexed. See `nodeId` above for the plain "which node is this". */
   indexKey?: string
   /** Detached sinks: when set, output/exit ALSO go to these callbacks (relay host). */
   onData?: (data: string) => void
@@ -267,7 +279,8 @@ interface Session {
   buf: string[]
   bufBytes: number
   flushTimer: ReturnType<typeof setTimeout> | null
-  /** Node id this session persists under (when tmux-backed) — used for scrollback snapshots. */
+  /** Node id this session PERSISTS under (only when tmux-backed / remote) — it gates scrollback
+   *  snapshots and tmux kill/capture, so it must stay conditional. See `nodeId` above. */
   persistKey?: string
   /** When set, the session runs on a remote host via ssh; kill/capture target the REMOTE tmux. */
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
@@ -897,6 +910,7 @@ export class PtyManager {
       // A detached (relay-served) pty is left unseeded: its first `resize` must reach the pty,
       // exactly as before, because its sink never reports a size at create time.
       appliedSize: clientId === null ? undefined : spawnSize,
+      nodeId: options.persistKey,
       indexKey: options.persistKey && !sinks ? options.persistKey : undefined,
       onData: sinks?.onData,
       onExit: sinks?.onExit,
@@ -1062,10 +1076,12 @@ export class PtyManager {
    * peer): its input still reaches the pty, it is just not badged.
    *
    * The badge is reported per NODE — the node id, which is what the canvas draws — never per
-   * sessionId. Both `indexKey` and `persistKey` ARE that node id; they differ only in which
-   * sessions carry them (`indexKey` is unset for a relay-served pty, which is deliberately not in
-   * the co-attach index, and `persistKey` is unset when tmux is off), so take whichever is there.
-   * A session with neither has no node id, and so nothing to badge.
+   * sessionId. `session.nodeId` is that id, and it is unconditional (see the field): the two
+   * conditional ids next to it, `indexKey` and `persistKey`, each go missing in a case the other
+   * covers — but with tmux OFF a relay-served (phone) session has NEITHER, and reading them here
+   * would leave a phone's typing silently unbadgeable while a co-attached desktop peer's still lit.
+   * A session created with no persistKey (a scratch pty) has no node id at all, and so nothing to
+   * badge.
    *
    * The hub throttles the broadcast (1 per 500 ms per client+node), so PtyManager does no
    * throttling of its own — but it does skip presence entirely when the user is ALONE: with one
@@ -1079,9 +1095,8 @@ export class PtyManager {
   write(clientId: ClientId | null, sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    const nodeId = session.indexKey ?? session.persistKey
-    if (clientId !== null && nodeId && presenceHub.peerCount() > 1)
-      presenceHub.noteTyping(clientId, nodeId)
+    if (clientId !== null && session.nodeId && presenceHub.peerCount() > 1)
+      presenceHub.noteTyping(clientId, session.nodeId)
     session.proc.write(data)
   }
 
