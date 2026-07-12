@@ -1,7 +1,7 @@
 # Team presence — design
 
 **Date:** 2026-07-12
-**Status:** **Stage 1 and Stage 2 landed.**
+**Status:** **Stage 1, Stage 2 and Stage 3 landed.**
 **Stage 1** — the `PresenceHub` (`src/core/presence/hub.ts`), both shells joining it (Server Edition
 browsers, the Electron window, cursorless relay phones), a real `window.nodeTerminal.presence` on
 **both** surfaces, and the three UI surfaces: project-scoped live cursors + cursor chat
@@ -9,10 +9,13 @@ browsers, the Electron window, cursorless relay phones), a real `window.nodeTerm
 **Stage 2** — terminal co-attach (the [Terminal co-attach](#terminal-co-attach) section): one pty,
 N subscribers; idempotent `pty:create`; smallest-subscriber-wins sizing; per-client backpressure with
 an 8 MB drop-and-redraw ceiling; typing attribution; and the delete/recycle split.
-**Stage 3** (canvas mutation sync — the [Canvas sync](#canvas-sync) section) is **not implemented**;
-it gets its own plan. Deltas between this document and what actually shipped are recorded in
-[What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec) and
-[What Stage 2 changed](#what-stage-2-changed-relative-to-this-spec).
+**Stage 3** — canvas mutation sync (the [Canvas sync](#canvas-sync) section): a stateless `canvas:mut`
+reflector, a diff-based publisher with an `adopt()` loop guard, a real `window.nodeTerminal.canvas` on
+both surfaces, and per-project apply (including into a loaded-but-inactive project's serialized nodes).
+Deltas between this document and what actually shipped are recorded in
+[What Stage 1 changed](#what-stage-1-changed-relative-to-this-spec),
+[What Stage 2 changed](#what-stage-2-changed-relative-to-this-spec) and
+[What Stage 3 changed](#what-stage-3-changed-relative-to-this-spec).
 **Scope:** live cursors with names, ephemeral cursor chat, per-node "who is active here",
 and the terminal co-attach that makes those indicators mean something.
 
@@ -280,8 +283,11 @@ own ⌘Z (undo of a delete) still restores the node, and the single-user path is
 `recycle` clears the tombstone (nothing was deleted).
 
 Its limits are real (see Known risks): the tombstone is in-memory, so it lives exactly as long as
-the core process. The complete fix is Stage 3's canvas-delete **mutation**, which removes the node
-from every canvas so no client is left holding one to re-create.
+the core process. Stage 3's canvas-delete **mutation** is the structural fix — it removes the node
+from every *attached* client's canvas, so nobody is left holding one to re-create. It did **not**
+make the tombstone removable: the mutation covers the clients that were attached at the moment of
+the delete, and the paths it does not cover still need the respawn guard. See
+[What Stage 3 changed](#what-stage-3-changed-relative-to-this-spec) for the exact list.
 
 The map is also **bounded in size and time** (`TOMBSTONE_MAX` / `TOMBSTONE_TTL_MS`, an LRU), and the
 `pty:destroy` / `pty:recycle` casts are **length-capped** (`REF_MAX_LEN`, like every other
@@ -310,6 +316,21 @@ backstop.
 Two things are deliberately **not** synced: ephemeral nodes (subagent / loop cards) are derived
 independently on each client from the already-broadcast `agent:status` stream; and undo stays
 **local per user** — you can in principle undo someone else's change (last-write-wins). No CRDT.
+
+**Implemented (Stage 3).** `CanvasMutation` now travels on `canvas:mut` (`src/shared/ipc.ts`):
+
+- **Publisher** (`src/shared/canvas-publish.ts`) — the renderer diffs each settled node snapshot
+  against the last one it published (`diffToMutations`), so edits that never pass through
+  `onNodesChange` (a rename, a color pick, a collapse, a direct `setNodes`) sync too. Position frames
+  are throttled to ~20 Hz while dragging and flushed on drag-stop; everything else is a full upsert.
+  Ephemeral subagent/loop cards are filtered out (`publishableStates`).
+- **Reflector** (`src/core/canvas-sync.ts`) — stateless: it holds no canvas state, persists nothing,
+  and sends each mutation to every attached client except the sender (`CorePlatform.clientIds()` +
+  `onWithSender`). Echo suppression is by sender `ClientId`.
+- **Loop guard** — a mutation applied from a peer is `adopt()`ed into the publisher's baseline before
+  the next diff runs, so it can never be re-published (no A→B→C→A ping-pong).
+- **Apply** — the vocabulary is single-sourced in `src/shared/canvas-mutations.ts` and used by both
+  ends. `window.nodeTerminal.canvas` is real on the preload **and** the ws-bridge.
 
 ## UI
 
@@ -429,6 +450,81 @@ collected here so the delta is legible.
      and leave only the separator. The two guards are redundant on purpose: a wrongly cleared screen
      is unrecoverable, a skipped repaint is not.
 
+## What Stage 3 changed relative to this spec
+
+Stage 3 implemented [Canvas sync](#canvas-sync) as approved — a publisher, a reflector, echo
+suppression, no CRDT, undo local per user. Five things differ from the spec as originally written, or
+were decided during implementation; the sections above are amended to match, and they are collected
+here so the delta is legible.
+
+1. **The publisher diffs SNAPSHOTS, not React Flow change-lists.** The spec said "`handleNodesChange`
+   publishes a mutation". That would have synced only the edits that flow through `onNodesChange` —
+   drags, selections, resizes. A rename, a color pick, a collapse, an add and a delete all reach the
+   nodes array through direct `setNodes(...)` calls that never touch it, so half the edits would have
+   silently failed to sync. The publisher instead diffs the serialized snapshot against the last one
+   it published (`src/shared/canvas-publish.ts`), which catches every edit whatever path produced it.
+
+2. **The reflector is deliberately NOT rate-limited** (`src/core/canvas-sync.ts`). Every other client
+   cast in this feature is bucketed (presence: `PRESENCE_RATE_BUDGETS`; session-ending pty casts:
+   `PTY_END_BUDGET`). A mutation is different in kind. A presence cast is a **sampled** signal whose
+   loss is self-correcting — the next cursor frame carries the current position. A mutation is an
+   **edge**: nothing supersedes it and nothing re-announces it, so a dropped mutation is *lost state*
+   — a node that never appears on a peer's canvas, or a delete that never lands and then gets written
+   back to disk by that peer's next whole-file save, which is the exact bug this stage exists to kill.
+   Legitimate traffic is also burstier than any bucket sized for it would survive: a drag emits at
+   20 Hz and a bulk delete emits N mutations in one tick. What **is** bounded is the *payload*:
+   `isCanvasMutation` refuses a malformed or oversized cast at ingest (`MUTATION_MAX_BYTES` = 256 KB,
+   ids capped at `REF_MAX_LEN`), so a hostile cast cannot amplify into every peer's socket or wedge a
+   peer's React Flow. If a budget is ever added here it must **queue**, never drop.
+
+3. **Mutations are project-scoped, and a mutation for a loaded-but-INACTIVE project is applied, not
+   dropped.** Each cast carries a `projectId` (React Flow only ever holds the *active* project's
+   nodes). Dropping a mutation for a project the client is not looking at would have been the
+   data-loss bug in a new costume: that project's nodes still sit in the `projects` store, and the
+   next whole-file `workspace.save` from that client would resurrect a node a peer had deleted. So
+   `Canvas` applies a peer's mutation for a non-active project straight into that project's
+   **serialized** nodes (`useProjects.applyNodeMutation`, `src/renderer/state/projects.ts`) and marks
+   the workspace dirty. An unknown project id is a no-op (nothing to apply). Clients therefore
+   converge **per project**, and the workspace rev-conflict bar stays as the cross-project backstop.
+
+4. **The tombstone stays. It could not honestly be removed.** Stage 2 said the tombstone
+   (`PtyManager.tombstones`, `src/core/pty-manager.ts`) was a stopgap and that Stage 3's canvas-delete
+   mutation was its real replacement. Stage 3 makes it *mostly* redundant — an attached client's
+   canvas loses the node the moment a peer deletes it, so it never asks to `create` it again — but
+   two live paths still reach `create` for a deleted node, and both would spawn a fresh `nt-<id>`
+   (the terminal its owner deliberately killed, as an empty shell) if the tombstone were deleted:
+   - **Project-level operations are not in the mutation vocabulary.** `CanvasMutation` addresses
+     *nodes*. `deleteProject` (`src/renderer/canvas/Canvas.tsx`, the `×` on a "Recently closed"
+     entry) ends every terminal's tmux session via `transport.destroy(nodeId)` and publishes
+     **nothing** — the project itself, with all of its nodes, is still in every peer's `projects`
+     store. A peer that reopens it from *its* "Recently closed" list mounts those nodes and creates
+     their ptys. Only the tombstone refuses that.
+   - **Delivery is best-effort with no catch-up.** The reflector casts to the clients attached *at
+     that instant*; there is no join snapshot and no replay. A client whose socket was down when the
+     delete landed never sees it. In the Server Edition the ws-bridge full-page-reloads on reconnect
+     (so it re-reads the workspace from disk and self-heals) — but only once the deleting client's
+     **debounced** save has flushed; inside that window the client is holding a node the file no
+     longer has.
+   Removing the tombstone would trade a bounded in-memory LRU for a resurrected terminal on those two
+   paths, so it stays. It is unchanged by this stage: still in-memory, still an LRU
+   (`TOMBSTONE_MAX` / `TOMBSTONE_TTL_MS`), still exempting the destroyer so their own ⌘Z works.
+
+5. **What canvas sync does NOT cover** (all deliberate; none of it is fixed by this stage):
+   - **Edges are not in the mutation vocabulary** — only nodes are. A context-link edge or a
+     sticky→terminal note link drawn by one client does **not** appear on the other, and a peer's
+     node *delete* can leave a **dangling edge** on your canvas (an edge whose endpoint node is
+     gone). React Flow tolerates it and the next save/load drops it, but until then it renders.
+   - **A peer's node removal unmounts the node but PARKS the terminal** — it does not kill the tmux
+     session locally, and it does not run the local delete path's cleanup
+     (`disposeTerminalOnUnmount` / `useAgentStatus.remove`). The session itself is already dead (the
+     *deleting* client's `transport.destroy` killed it), so nothing leaks server-side; what remains
+     on the peer is a parked xterm holding a dead pty until the 5-minute park timer fires, plus a
+     stale `agentStatus` entry for a node id that no longer exists.
+   - **Project lifecycle** (create / rename / close / delete / folder change) is **not** synced.
+   - **Viewport, selection and undo** are not synced. Undo is local per user, by design.
+   - **No conflict resolution beyond node-level last-write-wins.** Two clients editing the same node
+     converge on whichever mutation landed last — never a merge, never a duplicate. No CRDT.
+
 ## Non-goals (v1)
 
 Roles/permissions, follow/spotlight mode, persistent chat history, comment threads, write
@@ -458,7 +554,19 @@ read-only guests, per-user settings.
   it. → `src/core/pty-manager-platform.test.ts`
 - **Single-client regression** (delivered): min-size equals your own size and the spawn path is
   unchanged. → `src/core/pty-single-user.test.ts` (17 tests)
-- Canvas convergence: interleaved mutations from two clients → identical node sets. *(Stage 3.)*
+- **Canvas sync** (delivered): the reflector fans a mutation to every client but the sender, refuses a
+  malformed/oversized cast, and registers exactly once per platform; the publisher diffs snapshots,
+  throttles drag frames, flushes on settle, and `adopt()`s without emitting. →
+  `src/core/canvas-sync.test.ts`, `src/shared/canvas-publish.test.ts`,
+  `src/shared/canvas-mutations.test.ts`
+- **Canvas convergence** (delivered): two clients running the **real** publisher against the **real**
+  reflector, with interleaved local edits, land on identical node sets — in every interleaving tried;
+  last-write-wins on the same node produces one value, not a merge or a duplicate; a peer's mutation
+  is applied exactly once and **re-published never** (the `adopt()` loop guard: one cast per local
+  edit, no counter-cast, even for a bulk delete across three clients); a client never receives its own
+  mutation back; ephemeral subagent/loop cards never go on the wire; a client that joins late
+  converges with the other two; and a peer's delete is not resurrected by the surviving client's next
+  save. → `src/core/canvas-sync.convergence.test.ts` (8 tests)
 
 ### Manual smoke test (Stage 1)
 
@@ -575,6 +683,45 @@ sees no change) is the one that must never regress.
     own fit, no resync separator is ever printed, no typing ring, no facepile. Nothing may look or
     behave differently from `main`.
 
+### Manual smoke test (Stage 3 — canvas sync)
+
+Same two-client rig (`npm run server:dev`, one **normal** and one **private** window). **A** and **B**
+logged in, named, and on the **same project**.
+
+1. **A node created by A appears on B.** Add a terminal node in A. It appears on B's canvas at the
+   same flow coordinates, with the same title and color, within a moment — and B's canvas shows
+   **one** node, not two.
+2. **Move, rename, recolor propagate.** Drag the node in A → it moves on B. Rename it (header
+   click-to-rename) → the title updates on B. Change its color → the color updates on B. Now do the
+   same three from **B** → they land on A. (Rename and color never pass through `onNodesChange`; if
+   they fail to sync, the publisher has regressed to a change-list.)
+3. **A drag is throttled, not per-frame.** Drag a node around A for a few seconds with B's DevTools
+   Network → WS frames open. The `canvas:mut` frames arrive at roughly **20 Hz**, not one per
+   animation frame, and the **last** frame lands on the settled position (the drag-stop flush) — B's
+   node must end up exactly where A dropped it, never one frame short.
+4. **Delete propagates, and does not come back.** Delete the node in A. It disappears from B's canvas
+   (and B's terminal for it lands in the "closed by <A>" state — Stage 2). Now, in **B**, make an
+   unrelated edit (move another node) so B's canvas saves. Reload **both** tabs: the deleted node is
+   **gone** and stays gone. (Before Stage 3, B's whole-file save wrote the deleted node straight back
+   — this is the data-loss bug the stage exists to kill.)
+5. **A delete lands even on a project you are not looking at.** In **B**, switch to a *second* project
+   tab. In **A**, delete a node from the **first** project. Switch B back → the node is **already
+   gone** from B's first-project canvas (the mutation was applied to that project's serialized nodes
+   while it was inactive). Reload B: still gone.
+6. **Ephemeral subagent cards do not duplicate.** Run a prompt in a Claude node in A that spawns a
+   subagent (e.g. "use a subagent to list this repo's files"). The subagent card appears **once** in
+   A and **once** in B (each derives it from the `agent:status` stream) — never twice, and dragging
+   the card in A does not move or duplicate anything in B. Same for a `/loop` card.
+7. **No echo, no ping-pong.** With both tabs idle after an edit, watch the WS frames: `canvas:mut`
+   traffic goes **silent**. A mutation applied from a peer must not be re-published (that would be an
+   endless A→B→A loop); if you see mutation frames with nobody touching either canvas, the `adopt()`
+   loop guard has regressed.
+8. **A SOLO user sees no change whatsoever.** The regression that matters most. In the desktop app
+   (`npm run dev`), alone: add, drag, rename, recolor, group, delete nodes; undo/redo; switch projects
+   and back. With one client `clientIds()` has one entry and the reflector sends **nothing** — the
+   canvas must look and behave exactly as on `main`, with no extra dirty marks, no undo-stack entries
+   you did not create, and no node ever moving on its own.
+
 ## Known risks
 
 - **Weak identity** — anyone can claim any name.
@@ -587,11 +734,22 @@ sees no change) is the one that must never regress.
   i.e. every normal install — the joiner IS painted: the create result carries the screen (see
   [Painting the joiner](#painting-the-joiner)). A plain-shell session has no cross-client continuity
   to inherit anyway; that is what "no tmux = no persistence" already means everywhere else.
-- **A deleted node can still be resurrected across a core restart.** The respawn guard is two
-  layers: the `pty:closed` event (subscribers only) and the in-memory `tombstones` map (everyone
-  else, for as long as the core process lives). Restart the core — the Server Edition process, the
-  desktop app hosting the relay — and the tombstones are gone: a client whose canvas still carries
-  the deleted node will spawn a fresh `nt-<id>` for it the next time it opens that project. The
-  tombstone is deliberately not persisted, because persistence is not the missing piece: the node
-  should not be on that canvas at all. Stage 3's canvas-delete mutation removes it from every
-  client, which is the actual fix; until then this is a bounded, honestly-named gap, not a promise.
+- **A deleted node can still be resurrected on the paths canvas sync does not cover.** Stage 3 closed
+  the main one: an attached client's canvas loses the node the instant a peer deletes it (active
+  project *and* loaded-but-inactive project), so it never asks to re-create it, and its next
+  whole-file save cannot write it back. The respawn guard behind that is still three layers deep,
+  because the mutation does not reach everywhere: the `pty:closed` event (subscribers only), the
+  canvas-delete mutation (clients attached at that moment), and the in-memory `tombstones` map
+  (everyone else, for as long as the core process lives). What is left:
+  - **A whole project deleted by one client is not synced** (project lifecycle is not in the mutation
+    vocabulary), so a peer can still reopen it from *its* "Recently closed" list and re-create its
+    nodes' ptys. The tombstone is what refuses those creates.
+  - **A client that was disconnected when the delete landed misses it** (no join snapshot, no replay).
+    The browser self-heals on reconnect by reloading the page — but only after the deleting client's
+    debounced save has flushed.
+  - **The tombstone remains in-memory**, so it dies with the core process; across a core restart both
+    of the above degrade to "the node comes back". Bounded and honestly named, not a promise. See
+    [What Stage 3 changed](#what-stage-3-changed-relative-to-this-spec) (item 4).
+- **A peer's node delete can leave a dangling edge.** Edges are not in the mutation vocabulary — only
+  nodes are — so a context-link / note-link edge whose endpoint a peer deleted stays drawn on your
+  canvas until the next save/load drops it. Drawing an edge is likewise not synced.

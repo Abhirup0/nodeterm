@@ -392,9 +392,10 @@ type EndIntent = 'delete' | 'recycle'
  * records one even when no live session exists — so without a bound, a client looping
  * `pty:destroy(<random string>)` grows it forever. It is in-memory bookkeeping, not a promise: an
  * LRU of the most recent deletions is exactly as much as the respawn guard actually needs (a
- * co-viewer opens the deleted node's project minutes later, not next month), and Stage 3's
- * canvas-delete mutation is its real replacement. Eviction degrades to the pre-tombstone behavior
- * (the co-viewer may respawn the node), never to something worse.
+ * co-viewer opens the deleted node's project minutes later, not next month). Stage 3's canvas-delete
+ * mutation covers the attached clients; this map still covers the ones it cannot reach (see
+ * `tombstones`). Eviction degrades to the pre-tombstone behavior (the co-viewer may respawn the
+ * node), never to something worse.
  */
 export const TOMBSTONE_MAX = 200
 export const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000
@@ -459,8 +460,12 @@ export class PtyManager {
    *  - it is keyed by the DESTROYER, who is exempt: their own ⌘Z (undo of a delete) must still
    *    restore the node, and a solo user is always the destroyer, so their path is untouched.
    *  - a `recycle` (worktree move) explicitly CLEARS it: nothing was deleted there.
-   * The real fix is Stage 3's canvas-delete mutation, which removes the node from every canvas so
-   * no client is left holding one to re-create. See docs/team-presence.md (Known risks).
+   * Stage 3's canvas-delete mutation now removes the node from every ATTACHED client's canvas, so
+   * that client never asks to re-create it — but it did not retire this map. Two paths still reach
+   * `create` for a deleted node: a whole PROJECT deleted by one client is not synced (project
+   * lifecycle is not in the mutation vocabulary), and a client that was disconnected when the delete
+   * landed never receives it (no join snapshot, no replay). See docs/team-presence.md
+   * ("What Stage 3 changed", item 4).
    */
   private tombstones = new Map<string, { by: ClientId | null; at: number }>()
   /** `${clientId}:${channel}` → token bucket for the session-ending casts (see PTY_END_BUDGET). */
