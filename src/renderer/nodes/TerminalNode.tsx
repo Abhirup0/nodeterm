@@ -18,6 +18,7 @@ import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
+import { isCopyShortcut, xtermScrollback } from '../terminal/terminal-config'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -84,8 +85,10 @@ async function resolveSshRemote(
   // The remote hook endpoint (reverse tunnel + remote install) is set up alongside the master;
   // pass it through so the remote tmux session carries the hook env. Optional (fail-open).
   const hookEndpointPath = useSshConn.getState().getHookEndpointPath(projectId)
-  // The remote tmux config (mouse on → scroll; set-clipboard on → OSC 52) is written + sourced
-  // alongside the master; pass its path so a fresh remote session launches with `-f`. Optional.
+  // The remote tmux config (mouse off, so a drag is the emulator's own selection; set-clipboard on
+  // so an app that emits OSC 52 itself still reaches the local clipboard; history-limit) is written
+  // + sourced alongside the master; pass its path so a fresh remote session launches with `-f`.
+  // Optional.
   const tmuxConfPath = useSshConn.getState().getTmuxConfPath(projectId)
   // The connection's resolved remote $HOME, used to build an ABSOLUTE remote CLAUDE_CONFIG_DIR for a
   // managed remote account (Task 12). Optional (fail-open): absent → the remote account env is
@@ -331,7 +334,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         fontSize: s.fontSize,
         cursorBlink: s.cursorBlink,
         theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
-        allowProposedApi: true
+        allowProposedApi: true,
+        // Scrolling is xterm's job now (tmux's mouse is off), so it needs a real scrollback —
+        // the default is 1000 lines. Capped: the cost is per node and a canvas holds many.
+        scrollback: xtermScrollback(s.tmuxScrollback),
+        // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
+        // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
+        macOptionClickForcesSelection: true
       })
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
@@ -373,12 +382,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       loadWebgl()
       fit.fit()
       patchTerminalScale(term, getZoom)
-      // OSC 52 clipboard write: the remote tmux (set-clipboard on) emits OSC 52 on copy; route the
-      // decoded text to the Mac clipboard. WRITE-ONLY — `parseOsc52` returns null for a `?` read
-      // query so a remote program can never read the local clipboard. Returning true swallows the
-      // sequence (also the read query). This is additive: the local tmux conf also has set-clipboard
-      // on, so local tmux DOES emit OSC 52 and this handler fires too — a harmless redundant write of
-      // the same selection (pbcopy already wrote it), NOT a no-op.
+      // OSC 52 clipboard write: route the decoded text to the local clipboard. tmux's mouse is off,
+      // so tmux copy-mode no longer emits OSC 52 on our behalf — this handler is now the ONLY
+      // clipboard path for programs that emit OSC 52 themselves (vim "+y, gh, yazi), local and
+      // remote alike (both tmux confs keep `set-clipboard on` so those sequences pass through).
+      // Selection copy is xterm's own (see the Cmd+C / Ctrl+Shift+C handler below), not this.
+      // WRITE-ONLY — `parseOsc52` returns null for a `?` read query so a remote program can never
+      // read the local clipboard. Returning true swallows the sequence (also the read query).
       term.parser.registerOscHandler(52, (data) => {
         const text = parseOsc52(data)
         if (text !== null) window.nodeTerminal.clipboard.writeText(text)
@@ -386,16 +396,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     }
 
-    // Cmd+C copies the terminal selection (xterm renders to canvas, so the DOM-selection
-    // copy used elsewhere can't see it). Ctrl+C is left alone so it still sends SIGINT.
+    // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) copy the terminal selection — xterm renders to a
+    // canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is left alone so
+    // it still sends SIGINT.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'c') {
-        if (term.hasSelection()) {
-          window.nodeTerminal.clipboard.writeText(term.getSelection())
-          return false
-        }
-      }
-      return true
+      if (!term.hasSelection() || !isCopyShortcut(e)) return true
+      window.nodeTerminal.clipboard.writeText(term.getSelection())
+      return false
     })
 
     let sessionId: string | null = parked ? parked.sessionId : null
