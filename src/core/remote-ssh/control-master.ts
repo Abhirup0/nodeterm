@@ -77,7 +77,9 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
   )
 }
 /** Capture ONLY the history above the visible screen (`-E -1`). tmux redraws the visible screen
- *  itself on attach, so including it here would print it twice. */
+ *  itself on attach, so including it here would print it twice.
+ *  `lines` is interpolated into a remote shell command: callers MUST pass an already-clamped
+ *  integer (see `clampHistoryLines` in pty-manager, applied at `captureHistory`'s entry point). */
 export function remoteCaptureHistoryArgs(
   conn: SshConnection,
   controlPath: string,

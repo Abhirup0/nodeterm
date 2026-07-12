@@ -72,11 +72,21 @@ set -g set-clipboard on
 export function trimToBytes(text: string, maxBytes: number): string {
   const buf = Buffer.from(text, 'utf-8')
   if (buf.byteLength <= maxBytes) return text
-  const tail = buf.subarray(buf.byteLength - maxBytes).toString('utf-8')
-  // toString on a mid-character boundary yields a leading replacement char; drop the partial
-  // first line either way — it is the oldest content and the least missed.
+  // Walk the start index forward past any UTF-8 continuation bytes (0x80–0xBF) so the window
+  // begins on a character boundary. Decoding mid-character would otherwise yield U+FFFD
+  // replacement chars, which are 3 bytes each and can push the result BACK over maxBytes.
+  let start = buf.byteLength - maxBytes
+  while (start < buf.byteLength && (buf[start] & 0xc0) === 0x80) start++
+  const tail = buf.subarray(start).toString('utf-8')
+  // Drop the partial first line — it is the oldest content and the least missed.
   const nl = tail.indexOf('\n')
   return nl === -1 ? tail : tail.slice(nl + 1)
+}
+
+/** Clamp an untrusted `lines` request (it crosses IPC / WS-RPC from a renderer, and ends up
+ *  interpolated into a remote `tmux capture-pane -S -<n>` shell command) to a sane integer. */
+export function clampHistoryLines(lines: number): number {
+  return Math.min(HISTORY_LINES, Math.max(1, Math.floor(Number(lines) || HISTORY_LINES)))
 }
 
 /** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). */
@@ -877,6 +887,9 @@ export class PtyManager {
    * Best-effort: returns '' when tmux/ssh is unavailable.
    */
   async captureHistory(persistKey: string, lines = HISTORY_LINES): Promise<string> {
+    // `lines` is untrusted (it arrives from the renderer — a browser client in Server Edition)
+    // and is interpolated into a REMOTE shell command below. Clamp at the entry point.
+    const n = clampHistoryLines(lines)
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
     if (sshRemote) {
       const ssh = findSsh()
@@ -884,7 +897,7 @@ export class PtyManager {
       try {
         const { stdout } = await runAsync(
           ssh,
-          remoteCaptureHistoryArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), lines),
+          remoteCaptureHistoryArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey), n),
           { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
         )
         return trimToBytes(stdout, HISTORY_MAX_BYTES)
@@ -896,7 +909,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${lines}`, '-E', '-1'],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', `-${n}`, '-E', '-1'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return trimToBytes(stdout, HISTORY_MAX_BYTES)
