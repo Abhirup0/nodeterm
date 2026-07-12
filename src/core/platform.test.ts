@@ -29,6 +29,13 @@ describe('core platform accessor', () => {
     expect(fake.opened).toEqual(['https://example.com'])
   })
 
+  it('fake clientIds reflects the attached-client list tests set up', () => {
+    const fake = fakePlatform()
+    expect(fake.clientIds()).toEqual([])
+    fake.clients.push(1, 2)
+    expect(fake.clientIds()).toEqual([1, 2])
+  })
+
   it('fake records onWithSender listeners and passes the sender id through', () => {
     const fake = fakePlatform()
     const seen: Array<[number, string]> = []

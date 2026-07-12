@@ -388,6 +388,11 @@ export class ServerPlatform implements CorePlatform {
     for (const uiId of this.sinks.keys()) this.sendTo(uiId, channel, ...args)
   }
 
+  /** Every attached connection, in attach order (Map preserves insertion order; detach removes). */
+  clientIds(): number[] {
+    return [...this.sinks.keys()]
+  }
+
   openExternal(_url: string): Promise<void> {
     return Promise.reject(new Error('openExternal is not available on a headless server'))
   }

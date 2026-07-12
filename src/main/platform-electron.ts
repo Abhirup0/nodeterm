@@ -1,6 +1,6 @@
 import { app, ipcMain, shell, webContents } from 'electron'
 import type { CorePlatform } from '../core/platform'
-import { sendToMain } from './main-window'
+import { mainWindowClientIds, sendToMain } from './main-window'
 
 /** The Electron shell's CorePlatform. Getters keep app.getPath lazy (safe pre-ready). */
 export function electronPlatform(): CorePlatform {
@@ -23,6 +23,7 @@ export function electronPlatform(): CorePlatform {
       if (wc && !wc.isDestroyed()) wc.send(ch, ...args)
     },
     broadcast: (ch, ...args) => sendToMain(ch, ...args),
+    clientIds: () => mainWindowClientIds(),
     openExternal: (url) => shell.openExternal(url),
   }
 }

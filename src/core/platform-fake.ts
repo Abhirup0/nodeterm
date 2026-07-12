@@ -6,6 +6,8 @@ export interface FakePlatform extends CorePlatform {
   senderListeners: Record<string, (senderId: number, ...args: any[]) => void>
   sent: Array<{ to: number | 'broadcast'; channel: string; args: any[] }>
   opened: string[]
+  /** Attached UI ids returned by clientIds() — tests push/splice this directly. */
+  clients: number[]
 }
 
 /** In-memory CorePlatform for tests. Not a mock library — plain recording object. */
@@ -19,6 +21,7 @@ export function fakePlatform(overrides: Partial<CorePlatform> = {}): FakePlatfor
     senderListeners: {},
     sent: [],
     opened: [],
+    clients: [],
     handle(ch, fn) {
       f.handlers[ch] = fn
     },
@@ -37,6 +40,7 @@ export function fakePlatform(overrides: Partial<CorePlatform> = {}): FakePlatfor
     broadcast(channel, ...args) {
       f.sent.push({ to: 'broadcast', channel, args })
     },
+    clientIds: () => f.clients,
     async openExternal(url) {
       f.opened.push(url)
     },

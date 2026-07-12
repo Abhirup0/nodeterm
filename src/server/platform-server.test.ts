@@ -136,6 +136,16 @@ describe('ServerPlatform', () => {
     expect(flow).toEqual([]) // ui2 owes nothing → no resume fired
   })
 
+  it('clientIds lists every attached sink and drops detached ones', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    expect(p.clientIds()).toEqual([])
+    const a = p.attach(fakeSink().sink)
+    const b = p.attach(fakeSink().sink)
+    expect(p.clientIds()).toEqual([a, b])
+    p.detach(a)
+    expect(p.clientIds()).toEqual([b])
+  })
+
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {
     const p = new ServerPlatform({ userDataDir: '/data', appVersion: '9.9.9' })
     expect(p.userDataDir).toBe('/data')
