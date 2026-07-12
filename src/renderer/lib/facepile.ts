@@ -11,11 +11,20 @@
 
 import type { PeerFace } from '../state/presence'
 
-/** The minimum a project has to be for the facepile: an id and a display name (structural, so the
- *  helper stays testable without the whole Project type). */
-export interface FacepileProject {
-  id: string
-  name: string
+/** All the facepile needs to know about the workspace: project id → display name. A flat record of
+ *  STRINGS on purpose — the component derives it straight out of the projects store under
+ *  `useShallow`, and a record of primitives is the only projection that is genuinely
+ *  shallow-stable (an array of freshly built {id,name} objects compares unequal every time). */
+export type FacepileProjects = Readonly<Record<string, string>>
+
+/** clientId → the node that peer is focused on (null = nowhere). Focus changes when a teammate
+ *  clicks into another node — not at cursor rate — so it is cheap for the facepile to know. */
+export type FacepileFocus = Readonly<Record<number, string | null>>
+
+/** True when the qualifier " · phone" would only repeat what the name already says (the hub's
+ *  default name for a cursorless peer IS "Phone"). */
+function nameSaysPhone(name: string): boolean {
+  return /phone/i.test(name)
 }
 
 export interface FacepileEntry {
@@ -34,8 +43,10 @@ export interface FacepileEntry {
   /** "Ada · api" for a known off-project peer, plain "Ada" otherwise (NEVER "Ada · undefined"). */
   label: string
   title: string
-  /** True when we can actually follow them (we have their project). Clicking a peer whose project
-   *  is not in our workspace could only fail, so their avatar is inert. */
+  /** True when a click actually takes us somewhere: we have their project (a peer on a canvas we
+   *  do not have could only fail) AND there is somewhere to go — for a peer on the canvas we are
+   *  already on that means a focused node, since "switch to this project" would be a no-op.
+   *  Everyone still renders; a non-actionable face is just inert. */
   actionable: boolean
 }
 
@@ -56,24 +67,27 @@ export function initials(name: string): string {
 /**
  * Project the cursor-immune faces (selectFaces) into what the facepile draws. `activeProjectId`
  * is the canvas WE are on — null/'' on the welcome screen, where everyone is "away" but still
- * reachable (clicking a teammate is a legitimate way off the welcome screen).
+ * reachable (clicking a teammate is a legitimate way off the welcome screen). `focus` says where
+ * each peer is working: it is what makes a peer on OUR canvas worth clicking (there is a node to
+ * centre on) — without it the click could only re-open the project we are already in.
  */
 export function facepileEntries(
   faces: readonly PeerFace[],
-  projects: readonly FacepileProject[],
-  activeProjectId: string | null
+  projects: FacepileProjects,
+  activeProjectId: string | null,
+  focus: FacepileFocus = {}
 ): FacepileEntry[] {
   const active = activeProjectId || null
-  const names = new Map(projects.map((p) => [p.id, p.name]))
   return faces.map((f) => {
-    const projectName = f.projectId ? (names.get(f.projectId) ?? null) : null
+    const projectName = f.projectId ? (projects[f.projectId] ?? null) : null
     const away = f.projectId !== active
-    // Following a peer means opening their canvas — only possible for a project we have.
-    const actionable = projectName !== null
+    // Following a peer means opening their canvas (only possible for a project we have) or
+    // centering their node. On our own canvas only the node is left — see FacepileEntry.actionable.
+    const actionable = projectName !== null && (away || !!focus[f.clientId])
     const label = away && projectName ? `${f.name} · ${projectName}` : f.name
     const isPhone = f.kind === 'phone'
     const where = away
-      ? actionable
+      ? projectName
         ? `${label} (click to go there)`
         : f.projectId
           ? `${f.name} — on a canvas you do not have`
@@ -89,7 +103,7 @@ export function facepileEntries(
       projectId: f.projectId,
       projectName,
       label,
-      title: isPhone ? `${where} · phone` : where,
+      title: isPhone && !nameSaysPhone(f.name) ? `${where} · phone` : where,
       actionable
     }
   })
@@ -106,6 +120,8 @@ export function facepileEntries(
 export function faceClickTarget(entry: FacepileEntry, focus: string | null): FaceTarget {
   if (!entry.actionable) return null
   if (focus) return { kind: 'node', nodeId: focus }
-  if (entry.projectId) return { kind: 'project', projectId: entry.projectId }
+  // No node to centre on: all that is left is opening their canvas — which is nowhere at all when
+  // it is the canvas we are on (focus can go null between render and click, so re-check here).
+  if (entry.away && entry.projectId) return { kind: 'project', projectId: entry.projectId }
   return null
 }

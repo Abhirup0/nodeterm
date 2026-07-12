@@ -5262,7 +5262,9 @@ body,
   justify-content: center;
 }
 
-.presence-face:disabled {
+/* Non-actionable (a peer on a canvas we do not have, or one sitting on ours with no node focused):
+   inert, but NOT the `disabled` attribute — Chromium eats mouse events on those, tooltip and all. */
+.presence-face[aria-disabled='true'] {
   cursor: default;
 }
 
@@ -5274,7 +5276,7 @@ body,
   overflow: visible;
 }
 
-.presence-face--away:hover:enabled {
+.presence-face--away:not([aria-disabled='true']):hover {
   opacity: 0.75;
 }
 

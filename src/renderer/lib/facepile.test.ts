@@ -14,13 +14,13 @@ function face(clientId: number, over: Partial<PeerFace> = {}): PeerFace {
   }
 }
 
-const PROJECTS = [
-  { id: 'web', name: 'web' },
-  { id: 'api', name: 'api' }
-]
+const PROJECTS = { web: 'web', api: 'api' }
 
-const only = (faces: PeerFace[], active: string | null): FacepileEntry =>
-  facepileEntries(faces, PROJECTS, active)[0]
+const only = (
+  faces: PeerFace[],
+  active: string | null,
+  focus: Record<number, string | null> = {}
+): FacepileEntry => facepileEntries(faces, PROJECTS, active, focus)[0]
 
 describe('initials', () => {
   it('takes the first letter of the first two words', () => {
@@ -37,12 +37,21 @@ describe('initials', () => {
 
 describe('facepileEntries', () => {
   it('shows a peer on this canvas undimmed, labelled by name alone', () => {
-    const e = only([face(8, { name: 'Ada' })], 'web')
+    const e = only([face(8, { name: 'Ada' })], 'web', { 8: 'term-1' })
     expect(e.away).toBe(false)
     expect(e.label).toBe('Ada')
     expect(e.initials).toBe('AD')
     expect(e.projectName).toBe('web')
-    expect(e.actionable).toBe(true)
+    expect(e.actionable).toBe(true) // clicking centers their node
+  })
+
+  it('does not pretend a peer on this canvas focused on nothing is clickable', () => {
+    // The only thing a click could resolve to is "switch to the project you are already on".
+    const e = only([face(8, { name: 'Ada' })], 'web', {})
+    expect(e.away).toBe(false)
+    expect(e.projectName).toBe('web')
+    expect(e.actionable).toBe(false)
+    expect(faceClickTarget(e, null)).toBeNull()
   })
 
   it('shows an off-project peer dimmed and labelled with their project ("Ada · api")', () => {
@@ -83,6 +92,16 @@ describe('facepileEntries', () => {
     expect(only([face(8)], 'web').isPhone).toBe(false)
   })
 
+  it('does not stutter "phone" in the title when the name already says it', () => {
+    // The hub's default name for a phone peer IS "Phone" — "Phone · phone" is noise.
+    expect(only([face(8, { name: 'Phone', kind: 'phone' })], 'web').title).toBe('Phone')
+    expect(only([face(8, { name: "Ada's iPhone", kind: 'phone' })], 'web').title).toBe(
+      "Ada's iPhone"
+    )
+    // A named phone still gets the qualifier — that is the only hint it has no cursor.
+    expect(only([face(8, { name: 'Ada', kind: 'phone' })], 'web').title).toBe('Ada · phone')
+  })
+
   it('carries the peer color through untouched (palette-sanitized on the wire)', () => {
     expect(only([face(8, { color: PRESENCE_COLORS[3] })], 'web').color).toBe(PRESENCE_COLORS[3])
   })
@@ -95,14 +114,23 @@ describe('facepileEntries', () => {
 
 describe('faceClickTarget', () => {
   const entry = (over: Partial<FacepileEntry> = {}): FacepileEntry =>
-    ({ projectId: 'api', actionable: true, ...over }) as FacepileEntry
+    ({ projectId: 'api', away: true, actionable: true, ...over }) as FacepileEntry
 
   it('jumps to the peer’s focused node when they have one (focusNodeById switches projects)', () => {
     expect(faceClickTarget(entry(), 'term-1')).toEqual({ kind: 'node', nodeId: 'term-1' })
   })
 
   it('falls back to their project when they are focused on nothing', () => {
-    expect(faceClickTarget(entry(), null)).toEqual({ kind: 'project', projectId: 'api' })
+    expect(faceClickTarget(entry({ away: true }), null)).toEqual({
+      kind: 'project',
+      projectId: 'api'
+    })
+  })
+
+  it('goes nowhere for a peer on the canvas we are already on with no focused node', () => {
+    // Focus is read live at click time, so it can go null between render and click — the click
+    // must then be inert rather than "switch to the project you are already on".
+    expect(faceClickTarget(entry({ away: false, projectId: 'web' }), null)).toBeNull()
   })
 
   it('goes nowhere for a peer we cannot follow (unknown / no project)', () => {
