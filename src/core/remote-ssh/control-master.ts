@@ -4,6 +4,8 @@ import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
 import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+// Dependency-free (no node-pty): safe to import from these pure builders.
+import { clampHistoryLines } from '../history-limits'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
@@ -78,18 +80,21 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
 }
 /** Capture ONLY the history above the visible screen (`-E -1`). tmux redraws the visible screen
  *  itself on attach, so including it here would print it twice.
- *  `lines` is interpolated into a remote shell command: callers MUST pass an already-clamped
- *  integer (see `clampHistoryLines` in pty-manager, applied at `captureHistory`'s entry point). */
+ *  `lines` is interpolated into a remote shell command run by the login shell, so it is clamped
+ *  HERE, at the injection sink — not left to a caller-side convention that a future call site
+ *  (an IPC handler, the Server Edition shell) could forget. `PtyManager.captureHistory` clamps
+ *  again at its entry point; the clamp is idempotent. */
 export function remoteCaptureHistoryArgs(
   conn: SshConnection,
   controlPath: string,
   sessionId: string,
   lines: number
 ): string[] {
+  const n = clampHistoryLines(lines)
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S -${lines} -E -1`
+    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S -${n} -E -1`
   )
 }
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
