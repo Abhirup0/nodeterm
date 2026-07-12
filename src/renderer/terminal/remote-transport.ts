@@ -12,6 +12,13 @@ import type { TerminalTransport } from './transport'
  * detaches the client stream via `kill` — the host-side tmux session survives, exactly like
  * LocalTransport's kill/destroy split, but the client never owns the lifecycle of the host's
  * persistent session.
+ *
+ * The co-attach members (`onSize` / `onClosed` / `onResync`) are deliberately NOT implemented:
+ * the relay frame protocol carries no size, closed or resync frame, and a relay client is a
+ * mirror of the host's own terminal rather than an equal subscriber of the pty. Omitting the
+ * optional members makes TerminalNode fall back to today's behavior for relay-backed nodes
+ * (local FitAddon sizing, no closed overlay, no server-driven repaint) instead of silently
+ * doing nothing behind an implemented-looking method. See CLAUDE.md, "Three surfaces".
  */
 export class RemoteTransport implements TerminalTransport {
   constructor(private readonly connectionId: string) {}

@@ -178,7 +178,14 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     onData: (sessionId, listener) =>
       client.subscribe(IPC.ptyData(sessionId), listener as Listener),
     onExit: (sessionId, listener) =>
-      client.subscribe(IPC.ptyExit(sessionId), listener as Listener)
+      client.subscribe(IPC.ptyExit(sessionId), listener as Listener),
+    // Co-attach channels: ordinary JSON `ev` frames (only pty:data is binary), so the frame
+    // decoder is unchanged — they just fan out through the generic channel subscription.
+    onSize: (sessionId, listener) => client.subscribe(IPC.ptySize(sessionId), listener as Listener),
+    onClosed: (sessionId, listener) =>
+      client.subscribe(IPC.ptyClosed(sessionId), listener as Listener),
+    onResync: (sessionId, listener) =>
+      client.subscribe(IPC.ptyResync(sessionId), listener as Listener)
   }
 
   const workspace: WorkspaceApi = {

@@ -1,4 +1,5 @@
 import type { PtyCreateOptions, PtyCreateResult } from '@shared/types'
+import type { ClientId } from '@shared/presence'
 import type { TerminalTransport } from './transport'
 
 /**
@@ -41,6 +42,18 @@ export class LocalTransport implements TerminalTransport {
 
   onExit(sessionId: string, listener: (exitCode: number) => void): () => void {
     return this.pty.onExit(sessionId, listener)
+  }
+
+  onSize(sessionId: string, listener: (size: { cols: number; rows: number }) => void): () => void {
+    return this.pty.onSize(sessionId, listener)
+  }
+
+  onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void {
+    return this.pty.onClosed(sessionId, listener)
+  }
+
+  onResync(sessionId: string, listener: (screen: string) => void): () => void {
+    return this.pty.onResync(sessionId, listener)
   }
 }
 

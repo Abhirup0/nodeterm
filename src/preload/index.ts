@@ -10,7 +10,7 @@ import type {
   UpdateProgress,
   Workspace
 } from '../shared/types'
-import type { PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
+import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -66,6 +66,24 @@ const api: NodeTerminalApi = {
     onExit: (sessionId, listener) => {
       const channel = IPC.ptyExit(sessionId)
       const handler = (_e: unknown, code: number) => listener(code)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onSize: (sessionId, listener) => {
+      const channel = IPC.ptySize(sessionId)
+      const handler = (_e: unknown, size: { cols: number; rows: number }) => listener(size)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onClosed: (sessionId, listener) => {
+      const channel = IPC.ptyClosed(sessionId)
+      const handler = (_e: unknown, info: { by: ClientId | null }) => listener(info)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onResync: (sessionId, listener) => {
+      const channel = IPC.ptyResync(sessionId)
+      const handler = (_e: unknown, screen: string) => listener(screen)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     }

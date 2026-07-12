@@ -230,6 +230,21 @@ export interface PtyApi {
   onData(sessionId: string, listener: (data: string) => void): () => void
   /** Fires when the PTY process exits. Returns an unsubscribe function. */
   onExit(sessionId: string, listener: (exitCode: number) => void): () => void
+  /** The authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers
+   *  ("smallest subscriber wins"). Broadcast whenever the subscriber set or any reported size
+   *  changes; the terminal renders at this size instead of its own fit. Returns an unsubscribe. */
+  onSize(sessionId: string, listener: (size: { cols: number; rows: number }) => void): () => void
+  /** Another client permanently destroyed this node while we were co-viewing it: the session is
+   *  gone for good (do not respawn — show a "closed by <peer>" state). `by` is the destroying
+   *  client's ClientId, or null when the destroy was not attributed to a client (a local desktop
+   *  destroy); resolve it to a name via the presence store. Returns an unsubscribe. */
+  onClosed(sessionId: string, listener: (info: { by: ClientId | null }) => void): () => void
+  /** We fell too far behind and the server dropped our queued output; this is the session's
+   *  CURRENT screen captured from tmux. Reset the emulator and repaint from it.
+   *  CONTRACT: the payload is guaranteed NON-EMPTY (a failed capture is retried, never sent). The
+   *  listener must STILL ignore an empty/falsy payload — never reset on one: a wrongly cleared
+   *  screen is unrecoverable, a skipped repaint is not. Returns an unsubscribe. */
+  onResync(sessionId: string, listener: (screen: string) => void): () => void
 }
 
 export interface WorkspaceApi {
