@@ -1,12 +1,16 @@
+import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
 import {
   isAgentEnabled,
   setAgentEnabled,
   setDefaultAgent
 } from '../../../state/agentAvailability'
+import { ensureClaudeCliCaps } from '../../../state/permissionMode'
+import type { ClaudeCliCaps } from '@shared/types'
 import {
   AGENT_CONFIG,
   ALL_PERMISSION_MODES,
+  AUTO_PERMISSION_MODE_MIN_VERSION,
   BUILTIN_AGENT_IDS,
   PERMISSION_MODE_LABELS,
   type AgentId,
@@ -51,6 +55,28 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
     ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
     ...settings.customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
   ]
+
+  // The LOCAL Claude CLI's capabilities (the same memoized probe the launch path uses — no extra
+  // IPC). `Auto` is silently dropped on a CLI older than the floor (it exits 1 on the flag), and a
+  // setting that quietly does nothing reads as a broken setting — so say it where it's picked.
+  // Remote (SSH) projects run their own CLI; this note is about the machine running the app.
+  const [cliCaps, setCliCaps] = useState<ClaudeCliCaps | null>(null)
+  useEffect(() => {
+    let alive = true
+    void ensureClaudeCliCaps().then((c) => {
+      if (alive) setCliCaps(c)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+  // Only when the probe actually READ a version: an unknown version (probe failed / no CLI) is not
+  // evidence of an old CLI, and guessing would be its own kind of wrong.
+  const autoNote =
+    settings.claudePermissionMode === 'auto' && cliCaps?.version && !cliCaps.autoPermissionMode
+      ? `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer.`
+      : undefined
+
   return (
     <SettingsSection
       id="agents"
@@ -94,6 +120,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       <SearchableRow {...ROWS.permissionMode}>
         <FieldRow
           label="Permission mode"
+          note={autoNote}
           description="The mode Claude terminal sessions start in (chat nodes are not affected). Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
           control={
             <Select
