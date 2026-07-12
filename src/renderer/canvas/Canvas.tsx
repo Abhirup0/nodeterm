@@ -2076,10 +2076,28 @@ export function Canvas() {
         useProjects.getState().getProject(activeProjectId ?? '')?.cwd
       if (respawn) {
         for (const n of nodesRef.current) {
+          if (!displaced.has(n.id)) continue
           // RECYCLE, not DESTROY: the node is NOT deleted — it stays on the canvas (here and on
           // every co-viewer's) and respawns into the fallback cwd. `destroy` would cast "closed
           // by <name>" to co-viewers, permanently bricking their still-present node.
-          if (displaced.has(n.id) && n.type === 'terminal') transport.recycle(n.id)
+          if (n.type === 'terminal') transport.recycle(n.id)
+          // A chat node has no PTY, but it DOES have a live SDK driver — and that driver holds the
+          // deleted cwd. Fixing only the persisted `data.cwd` (below) left the running query rooted
+          // in a directory that no longer exists, where every tool call fails until the app is
+          // restarted: the node looked fine and was quietly broken, which is worse than looking
+          // broken. Recycling it is the exact same two steps the chat error bar's own "Reconnect"
+          // button takes — dispose the driver, then `ensure` a new one — except the cwd it comes
+          // back at is the fallback. `chatSessionId` is passed through, so the SDK RESUMES the same
+          // conversation (history intact, on both sides); the renderer's message store is
+          // deliberately NOT dropped, so the user sees no interruption at all.
+          if (n.type === 'chat') {
+            window.nodeTerminal.chat.dispose(n.id)
+            void window.nodeTerminal.chat.ensure(n.id, {
+              cwd: fallbackCwd,
+              sessionId: n.data.chatSessionId as string | undefined,
+              accountId: n.data.accountId as string | undefined
+            })
+          }
         }
       }
       setNodes((ns) =>
@@ -2410,13 +2428,19 @@ export function Canvas() {
       if (!target) return
       setWorktreeBusy(true)
       setWorktreeError(null)
-      const res = await window.nodeTerminal.git.worktreeAdd(
-        v.repoPath,
-        v.path,
-        v.branch,
-        v.baseRef,
-        v.mode === 'new'
-      )
+      // A REJECTED ipc is not the same as a failed op, and both have to land here. The Server
+      // Edition reaches git over WS-RPC, and a socket that drops mid-create rejects this promise
+      // (`E_DISCONNECTED`) — without the catch the `await` threw straight out of the callback,
+      // `setWorktreeBusy(false)` never ran, and the dialog sat on "Creating…" with its own Cancel
+      // button disabled by `busy`: no error, no way out but Escape. Fail closed — clear busy, say so
+      // inline, and leave the dialog open so the user can retry. (The sibling READS in this feature
+      // catch for exactly this reason; the three destructive calls did not.)
+      const res = await window.nodeTerminal.git
+        .worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
+        .catch((e: unknown) => ({
+          ok: false as const,
+          message: `Could not create the worktree: ${e instanceof Error ? e.message : String(e)}`
+        }))
       setWorktreeBusy(false)
       if (!res.ok) {
         setWorktreeError(res.message) // inline, never window.alert
@@ -2504,8 +2528,8 @@ export function Canvas() {
   //  - we created it            → delete the directory AND the branch (today's behavior).
   //  - the user created it      → unbind only, unless they ticked "Delete from disk too"; even
   //                               then the BRANCH is theirs and is kept.
-  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; that failure
-  // is swallowed, so the directory goes, the branch stays, and res.ok is still true.
+  // worktreeRemove uses `git branch -d`, which refuses to delete an unmerged branch; it no longer
+  // swallows that — the result message says whether the branch actually went.
   const confirmRemoveWorktree = useCallback(async () => {
     const t = removeTarget
     if (!t) return
@@ -2515,9 +2539,21 @@ export function Canvas() {
       return
     }
     setRemoveTarget(null)
-    // Unbind-only: touch no disk at all.
+    // Unbind-only: touch no disk at all — but route it through `releaseWorktreeBinding` like every
+    // OTHER path that drops a bound group (Unbind, Ungroup, Delete). Calling `clearWorktreeBinding`
+    // directly was the one hole left in that invariant, and it is reachable: adopt an existing
+    // worktree, `rm -rf` it from a shell, hit ✕ before the chip goes stale, let the 4 s poll strike
+    // the group out WHILE the confirm is open, then confirm with the delete box unticked. The
+    // binding went, but the children kept `data.cwd = <dead path>` — persisted into project.json,
+    // invisible until the next reboot cold-starts them into a directory that is not there — and
+    // git kept the stale registration, so a later `worktree add` at the same path failed with
+    // "missing but already registered".
+    //
+    // `releaseWorktreeBinding` no-ops unless the group is actually STALE, so unbinding a healthy
+    // adopted worktree still touches nothing: its directory is right there, and its children's cwd
+    // is still valid.
     if (!deleteFromDisk) {
-      clearWorktreeBinding(t.groupId)
+      void releaseWorktreeBinding(t.groupId).finally(() => clearWorktreeBinding(t.groupId))
       setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
@@ -2527,7 +2563,18 @@ export function Canvas() {
     //    meant the user's running processes were gone for good while the worktree was still there.
     //    Removing the directory out from under a live session is safe on POSIX (open files and
     //    cwds are unlinked, not blocked), and the sessions are ended a moment later anyway.
-    const res = await window.nodeTerminal.git.worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
+    //    A REJECTED ipc (the Server Edition's WS dropping mid-removal) is not a `worktreeGone` and
+    //    must never be read as one: `ok:false` with no `worktreeGone` is precisely "nothing was
+    //    removed, touch no sessions" — the same fail-closed answer a refusal gets. Without the catch
+    //    the rejection escaped the callback and the whole action became a silent no-op: no notice
+    //    ever appeared, so the user could not tell it from a removal that quietly worked.
+    const res = await window.nodeTerminal.git
+      .worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
+      .catch((e: unknown) => ({
+        ok: false as const,
+        worktreeGone: false,
+        message: `Could not remove the worktree: ${e instanceof Error ? e.message : String(e)}`
+      }))
     // 2) A failure that means "the worktree is already gone" must STILL clear the binding —
     //    returning early there is exactly what turns a deleted directory into an unrecoverable
     //    group (Remove keeps failing, and the dead path keeps being handed to new terminals).
@@ -2555,7 +2602,7 @@ export function Canvas() {
     resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd])
+  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd, releaseWorktreeBinding])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -2567,6 +2614,15 @@ export function Canvas() {
     void window.nodeTerminal.git
       .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
       .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
+      // A rejected ipc (a WS drop mid-merge) otherwise produced NO notice at all — the merge looked
+      // like a silent no-op, which is the one thing a destructive git action must never look like.
+      // The merge either happened or it did not, and we cannot tell from here: say exactly that.
+      .catch((e: unknown) =>
+        setNotice({
+          kind: 'error',
+          text: `The merge could not be confirmed: ${e instanceof Error ? e.message : String(e)}. Check ${t.baseRef} before retrying.`
+        })
+      )
   }, [mergeTarget, mergePush])
 
   // Worktree action dispatcher for GroupNode's header chip. Structured as a switch so the
@@ -5111,7 +5167,12 @@ export function Canvas() {
         <ConfirmDialog
           message={
             (removeTarget.canDelete
-              ? 'Remove this worktree? Its directory and branch are deleted.'
+              ? // Promise only what we will actually do. `git branch -d` REFUSES an unmerged branch
+                // (and we never escalate to -D), so "its branch is deleted" was a promise the op
+                // could not keep — the removal now reports which way it went, and the confirm says
+                // up front that the branch survives if it still holds unmerged work.
+                'Remove this worktree? Its directory is deleted, and its branch too — unless the ' +
+                'branch still has unmerged commits, in which case it is kept.'
               : 'This worktree was not created by nodeterm.\n\nUnbind detaches this group and ' +
                 'leaves the worktree untouched on disk.') +
             (deleteFromDisk && !removeTarget.canDelete
