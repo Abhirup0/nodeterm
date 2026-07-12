@@ -15,6 +15,40 @@ export function xtermScrollback(tmuxScrollback: number): number {
   return Math.min(tmuxScrollback, XTERM_SCROLLBACK_MAX)
 }
 
+/**
+ * What a freshly-created xterm has to be seeded with when its session resolves:
+ * - `cold-snapshot` — the tmux session is gone (first open after a reboot): replay the persisted
+ *   scrollback snapshot, with a "session restored" separator.
+ * - `warm-history`  — the tmux session is still alive but this xterm is new (app restart): tmux
+ *   only redraws the VISIBLE screen, so pull everything above it from tmux's own history.
+ * - `none`          — nothing to seed: a parked terminal keeps its buffer (seeding would duplicate
+ *   it), and a brand-new node with an `initialCommand` has no history to restore.
+ */
+export type AttachReplay = 'cold-snapshot' | 'warm-history' | 'none'
+
+/** Which seeding (if any) applies to a terminal that just attached. */
+export function attachReplay(opts: {
+  /** The xterm instance was adopted from the park cache — its buffer is already correct. */
+  parked: boolean
+  /** The tmux session did not exist and was created by this attach. */
+  fresh: boolean
+  /** The node carries a one-shot launch command, i.e. it is being opened for the first time. */
+  hasInitialCommand: boolean
+}): AttachReplay {
+  if (opts.parked) return 'none'
+  if (!opts.fresh) return 'warm-history'
+  return opts.hasInitialCommand ? 'none' : 'cold-snapshot'
+}
+
+/**
+ * Make text captured from tmux (`capture-pane`, LF-separated lines) safe to `term.write()`.
+ * xterm runs with `convertEol: false` — a bare LF moves down but keeps the column, so raw capture
+ * output would render as a staircase. Lone LFs become CRLF; existing CRLFs are left alone.
+ */
+export function toXtermText(text: string): string {
+  return text.replace(/\r?\n/g, '\r\n')
+}
+
 /** The subset of a KeyboardEvent the copy-shortcut decision looks at. */
 export interface CopyShortcutEvent {
   type: string

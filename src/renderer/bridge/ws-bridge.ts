@@ -170,7 +170,7 @@ function buildRealApi(client: RpcClient): Pick<NodeTerminalApi, 'pty' | 'workspa
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     captureHistory: (persistKey: string) =>
-      client.request(IPC.ptyCaptureHistory, persistKey).catch(() => '') as Promise<string>,
+      client.request(IPC.ptyCaptureHistory, persistKey) as Promise<string>,
     sendText: (persistKey, text) =>
       client.request(IPC.ptySendText, persistKey, text) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name.

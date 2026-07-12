@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { xtermScrollback, XTERM_SCROLLBACK_MAX, isCopyShortcut, type CopyShortcutEvent } from './terminal-config'
+import {
+  xtermScrollback,
+  XTERM_SCROLLBACK_MAX,
+  isCopyShortcut,
+  attachReplay,
+  toXtermText,
+  type CopyShortcutEvent
+} from './terminal-config'
 
 const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   type: 'keydown',
@@ -10,6 +17,41 @@ const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   altKey: false,
   shiftKey: false,
   ...p
+})
+
+describe('attachReplay', () => {
+  it('replays the persisted snapshot on a cold start (tmux session gone)', () => {
+    expect(attachReplay({ parked: false, fresh: true, hasInitialCommand: false })).toBe('cold-snapshot')
+  })
+
+  it('hydrates from tmux history on a warm reattach (fresh xterm, live session)', () => {
+    expect(attachReplay({ parked: false, fresh: false, hasInitialCommand: false })).toBe('warm-history')
+  })
+
+  it('seeds nothing on a brand-new node (fresh session + launch command)', () => {
+    expect(attachReplay({ parked: false, fresh: true, hasInitialCommand: true })).toBe('none')
+  })
+
+  it('seeds nothing for a parked terminal — its buffer is already correct', () => {
+    // Both fresh values: an adopted xterm must never be seeded, or the content would double.
+    expect(attachReplay({ parked: true, fresh: false, hasInitialCommand: false })).toBe('none')
+    expect(attachReplay({ parked: true, fresh: true, hasInitialCommand: false })).toBe('none')
+    expect(attachReplay({ parked: true, fresh: true, hasInitialCommand: true })).toBe('none')
+  })
+})
+
+describe('toXtermText', () => {
+  it('turns tmux capture-pane LFs into CRLFs (xterm runs with convertEol off)', () => {
+    expect(toXtermText('one\ntwo\n')).toBe('one\r\ntwo\r\n')
+  })
+
+  it('leaves existing CRLFs alone', () => {
+    expect(toXtermText('one\r\ntwo')).toBe('one\r\ntwo')
+  })
+
+  it('keeps escape sequences untouched', () => {
+    expect(toXtermText('\x1b[31mred\x1b[0m\n')).toBe('\x1b[31mred\x1b[0m\r\n')
+  })
 })
 
 describe('xtermScrollback', () => {

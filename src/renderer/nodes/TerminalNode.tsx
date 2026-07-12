@@ -18,7 +18,7 @@ import { RemoteTransport } from '../terminal/remote-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
-import { isCopyShortcut, xtermScrollback } from '../terminal/terminal-config'
+import { attachReplay, isCopyShortcut, toXtermText, xtermScrollback } from '../terminal/terminal-config'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -501,11 +501,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           sentRows = term.rows
           transport.resize(sid, term.cols, term.rows)
         }
-        // Cold restart: the tmux session (and anything that was running in it) is gone — replay
-        // the last persisted scrollback so the user sees where they left off. Warm reattach
-        // (`fresh` false) skips this: tmux redraws the live screen itself, so replaying would
-        // duplicate it. Skipped on the very first open too (`fresh` true but initialCommand set).
-        if (fresh && !data.initialCommand) {
+        // Seed the (fresh) emulator with the history it can't see: a cold restart replays the
+        // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
+        // tmux's own scrollback above the visible screen. Parked terminals get neither — their
+        // buffer is still correct and seeding it would duplicate content.
+        const replay = attachReplay({
+          parked: !!parked,
+          fresh,
+          hasInitialCommand: !!data.initialCommand
+        })
+        if (replay === 'cold-snapshot') {
           const snapshot = await scrollbackPromise
           if (disposed) {
             transport.kill(sid)
@@ -514,6 +519,25 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           if (snapshot) {
             term.write(snapshot)
             term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
+          }
+        } else if (replay === 'warm-history') {
+          // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
+          // missing from this fresh xterm. `captureHistory` excludes that visible screen (`-E -1`),
+          // so hydrating cannot duplicate the redraw. This is the session's REAL history, not a
+          // restore boundary — it gets no separator line.
+          // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
+          // tmux is only reachable once `create()` has registered the session's ssh target — an
+          // earlier call would silently fall through to the LOCAL tmux and return ''.
+          const history = await window.nodeTerminal.pty.captureHistory(id).catch(() => '')
+          if (disposed) {
+            transport.kill(sid)
+            return
+          }
+          if (history) {
+            // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence —
+            // start the block from a known-clean SGR state rather than an arbitrary one.
+            term.write('\x1b[0m')
+            term.write(toXtermText(history))
           }
         }
         // Flow control: track xterm's unprocessed write backlog (bytes handed to
