@@ -3056,6 +3056,87 @@ body,
   border-color: var(--accent);
 }
 
+/* Repo root, resolved from the project cwd — read-only context, not a field. */
+.bind-repo {
+  margin: 0 0 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-header);
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bind-existing {
+  margin: 0 0 12px;
+}
+
+.bind-existing__title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.bind-existing__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bind-existing__row:hover:not(:disabled) {
+  background: var(--panel-header);
+  border-color: var(--accent);
+}
+
+.bind-existing__row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.bind-existing__branch {
+  flex: none;
+}
+
+.bind-existing__path {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inline creation error (same red as .scm-error) — worktree paths never use window.alert. */
+.bind-error {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 69, 58, 0.4);
+  border-radius: 6px;
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff8a80;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .bind-mode {
   display: flex;
   gap: 18px;

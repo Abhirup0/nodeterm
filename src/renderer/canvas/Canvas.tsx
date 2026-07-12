@@ -72,7 +72,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
-import { BindWorktreeDialog, type BindWorktreeValue } from '../components/BindWorktreeDialog'
+import { WorktreeDialog, type WorktreeCreateValue } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
@@ -91,7 +91,13 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import { computeWorktreePath, sanitizeWorktreeBranch } from '@shared/worktree'
+import {
+  computeWorktreePath,
+  sanitizeWorktreeBranch,
+  type GroupWorktree,
+  type WorktreeEntry
+} from '@shared/worktree'
+import { useWorktrees } from '../state/worktrees'
 import {
   agentConfig,
   hasHooks,
@@ -139,6 +145,7 @@ import {
   createDinoNode,
   createDiffNode,
   createEditorNode,
+  createGroupNode,
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
@@ -346,8 +353,18 @@ export function Canvas() {
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
-  // Group id awaiting a worktree bind (drives BindWorktreeDialog).
-  const [bindTarget, setBindTarget] = useState<string | null>(null)
+  // Drives WorktreeDialog. `groupId` null = create the group frame around the new worktree;
+  // set = bind an existing group (the group context menu). `at` is the pane cursor, if any.
+  const [worktreeDialog, setWorktreeDialog] = useState<{
+    groupId: string | null
+    at?: { x: number; y: number }
+  } | null>(null)
+  const [worktreeBusy, setWorktreeBusy] = useState(false)
+  const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  // The store is filled asynchronously by the active-project effect, so the dialog subscribes
+  // (rather than reading getState() once) — the repo may resolve after it's already open.
+  const worktreeRepoRoot = useWorktrees((s) => s.repoRoot)
+  const worktreeOrphans = useWorktrees((s) => s.orphans)
   // Writable base dir for the default worktree path (Electron userData), fetched once on mount.
   const userDataDirRef = useRef('')
   useEffect(() => {
@@ -766,6 +783,18 @@ export function Canvas() {
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
+    // Worktree facts are per project: drop the previous project's (reset also clears its
+    // statuses), then re-resolve from this project's cwd. SSH projects are skipped — local git
+    // cannot reason about a remote path. Fire-and-forget: the store is epoch-guarded + fails open.
+    useWorktrees.getState().reset()
+    if (project.cwd && !project.ssh) {
+      void useWorktrees.getState().refresh(
+        project.cwd,
+        flow
+          .filter((n) => n.type === 'group' && n.data.worktree)
+          .map((n) => ({ groupId: n.id, worktree: n.data.worktree as GroupWorktree }))
+      )
+    }
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
     // Restore control ropes with the source agent's color (falls back to the browser blue).
     setControlEdges(
@@ -1848,39 +1877,85 @@ export function Canvas() {
     []
   )
 
-  const bindGroupToWorktree = useCallback((groupId: string) => setBindTarget(groupId), [])
+  const openWorktreeDialog = useCallback(
+    (groupId: string | null, at?: { x: number; y: number }) => {
+      setWorktreeError(null)
+      setWorktreeDialog({ groupId, at })
+    },
+    []
+  )
 
-  const confirmBind = useCallback(
-    async (v: BindWorktreeValue) => {
-      const git = window.nodeTerminal.git
-      const res = await git.worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
-      if (!res.ok) {
-        window.alert(res.message)
-        return
-      }
-      setNodes((ns) =>
-        ns.map((n) =>
-          n.id === bindTarget
-            ? {
-                ...n,
-                data: {
-                  ...n.data,
-                  worktree: {
-                    repoPath: v.repoPath,
-                    branch: v.branch,
-                    baseRef: v.baseRef,
-                    path: v.path,
-                    createdByApp: true
-                  }
-                }
-              }
-            : n
+  // Bind the worktree to an EXISTING group, or create a group around a new one. A group node
+  // carries no cwd of its own — the worktree's path is what its children inherit
+  // (`cwdForNewNodeIn`), so the frame IS the binding.
+  const attachWorktree = useCallback(
+    (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree) => {
+      if (target.groupId) {
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === target.groupId ? { ...n, data: { ...n.data, worktree: wt } } : n
+          )
         )
-      )
-      setBindTarget(null)
+      } else {
+        setNodes((ns) => {
+          const group = createGroupNode(target.at ?? viewCenter() ?? { x: 0, y: 0 }, undefined, ns.length)
+          group.data = { ...group.data, title: wt.branch, worktree: wt }
+          // Parents must come first — React Flow requires a group before its children.
+          return [group, ...(ns as CanvasNode[])]
+        })
+      }
       markDirty()
     },
-    [bindTarget, setNodes, markDirty]
+    [setNodes, markDirty, viewCenter]
+  )
+
+  const createWorktreeAndGroup = useCallback(
+    async (v: WorktreeCreateValue) => {
+      const target = worktreeDialog
+      if (!target) return
+      setWorktreeBusy(true)
+      setWorktreeError(null)
+      const res = await window.nodeTerminal.git.worktreeAdd(
+        v.repoPath,
+        v.path,
+        v.branch,
+        v.baseRef,
+        v.mode === 'new'
+      )
+      setWorktreeBusy(false)
+      if (!res.ok) {
+        setWorktreeError(res.message) // inline, never window.alert
+        return
+      }
+      attachWorktree(target, {
+        repoPath: v.repoPath,
+        branch: v.branch,
+        baseRef: v.baseRef,
+        path: v.path,
+        // We created this directory, so Remove may delete it.
+        createdByApp: true
+      })
+      setWorktreeDialog(null)
+    },
+    [attachWorktree, worktreeDialog]
+  )
+
+  const bindExistingWorktree = useCallback(
+    (e: WorktreeEntry) => {
+      const target = worktreeDialog
+      const root = useWorktrees.getState().repoRoot
+      if (!target || !root || !e.branch) return
+      attachWorktree(target, {
+        repoPath: root,
+        branch: e.branch,
+        baseRef: 'main',
+        path: e.path,
+        // The user (or a previous Unbind) made this one — Remove must not delete it by default.
+        createdByApp: false
+      })
+      setWorktreeDialog(null)
+    },
+    [attachWorktree, worktreeDialog]
   )
 
   // Ask-first worktree removal (Task 9). Gather any uncommitted-work info, then open a safety
@@ -2452,7 +2527,7 @@ export function Canvas() {
             {
               label: 'Bind to worktree…',
               icon: <IconBranch />,
-              onClick: () => bindGroupToWorktree(groupId)
+              onClick: () => openWorktreeDialog(groupId)
             } as MenuItem
           ]),
       { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
@@ -2462,7 +2537,7 @@ export function Canvas() {
       setNodesColor,
       ungroup,
       groupHasWorktree,
-      bindGroupToWorktree,
+      openWorktreeDialog,
       addTerminal,
       agentCreationItems,
       addSticky
@@ -2492,6 +2567,9 @@ export function Canvas() {
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
           { type: 'separator' },
+          // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
+          { label: 'New worktree…', icon: <IconBranch />, onClick: () => openWorktreeDialog(null, at) },
+          { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
           { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
@@ -2507,6 +2585,7 @@ export function Canvas() {
       addBrowser,
       openFileDialog,
       openRemotePicker,
+      openWorktreeDialog,
       selectAll,
       fitView
     ]
@@ -3728,6 +3807,12 @@ export function Canvas() {
             )
         })
       ),
+      {
+        id: 'worktree-new',
+        label: 'New worktree…',
+        icon: <IconBranch />,
+        run: () => openWorktreeDialog(null)
+      },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       { id: 'clone-repo', label: 'Clone repository…', icon: <IconProject />, run: () => setCloneDialogOpen(true) },
       {
@@ -3796,6 +3881,7 @@ export function Canvas() {
     addWebView,
     addBrowser,
     openFileDialog,
+    openWorktreeDialog,
     addProject,
     fitView,
     persist,
@@ -4178,11 +4264,10 @@ export function Canvas() {
         />
       )}
 
-      {bindTarget && (
-        <BindWorktreeDialog
-          initialRepoPath={
-            (nodesRef.current.find((n) => n.id === bindTarget)?.data.cwd as string) || ''
-          }
+      {worktreeDialog && (
+        <WorktreeDialog
+          repoPath={worktreeRepoRoot ?? ''}
+          existing={worktreeOrphans}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               userDataDirRef.current,
@@ -4190,8 +4275,14 @@ export function Canvas() {
               sanitizeWorktreeBranch(branch)
             )
           }
-          onConfirm={confirmBind}
-          onCancel={() => setBindTarget(null)}
+          busy={worktreeBusy}
+          error={worktreeError}
+          onCreate={createWorktreeAndGroup}
+          onBindExisting={bindExistingWorktree}
+          onCancel={() => {
+            setWorktreeDialog(null)
+            setWorktreeError(null)
+          }}
         />
       )}
 
