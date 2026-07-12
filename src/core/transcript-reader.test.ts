@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { parseTranscriptLines, pickSessionName } from './transcript-reader'
+import fs from 'fs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  parseTranscriptLines,
+  pickSessionName,
+  readSessionName,
+  setRemoteTranscriptReader
+} from './transcript-reader'
 import type { TranscriptLine } from '../shared/types'
 
 describe('pickSessionName', () => {
@@ -58,5 +64,40 @@ describe('parseTranscriptLines', () => {
       { role: 'user', text: 'plain user' }
     ]
     expect(parseTranscriptLines(text)).toEqual(expected)
+  })
+})
+
+// An SSH project's Claude runs on the remote host, so its transcript .jsonl lives on the remote
+// filesystem — the local scan can never find it. A registered remote reader (wired in main from
+// the hook-fed transcript path) is consulted FIRST, so `/rename` on a remote node reaches the
+// node title exactly like it does locally.
+describe('readSessionName — remote (SSH project) sessions', () => {
+  const sid = '11111111-2222-3333-4444-555555555555'
+  const custom = (t: string) => JSON.stringify({ type: 'custom-title', customTitle: t, sessionId: sid })
+
+  afterEach(() => setRemoteTranscriptReader(null))
+
+  it('reads the name from the remote transcript when the session is remote', async () => {
+    setRemoteTranscriptReader(async (id) =>
+      id === sid ? { text: [custom('Ship the relay fix')].join('\n') } : null
+    )
+    expect(await readSessionName(sid)).toBe('Ship the relay fix')
+  })
+
+  // A remote session is never in the local ~/.claude/projects, so scanning it is pure waste —
+  // and today's poll does exactly that every 4s, forever, for every SSH agent node.
+  it('does not scan the local transcript root for a known remote session', async () => {
+    const readdir = vi.spyOn(fs.promises, 'readdir')
+    setRemoteTranscriptReader(async () => ({ text: '' }))
+    expect(await readSessionName(sid)).toBeNull()
+    expect(readdir).not.toHaveBeenCalled()
+    readdir.mockRestore()
+  })
+
+  it('falls through to the local reader when the session is not remote', async () => {
+    setRemoteTranscriptReader(async () => null)
+    // No local transcript for this id either — the point is that it did not throw and the
+    // remote branch declined, leaving today's local behavior intact.
+    expect(await readSessionName(sid)).toBeNull()
   })
 })
