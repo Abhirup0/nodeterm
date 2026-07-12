@@ -142,7 +142,7 @@ describe('useWorktrees.refreshStatus', () => {
       dirty: 3,
       ahead: 3,
       behind: 1,
-      hasRemote: false
+      hasOrigin: false
     })
   })
 
@@ -256,15 +256,23 @@ describe('useWorktrees.refreshStatus', () => {
   })
 
   // The merge confirm has to tell the user whether merging also PUBLISHES to origin, and it reads
-  // that fact from here (the store is the only caller of the status IPC).
-  it('carries hasRemote into the chip status (the merge confirm reads it)', async () => {
-    gitMock.status.mockResolvedValue(okStatus({ hasRemote: true }))
+  // that fact from here (the store is the only caller of the status IPC). It is `hasOrigin`, not
+  // `hasRemote`: the push is `git push origin <base>`, which a fork with only `upstream` cannot do.
+  it('carries hasOrigin into the chip status (the merge confirm reads it)', async () => {
+    gitMock.status.mockResolvedValue(okStatus({ hasRemote: true, hasOrigin: true }))
 
     await useWorktrees.getState().refreshStatus('/wt/feat')
 
-    expect(useWorktrees.getState().statusByPath['/wt/feat'].hasRemote).toBe(true)
+    expect(useWorktrees.getState().statusByPath['/wt/feat'].hasOrigin).toBe(true)
   })
 
+  it('does not call a fork with only an `upstream` remote pushable to origin', async () => {
+    gitMock.status.mockResolvedValue(okStatus({ hasRemote: true, hasOrigin: false }))
+
+    await useWorktrees.getState().refreshStatus('/wt/feat')
+
+    expect(useWorktrees.getState().statusByPath['/wt/feat'].hasOrigin).toBe(false)
+  })
 
   // `refresh()` runs on a project switch, on binding another worktree, on deleting a node, on
   // ungrouping. If it SET `staleGroupIds` from reconcile alone, every one of those would erase a
@@ -368,7 +376,7 @@ describe('useWorktrees.refreshStatus', () => {
       dirty: 0,
       ahead: 2,
       behind: 0,
-      hasRemote: false
+      hasOrigin: false
     })
   })
 

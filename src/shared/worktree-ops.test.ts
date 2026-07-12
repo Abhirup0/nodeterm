@@ -150,6 +150,26 @@ describe('worktreeMerge', () => {
     expect(calls.some((c) => c[0] === 'push')).toBe(false)
     expect(r.message).not.toMatch(/push/i)
   })
+  // A fork's only remote is often `upstream`. The push is `git push origin <base>`, so "a remote
+  // exists" is not the question — `origin` itself has to exist, or the promise cannot be kept.
+  it('does not push when the only remote is not origin (a fork with just `upstream`)', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({ 'worktree list --porcelain': ok(list), remote: ok('upstream\n') })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    expect(r.ok).toBe(true)
+    expect(calls.some((c) => c[0] === 'push')).toBe(false)
+    expect(r.message).not.toMatch(/push/i)
+  })
+  it('pushes when origin is one of several remotes', async () => {
+    const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
+    const { git, calls } = fakeGit({
+      'worktree list --porcelain': ok(list),
+      remote: ok('origin\nupstream\n')
+    })
+    const r = await worktreeMerge(git, '/repo', 'feature/x', 'main', true)
+    expect(calls.some((c) => c.join(' ') === 'push origin main')).toBe(true)
+    expect(r.message).toMatch(/pushed main to origin/i)
+  })
   it('reports a failed push instead of swallowing it', async () => {
     const list = 'worktree /wt/x\nHEAD aaa\nbranch refs/heads/feature/x\n'
     const { git } = fakeGit({

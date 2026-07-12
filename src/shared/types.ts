@@ -520,8 +520,11 @@ export interface GitStatus {
   branches: string[]
   ahead: number
   behind: number
-  /** The repo has at least one remote (origin). */
+  /** The repo has at least one remote — which may well not be named `origin` (a fork can have only
+   *  `upstream`). Never read this to decide whether a `git push origin …` can work: use `hasOrigin`. */
   hasRemote: boolean
+  /** A remote literally named `origin` exists — i.e. a hardcoded `push origin <ref>` has a target. */
+  hasOrigin: boolean
   /** The current branch has an upstream tracking ref (i.e. it has been published). */
   hasUpstream: boolean
   ghAvailable: boolean

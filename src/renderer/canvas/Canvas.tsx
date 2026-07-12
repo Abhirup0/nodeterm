@@ -444,15 +444,14 @@ export function Canvas() {
     canDelete: boolean
   } | null>(null)
   const [deleteFromDisk, setDeleteFromDisk] = useState(false)
-  // Group awaiting confirmation to merge its worktree into the base branch. `hasRemote` decides
-  // whether the dialog offers (and warns about) the push to origin — a repo with no remote must
+  // Group awaiting confirmation to merge its worktree into the base branch. `hasOrigin` decides
+  // whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
   // never be threatened with a publish that cannot happen.
   const [mergeTarget, setMergeTarget] = useState<{
-    groupId: string
     repoPath: string
     branch: string
     baseRef: string
-    hasRemote: boolean
+    hasOrigin: boolean
   } | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
@@ -2184,7 +2183,7 @@ export function Canvas() {
     const t = mergeTarget
     setMergeTarget(null)
     if (!t) return
-    const push = t.hasRemote && mergePush
+    const push = t.hasOrigin && mergePush
     void window.nodeTerminal.git
       .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
       .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
@@ -2226,17 +2225,18 @@ export function Canvas() {
           // main working tree — AND (if asked) pushes the base branch to origin, which publishes it
           // to every teammate. Ask first, and say BOTH of those out loud.
           //
-          // `hasRemote` comes from the store's status poll (the chip that carries this very button
-          // has been polling it), so no extra git IPC is fired here. Unknown → assume no remote:
+          // `hasOrigin` comes from the store's status poll (the chip that carries this very button
+          // has been polling it), so no extra git IPC is fired here. Unknown → assume no origin:
           // the merge then does not push, which is the only safe way to be wrong.
-          const hasRemote = !!useWorktrees.getState().statusByPath[wt.path]?.hasRemote
-          setMergePush(hasRemote) // pushing is the default when a remote exists — but opt-out.
+          const hasOrigin = !!useWorktrees.getState().statusByPath[wt.path]?.hasOrigin
+          // Publishing to other people's machines is a DECISION, not a side effect of merging — and
+          // a push to origin/<base> cannot be politely undone. The box is offered, ticked by nobody.
+          setMergePush(false)
           setMergeTarget({
-            groupId,
             repoPath: wt.repoPath,
             branch: wt.branch,
             baseRef: wt.baseRef,
-            hasRemote
+            hasOrigin
           })
           break
         }
@@ -4575,17 +4575,18 @@ export function Canvas() {
           message={
             `Merge ${mergeTarget.branch} into ${mergeTarget.baseRef}?\n\n` +
             `If ${mergeTarget.baseRef} is checked out somewhere, this merges into that working tree.` +
-            (mergeTarget.hasRemote && mergePush
+            (mergeTarget.hasOrigin && mergePush
               ? `\n\n⚠ ${mergeTarget.baseRef} is also pushed to origin — everyone on the remote gets this merge.`
               : '')
           }
           confirmLabel="Merge"
           danger={false}
           option={
-            // No remote → no push to offer. With a remote, the push stays the default (it is what
-            // the user almost always wants after merging a finished worktree) but is now visible
-            // and switch-offable, instead of happening silently behind a dialog that never said so.
-            mergeTarget.hasRemote
+            // No `origin` → no push to offer (the push is `git push origin <base>`; a fork whose
+            // only remote is `upstream` would be promised a publish that then fails). With an
+            // origin, the push is offered UNTICKED: it lands on other people's machines and cannot
+            // be politely undone, so it is the user's decision, never a side effect of merging.
+            mergeTarget.hasOrigin
               ? {
                   label: `Also push ${mergeTarget.baseRef} to origin`,
                   checked: mergePush,

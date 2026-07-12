@@ -12,9 +12,11 @@ export interface WorktreeStatus {
   dirty: number
   ahead: number
   behind: number
-  /** The repo has a remote — i.e. a merge CAN publish the base branch to origin. The merge confirm
-   *  reads this to say so (and to not threaten a push that could never happen). */
-  hasRemote: boolean
+  /** A remote named `origin` exists — i.e. a merge CAN publish the base branch to origin. The merge
+   *  confirm reads this to offer the push (and to not threaten one that could never happen). It is
+   *  deliberately NOT `hasRemote` ("any remote"): the push is hardcoded to `origin`, so a fork whose
+   *  only remote is `upstream` would be shown a push it cannot perform. */
+  hasOrigin: boolean
 }
 
 /** The chip re-renders constantly; without this, every render would spawn a `git status`. */
@@ -175,7 +177,7 @@ export const useWorktrees = create<WorktreesState>((set) => ({
           dirty: status.staged.length + status.changes.length,
           ahead: status.ahead,
           behind: status.behind,
-          hasRemote: !!status.hasRemote
+          hasOrigin: !!status.hasOrigin
         }
       }
     }))

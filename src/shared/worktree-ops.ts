@@ -83,8 +83,8 @@ export async function worktreeAdd(
 }
 
 /**
- * Merge `branch` into `baseRef`, and — only when `push` is true AND the repo has a remote — publish
- * the base branch to origin.
+ * Merge `branch` into `baseRef`, and — only when `push` is true AND the repo actually has an
+ * `origin` — publish the base branch to origin.
  *
  * The push is OPT-IN by design. It used to run "best effort" on every merge: one click on a small
  * header chip published to `origin/main` (CI, teammates, protected-branch noise) without the confirm
@@ -124,9 +124,11 @@ export async function worktreeMerge(
   }
   const merged = `Merged ${branch} into ${baseRef}.`
   if (!push) return { ok: true, message: merged }
-  // Only push if a remote actually exists — never claim (or attempt) a publish that cannot happen.
-  const hasRemote = (await git(repoPath, ['remote'])).out.trim().length > 0
-  if (!hasRemote) return { ok: true, message: merged }
+  // The push below is hardcoded to `origin`, so "some remote exists" is not the question: a fork
+  // whose only remote is `upstream` would fail here after being promised an origin push. Only push
+  // when `origin` itself is there — never claim (or attempt) a publish that cannot happen.
+  const remotes = (await git(repoPath, ['remote'])).out.split('\n').map((r) => r.trim())
+  if (!remotes.includes('origin')) return { ok: true, message: merged }
   const p = await git(repoPath, ['push', 'origin', baseRef])
   // A failed push does not undo the merge, so this stays `ok` — but it is reported, not swallowed:
   // the user must know whether origin has the merge.

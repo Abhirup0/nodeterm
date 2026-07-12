@@ -258,6 +258,7 @@ export class GitService {
       ahead: 0,
       behind: 0,
       hasRemote: false,
+      hasOrigin: false,
       hasUpstream: false,
       ghAvailable: !!GH_PATH,
       ghAuthed: false,
@@ -295,6 +296,9 @@ export class GitService {
     const hasRemote = !!remotesR.out.trim()
     const hasUpstream = upstreamR.ok && !!upstreamR.out.trim()
     const originUrl = originR.out.trim()
+    // `hasRemote` is true for ANY remote — a fork whose only remote is `upstream` included. Anything
+    // that pushes to `origin` by name (the worktree merge does) must ask for origin itself.
+    const hasOrigin = originR.ok && !!originUrl
     const repoName = originUrl ? parseRepoName(originUrl, path.basename(cwd)) : path.basename(cwd)
 
     let ahead = 0
@@ -340,6 +344,7 @@ export class GitService {
       ahead,
       behind,
       hasRemote,
+      hasOrigin,
       hasUpstream,
       ghAvailable: !!GH_PATH,
       ghAuthed: gh,
