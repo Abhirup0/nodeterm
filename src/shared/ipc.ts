@@ -43,6 +43,10 @@ export const IPC = {
   agentSubagentActivity: 'agent:subagent-activity',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
+  /** Canvas sync: a client casts its local node mutations here; the core reflector
+   *  (src/core/canvas-sync.ts) sends them back out on the SAME channel to every OTHER attached
+   *  client. Args (both directions): [projectId: string, CanvasMutation]. */
+  canvasMut: 'canvas:mut',
   contextLinkSetLinks: 'context-link:set-links',
   contextLinkInfo: 'context-link:info',
   appUpdateAvailable: 'app:update-available',

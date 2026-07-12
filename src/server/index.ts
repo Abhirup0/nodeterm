@@ -17,6 +17,7 @@ import { hookServer } from '../core/agents/hook-server'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { initAgentStatusMirror } from '../core/agent-status-mirror'
 import { presenceHub } from '../core/presence/hub'
+import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { IPC } from '@shared/ipc'
 
@@ -74,6 +75,9 @@ export async function startServer(
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
+  // Canvas sync: reflect each browser tab's node mutations to the other attached tabs, so every
+  // client converges on the same node set (and no tab writes back a node another tab deleted).
+  initCanvasSync()
   // Team presence (hello / cursor / focus / chat). The hub itself is joined per WebSocket in
   // ws.ts; this only registers the RPC surface. Presence is transient — nothing is persisted.
   presenceHub.registerIpc()

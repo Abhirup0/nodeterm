@@ -18,6 +18,7 @@ import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import { initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
+import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
@@ -535,6 +536,10 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+  // Canvas sync: the same reflector the Server Edition boots. With a single window clientIds()
+  // returns one id, so on the desktop today it is a no-op — wired for parity (and for the
+  // relay-host / multi-window futures), not because Electron needs it right now.
+  initCanvasSync()
 
   // Agent hooks: install the managed hook script into each agent's config, then start the
   // local HTTP server that receives hook posts and forwards normalized events to the renderer.
