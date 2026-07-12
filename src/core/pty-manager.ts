@@ -375,6 +375,7 @@ export class PtyManager {
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
     )
+    platform().handle(IPC.ptyCaptureHistory, (persistKey: string) => this.captureHistory(persistKey))
     platform().handle(IPC.ptySendText, (persistKey: string, text: string) =>
       this.sendText(persistKey, text)
     )

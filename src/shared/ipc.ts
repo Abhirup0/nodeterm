@@ -11,6 +11,7 @@ export const IPC = {
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
   ptyReadScrollback: 'pty:read-scrollback',
+  ptyCaptureHistory: 'pty:capture-history',
   ptySendText: 'pty:send-text',
   ptyReadSessionName: 'pty:read-session-name',
   claudeReadTranscript: 'claude:read-transcript',

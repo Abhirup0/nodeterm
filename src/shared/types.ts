@@ -218,6 +218,9 @@ export interface PtyApi {
   capture(persistKey: string, full?: boolean): Promise<string>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
+  /** tmux scrollback above the visible screen, for hydrating a fresh emulator on a warm
+   *  reattach (the emulator owns scrolling now; tmux only redraws the visible screen). '' if none. */
+  captureHistory(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
