@@ -1,7 +1,7 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
-import type { AgentId } from '@shared/agents/config'
-import { agentConfig } from '@shared/agents/config'
+import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
+import { agentConfig, withPermissionMode } from '@shared/agents/config'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
@@ -285,13 +285,19 @@ export function createAgentNode(
   center?: { x: number; y: number },
   initialPrompt?: string,
   ssh?: Project['ssh'],
-  accountId?: string
+  accountId?: string,
+  permissionMode?: AgentPermissionMode
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
-  const initialCommand = initialPrompt
+  const withPrompt = initialPrompt
     ? `${baseCmd} ${shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())}`
     : baseCmd
+  // Flag goes last: the prompt is claude's positional argv and must stay adjacent to the binary.
+  // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
+  const initialCommand = permissionMode
+    ? withPermissionMode(withPrompt, agentId, permissionMode)
+    : withPrompt
   return {
     id: nextId('term'),
     type: 'terminal',
