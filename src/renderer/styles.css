@@ -3820,6 +3820,13 @@ body,
   user-select: none;
 }
 
+/* Zoomed far out (boost ≥ 2, toggled in Canvas.setGroupLabelBoost), the pill keeps only the
+   dot + name: the worktree chip (branch + counters + Merge/Unbind) is unreadable at that
+   scale and its width is what made counter-scaled pills swirl over neighboring frames. */
+.group-labels-compact .group-node__wt {
+  display: none;
+}
+
 .group-node__dot {
   width: 11px;
   height: 11px;

@@ -254,10 +254,15 @@ const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
 // and never below 1 (zooming IN doesn't shrink them). Written as a CSS var once per
 // viewport frame (see onMove) — CSS does the scaling, no per-node re-render.
 const setGroupLabelBoost = (zoom: number): void => {
-  // Cap 4 = constant on-screen size down to 25% zoom; beyond that it shrinks again so
-  // pills can't blanket the canvas at extreme zoom-out (minZoom goes to 0.01).
-  const boost = Math.min(4, Math.max(1, 1 / (zoom || 1)))
+  // Cap 2.5 = constant on-screen size down to 40% zoom; beyond that it shrinks again so
+  // pills can't blanket the canvas at extreme zoom-out (minZoom goes to 0.01). The old cap
+  // of 4 let a WORKTREE group's wide pill (branch chip + counters + buttons) scale past its
+  // own 760px frame and swirl over the neighbors ("vortex").
+  const boost = Math.min(2.5, Math.max(1, 1 / (zoom || 1)))
   document.documentElement.style.setProperty('--group-label-boost', boost.toFixed(3))
+  // Far out, keep only the name: the worktree chip is unreadable/unclickable at that scale
+  // anyway, and it is what makes the pill wide enough to blanket adjacent frames.
+  document.documentElement.classList.toggle('group-labels-compact', boost >= 2)
 }
 
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
