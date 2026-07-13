@@ -122,8 +122,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `open-terminal [--cwd P] [--cmd C]` — open a terminal node.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T]` — open N Claude sessions.',
-    '- `open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T]` — open any agent CLI.',
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]` — open N Claude sessions.',
+    '- `open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]` — open',
+    '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
+    '  hands its worktree path down as the cwd.',
     '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
     '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
     '- `open-browser --url U` — open a navigable browser node.',
@@ -138,7 +140,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
-    '  Both ask the user to confirm a dialog and may be denied.'
+    '  Both ask the user to confirm a dialog and may be denied.',
+    '',
+    'Orchestration ("Build with Nodeterm orchestration"): break the task into 2-5 independent',
+    'workstreams; per stream `open-worktree --branch <slug>` then `open-agent --agent claude',
+    '--group <groupId> --prompt "<concrete task>"` (each stream on its own branch, no tree',
+    'conflicts); `rename`/`arrange` the groups; the user merges when a stream is done, and',
+    '`close-worktree --group <id>` releases a finished station.'
   ].join('\n')
 }
 
