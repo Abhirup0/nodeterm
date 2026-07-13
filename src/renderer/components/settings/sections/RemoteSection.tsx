@@ -1,11 +1,14 @@
 import { useState } from 'react'
 import { useEntitlement } from '../../../state/entitlement'
+import { useProjects } from '../../../state/projects'
+import { hostShareOptions } from '../../../lib/relayHostShare'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Button } from '@renderer/ui/Button'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
+import { Select } from '@renderer/ui/Select'
 
 const ROWS = {
   allow: { title: 'Allow remote access', keywords: ['remote', 'host', 'share', 'pairing', 'ssh'] },
@@ -24,11 +27,22 @@ export function RemoteSection({
   onClose: () => void
 }): React.JSX.Element {
   const isPremium = useEntitlement((s) => s.isPremium)
+  const projects = useProjects((s) => s.projects)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
   const [hostOffer, setHostOffer] = useState('')
   const [hostBusy, setHostBusy] = useState(false)
   const [remoteError, setRemoteError] = useState('')
   const [clientCode, setClientCode] = useState('')
   const [connecting, setConnecting] = useState(false)
+
+  // Which project this host shares with the joiner. Default = the active project (hoisted first
+  // by hostShareOptions); the user can pick any other OPEN project before minting the offer.
+  const shareOptions = hostShareOptions(projects, activeProjectId)
+  const [shareId, setShareId] = useState('')
+  const effectiveShareId = shareOptions.some((o) => o.id === shareId)
+    ? shareId
+    : (shareOptions[0]?.id ?? '')
+  const sharedName = shareOptions.find((o) => o.id === effectiveShareId)?.name ?? ''
   // HOST side — the NEW relay tunnel (`relayHost`). `start()` returns the single-use pairing offer;
   // a connecting peer's approval + canvas sync are handled globally by Canvas (`relayHost.onPeerPending`
   // / `relayHost.confirm`, and the CorePlatform seq-stamped reflector — no old canvas-mirror flag).
@@ -36,7 +50,7 @@ export function RemoteSection({
     setRemoteError('')
     setHostBusy(true)
     try {
-      const { offer } = await window.nodeTerminal.relayHost.start()
+      const { offer } = await window.nodeTerminal.relayHost.start(effectiveShareId || undefined)
       setHostOffer(offer)
     } catch (err) {
       setRemoteError((err as Error).message)
@@ -78,7 +92,9 @@ export function RemoteSection({
             hostOffer ? (
               <div className="space-y-2">
                 <p className="text-sm text-muted">
-                  Share this pairing code with the other device (single use):
+                  Sharing <strong className="text-text">{sharedName || 'this project'}</strong> —
+                  the joiner will see this project and can run commands on this Mac. Share this
+                  pairing code with the other device (single use):
                 </p>
                 <FieldRow
                   label="Pairing code"
@@ -97,9 +113,34 @@ export function RemoteSection({
                 </div>
               </div>
             ) : (
-              <Button disabled={hostBusy} onClick={() => void startHosting()}>
-                {hostBusy ? 'Starting…' : 'Allow remote access'}
-              </Button>
+              <div className="space-y-2">
+                {shareOptions.length > 1 ? (
+                  <FieldRow
+                    label="Project to share"
+                    control={
+                      <Select
+                        className="w-72"
+                        value={effectiveShareId}
+                        onChange={(e) => setShareId(e.target.value)}
+                      >
+                        {shareOptions.map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </Select>
+                    }
+                  />
+                ) : (
+                  <p className="text-sm text-muted">
+                    Sharing <strong className="text-text">{sharedName || 'this project'}</strong> —
+                    the joiner sees this project and can run commands on this Mac.
+                  </p>
+                )}
+                <Button disabled={hostBusy} onClick={() => void startHosting()}>
+                  {hostBusy ? 'Starting…' : 'Allow remote access'}
+                </Button>
+              </div>
             )
           ) : (
             <p className="text-sm text-muted">
