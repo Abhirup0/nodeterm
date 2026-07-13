@@ -1,7 +1,15 @@
 # Remote workspace sessions — design (team, Stage 4)
 
 **Date:** 2026-07-13
-**Status:** approved, not yet implemented
+**Status:** 4a + 4b + 4d + **4c landed** on `feat/relay-rpc-main` (full suite + typecheck green,
+1690 tests). Two desktops are equal peers on one shared canvas over the E2EE relay: a remote host
+opens as a **project tab** (bridged `NodeTerminalApi` over the tunnel), mutual-SAS consent is shown
+at the grant moment, an offline tab greys + reconnects, and worktree/clone paths resolve on the
+host. The desktop-**client** legacy dialect is deleted; the **phone** dialect is intentionally
+retained until the iOS repo migrates to the tunnel (`docs/ios-protocol-migration.md`). Pending:
+the two-instance manual acceptance run (below), then the whole-branch security review + merge to
+`main`. See **"4c landed"** below for the shipped surface and the deferred follow-ups. 4e (Server
+Edition as a tab) is future.
 **Depends on:** Stages 1–3 (`docs/team-presence.md`), all merged.
 
 ## Goal
@@ -317,11 +325,64 @@ tmux; reconnect re-enters via co-attach (Stage 2 already guarantees this).
 | **4a** Session abstraction (renderer; local-only) | `feat/session-abstraction` | — | **Behavior-unchanged**: full suite + typecheck green, zero visible diff for a solo user |
 | **4b** Client registry in `electronPlatform` | `feat/peer-registry` | — | **Landed** — peer sinks receive presence/canvas/pty through the real platform (`peer-integration.test.ts`); webContents path bit-identical; solo cost zero. Hand-off: "4b → 4c interface" above |
 | **4d** Trust layer (keys, pins, mutual SAS, revoke) | `feat/peer-trust` | — | Crypto/pairing unit tests; revoke-kills-session hook tested against a fake connection |
-| **4c** `rpc.ts` over relay; remote tab; delete old dialect | `feat/relay-rpc` | 4a+4b+4d | The 24 crypto-layer tests pass **unchanged**; new relay-carrier test (below); Stage 1–3 smoke script passes over relay |
+| **4c** `rpc.ts` over relay; remote tab; delete old dialect | `feat/relay-rpc-main` | 4a+4b+4d | **Landed** — crypto/carrier gate (163 tests) + phone gate (77) pass **unchanged**; new-protocol `relay-tunnel.test.ts` (E2EE round-trip + pre-handshake refusal); full suite 1690 green. Manual two-instance acceptance pending (below) |
 | **4e** Server Edition as a tab | `feat/server-tab` | 4a+4c | Same smoke script against a Server Edition box |
 
 4a, 4b and 4d run in parallel worktrees. 4c is the join point and must not ship to
 users before 4d is wired (it grants `pty.create` to peers).
+
+## 4c landed — shipped surface, deletions, and deferred follow-ups
+
+**What shipped (on `feat/relay-rpc-main`):**
+- **Bridged api** (`src/renderer/bridge/relay-api.ts` `buildRelayApi`) — a full `NodeTerminalApi`
+  over the E2EE relay `RelayFrameTransport`, reusing the ws-bridge builders. Core-bound namespaces
+  (`pty`, `workspace`, `fs`, `git`, `files`, `context`, `canvas`, `presence`, `userDataDir`,
+  `claude.cliCaps`) hit the **remote** core; app-global (`updates`/`clipboard`/`settings`/…) stay
+  **local**. Two load-bearing exceptions: `pty.onData` reads the LOCAL per-session channel (relay
+  pty output is re-emitted there by main), and `dialog.selectFolder/selectFile` are the in-app
+  **host** directory browser (a remote tab's folder pick is a host pick — obligation d).
+- **Remote session as a project tab** (`src/renderer/session/relay-tab.ts` `openRelayTab`,
+  `Canvas.tsx`) — `createSession('relay', api, label)` bound to a projects tab; the Canvas subtree
+  is keyed by `session.id` so an api swap remounts (4a obligation 3). Presence teardown held +
+  disposed on disconnect (obligation 1); rename fans across all sessions via `setMeAll`
+  (obligation 2). `LocalTransport(useSession().api)` IS the remote transport — one protocol, no
+  separate `RemoteTransport`.
+- **Offline + reconnect** — an involuntary drop greys the tab to "unavailable" and takes its
+  session offline (kept + bound, presence left); a click reconnects in place with a fresh pairing
+  code (the relay offer is single-use — no silent/pinned reconnect in v1). Edits while disconnected
+  are lost (v1, no corruption). User-close fully disposes + removes; the two paths are distinct.
+- **Consent at the grant moment** — the host approval dialog sources from `relayHost.onPeerPending`
+  and shows `<ConsentNotice>` ("<peer> will be able to run commands on this Mac") above the SAS;
+  confirm rides the encrypted tunnel; `enterConfirms={false}` so a stray Enter can't approve.
+- **The desktop-client legacy dialect is deleted** (`RemoteSessionView`, `RemoteTransport`,
+  `client-service`/`remoteClient` preload+channels, `data.remote`, `remote-fs.ts`, and the old
+  client/relay e2e suites). The two settings dialogs were migrated to `relayClient`/`relayHost`.
+
+**Retained on the OLD dialect (do NOT delete — a shipped feature):** the phone server path —
+`host-service.ts`, `standing-host.ts`, `host-canvas-hub.ts`, `framing.ts`, `snapshot.ts`,
+`src/main/remote/canvas-sync.ts` (`sanitizeClientMutation`), `phone-presence.ts`, the `remoteHost`
+preload namespace, and `ssh-fs.ts` (live SSH). The renderer's phone canvas push is gated on
+`settings.phoneAccessEnabled` (single-sourced — it used to hang off a separate `hosting` flag that
+the dialect deletion orphaned, blanking the phone; that flag is gone).
+
+**Deferred follow-ups (v1 scope calls — not bugs):**
+- **iOS migration** — the phone stays on the old opcode dialect until *nodeterm mobile*
+  (`~/projects/nodeterm-ios`) moves to the relay tunnel. The desktop-side rewire of `standing-host`
+  onto the relay tunnel (so a migrated phone has a host to reach) is a **deliberate separate step**,
+  NOT done in 4c — it breaks the shipped phone and needs an explicit go. Blueprint:
+  `docs/ios-protocol-migration.md`.
+- **Relay-tab canvas population** — a remote tab's terminals/transport are wired; surfacing the
+  HOST's existing nodes into the tab (top-level Canvas api is still the local session) is a
+  follow-up.
+- **`dialog` open-file / open-folder in a relay tab** — the worktree/clone pickers resolve on the
+  host (obligation d), but the generic "open file"/"open folder" Canvas callers still use the
+  global (LOCAL) dialog. Same `ScmScope`-style "which machine?" question; a scoped follow-up.
+- **Relay tab persistence / bookmark** — a relay tab persists as an ordinary project entry; a
+  proper greyed-offline bookmark across restarts is not implemented.
+- **SDK chat node over relay** — refuses (`E_UNSUPPORTED`) in a relay tab, matching Server Edition.
+- **The preload↔main relay IPC boundary is not covered by vitest** (it needs Electron). Two real
+  send/handle + payload-shape bugs were found and fixed by inspection during 4c; the two-instance
+  acceptance run is what exercises it live. A preload-shape unit guard would help.
 
 ## 4a → 4c interface (landed)
 
@@ -408,13 +469,38 @@ session):
   supported), plus relay-specific steps: host sleep/wake (peer's terminal returns via
   co-attach), cable pull, revoke mid-session (peer is cut immediately), edits while
   disconnected (verify they are lost *and* nothing corrupts).
+- **4c two-instance acceptance checklist (run before merge — the live gate the vitest
+  suite can't reach, since the preload↔main relay IPC needs Electron):** on one Mac,
+  launch two instances (`NT_MULTI=1 NT_USER_DATA=/tmp/nt-A npm run dev` and a second with
+  `/tmp/nt-B`). Then:
+  1. On A, start a remote host (New Remote Connection → host) and copy the pairing offer.
+  2. On B, paste the offer → both show the **same 6-digit SAS** → B sees the **ConsentNotice**
+     on A's approval → confirm on both → A's canvas opens as a **project tab on B**.
+  3. Type in a terminal on the tab → it runs on A (the host) and both painters show it
+     (**co-attach**).
+  4. Sleep/wake A → the peer's terminal returns via co-attach (tmux still alive).
+  5. Pull B's network → the tab **greys to "unavailable"**; restore + click → **reconnect**
+     with a fresh code; disconnected edits are lost, nothing corrupts.
+  6. **Revoke** mid-session (from A) → B's peer is **cut immediately** (open socket dies, not
+     just the next handshake).
+  7. Confirm the **phone still works** on its own dialect (enable Settings → Phone on A,
+     connect the iOS app) — the client-dialect deletion must not have touched it.
 
 ## iOS (separate repo — tracked, not same-PR)
 
-The Swift client rewrites its wire layer against `rpc.ts` (it currently speaks the
-deleted opcode dialect). Until that lands the phone cannot connect. It then gains:
-named presence (`presence:hello`), git, agent status, co-attach, and the typing badge
-it already half-had. The nodeterm-side protocol work is complete at 4c; the iOS task
+**4c kept the phone dialect, so the phone still works today** — the deletion in Task 10 was
+scoped to the desktop-**client** dialect only; the phone's `standing-host` + `host-canvas-hub` +
+`framing`/`snapshot` path is intact and still boots. So the phone is NOT stranded by 4c.
+
+The migration is a **future, deliberate** two-part step (NOT done in 4c because it breaks a shipped
+feature without an explicit go):
+1. **iOS repo** — the Swift client rewrites its wire layer against `rpc.ts` (it currently speaks the
+   opcode dialect). Blueprint: `docs/ios-protocol-migration.md`. It then gains named presence
+   (`presence:hello`), git, agent status, co-attach, and the typing badge it already half-had.
+2. **Desktop** — `standing-host` is rewired onto the relay tunnel (`relay-host`) in lockstep, so a
+   migrated phone has a host to reach, and the old dialect files are finally deleted. Only once
+   both land does the phone move to the tunnel; until then it stays on the retained old dialect.
+The nodeterm-desktop protocol work (the tunnel + bridged api) is complete at 4c; the iOS task
 should be filed the day 4c merges.
 
 ## Out of scope (v1)
