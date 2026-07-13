@@ -14,8 +14,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
-import { transport as localTransport } from '../terminal/local-transport'
-import { RemoteTransport } from '../terminal/remote-transport'
+import { LocalTransport } from '../terminal/local-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
@@ -306,13 +305,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // inside the once-mounted lifecycle effect is safe and never re-runs that effect). Core-bound
   // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
   const { api } = useSession()
-  // Pick the session layer: a remote-bound node (data.remote) talks to a host over the relay
-  // via RemoteTransport; otherwise the local PTY (LocalTransport). The connectionId is stable
-  // for a node's lifetime, so the instance is created once and held in a ref.
+  // The transport is ALWAYS `LocalTransport` over THIS session's api — one protocol, no
+  // RemoteTransport. For the local session `api.pty` is the preload; for a relay tab it is Task 5's
+  // bridged pty (the relay tunnel), so LocalTransport over the bridged api IS the remote transport.
+  // The session's api is stable for the node's lifetime, so the instance is created once and held.
   const transportRef = useRef<TerminalTransport | null>(null)
   if (!transportRef.current) {
-    const conn = (data.remote as { connectionId: string } | undefined)?.connectionId
-    transportRef.current = conn ? new RemoteTransport(conn) : localTransport
+    transportRef.current = new LocalTransport(api)
   }
   const transport = transportRef.current
   // Scoped selectors (not the whole settings object) so this node only re-renders when a

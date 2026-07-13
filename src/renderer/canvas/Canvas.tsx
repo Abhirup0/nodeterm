@@ -83,7 +83,6 @@ import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { connectPresence, reportProject, usePresence } from '../state/presence'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
-import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
@@ -132,7 +131,8 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
-import { useSession } from '../session/session'
+import { useSession, SessionProvider, sessionForProject, setActiveSession } from '../session/session'
+import { openRelayTab, type RelayTab } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -428,8 +428,9 @@ export function Canvas() {
   // When set, add a terminal to this project once its nodes have loaded into React Flow
   // (cross-project "add" from the sidebar, which must switch projects first).
   const pendingAddRef = useRef<string | null>(null)
-  // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
-  const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
+  // Live relay tabs, keyed by relay connectionId, so a host/relay drop can dispose the right one
+  // (a remote connection is now a project TAB, not a full-surface overlay — Stage 4 Task 6).
+  const relayTabsRef = useRef<Map<string, RelayTab>>(new Map())
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
   const [sshDialogOpen, setSshDialogOpen] = useState(false)
@@ -960,6 +961,10 @@ export function Canvas() {
     // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
     // and Canvas deliberately never READS the presence store (see the connectPresence effect).
     reportProject(activeProjectId || null)
+    // Track the active session by the tab we switched to, so non-component api accessors
+    // (activeSessionApi() in scmDraft/worktrees) hit the active tab's core — the local session for
+    // a local tab, the relay session for a remote tab. Resolution is by binding (never persisted).
+    setActiveSession(sessionForProject(activeProjectId || '').id)
     if (!activeProjectId) return
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
@@ -1774,30 +1779,50 @@ export function Canvas() {
     [addTerminal, scmCwd]
   )
 
-  /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
-  // Tear down the active remote mirror: hide the view and disconnect the relay connection (ends
-  // the host<->client bridge; the host-side tmux sessions survive). Safe to call when none active.
-  const disconnectRemote = useCallback(() => {
-    setRemoteConnId((id) => {
-      if (id) void window.nodeTerminal.remoteClient.disconnect(id)
-      return null
+  // Turn an approved (or approving) relay connection into a project TAB (Stage 4 Task 6): build the
+  // bridged api, wait for mutual approval, then add a session-bound tab. `openRelayTab` guards the
+  // approval wait so a pre-approval socket drop rejects instead of hanging. On a later host/relay
+  // drop, dispose the tab's session (presence + relay socket teardown). Idempotent per connectionId.
+  const mountRemoteMirror = useCallback((connectionId: string, label = 'Remote host') => {
+    if (relayTabsRef.current.has(connectionId)) return
+    void openRelayTab(connectionId, label, {
+      relayClient: window.nodeTerminal.relayClient,
+      addProject: (name) => useProjects.getState().addProject(name),
+      setActiveProject: (id) => useProjects.getState().setActive(id),
     })
-  }, [])
-
-  // Mount the host mirror for an already-established connection. Wires `onClosed` so a dropped
-  // host/relay tears the view down without leaking the listener.
-  const mountRemoteMirror = useCallback((connectionId: string) => {
-    setRemoteConnId(connectionId)
+      .then((tab) => {
+        relayTabsRef.current.set(connectionId, tab)
+        // A host/relay drop after approval tears the tab's session down (once).
+        const un = window.nodeTerminal.relayClient.onClosed(connectionId, () => {
+          un()
+          relayTabsRef.current.delete(connectionId)
+          tab.dispose()
+        })
+      })
+      .catch((err) => {
+        window.alert(`Remote session did not open: ${(err as Error).message}`)
+      })
   }, [])
 
   // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
-  // and open the live mirror over the local canvas. This is the primary remote entry (it replaces
-  // B4's lone remote-terminal-on-connect flow).
+  // compare the SAS, confirm, and open the host as a project tab. This is the primary remote entry.
   const connectRemote = useCallback(async () => {
     const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
     if (!offer) return
     try {
-      const connectionId = await window.nodeTerminal.remoteClient.connect(offer)
+      const connectionId = await window.nodeTerminal.relayClient.connect(offer)
+      // Surface the SAS so this human can verify it matches the host's before confirming (the
+      // mutual-approval gate — the confirm rides the ENCRYPTED tunnel in main; see relay-client.ts).
+      const unSas = window.nodeTerminal.relayClient.onSas(connectionId, (sas) => {
+        unSas()
+        if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
+          window.nodeTerminal.relayClient.confirm(connectionId)
+        } else {
+          window.nodeTerminal.relayClient.disconnect(connectionId)
+        }
+      })
+      // Build the tab now (registers the one-shot onApproved listener BEFORE approval fires — see
+      // relay-api.ts gotcha 2); it resolves once both humans confirm.
       mountRemoteMirror(connectionId)
     } catch (err) {
       window.alert(`Could not connect: ${(err as Error).message}`)
@@ -2193,14 +2218,6 @@ export function Canvas() {
     window.addEventListener('nodeterm:open-remote-terminal', onOpenRemote)
     return () => window.removeEventListener('nodeterm:open-remote-terminal', onOpenRemote)
   }, [mountRemoteMirror])
-
-  // Tear the mirror down if the host/relay drops the active connection.
-  useEffect(() => {
-    if (!remoteConnId) return
-    return window.nodeTerminal.remoteClient.onClosed(remoteConnId, () => {
-      setRemoteConnId((id) => (id === remoteConnId ? null : id))
-    })
-  }, [remoteConnId])
 
   /**
    * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
@@ -5212,6 +5229,12 @@ export function Canvas() {
       </div>
 
       <div className="flow-wrap" ref={flowWrapRef}>
+        {/* The active project's node subtree runs under ITS session (local for a local tab, the
+            relay session for a remote tab). Keyed by session id so an api swap REMOUNTS the nodes
+            (obligation 3): TerminalNode/EditorNode/ChatNode capture `api` in []-effects, so a live
+            api change must remount them or they keep talking to the old core. For an all-local user
+            the key is always 'local', so this never remounts — zero behavior change. */}
+        <SessionProvider session={sessionForProject(activeProjectId || '')} key={sessionForProject(activeProjectId || '').id}>
         <ReactFlow
           nodes={allNodes}
           edges={displayEdges}
@@ -5266,6 +5289,7 @@ export function Canvas() {
           <PresenceLayer />
           <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
+        </SessionProvider>
 
         {/* Mounted unconditionally, even when we are alone: the facepile renders null with no peers,
             but it is also what prunes the presence store's face cache — gating its mount on a peer
@@ -5300,12 +5324,6 @@ export function Canvas() {
           onClose={() => setCloneDialogOpen(false)}
           onCloned={onRepoCloned}
         />
-
-        {remoteConnId && (
-          <div className="remote-session-overlay">
-            <RemoteSessionView connectionId={remoteConnId} onClose={disconnectRemote} />
-          </div>
-        )}
       </div>
 
       {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}

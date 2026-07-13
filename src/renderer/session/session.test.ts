@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   createSession,
   getSessionStores,
@@ -8,8 +8,21 @@ import {
   sessionForProject,
   sessionCount,
   resetSessionsForTest,
+  bindProjectToSession,
+  disposeSession,
+  holdSessionTeardown,
+  setMeAll,
 } from './session'
 import type { NodeTerminalApi } from '@shared/types'
+import type { PeerIdentity } from '@shared/presence'
+
+/** A fake api whose `presence.hello` is a spy — so a re-hello is observable in node env
+ *  (createSession's presence store is built against this api by identity). */
+function apiWithHelloSpy(marker: string): { api: NodeTerminalApi; hello: ReturnType<typeof vi.fn> } {
+  const hello = vi.fn().mockResolvedValue({ clientId: `id-${marker}`, peers: [] })
+  const api = { marker, presence: { hello } } as unknown as NodeTerminalApi
+  return { api, hello }
+}
 
 // A distinctive object we can assert is preserved BY IDENTITY (the behavior-unchanged guarantee).
 const fakeApi = { marker: 'preload' } as unknown as NodeTerminalApi
@@ -104,5 +117,79 @@ describe('sessionForProject (runtime tab → session resolver, never persisted)'
     expect(sessionCount()).toBe(1)
     createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
     expect(sessionCount()).toBe(2)
+  })
+})
+
+describe('bindProjectToSession (4c remote-tab resolution)', () => {
+  it('a bound project resolves to its remote session; an unbound one resolves to local', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+
+    bindProjectToSession('remote-tab', relay.id)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+    // An unbound project stays on the LOCAL session even while a remote session exists — never the
+    // merely-active one (the resolver is by binding, not by which tab is focused).
+    expect(sessionForProject('some-local-tab')).toBe(local)
+    // Even after the remote tab is made active, a local tab still resolves local.
+    setActiveSession(relay.id)
+    expect(sessionForProject('some-local-tab')).toBe(local)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+  })
+
+  it('rejects a binding to an unknown session id', () => {
+    createSession('local', fakeApi, 'This Mac')
+    expect(() => bindProjectToSession('p', 'relay-999')).toThrow()
+  })
+})
+
+describe('disposeSession (obligation 1 — the missing disposal path)', () => {
+  it('runs every held teardown exactly once, drops the session, and unbinds its projects', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    const relayClose = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    holdSessionTeardown(relay.id, relayClose)
+    bindProjectToSession('remote-tab', relay.id)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+
+    disposeSession(relay.id)
+
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+    expect(sessionCount()).toBe(1) // only local remains
+    // The binding is gone → the (now-dead) tab resolves back to the local session, never a throw.
+    expect(sessionForProject('remote-tab')).toBe(local)
+
+    // Idempotent: a second dispose (double close, revoke racing a socket drop) touches nothing.
+    disposeSession(relay.id)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('disposing an unknown session id is a no-op', () => {
+    expect(() => disposeSession('relay-nope')).not.toThrow()
+  })
+})
+
+describe('setMeAll (obligation 2 — a rename re-helloes EVERY live session)', () => {
+  it('re-helloes and updates identity on all registered sessions, not just the active one', () => {
+    const a = apiWithHelloSpy('a')
+    const b = apiWithHelloSpy('b')
+    const s1 = createSession('local', a.api, 'This Mac')
+    const s2 = createSession('relay', b.api, "Ayşe's Mac")
+    setActiveSession(s1.id)
+
+    const me: PeerIdentity = { name: 'Ada', color: '#0af' }
+    setMeAll(me)
+
+    // Every live session re-announced (setMe → sayHello → api.presence.hello) with the new identity.
+    expect(a.hello).toHaveBeenCalledWith(me)
+    expect(b.hello).toHaveBeenCalledWith(me)
+    // …and each session's store reflects the new identity.
+    expect(getSessionStores(s1.id).presence.store.getState().me).toEqual(me)
+    expect(getSessionStores(s2.id).presence.store.getState().me).toEqual(me)
   })
 })
