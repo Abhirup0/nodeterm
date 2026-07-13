@@ -311,6 +311,30 @@ export function createHostHandlers(
     }
   }
 
+  /**
+   * Scroll a remote client's view of the session's tmux history.
+   *
+   * Scrolling belongs to tmux (its mouse is on and the pane lives on the alternate screen, so the
+   * client's emulator has no scrollback of its own). This stream's pty IS a tmux client, so the
+   * wheel is simply written into it as an SGR mouse event and tmux does the rest — no tmux command
+   * channel, no copy-mode bookkeeping on our side. The phone drives this because it cannot deliver
+   * the wheel itself: its own emulator would swallow the gesture.
+   *
+   * `lines` is untrusted (it arrives from a remote client) — clamp it, and address the wheel to
+   * cell 1,1 so a hostile value cannot be interpolated anywhere interesting.
+   */
+  function handleScroll(req: RpcRequest): void {
+    const p = asRecord(req.params)
+    const stream = streams.get(num(p.streamId, -1))
+    if (stream) {
+      const up = str(p.dir) !== 'down'
+      const notches = Math.min(20, Math.max(1, Math.floor(num(p.lines, 1))))
+      const seq = `\x1b[<${up ? 64 : 65};1;1M`
+      for (let i = 0; i < notches; i++) pty.write(getClientId(), stream.sessionId, seq)
+    }
+    socket.respond(req.id, true, {})
+  }
+
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
@@ -335,6 +359,9 @@ export function createHostHandlers(
           break
         case 'pty.kill':
           handleKill(req)
+          break
+        case 'pty.scroll':
+          handleScroll(req)
           break
         case 'fs.list':
         case 'fs.read':
