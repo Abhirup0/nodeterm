@@ -203,10 +203,21 @@ function setVisible(c: Client, visible: boolean): void {
  */
 export function registerWebglClient(id: string, callbacks: WebglClientCallbacks): WebglClientHandle {
   // A re-register under the same id (e.g. a remount that raced teardown) supersedes the old entry.
+  // Release a still-granted predecessor: its handle's dispose() will short-circuit (stale-handle
+  // guard), so without this the old WebglAddon would leak a real browser context while the
+  // coordinator forgets it held a slot — exactly the overshoot this module exists to prevent.
   const existing = clients.get(id)
   if (existing) {
     cancelAcquire(existing)
     cancelRelease(existing)
+    if (existing.granted) {
+      try {
+        existing.release()
+      } catch {
+        // fail-open: a throwing release must not block the new registration
+      }
+      existing.granted = false
+    }
   }
   const client: Client = {
     id,

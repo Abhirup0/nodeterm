@@ -173,4 +173,19 @@ describe('webgl-budget coordinator', () => {
     clients.forEach(grant)
     expect(clients.every((c) => c.rec.held)).toBe(true)
   })
+
+  it('re-registering an id releases the superseded grant (no leaked context, no phantom slot)', () => {
+    const a = fakeClient('dup')
+    grant(a)
+    expect(a.rec.acquires).toBe(1)
+    // Remount races teardown: a second registration under the same id supersedes the first. The
+    // predecessor's grant must be reclaimed here — its own dispose() will short-circuit (stale
+    // handle), so skipping this leaks a real browser context the coordinator no longer counts.
+    const b = fakeClient('dup')
+    expect(a.rec.releases).toBe(1)
+    a.handle.dispose() // stale handle: inert
+    grant(b)
+    expect(b.rec.acquires).toBe(1)
+    b.handle.dispose()
+  })
 })
