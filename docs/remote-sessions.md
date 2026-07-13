@@ -191,9 +191,113 @@ tab).
 - 4d deliberately does NOT touch the `host-service`/`client-service` handshake code —
   4c rewrites those files; 4d ships the key/pin/SAS/consent layer (`pairing.ts`,
   `e2ee.ts`, `approved-devices*`, invite/consent UI) as a library 4c wires in.
+- **4d delivered (library, wired by 4c):** persistent peer identity
+  (`src/main/remote/peer-identity.ts` + pure `key-file-codec.ts`); mutual SAS + pin-both-ends
+  (`src/main/remote/mutual-approval-core.ts`); revocation with the `onRevoke` kill hook
+  (`src/main/remote/revocation.ts` — unpin persists, then the hook cuts the live session); consent
+  copy (`src/shared/remote/consent.ts` `describeGrant` + `ConsentNotice.tsx`). The existing crypto
+  tests (`e2ee`, `pairing`, `relay-id`, `approved-devices-core`) pass unchanged.
 - **Open product decision — license:** Pro currently gates only the host's token
   mint. The peer-to-peer story (host pays? both? invitee free?) is undecided; the
   spec records it as open rather than guessing.
+
+### 4d → 4c interface (the exact seam 4c wires)
+
+4d is an **inert library** — no connection code, no IPC, no UI beyond the leaf
+`ConsentNotice`. Nothing runs until 4c wires it into the rewritten handshake. The exact
+surface 4c consumes, gathered from the six 4d tasks:
+
+**Persistent peer identity** (`src/main/remote/peer-identity.ts`, I/O wrapper — the only
+4d module that imports `electron`):
+
+```ts
+function loadOrCreatePeerKeyPair(): Promise<KeyPair>   // throws PeerKeyLockedError (code E_PEER_KEY_LOCKED)
+function resetPeerKeyCache(): void                     // test seam only
+class PeerKeyLockedError extends Error                 // encrypted key + keyring locked ⇒ do NOT regenerate
+```
+
+Replaces the ephemeral `genKeyPair()` at `client-service.ts:286`. The public key is the
+stable identity a host pins across reconnects. `PeerKeyLockedError` must surface to the
+user ("unlock the keyring and reconnect") — never regenerate over it.
+
+**Mutual approval** (pure, `src/main/remote/mutual-approval-core.ts` — no electron):
+
+```ts
+type MutualApproval    // opaque/branded; only emptyMutualApproval can construct it
+function emptyMutualApproval(peerKeyB64: string, sessionId: string): MutualApproval
+function confirmLocal(s: MutualApproval): MutualApproval
+function confirmRemote(s: MutualApproval): MutualApproval
+function isMutuallyApproved(s: MutualApproval): boolean
+function recordApproval(store: ApprovedDevices, s: MutualApproval): ApprovedDevices   // pins s.peerKeyB64 only when both confirmed
+function mutualSas(shared: Uint8Array): string                                        // "NNN NNN"; alias of sasFromSharedKey
+```
+
+Flow: `emptyMutualApproval(peerKeyB64, sessionId)` → `confirmLocal` on this human's SAS
+match → `confirmRemote` on the peer's confirm frame → `recordApproval(store, state)` pins
+the peer's key (each end pins the other's; idempotent). One state per pairing attempt.
+
+**Revocation** (pure core + hook, `src/main/remote/revocation.ts` — no electron):
+
+```ts
+function revoke(store: ApprovedDevices, peerKeyB64: string): ApprovedDevices   // pure unpin, idempotent
+type OnRevoke = (peerId: string) => void | Promise<void>
+interface RevocationDeps { load(): Promise<ApprovedDevices>; save(s: ApprovedDevices): Promise<void>; onRevoke: OnRevoke }
+interface RevokeResult { persisted: boolean; killed: boolean }
+function createRevoker(deps: RevocationDeps): { revoke(peerKeyB64: string): Promise<RevokeResult> }
+```
+
+4c implements `onRevoke(peerId)` = close the peer's relay connection →
+`PtyManager.dropClient(clientId)` → `presenceHub.leave(clientId)` (the same teardown
+`peer-registry.ts` runs on sink unregister). `revoke()` unpins on disk FIRST, then fires
+the hook. `persisted:false` ⇒ pin may survive, the UI must NOT show "Removed" and must
+retry; `killed:false` ⇒ the cut is unconfirmed. `peerId` is the peer's stable box public
+key (base64).
+
+**Key-file codec** (pure, `src/main/remote/key-file-codec.ts` — no electron; `safeStorage`
+injected as `SafeStorageLike`):
+
+```ts
+function encodeKeyFile(keys: KeyPair, safe: SafeStorageLike): string
+function decodeKeyFile(raw: string, safe: SafeStorageLike): { keys: KeyPair; migrate: boolean } | null | 'locked'
+```
+
+`e2ee.ts` gained `secretKeyFromB64(b64)` (strict 32-byte, mirrors `publicKeyFromB64`) —
+the only edit to a pre-existing crypto file, additive.
+
+**Consent copy** (`src/shared/remote/consent.ts` + `src/renderer/remote/ConsentNotice.tsx`):
+
+```ts
+const SHELL_ACCESS_CONSENT: string
+function describeGrant(peerLabel: string): string       // "<name> will be able to run commands on this Mac — the same as giving them SSH access."
+function ConsentNotice({ peerLabel }: { peerLabel: string }): JSX.Element
+```
+
+4c places `<ConsentNotice peerLabel={…} />` in the actual invite/approve dialog.
+
+#### SECURITY-FATAL obligations 4c MUST honour
+
+These are the whole point of the trust layer. The pure modules cannot enforce them across
+the connection seam — 4c owns them, and breaking any one silently grants a MITM shell
+access on this machine:
+
+- **(a) `confirmRemote` may be driven ONLY by a frame received over the ENCRYPTED,
+  session-keyed channel** (the box under `deriveSessionKey`) — never a plaintext or
+  relay-visible message. A forgeable/replayable "I confirmed" signal degrades mutual
+  approval back to one-way: the relay supplies the confirmation the second human never
+  gave, and a single local confirm then pins the attacker.
+- **(b) Exactly ONE `MutualApproval` per pairing attempt**, constructed via
+  `emptyMutualApproval(peerKeyB64, sessionId)` from THIS session's ECDH peer key (the same
+  key whose shared secret produced the SAS the humans compared). No reuse across attempts,
+  no seeding with a different key.
+- **(c) Revocation must call the kill hook, not just unpin.** Unpinning refuses only the
+  NEXT handshake; the open socket keeps full shell access until it drops on its own. 4c's
+  `onRevoke` must cut the live session.
+- **(d) Adopt the codec in `host-service.ts` too.** Its existing `loadOrCreateKeyPair`
+  (`host-service.ts:548`) has the SAME keyring-lock flaw `peer-identity` fixed: an encrypted
+  `secretKeyEnc` key read while `isEncryptionAvailable()` is false at boot falls through both
+  read branches and regenerates a fresh key (line 574), overwriting the good encrypted
+  identity and forcing every host that pinned it to re-approve. 4d left `host-service.ts`
+  untouched by design; 4c should route it through `key-file-codec` + the `'locked'` outcome.
 
 ### Persistence
 
