@@ -13,9 +13,13 @@ import {
 } from './workspace-files'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 
+/** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
+ *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
+export type RemoteReadResult = { status: 'ok'; content: string } | { status: 'absent' } | { status: 'error' }
+
 /** Remote file access for SSH projects (implemented in src/main over SshFs — src/core stays electron-free). */
 export interface RemoteWorkspaceIO {
-  read(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<string | null>
+  read(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
   write(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
 }
 
@@ -50,6 +54,10 @@ export class WorkspaceStore {
    *  save/connect until a write confirms — guarantees the server file lands regardless of node
    *  type or creation timing. Runtime-only, never persisted. */
   private unmirrored = new Set<string>()
+  /** ssh project ids whose remote file has been read-compared at least once this run. Until then a
+   *  save may NOT blind-write the mirror: a fresh/re-added project would clobber a populated
+   *  server file it has never looked at (the ".nodeterm reset itself" bug). Runtime-only. */
+  private reconciled = new Set<string>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -251,10 +259,19 @@ export class WorkspaceStore {
       )
       e.cache.rev = changedSinceLoad ? prevRev + 1 : prevRev
       this.revs.set(e.id, e.cache.rev)
+      if (!this.remoteIO) continue
+      if (!this.reconciled.has(e.id)) {
+        // Never blind-write a remote file we have not read yet: the first mirror of a fresh or
+        // re-added project must LOOK first — an existing lineage on the server may win (adopted,
+        // broadcast to the renderer) instead of being clobbered by an empty newborn canvas.
+        const adopted = await this.reconcileSsh(e)
+        if (adopted) platform().broadcast(IPC.workspaceExternalChange, adopted)
+        continue
+      }
       // Mirror on change, and re-mirror while a previous write is still owed (the first save
       // often races the ControlMaster coming up — its write is dropped fail-open, and without
       // the retry nothing rewrites until the next real content change).
-      if (this.remoteIO && (changedSinceLoad || this.unmirrored.has(e.id))) {
+      if (changedSinceLoad || this.unmirrored.has(e.id)) {
         const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
         if (ok) this.unmirrored.delete(e.id)
         else this.unmirrored.add(e.id)
@@ -318,34 +335,83 @@ export class WorkspaceStore {
 
   /**
    * Called when an SSH project's connection comes up. Reconciles the server's
-   * .nodeterm/project.json with our cached copy by rev: higher remote rev → adopt
-   * remote (returned; caller broadcasts it); otherwise → push our cache up.
+   * .nodeterm/project.json with our cached copy (see reconcileSsh): remote won →
+   * adopt (returned; caller broadcasts it); otherwise our cache pushed up.
    */
   async refreshSshProject(projectId: string): Promise<Project | null> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.ssh)
     if (!e?.ssh || !this.remoteIO) return null
-    const raw = await this.remoteIO.read(projectId, e.ssh)
+    const adopted = await this.reconcileSsh(e)
+    // The reconcile may have moved cache/rev/name — persist the index either way (cheap, atomic).
+    await writeAtomic(this.indexPath, JSON.stringify(this.index))
+    return adopted
+  }
+
+  /** A throttled trailing mirror write was acked but later dropped (connection died inside the
+   *  throttle window): re-owe it so the next save retries. Wired from makeRemoteWorkspaceIO. */
+  markUnmirrored(projectId: string): void {
+    this.unmirrored.add(projectId)
+  }
+
+  /**
+   * The ONE place that decides who wins between an ssh entry's cache and the server's
+   * .nodeterm/project.json. Rules, in order:
+   * - read ERROR → decide nothing (a failed read is never evidence of absence): stay
+   *   un-reconciled, mirror stays owed, no write.
+   * - absent/corrupt remote → push our cache up.
+   * - same lineage (ids match): higher remote rev wins (rev is this file's save counter) —
+   *   including an emptier remote (the user really cleared their canvas elsewhere).
+   * - DIFFERENT lineage (the server file belongs to another project id — a re-added folder, a
+   *   second machine, a git checkout): an empty side never beats a populated one, regardless of
+   *   rev. Adoption re-keys the file to OUR entry id (node ids — tmux session names — are kept,
+   *   so the terminals reattach); a push outbids the losing lineage's rev so it stays beaten.
+   * Returns the adopted project (for the caller to surface) or null when our cache stood/pushed.
+   */
+  private async reconcileSsh(e: IndexEntryV3): Promise<Project | null> {
+    if (!e.ssh || !this.remoteIO) return null
+    const res = await this.remoteIO.read(e.id, e.ssh)
+    if (res.status === 'error') {
+      this.unmirrored.add(e.id)
+      return null
+    }
     let remote: ProjectFileV1 | null = null
-    if (raw) {
+    if (res.status === 'ok') {
       try {
-        const parsed = JSON.parse(raw) as ProjectFileV1
+        const parsed = JSON.parse(res.content) as ProjectFileV1
         if (parsed?.version === 1 && Array.isArray(parsed.nodes)) remote = parsed
       } catch { /* corrupt remote file → treat as absent, our cache pushes up */ }
     }
+    this.reconciled.add(e.id)
     const cacheRev = e.cache?.rev ?? 0
-    if (remote && remote.rev > cacheRev) {
-      e.cache = remote
-      this.revs.set(projectId, remote.rev)
-      this.unmirrored.delete(projectId) // the server copy IS the truth now — nothing owed
-      await writeAtomic(this.indexPath, JSON.stringify(this.index))
-      return fileToProject(remote, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
+    const cacheNodes = e.cache?.nodes.length ?? 0
+    const sameLineage = !e.cache || !remote || remote.id === e.cache.id
+    const remoteWins =
+      remote !== null &&
+      (sameLineage
+        ? remote.rev > cacheRev
+        : (cacheNodes === 0 && remote.nodes.length > 0) ||
+          (remote.nodes.length > 0 && remote.rev > cacheRev))
+    if (remote && remoteWins) {
+      const adopted = remote.id === e.id ? remote : { ...remote, id: e.id }
+      e.cache = adopted
+      e.name = adopted.name
+      e.color = adopted.color
+      this.revs.set(e.id, adopted.rev)
+      this.unmirrored.delete(e.id) // the server copy IS the truth now — nothing owed
+      return fileToProject(adopted, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
     }
     if (e.cache) {
+      // Our cache stood. If it just beat a FOREIGN lineage on the merits (not on rev), outbid that
+      // lineage's rev so a later rev-only reconcile can't resurrect the losing side.
+      if (remote && !sameLineage && remote.rev >= e.cache.rev) {
+        e.cache.rev = remote.rev + 1
+        this.revs.set(e.id, e.cache.rev)
+      }
       // Push-up runs with the master just up, but record the outcome anyway: a failed write
       // (connection flapped) stays owed so the next save retries it.
-      const ok = await this.remoteIO.write(projectId, e.ssh, serializeProjectFile(e.cache))
-      if (ok) this.unmirrored.delete(projectId)
-      else this.unmirrored.add(projectId)
+      const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
+      if (ok) this.unmirrored.delete(e.id)
+      else this.unmirrored.add(e.id)
     }
     return null
   }

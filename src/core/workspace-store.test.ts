@@ -387,7 +387,8 @@ describe('refreshSshProject', () => {
   it('remote rev > cache rev → adopts remote and reports it', async () => {
     const remote: Record<string, string> = {}
     const io = {
-      read: async (id: string) => remote[id] ?? null,
+      read: async (id: string) =>
+        remote[id] != null ? { status: 'ok' as const, content: remote[id] } : { status: 'absent' as const },
       write: async (id: string, _s: any, c: string) => ((remote[id] = c), true)
     }
     const store = new WorkspaceStore(io)
@@ -404,7 +405,8 @@ describe('refreshSshProject', () => {
     const remote: Record<string, string> = {}
     const writes: string[] = []
     const io = {
-      read: async (id: string) => remote[id] ?? null,
+      read: async (id: string) =>
+        remote[id] != null ? { status: 'ok' as const, content: remote[id] } : { status: 'absent' as const },
       write: async (id: string, _s: any, c: string) => (writes.push(id), (remote[id] = c), true)
     }
     const store = new WorkspaceStore(io)
@@ -418,7 +420,10 @@ describe('refreshSshProject', () => {
 
   it('no remote file yet → pushes the cache up (first machine wins)', async () => {
     const remote: Record<string, string> = {}
-    const io = { read: async () => null, write: async (id: string, _s: any, c: string) => ((remote[id] = c), true) }
+    const io = {
+      read: async () => ({ status: 'absent' as const }),
+      write: async (id: string, _s: any, c: string) => ((remote[id] = c), true)
+    }
     const store = new WorkspaceStore(io)
     await remoteFileOf(store, project({ id: 'ps', ssh: sshConn, cwd: undefined }))
     expect(await store.refreshSshProject('ps')).toBeNull()
@@ -429,12 +434,17 @@ describe('refreshSshProject', () => {
 describe('ssh mirror guarantee (unmirrored retry)', () => {
   const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
 
-  /** Fake IO whose write succeeds only while `up` is true (simulates the
-   *  ControlMaster still connecting during the first save). */
+  /** Fake IO simulating a ControlMaster that is down until `up` flips: reads ERROR while down
+   *  (a dead connection is not "no file"), writes fail while down. */
   const flakyIO = () => {
     const state = { up: false, writes: 0, remote: {} as Record<string, string> }
     const io = {
-      read: async (id: string) => state.remote[id] ?? null,
+      read: async (id: string) => {
+        if (!state.up) return { status: 'error' as const }
+        return state.remote[id] != null
+          ? { status: 'ok' as const, content: state.remote[id] }
+          : { status: 'absent' as const }
+      },
       write: async (id: string, _s: any, c: string) => {
         state.writes++
         if (!state.up) return false
@@ -445,23 +455,35 @@ describe('ssh mirror guarantee (unmirrored retry)', () => {
     return { state, io }
   }
 
-  it('retries a dropped mirror write on the next save even with unchanged content', async () => {
+  it('lands the mirror on a later save even when the first save ran disconnected', async () => {
     const { state, io } = flakyIO()
     const store = new WorkspaceStore(io)
     const w = ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])
 
-    await store.save(w) // connection not up yet → write dropped
-    expect(state.writes).toBe(1)
+    await store.save(w) // connection not up yet → read errors, nothing written, mirror owed
     expect(state.remote['ps']).toBeUndefined()
 
     state.up = true
     await store.save(w) // content unchanged, but the mirror is still owed
-    expect(state.writes).toBe(2)
     expect(state.remote['ps']).toContain('"id": "ps"')
     expect(JSON.parse(state.remote['ps']).rev).toBe(1) // retry does not bump rev
 
+    const writesSoFar = state.writes
     await store.save(w) // confirmed → unchanged saves stop writing
-    expect(state.writes).toBe(2)
+    expect(state.writes).toBe(writesSoFar)
+  })
+
+  it('markUnmirrored re-owes the mirror (a dropped trailing throttle write reports back)', async () => {
+    const { state, io } = flakyIO()
+    state.up = true
+    const store = new WorkspaceStore(io)
+    const w = ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])
+    await store.save(w) // reconciles (absent) + pushes
+    expect(state.remote['ps']).toContain('"id": "ps"')
+    delete state.remote['ps'] // the acked-but-dropped trailing write: server never got it
+    store.markUnmirrored('ps')
+    await store.save(w) // unchanged content, but the debt is back
+    expect(state.remote['ps']).toContain('"id": "ps"')
   })
 
   it('refreshSshProject records a failed push-up so the next save retries', async () => {
@@ -487,5 +509,111 @@ describe('ssh mirror guarantee (unmirrored retry)', () => {
     const writesAfterRefresh = state.writes
     await store.save(w) // unchanged + already mirrored → no write
     expect(state.writes).toBe(writesAfterRefresh)
+  })
+})
+
+// THE reset bug (field report: 12 fresh project ids for one server folder in two weeks, 45 orphaned
+// tmux sessions). Re-adding a folder via the SSH dialog minted a fresh project id with an empty
+// canvas; its first mirror write clobbered the server's populated .nodeterm/project.json, and rev
+// inflation (refresh seeded our counter from the remote lineage) made the empty canvas win every
+// later reconcile. These tests pin the lineage rules that prevent it.
+describe('ssh lineage safety', () => {
+  const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
+
+  /** A populated remote project file from ANOTHER lineage (different project id). */
+  const foreignRemote = (rev: number, nodes = 1) =>
+    JSON.stringify({
+      version: 1, rev, savedAt: 'then', id: 'old1', name: 'original', color: '#ffd60a',
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: Array.from({ length: nodes }, (_, i) => ({
+        id: `term-old-${i + 1}`, kind: 'terminal', position: { x: 0, y: 0 },
+        size: { width: 1, height: 1 }, title: 'survivor', color: '#fff', group: null
+      }))
+    })
+
+  /** Fake IO keyed by remoteCwd — the server file is the same file no matter which local
+   *  project id points at it (that is what makes re-adding dangerous). */
+  const cwdIO = () => {
+    const files: Record<string, string> = {}
+    const io = {
+      read: async (_id: string, ssh: any) =>
+        files[ssh.remoteCwd] != null
+          ? { status: 'ok' as const, content: files[ssh.remoteCwd] }
+          : { status: 'absent' as const },
+      write: async (_id: string, ssh: any, c: string) => ((files[ssh.remoteCwd] = c), true)
+    }
+    return { files, io }
+  }
+
+  it('a fresh empty project on a populated remote ADOPTS the remote (re-keyed to our id) instead of clobbering it', async () => {
+    const { files, io } = cwdIO()
+    files['~/app'] = foreignRemote(900)
+    const store = new WorkspaceStore(io)
+    // The dialog's re-add: fresh id, empty canvas.
+    await store.save(ws([project({ id: 'fresh1', ssh: sshConn, cwd: undefined, nodes: [] })]))
+
+    // The server file survived (never overwritten with the empty canvas).
+    expect(JSON.parse(files['~/app']).nodes).toHaveLength(1)
+    // The adoption is broadcast to the renderer under OUR project id (the renderer knows no 'old1').
+    const msg = fake.sent.find((m) => m.channel === 'workspace:external-change')
+    expect(msg).toBeTruthy()
+    expect(msg!.args[0]).toMatchObject({ id: 'fresh1', name: 'original' })
+    expect((msg!.args[0] as Project).nodes[0].id).toBe('term-old-1')
+
+    // Rev continues the surviving lineage: the next real edit mirrors as rev 901, not rev 2.
+    const adopted = msg!.args[0] as Project
+    await store.save(ws([{ ...adopted, name: 'renamed' }]))
+    expect(JSON.parse(files['~/app'])).toMatchObject({ rev: 901, id: 'fresh1', name: 'renamed' })
+  })
+
+  it('an EMPTY foreign remote never beats a populated cache, even with a higher rev — and the push outbids it', async () => {
+    const { files, io } = cwdIO()
+    files['~/app'] = foreignRemote(900, 0) // the clobbered file a buggy client left behind
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'fresh1', ssh: sshConn, cwd: undefined })])) // 1 real node
+
+    const after = JSON.parse(files['~/app'])
+    expect(after.id).toBe('fresh1')
+    expect(after.nodes).toHaveLength(1) // our populated canvas pushed up
+    expect(after.rev).toBeGreaterThan(900) // and it WINS future rev reconciles
+    expect(fake.sent.find((m) => m.channel === 'workspace:external-change')).toBeUndefined()
+  })
+
+  it('a read ERROR blocks the first mirror write entirely (no clobber on a flaky connect), then heals', async () => {
+    const files: Record<string, string> = {}
+    let up = false
+    const io = {
+      read: async (_id: string, ssh: any) => {
+        if (!up) return { status: 'error' as const }
+        return files[ssh.remoteCwd] != null
+          ? { status: 'ok' as const, content: files[ssh.remoteCwd] }
+          : { status: 'absent' as const }
+      },
+      write: async (_id: string, ssh: any, c: string) => {
+        if (!up) return false
+        files[ssh.remoteCwd] = c
+        return true
+      }
+    }
+    const store = new WorkspaceStore(io)
+    const w = ws([project({ id: 'fresh1', ssh: sshConn, cwd: undefined })])
+    await store.save(w)
+    expect(files['~/app']).toBeUndefined() // error ≠ absent: nothing pushed blind
+    up = true
+    await store.save(w) // unchanged content — but the reconcile is still owed
+    expect(files['~/app']).toContain('"id": "fresh1"')
+  })
+
+  it('same-lineage reconcile is untouched: an emptier remote with a higher rev still wins (user cleared their canvas)', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])) // rev 1, mirrored
+    const cleared = JSON.parse(files['~/app'])
+    cleared.rev = 7
+    cleared.nodes = [] // the same project id, deliberately emptied on another machine
+    files['~/app'] = JSON.stringify(cleared)
+    const adopted = await store.refreshSshProject('ps')
+    expect(adopted).toMatchObject({ id: 'ps' })
+    expect(adopted!.nodes).toHaveLength(0)
   })
 })

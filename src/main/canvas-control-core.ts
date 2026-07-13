@@ -121,7 +121,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
-    '- `open-terminal [--cwd P] [--cmd C]` — open a terminal node.',
+    '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]` — open N Claude sessions.',
     '- `open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]` — open',
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',

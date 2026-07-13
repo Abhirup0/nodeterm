@@ -28,7 +28,12 @@ export function sshReadBinaryArgs(conn: SshConnection, cp: string, path: string)
   return childArgs(conn, cp, `base64 ${quoteRemotePath(path)}`)
 }
 export function sshWriteArgs(conn: SshConnection, cp: string, path: string): string[] {
-  return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(dirname(path))} && cat > ${quoteRemotePath(path)}`)
+  // Atomic: `cat > file` truncates on open, so a connection dropped (or the ControlMaster killed
+  // at app quit) mid-write leaves a half/empty file — fatal for .nodeterm/project.json. Stream to
+  // a sibling .tmp and mv into place; a write that dies leaves the target untouched.
+  const target = quoteRemotePath(path)
+  const tmp = quoteRemotePath(`${path}.tmp`)
+  return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(dirname(path))} && cat > ${tmp} && mv -f ${tmp} ${target}`)
 }
 export function sshMkdirArgs(conn: SshConnection, cp: string, path: string): string[] {
   return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(path)}`)
@@ -83,6 +88,25 @@ export class SshFs {
       return code === 0 ? stdout : ''
     } catch {
       return ''
+    }
+  }
+
+  /**
+   * Like readText, but keeps "the file is not there" distinguishable from "the read failed".
+   * ssh exits 255 on any connection/auth failure; a remote command's own non-zero status (cat on
+   * a missing/unreadable file) passes through as-is. Workspace reconciliation depends on this:
+   * absent → push our cache up, error → do nothing (a failed read is never evidence of absence).
+   */
+  async readTextChecked(
+    ref: SshFsRef,
+    path: string
+  ): Promise<{ status: 'ok'; content: string } | { status: 'absent' } | { status: 'error' }> {
+    try {
+      const { code, stdout } = await this.run(sshReadArgs(ref.conn, ref.controlPath, path))
+      if (code === 0) return { status: 'ok', content: stdout }
+      return code === 255 ? { status: 'error' } : { status: 'absent' }
+    } catch {
+      return { status: 'error' }
     }
   }
 

@@ -1,8 +1,13 @@
-import { gatePermissionMode, resolvePermissionMode, type AgentPermissionMode } from '@shared/agents/config'
+import {
+  AUTO_PERMISSION_MODE_MIN_VERSION,
+  gatePermissionMode,
+  resolvePermissionMode,
+  type AgentPermissionMode
+} from '@shared/agents/config'
 import { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps, type Project } from '@shared/types'
 import { useProjects } from './projects'
 import { useSettings } from './settings'
-import { useSshConn } from './sshConn'
+import { useSshConn, type SshAutoPermAnswer } from './sshConn'
 
 /**
  * Local Claude CLI capabilities, probed once per app run through `claude.cliCaps()` (main/server →
@@ -82,13 +87,68 @@ export function activePermissionMode(): AgentPermissionMode {
   return gatePermissionMode(resolvePermissionMode(project, settings), autoSupportedFor(project))
 }
 
+/** How long a launch on an SSH project may wait for the REMOTE probe's first answer. The probe
+ *  fires right after connect and pushes every attempt's answer immediately, so this usually
+ *  resolves in the first couple of seconds; the cap keeps a dead probe from stalling a relaunch. */
+export const SSH_AUTO_PROBE_WAIT_MS = 10_000
+
+/** Resolve once the project's remote probe has ANY answer (yes/no), or after `ms`. Fail-open:
+ *  a timeout just means the caller gates on 'unknown' — bare command, never a blocked launch. */
+function waitForSshAutoAnswer(projectId: string, ms: number): Promise<void> {
+  if (useSshConn.getState().autoPermAnswer(projectId) !== 'unknown') return Promise.resolve()
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      unsub()
+      resolve()
+    }
+    const unsub = useSshConn.subscribe((s) => {
+      if (s.autoPermByProject[projectId] !== undefined) finish()
+    })
+    const timer = setTimeout(finish, ms)
+  })
+}
+
 /**
  * `activePermissionMode()` for callers that can run BEFORE the boot-time probe has answered — the
  * cold-restore agent relaunch fires on node mount. Awaiting the (memoized, warmed in the shell)
  * probe there means a rebooted machine still gets `auto`, instead of silently falling back to the
  * bare command for one session.
+ *
+ * On an SSH project the gate consults the REMOTE probe, which races the same mount (it fires
+ * after connect, through a slow login shell) — so when the resolved mode is `auto`, this also
+ * waits (bounded) for that probe's first answer. Any other mode never waits: the gate only ever
+ * touches `auto`.
  */
 export async function ensureActivePermissionMode(): Promise<AgentPermissionMode> {
   await ensureClaudeCliCaps()
+  const { settings } = useSettings.getState()
+  const { getProject, activeProjectId } = useProjects.getState()
+  const project = getProject(activeProjectId)
+  if (project?.ssh && resolvePermissionMode(project, settings) === 'auto') {
+    await waitForSshAutoAnswer(project.id, SSH_AUTO_PROBE_WAIT_MS)
+  }
   return activePermissionMode()
+}
+
+/**
+ * Why `auto` may not apply on this SSH project, for the tab menu's Auto rows — null when the
+ * remote CLI is confirmed and Auto works as chosen. The silent fail-open degrade is correct for
+ * launches but indistinguishable from "the dropdown is broken" without this.
+ */
+export function sshAutoModeHint(
+  answer: SshAutoPermAnswer,
+  version: string | null | undefined
+): string | null {
+  if (answer === 'yes') return null
+  if (answer === 'no') {
+    const v = version?.match(/\d+\.\d+\.\d+/)?.[0]
+    return v
+      ? `The server's Claude CLI is ${v} — Auto needs ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer, so sessions start without a mode flag until it is upgraded.`
+      : 'Claude CLI was not found on the server, so Auto cannot apply — sessions start without a mode flag.'
+  }
+  return `Not verified on this server yet — Auto applies once the server's Claude CLI (≥ ${AUTO_PERMISSION_MODE_MIN_VERSION}) is confirmed.`
 }

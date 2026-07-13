@@ -61,7 +61,7 @@ sh "${shimPath()}" <verb> [args]
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
-- \`open-terminal [--cwd P] [--cmd C]\` — open a terminal node.
+- \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N Claude sessions (default 1).
 - \`open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also

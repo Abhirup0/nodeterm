@@ -251,6 +251,22 @@ export function accountsForProject(
   return accounts.filter((a) => !a.pending && (hostKey ? a.host === hostKey : !a.host))
 }
 
+/**
+ * Hint row for an SSH project's account pickers when the host has no eligible accounts —
+ * local accounts are (correctly) filtered out there, which reads as "multi-account is broken
+ * on SSH" unless the menu says where this host's accounts come from. Null for local projects
+ * (an empty list there just means no managed accounts) and once a matching account exists.
+ * Takes the ALREADY-FILTERED list (`accountsForProject`), which every picker computes anyway.
+ */
+export function sshAccountsHint(
+  project: { ssh?: unknown } | undefined,
+  eligibleAccounts: ClaudeAccount[]
+): string | null {
+  return project?.ssh && eligibleAccounts.length === 0
+    ? 'No accounts on this host yet — add one in Settings → Accounts while this project is connected.'
+    : null
+}
+
 /** Account for a NEW Claude node: explicit pick, else the project default, else system. */
 export function resolveNewNodeAccount(
   explicit: string | undefined,
