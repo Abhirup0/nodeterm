@@ -145,32 +145,29 @@ describe('remoteTmuxCommand', () => {
 
 describe('remoteTmuxConf', () => {
   const c = remoteTmuxConf(50000)
-  it('leaves the mouse off so drags are the emulator\'s own selection', () => {
-    expect(c).toContain('set -g mouse off')
-    expect(c).not.toContain('set -g mouse on')
+  it('leaves the mouse ON — tmux owns scrolling and selection (native, alternate screen)', () => {
+    expect(c).toContain('set -g mouse on')
+    expect(c).not.toContain('set -g mouse off')
   })
-  it('binds no mouse keys (dead with the mouse off)', () => {
-    expect(c).not.toContain('MouseDragEnd1Pane')
-    expect(c).not.toContain('DoubleClick1Pane')
-    expect(c).not.toContain('TripleClick1Pane')
-    expect(c).not.toContain('copy-pipe-and-cancel')
+  it('does not blank smcup/rmcup/indn', () => {
+    expect(c).not.toContain('smcup@')
+    expect(c).not.toContain('rmcup@')
+    expect(c).not.toContain('indn@')
   })
-  it('keeps OSC 52 as a safety net for apps that emit it themselves', () => {
+  it('enables OSC 52 via terminal-features, NOT the Ms= override (a no-op on tmux 3.2+)', () => {
+    // This is what finally makes copying work over SSH: tmux emits OSC 52 to the attached client,
+    // whose handler writes the LOCAL clipboard. Measured: with `Ms=`, tmux emitted nothing.
     expect(c).toContain('set -g set-clipboard on')
-    expect(c).toContain('terminal-overrides')
-    expect(c).toContain('Ms=')
+    expect(c).toContain('set -as terminal-features ",*:clipboard"')
+    expect(c).not.toContain('Ms=')
+    expect(c).not.toContain('terminal-overrides')
   })
-  it('blanks smcup/rmcup AND indn so the emulator actually accumulates a scrollback', () => {
-    expect(c).toContain(`set -ga terminal-overrides ',*:smcup@:rmcup@:indn@'`)
-  })
-  it('APPENDS both terminal-overrides (neither clobbers the other)', () => {
-    // Both lines must use the append form (`-a`), or the second `set` would replace the first
-    // and we would silently lose either OSC 52 or the alternate-screen suppression.
-    const lines = c.split('\n').filter((l) => l.includes('terminal-overrides'))
-    expect(lines).toHaveLength(2)
-    for (const l of lines) expect(l).toMatch(/^set -(ag|ga) terminal-overrides ',/)
-    expect(lines.some((l) => l.includes('Ms='))).toBe(true)
-    expect(lines.some((l) => l.includes('smcup@:rmcup@'))).toBe(true)
+  it('copies mouse selections through tmux, with no pbcopy (it would run on the remote host)', () => {
+    expect(c).toContain('bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
+    expect(c).toContain('bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
+    expect(c).toContain('DoubleClick1Pane send-keys -X select-word')
+    expect(c).toContain('TripleClick1Pane send-keys -X select-line')
+    expect(c).not.toContain('pbcopy')
   })
   it('floors history-limit at 1000', () => {
     expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')

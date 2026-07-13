@@ -12,7 +12,6 @@
 //   - `write(streamId, data)`        -> `OP.Input`  frame (payload = UTF-8 bytes)
 //   - `resize(streamId, cols, rows)` -> `OP.Resize` frame (payload = 2x uint16 LE)
 //   - `kill(streamId)`               -> RPC `pty.kill {streamId}`
-//   - `captureHistory(streamId)`     -> RPC `pty.captureHistory {streamId}` (host-side scrollback)
 //   - host `OP.Output` frame -> per-session data event (UTF-8 decoded)
 //   - host `OP.Error`  frame -> per-session exit event ({exitCode} JSON), stream dropped
 //
@@ -61,13 +60,6 @@ export interface ClientHandlers {
   resize(streamId: number, cols: number, rows: number): void
   /** Kill a remote PTY (the host detaches its client; the host-side tmux session survives). */
   kill(streamId: number): void
-  /**
-   * Scrollback (tmux history + visible screen) of a stream this client is already attached to, so
-   * the renderer can hydrate its empty xterm on a warm reattach (`RPC pty.captureHistory`). The
-   * host jails the request to its own granted streams, so it is keyed by `streamId` — never by a
-   * tmux session name. Degrades to '' on an unknown stream or a host error.
-   */
-  captureHistory(streamId: number): Promise<string>
   /** Route an inbound host frame (OP.Output / OP.Error) to the matching session sinks. */
   onFrame(frame: Frame): void
   /** Drop all tracked streams (called on disconnect/close); does not RPC the host. */
@@ -141,16 +133,6 @@ export function createClientHandlers(
       const stream = streams.get(streamId)
       if (!stream) return
       socket.sendFrame(OP.Resize, streamId, stream.seq++, resizePayload(cols, rows))
-    },
-    async captureHistory(streamId) {
-      if (!streams.has(streamId)) return ''
-      try {
-        const body = asRecord(await socket.rpc('pty.captureHistory', { streamId }))
-        return typeof body.output === 'string' ? body.output : ''
-      } catch {
-        // History is a nicety; the live stream matters more — never fail the attach over it.
-        return ''
-      }
     },
     kill(streamId) {
       if (!streams.has(streamId)) return
@@ -374,15 +356,6 @@ export function initRemoteClient(win: BrowserWindow, deps?: { isPackaged?: boole
   ipcMain.on(IPC.remoteClientKill, (_e, connectionId: string, sessionId: string) => {
     connections.get(String(connectionId))?.handlers.kill(Number(sessionId))
   })
-
-  // Warm-reattach hydration: the remote node's tmux session lives on the host, so its scrollback
-  // has to come from there. A missing connection degrades to '' (the terminal still streams live).
-  ipcMain.handle(
-    IPC.remoteClientCaptureHistory,
-    (_e, connectionId: string, sessionId: string): Promise<string> =>
-      connections.get(String(connectionId))?.handlers.captureHistory(Number(sessionId)) ??
-      Promise.resolve('')
-  )
 
   // The client renderer's optimistic canvas edit → forward to the host as a `canvas:mutate` RPC.
   ipcMain.on(IPC.remoteClientMutate, (_e, connectionId: string, mutation: CanvasMutation) => {

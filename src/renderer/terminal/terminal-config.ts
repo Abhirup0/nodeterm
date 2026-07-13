@@ -124,18 +124,17 @@ export function shouldApplyResync(screen: string | null | undefined): screen is 
 export const XTERM_SCROLLBACK_MAX = 10000
 
 /**
- * Floor, mirroring the tmux conf's own `history-limit ${Math.max(1000, scrollback)}`. Without it a
- * user who sets `tmuxScrollback: 100` would get 1000 lines of tmux history but a 100-line xterm
- * buffer — and xterm is the buffer the user actually scrolls, so the tmux history would be
- * unreachable.
+ * Floor, mirroring the tmux conf's own `history-limit ${Math.max(1000, scrollback)}`, so the two
+ * buffers never disagree at the low end.
  */
 export const XTERM_SCROLLBACK_MIN = 1000
 
 /**
- * How many scrollback lines xterm keeps. Scrolling is xterm's job now (tmux's mouse is off),
- * so it needs a real scrollback — xterm's default is only 1000 lines. It follows the same
- * `settings.tmuxScrollback` the user picked for tmux's history-limit, but floored and capped
- * (same floor as the tmux conf, so the two buffers never disagree at the low end).
+ * How many scrollback lines xterm keeps. The WHEEL scrolls tmux (its mouse is on, and the pane is
+ * on the alternate screen), so this buffer is not what the user scrolls in a tmux session — it is
+ * the fallback for a session with no tmux (a plain shell) and the room a cold-restore snapshot
+ * replay needs. xterm's default of 1000 lines is too small for the latter, so it follows the same
+ * `settings.tmuxScrollback` the user picked for tmux's history-limit, floored and capped.
  */
 export function xtermScrollback(tmuxScrollback: number): number {
   return Math.min(Math.max(XTERM_SCROLLBACK_MIN, tmuxScrollback), XTERM_SCROLLBACK_MAX)
@@ -143,14 +142,17 @@ export function xtermScrollback(tmuxScrollback: number): number {
 
 /**
  * What a freshly-created xterm has to be seeded with when its session resolves:
- * - `cold-snapshot` — the tmux session is gone (first open after a reboot): replay the persisted
- *   scrollback snapshot, with a "session restored" separator.
- * - `warm-history`  — the tmux session is still alive but this xterm is new (app restart): tmux
- *   only redraws the VISIBLE screen, so pull everything above it from tmux's own history.
+ * - `cold-snapshot` — the tmux session is GONE (first open after a machine reboot, which kills the
+ *   tmux server): replay the persisted scrollback snapshot, with a "session restored" separator.
+ * - `warm-attach`   — the tmux session is still alive but this xterm is new (app restart): seed
+ *   NOTHING. tmux is attached to this client and PAINTS it — the visible screen on attach, and its
+ *   own history under the wheel (the mouse is tmux's; see `tmuxConf`). Hydrating anything here is
+ *   what used to produce the black bands and duplicated screens. The one exception is a co-attach
+ *   JOINER, which gets no redraw of its own — see `seedPaint`'s `create-screen`.
  * - `none`          — nothing to seed: a parked terminal keeps its buffer (seeding would duplicate
  *   it), and a brand-new node with an `initialCommand` has no history to restore.
  */
-export type AttachReplay = 'cold-snapshot' | 'warm-history' | 'none'
+export type AttachReplay = 'cold-snapshot' | 'warm-attach' | 'none'
 
 /** Which seeding (if any) applies to a terminal that just attached. */
 export function attachReplay(opts: {
@@ -162,18 +164,18 @@ export function attachReplay(opts: {
   hasInitialCommand: boolean
 }): AttachReplay {
   if (opts.parked) return 'none'
-  if (!opts.fresh) return 'warm-history'
+  if (!opts.fresh) return 'warm-attach'
   return opts.hasInitialCommand ? 'none' : 'cold-snapshot'
 }
 
 /**
  * What a resolved seed PAINTS into the emulator:
  * - `snapshot`      — the persisted cold-restore scrollback (with the "session restored" separator).
- * - `history`       — tmux's own scrollback, pulled by `transport.captureHistory`.
- * - `create-screen` — the joiner fallback: the screen captured server-side inside `create()`, used
- *   only when the history capture came back empty (tmux/ssh unavailable) — see "Painting the
- *   joiner" in docs/team-presence.md.
- * - `none`          — paint NOTHING.
+ * - `create-screen` — the CO-ATTACH JOINER's screen, captured server-side inside `create()`. A
+ *   joiner that did not resize gets no tmux redraw (tmux repaints on SIGWINCH), so this is the only
+ *   thing that paints it — see "Painting the joiner" in docs/team-presence.md.
+ * - `none`          — paint NOTHING. This is the normal warm reattach: tmux redraws the client and
+ *   owns its history, so there is nothing for us to write.
  *
  * The decision is deliberately about PAINTING ONLY, and the type has no "abort" member, because the
  * spawn continuation that calls this must go on to do the rest of its job no matter what comes back:
@@ -183,7 +185,7 @@ export function attachReplay(opts: {
  * nothing", NOT "return": returning from the continuation would leave a terminal that streams output
  * and looks perfectly alive while silently accepting no input, forever.
  */
-export type SeedPaint = 'snapshot' | 'history' | 'create-screen' | 'none'
+export type SeedPaint = 'snapshot' | 'create-screen' | 'none'
 
 /** What (if anything) the resolved seed should write. Never an instruction to stop. */
 export function seedPaint(opts: {
@@ -192,50 +194,14 @@ export function seedPaint(opts: {
   superseded: boolean
   /** The persisted scrollback snapshot (`cold-snapshot`), '' when there is none. */
   snapshot?: string | null
-  /** tmux's scrollback (`warm-history`), '' when the capture failed or tmux was unreachable. */
-  history?: string | null
   /** `PtyCreateResult.screen`: present (and non-empty) only for a joiner that did not resize. */
   screen?: string | null
 }): SeedPaint {
   if (opts.replay === 'none' || opts.superseded) return 'none'
   if (opts.replay === 'cold-snapshot') return opts.snapshot ? 'snapshot' : 'none'
-  if (opts.history) return 'history'
+  // `warm-attach`: tmux paints this client itself, so the only thing left to write is a joiner's
+  // captured screen (it never gets a redraw). Everyone else seeds nothing.
   return shouldApplyResync(opts.screen) ? 'create-screen' : 'none'
-}
-
-/**
- * The exact bytes a warm reattach writes into a fresh xterm, from tmux's scrollback (`history`) and,
- * for a joiner, the visible screen (`screen`).
- *
- * The subtle part is the padding. tmux's attach redraw is `\x1b[H\x1b[2J` + a repaint, and
- * `eraseInDisplay(2)` clears the viewport rows **in place** — it does not scroll them into
- * scrollback. So whatever we leave sitting in the viewport SURVIVES the redraw, above the screen
- * tmux then paints. The capture is hard-wrapped at the HOST pane's width, so it re-wraps to a
- * different number of rows here, and the leftover can never line up with what the redraw overwrites:
- * on a narrow client (a phone) the tail of the history reappears as a second copy the moment you
- * scroll back. Emitting `rows` newlines pushes the history entirely above the fold, so the redraw
- * lands on blank lines and overwrites nothing of ours. (The capture excludes the visible screen —
- * `capture-pane -E -1` — precisely because tmux is about to paint it.)
- *
- * A **joiner** gets no redraw (it did not resize, so tmux never repaints for it), which is why its
- * `screen` is painted here instead.
- */
-export function warmSeed(opts: {
-  history?: string | null
-  screen?: string | null
-  /** The xterm's row count — how far the history has to be pushed to clear the viewport. */
-  rows: number
-}): string {
-  const out: string[] = []
-  const history = opts.history ? stripTrailingNewline(opts.history) : ''
-  const screen = shouldApplyResync(opts.screen) ? stripTrailingNewline(opts.screen) : ''
-  if (history) {
-    // The capture is byte-trimmed at the head, so it can begin mid-escape-sequence — start from a
-    // known-clean SGR state rather than an arbitrary one.
-    out.push('\x1b[0m', toXtermText(history), '\r\n'.repeat(Math.max(1, opts.rows)))
-  }
-  if (screen) out.push('\x1b[0m', toXtermText(screen))
-  return out.join('')
 }
 
 /** The slice of xterm the resync repaint drives (so it can be tested without a DOM). */

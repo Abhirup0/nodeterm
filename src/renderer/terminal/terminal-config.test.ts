@@ -14,7 +14,6 @@ import {
   repaintResync,
   reportedSize,
   seedPaint,
-  warmSeed,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
@@ -86,8 +85,8 @@ describe('attachReplay', () => {
     expect(attachReplay({ parked: false, fresh: true, hasInitialCommand: false })).toBe('cold-snapshot')
   })
 
-  it('hydrates from tmux history on a warm reattach (fresh xterm, live session)', () => {
-    expect(attachReplay({ parked: false, fresh: false, hasInitialCommand: false })).toBe('warm-history')
+  it('seeds nothing on a warm reattach — tmux redraws the pane and owns its history', () => {
+    expect(attachReplay({ parked: false, fresh: false, hasInitialCommand: false })).toBe('warm-attach')
   })
 
   it('seeds nothing on a brand-new node (fresh session + launch command)', () => {
@@ -442,30 +441,24 @@ describe('seedPaint', () => {
     expect(seedPaint({ replay: 'cold-snapshot', superseded: false, snapshot: '' })).toBe('none')
   })
 
-  it('paints tmux history on a warm reattach', () => {
-    expect(seedPaint({ replay: 'warm-history', superseded: false, history: 'scrollback' })).toBe(
-      'history'
-    )
+  it('paints NOTHING on a plain warm reattach — tmux redraws the pane itself', () => {
+    // Hydrating here is exactly what produced the black bands and duplicated screens: tmux is a
+    // screen painter, and its repaints leaked into whatever we had seeded.
+    expect(seedPaint({ replay: 'warm-attach', superseded: false })).toBe('none')
   })
 
-  it('falls back to the create-result screen for a joiner whose history capture came back empty', () => {
+  it("paints the create-result screen for a CO-ATTACH JOINER (it gets no tmux redraw)", () => {
     expect(
-      seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: 'live screen' })
+      seedPaint({ replay: 'warm-attach', superseded: false, screen: 'live screen' })
     ).toBe('create-screen')
-    // Both available: the seed is still driven by the history (`warmSeed` paints the joiner's
-    // screen underneath it — the capture EXCLUDES the visible screen, so the two don't overlap).
-    expect(
-      seedPaint({ replay: 'warm-history', superseded: false, history: 'hist', screen: 'scr' })
-    ).toBe('history')
-    // Neither: a blank-but-live terminal beats a wrongly painted one.
-    expect(seedPaint({ replay: 'warm-history', superseded: false, history: '', screen: '' })).toBe(
-      'none'
-    )
+    // No screen (a solo warm reattach, or a capture that came back empty): a blank-but-live
+    // terminal beats a wrongly painted one — tmux paints it a moment later anyway.
+    expect(seedPaint({ replay: 'warm-attach', superseded: false, screen: '' })).toBe('none')
   })
 
   it('paints nothing for a parked terminal (its buffer is already correct)', () => {
     expect(
-      seedPaint({ replay: 'none', superseded: false, snapshot: 'old', history: 'hist' })
+      seedPaint({ replay: 'none', superseded: false, snapshot: 'old', screen: 'scr' })
     ).toBe('none')
   })
 
@@ -473,13 +466,12 @@ describe('seedPaint', () => {
     // The whole point of the helper: a superseded seed still returns a PAINT decision, so the spawn
     // continuation carries on to wire onExit, term.onData (the keyboard input path) and the
     // initialCommand / agent resume. `none` is not a signal to return.
-    for (const replay of ['cold-snapshot', 'warm-history', 'none'] as const) {
+    for (const replay of ['cold-snapshot', 'warm-attach', 'none'] as const) {
       expect(
         seedPaint({
           replay,
           superseded: true,
           snapshot: 'old snapshot',
-          history: 'old history',
           screen: 'old screen'
         })
       ).toBe('none')
@@ -513,7 +505,7 @@ function fakeTerm(): {
 describe('repaintResync', () => {
   it('resets only AFTER the writes already queued have been parsed (never mid-flight)', () => {
     const term = fakeTerm()
-    term.write('STALE HISTORY') // a warm-history seed, handed to xterm but not yet parsed
+    term.write('STALE HISTORY') // a seed already handed to xterm but not yet parsed
     repaintResync(term, 'FRESH')
     // Nothing repainted yet: an inline reset() would have cleared an almost-empty buffer and the
     // stale history would then parse on top of the cleared screen.
@@ -583,44 +575,5 @@ describe('repaintResync', () => {
     expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
     expect(term.ops).toContain('write:ONE')
     expect(term.ops).toContain('write:TWO')
-  })
-})
-
-describe('warmSeed', () => {
-  const rows = 20
-
-  it('pushes the history above the fold so tmux\'s in-place redraw cannot leave a second copy', () => {
-    const seed = warmSeed({ history: 'line1\nline2\n', rows })
-    // The history itself, CRLF-converted, with its trailing newline consumed by the padding.
-    expect(seed).toContain('line1\r\nline2')
-    // Exactly `rows` newlines after it: the viewport is blank when tmux repaints it, so nothing of
-    // ours survives in the viewport to reappear in the scrollback.
-    const padding = seed.slice(seed.indexOf('line2') + 'line2'.length)
-    expect(padding).toBe('\r\n'.repeat(rows))
-  })
-
-  it('starts the block from a clean SGR state (the capture can begin mid-escape)', () => {
-    expect(warmSeed({ history: 'x\n', rows }).startsWith('\x1b[0m')).toBe(true)
-  })
-
-  it('writes nothing at all when there is no history and no screen', () => {
-    expect(warmSeed({ history: '', screen: '', rows })).toBe('')
-    expect(warmSeed({ history: null, screen: null, rows })).toBe('')
-  })
-
-  it('emits no padding when there is no history (nothing to push above the fold)', () => {
-    expect(warmSeed({ screen: 'live\n', rows })).toBe('\x1b[0m' + 'live')
-  })
-
-  it("paints a joiner's screen after the history — it gets no tmux redraw of its own", () => {
-    const seed = warmSeed({ history: 'old\n', screen: 'now\n', rows })
-    expect(seed.indexOf('old')).toBeLessThan(seed.indexOf('now'))
-    expect(seed.endsWith('now')).toBe(true)
-    // …and the history is still pushed above the fold, so the screen lands on blank lines.
-    expect(seed).toContain('\r\n'.repeat(rows))
-  })
-
-  it('never divides by a zero-row terminal', () => {
-    expect(warmSeed({ history: 'x\n', rows: 0 })).toBe('\x1b[0m' + 'x' + '\r\n')
   })
 })

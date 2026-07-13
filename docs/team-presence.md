@@ -218,16 +218,14 @@ Three rules:
   never reaches this path at all: a fresh spawn has nothing to paint, and a warm reattach starts a
   tmux client, which redraws by itself.
 
-**Post-merge with `main`'s terminal work: `screen` became the joiner's FALLBACK, not its paint.**
-`main` gave every `fresh:false` attach a `warm-history` seed — it hydrates a fresh xterm from
-`transport.captureHistory` (tmux's own scrollback). A joiner is `fresh:false`, so it now lands on
-that path too, and painting *both* would splice the same screen onto the canvas twice. One source
-wins: **`captureHistory`**, because it is a strict superset of `screen` — the same tmux pane *plus*
-the scrollback above it, so the joiner opens on what its teammate sees **and** can scroll back.
-`PtyCreateResult.screen` remains as the fallback for the one case that path cannot cover:
-`captureHistory` returns `''` whenever tmux/ssh is unavailable, whereas `screen` is captured
-server-side inside `create()` and is guaranteed non-empty when present. So the joiner is painted
-**exactly once**, and never blank.
+**`screen` is the joiner's paint — and the ONLY thing a warm attach seeds.** There was briefly a
+second source: a `warm-history` seed that hydrated every `fresh:false` attach from tmux's own
+scrollback (`transport.captureHistory`). That whole hydration is **gone** — tmux owns the mouse and
+the scrollback again (see CLAUDE.md, "Terminal session continuity"), so it redraws the pane and its
+history is scrollable in place; hydrating on top of a screen *painter* is what produced the black
+bands and duplicated screens. A solo warm reattach therefore seeds **nothing**, and `seedPaint`'s
+`create-screen` — this capture — is the one seed a `warm-attach` can still yield, for the one client
+tmux does not repaint: a joiner that did not resize.
 
 **A `pty:resync` supersedes the seed, and the queue behind it.** `main`'s attach path subscribes to
 `pty:data` *before* awaiting its seed and holds the chunks in a `createDataGate`. A resync that lands

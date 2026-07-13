@@ -40,10 +40,6 @@ export class LocalTransport implements TerminalTransport {
     this.pty.recycle(persistKey)
   }
 
-  captureHistory(persistKey: string): Promise<string> {
-    return this.pty.captureHistory(persistKey)
-  }
-
   onData(sessionId: string, listener: (data: string) => void): () => void {
     return this.pty.onData(sessionId, listener)
   }
