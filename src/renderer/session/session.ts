@@ -5,8 +5,15 @@ import type { NodeTerminalApi } from '@shared/types'
 // presence store type (`../state/presence`) and Task 4 does the same for `AgentStatusSession`
 // (`../state/agentStatus`) — those stores are not per-instance factories yet, so importing them
 // here would be wrong. Deliberately not exported: nothing may depend on the placeholder shape.
-type PresenceSession = object
-type AgentStatusSession = object
+// BRANDED on purpose: a bare `object` would accept a real store, so wiring one into
+// `buildStores()` while forgetting to swap the alias would typecheck cleanly and leave the
+// slot typed as a placeholder forever. The unique-symbol brand makes that assignment a compile
+// error at the exact line — replacing the alias is the only way to satisfy the compiler.
+declare const PLACEHOLDER: unique symbol
+/** Task 2 replaces this with the real per-session presence store type. */
+type PresenceSession = { readonly [PLACEHOLDER]: 'replace in Task 2' }
+/** Task 4 replaces this with the real per-session agent-status store type. */
+type AgentStatusSession = { readonly [PLACEHOLDER]: 'replace in Task 4' }
 
 export type SessionSource = 'local' | 'relay' | 'server'
 
@@ -39,14 +46,29 @@ let remoteSeq = 0
 /** Task 2/4 replace this with the real default instances for the local session. Until then a
  *  minimal placeholder keeps the registry shape honest without pulling in the stores. */
 function buildStores(): SessionStores {
-  return { presence: {}, agentStatus: {} }
+  return { presence: {} as PresenceSession, agentStatus: {} as AgentStatusSession }
 }
 
+/** Idempotent per id: if the id already exists, the EXISTING session is returned and nothing is
+ *  rebuilt. After Task 2 `buildStores()` constructs a real presence store with a live
+ *  subscription — a duplicate call (hot reload, a test helper, a future reconnect path) must not
+ *  build a second one beside the first (Stage 1's "exactly one subscriber" invariant is per
+ *  session). Return-existing rather than throw: the duplicate caller wants "the session for this
+ *  id", and throwing would turn a benign HMR re-run of localSession.ts into a renderer crash. */
 export function createSession(source: SessionSource, api: NodeTerminalApi, label: string): WorkspaceSession {
   const id = source === 'local' ? 'local' : `${source}-${++remoteSeq}`
+  const existing = SESSIONS.get(id)
+  if (existing) return existing.session
   const session: WorkspaceSession = { id, source, label, api, status: 'connected' }
   SESSIONS.set(id, { session, stores: buildStores() })
   return session
+}
+
+/** Test-only: clears the registry so each test starts with no sessions. */
+export function resetSessionsForTest(): void {
+  SESSIONS.clear()
+  activeId = null
+  remoteSeq = 0
 }
 
 export function getSessionStores(sessionId: string): SessionStores {
