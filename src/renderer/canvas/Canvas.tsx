@@ -431,6 +431,17 @@ export function Canvas() {
   // Live relay tabs, keyed by relay connectionId, so a host/relay drop can dispose the right one
   // (a remote connection is now a project TAB, not a full-surface overlay — Stage 4 Task 6).
   const relayTabsRef = useRef<Map<string, RelayTab>>(new Map())
+  // A relay tab is a live client of a remote core — closing/deleting its project must tear the
+  // relay session down (held presence teardown + socket close), or the peer lingers in the host's
+  // facepile and the socket leaks until quit. Runs on BOTH close and delete (unlike a local tmux
+  // project, there is nothing to keep warm). No-op for a non-relay project.
+  const disposeRelayTabForProject = useCallback((projectId: string) => {
+    for (const [connectionId, tab] of relayTabsRef.current) {
+      if (tab.projectId !== projectId) continue
+      relayTabsRef.current.delete(connectionId)
+      tab.dispose() // idempotent — a prior socket-drop dispose leaves this a safe no-op
+    }
+  }, [])
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
   const [sshDialogOpen, setSshDialogOpen] = useState(false)
@@ -1783,6 +1794,10 @@ export function Canvas() {
   // bridged api, wait for mutual approval, then add a session-bound tab. `openRelayTab` guards the
   // approval wait so a pre-approval socket drop rejects instead of hanging. On a later host/relay
   // drop, dispose the tab's session (presence + relay socket teardown). Idempotent per connectionId.
+  // Connections the user deliberately abandoned (declined the SAS) — their bootstrap rejection is
+  // expected, not an error to alert about.
+  const cancelledConnsRef = useRef<Set<string>>(new Set())
+
   const mountRemoteMirror = useCallback((connectionId: string, label = 'Remote host') => {
     if (relayTabsRef.current.has(connectionId)) return
     void openRelayTab(connectionId, label, {
@@ -1800,6 +1815,8 @@ export function Canvas() {
         })
       })
       .catch((err) => {
+        // A user who declined the SAS triggered this close themselves — don't cry error.
+        if (cancelledConnsRef.current.delete(connectionId)) return
         window.alert(`Remote session did not open: ${(err as Error).message}`)
       })
   }, [])
@@ -1818,6 +1835,8 @@ export function Canvas() {
         if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
           window.nodeTerminal.relayClient.confirm(connectionId)
         } else {
+          // Deliberate decline: mark it so the bootstrap's close-reject isn't surfaced as an error.
+          cancelledConnsRef.current.add(connectionId)
           window.nodeTerminal.relayClient.disconnect(connectionId)
         }
       })
@@ -4738,10 +4757,11 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
   // Right-click on a sidebar project header: the same project actions as the tab caret menu,
@@ -4866,10 +4886,11 @@ export function Canvas() {
           .finally(() => void window.nodeTerminal.sshProject.disconnect(id))
         useSshConn.getState().clear(id)
       }
+      disposeRelayTabForProject(id)
       store.deleteProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
   const now = useMemo(() => Date.now(), [transcriptHits])
