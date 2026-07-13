@@ -116,6 +116,7 @@ import {
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
 import { useWorktrees } from '../state/worktrees'
+import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
   hasHooks,
@@ -185,6 +186,7 @@ import {
   createDiffNode,
   createEditorNode,
   createGroupNode,
+  WORKTREE_GROUP_SIZE,
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
@@ -490,6 +492,10 @@ export function Canvas() {
   } | null>(null)
   const [worktreeBusy, setWorktreeBusy] = useState(false)
   const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  // Local branch names for the dialog's Base / existing-branch dropdown. Fetched fresh each time the
+  // dialog opens (a branch created in a terminal since the last store refresh should still show), so
+  // it is dialog-local state rather than a store fact.
+  const [worktreeBranches, setWorktreeBranches] = useState<string[]>([])
   // The store is filled asynchronously by the active-project effect, so the dialog subscribes
   // (rather than reading getState() once) — the repo may resolve after it's already open.
   const worktreeRepoRoot = useWorktrees((s) => s.repoRoot)
@@ -2674,6 +2680,16 @@ export function Canvas() {
       }
       setWorktreeError(null)
       setWorktreeDialog({ groupId, at, projectId })
+      // Fresh branch list for the Base / existing-branch dropdown. Clear first so a previous repo's
+      // branches can't flash; fetch fire-and-forget (a failed read just leaves the field free-text).
+      setWorktreeBranches([])
+      const root = useWorktrees.getState().repoRoot
+      if (root) {
+        void activeSessionApi()
+          .git.status(root)
+          .then((s) => setWorktreeBranches(s.branches ?? []))
+          .catch(() => setWorktreeBranches([]))
+      }
     },
     []
   )
@@ -2691,7 +2707,7 @@ export function Canvas() {
       } else {
         const group = createGroupNode(
           target.at ?? viewCenter() ?? { x: 0, y: 0 },
-          undefined,
+          WORKTREE_GROUP_SIZE,
           nodesRef.current.length
         )
         group.data = { ...group.data, title: wt.branch, worktree: wt }
@@ -3024,14 +3040,16 @@ export function Canvas() {
     attachWorktree,
     releaseWorktreeBinding,
     clearWorktreeBinding,
-    requestRemoveWorktree
+    requestRemoveWorktree,
+    cwdForNewNodeIn
   })
   useEffect(() => {
     worktreeControlRef.current = {
       attachWorktree,
       releaseWorktreeBinding,
       clearWorktreeBinding,
-      requestRemoveWorktree
+      requestRemoveWorktree,
+      cwdForNewNodeIn
     }
   })
 
@@ -3967,6 +3985,21 @@ export function Canvas() {
             // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
+            // --group parents the new node(s) into an existing group frame; a worktree-bound
+            // group also hands its worktree path down as the cwd (same inheritance as
+            // UI-created nodes — cwdForNewNodeIn is the one resolver for that).
+            let intoGroupId: string | undefined
+            if (args.group) {
+              const g = nodesRef.current.find((nd) => nd.id === args.group)
+              if (!g || g.type !== 'group') {
+                reply({ ok: false, error: `${verb}: --group must name an existing group frame` })
+                return
+              }
+              intoGroupId = g.id
+            }
+            const groupCwd = intoGroupId
+              ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
+              : undefined
             // Inherit the source node's managed account, else the project default, else system —
             // the same funnel as addAgentNode (the factory drops accounts on non-claude agents).
             const projStore = useProjects.getState()
@@ -3977,20 +4010,17 @@ export function Canvas() {
             )
             const ids: string[] = []
             for (let i = 0; i < count; i++) {
-              ids.push(
-                addAndConnect(
-                  createAgentNode(
-                    agentId,
-                    nodesRef.current.length + i,
-                    args.cwd || srcCwd,
-                    placeBelow(i),
-                    args.prompt,
-                    undefined,
-                    account,
-                    activePermissionMode()
-                  )
-                )
+              const node = createAgentNode(
+                agentId,
+                nodesRef.current.length + i,
+                args.cwd || groupCwd || srcCwd,
+                placeBelow(i),
+                args.prompt,
+                undefined,
+                account,
+                activePermissionMode()
               )
+              ids.push(addAndConnect(intoGroupId ? parentInto(node, intoGroupId) : node))
             }
             reply({
               ok: true,
@@ -5587,6 +5617,7 @@ export function Canvas() {
           repoPath={worktreeRepoRoot ?? ''}
           existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
           defaultBaseRef={resolveBaseRef(worktreeEntries)}
+          branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               userDataDir,

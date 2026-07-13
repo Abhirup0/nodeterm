@@ -499,9 +499,9 @@ export const DEFAULT_SETTINGS: Settings = {
   customAgents: [],
   claudeAccounts: [],
   systemAccountLabel: '',
-  // New users see only Claude in the Add menus; Codex/Gemini are opt-in (re-enable in Settings).
+  // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
-  disabledAgents: ['codex', 'gemini'],
+  disabledAgents: [],
   defaultAgent: 'claude',
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
+import { BranchSelect } from './BranchSelect'
 import { isValidGitRef, type WorktreeCreateValue, type WorktreeEntry } from '@shared/worktree'
 
 interface Props {
@@ -13,6 +14,10 @@ interface Props {
   existing: WorktreeEntry[]
   /** The repo's default branch (the main checkout's), used as the Base default. */
   defaultBaseRef: string
+  /** The repo's local branch names. Base and the "existing branch" field pick from these with a
+   *  custom dropdown (`BranchSelect`). Base's dropdown also carries a free-text field so a base can
+   *  be any ref (a tag / SHA / `origin/x`), not just a local branch. Empty ⇒ plain text inputs. */
+  branches: string[]
   /** Suggested worktree path. Returns '' when no writable base dir is known — see `pathUnknown`. */
   defaultPath: (repoPath: string, branch: string) => string
   busy: boolean
@@ -28,6 +33,7 @@ export function WorktreeDialog({
   repoPath,
   existing,
   defaultBaseRef,
+  branches,
   defaultPath,
   busy,
   error,
@@ -37,6 +43,12 @@ export function WorktreeDialog({
 }: Props) {
   const [mode, setMode] = useState<'new' | 'existing'>('new')
   const [branch, setBranch] = useState('feature/')
+  // `feature/` is a head-start for typing, not a submittable value — it fails `isValidGitRef`
+  // (trailing slash). Showing the red "not a valid branch name" error on an untouched dialog reads
+  // as the app yelling before the user has done anything, so the error waits until the field is
+  // touched. (Create stays disabled meanwhile — see `valid` — so an unfinished `feature/` can't
+  // slip through either way.)
+  const [branchEdited, setBranchEdited] = useState(false)
   const [baseRef, setBaseRef] = useState(defaultBaseRef)
   const [path, setPath] = useState(() => defaultPath(repoPath, 'feature/'))
   const [pathEdited, setPathEdited] = useState(false)
@@ -52,6 +64,8 @@ export function WorktreeDialog({
   useEffect(() => {
     if (!baseEdited) setBaseRef(defaultBaseRef)
   }, [defaultBaseRef, baseEdited])
+
+  const hasBranches = branches.length > 0
 
   // Only the topmost modal answers a key (./dialog-stack): this dialog and a ConfirmDialog can be
   // open at the same time, and one Escape must not close both.
@@ -73,12 +87,10 @@ export function WorktreeDialog({
   // tracks the FIELD, not `pathEdited`: clearing the box after editing it also leaves Create
   // disabled, and a disabled button with no explanation is a dead end.
   const pathUnknown = !path.trim()
-  // The default branch value ('feature/') is a STARTING POINT for typing, not a submittable one —
-  // it fails `isValidGitRef` (trailing slash), so a fresh dialog must not let Create through: the
-  // ops layer would reject it and the user would see "Invalid branch name." on the very first use
-  // of the feature. Gate the button on the same validator the ops layer uses, so "clickable" always
-  // means "will not be rejected for this reason." The hint only fires once the field is non-empty —
-  // an untouched-but-empty field needs no explanation, `!valid` alone covers it.
+  // Gate Create on the same validator the ops layer uses, so "clickable" always means "will not be
+  // rejected for this reason" — the button reflects the REAL validity (so an untouched `feature/`
+  // can't be submitted). The red error, by contrast, only appears once the user has touched the
+  // field (`branchEdited`): a fresh dialog must not accuse the user of a bad name they never typed.
   const branchInvalid = !!branch.trim() && !isValidGitRef(branch)
   const valid = !!repoPath.trim() && !!branch.trim() && !branchInvalid && !!path.trim() && !busy
   const title = intent === 'bind' ? 'Bind to worktree' : 'New worktree'
@@ -134,12 +146,35 @@ export function WorktreeDialog({
           </label>
         </div>
 
-        <label className="bind-field">
-          Branch
-          <input value={branch} onChange={(e) => setBranch(e.target.value)} />
-        </label>
+        {/* New branch = a name that must NOT exist yet, so free text. Existing branch = check out
+            one that DOES exist, so pick it from the dropdown (falls back to text if none were read). */}
+        {mode === 'existing' && hasBranches ? (
+          <div className="bind-field">
+            Branch
+            <BranchSelect
+              value={branches.includes(branch) ? branch : ''}
+              options={branches}
+              placeholder="Select a branch…"
+              onChange={(v) => {
+                setBranch(v)
+                setBranchEdited(true)
+              }}
+            />
+          </div>
+        ) : (
+          <label className="bind-field">
+            Branch
+            <input
+              value={branch}
+              onChange={(e) => {
+                setBranch(e.target.value)
+                setBranchEdited(true)
+              }}
+            />
+          </label>
+        )}
 
-        {branchInvalid && (
+        {branchEdited && branchInvalid && (
           <div className="bind-error">
             Not a valid branch name — finish typing one (no spaces, "..", or a leading/trailing
             slash).
@@ -147,16 +182,38 @@ export function WorktreeDialog({
         )}
 
         {mode === 'new' && (
-          <label className="bind-field">
-            Base
-            <input
-              value={baseRef}
-              onChange={(e) => {
-                setBaseRef(e.target.value)
-                setBaseEdited(true)
-              }}
-            />
-          </label>
+          <>
+            {/* Pick a branch from the dropdown, or type any ref (tag / SHA / origin/x) in its
+                free-text field. If the branch list could not be read, degrade to a plain input. */}
+            {hasBranches ? (
+              <div className="bind-field">
+                Base
+                <BranchSelect
+                  value={baseRef}
+                  options={branches}
+                  placeholder="Select a base…"
+                  allowCustom
+                  customPlaceholder="or a tag, commit, origin/…"
+                  onChange={(v) => {
+                    setBaseRef(v)
+                    setBaseEdited(true)
+                  }}
+                />
+              </div>
+            ) : (
+              <label className="bind-field">
+                Base
+                <input
+                  value={baseRef}
+                  placeholder="e.g. origin/main, a tag, or a commit"
+                  onChange={(e) => {
+                    setBaseRef(e.target.value)
+                    setBaseEdited(true)
+                  }}
+                />
+              </label>
+            )}
+          </>
         )}
 
         <label className="bind-field">
