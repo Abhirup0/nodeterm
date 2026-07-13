@@ -138,9 +138,14 @@ let sshProjectManager: ReturnType<typeof initSshProject> | undefined
 const workspaceSshFs = new SshFs((args, stdin) =>
   sshProjectManager ? sshProjectManager.sshRun(args, stdin) : Promise.resolve({ code: 1, stdout: '' })
 )
-const workspaceStore = new WorkspaceStore(
-  makeRemoteWorkspaceIO((projectId) => sshProjectManager?.refForProject(projectId) ?? null, workspaceSshFs)
+const remoteWorkspaceIO = makeRemoteWorkspaceIO(
+  (projectId) => sshProjectManager?.refForProject(projectId) ?? null,
+  workspaceSshFs,
+  // A throttled trailing write that fails after its optimistic ack re-owes the mirror, so the
+  // next save retries instead of believing the server file landed.
+  (projectId) => workspaceStore.markUnmirrored(projectId)
 )
+const workspaceStore = new WorkspaceStore(remoteWorkspaceIO)
 // Watch each local ref's project.json for outside edits (git pull, a teammate's commit).
 // Self-writes match the store's last-written cache and are ignored. Re-synced after every
 // store load/save via onPersist; disposed on quit next to ptyManager.killAll().
@@ -1140,7 +1145,9 @@ app.on('window-all-closed', () => {
     app.quit()
   } else {
     void ptyManager.killAll()
-    sshProjectManager?.disconnectAll()
+    // Land any pending throttled .nodeterm mirror write BEFORE the masters die — killing a
+    // master mid-write used to leave a truncated project.json on the server.
+    void remoteWorkspaceIO.flush().finally(() => sshProjectManager?.disconnectAll())
   }
 })
 
@@ -1150,11 +1157,17 @@ let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
   workspaceWatcher.dispose()
-  sshProjectManager?.disconnectAll()
   chatDriver.disposeAll() // tear down every chat node's SDK query (resume-based, so this is safe)
-  if (quitFlushed) return
+  if (quitFlushed) {
+    // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
+    sshProjectManager?.disconnectAll()
+    return
+  }
   quitFlushed = true
   e.preventDefault()
-  const flush = ptyManager.killAll()
+  // Pending throttled .nodeterm mirror writes must land BEFORE the ControlMasters die — killing
+  // a master mid-write used to leave a truncated project.json on the server. The masters are
+  // therefore kept up through the raced flush and dropped on the second before-quit pass.
+  const flush = Promise.allSettled([remoteWorkspaceIO.flush(), ptyManager.killAll()])
   void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit())
 })

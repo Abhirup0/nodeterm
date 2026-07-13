@@ -75,3 +75,55 @@ describe('setDinoHighScore', () => {
     expect(useProjects.getState().projects).toHaveLength(0)
   })
 })
+
+// Regression: "Connect over SSH…" used to create a brand-new project (fresh id, empty canvas)
+// every time, even when a project for the same server+folder already existed — the empty canvas
+// then mirrored over the server's .nodeterm/project.json and wiped it. Same contract as
+// openFolderProject: reuse, reopen, never duplicate.
+describe('openSshProject', () => {
+  const server = { id: 's1', label: 'niova', host: 'h', user: 'root' } as never
+  const ssh = { server, remoteCwd: '~/app' }
+
+  it('creates a new ssh project and activates it when none matches', () => {
+    const p = useProjects.getState().openSshProject('app · niova', ssh)
+    expect(p.ssh).toEqual(ssh)
+    expect(p.name).toBe('app · niova')
+    const s = useProjects.getState()
+    expect(s.activeProjectId).toBe(p.id)
+    expect(s.projects).toHaveLength(1)
+  })
+
+  it('reuses the existing project for the same server+remoteCwd instead of duplicating', () => {
+    const first = useProjects.getState().openSshProject('app · niova', ssh)
+    // Re-added server entry: different SshServer id/label, same endpoint.
+    const readded = { id: 's2', label: 'renamed', host: 'h', user: 'root' } as never
+    const again = useProjects.getState().openSshProject('app · renamed', { server: readded, remoteCwd: '~/app' })
+    expect(again.id).toBe(first.id)
+    expect(useProjects.getState().projects).toHaveLength(1)
+    expect(useProjects.getState().activeProjectId).toBe(first.id)
+  })
+
+  it('reopens a closed matching project so it is visible again', () => {
+    const first = useProjects.getState().openSshProject('app · niova', ssh)
+    useProjects.getState().closeProject(first.id)
+    const p = useProjects.getState().openSshProject('app · niova', ssh)
+    expect(p.id).toBe(first.id)
+    const s = useProjects.getState()
+    expect(s.activeProjectId).toBe(first.id)
+    expect(s.projects.filter((q) => !q.closed).map((q) => q.id)).toEqual([first.id])
+  })
+
+  it('a different remoteCwd on the same server is a separate project', () => {
+    const first = useProjects.getState().openSshProject('app · niova', ssh)
+    const other = useProjects.getState().openSshProject('web · niova', { server, remoteCwd: '~/web' })
+    expect(other.id).not.toBe(first.id)
+    expect(useProjects.getState().projects).toHaveLength(2)
+  })
+
+  it('a different port on the same host is a separate project', () => {
+    const first = useProjects.getState().openSshProject('app · niova', ssh)
+    const alt = { id: 's3', label: 'alt', host: 'h', user: 'root', port: 2222 } as never
+    const other = useProjects.getState().openSshProject('app · alt', { server: alt, remoteCwd: '~/app' })
+    expect(other.id).not.toBe(first.id)
+  })
+})

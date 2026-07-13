@@ -25,6 +25,12 @@ interface ProjectsState {
    *  new one named after the folder. Activates and returns it (caller commits the current
    *  canvas first). */
   openFolderProject(folder: string): Project
+  /** "Connect over SSH…": a server folder maps to one project, same contract as
+   *  openFolderProject. Reuses the existing project with the same endpoint (host/user/port) and
+   *  remoteCwd — reopening it if it was closed — or creates a new one. Re-adding must NEVER mint
+   *  a fresh empty project for a folder that already has one: its first mirror write used to
+   *  clobber the server's .nodeterm/project.json. Activates and returns it. */
+  openSshProject(label: string, ssh: NonNullable<Project['ssh']>): Project
   /** Registers a probed project (from a folder's .nodeterm file). If the id collides with an
    *  existing project, derives a fresh project id (node ids untouched). Activates it. */
   adoptProject(project: Project): Project
@@ -150,6 +156,24 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }
     const name = folder.split('/').filter(Boolean).pop() || 'Project'
     const project = get().addProject(name, folder)
+    set({ activeProjectId: project.id })
+    return project
+  },
+
+  openSshProject(label, ssh) {
+    const existing = get().projects.find(
+      (p) =>
+        p.ssh &&
+        p.ssh.remoteCwd === ssh.remoteCwd &&
+        p.ssh.server.host === ssh.server.host &&
+        p.ssh.server.user === ssh.server.user &&
+        (p.ssh.server.port ?? 22) === (ssh.server.port ?? 22)
+    )
+    if (existing) {
+      get().reopenProject(existing.id)
+      return existing
+    }
+    const project = get().addProject(label, undefined, ssh)
     set({ activeProjectId: project.id })
     return project
   },

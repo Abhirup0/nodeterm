@@ -4868,15 +4868,16 @@ export function Canvas() {
     })
   }, [])
 
-  // Create an SSH project from the dialog: commit the current canvas, add + switch to the new
-  // project (its master is opened by the active-project effect on switch), persist.
+  // Create an SSH project from the dialog: commit the current canvas, then open-or-reuse the
+  // project for that server folder (its master is opened by the active-project effect on switch),
+  // persist. openSshProject dedupes by endpoint+remoteCwd — re-adding a folder must reuse its
+  // existing project, never mint a fresh empty one that would clobber the server's project.json.
   const createSshProject = useCallback(
     (input: { server: SshServer; remoteCwd: string; label: string }) => {
       commitActiveToStore()
-      const project = useProjects
+      useProjects
         .getState()
-        .addProject(input.label, undefined, { server: input.server, remoteCwd: input.remoteCwd })
-      useProjects.getState().setActive(project.id)
+        .openSshProject(input.label, { server: input.server, remoteCwd: input.remoteCwd })
       // Same contract as onRepoCloned: the welcome screen waits behind the SSH dialog and
       // dismisses only once the project is created (cancel returns to the welcome screen).
       setWelcomeOpen(false)
