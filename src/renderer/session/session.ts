@@ -1,18 +1,7 @@
 import { createContext, createElement, useContext, type ReactNode } from 'react'
 import type { NodeTerminalApi } from '@shared/types'
 import { createPresenceSession, type PresenceSession } from '../state/presence'
-
-// Placeholder store-instance type. Task 4 replaces `AgentStatusSession` with the real
-// per-session agent-status store type (`../state/agentStatus`) — that store is not a
-// per-instance factory yet, so importing it here would be wrong. Deliberately not exported:
-// nothing may depend on the placeholder shape.
-// BRANDED on purpose: a bare `object` would accept a real store, so wiring one into
-// `buildStores()` while forgetting to swap the alias would typecheck cleanly and leave the
-// slot typed as a placeholder forever. The unique-symbol brand makes that assignment a compile
-// error at the exact line — replacing the alias is the only way to satisfy the compiler.
-declare const PLACEHOLDER: unique symbol
-/** Task 4 replaces this with the real per-session agent-status store type. */
-type AgentStatusSession = { readonly [PLACEHOLDER]: 'replace in Task 4' }
+import { agentStatusForApi, type AgentStatusSession } from '../state/agentStatus'
 
 export type SessionSource = 'local' | 'relay' | 'server'
 
@@ -49,11 +38,14 @@ let remoteSeq = 0
  *  (a loopback debug session, a test double) shares that api's existing store rather than
  *  racing it for the bridge's first-subscriber replay buffer. A different api (a different
  *  core, a different peer-id space) gets a fresh instance.
- *  Task 4 replaces the agentStatus placeholder with the real default instance. */
+ *  `agentStatusForApi` follows the same rule: the local api resolves to the default persisted
+ *  instance (the exact object the historical `state/agentStatus` imports use), any other api
+ *  gets a keyless in-memory instance — a remote core's per-node status must never clobber the
+ *  local user's persisted unread/session under `nodeterm.agentStatus`. */
 function buildStores(api: NodeTerminalApi): SessionStores {
   return {
     presence: createPresenceSession(api),
-    agentStatus: {} as AgentStatusSession
+    agentStatus: agentStatusForApi(api)
   }
 }
 
