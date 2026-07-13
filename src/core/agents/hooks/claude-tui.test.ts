@@ -58,11 +58,14 @@ describe('ensureFullscreenTuiInFile (fail-open file wrapper)', () => {
     })
   })
 
-  it('tolerates a corrupt file (parses to {} then writes the key, like install-helper)', () => {
+  it('NEVER touches a file that exists but does not parse (data loss beats a rendering default)', () => {
+    // Unlike install-helper, which normalizes a corrupt file: if the hook merge bailed early,
+    // this pass would be the FIRST writer here, and replacing the user's settings with {tui:...}
+    // would silently destroy every real key they had.
     const p = path.join(dir, 'corrupt.json')
     writeFileSync(p, '{ not json', 'utf8')
-    expect(ensureFullscreenTuiInFile(p)).toBe(true)
-    expect(JSON.parse(readFileSync(p, 'utf8'))).toEqual({ tui: TUI_FULLSCREEN })
+    expect(ensureFullscreenTuiInFile(p)).toBe(false)
+    expect(readFileSync(p, 'utf8')).toBe('{ not json')
   })
 
   it('an empty file is treated as {} and gets the key', () => {

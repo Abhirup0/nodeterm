@@ -166,10 +166,14 @@ export class RemoteHooks {
         childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
       )
       let cfg: TuiSettings = {}
-      try {
-        cfg = JSON.parse(raw || '{}') as TuiSettings
-      } catch {
-        cfg = {}
+      if (raw.trim() && raw.trim() !== '{}') {
+        try {
+          cfg = JSON.parse(raw) as TuiSettings
+        } catch {
+          // The file EXISTS but does not parse (`|| echo '{}'` only fires when it is missing):
+          // never replace the user's settings with {tui:...} — same guard as the local wrapper.
+          return
+        }
       }
       const { config: next, changed } = ensureFullscreenTui(cfg)
       if (!changed) return // key already present (any value) → never overwrite the user's `/tui`

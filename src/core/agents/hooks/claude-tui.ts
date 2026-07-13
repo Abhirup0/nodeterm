@@ -32,16 +32,29 @@ export function ensureFullscreenTui(config: TuiSettings): { config: TuiSettings;
 
 /**
  * Fail-open file wrapper for the local surfaces (system `~/.claude` + managed account dirs). Reads
- * `configPath` (a missing/empty/corrupt file → `{}`, matching install-helper), applies
- * `ensureFullscreenTui`, and writes back ONLY if the key was added. Returns whether it wrote.
- * A read or write error is swallowed + warned, never thrown.
+ * `configPath`, applies `ensureFullscreenTui`, and writes back ONLY if the key was added. Returns
+ * whether it wrote. A read or write error is swallowed + warned, never thrown.
+ *
+ * A file that EXISTS but does not parse is left completely alone — unlike install-helper, which
+ * normalizes it. The hook merge usually runs first and normalizes a corrupt file, but when it bails
+ * early (its managed-script write failed) this pass would be the FIRST writer, and "replace the
+ * user's settings with {tui:...}" is data loss a cosmetic rendering default can never justify.
+ * Only a genuinely missing/empty file is treated as `{}`.
  */
 export function ensureFullscreenTuiInFile(configPath: string): boolean {
   let config: TuiSettings = {}
+  let raw: string | null = null
   try {
-    config = JSON.parse(readFileSync(configPath, 'utf8')) as TuiSettings
+    raw = readFileSync(configPath, 'utf8')
   } catch {
-    config = {}
+    raw = null // missing/unreadable → create from {}
+  }
+  if (raw !== null && raw.trim() !== '') {
+    try {
+      config = JSON.parse(raw) as TuiSettings
+    } catch {
+      return false // exists but unparseable: never replace the user's file
+    }
   }
   const { config: next, changed } = ensureFullscreenTui(config)
   if (!changed) return false
