@@ -176,6 +176,9 @@ describe('peer sink registry', () => {
 
     unregisterPeerSink(id)
 
+    // The wired gone-hook actually reached PtyManager: onPeerGone → dropClient(id) ran, so the pty
+    // layer heard this subscriber leave. Without it the pause below would leak forever.
+    expect(gone).toEqual([id])
     // The pause is returned by PtyManager.dropClient (the onPeerGone hook), never re-asserted or
     // re-resumed here; the sweep that would have done it is gone with its last client.
     expect(vi.getTimerCount()).toBe(0)

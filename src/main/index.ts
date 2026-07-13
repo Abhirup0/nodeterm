@@ -112,6 +112,8 @@ const ptyManager = new PtyManager()
 // `onPeerGone` → `dropClient`, and nothing else tells the pty layer that subscriber is gone (a
 // vanished peer sends no `pty:kill`) — the pause it owed would freeze the shared terminal for every
 // viewer. Inert with zero peers: the registry holds no sink, so none of this ever runs.
+// Wired once here — do not double-wire (4b Task 4). A second wirePeerRegistry() call would silently
+// overwrite these deps (last write wins), so keep this the sole call site in src/main.
 wirePeerRegistry({
   setFlow: (id, sid, resume, owner) => ptyManager.setFlow(id, sid, resume, owner),
   captureForResync: (sid) => ptyManager.captureForResync(sid),
