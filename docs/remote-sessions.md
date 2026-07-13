@@ -156,6 +156,65 @@ tmux; reconnect re-enters via co-attach (Stage 2 already guarantees this).
 4a, 4b and 4d run in parallel worktrees. 4c is the join point and must not ship to
 users before 4d is wired (it grants `pty.create` to peers).
 
+## 4a → 4c interface (landed)
+
+The session layer lives in `src/renderer/session/` (`session.ts` + `localSession.ts`).
+These are the exact exported names 4c builds against — do not rename:
+
+- **Types / context:** `WorkspaceSession` (`{id, source, label, api, status}`),
+  `SessionSource` (`'local' | 'relay' | 'server'`), `SessionContext`, `SessionProvider`.
+- **Hooks:** `useSession()` (the current session; components read `useSession().api`),
+  `useSessionStores()` (that session's per-session store instances),
+  `useProjectSession(projectId)` (the session a tab belongs to).
+- **Registry:** `createSession(source, api, label)` (idempotent per id; builds the
+  per-session stores once), `getSessionStores(sessionId)`, `setActiveSession(sessionId)`,
+  `getActiveSession()`, `activeSessionApi()` (non-component code's api accessor),
+  `sessionForProject(projectId)` (runtime-only tab → session resolver; returns the
+  local session today), `sessionCount()` (gates multi-session-only UI, e.g. the tab
+  session label), `resetSessionsForTest()`.
+- **Per-session store factories:** `createPresenceSession(api)` (`state/presence.ts`)
+  and `createAgentStatusSession(persistKey?)` / `agentStatusForApi(api)`
+  (`state/agentStatus.ts`) — the api-keyed entry points are **memoized by API
+  IDENTITY**, so the local api resolves to the historical singleton instances and a
+  repeat api never builds a second subscriber; `SessionStores` is the pair the
+  registry holds per session.
+
+The project → session binding is **runtime-only**: `workspace.json` / `project.json`
+gained no field, and `state/projects.test.ts` has a tripwire asserting `toWorkspace()`
+never emits a session field. `session/grep-gate.test.ts` enforces that no production
+renderer file outside the session layer / bridge reads a core-bound namespace
+(`pty|fs|git|chat|workspace|presence|canvas` + the agent event streams) off
+`window.nodeTerminal`.
+
+**Obligations 4c inherits** (surfaced by the 4a reviews — read before wiring a remote
+session):
+
+1. **A remote session's presence instance has no disposal path.** `createSession`
+   builds the presence store (with its live subscription) and nothing ever tears it
+   down. Whoever mounts a remote canvas MUST hold the teardown returned by the
+   presence session's `connect()` and call it on disconnect, or the store keeps
+   subscriptions on a dead connection.
+2. **`setMe` only re-helloes its own session.** Renaming yourself updates and
+   re-broadcasts on the session it was called on; another live session keeps
+   broadcasting the old name until reload. 4c needs a fan-out across sessions or a
+   shared identity slice.
+3. **Resource effects capture `api` in their closures — 4c must REMOUNT on api
+   change.** This is deliberate in 4a: adding `api` to a `[]`-dep resource effect
+   (TerminalNode's PTY, EditorNode's Monaco, ChatNode's driver) would create a SECOND
+   PTY/Monaco/chat driver on any api change. The consequence: if a session's api is
+   ever swapped IN PLACE (reconnect building a new RPC client under the same session),
+   those nodes keep talking to the OLD core until remount — and `EditorNode` would
+   LOAD from core A and SAVE to core B. **4c must key the session's subtree by session
+   id / api identity so an api change remounts it.** This is the most important line
+   in this hand-off.
+4. **`CloneRepoDialog`'s folder picker is client-local.** The native directory picker
+   chooses a path on the CLIENT machine while the clone runs on the SESSION's core —
+   harmless today (same machine), wrong on a remote tab. 4c must route the picker per
+   session (the Server Edition's in-app server-directory browser is the precedent).
+5. **Deferred namespaces still read off the global:** `sshProject`, `contextLink`,
+   `context`, `transcripts`, `handoff`, `files`. They live in files 4c rewrites; 4c
+   must decide each one (core-bound → session, or app-global → stays on the client).
+
 ## Testing
 
 - **Core tests are transport-agnostic** (~150 tests against the `CorePlatform` fake)
