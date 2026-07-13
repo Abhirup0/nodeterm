@@ -2458,8 +2458,7 @@ export function Canvas() {
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
         // session is being destroyed right here). Also drops an already-parked entry.
         if (n.type === 'terminal') disposeTerminalOnUnmount(n.id)
-        // Remote terminals have no local persistent session — only destroy local ones.
-        if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        if (n.type === 'terminal') transport.destroy(n.id)
         // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
         // lives across project switches (only permanent delete kills it), so this belongs here,
         // not in node unmount.
@@ -2472,20 +2471,6 @@ export function Canvas() {
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearLoop(n.id)
-      })
-      // Tear down relay connections owned solely by the deleted remote node(s). The model is
-      // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
-      // connectionId if no *surviving* remote node still uses it, so we never drop a live one.
-      const deletedConns = new Set<string>()
-      const survivingConns = new Set<string>()
-      nodesRef.current.forEach((n) => {
-        const conn = (n.data.remote as { connectionId: string } | undefined)?.connectionId
-        if (!conn) return
-        if (set.has(n.id)) deletedConns.add(conn)
-        else survivingConns.add(conn)
-      })
-      deletedConns.forEach((conn) => {
-        if (!survivingConns.has(conn)) void window.nodeTerminal.remoteClient.disconnect(conn)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
@@ -3090,9 +3075,7 @@ export function Canvas() {
     // silently (the confirm closing with nothing happening reads as a bug).
     //
     // The question is the PROJECT's (does its git — and its tmux — run over ssh?) and the NODE's
-    // (`isRemoteSessionNode`: relay `data.remote` OR an SSH project's `data.ssh`/`data.sshRemoteTmux`).
-    // Guarding `data.remote` alone asked only about relay nodes, which cannot occur in an SSH project
-    // at all — so the one node kind this exists to protect walked straight through it.
+    // (`isRemoteSessionNode`: an SSH project's `data.ssh`/`data.sshRemoteTmux`).
     if (isSshProject || isRemoteSessionNode(node.data)) {
       setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
       return

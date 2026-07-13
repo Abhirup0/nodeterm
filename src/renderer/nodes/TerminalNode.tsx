@@ -390,8 +390,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // not exist on the host. Both halves of "remote" are asked: the project (its terminals and its git
   // run over ssh — a local project that LATER became an SSH one still carries the old binding, and
   // its worktree directory may well still exist locally, so nothing else here would notice) and the
-  // node (`isRemoteSessionNode` — an SSH-project terminal carries `data.ssh`/`data.sshRemoteTmux`,
-  // never `data.remote`). The affordance is absent, not merely refused on click.
+  // node (`isRemoteSessionNode` — an SSH-project terminal carries `data.ssh`/`data.sshRemoteTmux`).
+  // The affordance is absent, not merely refused on click.
   const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
   const remoteSession = sshProject || isRemoteSessionNode(data)
   const canMoveIntoWorktree =
@@ -665,28 +665,25 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           if (event.metaKey || event.ctrlKey) window.nodeTerminal.shell.openExternal(uri)
         })
       )
-      // Relay-remote nodes have no client-side fs to verify paths against — URLs only.
-      if (!data.remote) {
-        const projectFs = (): { fs: FsApi; ssh: boolean } => {
-          const st = useProjects.getState()
-          const project = st.projects.find((p) => p.id === st.activeProjectId)
-          return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: api.fs, ssh: false }
-        }
-        const lookup = makeDirListingLookup(async (dir) => projectFs().fs.list(dir))
-        term.registerLinkProvider(
-          createFileLinkProvider(term, {
-            getCwd: () => (data.cwd as string | undefined) || undefined,
-            lookup,
-            activate: (abs, isDir) => {
-              if (isDir) window.dispatchEvent(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } }))
-              else
-                window.dispatchEvent(
-                  new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: projectFs().ssh } })
-                )
-            }
-          })
-        )
+      const projectFs = (): { fs: FsApi; ssh: boolean } => {
+        const st = useProjects.getState()
+        const project = st.projects.find((p) => p.id === st.activeProjectId)
+        return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: api.fs, ssh: false }
       }
+      const lookup = makeDirListingLookup(async (dir) => projectFs().fs.list(dir))
+      term.registerLinkProvider(
+        createFileLinkProvider(term, {
+          getCwd: () => (data.cwd as string | undefined) || undefined,
+          lookup,
+          activate: (abs, isDir) => {
+            if (isDir) window.dispatchEvent(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } }))
+            else
+              window.dispatchEvent(
+                new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: projectFs().ssh } })
+              )
+          }
+        })
+      )
     }
 
     // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
@@ -723,7 +720,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let handedOff: ParkedTerminal | null = null
     // Kill the PTY client at most once per session: the effect cleanup, a park dispose and a
     // still-in-flight spawn continuation can all reach for it. `PtyManager.kill` tolerates a
-    // repeat, but `RemoteTransport.kill` forwards to the relay unconditionally.
+    // repeat, but the guard keeps the kill idempotent across all three callers.
     const killSession = (sid: string): void => {
       if (life.killed) return
       life.killed = true
@@ -733,18 +730,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // to the still-live session on first mount); everything below that pushes here is gated on
     // `!parked` so nothing is wired twice.
     const cleanups: Array<() => void> = parked ? parked.cleanups : []
-
-    // Remote nodes: surface a dropped relay connection (host gone / socket closed) so the
-    // terminal isn't silently frozen. The actual relay teardown on node *deletion* happens
-    // in Canvas.deleteNodes (which can dedupe a connectionId shared by sibling nodes).
-    const remoteConn = (data.remote as { connectionId: string } | undefined)?.connectionId
-    if (!parked && remoteConn) {
-      cleanups.push(
-        window.nodeTerminal.remoteClient.onClosed(remoteConn, () => {
-          term.write('\r\n\x1b[31m[remote disconnected]\x1b[0m\r\n')
-        })
-      )
-    }
 
     // Agent state (busy/idle/attention) comes from the agent's own hooks via the
     // agent:status IPC (handled centrally in Canvas) — not from parsing the output here.
@@ -914,7 +899,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // `cleanups` has unsubscribed everything and the session is killed. `life.dead` (flipped
         // before the teardown in BOTH paths: the effect cleanup and the park dispose) is the
         // authority: past it there is no session left to un-pause, and `transport.setFlow` would
-        // address a dead one (RemoteTransport forwards to the relay unconditionally).
+        // address a dead one.
         const relieve = (bytes: number): void => {
           if (life.dead) return
           pending -= bytes
@@ -1655,14 +1640,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           className="term-node__close"
           title="Close (ends the session)"
           onClick={() => {
-            const remoteConn = (data.remote as { connectionId: string } | undefined)?.connectionId
-            if (remoteConn) {
-              // Remote node: no local tmux to destroy; tear down the relay connection
-              // (socket + keepalive + main-process map entry). N:1, so this owns it.
-              void window.nodeTerminal.remoteClient.disconnect(remoteConn)
-            } else {
-              transport.destroy(id)
-            }
+            transport.destroy(id)
             deleteElements({ nodes: [{ id }] })
           }}
         >

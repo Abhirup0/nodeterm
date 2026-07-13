@@ -32,8 +32,6 @@ export interface WorktreeListResult {
 
 /** The node fields that can say "this session does not run on this machine". */
 interface RemoteNodeLike {
-  /** Relay-bound node (`createRemoteTerminalNode`) — not persisted. */
-  remote?: unknown
   /** SSH-PROJECT terminal (`createTerminalNode(..., project.ssh)`) — the connection it runs on. */
   ssh?: unknown
   /** SSH-PROJECT terminal: its tmux server lives on the host, not here. */
@@ -48,13 +46,12 @@ interface RemoteNodeLike {
  * never be moved into one — its session would be destroyed and respawned into a directory that does
  * not exist there, and the dead path would be persisted to `project.json`.
  *
- * THREE different fields mean "remote", and guarding only one is how the exact node this protects
- * slipped through: `data.remote` is set ONLY by `createRemoteTerminalNode` (relay nodes, never
- * persisted, never inside an SSH project), while an SSH-PROJECT terminal carries `data.ssh` +
- * `data.sshRemoteTmux` and NEVER `data.remote`. Ask about all of them.
+ * An SSH-PROJECT terminal carries BOTH `data.ssh` (the connection it runs on) and
+ * `data.sshRemoteTmux` (its tmux server lives on the host), and guarding only one is how the exact
+ * node this protects slipped through — so ask about both.
  */
 export function isRemoteSessionNode(data: RemoteNodeLike | undefined): boolean {
-  return !!(data && (data.remote || data.ssh || data.sshRemoteTmux))
+  return !!(data && (data.ssh || data.sshRemoteTmux))
 }
 
 /**
