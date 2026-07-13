@@ -59,6 +59,7 @@ import { presenceHub, allocateRelayClientId } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { IPC } from '../shared/ipc'
+import { decodePtyData } from '../shared/rpc'
 
 /** A fake relay peer sink — records every RPC frame the platform pushed at it. `t` is the text
  *  (event) frames, `b` the binary (pty:data) frames; `ui` is what registerPeerSink takes. */
@@ -208,5 +209,141 @@ describe('peer integration — presence + canvas reflector reach a registered pe
       { op: 'upsert', node: { id: 'n2', position: { x: 0, y: 0 } } }
     )
     expect(s.t).toEqual([])
+  })
+})
+
+// ── merge-gate c: pty OUTPUT fans out to a peer sink, with the full Stage-2 backpressure ──────────
+//
+// This is the property that lets a real remote peer CO-ATTACH to a desktop terminal: pty bytes reach
+// the peer as BINARY frames (decodePtyData), and a peer that stops draining is paused, then — past
+// the 8 MB WS_DROP_WATER ceiling — dropped and redrawn from a tmux capture, WITHOUT throttling or
+// stalling a second, fast peer or the desktop's own window.
+//
+// Nothing here fakes the backpressure logic — that is the thing under test. What IS driven directly
+// (not through a real node-pty) is the pty read loop: in production PtyManager fans a chunk out with
+// `platform.sendTo(clientId, 'pty:data:<sid>', chunk)` per subscriber, so this composes the REAL
+// electronPlatform + REAL peerRegistry/UiSinkRegistry + REAL wirePeerRegistry and calls that exact
+// entry point. The tmux `captureForResync` and the PtyManager.setFlow actuator are the two injected
+// seams (wirePeerRegistry's deps) and are the only stand-ins — exactly as backpressure.test.ts
+// stands in for tmux/ptyManager on the Server Edition. This is the electron-side twin of
+// src/server/backpressure.test.ts, sharing the extracted UiSinkRegistry.
+describe('peer pty fan-out — binary frames + drop-and-redraw ceiling (merge-gate c)', () => {
+  /** A peer sink with a caller-controlled `buffered` (== ws.bufferedAmount): the number Stage-2's
+   *  ceiling keys on. `bins` are the pty:data binary frames; `resyncs` are the tmux redraws. */
+  function ctlSink() {
+    let buffered = 0
+    const bins: Uint8Array[] = []
+    const resyncs: string[] = []
+    const ui: UiSink = {
+      sendText: (json) => {
+        const m = JSON.parse(json)
+        if (String(m.channel).startsWith('pty:resync:')) resyncs.push(String(m.args[0]))
+      },
+      sendBinary: (b) => {
+        bins.push(b)
+        buffered += b.byteLength
+      },
+      bufferedAmount: () => buffered
+    }
+    return {
+      ui,
+      bins,
+      resyncs,
+      set: (n: number) => {
+        buffered = n
+      }
+    }
+  }
+
+  it('pty output fans out to a peer via sendBinary, with the drop-and-redraw ceiling (merge-gate c)', async () => {
+    const flow: Array<{ resume: boolean; owner: string }> = []
+    wirePeerRegistry({
+      setFlow: (_id, _sid, resume, owner) => flow.push({ resume, owner }),
+      captureForResync: async () => 'CURRENT SCREEN',
+      onPeerGone: () => {}
+    })
+    const p = electronPlatform()
+    const peer = allocateRelayClientId()
+    const s = ctlSink()
+    registerPeerSink(peer, s.ui)
+
+    // 1. A pty chunk reaches the peer as a BINARY frame the phone can decode back to (sid, data).
+    p.sendTo(peer, 'pty:data:s1', 'hello')
+    expect(decodePtyData(s.bins[0])).toEqual({ sessionId: 's1', data: 'hello' })
+
+    // 2. Past WS_DROP_WATER the chunk is DROPPED, not queued — bounded memory, no unbounded backlog.
+    s.set(9_000_000)
+    p.sendTo(peer, 'pty:data:s1', 'flood')
+    expect(s.bins).toHaveLength(1)
+
+    // 3. The socket drains → the sweep redraws the peer from tmux exactly ONCE (current screen, not a
+    //    replay of the 8 MB it missed).
+    s.set(1000)
+    await vi.waitFor(() => expect(s.resyncs).toEqual(['CURRENT SCREEN']))
+  })
+
+  it('pauses a slow peer at the high-water mark and resumes it below low, all under the socket owner', () => {
+    const flow: Array<{ resume: boolean; owner: string }> = []
+    wirePeerRegistry({
+      setFlow: (_id, _sid, resume, owner) => flow.push({ resume, owner }),
+      captureForResync: async () => 'SCREEN',
+      onPeerGone: () => {}
+    })
+    const p = electronPlatform()
+    const peer = allocateRelayClientId()
+    const s = ctlSink()
+    registerPeerSink(peer, s.ui)
+
+    s.set(1_500_000) // above WS_HIGH_WATER (1 MB), below the drop ceiling
+    p.sendTo(peer, 'pty:data:s1', 'chunk') // → pause the shared pty for this peer
+    expect(flow).toEqual([{ resume: false, owner: 'socket' }])
+
+    s.set(100_000) // drained below WS_LOW_WATER
+    p.sendTo(peer, 'pty:data:s1', 'chunk') // → resume
+    expect(flow).toEqual([
+      { resume: false, owner: 'socket' },
+      { resume: true, owner: 'socket' }
+    ])
+  })
+
+  it('a slow peer over the ceiling stalls NEITHER a fast peer NOR the desktop window (co-attach isolation)', async () => {
+    const flow: Array<{ id: number; resume: boolean }> = []
+    wirePeerRegistry({
+      setFlow: (id, _sid, resume) => flow.push({ id, resume }),
+      captureForResync: async () => 'CURRENT SCREEN',
+      onPeerGone: () => {}
+    })
+    const p = electronPlatform()
+    const slowId = allocateRelayClientId()
+    const fastId = allocateRelayClientId()
+    const slow = ctlSink()
+    const fast = ctlSink()
+    slow.set(8_000_001) // already past WS_DROP_WATER
+    registerPeerSink(slowId, slow.ui)
+    registerPeerSink(fastId, fast.ui)
+
+    // The pty read loop fans each chunk out to every subscriber: the slow peer, the fast peer, and
+    // the desktop's own window (webContents id 1, mocked in `webContents.fromId`).
+    for (let i = 0; i < 3; i++) {
+      p.sendTo(slowId, 'pty:data:s1', 'chunk')
+      p.sendTo(fastId, 'pty:data:s1', 'chunk')
+      p.sendTo(1, 'pty:data:s1', 'chunk')
+    }
+
+    // The slow peer is dropped: nothing more is queued for it (its buffer cannot grow past the bound).
+    expect(slow.bins).toHaveLength(0)
+    // The fast peer keeps streaming, uninterrupted — one binary frame per chunk.
+    expect(fast.bins).toHaveLength(3)
+    expect(decodePtyData(fast.bins[2])).toEqual({ sessionId: 's1', data: 'chunk' })
+    // The desktop window (native webContents send) is untouched by the slow peer entirely.
+    expect(h.sent.filter((x) => x.id === 1 && x.channel === 'pty:data:s1')).toHaveLength(3)
+    // And the shared pty is NEVER paused for the drowning peer — a per-client drop, not a global stall.
+    expect(flow).toEqual([])
+
+    // When the slow peer finally drains it is redrawn from tmux (once), while the fast peer and the
+    // window were never affected.
+    slow.set(1000)
+    await vi.waitFor(() => expect(slow.resyncs).toEqual(['CURRENT SCREEN']))
+    expect(fast.bins).toHaveLength(3)
   })
 })
