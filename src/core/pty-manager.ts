@@ -1483,7 +1483,12 @@ export class PtyManager {
   ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    if (cols === null || rows === null) {
+    // Loose `== null` on purpose (belt and braces): the sizes arrive over IPC on the desktop and
+    // over a JSON wire in the Server Edition, and JSON has no `undefined`. If any encoding path
+    // ever loses the distinction again, "no size" must degrade to PARK — dropping the client from
+    // the ledger — and never to `normalizeSize(undefined, undefined)`, which clamps to a 1×1 grid
+    // and would shrink the shared pty to one cell for every co-attached viewer.
+    if (cols == null || rows == null) {
       session.sizes.delete(clientId)
     } else {
       const size = normalizeSize(cols, rows)

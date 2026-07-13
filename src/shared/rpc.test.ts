@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { parseRpcMessage, encodePtyData, decodePtyData } from './rpc'
+import { parseRpcMessage, encodeArgs, encodePtyData, decodePtyData } from './rpc'
+
+/** What a sender actually puts on the wire: encode the arg slots, then JSON. */
+const wire = (method: string, ...args: unknown[]): string =>
+  JSON.stringify({ t: 'cast', method, args: encodeArgs(args) })
 
 describe('rpc protocol', () => {
   it('parses each message kind and rejects malformed input', () => {
@@ -20,17 +24,21 @@ describe('rpc protocol', () => {
     expect(parseRpcMessage('{"t":"req","id":"x","method":1}')).toBeNull()
   })
 
-  // `JSON.stringify([a, undefined])` is `[a, null]` — the wire has no `undefined`. So a browser
-  // call that omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`)
-  // arrives at the handler as an EXPLICIT `null`, which does NOT trigger a default parameter:
-  // `worktreeMerge(…, push = false)` runs with `push === null`. Today every such default happens to
-  // be falsy, so `null` coerces to the same behavior and the bug is invisible — safe by luck, not by
-  // construction. The first `= true` default (or any handler that branches on `arg === undefined`)
-  // reintroduces it; `git.history` already broke exactly this way. The decoder is the one place
-  // that can close it for every handler at once, so it does: no method in the preload API surface
-  // takes a meaningful `null`, which is what makes the substitution safe.
-  it('decodes a null argument back to undefined, so default parameters actually apply', () => {
-    const req = parseRpcMessage('{"t":"req","id":1,"method":"git:worktree-merge","args":["/repo","feat","main",null]}')
+  // `JSON.stringify([a, undefined])` is `[a, null]` — raw JSON has no `undefined`. A browser call
+  // that omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`)
+  // would therefore reach the handler as an EXPLICIT `null`, which does NOT trigger a default
+  // parameter: `worktreeMerge(…, push = false)` would run with `push === null` (`git.history` broke
+  // exactly this way). `encodeArgs` marks the `undefined` slots explicitly, so the decoder RESTORES
+  // them instead of guessing from `null`.
+  it('round-trips an omitted trailing argument as undefined, so default parameters apply', () => {
+    const req = parseRpcMessage(
+      JSON.stringify({
+        t: 'req',
+        id: 1,
+        method: 'git:worktree-merge',
+        args: encodeArgs(['/repo', 'feat', 'main', undefined])
+      })
+    )
     expect(req).toEqual({
       t: 'req', id: 1, method: 'git:worktree-merge', args: ['/repo', 'feat', 'main', undefined]
     })
@@ -40,16 +48,32 @@ describe('rpc protocol', () => {
     const push = args[3] as boolean | undefined
     expect(((p = false) => p)(push)).toBe(false)
 
-    // Interior nulls too: `[undefined, 2]` serialises to `[null, 2]` just the same.
-    expect(parseRpcMessage('{"t":"cast","method":"m","args":[null,2]}')).toEqual({
+    // Interior undefined slots survive too.
+    expect(parseRpcMessage(wire('m', undefined, 2))).toEqual({
       t: 'cast', method: 'm', args: [undefined, 2]
-    })
-    expect(parseRpcMessage('{"t":"ev","channel":"c","args":[null]}')).toEqual({
-      t: 'ev', channel: 'c', args: [undefined]
     })
   })
 
-  it('leaves a null NESTED inside an argument alone (only top-level slots are wire artifacts)', () => {
+  // The counterpart, and the reason the old blanket `null → undefined` decode was a BUG: several
+  // methods take a MEANINGFUL top-level `null` — `pty.resize(sid, null, null)` is the co-attach
+  // "park" signal (drop me from the size ledger), `presence.cursor/focus/chat/project(null)` clear
+  // state, `git.setActiveRemote(null)` clears the remote. Rewriting those to `undefined` collapsed
+  // the shared pty to 1×1 (the strict `cols === null` park check missed, and `normalizeSize(
+  // undefined, undefined)` clamps to 1). A null the caller MEANT must arrive as null.
+  it('preserves a meaningful top-level null (park signal / clear-state casts)', () => {
+    expect(parseRpcMessage(wire('pty:resize', 's1', null, null))).toEqual({
+      t: 'cast', method: 'pty:resize', args: ['s1', null, null]
+    })
+    expect(parseRpcMessage(wire('presence:cursor', null))).toEqual({
+      t: 'cast', method: 'presence:cursor', args: [null]
+    })
+    // …and a null and an omitted slot are distinguishable in the SAME call.
+    expect(parseRpcMessage(wire('m', null, undefined))).toEqual({
+      t: 'cast', method: 'm', args: [null, undefined]
+    })
+  })
+
+  it('leaves a null NESTED inside an argument alone (encoding only marks top-level slots)', () => {
     // A null inside an object/array is real data the sender meant to send — `{cwd: null}` is not the
     // same as `{}` to a handler that checks `'cwd' in opts`. Only the top-level arg slots are the
     // ones JSON mangled, so only those are restored.

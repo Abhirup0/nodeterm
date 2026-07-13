@@ -6,7 +6,13 @@
 // namespaces (`pty`, `workspace`, `settings`) over that socket. Every other namespace comes from
 // `buildStubApi()` (Task 7) so the renderer boots without a full Electron preload.
 
-import { parseRpcMessage, decodePtyData, E_DISCONNECTED, type RpcMessage } from '../../shared/rpc'
+import {
+  parseRpcMessage,
+  encodeArgs,
+  decodePtyData,
+  E_DISCONNECTED,
+  type RpcMessage
+} from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
@@ -144,13 +150,15 @@ export class RpcClient {
     const id = this.nextId++
     return new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      this.ws.send(JSON.stringify({ t: 'req', id, method, args }))
+      // encodeArgs: an OMITTED optional argument must reach the handler as `undefined` (so its
+      // default fires) while a MEANINGFUL `null` (pty.resize park, presence clears) stays `null`.
+      this.ws.send(JSON.stringify({ t: 'req', id, method, args: encodeArgs(args) }))
     })
   }
 
   /** Send a fire-and-forget cast (no response expected). */
   cast(method: string, ...args: unknown[]): void {
-    this.ws.send(JSON.stringify({ t: 'cast', method, args }))
+    this.ws.send(JSON.stringify({ t: 'cast', method, args: encodeArgs(args) }))
   }
 
   /** Subscribe to a channel; returns an unsubscribe function. */

@@ -18,25 +18,38 @@ export const E_NO_HANDLER = 'E_NO_HANDLER'
 export const E_DISCONNECTED = 'E_DISCONNECTED'
 
 /**
- * Undo JSON's `undefined` → `null` mangling on the TOP-LEVEL argument slots.
+ * Wire marker for an `undefined` TOP-LEVEL argument slot.
  *
- * `JSON.stringify([a, undefined])` is `[a, null]`: the wire has no `undefined`. So a caller that
- * simply omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`)
- * hands the handler an explicit `null` — and an explicit `null` does NOT trigger a default
- * parameter. `worktreeMerge(…, push = false)` would run with `push === null`.
+ * `JSON.stringify([a, undefined])` is `[a, null]`: raw JSON has no `undefined`. So a caller that
+ * omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`) would
+ * hand the handler an explicit `null` — and an explicit `null` does NOT trigger a default
+ * parameter, so `worktreeMerge(…, push = false)` would run with `push === null` (`git.history`
+ * broke exactly this way once).
  *
- * Every such default in the API today is falsy (`push = false`, `pruneOnly = false`, `full = false`),
- * so `null` coerces to the same behavior and nothing breaks — safe BY LUCK. The first `= true`
- * default, or any handler that tests `arg === undefined`, silently reintroduces the bug (`git.history`
- * already broke this way once). Restoring `undefined` here fixes it for every handler at once,
- * instead of asking each new one to remember.
+ * The *decoder* cannot repair that on its own: `null` on the wire is ambiguous between "JSON
+ * mangled an omitted argument" and "the caller meant null". And plenty of methods DO mean it —
+ * `pty.resize(sid, null, null)` is the co-attach PARK signal (drop me from the size ledger),
+ * `presence.cursor/focus/chat/project(null)` clear state, `git.setActiveRemote(null)` clears the
+ * active remote. Guessing `null → undefined` for all of them silently collapsed every co-attached
+ * viewer's shared pty to 1×1.
  *
- * Only the top-level slots are touched: a `null` nested inside an object or array is data the sender
- * genuinely meant to send (`{cwd: null}` is not `{}`), and no method in the preload API surface takes
- * a meaningful top-level `null` — which is what makes the substitution safe. Arity is preserved: the
- * slot stays, it just holds `undefined` again.
+ * So the SENDER disambiguates instead: `encodeArgs` replaces each `undefined` slot with this
+ * sentinel, `decodeArgs` turns exactly that sentinel back into `undefined`, and every other value
+ * — `null` included — passes through untouched. Arity is preserved either way. The sentinel is a
+ * NUL-prefixed string: no argument in the API surface can collide with it, and it survives JSON.
+ *
+ * Only top-level slots are marked: a `null`/`undefined` nested inside an object or array is the
+ * sender's own data (`{cwd: null}` is not `{}`), and JSON's own object rules already govern it.
  */
-const decodeArgs = (args: unknown[]): unknown[] => args.map((a) => (a === null ? undefined : a))
+export const RPC_UNDEFINED = '\u0000__rpc_undefined__'
+
+/** Sender side: mark the `undefined` argument slots so the decoder can restore them. */
+export const encodeArgs = (args: unknown[]): unknown[] =>
+  args.map((a) => (a === undefined ? RPC_UNDEFINED : a))
+
+/** Receiver side: restore the marked slots. A `null` stays `null` — it is a real value. */
+const decodeArgs = (args: unknown[]): unknown[] =>
+  args.map((a) => (a === RPC_UNDEFINED ? undefined : a))
 
 export function parseRpcMessage(text: string): RpcMessage | null {
   let m: unknown

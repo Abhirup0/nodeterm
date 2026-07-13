@@ -3,6 +3,7 @@ import type { FlowOwner } from '../core/pty-manager'
 import { IPC } from '../shared/ipc'
 import {
   E_NO_HANDLER,
+  encodeArgs,
   encodePtyData,
   type RpcErr,
   type RpcOk,
@@ -212,7 +213,9 @@ export class ServerPlatform implements CorePlatform {
         channel.startsWith(p)
       )
       if (deadPrefix) this.forgetFlowState(ServerPlatform.flowKey(uiId, channel.slice(deadPrefix.length)))
-      sink.sendText(JSON.stringify({ t: 'ev', channel, args }))
+      // Symmetric with the browser's send: mark `undefined` arg slots so the renderer's listeners
+      // see them as `undefined` rather than `null` (and a real `null` still arrives as `null`).
+      sink.sendText(JSON.stringify({ t: 'ev', channel, args: encodeArgs(args) }))
     }
   }
 
