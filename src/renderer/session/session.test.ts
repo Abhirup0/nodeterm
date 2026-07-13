@@ -15,6 +15,7 @@ import {
   setSessionStatus,
   takeSessionOffline,
   activeSessionPresence,
+  presenceForProject,
 } from './session'
 import { defaultPresence } from '../state/presence'
 import type { NodeTerminalApi } from '@shared/types'
@@ -272,6 +273,36 @@ describe('activeSessionPresence (Task 1 — the ACTIVE session presence, non-hoo
     // node-env safety: with an empty registry the accessor must still return a usable presence.
     expect(() => activeSessionPresence()).not.toThrow()
     expect(activeSessionPresence()).toBe(defaultPresence)
+  })
+})
+
+describe('presenceForProject (Task 2 — the provider-INDEPENDENT resolver the active-session presence hook is built on)', () => {
+  it('resolves a project BOUND to a relay session to that relay session\'s presence', () => {
+    // This is what makes Facepile / PresenceNamePrompt (rendered OUTSIDE the SessionProvider) and
+    // the presence-reading components see the ACTIVE (relay) session without moving in the tree:
+    // the hook passes the store's activeProjectId here, and a relay tab's project is bound to it.
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    bindProjectToSession('remote-tab', relay.id)
+
+    const p = presenceForProject('remote-tab')
+    expect(p).toBe(getSessionStores(relay.id).presence)
+    expect(p).not.toBe(getSessionStores(local.id).presence)
+  })
+
+  it('resolves an unbound (local) project to the LOCAL session\'s presence — byte-identical to today', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    // A local project is never bound — it must resolve to the local session's presence (the exact
+    // store the historical components read today), NOT the merely-active or relay one.
+    expect(presenceForProject('some-local-tab')).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to defaultPresence for an empty/unknown project id with no local session (node-env safe)', () => {
+    expect(() => presenceForProject('')).not.toThrow()
+    expect(presenceForProject('')).toBe(defaultPresence)
   })
 })
 

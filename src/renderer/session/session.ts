@@ -3,6 +3,7 @@ import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
 import { createPresenceSession, defaultPresence, type PresenceSession } from '../state/presence'
 import { agentStatusForApi, type AgentStatusSession } from '../state/agentStatus'
+import { useProjects } from '../state/projects'
 
 export type SessionSource = 'local' | 'relay' | 'server'
 
@@ -231,12 +232,42 @@ function presenceForSession(sessionId: string | null): PresenceSession {
   return local ? local.stores.presence : defaultPresence
 }
 
-/** The ACTIVE session's presence store, for components rendered UNDER the Canvas `SessionProvider`
- *  (so `useSession()` resolves the active session, not the app-chrome default). A local tab yields
- *  `defaultPresence`; a relay tab yields the relay session's presence. Allocation-free — returns the
- *  memoized `PresenceSession` directly — and never throws in render (see `presenceForSession`). */
+/** The presence store for the session a project belongs to — the provider-INDEPENDENT resolution
+ *  the active-session presence hook is built on. Runs through `sessionForProject` (a relay tab →
+ *  its bound session, every local tab → the local session), so a local tab yields `defaultPresence`
+ *  (byte-identical to the historical `state/presence` default the components read today). Exported
+ *  for unit tests — the hook itself needs a React tree. Allocation-free; never throws in render. */
+export function presenceForProject(projectId: string): PresenceSession {
+  // Mirror `sessionForProject`'s resolution (bound → its session; stale binding pruned; unbound →
+  // LOCAL, never the merely-active), but resolve to the presence store and NEVER throw in render:
+  // an empty/local-less registry (a node-env test) falls back to `defaultPresence`.
+  const boundId = PROJECT_BINDINGS.get(projectId)
+  if (boundId) {
+    const e = SESSIONS.get(boundId)
+    if (e) return e.stores.presence
+    PROJECT_BINDINGS.delete(projectId) // stale binding (session disposed) → resolve local
+  }
+  return presenceForSession(null) // unbound → the local session's presence (defaultPresence in-app)
+}
+
+/** The ACTIVE session's presence store. Resolves the active session REACTIVELY from the projects
+ *  store — NOT from the `SessionProvider` context — so it yields the identical session Canvas's
+ *  provider is keyed on (`sessionForProject(activeProjectId)`) whether the caller renders inside
+ *  that provider (`PresenceLayer`, `PresenceChips`) or outside it (`Facepile`, `PresenceNamePrompt`),
+ *  and re-renders on a tab switch (activeProjectId changes). A local tab yields `defaultPresence`;
+ *  a relay tab yields the relay session's presence. */
 export function useActiveSessionPresence(): PresenceSession {
-  return presenceForSession(useSession().id)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  return presenceForProject(activeProjectId ?? '')
+}
+
+/** The ACTIVE session's core API — where the cursor/chat casts go — resolved provider-independently
+ *  from the projects store, matching `useActiveSessionPresence` session-for-session (both go through
+ *  `sessionForProject(activeProjectId)`, and presence is keyed by that session's api identity). A
+ *  local tab yields `window.nodeTerminal`; a relay tab yields the relay session's api. */
+export function useActiveSessionApi(): NodeTerminalApi {
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  return sessionForProject(activeProjectId ?? '').api
 }
 
 /** Non-hook counterpart of `useActiveSessionPresence` for imperative (non-render) Canvas use: the
