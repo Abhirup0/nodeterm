@@ -131,7 +131,13 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
-import { useSession, SessionProvider, sessionForProject, setActiveSession } from '../session/session'
+import {
+  useSession,
+  SessionProvider,
+  sessionForProject,
+  setActiveSession,
+  disposeSession,
+} from '../session/session'
 import {
   openRelayTab,
   handleRelayDrop,
@@ -440,12 +446,19 @@ export function Canvas() {
   // relay session down (held presence teardown + socket close), or the peer lingers in the host's
   // facepile and the socket leaks until quit. Runs on BOTH close and delete (unlike a local tmux
   // project, there is nothing to keep warm). No-op for a non-relay project.
+  //
+  // Dispose by the project BINDING, not by iterating relayTabsRef: an INVOLUNTARY drop already
+  // removed the tab from relayTabsRef (it went offline) but KEPT the session bound, so only
+  // `sessionForProject` still reaches it — iterating relayTabsRef alone would orphan the offline
+  // session in the registry forever. `disposeSession` is idempotent: it runs the held teardowns for
+  // a still-live tab, no-ops them for an already-offline one, and unbinds + drops the entry either
+  // way. We also sweep any live relayTabsRef entry for the project so a dead connectionId can't linger.
   const disposeRelayTabForProject = useCallback((projectId: string) => {
     for (const [connectionId, tab] of relayTabsRef.current) {
-      if (tab.projectId !== projectId) continue
-      relayTabsRef.current.delete(connectionId)
-      tab.dispose() // idempotent — a prior socket-drop dispose leaves this a safe no-op
+      if (tab.projectId === projectId) relayTabsRef.current.delete(connectionId)
     }
+    const s = sessionForProject(projectId)
+    if (s.source === 'relay') disposeSession(s.id)
   }, [])
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
@@ -1807,7 +1820,12 @@ export function Canvas() {
   // to the EXISTING project id (reuse the tab, clear its "unavailable" grey) instead of adding a new
   // one — so a socket drop → greyed reconnectable tab, never a duplicate.
   const mountRemoteMirror = useCallback(
-    (connectionId: string, label = 'Remote host', reconnectProjectId?: string) => {
+    (
+      connectionId: string,
+      label = 'Remote host',
+      reconnectProjectId?: string,
+      staleSessionId?: string
+    ) => {
       if (relayTabsRef.current.has(connectionId)) return
       void openRelayTab(connectionId, label, {
         relayClient: window.nodeTerminal.relayClient,
@@ -1818,8 +1836,15 @@ export function Canvas() {
       })
         .then((tab) => {
           relayTabsRef.current.set(connectionId, tab)
-          // Back online: un-grey the reused tab.
-          if (reconnectProjectId) useProjects.getState().setProjectUnavailable(reconnectProjectId, false)
+          if (reconnectProjectId) {
+            // The fresh session is now bound to the tab (openRelayTab rebound the SAME project id),
+            // so it is finally safe to drop the stale offline session it replaced. Disposing only
+            // AFTER a successful rebind is what keeps a FAILED reconnect reconnectable: if approval
+            // never lands, the offline session stays bound and the tab stays greyed-clickable.
+            if (staleSessionId) disposeSession(staleSessionId)
+            // Back online: un-grey the reused tab.
+            useProjects.getState().setProjectUnavailable(reconnectProjectId, false)
+          }
           // A host/relay drop AFTER approval is INVOLUNTARY (not a user close): grey the tab to
           // "unavailable" and take its session offline (presence teardown runs once) — but KEEP the
           // project so a click can reconnect it in place. See relay-tab `handleRelayDrop`.
@@ -1846,7 +1871,7 @@ export function Canvas() {
   // relay-api.ts gotcha 2). Shared by the first connect and the Task 7 reconnect (which passes the
   // existing project id so the fresh session rebinds the SAME tab).
   const confirmAndMount = useCallback(
-    (connectionId: string, label: string, reconnectProjectId?: string) => {
+    (connectionId: string, label: string, reconnectProjectId?: string, staleSessionId?: string) => {
       const unSas = window.nodeTerminal.relayClient.onSas(connectionId, (sas) => {
         unSas()
         if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
@@ -1857,7 +1882,7 @@ export function Canvas() {
           window.nodeTerminal.relayClient.disconnect(connectionId)
         }
       })
-      mountRemoteMirror(connectionId, label, reconnectProjectId)
+      mountRemoteMirror(connectionId, label, reconnectProjectId, staleSessionId)
     },
     [mountRemoteMirror]
   )
@@ -1877,21 +1902,18 @@ export function Canvas() {
 
   // Reconnect an offline (dropped) relay tab IN PLACE (Stage 4 Task 7). The relay offer is
   // single-use (main/remote/pairing.ts), so v1 has no silent/pinned reconnect — prompt for a FRESH
-  // pairing code, drop the stale offline session, and mount the new connection onto the SAME tab.
+  // pairing code and mount the new connection onto the SAME tab. The stale offline session is
+  // captured here and disposed only AFTER the fresh session rebinds (in mountRemoteMirror's success
+  // path), so a cancelled/failed reconnect leaves the offline tab still bound and reconnectable.
   const reconnectRelay = useCallback(
     (projectId: string) => {
       const label = useProjects.getState().getProject(projectId)?.name ?? 'Remote host'
+      const bound = sessionForProject(projectId)
+      const staleSessionId = bound.source === 'relay' ? bound.id : undefined
       void reconnectRelayTab(projectId, {
         promptForOffer: () => promptDialog({ message: "Paste the host's new pairing code:" }),
         connect: (offer) => window.nodeTerminal.relayClient.connect(offer),
-        mount: (connectionId, projId) => confirmAndMount(connectionId, label, projId),
-        disposeStale: (projId) => {
-          for (const [connId, tab] of relayTabsRef.current) {
-            if (tab.projectId !== projId) continue
-            relayTabsRef.current.delete(connId)
-            tab.dispose() // disposeSession: unbind + drop the offline session before rebinding
-          }
-        },
+        mount: (connectionId, projId) => confirmAndMount(connectionId, label, projId, staleSessionId),
         onError: (message) => window.alert(`Could not reconnect: ${message}`),
       })
     },

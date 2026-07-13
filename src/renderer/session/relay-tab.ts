@@ -118,22 +118,24 @@ export interface RelayReconnectDeps {
   /** `relayClient.connect` — resolves a fresh connectionId. */
   connect(offer: string): Promise<string>
   /** Confirm the SAS + mount the fresh connection onto the EXISTING project id (reuses the tab —
-   *  never a duplicate). Clears `unavailable` once the tab is live again. */
+   *  never a duplicate). Disposes the stale offline session only after the fresh one rebinds, and
+   *  clears `unavailable` once the tab is live again. */
   mount(connectionId: string, projectId: string): void
-  /** Dispose the stale offline tab for this project (unbind + drop from the registry) before the
-   *  same project id is rebound to the fresh session. */
-  disposeStale(projectId: string): void
   onError(message: string): void
 }
 
 /** Reconnect an offline relay tab IN PLACE — same project id, so no duplicate tab is spawned. v1:
- *  the offer is single-use, so this prompts for a FRESH pairing code, disposes the stale offline
- *  session, connects, and mounts onto the existing tab. Cancelling the prompt reconnects nothing. */
+ *  the offer is single-use, so this prompts for a FRESH pairing code, connects, and mounts onto the
+ *  existing tab. Cancelling the prompt reconnects nothing.
+ *
+ *  The stale offline session is NOT torn down here: `mount` disposes it only once the fresh session
+ *  has rebound the project (see Canvas `mountRemoteMirror`). Disposing it up-front would unbind the
+ *  project, so a connect failure or a declined SAS would strand the tab resolved to the LOCAL
+ *  session — greyed but no longer recognised as relay, hence no longer reconnectable. */
 export async function reconnectRelayTab(projectId: string, deps: RelayReconnectDeps): Promise<void> {
   const offer = (await deps.promptForOffer())?.trim()
   if (!offer) return
   try {
-    deps.disposeStale(projectId)
     const connectionId = await deps.connect(offer)
     deps.mount(connectionId, projectId)
   } catch (err) {

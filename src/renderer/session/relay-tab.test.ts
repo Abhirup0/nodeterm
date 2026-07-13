@@ -172,35 +172,46 @@ describe('reconnectRelayTab (Stage 4 Task 7 — reconnect an offline tab IN PLAC
     deps: RelayReconnectDeps
     connect: ReturnType<typeof vi.fn>
     mount: ReturnType<typeof vi.fn>
-    disposeStale: ReturnType<typeof vi.fn>
   } {
     const connect = vi.fn().mockResolvedValue('conn-new')
     const mount = vi.fn()
-    const disposeStale = vi.fn()
     const deps: RelayReconnectDeps = {
       promptForOffer: over.promptForOffer ?? (() => Promise.resolve('fresh-offer')),
       connect: over.connect ?? connect,
       mount: over.mount ?? mount,
-      disposeStale: over.disposeStale ?? disposeStale,
       onError: over.onError ?? vi.fn(),
     }
-    return { deps, connect, mount, disposeStale }
+    return { deps, connect, mount }
   }
 
   it('prompts for a FRESH code (the offer is single-use), connects, and mounts onto the SAME project', async () => {
-    const { deps, connect, mount, disposeStale } = reconnectDeps()
+    const { deps, connect, mount } = reconnectDeps()
     await reconnectRelayTab('proj-1', deps)
-    expect(disposeStale).toHaveBeenCalledWith('proj-1') // the stale offline session is dropped first
     expect(connect).toHaveBeenCalledWith('fresh-offer') // a fresh pairing, not a silent reuse
     expect(mount).toHaveBeenCalledWith('conn-new', 'proj-1') // reuse the existing tab, not a new one
   })
 
+  it('connects BEFORE anything tears the stale session down (a connect failure must not strand the tab)', async () => {
+    // The stale offline session is disposed by `mount`, only after the fresh session rebinds — never
+    // up-front — so a connect that throws leaves the tab still bound + reconnectable. Assert mount is
+    // the ONLY disposal lever and it never runs when connect fails.
+    const onError = vi.fn()
+    const mount = vi.fn()
+    const { deps } = reconnectDeps({
+      connect: vi.fn().mockRejectedValue(new Error('relay unreachable')),
+      mount,
+      onError,
+    })
+    await reconnectRelayTab('proj-1', deps)
+    expect(mount).not.toHaveBeenCalled() // nothing disposed the stale session → tab stays reconnectable
+    expect(onError).toHaveBeenCalledWith('relay unreachable')
+  })
+
   it('a cancelled prompt reconnects nothing', async () => {
-    const { deps, connect, mount, disposeStale } = reconnectDeps({
+    const { deps, connect, mount } = reconnectDeps({
       promptForOffer: () => Promise.resolve(null),
     })
     await reconnectRelayTab('proj-1', deps)
-    expect(disposeStale).not.toHaveBeenCalled()
     expect(connect).not.toHaveBeenCalled()
     expect(mount).not.toHaveBeenCalled()
   })

@@ -204,6 +204,30 @@ describe('takeSessionOffline (Stage 4 Task 7 — an INVOLUNTARY drop, not a user
     expect(relayClose).toHaveBeenCalledTimes(1)
   })
 
+  it('an OFFLINE session stays disposable by BINDING (the Task-7 leak fix) and disposeSession runs its teardowns only once', () => {
+    // Regression: the drop path removed the tab from the Canvas relayTabsRef, so a cleanup that
+    // iterated relayTabsRef could no longer reach the offline session — it leaked in the registry
+    // forever. The fix disposes by the project BINDING instead, which takeSessionOffline KEEPS. This
+    // proves the offline session is still reachable + fully removable that way.
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    bindProjectToSession('remote-tab', relay.id)
+    takeSessionOffline(relay.id) // teardown ran once here
+
+    // Resolve the offline session the way Canvas now does — through the binding, not relayTabsRef.
+    const bound = sessionForProject('remote-tab')
+    expect(bound.source).toBe('relay')
+    disposeSession(bound.id)
+
+    // Gone: entry dropped, binding pruned (falls back to local), and the teardown did NOT run twice.
+    expect(sessionCount()).toBe(1)
+    expect(sessionForProject('remote-tab')).toBe(local)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+  })
+
   it('is a no-op for an unknown id', () => {
     expect(() => takeSessionOffline('relay-nope')).not.toThrow()
   })
