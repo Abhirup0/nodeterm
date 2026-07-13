@@ -1088,6 +1088,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
+        // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),
+        // so a mount that unmounts within the initial-delivery window could otherwise acquire a
+        // context onto a parked/disposed terminal — the very leak this feature exists to prevent.
+        if (disposed) return
         const visible = entries[entries.length - 1]?.isIntersecting ?? false
         switch (webglVisibilityAction(visible, webgl !== null)) {
           case 'acquire':
