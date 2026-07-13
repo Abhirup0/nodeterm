@@ -173,6 +173,7 @@ import {
   createDiffNode,
   createEditorNode,
   createGroupNode,
+  WORKTREE_GROUP_SIZE,
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
@@ -2585,7 +2586,7 @@ export function Canvas() {
       } else {
         const group = createGroupNode(
           target.at ?? viewCenter() ?? { x: 0, y: 0 },
-          undefined,
+          WORKTREE_GROUP_SIZE,
           nodesRef.current.length
         )
         group.data = { ...group.data, title: wt.branch, worktree: wt }

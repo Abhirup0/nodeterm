@@ -25,6 +25,10 @@ export const NODE_COLORS = [
 const TERMINAL_SIZE = { width: 600, height: 400 }
 const STICKY_SIZE = { width: 240, height: 200 }
 const GROUP_SIZE = { width: 520, height: 360 }
+/** A fresh worktree group starts empty but exists to HOLD terminals/agents, and the default
+ *  GROUP_SIZE (520×360) is smaller than a single terminal (600×400) — a dropped-in terminal would
+ *  overflow the frame. Open it large enough for one terminal with margin, and room to add another. */
+export const WORKTREE_GROUP_SIZE = { width: 760, height: 540 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
