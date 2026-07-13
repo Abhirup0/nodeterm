@@ -37,6 +37,8 @@ export interface RelayHostSession {
   sas(): string | null
   /** The peer's stable box public key (base64), or null before the handshake learned it. */
   peerKeyB64(): string | null
+  /** The single project this hosting session shares with the peer, or undefined if unscoped. */
+  sharedProjectId(): string | undefined
   /** This human confirmed the SAS (from the approve dialog). */
   confirm(): void
   /** Tear down: unregister the sink (leave + dropClient + prune), close the socket. Idempotent. */
@@ -50,6 +52,9 @@ export interface ConnectRelayHostOptions {
   platform: ElectronPlatform
   /** TEST ONLY: an in-process RelayTransport. Production opens a real ws (relay-socket.ts). */
   transport?: RelayTransport
+  /** The single project this hosting session shares with the peer. Undefined → unscoped (legacy
+   *  behaviour: the peer sees the whole workspace). Held on the session for Task 2's scoped serve. */
+  sharedProjectId?: string
   /** The SAS is known — ask the human to compare it. */
   onPeerPending(session: RelayHostSession): void
   /** Mutually approved: the peer is a CorePlatform client of this core now. */
@@ -96,6 +101,7 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     clientId: () => clientId,
     sas: () => gate?.sas() ?? null,
     peerKeyB64: () => gate?.peerKeyB64() ?? null,
+    sharedProjectId: () => opts.sharedProjectId,
     confirm: () => gate?.confirmHere(),
     close() {
       if (closed) return

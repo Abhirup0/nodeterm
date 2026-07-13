@@ -1131,9 +1131,10 @@ export interface RelayPeerPending {
 export interface RelayHostApi {
   /**
    * Enter host mode over the relay: connect and return a pairing offer string to hand to a client.
-   * Rejects if the device is not entitled (or a dev build without the relay URL).
+   * Rejects if the device is not entitled (or a dev build without the relay URL). `projectId` is the
+   * single project this hosting session shares with the peer; omit for the legacy whole-workspace view.
    */
-  start(): Promise<{ offer: string }>
+  start(projectId?: string): Promise<{ offer: string }>
   /** Leave host mode: close the relay connection (drops every bridged peer). */
   stop(): Promise<void>
   /**

@@ -42,6 +42,7 @@ vi.mock('./approved-devices', () => ({
 }))
 
 import { initRelayHost } from './relay-host-service'
+import type { RelayHostSession } from './relay-host'
 import { connectRelay, type RelayTransport } from './relay-socket'
 import { createTrustGate, type TrustGate } from './relay-trust'
 import { genKeyPair, publicKeyToB64 } from './e2ee'
@@ -283,6 +284,46 @@ describe('initRelayHost — confirm() opens the session', () => {
     await start()
     expect(() => h.handlers[IPC.relayHostConfirm]({}, { id: 'nope' })).not.toThrow()
     expect(peerRegistry().ids()).toEqual([])
+  })
+})
+
+describe('initRelayHost — sharedProjectId threads start → connect', () => {
+  /** Inject a fake `connect` that records the options it was called with. */
+  function wireWithCapture(): { opts: () => any } {
+    let captured: any = null
+    const win = fakeWin()
+    initRelayHost(win as never, platform, {
+      loadKeys: async () => genKeyPair(),
+      mintToken: async () => ({ pairingToken: 'tok-123' }),
+      isPremium: () => true,
+      relayAllowed: () => true,
+      getEntitlement: () => 'ent-abc',
+      connect: (o) => {
+        captured = o
+        // A no-op session; start() only needs the offer, which it builds itself.
+        return {
+          clientId: () => null,
+          sas: () => null,
+          peerKeyB64: () => null,
+          sharedProjectId: () => o.sharedProjectId,
+          confirm: () => {},
+          close: () => {}
+        } as unknown as RelayHostSession
+      }
+    })
+    return { opts: () => captured }
+  }
+
+  it('start(projectId) passes sharedProjectId to connect', async () => {
+    const cap = wireWithCapture()
+    await h.handlers[IPC.relayHostStart]({}, 'proj-1')
+    expect(cap.opts()?.sharedProjectId).toBe('proj-1')
+  })
+
+  it('start() with no arg leaves sharedProjectId undefined', async () => {
+    const cap = wireWithCapture()
+    await h.handlers[IPC.relayHostStart]({})
+    expect(cap.opts()?.sharedProjectId).toBeUndefined()
   })
 })
 
