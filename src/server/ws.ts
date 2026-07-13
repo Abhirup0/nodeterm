@@ -94,6 +94,24 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
   const { platform, auth, onClientGone, heartbeatMs = WS_HEARTBEAT_MS } = opts
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
 
+  // The one teardown for a connection that is GONE — whether by a clean 'close', or because its sink
+  // proved dead (the registry evicted it after consecutive throwing sends and called this back).
+  // Order matches 'close': leave the hub, hand the pty layer its subscriber back, detach the sink.
+  // Idempotent, so a sink-gone eviction that races the real 'close' is harmless.
+  const teardown = (uiId: number): void => {
+    presenceHub.leave(uiId)
+    // This client is a pty subscriber, and nothing else would ever tell PtyManager it is gone (a
+    // closed tab sends no `pty:kill`). Leaving it subscribed leaks the pty client, skips the
+    // detach-time scrollback snapshot, and can strand a session it had paused — a client joining
+    // that node later would inherit a frozen pty.
+    onClientGone?.(uiId)
+    platform.detach(uiId)
+  }
+  // `ws.send` does not throw synchronously on a dead socket, so this rarely fires server-side — but
+  // if a sink ever does throw consecutively, treat it exactly like a close rather than shouting into
+  // a dead socket forever (the registry already dropped the sink before calling back).
+  platform.setSinkGoneHandler(teardown)
+
   // Liveness heartbeat. Node enables no TCP keepalive on an upgraded socket, so a browser that
   // simply VANISHES (laptop asleep, wifi dropped, NAT idle-reap) leaves a half-open socket: no FIN
   // ever arrives, 'close' never fires, and the peer would sit in the presence hub — a ghost cursor
@@ -180,14 +198,6 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
       console.warn('[nodeterm-server] ws socket error', (e && e.code) || e)
     })
 
-    ws.on('close', () => {
-      presenceHub.leave(uiId)
-      // Before detaching the sink: this client is a pty subscriber, and nothing else would ever
-      // tell PtyManager it is gone (a closed tab sends no `pty:kill`). Leaving it subscribed
-      // leaks the pty client, skips the detach-time scrollback snapshot, and can strand a
-      // session it had paused — a client joining that node later would inherit a frozen pty.
-      onClientGone?.(uiId)
-      platform.detach(uiId)
-    })
+    ws.on('close', () => teardown(uiId))
   })
 }

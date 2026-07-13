@@ -76,6 +76,7 @@ import {
 } from './media-protocol'
 import { initPlatform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
+import { wirePeerRegistry } from './peer-registry'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
@@ -104,6 +105,21 @@ function isSafeExternalUrl(url: unknown): url is string {
 const settingsStore = new SettingsStore()
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
+
+// Relay PEER sinks (docs/remote-sessions.md 4b) — the desktop mirror of src/server/index.ts's
+// setFlowController / setResyncProvider / onClientGone. Wired at boot, BEFORE any peer can register
+// (4c), because a peer that leaves must hand its pty subscriptions back: `unregisterPeerSink` calls
+// `onPeerGone` → `dropClient`, and nothing else tells the pty layer that subscriber is gone (a
+// vanished peer sends no `pty:kill`) — the pause it owed would freeze the shared terminal for every
+// viewer. Inert with zero peers: the registry holds no sink, so none of this ever runs.
+// Wired once here — do not double-wire (4b Task 4). A second wirePeerRegistry() call would silently
+// overwrite these deps (last write wins), so keep this the sole call site in src/main.
+wirePeerRegistry({
+  setFlow: (id, sid, resume, owner) => ptyManager.setFlow(id, sid, resume, owner),
+  captureForResync: (sid) => ptyManager.captureForResync(sid),
+  onPeerGone: (id) => ptyManager.dropClient(id)
+})
+
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
 // (via the closures below) to resolve a live SSH project's ControlMaster for remote workspace IO.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
