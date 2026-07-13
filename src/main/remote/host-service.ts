@@ -20,17 +20,17 @@
 // The pure RPC/frame -> pty-manager mapping lives in `createHostHandlers` so it is unit-
 // testable with fakes; `initRemoteHost` wires it to IPC, the license gate, and the API call.
 
-import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
 import path from 'path'
-import { app, ipcMain, safeStorage, type BrowserWindow } from 'electron'
+import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
 import { getStoredEntitlement, isPremium } from '../../core/license'
-import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
+import { publicKeyToB64, type KeyPair } from './e2ee'
+import { loadOrCreateHostKeyPair, HostKeyLockedError } from './host-identity'
 import { OP, type Frame } from './framing'
 import { encodeOffer } from './pairing'
 import { sanitizeClientMutation } from './canvas-sync'
@@ -518,63 +518,16 @@ async function mintPairingToken(entitlement: string): Promise<PairTokenResponse>
 
 // --- persisted host keypair --------------------------------------------------
 
-function keyFile(): string {
-  return path.join(app.getPath('userData'), 'remote-host-key.json')
-}
-
-// R4: the secret key is encrypted at rest with Electron safeStorage (macOS: key held in the
-// user's Keychain), so `remote-host-key.json` alone no longer yields the host's E2EE identity.
-// Fallback when OS encryption is unavailable (e.g. Linux without a keyring): plaintext at
-// 0o600, as before — availability is re-checked on every load, so a machine that gains a
-// keyring migrates on the next start.
-async function persistKeyPair(keys: KeyPair): Promise<void> {
-  const publicKey = Buffer.from(keys.publicKey).toString('base64')
-  const secretB64 = Buffer.from(keys.secretKey).toString('base64')
-  const body = safeStorage.isEncryptionAvailable()
-    ? { publicKey, secretKeyEnc: safeStorage.encryptString(secretB64).toString('base64') }
-    : { publicKey, secretKey: secretB64 }
-  // 0o600 either way: the file still binds the pinned public identity.
-  await fs.writeFile(keyFile(), JSON.stringify(body), { encoding: 'utf-8', mode: 0o600 })
-}
-
-// Load the long-lived host NaCl keypair, generating + persisting it on first use. The public
-// key is pinned in every offer, so it must be stable across runs. Legacy plaintext files are
-// migrated to the encrypted form in place, KEEPING the identity (never regenerate on migrate);
-// an undecryptable blob (OS keychain reset) falls through to a fresh identity — old offers are
-// single-use pairing tokens, so new offers simply carry the new key.
+// The keypair now lives in host-identity.ts (same on-disk file + bytes: `remote-host-key.json`,
+// public key plaintext base64, secret key safeStorage-encrypted or 0600 plaintext). The loader
+// that used to be inlined here rotated the identity whenever the keyring happened to be locked at
+// boot — it read `secretKeyEnc` only when `isEncryptionAvailable()`, missed both branches, and
+// regenerated OVER the good encrypted key. host-identity refuses to write in that case
+// (HostKeyLockedError) via key-file-codec's `'locked'` outcome.
 //
-// Exported so the standing (phone) host and the pairing service can advertise the SAME host
-// identity (public key → hostId) the interactive host uses.
-export async function loadOrCreateKeyPair(): Promise<KeyPair> {
-  try {
-    const raw = JSON.parse(await fs.readFile(keyFile(), 'utf-8')) as {
-      publicKey?: string
-      secretKey?: string
-      secretKeyEnc?: string
-    }
-    if (raw.publicKey && raw.secretKeyEnc && safeStorage.isEncryptionAvailable()) {
-      const secretB64 = safeStorage.decryptString(Buffer.from(raw.secretKeyEnc, 'base64'))
-      return {
-        publicKey: Uint8Array.from(Buffer.from(raw.publicKey, 'base64')),
-        secretKey: Uint8Array.from(Buffer.from(secretB64, 'base64'))
-      }
-    }
-    if (raw.publicKey && raw.secretKey) {
-      const keys: KeyPair = {
-        publicKey: Uint8Array.from(Buffer.from(raw.publicKey, 'base64')),
-        secretKey: Uint8Array.from(Buffer.from(raw.secretKey, 'base64'))
-      }
-      // Legacy plaintext on disk → re-persist encrypted (same identity).
-      if (safeStorage.isEncryptionAvailable()) await persistKeyPair(keys).catch(() => {})
-      return keys
-    }
-  } catch {
-    // No (valid/decryptable) stored key — generate a fresh one below.
-  }
-  const keys = genKeyPair()
-  await persistKeyPair(keys).catch(() => {})
-  return keys
-}
+// Re-exported under the old name so the standing (phone) host and the pairing service keep
+// advertising the SAME host identity through their existing import.
+export { loadOrCreateHostKeyPair as loadOrCreateKeyPair, HostKeyLockedError }
 
 // --- dev gate ----------------------------------------------------------------
 
@@ -806,7 +759,7 @@ export function initRemoteHost(
     // Already hosting → tear the old session down before starting a fresh one.
     endSession()
 
-    const keys = await loadOrCreateKeyPair()
+    const keys = await loadOrCreateHostKeyPair()
     const { pairingToken } = await mintPairingToken(entitlement)
 
     // This session's presence slot, captured by its own callbacks (never read through `presence`,
