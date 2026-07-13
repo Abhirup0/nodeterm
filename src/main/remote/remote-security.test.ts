@@ -213,3 +213,40 @@ describe('R3: replayed encrypted frames are dropped', () => {
     expect(clientFrames).toHaveLength(1) // dropped — not re-delivered
   })
 })
+
+// Scrolling belongs to tmux (mouse on, alternate screen), and the phone cannot deliver the wheel
+// itself — its emulator swallows the gesture — so it asks the host to write it into the stream's
+// pty, which IS a tmux client. `lines` and the stream target both come off the wire.
+describe('pty.scroll drives tmux through the session pty', () => {
+  const attach = (handlers: ReturnType<typeof createHostHandlers>): void => {
+    handlers.onRpc({ id: 'a', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+  }
+  const writes = (pty: HostPtyManager): string[] =>
+    (pty.write as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as string)
+
+  it('writes one SGR wheel event per notch, up or down', () => {
+    const { socket, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    attach(handlers)
+    handlers.onRpc({ id: '1', method: 'pty.scroll', params: { streamId: 1, dir: 'up', lines: 3 } })
+    expect(writes(pty)).toEqual(['\x1b[<64;1;1M', '\x1b[<64;1;1M', '\x1b[<64;1;1M'])
+    handlers.onRpc({ id: '2', method: 'pty.scroll', params: { streamId: 1, dir: 'down', lines: 1 } })
+    expect(writes(pty).at(-1)).toBe('\x1b[<65;1;1M')
+  })
+
+  it('clamps a hostile `lines` (it arrives from a remote client) and ignores an unknown stream', () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    attach(handlers)
+    handlers.onRpc({ id: '1', method: 'pty.scroll', params: { streamId: 1, dir: 'up', lines: 1e9 } })
+    expect(writes(pty)).toHaveLength(20) // capped, not a million writes
+    ;(pty.write as ReturnType<typeof vi.fn>).mockClear()
+    handlers.onRpc({ id: '2', method: 'pty.scroll', params: { streamId: 1, lines: -5 } })
+    expect(writes(pty)).toHaveLength(1) // floored at one notch
+    ;(pty.write as ReturnType<typeof vi.fn>).mockClear()
+    // An unknown streamId is a no-op, and still answers — never a hang.
+    handlers.onRpc({ id: '3', method: 'pty.scroll', params: { streamId: 99, dir: 'up', lines: 2 } })
+    expect(pty.write).not.toHaveBeenCalled()
+    expect(responses.at(-1)).toMatchObject({ id: '3', ok: true })
+  })
+})
