@@ -34,16 +34,22 @@ import {
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
+import { type FrameTransport, WebSocketFrameTransport } from './frame-transport'
 
 type Listener = (...args: unknown[]) => void
 
 /**
- * One WebSocket, a pending-request map keyed by an incrementing id, and a channel-listener
- * fan-out map. Exported for the unit test (`ws-bridge.test.ts`). Kept free of any DOM/overlay
- * concerns so the test stays clean — reconnect UI lives in `installWsBridge`.
+ * A `FrameTransport`, a pending-request map keyed by an incrementing id, and a channel-listener
+ * fan-out map. Exported for the unit tests (`ws-bridge.test.ts` / `frame-transport.test.ts`). Kept
+ * free of any DOM/overlay concerns so the tests stay clean — reconnect UI lives in `installWsBridge`.
+ *
+ * `RpcClient` speaks the rpc.ts protocol but is carrier-agnostic: it depends only on a
+ * `FrameTransport` (the WebSocket to the Server Edition server, or the relay tunnel to a remote
+ * desktop). For back-compat a plain URL string is accepted and wrapped in a `WebSocketFrameTransport`
+ * (so the WebSocket path — and its tests — are byte-identical to before the transport was extracted).
  */
 export class RpcClient {
-  private ws: WebSocket
+  private transport: FrameTransport
   private nextId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private channels = new Map<string, Set<Listener>>()
@@ -51,21 +57,15 @@ export class RpcClient {
   // event in the same macrotask as `open`, so a subscriber registered one microtask later (via
   // `await ready()`) would otherwise miss it. Buffered here (capped) and flushed on subscribe.
   private early: Array<{ channel: string; args: unknown[] }> = []
-  private readyPromise: Promise<void>
   private closeCbs = new Set<() => void>()
 
-  constructor(url: string) {
-    const ws = new WebSocket(url)
-    ws.binaryType = 'arraybuffer'
-    this.ws = ws
-    this.readyPromise = new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve())
-      ws.addEventListener('error', () => reject(new Error('WebSocket error')))
-    })
-    ws.addEventListener('message', (ev: MessageEvent) => this.onMessage(ev.data))
-    ws.addEventListener('close', () => {
+  constructor(transport: FrameTransport | string) {
+    this.transport =
+      typeof transport === 'string' ? new WebSocketFrameTransport(transport) : transport
+    this.transport.onMessage((data) => this.onMessage(data))
+    this.transport.onClose(() => {
       // Fail the in-flight requests BEFORE the overlay hooks: a response can only arrive over the
-      // socket that carried the request, so once it is gone they are unanswerable.
+      // carrier that carried the request, so once it is gone they are unanswerable.
       this.failPending()
       this.closeCbs.forEach((cb) => cb())
     })
@@ -91,9 +91,9 @@ export class RpcClient {
     for (const p of waiting) p.reject(err)
   }
 
-  /** Resolves once the socket is open; rejects if it errors before opening. */
+  /** Resolves once the carrier is open; rejects if it fails to open. */
   ready(): Promise<void> {
-    return this.readyPromise
+    return this.transport.ready()
   }
 
   /** Register a connection-loss hook (used by the reconnect overlay). */
@@ -101,23 +101,16 @@ export class RpcClient {
     this.closeCbs.add(cb)
   }
 
-  private onMessage(data: unknown): void {
+  private onMessage(data: string | Uint8Array): void {
     if (typeof data === 'string') {
       const m = parseRpcMessage(data)
       if (!m) return
       this.handleJson(m)
       return
     }
-    // Binary pty frame. Browser gives ArrayBuffer (binaryType='arraybuffer'); the `ws` package
-    // in tests gives a Buffer (already a Uint8Array). Normalize both to a Uint8Array.
-    const bytes =
-      data instanceof Uint8Array
-        ? data
-        : data instanceof ArrayBuffer
-          ? new Uint8Array(data)
-          : null
-    if (!bytes) return
-    const decoded = decodePtyData(bytes)
+    // Binary pty frame. The transport has already normalized the carrier's native binary shape
+    // (ArrayBuffer in the browser, Buffer under the `ws` package in tests) to a Uint8Array.
+    const decoded = decodePtyData(data)
     if (!decoded) return
     this.fanOut(IPC.ptyData(decoded.sessionId), [decoded.data])
   }
@@ -152,13 +145,13 @@ export class RpcClient {
       this.pending.set(id, { resolve, reject })
       // encodeArgs: an OMITTED optional argument must reach the handler as `undefined` (so its
       // default fires) while a MEANINGFUL `null` (pty.resize park, presence clears) stays `null`.
-      this.ws.send(JSON.stringify({ t: 'req', id, method, ...encodeArgs(args) }))
+      this.transport.send(JSON.stringify({ t: 'req', id, method, ...encodeArgs(args) }))
     })
   }
 
   /** Send a fire-and-forget cast (no response expected). */
   cast(method: string, ...args: unknown[]): void {
-    this.ws.send(JSON.stringify({ t: 'cast', method, ...encodeArgs(args) }))
+    this.transport.send(JSON.stringify({ t: 'cast', method, ...encodeArgs(args) }))
   }
 
   /** Subscribe to a channel; returns an unsubscribe function. */
@@ -544,7 +537,7 @@ function startReconnect(): void {
  * failure path (overlay shown, reconnect loop running) so bootstrap can skip loading the app.
  */
 export async function installWsBridge(): Promise<boolean> {
-  const client = new RpcClient(wsUrl())
+  const client = new RpcClient(new WebSocketFrameTransport(wsUrl()))
   try {
     await client.ready()
   } catch {
