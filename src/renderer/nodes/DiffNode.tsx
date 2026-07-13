@@ -4,6 +4,7 @@ import { monaco } from '../editor/monaco-setup'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { sshFs } from '../terminal/ssh-fs'
+import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 
@@ -13,6 +14,11 @@ import { tooLargeSize, formatBytes } from '@shared/fsLimits'
  */
 export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements } = useReactFlow()
+  // This node's core api (a stable context read). Captured by the mount effect's CLOSURE below —
+  // deliberately NOT in its dep array: that effect creates/tears down Monaco models, and the
+  // local api is referentially stable, so re-keying the effect on it would be a silent lifecycle
+  // change armed for 4c. Task 6 precedent.
+  const { api } = useSession()
   const bodyRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null)
   const originalRef = useRef<monaco.editor.ITextModel | null>(null)
@@ -48,7 +54,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
     let original: monaco.editor.ITextModel | null = null
     let modified: monaco.editor.ITextModel | null = null
 
-    const git = window.nodeTerminal.git
+    const git = api.git
     const abs = `${cwd}/${rel}`
     // SSH project: `git.showFile` already routes remotely (Task 2 chokepoint), but the working-tree
     // side is a raw fs read — for an SSH project (active project has `ssh`) read it over the master
@@ -57,7 +63,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
     const sshProjectId = projState.getProject(projState.activeProjectId)?.ssh
       ? projState.activeProjectId
       : null
-    const workingFs = sshProjectId ? sshFs(sshProjectId) : window.nodeTerminal.fs
+    const workingFs = sshProjectId ? sshFs(sshProjectId) : api.fs
     // commit mode: parent (<oid>^) vs commit (<oid>). staged: HEAD vs index. unstaged: index vs working.
     const origP = commitOid
       ? git.showFile(cwd, `${commitOid}^`, rel)

@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useWorktrees, WORKTREE_STATUS_THROTTLE_MS } from './worktrees'
+import { createSession, resetSessionsForTest, setActiveSession } from '../session/session'
+import type { NodeTerminalApi } from '@shared/types'
 
 /** A `git status` on a healthy worktree, with only the fields the store reads spelled out. */
 const okStatus = (over: Partial<Record<string, unknown>> = {}): unknown => ({
@@ -32,6 +34,12 @@ beforeEach(() => {
   gitMock.status.mockReset()
   // Test double for the preload/bridge API (the vitest env is `node`, so there is no real window).
   ;(globalThis as { window?: unknown }).window = { nodeTerminal: { git: gitMock } }
+  // The store reads git through the ACTIVE SESSION's api (Stage 4), so register a session whose
+  // api carries the same git mock. Store construction touches no wire, so this is free.
+  resetSessionsForTest()
+  setActiveSession(
+    createSession('local', { git: gitMock } as unknown as NodeTerminalApi, 'test').id
+  )
   useWorktrees.getState().reset()
 })
 
@@ -694,5 +702,31 @@ describe('useWorktrees.refresh interleaving without reset', () => {
       '/repo-b',
       '/wt/b-feat'
     ])
+  })
+})
+
+describe('session routing (Stage 4)', () => {
+  // The store is a NON-COMPONENT consumer: it must reach git through the active session's api
+  // (`activeSessionApi().git`), never through the `window.nodeTerminal` global — a remote tab's
+  // worktree facts must come from the remote core. The window stub here carries DIFFERENT spies
+  // than the session api, so the two paths are distinguishable.
+  it('reads git through the active session api, not the window global', async () => {
+    const windowGit = {
+      repoRoot: vi.fn(async () => '/repo'),
+      worktreeList: vi.fn(async () => listed([])),
+      status: vi.fn(async () => okStatus())
+    }
+    ;(globalThis as { window?: unknown }).window = { nodeTerminal: { git: windowGit } }
+    gitMock.status.mockResolvedValue(okStatus())
+    gitMock.repoRoot.mockResolvedValue('/repo')
+    gitMock.worktreeList.mockResolvedValue(listed([]))
+
+    await useWorktrees.getState().refreshStatus('/wt/feat', 'g1')
+    await useWorktrees.getState().refresh('/repo', [])
+
+    expect(gitMock.status).toHaveBeenCalledWith('/wt/feat')
+    expect(gitMock.repoRoot).toHaveBeenCalledWith('/repo')
+    expect(windowGit.status).not.toHaveBeenCalled()
+    expect(windowGit.repoRoot).not.toHaveBeenCalled()
   })
 })

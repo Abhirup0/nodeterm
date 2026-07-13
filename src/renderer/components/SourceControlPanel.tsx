@@ -7,6 +7,7 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useSshConn } from '../state/sshConn'
 import { useScmDraft } from '../state/scmDraft'
+import { useSession } from '../session/session'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu, type MenuItem } from './ContextMenu'
@@ -113,7 +114,9 @@ export function SourceControlPanel({
     action: 'merge' | 'rebase' | 'delete'
   } | null>(null)
 
-  const git = window.nodeTerminal.git
+  // This panel's core api (a stable context read — the local session's api IS window.nodeTerminal,
+  // so `git` keeps its identity and every hook dep array it sits in behaves exactly as before).
+  const git = useSession().api.git
 
   const refresh = useCallback(async () => {
     setStatus(cwd ? await git.status(cwd) : null)

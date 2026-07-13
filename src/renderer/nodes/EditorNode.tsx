@@ -6,6 +6,7 @@ import { useSettings } from '../state/settings'
 import { remoteFs } from '../terminal/remote-fs'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
+import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 
@@ -45,16 +46,19 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // Set by a worktree removal sweep (`displacedByWorktree` / `resetDisplacedCwd` in Canvas.tsx):
   // this file no longer exists, and unlike a terminal's cwd there is nothing to re-point it at.
   const fileMissing = !!data.fileMissing
+  // This node's core api (a stable context read — the local session's api IS window.nodeTerminal).
+  const { api } = useSession()
   // Backend pick (the `FsApi` shape is identical across all three, so the rest of the component is
   // unchanged): a relay session operates on the HOST's filesystem via the relay; an SSH-project
-  // editor (`data.sshFs`) on the project's remote fs over the ControlMaster; otherwise the local fs.
+  // editor (`data.sshFs`) on the project's remote fs over the ControlMaster; otherwise the
+  // session's fs.
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const connectionId = data.remote?.connectionId
   const fs = connectionId
     ? remoteFs(connectionId)
     : data.sshFs && activeProjectId
       ? sshFs(activeProjectId)
-      : window.nodeTerminal.fs
+      : api.fs
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
   const isImage = ext in IMAGE_MIME

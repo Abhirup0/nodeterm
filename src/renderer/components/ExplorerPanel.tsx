@@ -4,6 +4,7 @@ import type { DirEntry, FsApi } from '@shared/types'
 import { useProjects } from '../state/projects'
 import { useExplorer } from '../state/explorer'
 import { sshFs } from '../terminal/ssh-fs'
+import { useSession } from '../session/session'
 import { promptDialog } from './promptDialog'
 import { ancestorDirs, createTargetDir, newEntryPath, parentDir } from '../lib/explorerCreate'
 
@@ -166,9 +167,14 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   // ControlMaster via `sshFs`. Local (and relay) projects keep the local fs rooted at `cwd`.
   const ssh = project?.ssh
   const cwd = ssh ? ssh.remoteCwd : project?.cwd
+  // This panel's core api (a stable context read — the local session's api IS window.nodeTerminal).
+  // `api` IS a dep here: the memo is a pure pick (no resource), and the list effect below should
+  // re-fetch off a new core's fs when 4c makes a session's api replaceable.
+  const { api } = useSession()
   const fs = useMemo<FsApi>(
-    () => (ssh && project ? sshFs(project.id) : window.nodeTerminal.fs),
-    [project?.id, ssh]
+    () => (ssh && project ? sshFs(project.id) : api.fs),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project?.id, ssh, api]
   )
   // Files opened from an SSH project's Explorer are genuinely remote — stamp `sshFs` so the editor
   // node routes its read/write over the project's ControlMaster fs (local/relay projects pass false).

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { activeSessionApi } from '../session/session'
 import {
   normWorktreePath,
   reconcileWorktrees,
@@ -121,7 +122,10 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     // After bumping, capture the new epoch so this refresh knows if it was superseded.
     epoch++
     const mineEpoch = epoch
-    const git = window.nodeTerminal.git
+    // Non-component consumer: git comes from the ACTIVE session's core (resolved per call, not at
+    // module load — the local session's api is `window.nodeTerminal` by identity, so this is the
+    // same function reference as before Stage 4).
+    const git = activeSessionApi().git
     try {
       const root = await git.repoRoot(projectCwd)
       if (mineEpoch !== epoch) return
@@ -200,9 +204,10 @@ export const useWorktrees = create<WorktreesState>((set) => ({
     const prev = lastStatusAt.get(path) ?? 0
     if (now - prev < WORKTREE_STATUS_THROTTLE_MS) return
     lastStatusAt.set(path, now)
-    let status: Awaited<ReturnType<typeof window.nodeTerminal.git.status>>
+    const git = activeSessionApi().git
+    let status: Awaited<ReturnType<typeof git.status>>
     try {
-      status = await window.nodeTerminal.git.status(path)
+      status = await git.status(path)
     } catch {
       // Un-stamp, or a transient failure would lock the chip out of retrying for the whole window.
       if (lastStatusAt.get(path) === now) lastStatusAt.delete(path)
