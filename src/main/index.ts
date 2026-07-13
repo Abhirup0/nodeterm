@@ -1078,14 +1078,21 @@ app.whenReady().then(async () => {
     })
     // This human compared the SAS and pressed Confirm → advance the trust gate (confirm rides the
     // ENCRYPTED tunnel). An unknown id (stale event) is a no-op.
-    ipcMain.on(IPC.relayClientConfirm, (_e, connectionId: string) => {
-      relayClients.get(String(connectionId))?.confirm()
+    // Preload sends `{ id }` (matching the host side's relayHostConfirm), so read the object — a
+    // positional `connectionId` here would stringify to "[object Object]" and match no session,
+    // silently breaking the client's half of the mutual approval (never covered by vitest — this
+    // send↔on boundary only runs under real Electron).
+    ipcMain.on(IPC.relayClientConfirm, (_e, msg: { id?: string } = {}) => {
+      if (msg?.id) relayClients.get(String(msg.id))?.confirm()
     })
     // The renderer casts an outbound rpc frame at the host (refused inside the session before approval).
     ipcMain.on(IPC.relayClientSend, (_e, connectionId: string, json: string) => {
       relayClients.get(String(connectionId))?.send(String(json))
     })
-    ipcMain.handle(IPC.relayClientDisconnect, (_e, connectionId: string) => {
+    // `on`, not `handle`: the preload calls this via `ipcRenderer.send` (fire-and-forget), which an
+    // `ipcMain.handle` would never receive — the socket would never close and the host-side presence
+    // leave would never fire (the peer lingers in the host facepile).
+    ipcMain.on(IPC.relayClientDisconnect, (_e, connectionId: string) => {
       const id = String(connectionId)
       relayClients.get(id)?.close()
       relayClients.delete(id)
