@@ -3984,6 +3984,53 @@ export function Canvas() {
           height: GROUP_PAD_TOP + rows * h + (rows - 1) * GROUP_GAP + GROUP_PAD_X
         }
       }
+      // Validate `--group` (open-terminal / open-claude / open-agent): must name an existing
+      // group frame. Returns its id, or null with the error already replied.
+      const resolveIntoGroup = (): string | null | undefined => {
+        if (!args.group) return undefined
+        const g = nodesRef.current.find((nd) => nd.id === args.group)
+        if (!g || g.type !== 'group') {
+          reply({ ok: false, error: `${verb}: --group must name an existing group frame` })
+          return null
+        }
+        return g.id
+      }
+      // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
+      // clamp children landing outside it), then drop each node into the next grid slot
+      // after the existing children. Shared by the terminal and agent open verbs.
+      const addGrouped = (groupId: string, count: number, make: (i: number) => CanvasNode): string[] => {
+        const existing = nodesRef.current.filter((nd) => nd.parentId === groupId).length
+        const ids: string[] = []
+        for (let i = 0; i < count; i++) {
+          const node = make(i)
+          const w = (node.width as number) ?? 600
+          const h = (node.height as number) ?? 400
+          if (i === 0) {
+            const need = groupSizeFor(existing + count, w, h)
+            setNodes((ns) =>
+              ns.map((nd) =>
+                nd.id === groupId
+                  ? {
+                      ...nd,
+                      width: Math.max((nd.width as number) ?? 0, need.width),
+                      height: Math.max((nd.height as number) ?? 0, need.height),
+                      style: {
+                        ...nd.style,
+                        width: Math.max((nd.width as number) ?? 0, need.width),
+                        height: Math.max((nd.height as number) ?? 0, need.height)
+                      }
+                    }
+                  : nd
+              )
+            )
+          }
+          node.position = groupSlot(existing + i, w, h)
+          node.parentId = groupId
+          node.extent = 'parent'
+          ids.push(addAndConnect(node))
+        }
+        return ids
+      }
 
       try {
         switch (verb) {
@@ -4001,10 +4048,27 @@ export function Canvas() {
             return
           }
           case 'open-terminal': {
-            const id = addAndConnect(
-              createTerminalNode(nodesRef.current.length, args.cwd || srcCwd, placeBelow(), args.cmd)
-            )
-            reply({ ok: true, message: `opened terminal ${id}`, result: { id } })
+            const count = Math.max(1, Math.min(8, parseInt(args.count || '1', 10) || 1))
+            const intoGroupId = resolveIntoGroup()
+            if (intoGroupId === null) return // bad --group, already replied
+            const groupCwd = intoGroupId
+              ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
+              : undefined
+            const make = (i: number): CanvasNode =>
+              createTerminalNode(
+                nodesRef.current.length + i,
+                args.cwd || groupCwd || srcCwd,
+                placeBelow(i),
+                args.cmd
+              )
+            const ids = intoGroupId
+              ? addGrouped(intoGroupId, count, make)
+              : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            reply({
+              ok: true,
+              message: `opened ${count} terminal(s): ${ids.join(', ')}`,
+              result: { ids, id: ids[0] }
+            })
             return
           }
           case 'open-claude':
@@ -4016,15 +4080,8 @@ export function Canvas() {
             // --group parents the new node(s) into an existing group frame; a worktree-bound
             // group also hands its worktree path down as the cwd (same inheritance as
             // UI-created nodes — cwdForNewNodeIn is the one resolver for that).
-            let intoGroupId: string | undefined
-            if (args.group) {
-              const g = nodesRef.current.find((nd) => nd.id === args.group)
-              if (!g || g.type !== 'group') {
-                reply({ ok: false, error: `${verb}: --group must name an existing group frame` })
-                return
-              }
-              intoGroupId = g.id
-            }
+            const intoGroupId = resolveIntoGroup()
+            if (intoGroupId === null) return // bad --group, already replied
             const groupCwd = intoGroupId
               ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
               : undefined
@@ -4036,14 +4093,8 @@ export function Canvas() {
               projStore.getProject(projStore.activeProjectId ?? ''),
               useSettings.getState().settings.claudeAccounts
             )
-            // Members land in tidy 2-column grid slots inside the frame (after existing
-            // children), and the frame is grown FIRST so extent:'parent' cannot clamp them.
-            const existingChildren = intoGroupId
-              ? nodesRef.current.filter((nd) => nd.parentId === intoGroupId).length
-              : 0
-            const ids: string[] = []
-            for (let i = 0; i < count; i++) {
-              const node = createAgentNode(
+            const make = (i: number): CanvasNode =>
+              createAgentNode(
                 agentId,
                 nodesRef.current.length + i,
                 args.cwd || groupCwd || srcCwd,
@@ -4053,34 +4104,9 @@ export function Canvas() {
                 account,
                 activePermissionMode()
               )
-              if (intoGroupId) {
-                const w = (node.width as number) ?? 600
-                const h = (node.height as number) ?? 400
-                if (i === 0) {
-                  const need = groupSizeFor(existingChildren + count, w, h)
-                  setNodes((ns) =>
-                    ns.map((nd) =>
-                      nd.id === intoGroupId
-                        ? {
-                            ...nd,
-                            width: Math.max((nd.width as number) ?? 0, need.width),
-                            height: Math.max((nd.height as number) ?? 0, need.height),
-                            style: {
-                              ...nd.style,
-                              width: Math.max((nd.width as number) ?? 0, need.width),
-                              height: Math.max((nd.height as number) ?? 0, need.height)
-                            }
-                          }
-                        : nd
-                    )
-                  )
-                }
-                node.position = groupSlot(existingChildren + i, w, h)
-                node.parentId = intoGroupId
-                node.extent = 'parent'
-              }
-              ids.push(addAndConnect(node))
-            }
+            const ids = intoGroupId
+              ? addGrouped(intoGroupId, count, make)
+              : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
             reply({
               ok: true,
               message: `opened ${count} ${agentId} session(s): ${ids.join(', ')}`,
