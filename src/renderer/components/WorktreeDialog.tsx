@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
+import { BranchSelect } from './BranchSelect'
 import { isValidGitRef, type WorktreeCreateValue, type WorktreeEntry } from '@shared/worktree'
 
 interface Props {
@@ -14,9 +15,8 @@ interface Props {
   /** The repo's default branch (the main checkout's), used as the Base default. */
   defaultBaseRef: string
   /** The repo's local branch names. Base and the "existing branch" field pick from these with a
-   *  real `<select>` (a `<datalist>` filters its options by the field's current value, so a Base
-   *  defaulting to `main` would hide every branch that isn't a prefix of "main"). Base keeps an
-   *  "Other ref…" escape so it can still be a tag / SHA / `origin/x`. Empty ⇒ plain text inputs. */
+   *  custom dropdown (`BranchSelect`). Base's dropdown also carries a free-text field so a base can
+   *  be any ref (a tag / SHA / `origin/x`), not just a local branch. Empty ⇒ plain text inputs. */
   branches: string[]
   /** Suggested worktree path. Returns '' when no writable base dir is known — see `pathUnknown`. */
   defaultPath: (repoPath: string, branch: string) => string
@@ -65,10 +65,6 @@ export function WorktreeDialog({
     if (!baseEdited) setBaseRef(defaultBaseRef)
   }, [defaultBaseRef, baseEdited])
 
-  // Base defaults to picking a branch from the dropdown; "Other ref…" flips it to a free-text field
-  // so the base can be a tag, a commit, or a remote branch (`origin/x`) that isn't a local branch.
-  const [baseCustom, setBaseCustom] = useState(false)
-  const CUSTOM_BASE = ' other' // sentinel option value; a space cannot be in a git branch name
   const hasBranches = branches.length > 0
 
   // Only the topmost modal answers a key (./dialog-stack): this dialog and a ConfirmDialog can be
@@ -150,26 +146,24 @@ export function WorktreeDialog({
           </label>
         </div>
 
-        <label className="bind-field">
-          Branch
-          {/* New branch = a name that must NOT exist yet, so free text. Existing branch = check out
-              one that DOES exist, so pick it from the list (falls back to text if none were read). */}
-          {mode === 'existing' && hasBranches ? (
-            <select
+        {/* New branch = a name that must NOT exist yet, so free text. Existing branch = check out
+            one that DOES exist, so pick it from the dropdown (falls back to text if none were read). */}
+        {mode === 'existing' && hasBranches ? (
+          <div className="bind-field">
+            Branch
+            <BranchSelect
               value={branches.includes(branch) ? branch : ''}
-              onChange={(e) => {
-                setBranch(e.target.value)
+              options={branches}
+              placeholder="Select a branch…"
+              onChange={(v) => {
+                setBranch(v)
                 setBranchEdited(true)
               }}
-            >
-              <option value="">Select a branch…</option>
-              {branches.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          ) : (
+            />
+          </div>
+        ) : (
+          <label className="bind-field">
+            Branch
             <input
               value={branch}
               onChange={(e) => {
@@ -177,8 +171,8 @@ export function WorktreeDialog({
                 setBranchEdited(true)
               }}
             />
-          )}
-        </label>
+          </label>
+        )}
 
         {branchEdited && branchInvalid && (
           <div className="bind-error">
@@ -188,40 +182,38 @@ export function WorktreeDialog({
         )}
 
         {mode === 'new' && (
-          <label className="bind-field">
-            Base
-            {/* Pick a branch, or "Other ref…" to type a tag / SHA / origin/x. If the branch list
-                could not be read, degrade to a plain text field. */}
-            {hasBranches && !baseCustom ? (
-              <select
-                value={branches.includes(baseRef) ? baseRef : CUSTOM_BASE}
-                onChange={(e) => {
-                  if (e.target.value === CUSTOM_BASE) {
-                    setBaseCustom(true)
-                  } else {
+          <>
+            {/* Pick a branch from the dropdown, or type any ref (tag / SHA / origin/x) in its
+                free-text field. If the branch list could not be read, degrade to a plain input. */}
+            {hasBranches ? (
+              <div className="bind-field">
+                Base
+                <BranchSelect
+                  value={baseRef}
+                  options={branches}
+                  placeholder="Select a base…"
+                  allowCustom
+                  customPlaceholder="or a tag, commit, origin/…"
+                  onChange={(v) => {
+                    setBaseRef(v)
+                    setBaseEdited(true)
+                  }}
+                />
+              </div>
+            ) : (
+              <label className="bind-field">
+                Base
+                <input
+                  value={baseRef}
+                  placeholder="e.g. origin/main, a tag, or a commit"
+                  onChange={(e) => {
                     setBaseRef(e.target.value)
                     setBaseEdited(true)
-                  }
-                }}
-              >
-                {branches.map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-                <option value={CUSTOM_BASE}>Other ref…</option>
-              </select>
-            ) : (
-              <input
-                value={baseRef}
-                placeholder="e.g. origin/main, a tag, or a commit"
-                onChange={(e) => {
-                  setBaseRef(e.target.value)
-                  setBaseEdited(true)
-                }}
-              />
+                  }}
+                />
+              </label>
             )}
-          </label>
+          </>
         )}
 
         <label className="bind-field">
