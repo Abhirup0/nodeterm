@@ -3651,8 +3651,13 @@ export function Canvas() {
         window.nodeTerminal.sendAgentControlResult({ requestId, ...r })
 
       // Authorization boundary: the source must be a live, control-capable agent node.
+      // The `?? 'claude'` MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
+      // a PLAIN terminal node (no agentId — including the account "Claude login" node) received
+      // the claude hook env at spawn, so a manual `claude` there holds NODETERM_CANVAS_CONTROL —
+      // rejecting it here contradicted the env it was handed and surfaced as a baffling
+      // "not a control-capable agent" from a session that plainly runs claude.
       const src = nodesRef.current.find((n) => n.id === sourceNodeId)
-      if (!src || !canControlCanvas((src.data.agentId as AgentId | undefined) ?? '')) {
+      if (!src || !canControlCanvas((src.data.agentId as AgentId | undefined) ?? 'claude')) {
         reply({ ok: false, error: 'source node is not a control-capable agent' })
         return
       }
