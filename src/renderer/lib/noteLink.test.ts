@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink } from './noteLink'
+import {
+  buildBackgroundLinkMaps,
+  buildContextLinkNote,
+  buildLinkMap,
+  buildNotePushMessage,
+  classifyLink
+} from './noteLink'
+import type { CanvasNodeState } from '@shared/types'
 
 const term = (contextCapable = false) => ({ kind: 'terminal', contextCapable })
 const sticky = () => ({ kind: 'sticky', contextCapable: false })
@@ -98,16 +105,94 @@ describe('buildLinkMap agent identity', () => {
 })
 
 describe('buildContextLinkNote', () => {
-  it('claude gets the skill wording (unchanged legacy text)', () => {
-    expect(buildContextLinkNote('claude', 'Builder', '/x/context.sh')).toBe(
-      '[nodeterm] You are now linked to "Builder". Use the get-linked-context skill to read its context when you need it.'
-    )
+  it('claude gets the skill wording', () => {
+    const msg = buildContextLinkNote('claude', 'Builder', '/x/context.sh')
+    expect(msg).toContain('[nodeterm] You are now linked to "Builder"')
+    expect(msg).toContain('get-linked-context skill')
   })
   it('codex/gemini get the inline CLI command, single line', () => {
     const msg = buildContextLinkNote('codex', 'Builder', '/x/context.sh')
     expect(msg).toContain('sh "/x/context.sh"')
     expect(msg).toContain('Builder')
     expect(msg).not.toContain('\n')
+  })
+  it('every variant says the note is informational — no action now', () => {
+    // The message is injected + submitted as a prompt, so an agent that reads it as a task
+    // launches an unsolicited investigation (observed with gemini). It must self-defuse.
+    for (const agent of [undefined, 'claude', 'codex', 'gemini']) {
+      const msg = buildContextLinkNote(agent, 'Builder', '/x/context.sh')
+      expect(msg, `agent=${agent}`).toMatch(/[Nn]o action/)
+      expect(msg, `agent=${agent}`).not.toContain('\n')
+    }
+  })
+})
+
+describe('buildBackgroundLinkMaps', () => {
+  const node = (over: Partial<CanvasNodeState>): CanvasNodeState =>
+    ({
+      id: 'x',
+      kind: 'terminal',
+      position: { x: 0, y: 0 },
+      size: { width: 1, height: 1 },
+      title: '',
+      color: '',
+      group: null,
+      ...over
+    }) as CanvasNodeState
+  const projects = [
+    {
+      id: 'p-active',
+      nodes: [node({ id: 'a1', agentId: 'claude' }), node({ id: 'a2', agentId: 'codex' })],
+      bridges: [{ id: 'e0', source: 'a1', target: 'a2' }]
+    },
+    {
+      id: 'p-bg',
+      nodes: [
+        node({ id: 'b1', title: 'Fitness', cwd: '/fit', agentId: 'claude', accountId: 'acct-1' }),
+        node({ id: 'b2', title: 'Gem', cwd: '/fit', agentId: 'gemini' }),
+        node({ id: 'b3', kind: 'sticky', title: 'Note', text: 'remember this' })
+      ],
+      bridges: [
+        { id: 'e1', source: 'b1', target: 'b2' },
+        { id: 'e2', source: 'b3', target: 'b1' }
+      ]
+    },
+    { id: 'p-nolinks', nodes: [node({ id: 'c1' })], bridges: [] }
+  ]
+
+  it('maps every project except the active one (React Flow owns that live)', () => {
+    const map = buildBackgroundLinkMaps(projects, 'p-active', () => undefined)
+    expect(map['a1']).toBeUndefined()
+    expect(map['a2']).toBeUndefined()
+    expect(map['b1']).toBeDefined()
+    expect(map['b2']).toEqual([
+      { id: 'b1', title: 'Fitness', cwd: '/fit', agentId: 'claude', accountId: 'acct-1' }
+    ])
+  })
+  it('serialized stickies map one-way with their text', () => {
+    const map = buildBackgroundLinkMaps(projects, 'p-active', () => undefined)
+    expect(map['b1']).toContainEqual({ id: 'b3', title: 'Note', note: 'remember this' })
+    expect(map['b3']).toBeUndefined()
+  })
+  it('threads sessionIds from the callback', () => {
+    const map = buildBackgroundLinkMaps(projects, 'p-active', (id) =>
+      id === 'b2' ? 'sess-b2' : undefined
+    )
+    expect(map['b1']).toContainEqual({
+      id: 'b2',
+      title: 'Gem',
+      cwd: '/fit',
+      agentId: 'gemini',
+      sessionId: 'sess-b2'
+    })
+  })
+  it('drops edges whose endpoints are gone from the serialized nodes', () => {
+    const map = buildBackgroundLinkMaps(
+      [{ id: 'p', nodes: [node({ id: 'z1' })], bridges: [{ id: 'e', source: 'z1', target: 'gone' }] }],
+      null,
+      () => undefined
+    )
+    expect(map).toEqual({})
   })
 })
 

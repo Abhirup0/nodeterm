@@ -2,7 +2,7 @@
 // agent nodes vs. note link between a sticky and a terminal), build the one-shot push
 // message a note link injects into an agent session, and build the link map pushed to main.
 // Kept free of React/store imports so the connection matrix is unit-testable.
-import type { ContextLinkInfo, ContextLinkMap } from '@shared/types'
+import type { BridgeLink, CanvasNodeState, ContextLinkInfo, ContextLinkMap } from '@shared/types'
 
 export interface LinkEndpoint {
   /** React Flow node type: 'terminal' | 'sticky' | 'editor' | … */
@@ -54,10 +54,13 @@ export function buildContextLinkNote(
   otherTitle: string,
   shimPath: string
 ): string {
+  // Both variants must self-defuse: the note is injected + submitted as a prompt, and an
+  // agent that reads it as a task launches an unsolicited investigation of the linked node
+  // (observed with gemini). "No action needed" keeps it a notification.
   if (!agentId || agentId === 'claude') {
-    return `[nodeterm] You are now linked to "${otherTitle}". Use the get-linked-context skill to read its context when you need it.`
+    return `[nodeterm] You are now linked to "${otherTitle}". Use the get-linked-context skill to read its context when you need it. No action needed now — just acknowledge briefly.`
   }
-  return `[nodeterm] You are now linked to "${otherTitle}". To read its context run: sh "${shimPath}" list — then summary | transcript | terminal --node <id>. Details are in the get-linked-context section of your global agent instructions.`
+  return `[nodeterm] You are now linked to "${otherTitle}". When you need its context (and only then) run: sh "${shimPath}" list — then summary | transcript | terminal --node <id>. Details are in the get-linked-context section of your global agent instructions. No action needed now — acknowledge briefly and do not run these commands yet.`
 }
 
 export interface LinkNodeInfo {
@@ -101,6 +104,43 @@ export function buildLinkMap(
       ;(map[s.id] ??= []).push(entryOf(t))
       ;(map[t.id] ??= []).push(entryOf(s))
     }
+  }
+  return map
+}
+
+/**
+ * Link maps for every project EXCEPT the active one, built from the projects store's
+ * serialized nodes + bridges. The active project's map is built live from React Flow; this
+ * covers the rest, because main's writeLinkFiles clears ALL link files before writing the
+ * pushed map — pushing only the active project's map deleted the link files of background
+ * projects whose tmux sessions (and agents mid-task) were still running.
+ * Node ids are globally unique across projects, so the maps merge without collisions.
+ */
+export function buildBackgroundLinkMaps(
+  projects: Array<{ id: string; nodes: CanvasNodeState[]; bridges?: BridgeLink[] }>,
+  activeProjectId: string | null,
+  sessionIdOf: (nodeId: string) => string | undefined
+): ContextLinkMap {
+  const map: ContextLinkMap = {}
+  for (const p of projects) {
+    if (p.id === activeProjectId || !p.bridges?.length) continue
+    const byId = new Map(p.nodes.map((n) => [n.id, n]))
+    const edges = p.bridges.filter((e) => byId.has(e.source) && byId.has(e.target))
+    const infoOf = (id: string): LinkNodeInfo => {
+      const n = byId.get(id)!
+      const sticky = n.kind === 'sticky'
+      return {
+        id,
+        title: n.title || id,
+        cwd: n.cwd ?? '',
+        note: sticky ? (n.text ?? '') : undefined,
+        sticky,
+        agentId: sticky ? undefined : n.agentId,
+        sessionId: !sticky && n.agentId ? sessionIdOf(id) : undefined,
+        accountId: sticky ? undefined : n.accountId
+      }
+    }
+    Object.assign(map, buildLinkMap(edges, infoOf))
   }
   return map
 }
