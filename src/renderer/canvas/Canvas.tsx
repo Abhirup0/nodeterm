@@ -861,11 +861,11 @@ export function Canvas() {
           useSettings.getState().update({ seenShortcuts: true })
         }
       })
-    window.nodeTerminal.workspace.load().then((ws) => {
+    api.workspace.load().then((ws) => {
       if (cancelled) return
       useProjects.getState().hydrate(ws)
       // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away.
-      void window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+      void api.workspace.save(useProjects.getState().toWorkspace())
     })
     return () => {
       cancelled = true
@@ -996,7 +996,7 @@ export function Canvas() {
   }, [])
 
   const writeDisk = useCallback(async () => {
-    await window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+    await api.workspace.save(useProjects.getState().toWorkspace())
     setDirty(false)
   }, [])
 
@@ -1022,7 +1022,7 @@ export function Canvas() {
 
   // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine).
   useEffect(() => {
-    return window.nodeTerminal.workspace.onExternalChange((project) => {
+    return api.workspace.onExternalChange((project) => {
       const { activeProjectId: current } = useProjects.getState()
       if (project.id !== current) {
         // Background project: adopt silently — it reloads into React Flow on next switch.
@@ -1042,7 +1042,7 @@ export function Canvas() {
 
   // One-shot note after a v2→v3 on-disk migration (dismissible, non-blocking strip).
   useEffect(() => {
-    return window.nodeTerminal.workspace.onMigrated(() => {
+    return api.workspace.onMigrated(() => {
       setMigrationNote(
         'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
       )
@@ -1867,7 +1867,7 @@ export function Canvas() {
         setCopyError(`Invalid name: “${name.trim()}”`)
         return
       }
-      const fsApi = project.ssh ? sshFs(project.id) : window.nodeTerminal.fs
+      const fsApi = project.ssh ? sshFs(project.id) : api.fs
       if (await fsApi.exists(dest)) {
         setCopyError(`Already exists: ${dest}`)
         return
@@ -4504,7 +4504,7 @@ export function Canvas() {
     } else {
       // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
       // another machine's project) — only a virgin folder gets a brand-new project.
-      const probed = await window.nodeTerminal.workspace.probeFolder(folder)
+      const probed = await api.workspace.probeFolder(folder)
       if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
       else useProjects.getState().openFolderProject(folder)
     }
