@@ -88,7 +88,8 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     ...buildCanvasApi(client), // canvas sync against the host's reflector
     ...buildPresenceApi(client), // the host's presence hub
     // `cliCaps` is REAL over the relay so the --permission-mode auto version gate probes the HOST's
-    // claude CLI (a remote node launches on the host); `readTranscript` keeps the stub's reject.
+    // claude CLI (a remote node launches on the host); `readTranscript` stays LOCAL (v1 degrade —
+    // transcripts aren't relayed, so it reads this machine's; the only consumer reads the global api).
     claude: buildClaudeApi(client, local.claude),
 
     // pty is core-bound EXCEPT `onData` (gotcha 1): its output arrives on the LOCAL per-session
