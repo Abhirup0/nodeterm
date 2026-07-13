@@ -5536,7 +5536,9 @@ export function Canvas() {
         <ConfirmDialog
           // ConsentNotice → describeGrant: the human reads WHAT they grant ("<peer> will be able to
           // run commands on this Mac — the same as SSH") above the SAS body, before confirming.
-          body={<ConsentNotice peerLabel={pendingPeer.label ?? 'This device'} />}
+          // Everything the dialog needs (label, SAS body, confirm id) comes from the ONE pure
+          // view-model, so the peer label the user reads is the same field the test guards.
+          body={<ConsentNotice peerLabel={peerApprovalView(pendingPeer).peerLabel} />}
           message={peerApprovalView(pendingPeer).message}
           confirmLabel="Allow"
           cancelLabel="Deny"

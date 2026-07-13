@@ -3380,6 +3380,21 @@ body,
   white-space: pre-line;
 }
 
+/* The grant disclosure (`ConsentNotice` → describeGrant) shown ABOVE the SAS body in the host
+   approval dialog: the human reads that they are handing the peer shell access before they Allow.
+   Styled as a distinct callout — accent-tinted panel — so a load-bearing security sentence does
+   not read as an unstyled default paragraph. */
+.remote-consent {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 /* Explicit opt-in inside a confirm dialog (e.g. "also delete the directory from disk"). */
 .confirm__option {
   display: flex;
