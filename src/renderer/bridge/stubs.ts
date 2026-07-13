@@ -271,6 +271,29 @@ export function buildStubApi(): Omit<
       fsReadBinary: U('remoteClient.fsReadBinary'),
       fsWrite: U('remoteClient.fsWrite')
     },
+    // New relay tunnel (Stage 4). Hosting/connecting a peer-to-peer relay is a desktop-only
+    // (Electron) capability — the Server Edition is itself the remote host, reached over its own WS
+    // bridge — so the entry points (`start`/`connect`) reject with E_UNSUPPORTED and the UI hides
+    // the affordance. Because those never yield a live connection, the gate/frame void members are
+    // inert no-ops (there is no connectionId to act on) and the subscriptions are no-op unsubscribes.
+    relayHost: {
+      start: U('relayHost.start'),
+      stop: U('relayHost.stop'),
+      onPeerPending: noopUnsub,
+      confirm: noop,
+      onOpen: noopUnsub,
+      onClosed: noopUnsub
+    },
+    relayClient: {
+      connect: U('relayClient.connect'),
+      onSas: noopUnsub,
+      confirm: noop,
+      onApproved: noopUnsub,
+      send: noop,
+      onFrame: noopUnsub,
+      onClosed: noopUnsub,
+      disconnect: noop
+    },
     handoff: {
       build: U('handoff.build')
     },

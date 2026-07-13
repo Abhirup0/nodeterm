@@ -240,6 +240,38 @@ export const IPC = {
     `remote:client:exit:${connectionId}:${streamId}`,
   // Fired when a connection's relay socket drops (host/relay gone).
   remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
+  // ── New E2EE relay tunnel (Stage 4) ─────────────────────────────────────────────────────────
+  // The successor to the legacy `remote:host:*` / `remote:client:*` dialect above. Both coexist
+  // during the migration (the phone still speaks the old channels until Task 10 deletes them), so
+  // these deliberately use a distinct `relay:*` namespace. A connected peer is a first-class
+  // CorePlatform client: the client casts raw rpc.ts frames (JSON strings) at the host and receives
+  // frames back, rather than a bespoke per-verb channel set.
+  //
+  // HOST side: enter/leave host mode, and the mutual-approval gate. `relayHostPeerPending` fires
+  // main → renderer when a client finishes the encrypted handshake and is awaiting approval
+  // (payload `{ id, sas, peerKeyB64 }` — the SAS both humans compare, the peer's box key to pin);
+  // the host human answers with `relayHostConfirm` (id). `relayHostOpen` / `relayHostClosed` fire
+  // main → renderer when a bridged peer becomes a live client / drops (payload `{ id }`).
+  relayHostStart: 'relay:host:start',
+  relayHostStop: 'relay:host:stop',
+  relayHostPeerPending: 'relay:host:peer-pending',
+  relayHostConfirm: 'relay:host:confirm',
+  relayHostOpen: 'relay:host:open',
+  relayHostClosed: 'relay:host:closed',
+  // CLIENT side: connect to a host by its pairing offer (resolves a connectionId), the client half
+  // of the same mutual-approval gate, and the raw frame pipe. `relayClientSas` pushes the channel
+  // SAS main → renderer so the client human can compare it before the host approves;
+  // `relayClientConfirm` (id) is this human's confirmation; `relayClientApproved` fires once the
+  // host approves. `relayClientSend` casts an outbound rpc frame (JSON) at the host;
+  // `relayClientFrame` delivers an inbound one. `relayClientClosed` fires when the socket drops.
+  relayClientConnect: 'relay:client:connect',
+  relayClientConfirm: 'relay:client:confirm',
+  relayClientSend: 'relay:client:send',
+  relayClientDisconnect: 'relay:client:disconnect',
+  relayClientSas: (connectionId: string) => `relay:client:sas:${connectionId}`,
+  relayClientApproved: (connectionId: string) => `relay:client:approved:${connectionId}`,
+  relayClientFrame: (connectionId: string) => `relay:client:frame:${connectionId}`,
+  relayClientClosed: (connectionId: string) => `relay:client:closed:${connectionId}`,
   handoffBuild: 'handoff:build',
   // Phone pairing (nodeterm iOS "scan a QR" flow): renderer starts/stops the one-shot LAN
   // listener; main pushes the completion result back over `pairing:done`. The per-device

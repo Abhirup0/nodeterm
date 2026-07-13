@@ -1163,6 +1163,76 @@ export interface RemoteClientApi {
   fsWrite(connectionId: string, path: string, content: string): Promise<boolean>
 }
 
+/**
+ * Payload of `relayHost.onPeerPending`: a client has finished the E2EE handshake over the new
+ * relay tunnel and is awaiting the host human's approval. `id` addresses this pending peer for
+ * `confirm(id)`; `sas` is the channel verification code both humans compare (null before the key is
+ * derived); `peerKeyB64` is the peer's stable box public key to pin on approval.
+ */
+export interface RelayPeerPending {
+  id: string
+  sas: string | null
+  peerKeyB64: string
+}
+
+/**
+ * HOST side of the new E2EE relay tunnel (Stage 4) — the successor to `RemoteHostApi`. A connected
+ * peer becomes a first-class CorePlatform client (it exchanges raw rpc frames), so this surface is
+ * only the mutual-approval gate plus enter/leave, not a per-verb API. Desktop-only (Electron);
+ * the Server Edition browser build degrades every member to `E_UNSUPPORTED`/no-op.
+ */
+export interface RelayHostApi {
+  /**
+   * Enter host mode over the relay: connect and return a pairing offer string to hand to a client.
+   * Rejects if the device is not entitled (or a dev build without the relay URL).
+   */
+  start(): Promise<{ offer: string }>
+  /** Leave host mode: close the relay connection (drops every bridged peer). */
+  stop(): Promise<void>
+  /**
+   * Fires when a client finishes the handshake and is awaiting approval. The host must `confirm()`
+   * before the peer is admitted as a client. Returns an unsubscribe function.
+   */
+  onPeerPending(listener: (info: RelayPeerPending) => void): () => void
+  /** Approve the pending peer (by its pending id) after comparing the SAS → it joins as a client. */
+  confirm(id: string): void
+  /** Fires when a bridged peer becomes a live client (both humans confirmed). Returns unsubscribe. */
+  onOpen(listener: (info: { id: string }) => void): () => void
+  /** Fires when a bridged peer's connection drops. Returns an unsubscribe function. */
+  onClosed(listener: (info: { id: string }) => void): () => void
+}
+
+/**
+ * CLIENT side of the new E2EE relay tunnel (Stage 4) — the successor to `RemoteClientApi`. The
+ * client exchanges raw rpc.ts frames (JSON strings) with the host over the encrypted tunnel rather
+ * than a per-verb channel set. Desktop-only (Electron); the Server Edition browser build degrades
+ * every member to `E_UNSUPPORTED`/no-op.
+ */
+export interface RelayClientApi {
+  /**
+   * Connect to a host by its pairing offer string. Gates on entitlement (rejects otherwise, and in
+   * dev builds without the relay URL). Resolves with a `connectionId` to address the methods below.
+   */
+  connect(offer: string): Promise<string>
+  /**
+   * Listen for the channel SAS once the handshake completes, so the client human can compare it
+   * with the code shown on the host before approving. Returns an unsubscribe function.
+   */
+  onSas(connectionId: string, listener: (sas: string | null) => void): () => void
+  /** Confirm the SAS on this side (the client half of the mutual-approval gate). */
+  confirm(connectionId: string): void
+  /** Fires once the host approves this connection → the client may begin exchanging frames. */
+  onApproved(connectionId: string, listener: () => void): () => void
+  /** Cast an outbound rpc frame (a JSON string) at the host over the tunnel. */
+  send(connectionId: string, frame: string): void
+  /** Listen for an inbound rpc frame (a JSON string) from the host. Returns an unsubscribe. */
+  onFrame(connectionId: string, listener: (frame: string) => void): () => void
+  /** Fires when the connection's relay socket drops (host/relay gone). Returns unsubscribe. */
+  onClosed(connectionId: string, listener: () => void): () => void
+  /** Close a connection: end the relay socket and drop access to the host. */
+  disconnect(connectionId: string): void
+}
+
 /** A paired device as exposed to the renderer — the bearer token is never included. */
 export interface PairedDevice {
   id: string
@@ -1239,6 +1309,8 @@ export interface NodeTerminalApi {
   transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   remoteClient: RemoteClientApi
+  relayHost: RelayHostApi
+  relayClient: RelayClientApi
   handoff: HandoffApi
   pairing: PairingApi
   presence: PresenceApi
