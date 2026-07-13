@@ -61,6 +61,7 @@ import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
+import { useSession } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -299,6 +300,10 @@ function setCo(id: string, patch: Partial<CoState>): void {
  */
 export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes, getNode } = useReactFlow()
+  // This node's core api (a context read — stable for the session's lifetime, so using it
+  // inside the once-mounted lifecycle effect is safe and never re-runs that effect). Core-bound
+  // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
+  const { api } = useSession()
   // Pick the session layer: a remote-bound node (data.remote) talks to a host over the relay
   // via RemoteTransport; otherwise the local PTY (LocalTransport). The connectionId is stable
   // for a node's lifetime, so the instance is created once and held in a ref.
@@ -641,7 +646,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const projectFs = (): { fs: FsApi; ssh: boolean } => {
           const st = useProjects.getState()
           const project = st.projects.find((p) => p.id === st.activeProjectId)
-          return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: window.nodeTerminal.fs, ssh: false }
+          return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: api.fs, ssh: false }
         }
         const lookup = makeDirListingLookup(async (dir) => projectFs().fs.list(dir))
         term.registerLinkProvider(
@@ -745,7 +750,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const scrollbackPromise =
       parked || noSpawn
         ? Promise.resolve('')
-        : window.nodeTerminal.pty.readScrollback(id).catch(() => '')
+        : api.pty.readScrollback(id).catch(() => '')
     // Consume the recycle-restart flag HERE, at the start of the spawn it belongs to — not in the
     // create() continuation, which returns early when the node unmounted mid-spawn and would leave
     // the flag set for some unrelated mount hours later ("session restarted by another user" out of
@@ -1240,7 +1245,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
   // the live session (tmux send-keys, like Branch's /branch). No-op for other agents/shells.
   const pushSessionRename = (name: string) => {
-    if (canRenameNode && name) void window.nodeTerminal.pty.sendText(id, `/rename ${name}`)
+    if (canRenameNode && name) void api.pty.sendText(id, `/rename ${name}`)
   }
 
   // The user took over the name (manual rename or ✦ AI-name): stop auto-tracking the session
@@ -1260,7 +1265,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
   const nameWithAi = async () => {
     setNaming(true)
-    const r = await window.nodeTerminal.pty.generateName(id, (data.cwd as string) ?? '')
+    const r = await api.pty.generateName(id, (data.cwd as string) ?? '')
     setNaming(false)
     if (r.ok) applyManualTitle(r.message)
   }
@@ -1289,7 +1294,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await window.nodeTerminal.pty.readSessionName(sid, data.accountId)
+      const name = await api.pty.readSessionName(sid, data.accountId)
       if (cancelled) return
       if (name) delayMs = 15000
       if (
@@ -1349,7 +1354,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   useEffect(() => {
     if (data.mdMode && !useChat) {
       // Full scrollback (not just the visible viewport) so the whole session renders.
-      void window.nodeTerminal.pty.capture(id, true).then((t) => setMdHtml(renderMarkdown(t)))
+      void api.pty.capture(id, true).then((t) => setMdHtml(renderMarkdown(t)))
     }
   }, [data.mdMode, id, useChat])
 

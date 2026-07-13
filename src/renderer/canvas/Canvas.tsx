@@ -131,6 +131,7 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
+import { useSession } from '../session/session'
 import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -304,6 +305,9 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
 }
 
 export function Canvas() {
+  // This canvas's core api (a context read — stable for the session, no store subscription).
+  // For the local session it IS window.nodeTerminal, so every call resolves identically.
+  const { api } = useSession()
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
@@ -2927,7 +2931,7 @@ export function Canvas() {
       if (known) {
         await window.nodeTerminal.pty.sendText(nodeId, '/branch')
       } else {
-        const res = await branchClaudeSession(nodeId)
+        const res = await branchClaudeSession(api, nodeId)
         if (!res.ok || !res.originalId) {
           const error = res.error ?? 'Branch failed.'
           // The error dialog is for humans; agent-CLI calls get the error in the reply instead.
@@ -2958,7 +2962,7 @@ export function Canvas() {
       markDirty()
       return { ok: true, newNodeId: copy.id }
     },
-    [setNodes, markDirty]
+    [api, setNodes, markDirty]
   )
 
   // Transfer this agent's full conversation to a different agent. We render the source

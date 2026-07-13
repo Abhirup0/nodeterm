@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { renderMarkdown } from '../lib/markdown'
 import { useAgentStatus } from '../state/agentStatus'
+import { useSession } from '../session/session'
 import type { ChatMessage } from '@shared/types'
 
 // Memoized bubble: marked+DOMPurify re-ran for EVERY message on each ChatPanel render (each
@@ -25,6 +26,9 @@ interface ChatPanelProps {
  * (working -> idle); live streaming is a later phase. Replaces the markdown-of-output overlay.
  */
 export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps) {
+  // This node's core api (stable for the session — the chat transcript and the tmux session
+  // both live on the core this panel's project belongs to).
+  const { api } = useSession()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [readonly, setReadonly] = useState(false)
@@ -33,8 +37,8 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
   const prevState = useRef(state)
 
   const load = useCallback(() => {
-    void window.nodeTerminal.chat.readTranscript(sessionId, cwd, accountId).then(setMessages)
-  }, [sessionId, cwd, accountId])
+    void api.chat.readTranscript(sessionId, cwd, accountId).then(setMessages)
+  }, [api, sessionId, cwd, accountId])
 
   // Initial load.
   useEffect(() => {
@@ -58,7 +62,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
   const send = useCallback(async () => {
     const text = input.trim()
     if (!text || working) return
-    const ok = await window.nodeTerminal.pty.sendText(nodeId, text)
+    const ok = await api.pty.sendText(nodeId, text)
     if (!ok) {
       setReadonly(true)
       return
@@ -66,7 +70,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
     // Optimistic: show the prompt immediately; the next load() reconciles from the transcript.
     setMessages((m) => [...m, { role: 'user', parts: [{ kind: 'text', text }] }])
     setInput('')
-  }, [input, working, nodeId])
+  }, [api, input, working, nodeId])
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter') {
