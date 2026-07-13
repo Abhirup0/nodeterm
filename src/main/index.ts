@@ -68,6 +68,9 @@ import { initRelayHost } from './remote/relay-host-service'
 import { createRevoker } from './remote/revocation'
 import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
 import { initRemoteClient } from './remote/client-service'
+import { connectRelayClient, type RelayClientSession } from './remote/relay-client'
+import { decodeOffer } from './remote/pairing'
+import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
@@ -1028,6 +1031,66 @@ app.whenReady().then(async () => {
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()
   initRemoteClient(win, { isPackaged: app.isPackaged })
+  // NEW interactive relay CLIENT (Stage 4): connect OUT to another desktop's host. `connectRelayClient`
+  // runs the client half of mutual SAS approval and, once BOTH humans confirm, exposes the raw rpc.ts
+  // frame pipe (`relay:client:send`/`relay:client:frame`) that Task 4's RpcClient drives. Runs BESIDE
+  // the legacy client (initRemoteClient). Inert until `relay:client:connect` — a solo user pays nothing.
+  {
+    const relayClients = new Map<string, RelayClientSession>()
+    const sendTo = (channel: string, ...args: unknown[]): void => {
+      if (!win.isDestroyed()) win.webContents.send(channel, ...args)
+    }
+    ipcMain.handle(IPC.relayClientConnect, async (_e, offerCode: string): Promise<string> => {
+      // No Pro gate on the client: the paywall is the HOST minting the pairing token, so a valid offer
+      // is the credential (mirrors initRemoteClient). The dev/relay gate still applies.
+      if (!relayAllowed()) {
+        throw new Error('Remote access is unavailable in development builds (set NODETERM_RELAY_URL).')
+      }
+      const offer = decodeOffer(String(offerCode ?? ''))
+      if (!offer) {
+        throw new Error('That pairing code is invalid or incomplete.')
+      }
+      // Our persistent peer identity (4d: pinned on both ends). A locked keyring rejects here as
+      // PeerKeyLockedError (E_PEER_KEY_LOCKED) — the identity on disk is intact and must NOT be rotated;
+      // the renderer tells the human to unlock and reconnect.
+      const keys = await loadOrCreatePeerKeyPair()
+      const connectionId = randomUUID()
+      const session = connectRelayClient({
+        url: offer.relayEndpoint,
+        token: offer.pairingToken,
+        hostKeyB64: offer.hostPublicKeyB64,
+        ourKeys: keys,
+        // The SAS is known — push it so this human can compare it before the host approves.
+        onSas: (s) => sendTo(IPC.relayClientSas(connectionId), s.sas()),
+        // Mutually approved — the frame pipe is live.
+        onApproved: () => sendTo(IPC.relayClientApproved(connectionId)),
+        // An inbound rpc frame from the host (res/ev) → the renderer's RpcClient.
+        onFrame: (json) => sendTo(IPC.relayClientFrame(connectionId), json),
+        // pty output arrives on the SAME per-session channel a local pty uses (ws-bridge binary path).
+        onPtyData: (sessionId, data) => sendTo(IPC.ptyData(sessionId), data),
+        onClose: () => {
+          relayClients.delete(connectionId)
+          sendTo(IPC.relayClientClosed(connectionId))
+        }
+      })
+      relayClients.set(connectionId, session)
+      return connectionId
+    })
+    // This human compared the SAS and pressed Confirm → advance the trust gate (confirm rides the
+    // ENCRYPTED tunnel). An unknown id (stale event) is a no-op.
+    ipcMain.on(IPC.relayClientConfirm, (_e, connectionId: string) => {
+      relayClients.get(String(connectionId))?.confirm()
+    })
+    // The renderer casts an outbound rpc frame at the host (refused inside the session before approval).
+    ipcMain.on(IPC.relayClientSend, (_e, connectionId: string, json: string) => {
+      relayClients.get(String(connectionId))?.send(String(json))
+    })
+    ipcMain.handle(IPC.relayClientDisconnect, (_e, connectionId: string) => {
+      const id = String(connectionId)
+      relayClients.get(id)?.close()
+      relayClients.delete(id)
+    })
+  }
   sshProjectManager = initSshProject(win, (projectId) => {
     // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
     // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
