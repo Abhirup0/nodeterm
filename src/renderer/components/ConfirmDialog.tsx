@@ -1,5 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { isTopDialog, nextDialogId, popDialog, pushDialog } from './dialog-stack'
 
 interface ConfirmDialogProps {
   message: string
@@ -13,7 +14,11 @@ interface ConfirmDialogProps {
   onCancel: () => void
 }
 
-/** A small themed confirm dialog. Enter confirms, Esc cancels. */
+/**
+ * A small themed confirm dialog. Enter confirms, Esc cancels — but ONLY while this dialog is the
+ * topmost one (see ./dialog-stack): the listener is on `window`, and a dialog painted underneath
+ * another must never answer a key the user aimed at the one they can see.
+ */
 export function ConfirmDialog({
   message,
   confirmLabel = 'Delete',
@@ -23,8 +28,21 @@ export function ConfirmDialog({
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
+  // One id per instance, for the lifetime of the component (mount order == paint order == stack).
+  const idRef = useRef<string>()
+  if (!idRef.current) idRef.current = nextDialogId()
+  const id = idRef.current
+
+  useEffect(() => {
+    pushDialog(id)
+    return () => popDialog(id)
+  }, [id])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Not the dialog on top → this key is not ours. Do not preventDefault either: the topmost
+      // dialog's own listener still has to see it.
+      if (!isTopDialog(id)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         onCancel()
@@ -35,7 +53,7 @@ export function ConfirmDialog({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onConfirm, onCancel])
+  }, [id, onConfirm, onCancel])
 
   return createPortal(
     <div className="confirm-overlay" onClick={onCancel}>
