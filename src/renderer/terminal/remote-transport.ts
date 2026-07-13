@@ -39,16 +39,6 @@ export class RemoteTransport implements TerminalTransport {
     return { sessionId, fresh: false }
   }
 
-  async captureHistory(persistKey: string): Promise<string> {
-    // The tmux session lives on the HOST, so its history has to come over the relay. The host jails
-    // the request to a stream this client already attached to (`pty.captureHistory {streamId}`) —
-    // hence the lookup: we ask for the history of the session `create()` opened for this node, not
-    // for an arbitrary tmux session name.
-    const sessionId = this.sessions.get(persistKey)
-    if (!sessionId) return ''
-    return this.client.captureHistory(this.connectionId, sessionId)
-  }
-
   write(sessionId: string, data: string): void {
     this.client.write(this.connectionId, sessionId, data)
   }

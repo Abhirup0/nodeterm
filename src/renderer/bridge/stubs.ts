@@ -247,7 +247,6 @@ export function buildStubApi(): Omit<
       // Relay client mode is desktop-only (the whole `remoteClient` block is unsupported here), so
       // there is no host session to hydrate from — '' is the same "nothing to seed" the local
       // hydration degrades to, and it keeps TerminalNode's warm-attach path from rejecting.
-      captureHistory: async () => '',
       onData: noopUnsub,
       onExit: noopUnsub,
       onClosed: noopUnsub,

@@ -31,7 +31,6 @@ import {
   repaintResync,
   reportedSize,
   seedPaint,
-  warmSeed,
   setFittedSize,
   shouldApplyResync,
   stripTrailingNewline,
@@ -887,10 +886,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             })
           )
         }
-        // Seed the (fresh) emulator with the history it can't see: a cold restart replays the
-        // persisted snapshot (the tmux session died with the machine), a warm reattach pulls
-        // tmux's own scrollback. Parked terminals get neither — their buffer is still correct
-        // and seeding it would duplicate content.
+        // Seed the (fresh) emulator — but only in the two cases where nothing else will paint it:
+        // a COLD restart (the machine rebooted, the tmux session is gone, so replay the persisted
+        // snapshot) and a co-attach JOINER (no redraw of its own — see below). A plain warm
+        // reattach seeds NOTHING: tmux is attached to this client, redraws it, and owns the
+        // history the wheel scrolls. Parked terminals seed nothing either — their buffer is still
+        // correct and writing to it would duplicate content.
         // The gate MUST be opened whatever happens in here (`finally`): the data listener already
         // exists, so a throw between it and `gate.open()` would queue chunks forever — the source
         // pauses at the high-water mark and the terminal freezes silently and permanently. The
@@ -911,34 +912,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
               term.write(toXtermText(snapshot))
               term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
             }
-          } else if (replay === 'warm-history') {
-            // Warm reattach: tmux redraws only the VISIBLE screen, so everything above it would be
-            // missing from this fresh xterm. `captureHistory` includes the visible screen too —
-            // tmux's redraw (\x1b[H\x1b[2J) erases exactly those lines in place, so it overwrites
-            // the tail of what we write here instead of leaving a gap. This is the session's REAL
-            // history, not a restore boundary — it gets no separator line.
-            // Requested only now (not prefetched alongside the spawn): for an SSH node the remote
-            // tmux is only reachable once `create()` has registered the session's ssh target — an
-            // earlier call would silently fall through to the LOCAL tmux and return ''.
-            // Goes through the TRANSPORT, not `window.nodeTerminal.pty`: a relay-backed node's tmux
-            // session lives on the HOST, so the local PtyManager has nothing to capture and the
-            // node would come up with an empty scrollback.
-            const history = await transport.captureHistory(id).catch(() => '')
-            if ((toreDown = onDisposed())) return
-            // A resync that landed while we awaited the capture is strictly newer than what we just
-            // fetched, so `seedPaint` says 'none' and we write nothing. It is a CONDITION, never a
-            // `return`: everything below this try/finally — the onExit notice, `term.onData` (the
-            // KEYBOARD INPUT path) and the initialCommand / agent-resume — must still be wired, or
-            // the terminal streams output, looks alive, and silently accepts no input forever.
-            const paint = seedPaint({ replay, superseded, history, screen })
-            if (paint !== 'none') {
-              // `warmSeed` owns the exact bytes: the history, pushed `term.rows` lines above the
-              // fold so tmux's in-place redraw cannot leave a second copy of it behind (see its
-              // doc), plus — for a CO-ATTACH JOINER — the visible `screen` from `create()`, which
-              // is the one thing the history no longer carries (the capture excludes the visible
-              // screen, because tmux is about to paint it) and which a joiner never gets a redraw
-              // for. A joiner whose history capture failed still opens on its teammate's screen.
-              term.write(warmSeed({ history, screen, rows: term.rows }))
+          } else if (replay === 'warm-attach') {
+            // tmux is attached to this client and paints it: the visible screen on attach, its own
+            // history under the wheel. So there is nothing to hydrate — EXCEPT for a CO-ATTACH
+            // JOINER, whose `screen` was captured inside `create()`: tmux only repaints on SIGWINCH,
+            // and a joiner that did not resize never gets one, so this capture is the only thing
+            // that paints it (see "Painting the joiner" in docs/team-presence.md).
+            // A resync that landed while we awaited the spawn is strictly newer, so `seedPaint` says
+            // 'none' and we write nothing. It is a CONDITION, never a `return`: everything below
+            // this try/finally — the onExit notice, `term.onData` (the KEYBOARD INPUT path) and the
+            // initialCommand / agent-resume — must still be wired, or the terminal streams output,
+            // looks alive, and silently accepts no input forever.
+            if (seedPaint({ replay, superseded, screen }) === 'create-screen') {
+              // Start from a known-clean SGR state; the capture is LF-separated (`capture-pane -p`)
+              // and xterm runs with convertEol:false, so the LFs have to become CRLFs.
+              term.write('\x1b[0m' + toXtermText(stripTrailingNewline(screen as string)))
             }
           }
         } catch (err) {
