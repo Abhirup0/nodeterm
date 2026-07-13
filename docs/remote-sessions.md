@@ -97,53 +97,70 @@ dispatches by id to a webContents *or* a registered peer sink (the relay connect
 With that one seam, `presenceHub`, the Stage 3 canvas reflector and terminal co-attach
 flow to a remote peer with no further changes — they never knew what a webContents
 was. `phone-presence.ts`'s half-join (host sees the phone; the phone is blind because
-`sendTo` no-ops) is retired by the same change.
+`sendTo` no-ops) is what this seam makes fixable — the fix itself lands in 4c, when the
+phone gets a real sink (see below).
 
-#### 4b landed — the peer-sink registry (branch `feat/peer-registry`)
+### 4b → 4c interface (landed)
 
-The "client registry" above shipped. `electronPlatform` is now genuinely multi-client:
-a relay peer is a first-class `CorePlatform` client of the desktop's core, addressed by
-a `UiSink` instead of a webContents. What 4b built, and the exact seam 4c plugs into:
+4b is **merged**: `electronPlatform` is genuinely multi-client. A relay peer is now a
+first-class `CorePlatform` client of the desktop's core, so `presenceHub`, the Stage 3
+canvas reflector and terminal co-attach already reach it — 4c only has to supply the
+socket. What 4c consumes:
 
-- **`UiSink`** (home: `src/core/ui-sink-registry.ts`, re-exported from
-  `src/main/peer-registry.ts`) — the sink 4c hands the platform per peer:
-  ```ts
-  interface UiSink {
-    sendText(json: string): void        // RPC event frames ({ t:'ev', channel, args })
-    sendBinary(buf: Uint8Array): void    // pty:data frames (encodePtyData)
-    bufferedAmount?(): number            // ws.bufferedAmount — see the ceiling note below
-  }
-  ```
-- **`registerPeerSink(id: number, sink: UiSink): void`** (`src/main/peer-registry.ts`) —
-  adds the peer as a client. `electronPlatform.sendTo`/`broadcast`/`clientIds` then reach
-  it alongside the webContents window.
-- **`unregisterPeerSink(id: number): void`** — full teardown, mirroring the WS close path:
-  `presenceHub.leave(id)` → `onPeerGone(id)` (`PtyManager.dropClient`) → registry prunes
-  this id's sink + flow/desync state. 4c calls this when the relay session ends by ANY
-  path; 4d's revoke-kills-session reuses it.
-- **Id allocation:** the caller (4c) mints `id` with **`allocateRelayClientId()`**
-  (`src/core/presence/hub.ts`, ≥ 1_000_000, monotonic) — no collision with webContents ids
-  or ServerPlatform uiIds (both count up from small numbers).
-- **`wirePeerRegistry({ setFlow, captureForResync, onPeerGone })`** — called once at boot
-  from `src/main/index.ts` (analogous to `src/server/index.ts`'s controller wiring). **The
-  `onPeerGone: PtyManager.dropClient` hook is already wired there — 4c must NOT double-wire
-  it.** Inert until a peer registers, so the solo desktop path runs none of it.
-- **`bufferedAmount` is load-bearing.** Stage 2's per-(client, session) backpressure and the
-  8 MB `WS_DROP_WATER` drop-and-redraw ceiling key on it. **A relay carrier sink that always
-  returns 0 disables the ceiling** — an undraining peer would then grow the host's send buffer
-  without bound. **4c MUST report the real relay socket's buffered amount.**
-- **Self-healing:** a peer sink that throws on send (a half-closed relay socket) self-evicts
-  after **2 consecutive strikes** (`SINK_FAILURE_LIMIT`) via the same `unregisterPeerSink`
-  teardown — the safety net for when the socket-close hook never fires. One bad peer never
-  breaks the fan-out to the others or freezes the host's own presence/canvas.
+```ts
+// src/main/peer-registry.ts
+export function registerPeerSink(id: number, sink: UiSink): void
+export function unregisterPeerSink(id: number): void
 
-**What 4b does NOT do** (still 4c's/4d's job): no connection/relay/socket/crypto code; no
-retirement of `src/main/remote/phone-presence.ts` (4c retires it); no inbound peer→core cast
-path beyond what `onWithSender` already gives (4b built only the OUTBOUND sink path + the
-registry + teardown). Proven end-to-end by `src/main/peer-integration.test.ts`: a registered
-peer receives presence + canvas mutations (merge-gates a/b) and pty OUTPUT as binary frames
-with the full drop-and-redraw ceiling — a slow peer is paused and dropped-and-redrawn without
-stalling a fast peer or the host window (merge-gate c).
+// src/core/ui-sink-registry.ts (shared with the Server Edition, which registers browsers)
+export interface UiSink {
+  sendText(json: string): void        // RPC event frame: {t:'ev', channel, args}
+  sendBinary(buf: Uint8Array): void   // pty:data, encodePtyData(sessionId, chunk)
+  bufferedAmount?(): number           // bytes queued in the socket send buffer
+}
+```
+
+- **Ids come from `allocateRelayClientId()`** (`src/core/presence/hub.ts`) — monotonic
+  from `1_000_000`, so a peer id can never collide with a webContents id (those start
+  small and count up). 4c mints one per connection and uses the *same* id for
+  `presenceHub.join`, `registerPeerSink`, and every `sendTo`.
+- **`bufferedAmount()` MUST report the relay socket's real buffered bytes.** This is the
+  single most important contract in 4b. Stage 2's per-client backpressure *and* the 8 MB
+  `WS_DROP_WATER` drop-and-redraw ceiling key on that one number. A sink that always
+  returns `0` looks fine in every test and silently disables the ceiling: a slow peer
+  then queues pty output without bound, nothing ever pauses the pty or drops its backlog,
+  and the **host's memory grows until the host process dies**. If the relay carrier has no
+  native `bufferedAmount`, 4c must compute one (bytes handed to the socket minus bytes
+  flushed) — an honest number, not a placeholder.
+- **`onPeerGone` is already wired at boot.** `src/main/index.ts` calls `wirePeerRegistry({
+  setFlow, captureForResync, onPeerGone: ptyManager.dropClient })` exactly once. **4c must
+  NOT call `wirePeerRegistry` a second time** — the deps are last-write-wins, so a second
+  call silently overwrites them. Just call `unregisterPeerSink(id)` on socket close (or
+  revoke, per 4d): it mirrors `src/server/ws.ts`'s close path exactly — `presenceHub.leave`
+  → `PtyManager.dropClient` → registry prune (which also returns any pty pause that peer
+  owed, so a shared terminal cannot freeze for the other viewers).
+- **A sink that throws twice consecutively self-evicts** (`SINK_FAILURE_LIMIT` = 2; any
+  successful send resets the count) and gets the full teardown above. So 4c's sink should
+  **throw on a dead socket rather than swallow** (a write to a half-closed stream throwing
+  `EPIPE` / `ERR_STREAM_WRITE_AFTER_END` is the signal), and must **not** throw transiently
+  on a healthy one — two throws in a row will kick a live peer out of the session.
+
+What 4b explicitly does **not** do:
+
+- **No connection code.** There is no relay socket, no handshake, no framing — 4b is the
+  registry seam and nothing else. 4c brings the carrier.
+- **`phone-presence.ts`'s half-join is NOT retired.** It still only joins the hub; the
+  bridged phone registers no sink, so it still receives nothing. Retiring it is 4c's job,
+  when it makes the phone a real peer (register a sink under the id it already mints).
+- **No inbound peer→core cast path** beyond what `onWithSender` already provides: 4b makes
+  the core able to *talk to* a peer, not to *hear* one. Routing a peer's RPC calls into the
+  core's `handle`/`on`/`onWithSender` handlers (with the peer's id as the sender) is 4c.
+
+Proven end-to-end by `src/main/peer-integration.test.ts` against the REAL platform + hub +
+canvas reflector: a registered peer receives `presence:sync` / `presence:peer` and seq-stamped
+`canvas:mut`, and pty output fans out to its sink as `sendBinary` frames under the per-client
+backpressure + drop-and-redraw ceiling (a slow peer is dropped and redrawn without stalling
+the host window or a fast peer).
 
 ### The protocol path (4c)
 
@@ -194,7 +211,7 @@ tmux; reconnect re-enters via co-attach (Stage 2 already guarantees this).
 | Sub-stage | Branch | Depends on | Merge gate |
 |---|---|---|---|
 | **4a** Session abstraction (renderer; local-only) | `feat/session-abstraction` | — | **Behavior-unchanged**: full suite + typecheck green, zero visible diff for a solo user |
-| **4b** Client registry in `electronPlatform` | `feat/peer-registry` | — | Fake peer sink receives presence/canvas/pty events; webContents path bit-identical |
+| **4b** Client registry in `electronPlatform` | `feat/peer-registry` | — | **Landed** — peer sinks receive presence/canvas/pty through the real platform (`peer-integration.test.ts`); webContents path bit-identical; solo cost zero. Hand-off: "4b → 4c interface" above |
 | **4d** Trust layer (keys, pins, mutual SAS, revoke) | `feat/peer-trust` | — | Crypto/pairing unit tests; revoke-kills-session hook tested against a fake connection |
 | **4c** `rpc.ts` over relay; remote tab; delete old dialect | `feat/relay-rpc` | 4a+4b+4d | The 24 crypto-layer tests pass **unchanged**; new relay-carrier test (below); Stage 1–3 smoke script passes over relay |
 | **4e** Server Edition as a tab | `feat/server-tab` | 4a+4c | Same smoke script against a Server Edition box |
