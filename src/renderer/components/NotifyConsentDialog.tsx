@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogStack } from './dialog-stack'
 
 interface Props {
   onEnable: () => void
@@ -8,8 +9,12 @@ interface Props {
 
 /** A polished one-time prompt asking to enable Claude completion notifications. */
 export function NotifyConsentDialog({ onEnable, onDismiss }: Props) {
+  // Only the TOPMOST modal answers a key — this one and a ConfirmDialog can be on screen together,
+  // and both window listeners used to fire on one Enter (see ./dialog-stack).
+  const isTop = useDialogStack()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
       if (e.key === 'Escape') {
         e.preventDefault()
         onDismiss()
@@ -20,7 +25,7 @@ export function NotifyConsentDialog({ onEnable, onDismiss }: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onEnable, onDismiss])
+  }, [isTop, onEnable, onDismiss])
 
   return createPortal(
     <div className="consent-overlay" onClick={onDismiss}>

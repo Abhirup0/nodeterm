@@ -314,13 +314,17 @@ export interface PtyApi {
   onResync(sessionId: string, listener: (screen: string) => void): () => void
 }
 
+export type WorkspaceMigrationKind = 'v2' | 'exec'
+
 export interface WorkspaceApi {
   load(): Promise<Workspace>
   save(workspace: Workspace): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
-  /** Fired once after a v2→v3 migration wrote .nodeterm/ dirs into project folders. */
-  onMigrated(cb: () => void): () => void
+  /** Fired once after an on-disk migration: `v2` = a v2→v3 migration wrote .nodeterm/ dirs into the
+   *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
+   *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
+  onMigrated(cb: (kind: WorkspaceMigrationKind) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
 }

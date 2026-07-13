@@ -9,8 +9,9 @@ import {
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, sameProjectContent,
   serializeProjectFile, splitWorkspace,
-  type ProjectFileV1, type WorkspaceIndexV3
+  type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
+import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 
 /** Remote file access for SSH projects (implemented in src/main over SshFs — src/core stays electron-free). */
 export interface RemoteWorkspaceIO {
@@ -37,6 +38,12 @@ export class WorkspaceStore {
   private lastWritten = new Map<string, string>()
   /** project id -> rev of the last written/loaded file. */
   private revs = new Map<string, number>()
+  /** Entries whose one-time exec migration could NOT run (their project file was unreadable at load).
+   *  They stay unmarked on disk, so the hoist is retried when the folder/server comes back. */
+  private execUnmigrated = new Set<string>()
+  /** A hoist happened this load → show the one-time note (fired with the migration's save, exactly
+   *  like the v2→v3 one: a silent change to how the user's own config is stored is not acceptable). */
+  private pendingExecNote = false
   /** Raw v2 file content, kept until the first save backs it up (migration). */
   private pendingV2Backup: string | null = null
   /** ssh project ids whose last mirror write was dropped (connection down). Retried on every
@@ -104,15 +111,25 @@ export class WorkspaceStore {
         if (p) {
           this.revs.set(p.id, p.rev)
           this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(p))
-          projects.push(fileToProject(p, { cwd: e.cwd, closed: e.closed }))
+          projects.push(
+            fileToProject(p, { cwd: e.cwd, closed: e.closed, localExec: this.execOverlay(e, p) })
+          )
         } else {
+          this.deferExecMigration(e)
           projects.push(unavailableProject(e))
         }
       } else if (e.ssh) {
         if (e.cache) {
           this.revs.set(e.id, e.cache.rev)
-          projects.push(fileToProject(e.cache, { ssh: e.ssh, closed: e.closed }))
+          projects.push(
+            fileToProject(e.cache, {
+              ssh: e.ssh,
+              closed: e.closed,
+              localExec: this.execOverlay(e, e.cache)
+            })
+          )
         } else {
+          this.deferExecMigration(e)
           projects.push(unavailableProject(e))
         }
       }
@@ -121,6 +138,37 @@ export class WorkspaceStore {
       ? index.activeProjectId
       : (projects.find((p) => !p.closed && !p.unavailable)?.id ?? '')
     return { version: 2, activeProjectId: active, projects }
+  }
+
+  /**
+   * The machine-local exec overlay for one ref'd entry — plus the ONE-TIME migration (see
+   * `IndexEntryV3.execMigrated` / `hoistLegacyNodeExec`).
+   *
+   * `ssh.extraArgs` had a producer before the trust boundary existed, so an existing user's jump
+   * host / corporate `ProxyCommand` is sitting in the CURRENT project file with no `localExec` to
+   * match. Dropping it would break the connection and then, on the next save, erase it from disk and
+   * propagate the deletion to every teammate. So for an entry that has not been migrated yet — i.e.
+   * one that was ALREADY REFERENCED in this machine's workspace.json at upgrade time, which is the
+   * provenance signal available — the file's own values are hoisted into the overlay once.
+   * `localExec` (if any) still wins per node.
+   */
+  private execOverlay(e: IndexEntryV3, f: ProjectFileV1): LocalNodeExecMap | undefined {
+    // This entry is readable THIS load, so any earlier deferral (its file was offline when we first
+    // loaded) is now resolved. Clear it so the next save() may record execMigrated=true — otherwise
+    // the entry stays unmarked forever and the hoist re-runs on every full load, which would also
+    // let a project.json swapped in AFTER the deferral get its exec fields hoisted as trusted.
+    this.execUnmigrated.delete(e.id)
+    if (e.execMigrated) return e.localExec
+    const hoisted = hoistLegacyNodeExec(f.nodes)
+    if (!hoisted) return e.localExec
+    this.pendingExecNote = true
+    return { ...hoisted, ...e.localExec }
+  }
+
+  /** The file was unreadable, so the hoist could not run: leave the entry unmarked and retry it on
+   *  a later load. Anything dropped must be visible or recoverable — never silently gone. */
+  private deferExecMigration(e: IndexEntryV3): void {
+    if (!e.execMigrated) this.execUnmigrated.add(e.id)
   }
 
   /**
@@ -158,12 +206,24 @@ export class WorkspaceStore {
     // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
     // and cache; here we restore the machine-local payload (ssh offline cache) from the previous
     // index so the index rewrite doesn't drop a good cache we still can't reach.
+    // The one-time exec migration is now recorded, so it never runs again for these entries — which
+    // is what keeps a project.json cloned AFTER the upgrade (the hostile case) out of the hoist. An
+    // entry whose file we could not read at load stays unmarked, so it is retried.
+    for (const e of index.entries) {
+      if (e.project) continue // inline canvases live in this machine-local file already
+      if (!this.execUnmigrated.has(e.id)) e.execMigrated = true
+    }
+
     const unavailableIds = new Set(workspace.projects.filter((p) => p.unavailable).map((p) => p.id))
     if (unavailableIds.size) {
       for (const e of index.entries) {
         if (!unavailableIds.has(e.id)) continue
         const old = this.index?.entries.find((o) => o.id === e.id)
         if (old?.cache) e.cache = old.cache
+        // Same reasoning for the machine-local exec values: the placeholder has no nodes, so
+        // splitWorkspace could not carry them — restoring them keeps the user's own custom shell /
+        // ssh args for when the ref becomes readable again.
+        if (old?.localExec) e.localExec = old.localExec
       }
     }
 
@@ -215,13 +275,20 @@ export class WorkspaceStore {
     await writeAtomic(this.indexPath, JSON.stringify(index))
     this.index = index
 
-    if (migrating) platform().broadcast(IPC.workspaceMigrated)
+    if (migrating) platform().broadcast(IPC.workspaceMigrated, 'v2')
+    if (this.pendingExecNote) {
+      this.pendingExecNote = false
+      platform().broadcast(IPC.workspaceMigrated, 'exec')
+    }
 
     this.onPersist?.()
   }
 
   async probeFolder(folder: string): Promise<Project | null> {
     const f = await this.readProjectFile(folder, false)
+    // No `localExec`: this folder is being ADOPTED (its project.json may have been cloned from
+    // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
+    // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
     return f ? fileToProject(f, { cwd: folder }) : null
   }
 
@@ -240,7 +307,7 @@ export class WorkspaceStore {
     if (!f) return null
     this.revs.set(f.id, f.rev)
     this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(f))
-    return fileToProject(f, { cwd: e.cwd, closed: e.closed })
+    return fileToProject(f, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
   }
 
   /** Maps a watched file path back to its project and re-reads it. */
@@ -271,7 +338,7 @@ export class WorkspaceStore {
       this.revs.set(projectId, remote.rev)
       this.unmirrored.delete(projectId) // the server copy IS the truth now — nothing owed
       await writeAtomic(this.indexPath, JSON.stringify(this.index))
-      return fileToProject(remote, { ssh: e.ssh, closed: e.closed })
+      return fileToProject(remote, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
     }
     if (e.cache) {
       // Push-up runs with the master just up, but record the outcome anyway: a failed write

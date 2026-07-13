@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogStack } from './dialog-stack'
 import { isValidGitRef, type WorktreeCreateValue, type WorktreeEntry } from '@shared/worktree'
 
 interface Props {
@@ -52,8 +53,12 @@ export function WorktreeDialog({
     if (!baseEdited) setBaseRef(defaultBaseRef)
   }, [defaultBaseRef, baseEdited])
 
+  // Only the topmost modal answers a key (./dialog-stack): this dialog and a ConfirmDialog can be
+  // open at the same time, and one Escape must not close both.
+  const isTop = useDialogStack()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
       if (e.key === 'Escape') {
         e.preventDefault()
         onCancel()
@@ -61,7 +66,7 @@ export function WorktreeDialog({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onCancel])
+  }, [isTop, onCancel])
 
   // No writable base dir is known, so we refuse to *suggest* a path — an empty base would
   // otherwise propose `/worktrees/…` at the filesystem root. The user can still type one. The hint

@@ -106,6 +106,7 @@ import {
   sanitizeWorktreeBranch,
   worktreeFromCreate,
   worktreeFromEntry,
+  worktreeRemoveMessage,
   type GroupWorktree,
   type WorktreeCreateValue,
   type WorktreeEntry
@@ -192,6 +193,48 @@ const GRID = 24
 
 /** How long a successful worktree notice stays on screen before fading itself out. */
 const NOTICE_MS = 6000
+
+/** The confirm dialogs, named so their setters can be wrapped in a synchronous open-guard (see
+ *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
+interface ConfirmState {
+  message: string
+  onConfirm: () => void
+  /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
+  onCancel?: () => void
+  confirmLabel?: string
+  cancelLabel?: string
+  danger?: boolean
+  /** Set when an AGENT asked for this dialog: it is answered by an explicit click, never by an
+   *  Enter the user aimed at their terminal (see components/confirm-key). */
+  requestedBy?: string
+}
+interface RemoveState {
+  groupId: string
+  warning: string
+  /** nodeterm created this directory (`worktree.createdByApp`), so deleting it is ours to offer as
+   *  the default. A worktree the user made outside the app defaults to Unbind, and deleting it from
+   *  disk is an explicit opt-in (`deleteFromDisk`). */
+  canDelete: boolean
+  /** Named in the dialog, so the user approves the worktree they were shown — not whichever one
+   *  the group happens to point at by the time they hit Enter. */
+  branch: string
+  path: string
+  /** Set when an AGENT asked (canvas-control `close-worktree --mode remove`); the dialog says so,
+   *  exactly like the agent `write`/`close` confirms do — AND refuses to be confirmed by keyboard. */
+  requestedBy?: string
+}
+interface MergeState {
+  repoPath: string
+  branch: string
+  baseRef: string
+  /** Whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
+   *  never be threatened with a publish that cannot happen. */
+  hasOrigin: boolean
+}
+interface PendingPeerState {
+  sas: string | null
+  id: string
+}
 
 /**
  * Worktrees are out of scope for SSH projects in v1, and being honestly absent beats being
@@ -391,16 +434,8 @@ export function Canvas() {
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
   const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
-  const [pendingPeer, setPendingPeer] = useState<{ sas: string | null; id: string } | null>(null)
-  const [confirm, setConfirm] = useState<{
-    message: string
-    onConfirm: () => void
-    /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
-    onCancel?: () => void
-    confirmLabel?: string
-    cancelLabel?: string
-    danger?: boolean
-  } | null>(null)
+  const [pendingPeer, setPendingPeerState] = useState<PendingPeerState | null>(null)
+  const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
@@ -466,26 +501,25 @@ export function Canvas() {
     return () => window.removeEventListener('nodeterm:toast', onToast)
   }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
-  const [moveTarget, setMoveTarget] = useState<string | null>(null)
+  const [moveTarget, setMoveTargetState] = useState<string | null>(null)
   // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
   // `canDelete` = nodeterm created this directory (`worktree.createdByApp`), so deleting it is
   // ours to offer as the default. For a worktree the user made outside the app and merely bound,
   // the default is Unbind and deleting from disk is an explicit opt-in (`deleteFromDisk`).
-  const [removeTarget, setRemoveTarget] = useState<{
-    groupId: string
-    warning: string
-    canDelete: boolean
-  } | null>(null)
+  const [removeTarget, setRemoveTargetState] = useState<RemoveState | null>(null)
+  /**
+   * True from the instant a removal confirm is REQUESTED until its dialog closes. `removeTarget`
+   * alone cannot carry this: `requestRemoveWorktree` awaits `git.status` before opening, and two
+   * rapid `close-worktree --mode remove` calls both got through that gap — the second silently
+   * SWAPPED the target under an open dialog, so the user could approve the deletion of a worktree
+   * they never read.
+   */
+  const removePendingRef = useRef(false)
   const [deleteFromDisk, setDeleteFromDisk] = useState(false)
   // Group awaiting confirmation to merge its worktree into the base branch. `hasOrigin` decides
   // whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
   // never be threatened with a publish that cannot happen.
-  const [mergeTarget, setMergeTarget] = useState<{
-    repoPath: string
-    branch: string
-    baseRef: string
-    hasOrigin: boolean
-  } | null>(null)
+  const [mergeTarget, setMergeTargetState] = useState<MergeState | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
@@ -534,10 +568,53 @@ export function Canvas() {
    *  WORKTREE_SSH_HINT). Reactive, so the menus rebuild when the user switches projects. */
   const isSshProject = !!activeSshServer
   nodesRef.current = nodes
-  // Mirror the open-confirm state into a ref so the []-dep agent-control effect can see the
-  // CURRENT dialog (it closes over a stale `confirm`), to reject overlapping destructive verbs.
-  const confirmRef = useRef(confirm)
-  confirmRef.current = confirm
+  /**
+   * ONE confirm dialog at a time — mirrored into a ref so the []-dep agent-control effect sees the
+   * CURRENT dialogs (it closes over a stale `confirm`).
+   *
+   * This used to mirror `confirm` ONLY, which is how an agent could get a worktree deleted with an
+   * Enter the user aimed elsewhere: `close-worktree --mode remove` opened the (independent)
+   * `removeTarget` dialog, a following `write` saw a null `confirm` and mounted the benign "Agent
+   * wants to send…" dialog ON TOP of it, and the user's Enter answered both. ConfirmDialog now only
+   * answers keys while it is topmost (see components/dialog-stack), but a destructive dialog the
+   * user cannot even SEE must not exist in the first place: every confirm state is in this guard.
+   */
+  const confirmFlags = useRef({
+    confirm: false,
+    remove: false,
+    move: false,
+    merge: false,
+    peer: false
+  })
+  // Every confirm setter flips its flag AT CALL TIME. Assigning the mirror during RENDER (what this
+  // used to do) is a tick too late: two agent verbs arriving in separate IPC events before React
+  // commits both read the stale `false` and both open a dialog — the very stacking this guard
+  // exists to prevent.
+  const setConfirm = useCallback((v: ConfirmState | null) => {
+    confirmFlags.current.confirm = !!v
+    setConfirmState(v)
+  }, [])
+  const setRemoveTarget = useCallback((v: RemoveState | null) => {
+    confirmFlags.current.remove = !!v
+    setRemoveTargetState(v)
+  }, [])
+  const setMoveTarget = useCallback((v: string | null) => {
+    confirmFlags.current.move = !!v
+    setMoveTargetState(v)
+  }, [])
+  const setMergeTarget = useCallback((v: MergeState | null) => {
+    confirmFlags.current.merge = !!v
+    setMergeTargetState(v)
+  }, [])
+  const setPendingPeer = useCallback((v: PendingPeerState | null) => {
+    confirmFlags.current.peer = !!v
+    setPendingPeerState(v)
+  }, [])
+  /** Is any confirm open — or being opened (the async gap in `requestRemoveWorktree`)? */
+  const confirmBusy = useCallback(() => {
+    const f = confirmFlags.current
+    return f.confirm || f.remove || f.move || f.merge || f.peer || removePendingRef.current
+  }, [])
 
   const nodeTypes = useMemo(
     () => ({
@@ -1039,11 +1116,14 @@ export function Canvas() {
     })
   }, [reloadActiveProject])
 
-  // One-shot note after a v2→v3 on-disk migration (dismissible, non-blocking strip).
+  // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
+  // where the user's data lives, so neither may happen silently.
   useEffect(() => {
-    return window.nodeTerminal.workspace.onMigrated(() => {
+    return window.nodeTerminal.workspace.onMigrated((kind) => {
       setMigrationNote(
-        'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
+        kind === 'exec'
+          ? 'Custom shells and advanced SSH options (e.g. a ProxyCommand jump host) are no longer stored in the shared .nodeterm/project.json — a cloned repo could use them to run code. They still work here: they moved to this machine only, and your teammates no longer receive them.'
+          : 'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
       )
     })
   }, [])
@@ -2565,21 +2645,50 @@ export function Canvas() {
   // Ask-first worktree removal. Gather any uncommitted-work info, then open a safety dialog
   // before doing anything destructive. GitStatus has no `files` field — the dirty count is
   // staged + unstaged changes.
-  const requestRemoveWorktree = useCallback(async (groupId: string) => {
-    const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
-    if (!wt) return
-    // The probe is a courtesy (it only enriches the warning), so a rejected IPC (WS-RPC transport
-    // error on the Server Edition) must not swallow the whole action: without this catch the dialog
-    // silently never opens and Remove looks broken. Fail open — ask without the dirty-file count.
-    const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
-    const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
-    const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
-    // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
-    // and deleting it from disk is an opt-in checkbox. One we created may be deleted (still behind
-    // the confirm).
-    setDeleteFromDisk(wt.createdByApp)
-    setRemoveTarget({ groupId, warning, canDelete: wt.createdByApp })
-  }, [])
+  const requestRemoveWorktree = useCallback(
+    async (
+      groupId: string,
+      opts?: { requestedBy?: string }
+    ): Promise<{ ok: boolean; error?: string }> => {
+      // One confirm at a time — for EVERY caller, not just the agent one. Two rapid requests used
+      // to swap `removeTarget` under an open dialog (the user reads worktree A, approves the
+      // deletion of worktree B), and an unrelated confirm stacked on top of this one used to make
+      // it invisible while still live (see `confirmOpenRef`). Refuse instead.
+      if (confirmBusy()) return { ok: false, error: 'a confirmation is already pending — try again' }
+      const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+      if (!wt) return { ok: false, error: `${groupId} is not a worktree-bound group` }
+      // Held across the `await` below: without it a second call slips through the gap before
+      // `removeTarget` exists.
+      removePendingRef.current = true
+      try {
+        // The probe is a courtesy (it only enriches the warning), so a rejected IPC (WS-RPC
+        // transport error on the Server Edition) must not swallow the whole action: without this
+        // catch the dialog silently never opens and Remove looks broken. Fail open — ask without
+        // the dirty-file count.
+        const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
+        const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
+        const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
+        // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
+        // and deleting it from disk is an opt-in checkbox. One we created may be deleted (still
+        // behind the confirm).
+        setDeleteFromDisk(wt.createdByApp)
+        setRemoveTarget({
+          groupId,
+          warning,
+          canDelete: wt.createdByApp,
+          branch: wt.branch,
+          path: wt.path,
+          requestedBy: opts?.requestedBy
+        })
+        return { ok: true }
+      } catch (e) {
+        // Nothing opened → nothing is pending. Never leave the guard latched.
+        removePendingRef.current = false
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    [confirmBusy]
+  )
 
   /** Clear a group's worktree binding and re-read git's facts (the worktree, if it still exists,
    *  becomes an orphan the dialog can offer again). The one place a binding is dropped. */
@@ -2606,6 +2715,9 @@ export function Canvas() {
   // swallows that — the result message says whether the branch actually went.
   const confirmRemoveWorktree = useCallback(async () => {
     const t = removeTarget
+    // The dialog is being answered → the "a removal confirm is open" guard is released (both exits,
+    // here and the dialog's onCancel, clear it; nothing else may).
+    removePendingRef.current = false
     if (!t) return
     const wt = nodesRef.current.find((n) => n.id === t.groupId)?.data.worktree
     if (!wt) {
@@ -2753,7 +2865,11 @@ export function Canvas() {
           break
         }
         case 'remove':
-          void requestRemoveWorktree(groupId)
+          // A refusal (another confirm is already open) used to be discarded here, so Remove simply
+          // looked broken. Say it out loud instead.
+          void requestRemoveWorktree(groupId).then((res) => {
+            if (!res.ok && res.error) setNotice({ kind: 'error', text: res.error })
+          })
           break
         default:
           break
@@ -4000,9 +4116,16 @@ export function Canvas() {
               return
             }
             if (mode === 'remove') {
-              // Destructive → the existing ask-first safety dialog decides; reply now (once).
-              void ctl.requestRemoveWorktree(id)
-              reply({ ok: true, message: 'removal confirmation shown to the user — they decide' })
+              // Destructive → the existing ask-first safety dialog decides. It REFUSES while any
+              // other confirm is open (`confirmBusy`): stacking a second dialog on this one hid a
+              // pre-ticked "delete from disk" behind a benign one, and the user's Enter answered
+              // both. The dialog also names this agent and the branch/path it wants gone.
+              const res = await ctl.requestRemoveWorktree(id, { requestedBy: srcTitle })
+              reply(
+                res.ok
+                  ? { ok: true, message: 'removal confirmation shown to the user — they decide' }
+                  : { ok: false, error: res.error ?? 'could not open the removal confirmation' }
+              )
               return
             }
             reply({ ok: false, error: `close-worktree: unknown --mode ${mode} (unbind|remove)` })
@@ -4055,8 +4178,11 @@ export function Canvas() {
               return
             }
             // One confirm dialog at a time: setConfirm would replace a pending one, orphaning its
-            // reply and hanging that earlier request to its 120s timeout. Reject instead.
-            if (confirmRef.current) {
+            // reply and hanging that earlier request to its 120s timeout — and a second dialog
+            // mounted on top of a destructive one (the worktree-removal confirm) turned an Enter
+            // aimed at THIS harmless prompt into a deletion. `confirmBusy` covers every confirm
+            // state, not just `confirm`. Reject instead.
+            if (confirmBusy()) {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
@@ -4064,6 +4190,7 @@ export function Canvas() {
             setConfirm({
               message: `Agent "${srcTitle}" wants to send to ${args.node}:\n\n${args.text ?? ''}`,
               confirmLabel: 'Send',
+              requestedBy: srcTitle,
               onConfirm: async () => {
                 setConfirm(null)
                 try {
@@ -4086,14 +4213,16 @@ export function Canvas() {
               reply({ ok: false, error: 'close requires --node' })
               return
             }
-            // One confirm dialog at a time (see `write`): reject rather than orphan a pending one.
-            if (confirmRef.current) {
+            // One confirm dialog at a time (see `write`): reject rather than orphan a pending one —
+            // or stack this one over a destructive dialog the user then cannot see.
+            if (confirmBusy()) {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
             // Destructive → confirm. Replies on confirm AND cancel.
             setConfirm({
               message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
+              requestedBy: srcTitle,
               confirmLabel: 'Close',
               danger: true,
               onConfirm: () => {
@@ -5258,6 +5387,9 @@ export function Canvas() {
           confirmLabel={confirm.confirmLabel}
           cancelLabel={confirm.cancelLabel}
           danger={confirm.danger}
+          // The user did not open this one — an agent did. It appeared under their hands, so it is
+          // answered by a click, never by a keystroke aimed somewhere else (components/confirm-key).
+          enterConfirms={!confirm.requestedBy}
           onConfirm={confirm.onConfirm}
           onCancel={() => {
             confirm.onCancel?.()
@@ -5276,7 +5408,13 @@ export function Canvas() {
           }
           confirmLabel="Allow"
           cancelLabel="Deny"
-          danger={false}
+          // A REMOTE device raised this — the far side completing the pairing handshake pops it
+          // under the user's hands. So it is answered by an explicit click, never by a stray Enter
+          // aimed at a terminal: a keystroke must not confirm approval and bypass the SAS
+          // match-check that is the whole MITM protection. `danger` also keeps autofocus off the
+          // consenting "Allow" button (it lands on "Deny" instead). See components/confirm-key.
+          enterConfirms={false}
+          danger
           onConfirm={() => {
             window.nodeTerminal.remoteHost.approve(pendingPeer.id)
             setPendingPeer(null)
@@ -5370,23 +5508,22 @@ export function Canvas() {
 
       {removeTarget && (
         <ConfirmDialog
-          message={
-            (removeTarget.canDelete
-              ? // Promise only what we will actually do. `git branch -d` REFUSES an unmerged branch
-                // (and we never escalate to -D), so "its branch is deleted" was a promise the op
-                // could not keep — the removal now reports which way it went, and the confirm says
-                // up front that the branch survives if it still holds unmerged work.
-                'Remove this worktree? Its directory is deleted, and its branch too — unless the ' +
-                'branch still has unmerged commits, in which case it is kept.'
-              : 'This worktree was not created by nodeterm.\n\nUnbind detaches this group and ' +
-                'leaves the worktree untouched on disk.') +
-            (deleteFromDisk && !removeTarget.canDelete
-              ? '\n\n⚠ The worktree directory will be DELETED. Its branch is kept.'
-              : '') +
-            (removeTarget.warning ? '\n\n⚠ ' + removeTarget.warning : '')
-          }
+          // Says WHO asked (an agent, or nobody = the user) and WHAT is destroyed (branch + path):
+          // this dialog is reachable from canvas-control, and it used to be byte-identical to a
+          // user-initiated removal. Pure + tested in @shared/worktree.
+          message={worktreeRemoveMessage({
+            branch: removeTarget.branch,
+            path: removeTarget.path,
+            canDelete: removeTarget.canDelete,
+            deleteFromDisk,
+            warning: removeTarget.warning,
+            requestedBy: removeTarget.requestedBy
+          })}
           confirmLabel={deleteFromDisk ? 'Delete' : 'Unbind'}
           danger={deleteFromDisk}
+          // An agent asked for this one: it appeared while the user was typing somewhere else, so
+          // no keystroke may confirm it — only a click on a button they had to look at.
+          enterConfirms={!removeTarget.requestedBy}
           option={
             // We created it → deletion is the point of the action, no opt-in to make. The user
             // created it → deleting from disk is a deliberate extra choice, never the default.
@@ -5399,7 +5536,11 @@ export function Canvas() {
                 }
           }
           onConfirm={confirmRemoveWorktree}
-          onCancel={() => setRemoveTarget(null)}
+          onCancel={() => {
+            // Both exits release the one-at-a-time guard (see `removePendingRef`).
+            removePendingRef.current = false
+            setRemoveTarget(null)
+          }}
         />
       )}
 

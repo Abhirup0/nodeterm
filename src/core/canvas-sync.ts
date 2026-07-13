@@ -39,6 +39,7 @@
 import { platform, type CorePlatform } from './platform'
 import { IPC } from '../shared/ipc'
 import { isCanvasMutation, isRefId, MUTATION_MAX_BYTES } from '../shared/canvas-mutations'
+import { sanitizeInboundMutation } from '../shared/node-exec'
 import { type ClientId } from '../shared/presence'
 import type { CanvasMutation } from '../shared/types'
 
@@ -98,7 +99,11 @@ export function initCanvasSync(): void {
     if (!isCanvasMutation(mutation)) return
     // Stamped ONCE, here: the order every client will agree on. The sender is in the target list —
     // its copy is the ack that tells it where its own edit landed (see the header).
-    const stamped = stampMutation(mutation, ++seq)
+    // The exec-enabling node fields (`shell`, `ssh.extraArgs`) are stripped HERE too, so they are
+    // not even reflected to the other clients: a peer must not be able to put a program name or an
+    // `-o ProxyCommand=…` into anybody's canvas (@shared/node-exec). Every receiver strips them
+    // again on apply — this is the cheap upstream half.
+    const stamped = stampMutation(sanitizeInboundMutation(mutation), ++seq)
     for (const id of reflectTargets(p.clientIds(), senderId)) {
       p.sendTo(id, IPC.canvasMut, projectId, stamped)
     }

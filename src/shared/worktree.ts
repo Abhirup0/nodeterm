@@ -303,3 +303,48 @@ export function decideMergeStrategy(args: { baseCheckedOutPath: string | null; b
   }
   return { kind: 'merge-in-place', path: args.baseCheckedOutPath }
 }
+
+/** What the removal confirm needs to say — WHO asked, and WHAT exactly gets destroyed. */
+export interface WorktreeRemovePrompt {
+  branch: string
+  path: string
+  /** nodeterm created the directory → deleting it is the action; otherwise Unbind is the default. */
+  canDelete: boolean
+  /** The live value of the "delete from disk too" box (for an adopted worktree). */
+  deleteFromDisk: boolean
+  /** e.g. "3 uncommitted file(s) in the worktree." */
+  warning?: string
+  /** Title of the AGENT that asked for this. Absent = the user asked for it themselves. */
+  requestedBy?: string
+}
+
+/**
+ * The removal dialog's text. Pure, so it can be read (and tested) without the canvas.
+ *
+ * Two things it must never omit again:
+ *  - ATTRIBUTION. An agent can open this dialog (canvas-control `close-worktree --mode remove`).
+ *    The old text was byte-identical to a user-initiated removal, so a user who never asked for it
+ *    had no way to tell where it came from — while `write`/`close` have always said
+ *    `Agent "<title>" wants to …`.
+ *  - THE TARGET. It named neither the branch nor the directory, so an agent could open it for one
+ *    worktree and the user could approve the deletion of a worktree they never looked at.
+ */
+export function worktreeRemoveMessage(p: WorktreeRemovePrompt): string {
+  const who = p.requestedBy
+    ? `Agent "${p.requestedBy}" wants to remove this worktree.\n\n`
+    : ''
+  const what = `Branch: ${p.branch}\nDirectory: ${p.path}\n\n`
+  const body = p.canDelete
+    ? // Promise only what we will actually do. `git branch -d` REFUSES an unmerged branch (and we
+      // never escalate to -D), so "its branch is deleted" was a promise the op could not keep.
+      'Remove this worktree? Its directory is deleted, and its branch too — unless the branch ' +
+      'still has unmerged commits, in which case it is kept.'
+    : 'This worktree was not created by nodeterm.\n\nUnbind detaches this group and leaves the ' +
+      'worktree untouched on disk.'
+  const optIn =
+    p.deleteFromDisk && !p.canDelete
+      ? '\n\n⚠ The worktree directory will be DELETED. Its branch is kept.'
+      : ''
+  const warn = p.warning ? `\n\n⚠ ${p.warning}` : ''
+  return `${who}${what}${body}${optIn}${warn}`
+}

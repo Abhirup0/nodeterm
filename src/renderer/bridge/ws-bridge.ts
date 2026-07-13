@@ -6,7 +6,13 @@
 // namespaces (`pty`, `workspace`, `settings`) over that socket. Every other namespace comes from
 // `buildStubApi()` (Task 7) so the renderer boots without a full Electron preload.
 
-import { parseRpcMessage, decodePtyData, E_DISCONNECTED, type RpcMessage } from '../../shared/rpc'
+import {
+  parseRpcMessage,
+  encodeArgs,
+  decodePtyData,
+  E_DISCONNECTED,
+  type RpcMessage
+} from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
@@ -144,13 +150,15 @@ export class RpcClient {
     const id = this.nextId++
     return new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      this.ws.send(JSON.stringify({ t: 'req', id, method, args }))
+      // encodeArgs: an OMITTED optional argument must reach the handler as `undefined` (so its
+      // default fires) while a MEANINGFUL `null` (pty.resize park, presence clears) stays `null`.
+      this.ws.send(JSON.stringify({ t: 'req', id, method, ...encodeArgs(args) }))
     })
   }
 
   /** Send a fire-and-forget cast (no response expected). */
   cast(method: string, ...args: unknown[]): void {
-    this.ws.send(JSON.stringify({ t: 'cast', method, args }))
+    this.ws.send(JSON.stringify({ t: 'cast', method, ...encodeArgs(args) }))
   }
 
   /** Subscribe to a channel; returns an unsubscribe function. */
@@ -183,7 +191,7 @@ const AI_NAMING_UNAVAILABLE = {
 
 /** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
  *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
-function buildRealApi(
+export function buildRealApi(
   client: RpcClient
 ): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'userDataDir'> {
   const pty: PtyApi = {
@@ -224,10 +232,20 @@ function buildRealApi(
   const workspace: WorkspaceApi = {
     load: () => client.request(IPC.workspaceLoad) as Promise<Workspace>,
     save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>,
-    // No server handler — per-project file storage is desktop-only for now; degrade
-    // gracefully (null probe, no-op event subscriptions) so the boot path never rejects.
-    probeFolder: () => Promise.resolve(null),
-    onMigrated: () => () => {},
+    // REAL: WorkspaceStore (core) registers IPC.workspaceProbeFolder, so the server serves it.
+    // Stubbing it to `null` meant "Open folder…" on a repo that already carries a committed
+    // .nodeterm/project.json concluded there was no project there, created an EMPTY one, and the
+    // next writeDisk() overwrote the team's shared canvas. Data loss, not a degrade.
+    probeFolder: (folder: string) =>
+      client.request(IPC.workspaceProbeFolder, folder) as ReturnType<WorkspaceApi['probeFolder']>,
+    // REAL: core broadcasts IPC.workspaceMigrated after a v2→v3 migration (workspace-store.ts).
+    onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
+    // Deliberate degrade: the external-change WATCHER (core/workspace-watcher.ts) is only started
+    // by the desktop shell (src/main/index.ts), so the server never broadcasts
+    // IPC.workspaceExternalChange and there is nothing to subscribe to. Effect in the browser:
+    // an outside edit (git pull / a teammate's push) is not picked up until reload — no silent
+    // data loss (the store's own rev reconciliation still guards writes). Booting the watcher in
+    // src/server is the follow-up.
     onExternalChange: () => () => {}
   }
 

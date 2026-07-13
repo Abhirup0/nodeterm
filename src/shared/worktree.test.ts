@@ -13,6 +13,7 @@ import {
   resolveBaseRef,
   worktreeFromCreate,
   worktreeFromEntry,
+  worktreeRemoveMessage,
   DEFAULT_BASE_REF,
   type WorktreeEntry
 } from './worktree'
@@ -339,5 +340,39 @@ describe('isInsideDir', () => {
   it('is false for an unset cwd (nothing to displace)', () => {
     expect(isInsideDir(undefined, '/wt/feat')).toBe(false)
     expect(isInsideDir('', '/wt/feat')).toBe(false)
+  })
+})
+
+describe('worktreeRemoveMessage', () => {
+  const base = { branch: 'feat/x', path: '/wt/feat-x', canDelete: true, deleteFromDisk: true }
+
+  it('names the branch and the directory that will be destroyed', () => {
+    const msg = worktreeRemoveMessage(base)
+    expect(msg).toContain('Branch: feat/x')
+    expect(msg).toContain('Directory: /wt/feat-x')
+  })
+
+  it('attributes an agent-opened removal (it used to be identical to a user-initiated one)', () => {
+    expect(worktreeRemoveMessage({ ...base, requestedBy: 'claude-1' })).toContain(
+      'Agent "claude-1" wants to remove this worktree.'
+    )
+    // A user-initiated removal claims no agent.
+    expect(worktreeRemoveMessage(base)).not.toContain('Agent "')
+  })
+
+  it('an adopted worktree defaults to unbind, and says so; the disk opt-in is spelled out', () => {
+    const adopted = { ...base, canDelete: false, deleteFromDisk: false }
+    const unbind = worktreeRemoveMessage(adopted)
+    expect(unbind).toContain('not created by nodeterm')
+    expect(unbind).not.toContain('DELETED')
+    expect(worktreeRemoveMessage({ ...adopted, deleteFromDisk: true })).toContain(
+      '⚠ The worktree directory will be DELETED. Its branch is kept.'
+    )
+  })
+
+  it('carries the uncommitted-work warning', () => {
+    expect(worktreeRemoveMessage({ ...base, warning: '3 uncommitted file(s) in the worktree.' })).toContain(
+      '⚠ 3 uncommitted file(s) in the worktree.'
+    )
   })
 })

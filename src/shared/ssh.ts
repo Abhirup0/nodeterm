@@ -13,8 +13,100 @@ export interface SshConnection {
   identityFile?: string
   /** Optional raw extra ssh args (advanced), POSIX-tokenized. */
   extraArgs?: string
+  /**
+   * PROVENANCE, in memory only: this machine's own `extraArgs`, set by the two local producers —
+   * `createSshTerminalNode` (copied from the machine-local SSH server store, i.e. typed by the user)
+   * and `applyLocalNodeExec` (re-attached from the machine-local workspace index). It is NEVER
+   * written to a project file (`stripSharedNodeExec`) and NEVER accepted off the wire
+   * (`sanitizeInboundNode`), so a cloned project.json or a canvas-sync peer cannot set it.
+   *
+   * Only a trusted `extraArgs` may carry the ssh options that make the LOCAL machine execute a
+   * command (`ProxyCommand` & co). A corporate jump host is a legitimate reason to have one — an
+   * untrusted document is not. See `stripLocalExecArgs`.
+   */
+  execTrusted?: boolean
   /** Display label, copied from the saved server when the node is created. */
   label?: string
+}
+
+/**
+ * ssh options that make ssh RUN SOMETHING, on this machine unless noted. `-o ProxyCommand=<cmd>`
+ * is the classic one: ssh executes `<cmd>` locally through /bin/sh, every time the node opens.
+ *
+ * - `proxycommand`, `localcommand` (+ `permitlocalcommand`), `knownhostscommand` — local exec.
+ * - `match` — `Match exec "<cmd>"` runs `<cmd>` locally to decide whether the block applies.
+ * - `include` — pulls in another config file, which may carry any of the above.
+ * - `pkcs11provider`, `securitykeyprovider` — dlopen a local shared object: code execution.
+ * - `proxyusefdpass` — only meaningful alongside ProxyCommand; refused with it.
+ * - `remotecommand` — exec on the far side rather than here, but still not something a document
+ *   gets to choose.
+ */
+const LOCAL_EXEC_SSH_OPTIONS = new Set([
+  'proxycommand',
+  'localcommand',
+  'permitlocalcommand',
+  'knownhostscommand',
+  'match',
+  'include',
+  'pkcs11provider',
+  'securitykeyprovider',
+  'proxyusefdpass',
+  'remotecommand'
+])
+
+/** The keyword of an ssh `-o` value: `ProxyCommand=x`, `ProxyCommand x` and a bare `Match` all
+ *  yield `proxycommand` / `match`. */
+function optionKeyword(value: string): string {
+  return value.split(/[=\s]/, 1)[0].trim().toLowerCase()
+}
+
+/**
+ * Remove the exec-enabling options from a tokenized extra-args list — the exec-site guard, in the
+ * same idiom as `permissionModeFlag` / `SAFE_SESSION_ID`: re-validate where the value BECOMES a
+ * command, and degrade safely (the connection is still attempted, just without the option that
+ * would have run code). Everything else — `-J jump`, `-o StrictHostKeyChecking=no`, `-A`, `-v` —
+ * passes through untouched.
+ *
+ * Both spellings of an option are covered (`-o ProxyCommand=x` and `-oProxyCommand=x`), and `-F`
+ * (an alternate ssh_config, which may itself carry a ProxyCommand) counts as exec-enabling.
+ */
+export function stripLocalExecArgs(tokens: string[]): { args: string[]; dropped: string[] } {
+  const args: string[] = []
+  const dropped: string[] = []
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]
+    // `-F <file>` / `-F<file>`: an ssh_config we did not write.
+    if (t === '-F') {
+      dropped.push(t, ...(i + 1 < tokens.length ? [tokens[++i]] : []))
+      continue
+    }
+    if (t.startsWith('-F') && t.length > 2) {
+      dropped.push(t)
+      continue
+    }
+    if (t === '-o') {
+      const value = tokens[i + 1]
+      if (value !== undefined && LOCAL_EXEC_SSH_OPTIONS.has(optionKeyword(value))) {
+        dropped.push(t, value)
+        i++
+        continue
+      }
+      args.push(t)
+      continue
+    }
+    if (t.startsWith('-o') && t.length > 2 && LOCAL_EXEC_SSH_OPTIONS.has(optionKeyword(t.slice(2)))) {
+      dropped.push(t)
+      continue
+    }
+    args.push(t)
+  }
+  return { args, dropped }
+}
+
+/** Would this raw extra-args string make ssh execute something? (Used to decide whether a value of
+ *  unknown provenance may enter the machine-local store — see `localNodeExec`.) */
+export function sshExtraArgsEnableLocalExec(extraArgs: string | undefined): boolean {
+  return stripLocalExecArgs(parseExtraArgs(extraArgs)).dropped.length > 0
 }
 
 /** A saved server in the app's SSH store. `label` is required for display. */
@@ -64,11 +156,30 @@ export function sshHostKey(conn: Pick<SshConnection, 'host' | 'user'>): string {
   return `${conn.user}@${conn.host}`
 }
 
-/** Build the `ssh` argv: `-p <port> [-i <id>] [...extra] user@host`. */
+/**
+ * Build the `ssh` argv: `-p <port> [-i <id>] [...extra] user@host`.
+ *
+ * `extraArgs` is spliced in verbatim ONLY when the connection is `execTrusted` — i.e. the value
+ * came from this machine (the user's SSH server store, or the machine-local workspace index). Any
+ * other value contributes NOTHING: a `.nodeterm/project.json` from a cloned repo, or a canvas-sync
+ * peer's node, must never be able to add ssh flags at all. The connection is still attempted —
+ * degrade, never block.
+ */
 export function buildSshArgs(conn: SshConnection): string[] {
   const args = ['-p', String(conn.port ?? 22)]
   if (conn.identityFile) args.push('-i', conn.identityFile)
-  args.push(...parseExtraArgs(conn.extraArgs))
+  const extra = parseExtraArgs(conn.extraArgs)
+  if (conn.execTrusted) {
+    args.push(...extra)
+  }
+  // else: an UNTRUSTED extraArgs contributes no tokens. `stripLocalExecArgs` removes the
+  // exec-enabling OPTIONS, but the survivors are still not safe to splice: a bare token
+  // (`evilhost`) has no exec option so it passes the strip with dropped=[], and ssh reads the
+  // first positional argument as the DESTINATION — silently retargeting the connection. Flags like
+  // `-A` (agent forwarding) or `-J` (jump host) from a document are unwanted too. An untrusted
+  // source has no legitimate need to add ssh args (this branch isn't even reached today —
+  // untrusted extraArgs is stripped upstream), so the empty list is the only safe degrade; there
+  // is no residue to reason about token by token.
   args.push(`${conn.user}@${conn.host}`)
   return args
 }

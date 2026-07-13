@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogStack } from './dialog-stack'
 
 interface InputDialogProps {
   message: string
@@ -27,6 +28,10 @@ export function InputDialog({
 }: InputDialogProps) {
   const [value, setValue] = useState(initialValue)
   const inputRef = useRef<HTMLInputElement>(null)
+  // Registered in the modal stack so a ConfirmDialog underneath does not ALSO answer the Enter /
+  // Escape typed into this input (its own listener is on `window`). The keys here are handled on
+  // the input element itself, so nothing else is needed.
+  useDialogStack()
 
   useEffect(() => {
     inputRef.current?.focus()

