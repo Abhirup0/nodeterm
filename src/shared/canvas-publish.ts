@@ -21,6 +21,7 @@
 //
 // Pure + DOM-free (vitest runs in the node environment): only setTimeout, no React, no window.
 
+import { stripSharedNodeExec } from './node-exec'
 import { diffToMutations } from './canvas-mutations'
 import { mutationNodeId } from './canvas-order'
 import type { CanvasMutation, CanvasNodeState } from './types'
@@ -189,5 +190,10 @@ export function publishableStates(
   states: CanvasNodeState[],
   ephemeralIds: ReadonlySet<string>
 ): CanvasNodeState[] {
-  return states.filter((n) => !isEphemeralNodeId(n.id, ephemeralIds))
+  // `stripSharedNodeExec`, for the same reason it runs on a project file: the exec-enabling fields
+  // are MACHINE-LOCAL. A teammate cannot use our `shell` or our `-o ProxyCommand=…` (they name
+  // programs and hosts on OUR box), and sending them would both leak our local setup and put a
+  // value of foreign provenance into their live nodes. The publisher's baseline is built from this
+  // same function, so nothing re-publishes in a loop.
+  return stripSharedNodeExec(states.filter((n) => !isEphemeralNodeId(n.id, ephemeralIds)))
 }

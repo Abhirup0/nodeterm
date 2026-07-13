@@ -26,6 +26,7 @@
  * a program string carrying shell metacharacters is never handed to tmux.
  */
 
+import { sshExtraArgsEnableLocalExec } from './ssh'
 import type { CanvasNodeState } from './types'
 
 /** Per-node exec values the LOCAL machine typed. Persisted only in the machine-local index. */
@@ -66,26 +67,72 @@ export function safeSessionProgram(shell: string | undefined): string | undefine
  * The values survive on this machine via `localNodeExec` (below); what leaves for git/the remote
  * host carries no command of any kind.
  */
-export function stripSharedNodeExec(nodes: CanvasNodeState[]): CanvasNodeState[] {
-  return nodes.map((n) => {
-    if (n.shell === undefined && n.ssh?.extraArgs === undefined) return n
-    const out: CanvasNodeState = { ...n }
-    delete out.shell
-    if (out.ssh) {
-      const { extraArgs: _extraArgs, ...conn } = out.ssh
-      out.ssh = conn
-    }
-    return out
-  })
+function stripNodeExec(n: CanvasNodeState): CanvasNodeState {
+  if (n.shell === undefined && n.ssh?.extraArgs === undefined && n.ssh?.execTrusted === undefined)
+    return n
+  const out: CanvasNodeState = { ...n }
+  delete out.shell
+  if (out.ssh) {
+    // `execTrusted` goes with the value it vouches for. It is a MACHINE-LOCAL provenance marker:
+    // if it could ride a document or a wire frame, a hostile one would simply set it to true.
+    const { extraArgs: _extraArgs, execTrusted: _execTrusted, ...conn } = out.ssh
+    out.ssh = conn
+  }
+  return out
 }
 
-/** Collect the machine-local exec values of these nodes (for the workspace.json index entry). */
+export function stripSharedNodeExec(nodes: CanvasNodeState[]): CanvasNodeState[] {
+  return nodes.map(stripNodeExec)
+}
+
+/**
+ * Strip the exec-enabling fields from a node that arrived OVER THE WIRE (a canvas-sync peer's
+ * mutation, or a relay client's).
+ *
+ * This is the other half of the trust boundary, and without it the disk half was worthless: a peer
+ * mutation is applied VERBATIM (`isCanvasMutation` validates only id/position/size), and the next
+ * save harvests whatever `shell` / `ssh.extraArgs` are now in the live nodes into the MACHINE-LOCAL
+ * `workspace.json` — where they are re-attached as this machine's own values on every load, for
+ * ever, surviving the peer leaving, being revoked, and the app restarting. The peer laundered an
+ * exec field into the trusted store.
+ *
+ * A peer has no business setting either field on our machine: both are per-machine settings (which
+ * program to run here, which ssh options to pass here), and neither is meaningful on a canvas that
+ * is merely being mirrored. So they are dropped at ingest, on every surface.
+ */
+export function sanitizeInboundNode(node: CanvasNodeState): CanvasNodeState {
+  return stripNodeExec(node)
+}
+
+/** `sanitizeInboundNode` for a whole mutation (the stamps — `src`, `seq` — are preserved). */
+export function sanitizeInboundMutation<T extends { op: 'upsert' | 'remove' }>(m: T): T {
+  if (m.op !== 'upsert') return m
+  const up = m as unknown as { node: CanvasNodeState }
+  const node = sanitizeInboundNode(up.node)
+  return node === up.node ? m : ({ ...m, node } as T)
+}
+
+/**
+ * Collect the machine-local exec values of these nodes (for the workspace.json index entry).
+ *
+ * The index is the TRUSTED store — whatever lands here is re-attached to the node on every future
+ * load, as this machine's own value. So an inbound value must not be able to launder itself in
+ * (see `sanitizeInboundNode`, which is the primary guard), and this collector re-checks what it is
+ * about to bless:
+ *  - `shell` — only if it still passes the exec-site validator. A program the exec site would
+ *    refuse anyway has no business being persisted as trusted.
+ *  - `ssh.extraArgs` — an exec-enabling value (a `ProxyCommand` & co) is stored only when it is
+ *    `execTrusted`, i.e. a LOCAL producer set it (the user's SSH server store, or a previous
+ *    machine-local index entry). Harmless args are stored either way, so nothing legitimate is lost.
+ */
 export function localNodeExec(nodes: CanvasNodeState[]): LocalNodeExecMap | undefined {
   const map: LocalNodeExecMap = {}
   for (const n of nodes) {
     const entry: LocalNodeExec = {}
-    if (n.shell) entry.shell = n.shell
-    if (n.ssh?.extraArgs) entry.sshExtraArgs = n.ssh.extraArgs
+    if (n.shell && safeSessionProgram(n.shell)) entry.shell = n.shell
+    const extraArgs = n.ssh?.extraArgs
+    if (extraArgs && (n.ssh?.execTrusted || !sshExtraArgsEnableLocalExec(extraArgs)))
+      entry.sshExtraArgs = extraArgs
     if (entry.shell || entry.sshExtraArgs) map[n.id] = entry
   }
   return Object.keys(map).length ? map : undefined
@@ -104,12 +151,12 @@ export function applyLocalNodeExec(
 ): CanvasNodeState[] {
   return nodes.map((n) => {
     const mine = local?.[n.id]
-    const out: CanvasNodeState = { ...n }
+    const out: CanvasNodeState = stripNodeExec(n)
     if (mine?.shell) out.shell = mine.shell
-    else delete out.shell
-    if (out.ssh) {
-      const { extraArgs: _extraArgs, ...conn } = out.ssh
-      out.ssh = mine?.sshExtraArgs ? { ...conn, extraArgs: mine.sshExtraArgs } : conn
+    if (out.ssh && mine?.sshExtraArgs) {
+      // Ours: it came out of the machine-local index, so the exec site may honor an option like
+      // ProxyCommand (a jump host is a legitimate thing to have configured).
+      out.ssh = { ...out.ssh, extraArgs: mine.sshExtraArgs, execTrusted: true }
     }
     return out
   })

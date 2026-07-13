@@ -9,6 +9,7 @@ import { useSettings } from './settings'
 // single implementation lives in src/shared and is shared with the relay host + the canvas-sync
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
+import { sanitizeInboundNode } from '@shared/node-exec'
 
 /** Preset color palette — macOS system colors (dark mode). */
 export const NODE_COLORS = [
@@ -229,6 +230,10 @@ export function createSshTerminalNode(
         port: server.port,
         identityFile: server.identityFile,
         extraArgs: server.extraArgs,
+        // Provenance: this came from the machine-local SSH server store — the local user typed it.
+        // So the exec site may honor an advanced option like a jump host's `-o ProxyCommand=…`.
+        // The marker never reaches a project file or the wire (@shared/node-exec).
+        execTrusted: server.extraArgs ? true : undefined,
         label: server.label
       }
     }
@@ -1038,7 +1043,10 @@ export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): Can
     if (!nodes.some((n) => n.id === m.id)) return nodes // already gone — keep identity, skip render
     return nodes.filter((n) => n.id !== m.id)
   }
-  const incoming = nodeStatesToFlow([m.node])[0]
+  // A peer's node never brings the exec-enabling fields with it (@shared/node-exec): they are
+  // per-machine settings, and letting one into the live array is exactly how it ends up harvested
+  // into this machine's "trusted" workspace.json on the next save.
+  const incoming = nodeStatesToFlow([sanitizeInboundNode(m.node)])[0]
   const idx = nodes.findIndex((n) => n.id === m.node.id)
   if (idx === -1) {
     // Append, then re-sort: React Flow requires a parent to appear BEFORE its children, and a peer
