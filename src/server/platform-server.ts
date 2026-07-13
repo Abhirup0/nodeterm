@@ -215,7 +215,7 @@ export class ServerPlatform implements CorePlatform {
       if (deadPrefix) this.forgetFlowState(ServerPlatform.flowKey(uiId, channel.slice(deadPrefix.length)))
       // Symmetric with the browser's send: mark `undefined` arg slots so the renderer's listeners
       // see them as `undefined` rather than `null` (and a real `null` still arrives as `null`).
-      sink.sendText(JSON.stringify({ t: 'ev', channel, args: encodeArgs(args) }))
+      sink.sendText(JSON.stringify({ t: 'ev', channel, ...encodeArgs(args) }))
     }
   }
 

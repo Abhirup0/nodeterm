@@ -698,7 +698,7 @@ describe('size negotiation: smallest subscriber wins', () => {
     const frame = JSON.stringify({
       t: 'cast',
       method: IPC.ptyResize,
-      args: encodeArgs([sessionId, null, null])
+      ...encodeArgs([sessionId, null, null])
     })
     const m = parseRpcMessage(frame) as { method: string; args: unknown[] }
     expect(m.args).toEqual([sessionId, null, null]) // the nulls MEAN something — they survive

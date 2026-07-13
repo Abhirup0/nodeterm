@@ -3,11 +3,11 @@
  *  events; binary frames only for high-volume pty output. Isomorphic: runs in the
  *  browser bridge and the node server. */
 
-export type RpcRequest = { t: 'req'; id: number; method: string; args: unknown[] }
-export type RpcCast = { t: 'cast'; method: string; args: unknown[] }
+export type RpcRequest = { t: 'req'; id: number; method: string; args: unknown[]; undef?: number[] }
+export type RpcCast = { t: 'cast'; method: string; args: unknown[]; undef?: number[] }
 export type RpcOk = { t: 'res'; id: number; ok: true; result: unknown }
 export type RpcErr = { t: 'res'; id: number; ok: false; error: { code: string; message: string } }
-export type RpcEvent = { t: 'ev'; channel: string; args: unknown[] }
+export type RpcEvent = { t: 'ev'; channel: string; args: unknown[]; undef?: number[] }
 export type RpcMessage = RpcRequest | RpcCast | RpcOk | RpcErr | RpcEvent
 
 export const E_UNSUPPORTED = 'E_UNSUPPORTED'
@@ -18,7 +18,8 @@ export const E_NO_HANDLER = 'E_NO_HANDLER'
 export const E_DISCONNECTED = 'E_DISCONNECTED'
 
 /**
- * Wire marker for an `undefined` TOP-LEVEL argument slot.
+ * Wire encoding for `undefined` TOP-LEVEL argument slots — an OUT-OF-BAND index list, never an
+ * in-band value.
  *
  * `JSON.stringify([a, undefined])` is `[a, null]`: raw JSON has no `undefined`. So a caller that
  * omits a trailing optional argument (`git.history(cwd)`, `worktreeMerge(repo, b, base)`) would
@@ -33,23 +34,47 @@ export const E_DISCONNECTED = 'E_DISCONNECTED'
  * active remote. Guessing `null → undefined` for all of them silently collapsed every co-attached
  * viewer's shared pty to 1×1.
  *
- * So the SENDER disambiguates instead: `encodeArgs` replaces each `undefined` slot with this
- * sentinel, `decodeArgs` turns exactly that sentinel back into `undefined`, and every other value
- * — `null` included — passes through untouched. Arity is preserved either way. The sentinel is a
- * NUL-prefixed string: no argument in the API surface can collide with it, and it survives JSON.
+ * So the SENDER disambiguates — but it must do so in a way an argument's own CONTENT cannot forge.
+ * An in-band sentinel string (the first cut here) was compared with `===` against every top-level
+ * argument, and several methods take one whole attacker-CHOOSABLE string in a top-level slot:
+ * `pty.write(sessionId, data)` (a paste, or an agent-driven write), `fs.write(path, content)`,
+ * presence chat. A payload equal to the sentinel would have decoded to `undefined`. A NUL prefix
+ * makes that improbable, not impossible — and improbability is not a security boundary.
+ *
+ * `undef` is therefore a separate frame field carrying the INDEXES of the omitted slots. Argument
+ * values are never inspected, so no value can pose as the marker. Arity is preserved, a meaningful
+ * `null` survives as `null`, and a frame without `undef` decodes exactly as it always did.
  *
  * Only top-level slots are marked: a `null`/`undefined` nested inside an object or array is the
  * sender's own data (`{cwd: null}` is not `{}`), and JSON's own object rules already govern it.
  */
-export const RPC_UNDEFINED = '\u0000__rpc_undefined__'
+export interface RpcArgs {
+  args: unknown[]
+  undef?: number[]
+}
 
-/** Sender side: mark the `undefined` argument slots so the decoder can restore them. */
-export const encodeArgs = (args: unknown[]): unknown[] =>
-  args.map((a) => (a === undefined ? RPC_UNDEFINED : a))
+/** Sender side. Spread into the frame: `{ t: 'req', id, method, ...encodeArgs(args) }`. */
+export function encodeArgs(args: unknown[]): RpcArgs {
+  const undef: number[] = []
+  const out = args.map((a, i) => {
+    if (a !== undefined) return a
+    undef.push(i)
+    return null
+  })
+  return undef.length ? { args: out, undef } : { args: out }
+}
 
-/** Receiver side: restore the marked slots. A `null` stays `null` — it is a real value. */
-const decodeArgs = (args: unknown[]): unknown[] =>
-  args.map((a) => (a === RPC_UNDEFINED ? undefined : a))
+/** Receiver side: restore exactly the listed slots. Every VALUE passes through untouched. */
+function decodeArgs(args: unknown[], undef: unknown): unknown[] {
+  if (!Array.isArray(undef) || undef.length === 0) return args
+  const out = args.slice()
+  for (const i of undef) {
+    // A junk / out-of-range index (a hostile or buggy peer) marks nothing: it can never lengthen
+    // the array, i.e. it cannot invent an argument slot the sender did not send.
+    if (typeof i === 'number' && Number.isInteger(i) && i >= 0 && i < out.length) out[i] = undefined
+  }
+  return out
+}
 
 export function parseRpcMessage(text: string): RpcMessage | null {
   let m: unknown
@@ -62,12 +87,16 @@ export function parseRpcMessage(text: string): RpcMessage | null {
   const o = m as Record<string, unknown>
   switch (o.t) {
     case 'req':
-      if (typeof o.id === 'number' && typeof o.method === 'string' && Array.isArray(o.args))
-        return { ...(o as RpcRequest), args: decodeArgs(o.args) }
+      if (typeof o.id === 'number' && typeof o.method === 'string' && Array.isArray(o.args)) {
+        const { undef, ...rest } = o as RpcRequest
+        return { ...rest, args: decodeArgs(o.args, undef) }
+      }
       return null
     case 'cast':
-      if (typeof o.method === 'string' && Array.isArray(o.args))
-        return { ...(o as RpcCast), args: decodeArgs(o.args) }
+      if (typeof o.method === 'string' && Array.isArray(o.args)) {
+        const { undef, ...rest } = o as RpcCast
+        return { ...rest, args: decodeArgs(o.args, undef) }
+      }
       return null
     case 'res':
       if (typeof o.id !== 'number') return null
@@ -75,8 +104,10 @@ export function parseRpcMessage(text: string): RpcMessage | null {
       if (o.ok === false && typeof o.error === 'object' && o.error !== null) return o as RpcErr
       return null
     case 'ev':
-      if (typeof o.channel === 'string' && Array.isArray(o.args))
-        return { ...(o as RpcEvent), args: decodeArgs(o.args) }
+      if (typeof o.channel === 'string' && Array.isArray(o.args)) {
+        const { undef, ...rest } = o as RpcEvent
+        return { ...rest, args: decodeArgs(o.args, undef) }
+      }
       return null
     default:
       return null
