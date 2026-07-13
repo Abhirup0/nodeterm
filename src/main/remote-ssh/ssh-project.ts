@@ -6,7 +6,7 @@ import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatusEvent } from '../../shared/types'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
-import { supportsAutoPermissionMode } from '../../shared/agents/config'
+import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
 import {
   controlPathFor,
   masterArgs,
@@ -380,7 +380,13 @@ export class SshProjectManager {
     // Install the managed hook into the account dir's settings.json (needs the absolute $HOME so the
     // merged `sh "…"` command has no unexpanded ~). Fail-open when the home never resolved.
     if (c.remoteHome) await this.remoteHooks.installIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
-    return { configDir: dir, versionSupported: await this.remoteClaudeVersionOk(c) }
+    // One remote `claude --version` gates both the keychain-scoping answer (>= 2.1, fail-open true)
+    // AND the fullscreen-tui write (>= 2.1.89, write-if-absent) into the account dir.
+    const version = await this.remoteClaudeVersion(c.conn, c.controlPath)
+    if (c.remoteHome && supportsFullscreenTui(version)) {
+      await this.remoteHooks.ensureFullscreenTuiInAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
+    }
+    return { configDir: dir, versionSupported: version ? isSupportedClaudeVersion(version) : true }
   }
 
   /** Read a managed remote account's `.claude.json` (login capture); null when not connected or the
@@ -434,22 +440,21 @@ export class SshProjectManager {
    * fallback); the next launch, once the answer lands, gets `auto`.
    */
   private async probeClaudeAutoPermissionMode(projectId: string, entry: Conn): Promise<void> {
-    const supported = supportsAutoPermissionMode(
-      await this.remoteClaudeVersion(entry.conn, entry.controlPath)
-    )
+    // One remote `claude --version` feeds BOTH version gates (permission-mode auto >= 2.1.71 and
+    // fullscreen tui >= 2.1.89) — no second probe.
+    const version = await this.remoteClaudeVersion(entry.conn, entry.controlPath)
+    const supported = supportsAutoPermissionMode(version)
     // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
     // connection; drop it rather than write it onto the new one.
     if (this.conns.get(projectId) !== entry) return
     entry.claudeAutoPermissionMode = supported
     this.r.onStatus({ projectId, status: 'connected', claudeAutoPermissionMode: supported })
-  }
-
-  /** Is the remote claude new enough to scope credentials per config dir? Returns true when it
-   *  can't be determined so remote account add is never blocked on detection (fail-open). */
-  private async remoteClaudeVersionOk(c: Conn): Promise<boolean> {
-    const version = await this.remoteClaudeVersion(c.conn, c.controlPath)
-    if (!version) return true
-    return isSupportedClaudeVersion(version)
+    // Ensure Claude's fullscreen TUI on the host's ~/.claude/settings.json (write-if-absent), so a
+    // remote Claude session behaves natively in the host's tmux. Gated on the same probed version;
+    // fail-open inside RemoteHooks. Needs the resolved $HOME for an absolute path.
+    if (entry.remoteHome && supportsFullscreenTui(version)) {
+      await this.remoteHooks.ensureFullscreenTui(entry.conn, entry.controlPath, entry.remoteHome)
+    }
   }
 
   async disconnect(projectId: string): Promise<void> {

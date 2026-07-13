@@ -7,6 +7,7 @@
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import { mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
+import { ensureFullscreenTui, type TuiSettings } from '../../core/agents/hooks/claude-tui'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
 
 export interface RemoteRunner {
@@ -132,6 +133,52 @@ export class RemoteHooks {
       )
     } catch {
       /* fail-open: the account session simply runs without status hooks */
+    }
+  }
+
+  /**
+   * Ensure `"tui": "fullscreen"` in the REMOTE host's `~/.claude/settings.json` — write-if-absent,
+   * so a remote Claude session takes the alternate screen + mouse and behaves natively in the
+   * host's tmux. The CALLER gates this on the host CLI being >= 2.1.89 (the remote `claude --version`
+   * already cached on the connection — no second probe). `remoteHome` is the resolved remote `$HOME`
+   * so the path is absolute (a literal `~` would not expand). Fail-open.
+   */
+  async ensureFullscreenTui(conn: SshConnection, controlPath: string, remoteHome: string): Promise<void> {
+    await this.ensureFullscreenTuiAt(conn, controlPath, `${remoteHome}/.claude/settings.json`)
+  }
+
+  /** Same guardrails, for a REMOTE managed-account config dir's `settings.json`. */
+  async ensureFullscreenTuiInAccountDir(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string,
+    accountId: string
+  ): Promise<void> {
+    const config = `${remoteHome}/.nodeterm/claude-accounts/${accountId}/settings.json`
+    await this.ensureFullscreenTuiAt(conn, controlPath, config)
+  }
+
+  /** Read-merge-write the fullscreen-tui key at one absolute remote config path, over the master.
+   *  Same read-if-present, write-only-if-changed, fail-open mechanics as the hook merge above. */
+  private async ensureFullscreenTuiAt(conn: SshConnection, controlPath: string, config: string): Promise<void> {
+    try {
+      const { stdout: raw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
+      )
+      let cfg: TuiSettings = {}
+      try {
+        cfg = JSON.parse(raw || '{}') as TuiSettings
+      } catch {
+        cfg = {}
+      }
+      const { config: next, changed } = ensureFullscreenTui(cfg)
+      if (!changed) return // key already present (any value) → never overwrite the user's `/tui`
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p $(dirname ${posixQuote(config)}) && cat > ${posixQuote(config)}`),
+        JSON.stringify(next, null, 2)
+      )
+    } catch {
+      /* fail-open: a failed remote read/write must never break the connect */
     }
   }
 

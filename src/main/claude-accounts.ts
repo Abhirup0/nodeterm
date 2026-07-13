@@ -10,7 +10,7 @@ import { ipcMain } from 'electron'
 import { IPC } from '../shared/ipc'
 import { isSupportedClaudeVersion, parseLoginCapture } from '../core/claude-accounts-core'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
-import { installClaudeHooksInto } from '../core/agents/hooks/claude'
+import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
 import { installCanvasSkillInto } from './canvas-control'
 import { findInLoginPath } from '../core/pty-manager'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
@@ -76,6 +76,9 @@ export function initClaudeAccounts(getSshManager?: () => SshProjectManager | und
     // the canvas (Claude resolves skills relative to CLAUDE_CONFIG_DIR, not ~/.claude).
     installClaudeHooksInto(configDir)
     installCanvasSkillInto(configDir)
+    // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated). Best-effort,
+    // off the response path — the memoized probe + write both fail open.
+    void ensureClaudeFullscreenTuiInto(configDir)
     const versionSupported = await checkClaudeVersion()
     return { id, configDir, versionSupported }
   })

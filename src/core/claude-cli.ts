@@ -7,7 +7,7 @@
 // The remote (SSH) CLI is probed separately on its own host — see SshProjectManager.
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { supportsAutoPermissionMode } from '../shared/agents/config'
+import { supportsAutoPermissionMode, supportsFullscreenTui } from '../shared/agents/config'
 import { IPC } from '../shared/ipc'
 import { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps } from '../shared/types'
 import { findInLoginPath } from './pty-manager'
@@ -21,7 +21,11 @@ export { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps }
 /** Pure: `claude --version` output → caps. The impure probe below is just plumbing around it. */
 export function claudeCliCapsFrom(versionOutput: string | null | undefined): ClaudeCliCaps {
   const version = versionOutput?.trim() || null
-  return { version, autoPermissionMode: supportsAutoPermissionMode(version) }
+  return {
+    version,
+    autoPermissionMode: supportsAutoPermissionMode(version),
+    fullscreenTui: supportsFullscreenTui(version)
+  }
 }
 
 let cached: Promise<ClaudeCliCaps> | null = null

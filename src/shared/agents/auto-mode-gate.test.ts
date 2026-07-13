@@ -5,7 +5,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   AUTO_PERMISSION_MODE_MIN_VERSION,
+  FULLSCREEN_TUI_MIN_VERSION,
   supportsAutoPermissionMode,
+  supportsFullscreenTui,
   gatePermissionMode,
   withPermissionMode,
   ALL_PERMISSION_MODES,
@@ -47,6 +49,32 @@ describe('supportsAutoPermissionMode', () => {
   it('does not confuse a longer number that merely starts with a supported prefix', () => {
     expect(supportsAutoPermissionMode('12.1.90')).toBe(true)
     expect(supportsAutoPermissionMode('0.2.99')).toBe(false)
+  })
+})
+
+describe('supportsFullscreenTui', () => {
+  it('accepts the first version that understands the tui setting and everything above it', () => {
+    expect(FULLSCREEN_TUI_MIN_VERSION).toBe('2.1.89')
+    expect(supportsFullscreenTui('2.1.89')).toBe(true)
+    expect(supportsFullscreenTui('2.1.90')).toBe(true)
+    expect(supportsFullscreenTui('2.2.0')).toBe(true)
+    expect(supportsFullscreenTui('3.0.0')).toBe(true)
+    expect(supportsFullscreenTui('2.1.207 (Claude Code)')).toBe(true)
+  })
+
+  it('rejects versions below the 2.1.89 floor', () => {
+    expect(supportsFullscreenTui('2.1.88')).toBe(false)
+    expect(supportsFullscreenTui('2.1.71')).toBe(false)
+    expect(supportsFullscreenTui('2.0.99')).toBe(false)
+    expect(supportsFullscreenTui('1.9.999')).toBe(false)
+  })
+
+  it('fails open (no write) on anything it cannot read', () => {
+    expect(supportsFullscreenTui('')).toBe(false)
+    expect(supportsFullscreenTui(null)).toBe(false)
+    expect(supportsFullscreenTui(undefined)).toBe(false)
+    expect(supportsFullscreenTui('command not found')).toBe(false)
+    expect(supportsFullscreenTui('2.1')).toBe(false)
   })
 })
 

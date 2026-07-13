@@ -53,7 +53,7 @@ import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { isSafeLocalTranscriptPath, isSafeRemoteTranscriptPath } from '../core/claude-accounts-core'
-import { installClaudeHooksInto } from '../core/agents/hooks/claude'
+import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -760,6 +760,10 @@ app.whenReady().then(async () => {
     try {
       installClaudeHooksInto(claudeConfigDirFor(acct.id))
       installCanvasSkillInto(claudeConfigDirFor(acct.id))
+      // Ensure fullscreen TUI in this account dir (write-if-absent, version-gated). Off the
+      // critical path: it awaits the memoized CLI probe, then writes fail-open. (The system
+      // ~/.claude is handled by installManagedAgentHooks above, which covers Server Edition too.)
+      void ensureClaudeFullscreenTuiInto(claudeConfigDirFor(acct.id))
     } catch (e) {
       console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
     }

@@ -5,15 +5,25 @@ describe('claudeCliCapsFrom', () => {
   it('reads a real `claude --version` line', () => {
     expect(claudeCliCapsFrom('2.1.207 (Claude Code)\n')).toEqual({
       version: '2.1.207 (Claude Code)',
-      autoPermissionMode: true
+      autoPermissionMode: true,
+      fullscreenTui: true
     })
   })
 
   it('marks an older CLI as not knowing `auto` (it would exit 1 on the flag value)', () => {
     expect(claudeCliCapsFrom('2.1.50 (Claude Code)')).toEqual({
       version: '2.1.50 (Claude Code)',
-      autoPermissionMode: false
+      autoPermissionMode: false,
+      fullscreenTui: false
     })
+  })
+
+  it('gates fullscreen tui on >= 2.1.89 (older CLI knows the flag but not the setting)', () => {
+    // A CLI new enough for `--permission-mode auto` (>= 2.1.71) can still be too old for the
+    // `tui` setting (>= 2.1.89) — the two capabilities are independent version gates.
+    expect(claudeCliCapsFrom('2.1.88 (Claude Code)').fullscreenTui).toBe(false)
+    expect(claudeCliCapsFrom('2.1.89 (Claude Code)').fullscreenTui).toBe(true)
+    expect(claudeCliCapsFrom('2.1.88 (Claude Code)').autoPermissionMode).toBe(true)
   })
 
   it('collapses no output to the fail-open caps (no version → no auto → bare command)', () => {
