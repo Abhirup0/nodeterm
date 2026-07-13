@@ -150,7 +150,6 @@ import {
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
-import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
@@ -1064,10 +1063,10 @@ export function Canvas() {
     const t = setTimeout(() => {
       loadingRef.current = false
       // The broadcast effect early-returns while `loadingRef` is set and isn't re-triggered by the
-      // reset, so push the freshly-loaded project's canvas once now — otherwise a connected client
+      // reset, so push the freshly-loaded project's canvas once now — otherwise the connected phone
       // keeps mirroring the previous project until the host's next edit. Gated like the effect:
-      // when not hosting, the serialize itself is the waste (main would drop the payload anyway).
-      if (useRemoteHosting.getState().hosting) {
+      // without phone access on, the serialize itself is the waste (main would drop the payload).
+      if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
       }
       // Consume a cross-project focus request (notification click on a background node).
@@ -1194,21 +1193,23 @@ export function Canvas() {
     return () => clearTimeout(t)
   }, [dirty, conflict, persist])
 
-  // ---- remote canvas mirror (host side) ----
-  // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
-  // change, so a connected client mirrors the layout. Gated on the hosting flag: without it every
-  // canvas edit paid a full flowToNodeStates serialize + IPC even with no client ever connecting.
-  // When hosting flips on, the effect fires once immediately, so main's snapshot is fresh before
-  // a client joins. Skips programmatic loads to avoid a redundant push on project switch (the
-  // post-load value is captured by the next real change).
-  const hosting = useRemoteHosting((s) => s.hosting)
+  // ---- remote canvas mirror (phone host side) ----
+  // While phone access is on, push the serialized active-project canvas to main (debounced ~120ms)
+  // on every change, so the connected phone mirrors the layout (main's host-canvas-hub feeds the
+  // standing host). Gated on `phoneAccessEnabled`: without it every canvas edit would pay a full
+  // flowToNodeStates serialize + IPC even with no phone ever connecting. When phone access flips on,
+  // the effect fires once immediately, so main's snapshot is fresh before the phone joins. Skips
+  // programmatic loads to avoid a redundant push on project switch (the post-load value is captured
+  // by the next real change). NOTE: desktop RELAY peers do NOT use this path — they sync via the
+  // CorePlatform canvas reflector (buildCanvasApi); this push is the phone feed only.
+  const phoneHosting = settings.phoneAccessEnabled
   useEffect(() => {
-    if (!hosting || loadingRef.current) return
+    if (!phoneHosting || loadingRef.current) return
     const t = setTimeout(() => {
       window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
     }, 120)
     return () => clearTimeout(t)
-  }, [nodes, hosting])
+  }, [nodes, phoneHosting])
 
   // Apply a client's mutation to React Flow — the host's single writer. Serialize the live nodes,
   // apply the mutation, and convert back. A direct `setNodes(...)` bypasses `handleNodesChange`,
