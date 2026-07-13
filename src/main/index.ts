@@ -63,6 +63,9 @@ import {
   RELAY_URL
 } from './remote/host-service'
 import { initStandingHost } from './remote/standing-host'
+import { killRelayHostsByPeerKey } from './remote/relay-host'
+import { createRevoker } from './remote/revocation'
+import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
 import { initRemoteClient } from './remote/client-service'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
@@ -515,6 +518,21 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
+
+  // Revoking a bridged PEER must CUT THE LIVE SESSION, not just unpin it (revocation.ts): unpinning
+  // refuses only the NEXT handshake, while the open relay socket keeps full shell access — "the
+  // person I just removed is still sitting in my terminal, typing". `killByPeerKey` closes every
+  // live session with that key, and each close runs the peer teardown (presence leave →
+  // PtyManager.dropClient → sink prune). Host-security control plane, so it stays on raw ipcMain:
+  // a remote peer must never be able to revoke anyone.
+  const peerRevoker = createRevoker({
+    load: loadApprovedDevices,
+    save: saveApprovedDevices,
+    onRevoke: (peerKeyB64) => killRelayHostsByPeerKey(peerKeyB64)
+  })
+  ipcMain.handle(IPC.remoteRevokePeer, (_e, peerKeyB64: string) =>
+    peerRevoker.revoke(String(peerKeyB64))
+  )
 
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
