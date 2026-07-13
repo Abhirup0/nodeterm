@@ -14,7 +14,9 @@ import {
   setMeAll,
   setSessionStatus,
   takeSessionOffline,
+  activeSessionPresence,
 } from './session'
+import { defaultPresence } from '../state/presence'
 import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
 
@@ -239,6 +241,37 @@ describe('takeSessionOffline (Stage 4 Task 7 — an INVOLUNTARY drop, not a user
     setSessionStatus(s.id, 'connected')
     expect(s.status).toBe('connected')
     expect(() => setSessionStatus('nope', 'offline')).not.toThrow()
+  })
+})
+
+describe('activeSessionPresence (Task 1 — the ACTIVE session presence, non-hook accessor)', () => {
+  it('returns the ACTIVE relay session\'s presence — a distinct instance from local', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    setActiveSession(relay.id)
+    const p = activeSessionPresence()
+    expect(p).toBe(getSessionStores(relay.id).presence)
+    expect(p).not.toBe(getSessionStores(local.id).presence)
+  })
+
+  it('returns the LOCAL session\'s presence when local is active', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    setActiveSession(local.id)
+    expect(activeSessionPresence()).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to the local session\'s presence when no session is active (never throws)', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    // activeId is null (setActiveSession never called) — must not throw, resolves to local.
+    expect(() => activeSessionPresence()).not.toThrow()
+    expect(activeSessionPresence()).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to defaultPresence when there is neither an active nor a local session', () => {
+    // node-env safety: with an empty registry the accessor must still return a usable presence.
+    expect(() => activeSessionPresence()).not.toThrow()
+    expect(activeSessionPresence()).toBe(defaultPresence)
   })
 })
 

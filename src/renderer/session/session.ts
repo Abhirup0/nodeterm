@@ -1,7 +1,7 @@
 import { createContext, createElement, useContext, type ReactNode } from 'react'
 import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
-import { createPresenceSession, type PresenceSession } from '../state/presence'
+import { createPresenceSession, defaultPresence, type PresenceSession } from '../state/presence'
 import { agentStatusForApi, type AgentStatusSession } from '../state/agentStatus'
 
 export type SessionSource = 'local' | 'relay' | 'server'
@@ -216,6 +216,33 @@ export function useSession(): WorkspaceSession {
 
 export function useSessionStores(): SessionStores {
   return getSessionStores(useSession().id)
+}
+
+/** The presence store for a session id, with the render-safe fallback the two accessors below share:
+ *  an unknown/not-yet-registered id (a transient render before its session exists) resolves to the
+ *  LOCAL session's presence — which in the real app IS `defaultPresence` (the exact object the ~40
+ *  static `state/presence` imports use), so a local tab is byte-identical. Never throws. */
+function presenceForSession(sessionId: string | null): PresenceSession {
+  if (sessionId) {
+    const e = SESSIONS.get(sessionId)
+    if (e) return e.stores.presence
+  }
+  const local = SESSIONS.get('local')
+  return local ? local.stores.presence : defaultPresence
+}
+
+/** The ACTIVE session's presence store, for components rendered UNDER the Canvas `SessionProvider`
+ *  (so `useSession()` resolves the active session, not the app-chrome default). A local tab yields
+ *  `defaultPresence`; a relay tab yields the relay session's presence. Allocation-free — returns the
+ *  memoized `PresenceSession` directly — and never throws in render (see `presenceForSession`). */
+export function useActiveSessionPresence(): PresenceSession {
+  return presenceForSession(useSession().id)
+}
+
+/** Non-hook counterpart of `useActiveSessionPresence` for imperative (non-render) Canvas use: the
+ *  ACTIVE session's presence, read straight from the registry (`activeId`), with the same fallback. */
+export function activeSessionPresence(): PresenceSession {
+  return presenceForSession(activeId)
 }
 
 export function SessionProvider({ session, children }: { session: WorkspaceSession; children: ReactNode }) {
