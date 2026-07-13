@@ -51,6 +51,18 @@ export interface IndexEntryV3 {
    *  shell / advanced ssh args still survive a restart. Inline (`project`) entries need none: they
    *  live in this same machine-local file already. */
   localExec?: LocalNodeExecMap
+  /**
+   * The one-time exec migration has run for this entry: its project file has been searched once for
+   * the exec values it carried from BEFORE the trust boundary existed (a jump host's `ProxyCommand`
+   * put there by `createSshTerminalNode`), and they were hoisted into `localExec` above.
+   *
+   * Absent = not migrated yet. Set on the first save after the upgrade for every entry whose file we
+   * could actually READ — an entry that was unavailable at that moment stays unmarked, so its values
+   * are still hoisted when the folder/server comes back. A folder adopted AFTER the upgrade is
+   * written with the flag already set, which is what keeps a cloned project.json (hostile) out of
+   * the hoist. See `hoistLegacyNodeExec`.
+   */
+  execMigrated?: boolean
 }
 
 export interface WorkspaceIndexV3 {

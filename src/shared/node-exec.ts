@@ -139,6 +139,36 @@ export function localNodeExec(nodes: CanvasNodeState[]): LocalNodeExecMap | unde
 }
 
 /**
+ * ONE-TIME UPGRADE. Take the exec values a project file carried from BEFORE this trust boundary
+ * existed, and adopt them as this machine's own.
+ *
+ * `ssh.extraArgs` has a real producer (`createSshTerminalNode` copies it out of the machine-local
+ * SSH server store), so every existing ssh-terminal node with a jump host or a corporate
+ * `ProxyCommand` has one in its CURRENT `.nodeterm/project.json` — and the v3 index has no
+ * `localExec` for it. Without this hoist the first load after the upgrade would silently drop the
+ * value (the connection breaks with a confusing error) and the next save would erase it from disk
+ * and propagate the deletion to every teammate via `rev`.
+ *
+ * The provenance signal is the one actually available at upgrade time: the project was ALREADY
+ * REFERENCED in this machine's `workspace.json`, i.e. it is a folder this user had already opened.
+ * The caller runs this exactly once per entry (`IndexEntryV3.execMigrated`), so a project file
+ * cloned AFTER the upgrade — the hostile case — never reaches it.
+ *
+ * `shell` is still validated: it has no producer, so anything there is either junk or an attack,
+ * and blessing a value the exec site would refuse anyway buys nothing.
+ */
+export function hoistLegacyNodeExec(nodes: CanvasNodeState[]): LocalNodeExecMap | undefined {
+  const map: LocalNodeExecMap = {}
+  for (const n of nodes) {
+    const entry: LocalNodeExec = {}
+    if (n.shell && safeSessionProgram(n.shell)) entry.shell = n.shell
+    if (n.ssh?.extraArgs) entry.sshExtraArgs = n.ssh.extraArgs
+    if (entry.shell || entry.sshExtraArgs) map[n.id] = entry
+  }
+  return Object.keys(map).length ? map : undefined
+}
+
+/**
  * Re-attach this machine's own exec values to nodes just read from a project file. Anything the
  * FILE carried in those fields is dropped first (it is not ours), so a hostile/cloned project.json
  * can only ever produce the safe default. Keyed by node id, which is stable (it is the tmux

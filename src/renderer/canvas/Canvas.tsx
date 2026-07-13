@@ -1116,11 +1116,14 @@ export function Canvas() {
     })
   }, [reloadActiveProject])
 
-  // One-shot note after a v2→v3 on-disk migration (dismissible, non-blocking strip).
+  // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
+  // where the user's data lives, so neither may happen silently.
   useEffect(() => {
-    return window.nodeTerminal.workspace.onMigrated(() => {
+    return window.nodeTerminal.workspace.onMigrated((kind) => {
       setMigrationNote(
-        'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
+        kind === 'exec'
+          ? 'Custom shells and advanced SSH options (e.g. a ProxyCommand jump host) are no longer stored in the shared .nodeterm/project.json — a cloned repo could use them to run code. They still work here: they moved to this machine only, and your teammates no longer receive them.'
+          : 'Projects now live in a .nodeterm folder inside each project directory — commit it to share the canvas, or add it to .gitignore.'
       )
     })
   }, [])

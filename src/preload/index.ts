@@ -9,7 +9,8 @@ import type {
   RecycledInfo,
   UpdateInfo,
   UpdateProgress,
-  Workspace
+  Workspace,
+  WorkspaceMigrationKind
 } from '../shared/types'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
 
@@ -100,8 +101,9 @@ const api: NodeTerminalApi = {
     load: () => ipcRenderer.invoke(IPC.workspaceLoad),
     save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace),
     probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),
-    onMigrated: (cb: () => void) => {
-      const h = () => cb()
+    onMigrated: (cb: (kind: WorkspaceMigrationKind) => void) => {
+      // Older mains broadcast no payload; that was the v2→v3 migration.
+      const h = (_e: unknown, kind?: WorkspaceMigrationKind) => cb(kind ?? 'v2')
       ipcRenderer.on(IPC.workspaceMigrated, h)
       return () => ipcRenderer.removeListener(IPC.workspaceMigrated, h)
     },
