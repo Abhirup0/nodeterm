@@ -82,7 +82,10 @@ let platform: ElectronPlatform
  * A host session bridged to a REAL peer relay socket over an in-process transport pair. `buffered`
  * is the host transport's ws.bufferedAmount — the number the sink must surface.
  */
-function openHostAgainstFakeRelay(opts?: { bufferedAmount?: () => number }): {
+function openHostAgainstFakeRelay(opts?: {
+  bufferedAmount?: () => number
+  sharedProjectId?: string
+}): {
   session: RelayHostSession
   peerKeyB64: string
   textFrames: string[]
@@ -142,6 +145,7 @@ function openHostAgainstFakeRelay(opts?: { bufferedAmount?: () => number }): {
     ourKeys: hostKeys,
     platform,
     transport: hostT,
+    sharedProjectId: opts?.sharedProjectId,
     onPeerPending: (s) => pending.push(s),
     onOpen: (s) => opens.push(s),
     onClose: () => {
@@ -345,6 +349,62 @@ describe('relay host — presence, canvas and RPC reach a bridged peer', () => {
 
     s.peerSendsTunnelText(JSON.stringify({ t: 'cast', method: 'pty:write', args: ['ls\r'] }))
     await vi.waitFor(() => expect(casts).toEqual([[id, 'ls\r']]))
+  })
+})
+
+describe('relay host — workspace:load is scoped to the shared project', () => {
+  const threeProjectWorkspace = () => ({
+    version: 2,
+    activeProjectId: 'proj-0',
+    projects: [
+      { id: 'proj-0', name: 'zero', color: '#000', nodes: [], viewport: { x: 0, y: 0, zoom: 1 } },
+      { id: 'proj-1', name: 'one', color: '#111', nodes: [], viewport: { x: 0, y: 0, zoom: 1 } },
+      { id: 'proj-2', name: 'two', color: '#222', nodes: [], viewport: { x: 0, y: 0, zoom: 1 } }
+    ]
+  })
+
+  it('returns ONLY the shared project (activeProjectId retargeted) over a scoped session', async () => {
+    platform.handle(IPC.workspaceLoad, async () => threeProjectWorkspace())
+    const s = openHostAgainstFakeRelay({ sharedProjectId: 'proj-1' })
+    await s.openMutually()
+
+    s.peerSendsTunnelText(JSON.stringify({ t: 'req', id: 7, method: IPC.workspaceLoad, args: [] }))
+    await vi.waitFor(() => {
+      const res = JSON.parse(s.textFrames.at(-1)!)
+      expect(res).toMatchObject({ t: 'res', id: 7, ok: true })
+      expect(res.result.projects.map((p: any) => p.id)).toEqual(['proj-1'])
+      expect(res.result.activeProjectId).toBe('proj-1')
+    })
+  })
+
+  it('leaves a NON-workspace method (git:status) untouched on a scoped session', async () => {
+    platform.handle(IPC.gitStatus, async () => ({ branch: 'main', files: [] }))
+    const s = openHostAgainstFakeRelay({ sharedProjectId: 'proj-1' })
+    await s.openMutually()
+
+    s.peerSendsTunnelText(JSON.stringify({ t: 'req', id: 8, method: IPC.gitStatus, args: ['/w'] }))
+    await vi.waitFor(() =>
+      expect(JSON.parse(s.textFrames.at(-1)!)).toMatchObject({
+        t: 'res',
+        id: 8,
+        ok: true,
+        result: { branch: 'main', files: [] }
+      })
+    )
+  })
+
+  it('with NO sharedProjectId returns the FULL workspace unchanged', async () => {
+    platform.handle(IPC.workspaceLoad, async () => threeProjectWorkspace())
+    const s = openHostAgainstFakeRelay() // unscoped — legacy behaviour
+    await s.openMutually()
+
+    s.peerSendsTunnelText(JSON.stringify({ t: 'req', id: 9, method: IPC.workspaceLoad, args: [] }))
+    await vi.waitFor(() => {
+      const res = JSON.parse(s.textFrames.at(-1)!)
+      expect(res).toMatchObject({ t: 'res', id: 9, ok: true })
+      expect(res.result.projects.map((p: any) => p.id)).toEqual(['proj-0', 'proj-1', 'proj-2'])
+      expect(res.result.activeProjectId).toBe('proj-0')
+    })
   })
 })
 

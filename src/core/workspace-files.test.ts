@@ -108,6 +108,21 @@ describe('splitWorkspace', () => {
       () => 1, '2026-07-11T00:00:00.000Z')
     expect(index.entries[0].project!.unavailable).toBeUndefined()
   })
+  it('never persists a remote (relay) project — no ref, no inline, no cache, in any branch', () => {
+    const ws2: Workspace = {
+      version: 2, activeProjectId: 'keep',
+      projects: [
+        project({ id: 'keep', name: 'normal', cwd: '/a/foo' }),
+        project({ id: 'r1', name: 'relay-cwdless', remote: true }),
+        project({ id: 'r2', name: 'relay-cwd', cwd: '/a/bar', remote: true }),
+        project({ id: 'r3', name: 'relay-ssh', ssh: { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }, remote: true })
+      ]
+    }
+    const { index, files } = splitWorkspace(ws2, () => 1, '2026-07-11T00:00:00.000Z')
+    // Only the normal project is emitted; every relay project is absent entirely.
+    expect(index.entries.map((e) => e.id)).toEqual(['keep'])
+    expect(files.has('/a/bar')).toBe(false) // relay cwd never written as a file
+  })
   it('an unavailable ref is header-only: no file (local cwd) and no cache (ssh)', () => {
     const local = splitWorkspace(
       { version: 2, activeProjectId: 'p1', projects: [project({ id: 'p1', cwd: '/a/foo', unavailable: true })] },

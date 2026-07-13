@@ -37,6 +37,7 @@ import {
   shouldApplyResync,
   stripTrailingNewline,
   takeRecycled,
+  terminalKey,
   terminalKeyAction,
   toXtermText,
   SHIFT_ENTER_SEQ,
@@ -182,26 +183,34 @@ function disposeParked(p: ParkedTerminal): void {
   p.term.dispose()
 }
 
-/** Drop a node's parked terminal (if any), detaching its PTY client. Canvas calls this on
- *  permanent deletion — the node may be unmounted (parked) when it is deleted. */
-export function disposeParkedTerminal(id: string): void {
-  const p = parkedTerminals.get(id)
+/** Drop a node's parked terminal (if any), detaching its PTY client. `key` is the session-scoped
+ *  `terminalKey(sessionId, nodeId)` — the module maps are keyed by it so a local and a relay node
+ *  that share a bare id never collide. */
+export function disposeParkedTerminal(key: string): void {
+  const p = parkedTerminals.get(key)
   if (!p) return
-  parkedTerminals.delete(id)
+  parkedTerminals.delete(key)
   disposeParked(p)
 }
 
-/** Nodes whose next unmount must dispose (not park) — set on permanent deletion, where the
- *  unmount runs AFTER the session was already destroyed, so parking would keep a dead xterm. */
+/** Session-scoped keys (`terminalKey`) whose next unmount must dispose (not park) — set on permanent
+ *  deletion, where the unmount runs AFTER the session was already destroyed, so parking would keep a
+ *  dead xterm. */
 const noParkIds = new Set<string>()
 
 /** Canvas calls this when permanently deleting a terminal node: drops an already-parked entry
- *  AND makes the upcoming unmount (if the node is currently mounted) dispose instead of park. */
-export function disposeTerminalOnUnmount(id: string): void {
-  noParkIds.add(id)
-  disposeParkedTerminal(id)
-  coStates.delete(id)
-  forgetNodeTermState(id)
+ *  AND makes the upcoming unmount (if the node is currently mounted) dispose instead of park. Takes
+ *  the node's `sessionId` (the session its tab is bound to) so the composite key matches the one the
+ *  mounted `TerminalNode` uses — a local node resolves to `'local'`, i.e. its historical bare-id
+ *  behavior. `forgetNodeTermState` stays node-id keyed: `fittedByNode`/`recycledIds` are transient
+ *  per-mount and only one node with a given id mounts at a time, so a cross-session collision there
+ *  is benign. */
+export function disposeTerminalOnUnmount(sessionId: string, nodeId: string): void {
+  const key = terminalKey(sessionId, nodeId)
+  noParkIds.add(key)
+  disposeParkedTerminal(key)
+  coStates.delete(key)
+  forgetNodeTermState(nodeId)
 }
 
 /**
@@ -276,19 +285,19 @@ const coSubs = new Map<string, (s: CoState) => void>()
  */
 const restartSubs = new Map<string, () => void>()
 
-function getCo(id: string): CoState {
-  return coStates.get(id) ?? NO_CO
+function getCo(key: string): CoState {
+  return coStates.get(key) ?? NO_CO
 }
 
-function setCo(id: string, patch: Partial<CoState>): void {
-  const prev = getCo(id)
+function setCo(key: string, patch: Partial<CoState>): void {
+  const prev = getCo(key)
   const next = { ...prev, ...patch }
   // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
   // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
   if (next.letterbox === prev.letterbox && next.closed === prev.closed && next.ended === prev.ended)
     return
-  coStates.set(id, next)
-  coSubs.get(id)?.(next)
+  coStates.set(key, next)
+  coSubs.get(key)?.(next)
 }
 
 /**
@@ -303,7 +312,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // This node's core api (a context read — stable for the session's lifetime, so using it
   // inside the once-mounted lifecycle effect is safe and never re-runs that effect). Core-bound
   // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
-  const { api } = useSession()
+  const session = useSession()
+  const { api } = session
+  // Session-scope the module-global node-keyed maps (parkedTerminals / coStates / coSubs /
+  // restartSubs / noParkIds): a relay tab adopts the host's project KEEPING node ids, so a local
+  // node and a relay node can share a bare id. `session.id` is stable for this node's lifetime
+  // ('local' for the local session, relay-N for a relay tab — both survive project switches), so
+  // `termKey` is stable across a park→remount of the same terminal yet distinct across sessions.
+  const termKey = terminalKey(session.id, id)
   // The transport is ALWAYS `LocalTransport` over THIS session's api — one protocol, no
   // RemoteTransport. For the local session `api.pty` is the preload; for a relay tab it is Task 5's
   // bridged pty (the relay tunnel), so LocalTransport over the bridged api IS the remote transport.
@@ -417,14 +433,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // missing at spawn (Task 3 fallback) — flags the account chip with a warning tint + tooltip.
   const [accountFallback, setAccountFallback] = useState(false)
   // Co-attach state published by the (park-surviving) transport listeners — see CoState.
-  const [co, setCo_] = useState<CoState>(() => getCo(id))
+  const [co, setCo_] = useState<CoState>(() => getCo(termKey))
   useEffect(() => {
-    coSubs.set(id, setCo_)
-    setCo_(getCo(id)) // catch up anything published while this instance was mounting
+    coSubs.set(termKey, setCo_)
+    setCo_(getCo(termKey)) // catch up anything published while this instance was mounting
     return () => {
-      if (coSubs.get(id) === setCo_) coSubs.delete(id)
+      if (coSubs.get(termKey) === setCo_) coSubs.delete(termKey)
     }
-  }, [id])
+  }, [termKey])
   // Publish this instance's restart trigger for the (park-surviving) onRecycled listener — see
   // restartSubs. Bumping `respawnNonce` re-runs the lifecycle effect below, which is exactly what
   // the mover's own canvas does; the transient nonce is never persisted.
@@ -433,11 +449,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       updateNodeData(id, (n) => ({
         respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
       }))
-    restartSubs.set(id, restart)
+    restartSubs.set(termKey, restart)
     return () => {
-      if (restartSubs.get(id) === restart) restartSubs.delete(id)
+      if (restartSubs.get(termKey) === restart) restartSubs.delete(termKey)
     }
-  }, [id, updateNodeData])
+  }, [termKey, id, updateNodeData])
   // The name of the peer who closed this node. Read NON-reactively (getState, not a selector): the
   // presence store is written at cursor rate and its perf contract reserves subscriptions for the
   // presence components — a per-terminal subscriber would run on every one of those writes. The
@@ -447,7 +463,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // "Session ended" (a recycle whose replacement never came — see CoState.ended): the user asks for
   // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
   const reopenEnded = (): void => {
-    setCo(id, { ended: false })
+    setCo(termKey, { ended: false })
     updateNodeData(id, (n) => ({
       respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
     }))
@@ -516,9 +532,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // xterm + session are built. `myNonce` vs the render-updated ref tells the cleanup below
     // whether it runs for a respawn (worktree move — must NOT park) or a plain unmount.
     const myNonce = data.respawnNonce
-    const parked = parkedTerminals.get(id)
+    const parked = parkedTerminals.get(termKey)
     if (parked) {
-      parkedTerminals.delete(id)
+      parkedTerminals.delete(termKey)
       clearTimeout(parked.timer)
     }
 
@@ -628,7 +644,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         sentCols = size.cols
         sentRows = size.rows
         resizeTerm(term, size.cols, size.rows)
-        setCo(id, { letterbox: false })
+        setCo(termKey, { letterbox: false })
         // Before the session exists we are the only voice: the size rides the initial `create()`.
         if (sessionId) transport.resize(sessionId, size.cols, size.rows)
       } catch {
@@ -759,7 +775,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const noSpawn = !!getCo(id).closed || getCo(id).ended
+    const noSpawn = !!getCo(termKey).closed || getCo(termKey).ended
     const scrollbackPromise =
       parked || noSpawn
         ? Promise.resolve('')
@@ -806,7 +822,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
         // BEFORE `onDisposed()`: there is no session here, so there is nothing to kill or unwire.
         if (closed) {
-          setCo(id, { closed })
+          setCo(termKey, { closed })
           if (!disposed) term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
           return
         }
@@ -840,7 +856,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
               resizeTerm(term, size.cols, size.rows)
               // Measured against the CURRENT mount's fit (the registry, not a closure): this
               // listener outlives the mount that wired it — see terminal-config's fittedByNode.
-              setCo(id, { letterbox: letterboxFor(id, size) })
+              setCo(termKey, { letterbox: letterboxFor(id, size) })
             })
           )
         }
@@ -849,7 +865,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (transport.onClosed) {
           cleanups.push(
             transport.onClosed(sid, ({ by }) => {
-              setCo(id, { closed: { by } })
+              setCo(termKey, { closed: { by } })
               term.write('\r\n\x1b[90m[session closed by another user]\x1b[0m\r\n')
             })
           )
@@ -865,14 +881,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           cleanups.push(
             transport.onRecycled(sid, (info) => {
               if (recycleAction(info) === 'ended') {
-                disposeParkedTerminal(id) // the park holds a dead pty either way
-                setCo(id, { ended: true })
+                disposeParkedTerminal(termKey) // the park holds a dead pty either way
+                setCo(termKey, { ended: true })
                 term.write('\r\n\x1b[90m[session ended — reopen to restart]\x1b[0m\r\n')
                 return
               }
-              const restart = restartSubs.get(id)
+              const restart = restartSubs.get(termKey)
               if (!restart) {
-                disposeParkedTerminal(id) // unmounted: drop the park, the next mount creates fresh
+                disposeParkedTerminal(termKey) // unmounted: drop the park, the next mount creates fresh
                 return
               }
               markRecycled(id)
@@ -1147,8 +1163,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // another client destroyed — or ended under us with no replacement — is gone: nothing to park
       // (and nothing left to keep alive).
       const isRespawn = respawnNonceRef.current !== myNonce
-      const co = getCo(id)
-      if (sessionId && !isRespawn && !co.closed && !co.ended && !noParkIds.delete(id)) {
+      const co = getCo(termKey)
+      if (sessionId && !isRespawn && !co.closed && !co.ended && !noParkIds.delete(termKey)) {
         // Park = "subscribed, but not viewing": report no size at all, so this window's (possibly
         // small) grid stops clamping every other subscriber's terminal for the next five minutes.
         // The subscription itself stays — output keeps streaming into the parked xterm — and the
@@ -1164,14 +1180,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           cleanups,
           life,
           timer: setTimeout(() => {
-            if (parkedTerminals.get(id) === entry) {
-              parkedTerminals.delete(id)
+            if (parkedTerminals.get(termKey) === entry) {
+              parkedTerminals.delete(termKey)
               disposeParked(entry)
             }
           }, TERM_PARK_MS)
         }
-        disposeParkedTerminal(id) // defensive: never stack two entries for one node
-        parkedTerminals.set(id, entry)
+        disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
+        parkedTerminals.set(termKey, entry)
         // A spawn continuation still awaiting its history seed reads this to know the session
         // survived this unmount (parked, or adopted by a remount) and must be finished, not killed.
         handedOff = entry

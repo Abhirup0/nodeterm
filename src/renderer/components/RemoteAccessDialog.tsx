@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { useEntitlement } from '../state/entitlement'
+import { useProjects } from '../state/projects'
+import { hostShareOptions } from '../lib/relayHostShare'
 import { Button } from '@renderer/ui/Button'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
+import { Select } from '@renderer/ui/Select'
 
 /**
  * Remote access dialog — a self-contained popup reachable from the project (tab) caret menu, so
@@ -18,10 +21,21 @@ import { Input } from '@renderer/ui/Input'
 export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
   const isPremium = useEntitlement((s) => s.isPremium)
   const upgrade = useEntitlement((s) => s.upgrade)
+  const projects = useProjects((s) => s.projects)
+  const activeProjectId = useProjects((s) => s.activeProjectId)
   const [hostOffer, setHostOffer] = useState('')
   const [hostBusy, setHostBusy] = useState(false)
   const [error, setError] = useState('')
   const [clientCode, setClientCode] = useState('')
+
+  // Which project this host shares with the joiner. Default = the active project (hoisted first
+  // by hostShareOptions); the user can pick any other OPEN project before minting the offer.
+  const shareOptions = hostShareOptions(projects, activeProjectId)
+  const [shareId, setShareId] = useState('')
+  const effectiveShareId = shareOptions.some((o) => o.id === shareId)
+    ? shareId
+    : (shareOptions[0]?.id ?? '')
+  const sharedName = shareOptions.find((o) => o.id === effectiveShareId)?.name ?? ''
 
   // Only the topmost modal answers a key (./dialog-stack) — the host approval ConfirmDialog opens
   // on top of THIS dialog, and its Escape must not also close the one underneath.
@@ -45,7 +59,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
     setError('')
     setHostBusy(true)
     try {
-      const { offer } = await window.nodeTerminal.relayHost.start()
+      const { offer } = await window.nodeTerminal.relayHost.start(effectiveShareId || undefined)
       setHostOffer(offer)
     } catch (err) {
       setError((err as Error).message)
@@ -88,7 +102,10 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
         {isPremium ? (
           hostOffer ? (
             <div className="remote-dialog__block">
-              <p className="remote-dialog__hint">Share this pairing code (single use):</p>
+              <p className="remote-dialog__hint">
+                Sharing <strong>{sharedName || 'this project'}</strong> — the joiner will see this
+                project and can run commands on this Mac. Share this pairing code (single use):
+              </p>
               <Input
                 className="w-full"
                 readOnly
@@ -101,9 +118,32 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
               </div>
             </div>
           ) : (
-            <Button disabled={hostBusy} onClick={() => void startHosting()}>
-              {hostBusy ? 'Starting…' : 'Allow remote access'}
-            </Button>
+            <div className="remote-dialog__block">
+              {shareOptions.length > 1 ? (
+                <label className="remote-dialog__hint">
+                  Project to share
+                  <Select
+                    className="w-full mt-1"
+                    value={effectiveShareId}
+                    onChange={(e) => setShareId(e.target.value)}
+                  >
+                    {shareOptions.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              ) : (
+                <p className="remote-dialog__hint">
+                  Sharing <strong>{sharedName || 'this project'}</strong> — the joiner sees this
+                  project and can run commands on this Mac.
+                </p>
+              )}
+              <Button disabled={hostBusy} onClick={() => void startHosting()}>
+                {hostBusy ? 'Starting…' : 'Allow remote access'}
+              </Button>
+            </div>
           )
         ) : (
           <div className="remote-dialog__block">

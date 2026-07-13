@@ -28,7 +28,10 @@ import type { KeyPair } from './e2ee'
 import type { ElectronPlatform } from '../platform-electron'
 import { registerPeerSink, unregisterPeerSink } from '../peer-registry'
 import { allocateRelayClientId, presenceHub } from '../../core/presence/hub'
-import { E_UNAUTHORIZED, parseRpcMessage } from '../../shared/rpc'
+import { E_UNAUTHORIZED, parseRpcMessage, type RpcErr, type RpcOk } from '../../shared/rpc'
+import { IPC } from '../../shared/ipc'
+import { scopeWorkspaceToProject } from '../../shared/relay-workspace-scope'
+import type { Workspace } from '../../shared/types'
 
 export interface RelayHostSession {
   /** The peer's presence/platform ClientId once it is open, else null. */
@@ -37,6 +40,8 @@ export interface RelayHostSession {
   sas(): string | null
   /** The peer's stable box public key (base64), or null before the handshake learned it. */
   peerKeyB64(): string | null
+  /** The single project this hosting session shares with the peer, or undefined if unscoped. */
+  sharedProjectId(): string | undefined
   /** This human confirmed the SAS (from the approve dialog). */
   confirm(): void
   /** Tear down: unregister the sink (leave + dropClient + prune), close the socket. Idempotent. */
@@ -50,6 +55,9 @@ export interface ConnectRelayHostOptions {
   platform: ElectronPlatform
   /** TEST ONLY: an in-process RelayTransport. Production opens a real ws (relay-socket.ts). */
   transport?: RelayTransport
+  /** The single project this hosting session shares with the peer. Undefined → unscoped (legacy
+   *  behaviour: the peer sees the whole workspace). Held on the session for Task 2's scoped serve. */
+  sharedProjectId?: string
   /** The SAS is known — ask the human to compare it. */
   onPeerPending(session: RelayHostSession): void
   /** Mutually approved: the peer is a CorePlatform client of this core now. */
@@ -96,6 +104,7 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     clientId: () => clientId,
     sas: () => gate?.sas() ?? null,
     peerKeyB64: () => gate?.peerKeyB64() ?? null,
+    sharedProjectId: () => opts.sharedProjectId,
     confirm: () => gate?.confirmHere(),
     close() {
       if (closed) return
@@ -146,6 +155,16 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     presenceHub.join(id, 'desktop')
     clientId = id
     opts.onOpen(session)
+  }
+
+  /** UX scope, NOT a trust boundary: for the ONE `workspace:load` method, when this hosting session
+   *  is bound to a single project, narrow the successful response to that project (see
+   *  scopeWorkspaceToProject). Every other method — and an error response, and an unscoped session —
+   *  passes through byte-identical. This can only NARROW: it never exposes anything the core did not
+   *  already return, and it never touches a non-`workspace:load` response. */
+  const scopeResponse = (method: string, res: RpcOk | RpcErr): RpcOk | RpcErr => {
+    if (!opts.sharedProjectId || method !== IPC.workspaceLoad || res.ok !== true) return res
+    return { ...res, result: scopeWorkspaceToProject(res.result as Workspace, opts.sharedProjectId) }
   }
 
   const socket = connectRelay({
@@ -204,7 +223,7 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
         const id = clientId
         void opts.platform
           .dispatch(id, m)
-          .then((res) => socket.sendTunnelText(JSON.stringify(res)))
+          .then((res) => socket.sendTunnelText(JSON.stringify(scopeResponse(m.method, res))))
       } else if (m.t === 'cast') {
         opts.platform.cast(clientId, m.method, m.args)
       }

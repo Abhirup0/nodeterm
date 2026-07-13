@@ -357,6 +357,26 @@ users before 4d is wired (it grants `pty.create` to peers).
 - **The desktop-client legacy dialect is deleted** (`RemoteSessionView`, `RemoteTransport`,
   `client-service`/`remoteClient` preload+channels, `data.remote`, `remote-fs.ts`, and the old
   client/relay e2e suites). The two settings dialogs were migrated to `relayClient`/`relayHost`.
+- **Project-scoped sharing** (branch `feat/relay-project-scope`) — a relay tab now shows the host's
+  ACTUAL project, not a blank canvas. **The host picks ONE project to share when it starts hosting**
+  (`relayHost.start(projectId)`; default = active project; a chooser in both host UIs). The id is
+  held on the host relay SESSION (`sharedProjectId`) — never in the pairing offer, so no project
+  name leaks into a code that gets pasted around. The host **scopes the peer's `workspace:load`
+  response** to just that project at the relay dispatch boundary (`scopeWorkspaceToProject`,
+  `relay-host.ts`) — the core `workspace:load` handler is untouched, so a local window still gets the
+  full workspace; the scope only ever NARROWS (a pure filter, verified it can't widen or leak the
+  other projects' names/cwds/nodes). The client `openRelayTab` then `api.workspace.load()`s that one
+  scoped project and **adopts** it (`useProjects.adoptProject({ ...hostProject, remote: true })` —
+  fresh project id, host node ids kept so terminals co-attach to the host's tmux); Stage-3 mutation
+  sync keeps it live. A relay tab is marked `project.remote` (runtime-only) and is **never persisted**
+  to the peer's `workspace.json` (excluded in both `workspace-files.ts` and `toWorkspace`). Two
+  bugs the integration surfaced and fixed: the renderer-global terminal maps
+  (`parkedTerminals`/`coStates`/…) were bare-node-id-keyed, so a peer that had the SAME repo cloned
+  locally could cross-wire a relay terminal onto its LOCAL pty on a tab switch — now keyed by
+  `terminalKey(sessionId, nodeId)`; and a post-approval `workspace.load()` failure leaked the
+  session — now disposed on the failure path. Sharing is **fixed per hosting session** (change the
+  shared project = stop + restart hosting); re-fetching the host's current nodes on reconnect is a
+  follow-up (the tab keeps its last-seen nodes until the next live mutation).
 
 **Retained on the OLD dialect (do NOT delete — a shipped feature):** the phone server path —
 `host-service.ts`, `standing-host.ts`, `host-canvas-hub.ts`, `framing.ts`, `snapshot.ts`,
@@ -371,14 +391,18 @@ the dialect deletion orphaned, blanking the phone; that flag is gone).
   onto the relay tunnel (so a migrated phone has a host to reach) is a **deliberate separate step**,
   NOT done in 4c — it breaks the shipped phone and needs an explicit go. Blueprint:
   `docs/ios-protocol-migration.md`.
-- **Relay-tab canvas population** — a remote tab's terminals/transport are wired; surfacing the
-  HOST's existing nodes into the tab (top-level Canvas api is still the local session) is a
-  follow-up.
 - **`dialog` open-file / open-folder in a relay tab** — the worktree/clone pickers resolve on the
   host (obligation d), but the generic "open file"/"open folder" Canvas callers still use the
   global (LOCAL) dialog. Same `ScmScope`-style "which machine?" question; a scoped follow-up.
-- **Relay tab persistence / bookmark** — a relay tab persists as an ordinary project entry; a
-  proper greyed-offline bookmark across restarts is not implemented.
+- **Relay tab persistence / bookmark** — a relay tab is deliberately NOT persisted (it is a live
+  connection, not a workspace on the peer's disk — see project-scoped sharing below). A proper
+  greyed-offline *bookmark* that survives an app restart (reconnect to a known host without a fresh
+  pairing code) is not implemented; the tab simply vanishes on restart.
+- **Reconnect re-fetch** — on a reconnect the tab keeps its last-seen nodes; it does not re-pull the
+  host's *current* workspace, so nodes the host added while the peer was offline appear only on the
+  next live mutation. Re-running `api.workspace.load()` into the bound project on reconnect closes it.
+- **Change the shared project without dropping the session** — sharing is fixed per hosting session
+  (change project = stop + restart hosting). A live "share a different project" control is a follow-up.
 - **SDK chat node over relay** — refuses (`E_UNSUPPORTED`) in a relay tab, matching Server Edition.
 - **The preload↔main relay IPC boundary is not covered by vitest** (it needs Electron). Two real
   send/handle + payload-shape bugs were found and fixed by inspection during 4c; the two-instance
@@ -480,11 +504,14 @@ session):
   suite can't reach, since the preload↔main relay IPC needs Electron):** on one Mac,
   launch two instances (`NT_MULTI=1 NT_USER_DATA=/tmp/nt-A npm run dev` and a second with
   `/tmp/nt-B`). Then:
-  1. On A, start a remote host (New Remote Connection → host) and copy the pairing offer.
+  1. On A, start a remote host (New Remote Connection → host), **pick which project to share**
+     (default = active), and copy the pairing offer.
   2. On B, paste the offer → both show the **same 6-digit SAS** → B sees the **ConsentNotice**
-     on A's approval → confirm on both → A's canvas opens as a **project tab on B**.
+     on A's approval → confirm on both → the **shared project opens as a tab on B, already
+     populated with A's nodes** (NOT a blank canvas — this is the project-scope check). B sees ONLY
+     the shared project, not A's other projects.
   3. Type in a terminal on the tab → it runs on A (the host) and both painters show it
-     (**co-attach**).
+     (**co-attach**). Add/move a node on either side → it syncs to the other (Stage-3 mutations).
   4. Sleep/wake A → the peer's terminal returns via co-attach (tmux still alive).
   5. Pull B's network → the tab **greys to "unavailable"**; restore + click → **reconnect**
      with a fresh code; disconnected edits are lost, nothing corrupts.

@@ -86,7 +86,7 @@ export function initRelayHost(
     for (const [id, s] of byId) if (s === session) byId.delete(id)
   }
 
-  ipcMain.handle(IPC.relayHostStart, async (): Promise<{ offer: string }> => {
+  ipcMain.handle(IPC.relayHostStart, async (_e, projectId?: string): Promise<{ offer: string }> => {
     if (!isPremium()) {
       throw new Error('Remote access requires nodeterm Pro.')
     }
@@ -118,6 +118,9 @@ export function initRelayHost(
       ourKeys: keys,
       platform,
       transport: deps.transport,
+      // The single project this hosting session shares with the peer (Task 2 scopes the
+      // workspace:load response to it). Absent → unscoped, exactly as before.
+      sharedProjectId: projectId,
       // The SAS is known — ask the human to compare it. NOTHING is served yet.
       onPeerPending: (s) => {
         rendererId = randomUUID()
