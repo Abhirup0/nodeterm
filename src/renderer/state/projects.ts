@@ -32,6 +32,10 @@ interface ProjectsState {
   replaceProject(project: Project): void
   renameProject(id: string, name: string): void
   setProjectCwd(id: string, cwd: string): void
+  /** Grey (or un-grey) a project tab as "unavailable" WITHOUT dropping it — runtime-only, never
+   *  persisted (see the toWorkspace tripwire). Set true when a relay tab's socket drops (Stage 4
+   *  Task 7) so it stays reconnectable; cleared when it reconnects. */
+  setProjectUnavailable(id: string, unavailable: boolean): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
   /** Sets (or clears, with undefined = fall back to the global setting) the project's default
@@ -176,6 +180,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectCwd(id, cwd) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, cwd } : p))
+    }))
+  },
+
+  setProjectUnavailable(id, unavailable) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, unavailable } : p))
     }))
   },
 

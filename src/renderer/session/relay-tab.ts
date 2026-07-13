@@ -23,6 +23,8 @@ import {
   holdSessionTeardown,
   disposeSession,
   getSessionStores,
+  takeSessionOffline,
+  type SessionSource,
 } from './session'
 
 /** Backstop for a `ready()` that neither approves nor closes (the network vanished without a FIN). */
@@ -84,6 +86,70 @@ export async function openRelayTab(
     projectId: project.id,
     dispose: () => disposeSession(session.id),
   }
+}
+
+// ── Stage 4 Task 7: offline "unavailable" tab + reconnect ────────────────────────────────────────
+//
+// A relay tab is a connection BOOKMARK, not a workspace on the peer's disk (docs/remote-sessions.md
+// "Persistence"). So an involuntary socket drop must NOT vanish the tab — it greys to "unavailable"
+// (reusing the workspace-index rendering) and reconnects on click. This is DISTINCT from a
+// user-initiated close (`RelayTab.dispose` → `disposeSession`, which drops the tab): closing by hand
+// is deliberate destruction; a dropped socket is a temporary outage the host's tmux survives.
+
+export interface RelayDropDeps {
+  /** Grey the tab without dropping it (`useProjects.getState().setProjectUnavailable`). */
+  setProjectUnavailable(projectId: string, unavailable: boolean): void
+}
+
+/** Handle an INVOLUNTARY relay socket drop (host/relay gone): take the session offline — its
+ *  presence teardown runs ONCE so the peer leaves every facepile, the already-dead socket close
+ *  no-ops — but KEEP the project tab and its 'relay' binding so it greys to "unavailable" and can
+ *  reconnect in place. NEVER removes the project (that is only a user close). Idempotent. */
+export function handleRelayDrop(tab: RelayTab, deps: RelayDropDeps): void {
+  takeSessionOffline(tab.sessionId)
+  deps.setProjectUnavailable(tab.projectId, true)
+}
+
+export interface RelayReconnectDeps {
+  /** Prompt the human for a FRESH pairing code. The relay offer carries a SINGLE-USE token
+   *  (main/remote/pairing.ts), so v1 has no silent/pinned reconnect — the host must mint a new
+   *  offer. Returns null when cancelled. */
+  promptForOffer(): Promise<string | null>
+  /** `relayClient.connect` — resolves a fresh connectionId. */
+  connect(offer: string): Promise<string>
+  /** Confirm the SAS + mount the fresh connection onto the EXISTING project id (reuses the tab —
+   *  never a duplicate). Clears `unavailable` once the tab is live again. */
+  mount(connectionId: string, projectId: string): void
+  /** Dispose the stale offline tab for this project (unbind + drop from the registry) before the
+   *  same project id is rebound to the fresh session. */
+  disposeStale(projectId: string): void
+  onError(message: string): void
+}
+
+/** Reconnect an offline relay tab IN PLACE — same project id, so no duplicate tab is spawned. v1:
+ *  the offer is single-use, so this prompts for a FRESH pairing code, disposes the stale offline
+ *  session, connects, and mounts onto the existing tab. Cancelling the prompt reconnects nothing. */
+export async function reconnectRelayTab(projectId: string, deps: RelayReconnectDeps): Promise<void> {
+  const offer = (await deps.promptForOffer())?.trim()
+  if (!offer) return
+  try {
+    deps.disposeStale(projectId)
+    const connectionId = await deps.connect(offer)
+    deps.mount(connectionId, projectId)
+  } catch (err) {
+    deps.onError(err instanceof Error ? err.message : String(err))
+  }
+}
+
+/** Which behavior a tab click gets. An available tab switches. An unavailable tab distinguishes by
+ *  its bound session SOURCE: a relay/server drop is clickable-to-reconnect; a local unavailable tab
+ *  is a missing folder — inert (there is nothing to reconnect to). */
+export function tabClickAction(
+  unavailable: boolean,
+  source: SessionSource
+): 'switch' | 'reconnect' | 'ignore' {
+  if (!unavailable) return 'switch'
+  return source === 'local' ? 'ignore' : 'reconnect'
 }
 
 /** Resolve on approval (`handle.ready()`); reject on a pre-approval socket drop or a timeout. */

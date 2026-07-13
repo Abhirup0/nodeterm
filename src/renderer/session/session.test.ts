@@ -12,6 +12,8 @@ import {
   disposeSession,
   holdSessionTeardown,
   setMeAll,
+  setSessionStatus,
+  takeSessionOffline,
 } from './session'
 import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
@@ -171,6 +173,48 @@ describe('disposeSession (obligation 1 — the missing disposal path)', () => {
 
   it('disposing an unknown session id is a no-op', () => {
     expect(() => disposeSession('relay-nope')).not.toThrow()
+  })
+})
+
+describe('takeSessionOffline (Stage 4 Task 7 — an INVOLUNTARY drop, not a user close)', () => {
+  it('runs held teardowns once and flips status offline, but KEEPS the entry + its binding', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    const relayClose = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    holdSessionTeardown(relay.id, relayClose)
+    bindProjectToSession('remote-tab', relay.id)
+
+    takeSessionOffline(relay.id)
+
+    // The peer left every facepile (presence teardown ran) and the dead socket was closed — ONCE.
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+    // Unlike disposeSession, the session survives (offline) and the tab stays bound to it — that is
+    // what lets the greyed tab resolve to a 'relay' source and reconnect in place.
+    expect(sessionCount()).toBe(2)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+    expect(sessionForProject('remote-tab').status).toBe('offline')
+
+    // Idempotent: a second drop (a revoke racing the FIN) re-runs nothing.
+    takeSessionOffline(relay.id)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op for an unknown id', () => {
+    expect(() => takeSessionOffline('relay-nope')).not.toThrow()
+  })
+
+  it('setSessionStatus updates a live session and no-ops for an unknown id', () => {
+    const s = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    setSessionStatus(s.id, 'connecting')
+    expect(s.status).toBe('connecting')
+    setSessionStatus(s.id, 'connected')
+    expect(s.status).toBe('connected')
+    expect(() => setSessionStatus('nope', 'offline')).not.toThrow()
   })
 })
 

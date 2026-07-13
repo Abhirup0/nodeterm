@@ -81,6 +81,18 @@ export function holdSessionTeardown(sessionId: string, teardown: () => void): vo
   e.teardowns.push(teardown)
 }
 
+/** Run a session's held teardowns EXACTLY ONCE. splice() so a teardown that (re-entrantly) triggers
+ *  another run finds nothing left to re-run. Shared by disposeSession + takeSessionOffline. */
+function runTeardowns(e: Entry): void {
+  for (const t of e.teardowns.splice(0)) {
+    try {
+      t()
+    } catch (err) {
+      console.warn('[session] teardown failed', err)
+    }
+  }
+}
+
 /** Tear a session down (obligation 1 — the missing disposal path a remote tab needs on disconnect):
  *  run every held teardown EXACTLY ONCE, drop the entry, and unbind its projects so their (now
  *  dead) tabs resolve back to the local session. Idempotent and no-op for an unknown id — a double
@@ -89,17 +101,31 @@ export function disposeSession(sessionId: string): void {
   const e = SESSIONS.get(sessionId)
   if (!e || e.disposed) return
   e.disposed = true
-  // splice() so a teardown that (re-entrantly) calls disposeSession again finds nothing to re-run.
-  for (const t of e.teardowns.splice(0)) {
-    try {
-      t()
-    } catch (err) {
-      console.warn('[session] teardown failed', err)
-    }
-  }
+  runTeardowns(e)
   SESSIONS.delete(sessionId)
   for (const [projectId, sid] of PROJECT_BINDINGS) if (sid === sessionId) PROJECT_BINDINGS.delete(projectId)
   if (activeId === sessionId) activeId = SESSIONS.has('local') ? 'local' : null
+}
+
+/** Set a session's live status (Stage 4 Task 7 — a relay tab going offline / reconnecting). No-op
+ *  for an unknown id. This mutates the live session object in place, which is how the tab session
+ *  label (and the offline gate) read the current state without re-registering the session. */
+export function setSessionStatus(sessionId: string, status: WorkspaceSession['status']): void {
+  const e = SESSIONS.get(sessionId)
+  if (e) e.session.status = status
+}
+
+/** Take a session OFFLINE on an INVOLUNTARY socket drop (host/relay gone) — the counterpart of a
+ *  user close. Unlike disposeSession, this KEEPS the entry and its project binding: run the held
+ *  teardowns once (presence leaves every peer's facepile; the already-dead relay socket close is a
+ *  safe no-op) and flip status to 'offline', but leave the tab bound to a 'relay' source so the
+ *  greyed "unavailable" tab can reconnect IN PLACE (see relay-tab `handleRelayDrop` / `tabClickAction`).
+ *  Idempotent; no-op once offline/disposed/unknown. */
+export function takeSessionOffline(sessionId: string): void {
+  const e = SESSIONS.get(sessionId)
+  if (!e || e.disposed || e.session.status === 'offline') return
+  runTeardowns(e)
+  e.session.status = 'offline'
 }
 
 /** Test-only: clears the registry so each test starts with no sessions. */

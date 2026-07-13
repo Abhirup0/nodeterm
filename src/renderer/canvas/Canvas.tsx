@@ -132,7 +132,12 @@ import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import { useSession, SessionProvider, sessionForProject, setActiveSession } from '../session/session'
-import { openRelayTab, type RelayTab } from '../session/relay-tab'
+import {
+  openRelayTab,
+  handleRelayDrop,
+  reconnectRelayTab,
+  type RelayTab,
+} from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -1798,38 +1803,50 @@ export function Canvas() {
   // expected, not an error to alert about.
   const cancelledConnsRef = useRef<Set<string>>(new Set())
 
-  const mountRemoteMirror = useCallback((connectionId: string, label = 'Remote host') => {
-    if (relayTabsRef.current.has(connectionId)) return
-    void openRelayTab(connectionId, label, {
-      relayClient: window.nodeTerminal.relayClient,
-      addProject: (name) => useProjects.getState().addProject(name),
-      setActiveProject: (id) => useProjects.getState().setActive(id),
-    })
-      .then((tab) => {
-        relayTabsRef.current.set(connectionId, tab)
-        // A host/relay drop after approval tears the tab's session down (once).
-        const un = window.nodeTerminal.relayClient.onClosed(connectionId, () => {
-          un()
-          relayTabsRef.current.delete(connectionId)
-          tab.dispose()
+  // `reconnectProjectId` (Stage 4 Task 7): when reconnecting an offline tab, bind the fresh session
+  // to the EXISTING project id (reuse the tab, clear its "unavailable" grey) instead of adding a new
+  // one — so a socket drop → greyed reconnectable tab, never a duplicate.
+  const mountRemoteMirror = useCallback(
+    (connectionId: string, label = 'Remote host', reconnectProjectId?: string) => {
+      if (relayTabsRef.current.has(connectionId)) return
+      void openRelayTab(connectionId, label, {
+        relayClient: window.nodeTerminal.relayClient,
+        addProject: reconnectProjectId
+          ? () => ({ id: reconnectProjectId }) // reconnect: reuse the existing tab, don't spawn one
+          : (name) => useProjects.getState().addProject(name),
+        setActiveProject: (id) => useProjects.getState().setActive(id),
+      })
+        .then((tab) => {
+          relayTabsRef.current.set(connectionId, tab)
+          // Back online: un-grey the reused tab.
+          if (reconnectProjectId) useProjects.getState().setProjectUnavailable(reconnectProjectId, false)
+          // A host/relay drop AFTER approval is INVOLUNTARY (not a user close): grey the tab to
+          // "unavailable" and take its session offline (presence teardown runs once) — but KEEP the
+          // project so a click can reconnect it in place. See relay-tab `handleRelayDrop`.
+          const un = window.nodeTerminal.relayClient.onClosed(connectionId, () => {
+            un()
+            relayTabsRef.current.delete(connectionId)
+            handleRelayDrop(tab, {
+              setProjectUnavailable: (id, v) => useProjects.getState().setProjectUnavailable(id, v),
+            })
+          })
         })
-      })
-      .catch((err) => {
-        // A user who declined the SAS triggered this close themselves — don't cry error.
-        if (cancelledConnsRef.current.delete(connectionId)) return
-        window.alert(`Remote session did not open: ${(err as Error).message}`)
-      })
-  }, [])
+        .catch((err) => {
+          // A user who declined the SAS triggered this close themselves — don't cry error.
+          if (cancelledConnsRef.current.delete(connectionId)) return
+          window.alert(`Remote session did not open: ${(err as Error).message}`)
+        })
+    },
+    []
+  )
 
-  // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
-  // compare the SAS, confirm, and open the host as a project tab. This is the primary remote entry.
-  const connectRemote = useCallback(async () => {
-    const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
-    if (!offer) return
-    try {
-      const connectionId = await window.nodeTerminal.relayClient.connect(offer)
-      // Surface the SAS so this human can verify it matches the host's before confirming (the
-      // mutual-approval gate — the confirm rides the ENCRYPTED tunnel in main; see relay-client.ts).
+  // Surface the SAS so this human can verify it matches the host's before confirming (the
+  // mutual-approval gate — the confirm rides the ENCRYPTED tunnel in main; see relay-client.ts),
+  // then build the tab (registers the one-shot onApproved listener BEFORE approval fires — see
+  // relay-api.ts gotcha 2). Shared by the first connect and the Task 7 reconnect (which passes the
+  // existing project id so the fresh session rebinds the SAME tab).
+  const confirmAndMount = useCallback(
+    (connectionId: string, label: string, reconnectProjectId?: string) => {
       const unSas = window.nodeTerminal.relayClient.onSas(connectionId, (sas) => {
         unSas()
         if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
@@ -1840,13 +1857,46 @@ export function Canvas() {
           window.nodeTerminal.relayClient.disconnect(connectionId)
         }
       })
-      // Build the tab now (registers the one-shot onApproved listener BEFORE approval fires — see
-      // relay-api.ts gotcha 2); it resolves once both humans confirm.
-      mountRemoteMirror(connectionId)
+      mountRemoteMirror(connectionId, label, reconnectProjectId)
+    },
+    [mountRemoteMirror]
+  )
+
+  // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
+  // compare the SAS, confirm, and open the host as a project tab. This is the primary remote entry.
+  const connectRemote = useCallback(async () => {
+    const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
+    if (!offer) return
+    try {
+      const connectionId = await window.nodeTerminal.relayClient.connect(offer)
+      confirmAndMount(connectionId, 'Remote host')
     } catch (err) {
       window.alert(`Could not connect: ${(err as Error).message}`)
     }
-  }, [mountRemoteMirror])
+  }, [confirmAndMount])
+
+  // Reconnect an offline (dropped) relay tab IN PLACE (Stage 4 Task 7). The relay offer is
+  // single-use (main/remote/pairing.ts), so v1 has no silent/pinned reconnect — prompt for a FRESH
+  // pairing code, drop the stale offline session, and mount the new connection onto the SAME tab.
+  const reconnectRelay = useCallback(
+    (projectId: string) => {
+      const label = useProjects.getState().getProject(projectId)?.name ?? 'Remote host'
+      void reconnectRelayTab(projectId, {
+        promptForOffer: () => promptDialog({ message: "Paste the host's new pairing code:" }),
+        connect: (offer) => window.nodeTerminal.relayClient.connect(offer),
+        mount: (connectionId, projId) => confirmAndMount(connectionId, label, projId),
+        disposeStale: (projId) => {
+          for (const [connId, tab] of relayTabsRef.current) {
+            if (tab.projectId !== projId) continue
+            relayTabsRef.current.delete(connId)
+            tab.dispose() // disposeSession: unbind + drop the offline session before rebinding
+          }
+        },
+        onError: (message) => window.alert(`Could not reconnect: ${message}`),
+      })
+    },
+    [confirmAndMount]
+  )
 
   /** Open a file as a code editor node on the canvas. `sshFs` must be passed explicitly by the
    *  caller: only genuinely-remote, Explorer-opened files in an SSH project pass `true`; native
@@ -5074,6 +5124,7 @@ export function Canvas() {
     <div className="canvas-root">
       <TabBar
         onSwitch={switchProject}
+        onReconnect={reconnectRelay}
         onOpenWelcome={() => setWelcomeOpen(true)}
         onRename={renameProject}
         onSetFolder={setProjectFolder}

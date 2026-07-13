@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { openRelayTab, type RelayTabDeps } from './relay-tab'
+import {
+  openRelayTab,
+  handleRelayDrop,
+  reconnectRelayTab,
+  tabClickAction,
+  type RelayTabDeps,
+  type RelayReconnectDeps,
+} from './relay-tab'
 import {
   createSession,
   setActiveSession,
@@ -25,19 +32,22 @@ function fakeRelayClient() {
   }
 }
 
-/** A bridged relay api whose `pty.create` is a spy — this is what `LocalTransport(api)` must hit. */
+/** A bridged relay api whose `pty.create` is a spy — this is what `LocalTransport(api)` must hit.
+ *  `presenceUnsub` is what the session's held presence teardown calls (onSync's unsubscribe), so a
+ *  drop that "runs the presence teardown" is observable in node env. */
 function fakeBridgedApi() {
   const ptyCreate = vi.fn().mockResolvedValue({ sessionId: 's1', fresh: false })
+  const presenceUnsub = vi.fn()
   const api = {
     marker: 'relay-bridged',
     pty: { create: ptyCreate },
     presence: {
       hello: vi.fn().mockResolvedValue({ clientId: 'x', peers: [] }),
-      onSync: vi.fn(() => () => {}),
+      onSync: vi.fn(() => presenceUnsub),
       onPeer: vi.fn(() => () => {}),
     },
   } as unknown as NodeTerminalApi
-  return { api, ptyCreate }
+  return { api, ptyCreate, presenceUnsub }
 }
 
 function makeDeps(over: Partial<RelayTabDeps> & { handle: RelayApiHandle }): {
@@ -127,5 +137,95 @@ describe('openRelayTab (connect → tab → mount)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('handleRelayDrop (Stage 4 Task 7 — involuntary drop → greyed reconnectable tab)', () => {
+  it('marks the bound project unavailable + runs the presence teardown ONCE, never removes it', async () => {
+    const { api, presenceUnsub } = fakeBridgedApi()
+    const close = vi.fn()
+    const handle: RelayApiHandle = { api, ready: () => Promise.resolve(), close }
+    const { deps } = makeDeps({ handle })
+    const tab = await openRelayTab('conn-1', "Ayşe's Mac", deps)
+
+    const setProjectUnavailable = vi.fn()
+    handleRelayDrop(tab, { setProjectUnavailable })
+
+    // The tab greys but survives — the peer left every facepile (presence teardown ran) and the
+    // dead socket was closed, but the PROJECT is kept and stays bound to a 'relay' source.
+    expect(setProjectUnavailable).toHaveBeenCalledWith(tab.projectId, true)
+    expect(presenceUnsub).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(sessionForProject(tab.projectId).source).toBe('relay') // still reconnectable in place
+    expect(sessionForProject(tab.projectId).status).toBe('offline')
+    expect(sessionCount()).toBe(2) // local + the offline relay — NOT removed
+
+    // Idempotent: a redundant drop (a revoke racing the FIN) re-runs no teardown.
+    handleRelayDrop(tab, { setProjectUnavailable })
+    expect(presenceUnsub).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('reconnectRelayTab (Stage 4 Task 7 — reconnect an offline tab IN PLACE)', () => {
+  function reconnectDeps(over: Partial<RelayReconnectDeps> = {}): {
+    deps: RelayReconnectDeps
+    connect: ReturnType<typeof vi.fn>
+    mount: ReturnType<typeof vi.fn>
+    disposeStale: ReturnType<typeof vi.fn>
+  } {
+    const connect = vi.fn().mockResolvedValue('conn-new')
+    const mount = vi.fn()
+    const disposeStale = vi.fn()
+    const deps: RelayReconnectDeps = {
+      promptForOffer: over.promptForOffer ?? (() => Promise.resolve('fresh-offer')),
+      connect: over.connect ?? connect,
+      mount: over.mount ?? mount,
+      disposeStale: over.disposeStale ?? disposeStale,
+      onError: over.onError ?? vi.fn(),
+    }
+    return { deps, connect, mount, disposeStale }
+  }
+
+  it('prompts for a FRESH code (the offer is single-use), connects, and mounts onto the SAME project', async () => {
+    const { deps, connect, mount, disposeStale } = reconnectDeps()
+    await reconnectRelayTab('proj-1', deps)
+    expect(disposeStale).toHaveBeenCalledWith('proj-1') // the stale offline session is dropped first
+    expect(connect).toHaveBeenCalledWith('fresh-offer') // a fresh pairing, not a silent reuse
+    expect(mount).toHaveBeenCalledWith('conn-new', 'proj-1') // reuse the existing tab, not a new one
+  })
+
+  it('a cancelled prompt reconnects nothing', async () => {
+    const { deps, connect, mount, disposeStale } = reconnectDeps({
+      promptForOffer: () => Promise.resolve(null),
+    })
+    await reconnectRelayTab('proj-1', deps)
+    expect(disposeStale).not.toHaveBeenCalled()
+    expect(connect).not.toHaveBeenCalled()
+    expect(mount).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a connect failure through onError (no throw)', async () => {
+    const onError = vi.fn()
+    const { deps } = reconnectDeps({
+      connect: vi.fn().mockRejectedValue(new Error('relay unreachable')),
+      onError,
+    })
+    await expect(reconnectRelayTab('proj-1', deps)).resolves.toBeUndefined()
+    expect(onError).toHaveBeenCalledWith('relay unreachable')
+  })
+})
+
+describe('tabClickAction (which behavior a tab click gets)', () => {
+  it('an available tab switches', () => {
+    expect(tabClickAction(false, 'relay')).toBe('switch')
+    expect(tabClickAction(false, 'local')).toBe('switch')
+  })
+  it('an unavailable RELAY tab reconnects (a socket drop, clickable to reconnect)', () => {
+    expect(tabClickAction(true, 'relay')).toBe('reconnect')
+    expect(tabClickAction(true, 'server')).toBe('reconnect')
+  })
+  it('an unavailable LOCAL tab is inert (a missing folder, not clickable-to-reconnect)', () => {
+    expect(tabClickAction(true, 'local')).toBe('ignore')
   })
 })

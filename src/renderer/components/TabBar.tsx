@@ -5,7 +5,8 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, systemAccountDisplay } from '../state/workspace'
 import { useSystemAccount } from '../state/systemAccount'
-import { sessionCount, useProjectSession } from '../session/session'
+import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
+import { tabClickAction } from '../session/relay-tab'
 import {
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
@@ -14,6 +15,9 @@ import {
 
 interface TabBarProps {
   onSwitch: (id: string) => void
+  /** Reconnect an offline (dropped) relay tab in place (Stage 4 Task 7). Called when an
+   *  "unavailable" tab whose session is a relay/server source is clicked. */
+  onReconnect: (id: string) => void
   /** Open the start screen (New project / Open folder / Clone repo) — what "+" now shows. */
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
@@ -52,6 +56,7 @@ function TabSessionLabel({ projectId }: { projectId: string }) {
  */
 export function TabBar({
   onSwitch,
+  onReconnect,
   onOpenWelcome,
   onRename,
   onSetFolder,
@@ -190,10 +195,19 @@ export function TabBar({
                 key={p.id}
                 className={`tab${active ? ' active' : ''}${p.unavailable ? ' unavailable' : ''}`}
                 style={active ? { color: p.color } : undefined}
-                onClick={() => !editingId && !p.unavailable && onSwitch(p.id)}
+                onClick={() => {
+                  if (editingId) return
+                  // An unavailable tab distinguishes by its bound session source: a dropped RELAY
+                  // tab reconnects on click (Stage 4 Task 7), a missing local folder is inert.
+                  const action = tabClickAction(!!p.unavailable, sessionForProject(p.id).source)
+                  if (action === 'switch') onSwitch(p.id)
+                  else if (action === 'reconnect') onReconnect(p.id)
+                }}
                 title={
                   p.unavailable
-                    ? `${p.cwd ?? 'project'} is unavailable (folder missing or unreachable)`
+                    ? sessionForProject(p.id).source === 'local'
+                      ? `${p.cwd ?? 'project'} is unavailable (folder missing or unreachable)`
+                      : `${p.name} disconnected — click to reconnect`
                     : p.cwd || undefined
                 }
               >
