@@ -5,6 +5,7 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, systemAccountDisplay } from '../state/workspace'
 import { useSystemAccount } from '../state/systemAccount'
+import { sessionCount, useProjectSession } from '../session/session'
 import {
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
@@ -25,6 +26,22 @@ interface TabBarProps {
   onSetDefaultAccount: (id: string, accountId: string | undefined) => void
   /** Set (or clear, with undefined = use the global setting) the project's default permission mode. */
   onSetDefaultPermissionMode: (id: string, mode: AgentPermissionMode | undefined) => void
+}
+
+/**
+ * The runtime session dimension of a tab (which core the project lives on). Rendered ONLY when
+ * more than one session exists — `sessionCount()` is 1 for a solo user today, so this never
+ * mounts and the solo tab bar is pixel-identical. Its own component because
+ * `useProjectSession` is a hook and the tabs render in a `.map()`. Nothing here is persisted:
+ * the project → session binding is resolved at runtime by `sessionForProject`.
+ */
+function TabSessionLabel({ projectId }: { projectId: string }) {
+  const session = useProjectSession(projectId)
+  return (
+    <span className="tab__session" title={`Session: ${session.label} (${session.status})`}>
+      {session.label}
+    </span>
+  )
 }
 
 /**
@@ -71,6 +88,12 @@ export function TabBar({
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
   const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
+
+  // Session labels appear only once a second session exists (4c: remote tabs). For a solo user
+  // this is always false, so the tab strip renders exactly as before. Plain call, not a
+  // subscription: sessions are registered at boot (and, in 4c, on connect — which re-renders
+  // through its own state), so no store is needed here.
+  const multiSession = sessionCount() > 1
 
   const menuProject = projects.find((p) => p.id === menuId)
   // Accounts eligible as the caret-menu project's default: local accounts for a local project, this
@@ -195,6 +218,8 @@ export function TabBar({
                 ) : (
                   <span className="tab__name">{p.name}</span>
                 )}
+
+                {multiSession && <TabSessionLabel projectId={p.id} />}
 
                 {unreadCount > 0 && (
                   <span className="tab__badge" title={`${unreadCount} unread`}>

@@ -5,6 +5,8 @@ import {
   getActiveSession,
   setActiveSession,
   activeSessionApi,
+  sessionForProject,
+  sessionCount,
   resetSessionsForTest,
 } from './session'
 import type { NodeTerminalApi } from '@shared/types'
@@ -85,5 +87,22 @@ describe('createSession', () => {
 
   it('throws for an unknown session id', () => {
     expect(() => getSessionStores('nope')).toThrow()
+  })
+})
+
+describe('sessionForProject (runtime tab → session resolver, never persisted)', () => {
+  it('sessionForProject returns the active (local) session for any project today', () => {
+    const s = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(s.id)
+    expect(sessionForProject('any-project-id')).toBe(s)
+    expect(sessionCount()).toBe(1)
+  })
+
+  it('sessionCount counts registered sessions', () => {
+    expect(sessionCount()).toBe(0)
+    createSession('local', fakeApi, 'This Mac')
+    expect(sessionCount()).toBe(1)
+    createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    expect(sessionCount()).toBe(2)
   })
 })

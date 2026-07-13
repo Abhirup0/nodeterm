@@ -91,6 +91,27 @@ export function activeSessionApi(): NodeTerminalApi {
   return getActiveSession().api
 }
 
+/** How many sessions are registered. `1` for a solo user today — UI affordances that only make
+ *  sense with multiple cores (the tab session label) gate on `> 1` so the solo UI is unchanged. */
+export function sessionCount(): number {
+  return SESSIONS.size
+}
+
+/** Which session a project belongs to. Runtime-only — NEVER persisted (workspace.json /
+ *  project.json are shared across machines; a session id is meaningless off this machine — see
+ *  the toWorkspace tripwire in state/projects.test.ts). Today every project is on the local
+ *  session; 4c returns the tab's bound session (local | relay | server). */
+export function sessionForProject(_projectId: string): WorkspaceSession {
+  return getActiveSession()
+}
+
+/** Hook wrapper over `sessionForProject` for components. Subscribes via `useSession()` so a
+ *  provider change re-renders the consumer; the resolver itself is runtime, not persisted. */
+export function useProjectSession(projectId: string): WorkspaceSession {
+  useSession() // subscribe to provider changes; resolver is runtime, not persisted
+  return sessionForProject(projectId)
+}
+
 export const SessionContext = createContext<WorkspaceSession | null>(null)
 
 export function useSession(): WorkspaceSession {

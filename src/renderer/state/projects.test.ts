@@ -44,6 +44,20 @@ describe('openFolderProject', () => {
   })
 })
 
+describe('toWorkspace', () => {
+  // Tripwire for Stage 4a: a project's session binding is RUNTIME-ONLY (resolved by
+  // src/renderer/session/session.ts `sessionForProject`). The persisted workspace shape must
+  // never gain a session field — workspace.json / project.json are shared across machines and a
+  // session id is meaningless anywhere but the machine that minted it. If this fails, someone
+  // started persisting the session dimension; that is a design change, not a bug fix.
+  it('toWorkspace does not persist any session dimension', () => {
+    useProjects.getState().addProject('my-app', '/Users/me/dev/my-app')
+    const ws = useProjects.getState().toWorkspace()
+    const json = JSON.stringify(ws)
+    expect(json).not.toMatch(/"session/i)
+  })
+})
+
 describe('setDinoHighScore', () => {
   it('raises the project record and never lowers it', () => {
     const p = useProjects.getState().addProject('game', '/tmp/game')
