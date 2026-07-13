@@ -83,7 +83,7 @@ import { UsageIndicator } from '../components/UsageIndicator'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
-import { connectPresence, reportProject, usePresence } from '../state/presence'
+import { usePresence } from '../state/presence'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -139,6 +139,7 @@ import {
   useSession,
   SessionProvider,
   sessionForProject,
+  presenceForProject,
   setActiveSession,
   disposeSession,
 } from '../session/session'
@@ -1009,8 +1010,10 @@ export function Canvas() {
     // tab switch). Peers only draw each other's cursors and node chips when the project matches —
     // each project is its own canvas with its own coordinate space. No project open (welcome
     // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
-    // and Canvas deliberately never READS the presence store (see the connectPresence effect).
-    reportProject(activeProjectId || null)
+    // and Canvas deliberately never READS the presence store (see the connect effect). Route to the
+    // ACTIVE session's presence (a relay tab tells its host, over the right core; a local tab hits
+    // `defaultPresence` — byte-identical to before), resolved by binding from the project we switched to.
+    presenceForProject(activeProjectId || '').reportProject(activeProjectId || null)
     // Track the active session by the tab we switched to, so non-component api accessors
     // (activeSessionApi() in scmDraft/worktrees) hit the active tab's core — the local session for
     // a local tab, the relay session for a remote tab. Resolution is by binding (never persisted).
@@ -3890,12 +3893,19 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
-  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session ([] deps —
-  // connectPresence is idempotent, but a second live connection whose teardown ran first would tear
-  // the shared one down under the survivor). Canvas deliberately does NOT read the presence store:
-  // only PresenceLayer / Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never
-  // re-renders this component (docs/team-presence.md → UI).
-  useEffect(() => connectPresence(), [])
+  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session. Bound to
+  // the ACTIVE session's presence (a relay tab connects the relay core; a local tab hits
+  // `defaultPresence` — byte-identical to before), re-keyed on `presence` so a tab switch tears the
+  // old session's connection down and connects the new one. `presenceForProject` is a plain,
+  // allocation-free resolve of the memoized (WeakMap-per-core) PresenceSession from the project we
+  // switched to — NOT a reactive subscription to the peer table — so `presence` is a stable
+  // reference per session and the effect re-runs ONLY when the active session changes. connect() is
+  // idempotent, and a second live connection whose teardown ran first would tear the shared one down
+  // under the survivor. Canvas deliberately does NOT read the presence store: only PresenceLayer /
+  // Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never re-renders this component
+  // (docs/team-presence.md → UI, PERF CONTRACT).
+  const presence = presenceForProject(activeProjectId || '')
+  useEffect(() => presence.connect(), [presence])
 
   // A browser guest's new-window (target=_blank / window.open) request → open another browser node
   // (never a real popup; main denies the real one) roped below/right of the source. Reads the
