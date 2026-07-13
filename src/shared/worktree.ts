@@ -91,6 +91,27 @@ export function computeWorktreePath(userDataDir: string, repoName: string, branc
   return `${base}/worktrees/${repoName}/${flat}`
 }
 
+/**
+ * Resolve the on-disk worktree directory for a create: an explicit `--path` wins; otherwise the
+ * default under the SESSION CORE's writable base (`userDataDir()` — the HOST's userData for a
+ * remote tab, so the worktree lands on the machine `git worktree add` runs on, not this client).
+ *
+ * `userDataDir` is injected (not read off any global) precisely so the path follows the session
+ * that runs the git op — the obligation-c fix. Async because the base dir is fetched from the core;
+ * a given `--path` short-circuits it, so the provider is never touched when the caller already knows
+ * the location. Returns '' when nothing can be derived (an unknown base and no `--path`).
+ */
+export async function resolveWorktreePath(args: {
+  explicitPath?: string
+  userDataDir: () => Promise<string>
+  repoRoot: string
+  branch: string
+}): Promise<string> {
+  const explicit = args.explicitPath?.trim()
+  if (explicit) return explicit
+  return computeWorktreePath(await args.userDataDir(), args.repoRoot.split('/').pop() || 'repo', args.branch)
+}
+
 /** Values the worktree dialog collects. Mapped to a `GroupWorktree` by `worktreeFromCreate`. */
 export interface WorktreeCreateValue {
   repoPath: string

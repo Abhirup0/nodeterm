@@ -42,6 +42,7 @@ import {
   buildClaudeApi
 } from './ws-bridge'
 import { buildStubApi } from './stubs'
+import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
 
 /** What Task 6 consumes: the bridged api for `createSession`, an approval gate to await, and a
  *  teardown hook to run on disconnect/revoke. */
@@ -101,6 +102,23 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
 
     // `settings` stays LOCAL (font/cursor/theme render in YOUR window). It came in via `...local`;
     // `real.settings` is deliberately left unused so a remote tab never adopts the host's prefs.
+
+    // `dialog` REFINES Task 5's coarse "dialog → local". `selectFolder`/`selectFile` are the only
+    // members `DialogApi` exposes, and in a remote tab BOTH are host-path pickers, not local ones:
+    // the chosen path is fed to the SESSION core (a clone destination for `api.git.clone`, an
+    // "open folder/file" target on the host fs), so a native LOCAL picker would land the op on the
+    // wrong machine (obligation d). Route both to the SAME in-app directory browser the Server
+    // Edition uses, over the HOST's `fs.list` (`files.fs`, already core-bound). There is no other,
+    // genuinely-local `dialog.*` method that would want to stay on `...local`. Desktop-only path, so
+    // `document` exists for `mountPickerRoot`.
+    dialog: (() => {
+      mountPickerRoot()
+      const startDir = '/' // navigable up/down from the host root; no cross-call memory in v1
+      return {
+        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: files.fs.list }),
+        selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: files.fs.list })
+      }
+    })(),
 
     // ── Deferred over the relay in v1 — documented degrades (a clean refusal, not a wrong-machine
     //    silent no-op): ──

@@ -101,6 +101,7 @@ import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
+  resolveWorktreePath,
   displacedByWorktree,
   isRemoteSessionNode,
   resolveBaseRef,
@@ -501,8 +502,12 @@ export function Canvas() {
   // resolves must re-render with the real base, or it would keep suggesting nothing.
   const [userDataDir, setUserDataDir] = useState('')
   useEffect(() => {
-    void window.nodeTerminal.userDataDir().then(setUserDataDir)
-  }, [])
+    // The SESSION core's writable base, not this client's: a remote tab's worktree default path
+    // must live on the machine `git worktree add` runs on (the host — obligation c), so it comes
+    // from the session api (`api.userDataDir()`), re-resolved when the active session changes.
+    // For the local session `api` IS window.nodeTerminal, so this stays byte-identical.
+    void api.userDataDir().then(setUserDataDir)
+  }, [api])
   // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
   // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
   // guard that stops the dialog from offering a worktree a second group could bind to.
@@ -4193,13 +4198,14 @@ export function Canvas() {
               bindGroupId = g.id
             }
             const baseRef = args.base?.trim() || resolveBaseRef(entries)
-            const wtPath =
-              args.path?.trim() ||
-              computeWorktreePath(
-                await window.nodeTerminal.userDataDir(),
-                repoRoot.split('/').pop() || 'repo',
-                branch
-              )
+            // Path from the SESSION core's userData (the HOST for a remote tab), not the local
+            // client's — the git worktree op below runs on `api.git`, so the path must live there.
+            const wtPath = await resolveWorktreePath({
+              explicitPath: args.path,
+              userDataDir: api.userDataDir,
+              repoRoot,
+              branch
+            })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
               return

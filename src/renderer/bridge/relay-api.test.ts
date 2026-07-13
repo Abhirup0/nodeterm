@@ -86,12 +86,28 @@ describe('buildRelayApi', () => {
     const t = new FakeTransport()
     const { api } = buildRelayApi('conn-1', t)
 
-    // Your update banner, clipboard, dialog picker, settings and license are YOURS, not the host's.
+    // Your update banner, clipboard, settings and license are YOURS, not the host's.
     expect(api.updates).toBe(local.updates)
     expect(api.clipboard).toBe(local.clipboard)
     expect(api.settings).toBe(local.settings)
-    expect(api.dialog).toBe(local.dialog)
     expect(api.license).toBe(local.license)
+  })
+
+  it('routes the folder/file picker to the HOST fs, not the local native dialog', () => {
+    // Task 9 refines Task 5's coarse "dialog → local": selectFolder/selectFile are host-path
+    // pickers in a remote tab (the chosen path feeds api.git.clone / the host fs), so they must
+    // browse the HOST filesystem via the in-app directory browser, NOT this client's native dialog.
+    const { local } = fakeLocalApi()
+    ;(globalThis as Record<string, unknown>).window = { nodeTerminal: local }
+    const t = new FakeTransport()
+    const { api } = buildRelayApi('conn-1', t)
+
+    expect(api.dialog).not.toBe(local.dialog) // overridden — no longer the local native dialog
+    expect(typeof api.dialog.selectFolder).toBe('function')
+    expect(api.dialog.selectFolder).not.toBe(
+      (local.dialog as unknown as { selectFolder?: unknown }).selectFolder
+    )
+    expect(typeof api.dialog.selectFile).toBe('function')
   })
 
   it('delegates pty.onData to the LOCAL per-session channel, not the RpcClient', () => {

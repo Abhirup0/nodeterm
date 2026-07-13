@@ -5,6 +5,7 @@ import {
   isInsideDir,
   sanitizeWorktreeBranch,
   computeWorktreePath,
+  resolveWorktreePath,
   parseWorktreePorcelain,
   isDangerousWorktreeRemovalPath,
   decideMergeStrategy,
@@ -89,6 +90,36 @@ describe('computeWorktreePath', () => {
   })
   it('drops a trailing slash on the base dir', () => {
     expect(computeWorktreePath('/u/', 'r', 'b')).toBe('/u/worktrees/r/b')
+  })
+})
+
+describe('resolveWorktreePath', () => {
+  it('derives the default UNDER the session core userData (the host, for a remote tab)', async () => {
+    // The provider is the SESSION core's `userDataDir()` — a remote tab hands the HOST's base, so
+    // the worktree lands on the machine `git worktree add` runs on, not this client.
+    const p = await resolveWorktreePath({
+      userDataDir: () => Promise.resolve('/home/host/.config/nodeterm'),
+      repoRoot: '/srv/repos/myapp',
+      branch: 'feature/x'
+    })
+    expect(p).toBe('/home/host/.config/nodeterm/worktrees/myapp/feature-x')
+  })
+  it('honors an explicit --path and never reads the userData provider', async () => {
+    const p = await resolveWorktreePath({
+      explicitPath: '  /custom/wt  ',
+      userDataDir: () => Promise.reject(new Error('provider must not be read when --path is given')),
+      repoRoot: '/srv/repos/x',
+      branch: 'b'
+    })
+    expect(p).toBe('/custom/wt')
+  })
+  it('yields "" when the base dir is unknown and no --path was given', async () => {
+    const p = await resolveWorktreePath({
+      userDataDir: () => Promise.resolve(''),
+      repoRoot: '/srv/repos/x',
+      branch: 'b'
+    })
+    expect(p).toBe('')
   })
 })
 
