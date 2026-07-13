@@ -160,7 +160,16 @@ describe('remoteTmuxConf', () => {
     expect(c).toContain('set -g set-clipboard on')
     expect(c).toContain('set -as terminal-features ",*:clipboard"')
     expect(c).not.toContain('Ms=')
-    expect(c).not.toContain('terminal-overrides')
+    // The only terminal-overrides mention allowed is the MIGRATION unset — never a new entry.
+    expect(c).not.toMatch(/set -g[a]? terminal-overrides/)
+    expect(c).not.toMatch(/set -a[gs]? terminal-overrides/)
+  })
+  it('clears the override/feature arrays a long-lived server accumulated from older versions', () => {
+    // A tmux server outlives the app and keeps every entry ever sourced into it; the stale
+    // smcup@/rmcup@/indn@ entries would otherwise keep breaking scrolling forever. Measured:
+    // sourcing these unsets into a poisoned server restored the alternate screen for new clients.
+    expect(c).toContain('set -su terminal-overrides')
+    expect(c).toContain('set -su terminal-features')
   })
   it('copies mouse selections through tmux, with no pbcopy (it would run on the remote host)', () => {
     expect(c).toContain('bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')

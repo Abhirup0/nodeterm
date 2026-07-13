@@ -107,6 +107,13 @@ set -g destroy-unattached off
 setw -g aggressive-resize on
 # OSC 52 to the client, which writes the LOCAL clipboard. BOTH lines are needed on tmux 3.2+ — see
 # remoteTmuxConf's doc comment before touching either.
+# MIGRATION — do not remove. Older versions of this file blanked smcup/rmcup/indn via
+# terminal-overrides, and a long-lived tmux server keeps every entry ever sourced into it (the
+# array only grows; -f is read once at server start). With those stale entries present the client
+# never returns to the alternate screen and scrolling stays broken NO MATTER what this file sets
+# below. Unset both arrays back to defaults, then re-add the one feature we actually want.
+set -su terminal-overrides
+set -su terminal-features
 set -g set-clipboard on
 set -as terminal-features ",*:clipboard"
 # Mouse copy: tmux copies to its buffer AND emits OSC 52. No pipe to a local command — it would run
