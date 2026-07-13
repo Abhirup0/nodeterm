@@ -194,6 +194,48 @@ const GRID = 24
 /** How long a successful worktree notice stays on screen before fading itself out. */
 const NOTICE_MS = 6000
 
+/** The confirm dialogs, named so their setters can be wrapped in a synchronous open-guard (see
+ *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
+interface ConfirmState {
+  message: string
+  onConfirm: () => void
+  /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
+  onCancel?: () => void
+  confirmLabel?: string
+  cancelLabel?: string
+  danger?: boolean
+  /** Set when an AGENT asked for this dialog: it is answered by an explicit click, never by an
+   *  Enter the user aimed at their terminal (see components/confirm-key). */
+  requestedBy?: string
+}
+interface RemoveState {
+  groupId: string
+  warning: string
+  /** nodeterm created this directory (`worktree.createdByApp`), so deleting it is ours to offer as
+   *  the default. A worktree the user made outside the app defaults to Unbind, and deleting it from
+   *  disk is an explicit opt-in (`deleteFromDisk`). */
+  canDelete: boolean
+  /** Named in the dialog, so the user approves the worktree they were shown — not whichever one
+   *  the group happens to point at by the time they hit Enter. */
+  branch: string
+  path: string
+  /** Set when an AGENT asked (canvas-control `close-worktree --mode remove`); the dialog says so,
+   *  exactly like the agent `write`/`close` confirms do — AND refuses to be confirmed by keyboard. */
+  requestedBy?: string
+}
+interface MergeState {
+  repoPath: string
+  branch: string
+  baseRef: string
+  /** Whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
+   *  never be threatened with a publish that cannot happen. */
+  hasOrigin: boolean
+}
+interface PendingPeerState {
+  sas: string | null
+  id: string
+}
+
 /**
  * Worktrees are out of scope for SSH projects in v1, and being honestly absent beats being
  * silently wrong: the default worktree path is computed from the LOCAL data dir while the git
@@ -392,16 +434,8 @@ export function Canvas() {
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
   const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
-  const [pendingPeer, setPendingPeer] = useState<{ sas: string | null; id: string } | null>(null)
-  const [confirm, setConfirm] = useState<{
-    message: string
-    onConfirm: () => void
-    /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
-    onCancel?: () => void
-    confirmLabel?: string
-    cancelLabel?: string
-    danger?: boolean
-  } | null>(null)
+  const [pendingPeer, setPendingPeerState] = useState<PendingPeerState | null>(null)
+  const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   const [consentOpen, setConsentOpen] = useState(false)
@@ -467,23 +501,12 @@ export function Canvas() {
     return () => window.removeEventListener('nodeterm:toast', onToast)
   }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
-  const [moveTarget, setMoveTarget] = useState<string | null>(null)
+  const [moveTarget, setMoveTargetState] = useState<string | null>(null)
   // Group awaiting confirmation to remove its worktree (drives the ask-first safety dialog).
   // `canDelete` = nodeterm created this directory (`worktree.createdByApp`), so deleting it is
   // ours to offer as the default. For a worktree the user made outside the app and merely bound,
   // the default is Unbind and deleting from disk is an explicit opt-in (`deleteFromDisk`).
-  const [removeTarget, setRemoveTarget] = useState<{
-    groupId: string
-    warning: string
-    canDelete: boolean
-    /** Named in the dialog, so the user approves the worktree they were shown — not whichever one
-     *  the group happens to point at by the time they hit Enter. */
-    branch: string
-    path: string
-    /** Set when an AGENT asked (canvas-control `close-worktree --mode remove`); the dialog says so,
-     *  exactly like the agent `write`/`close` confirms do. */
-    requestedBy?: string
-  } | null>(null)
+  const [removeTarget, setRemoveTargetState] = useState<RemoveState | null>(null)
   /**
    * True from the instant a removal confirm is REQUESTED until its dialog closes. `removeTarget`
    * alone cannot carry this: `requestRemoveWorktree` awaits `git.status` before opening, and two
@@ -496,12 +519,7 @@ export function Canvas() {
   // Group awaiting confirmation to merge its worktree into the base branch. `hasOrigin` decides
   // whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
   // never be threatened with a publish that cannot happen.
-  const [mergeTarget, setMergeTarget] = useState<{
-    repoPath: string
-    branch: string
-    baseRef: string
-    hasOrigin: boolean
-  } | null>(null)
+  const [mergeTarget, setMergeTargetState] = useState<MergeState | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
@@ -561,13 +579,42 @@ export function Canvas() {
    * answers keys while it is topmost (see components/dialog-stack), but a destructive dialog the
    * user cannot even SEE must not exist in the first place: every confirm state is in this guard.
    */
-  const confirmOpenRef = useRef(false)
-  confirmOpenRef.current = !!(confirm || removeTarget || moveTarget || mergeTarget || pendingPeer)
+  const confirmFlags = useRef({
+    confirm: false,
+    remove: false,
+    move: false,
+    merge: false,
+    peer: false
+  })
+  // Every confirm setter flips its flag AT CALL TIME. Assigning the mirror during RENDER (what this
+  // used to do) is a tick too late: two agent verbs arriving in separate IPC events before React
+  // commits both read the stale `false` and both open a dialog — the very stacking this guard
+  // exists to prevent.
+  const setConfirm = useCallback((v: ConfirmState | null) => {
+    confirmFlags.current.confirm = !!v
+    setConfirmState(v)
+  }, [])
+  const setRemoveTarget = useCallback((v: RemoveState | null) => {
+    confirmFlags.current.remove = !!v
+    setRemoveTargetState(v)
+  }, [])
+  const setMoveTarget = useCallback((v: string | null) => {
+    confirmFlags.current.move = !!v
+    setMoveTargetState(v)
+  }, [])
+  const setMergeTarget = useCallback((v: MergeState | null) => {
+    confirmFlags.current.merge = !!v
+    setMergeTargetState(v)
+  }, [])
+  const setPendingPeer = useCallback((v: PendingPeerState | null) => {
+    confirmFlags.current.peer = !!v
+    setPendingPeerState(v)
+  }, [])
   /** Is any confirm open — or being opened (the async gap in `requestRemoveWorktree`)? */
-  const confirmBusy = useCallback(
-    () => confirmOpenRef.current || removePendingRef.current,
-    []
-  )
+  const confirmBusy = useCallback(() => {
+    const f = confirmFlags.current
+    return f.confirm || f.remove || f.move || f.merge || f.peer || removePendingRef.current
+  }, [])
 
   const nodeTypes = useMemo(
     () => ({
@@ -2815,7 +2862,11 @@ export function Canvas() {
           break
         }
         case 'remove':
-          void requestRemoveWorktree(groupId)
+          // A refusal (another confirm is already open) used to be discarded here, so Remove simply
+          // looked broken. Say it out loud instead.
+          void requestRemoveWorktree(groupId).then((res) => {
+            if (!res.ok && res.error) setNotice({ kind: 'error', text: res.error })
+          })
           break
         default:
           break
@@ -4136,6 +4187,7 @@ export function Canvas() {
             setConfirm({
               message: `Agent "${srcTitle}" wants to send to ${args.node}:\n\n${args.text ?? ''}`,
               confirmLabel: 'Send',
+              requestedBy: srcTitle,
               onConfirm: async () => {
                 setConfirm(null)
                 try {
@@ -4167,6 +4219,7 @@ export function Canvas() {
             // Destructive → confirm. Replies on confirm AND cancel.
             setConfirm({
               message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
+              requestedBy: srcTitle,
               confirmLabel: 'Close',
               danger: true,
               onConfirm: () => {
@@ -5331,6 +5384,9 @@ export function Canvas() {
           confirmLabel={confirm.confirmLabel}
           cancelLabel={confirm.cancelLabel}
           danger={confirm.danger}
+          // The user did not open this one — an agent did. It appeared under their hands, so it is
+          // answered by a click, never by a keystroke aimed somewhere else (components/confirm-key).
+          enterConfirms={!confirm.requestedBy}
           onConfirm={confirm.onConfirm}
           onCancel={() => {
             confirm.onCancel?.()
@@ -5456,6 +5512,9 @@ export function Canvas() {
           })}
           confirmLabel={deleteFromDisk ? 'Delete' : 'Unbind'}
           danger={deleteFromDisk}
+          // An agent asked for this one: it appeared while the user was typing somewhere else, so
+          // no keystroke may confirm it — only a click on a button they had to look at.
+          enterConfirms={!removeTarget.requestedBy}
           option={
             // We created it → deletion is the point of the action, no opt-in to make. The user
             // created it → deleting from disk is a deliberate extra choice, never the default.

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogStack } from './dialog-stack'
 import { useSshServers } from '../state/sshServers'
 import { useEntitlement } from '../state/entitlement'
 import { useUpgradeGate } from '../state/upgradeGate'
@@ -99,13 +100,16 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
     onClose()
   }, [disconnectBrowse, onClose])
 
+  // Only the topmost modal answers a key (./dialog-stack).
+  const isTop = useDialogStack()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
       if (e.key === 'Escape') close()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [close])
+  }, [isTop, close])
 
   // Disconnect the browse master if the dialog unmounts without an explicit close.
   useEffect(() => () => disconnectBrowse(), [disconnectBrowse])

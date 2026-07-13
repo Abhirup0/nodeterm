@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useRef } from 'react'
+
 /**
  * The open-modal stack — which dialog owns the keyboard.
  *
@@ -49,4 +51,23 @@ export function openDialogCount(): number {
 /** Tests only: forget every registration. */
 export function resetDialogStack(): void {
   stack.length = 0
+}
+
+/**
+ * Register a modal for the life of the component and get back "do I own the keyboard?".
+ *
+ * EVERY modal belongs in this stack, not just `ConfirmDialog` — `WorktreeDialog`,
+ * `NotifyConsentDialog`, `SshProjectDialog`, `RemoteAccessDialog` and `InputDialog`/`promptDialog`
+ * each listen for Enter/Escape too, and one of them coexisting with a confirm meant a single Enter
+ * or Escape was answered by both.
+ */
+export function useDialogStack(): () => boolean {
+  const idRef = useRef<string>()
+  if (!idRef.current) idRef.current = nextDialogId()
+  const id = idRef.current
+  useEffect(() => {
+    pushDialog(id)
+    return () => popDialog(id)
+  }, [id])
+  return useCallback(() => isTopDialog(id), [id])
 }

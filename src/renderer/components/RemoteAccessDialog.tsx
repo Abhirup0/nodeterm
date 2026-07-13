@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogStack } from './dialog-stack'
 import { useEntitlement } from '../state/entitlement'
 import { useRemoteHosting } from '../state/remoteHosting'
 import { Button } from '@renderer/ui/Button'
@@ -26,8 +27,12 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
   const [clientSas, setClientSas] = useState<string | null>(null)
   const [connectedId, setConnectedId] = useState<string | null>(null)
 
+  // Only the topmost modal answers a key (./dialog-stack) — the host approval ConfirmDialog opens
+  // on top of THIS dialog, and its Escape must not also close the one underneath.
+  const isTop = useDialogStack()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
       if (e.key === 'Escape') {
         e.preventDefault()
         onClose()
@@ -35,7 +40,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [isTop, onClose])
 
   const startHosting = async () => {
     setError('')
