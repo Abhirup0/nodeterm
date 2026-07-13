@@ -99,6 +99,26 @@ export async function writeText(filePath: string, content: string): Promise<bool
   }
 }
 
+/** Create a directory (recursive, mkdir -p semantics). Resolves `true` on success. */
+export async function makeDir(dirPath: string): Promise<boolean> {
+  try {
+    await fs.mkdir(dirPath, { recursive: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** True when the path exists (file or directory). */
+export async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
 const QUICK_OPEN_FILE_CAP = 50_000
 const QUICK_OPEN_TIMEOUT_MS = 10_000
 

@@ -361,6 +361,10 @@ export interface FsApi {
   readBinary(filePath: string): Promise<string>
   /** Write text to a file; resolves true on success. */
   write(filePath: string, content: string): Promise<boolean>
+  /** Create a directory (recursive). Resolves true on success. */
+  mkdir(dirPath: string): Promise<boolean>
+  /** True when the path exists (file or directory). */
+  exists(path: string): Promise<boolean>
 }
 
 export interface FilesApi {
@@ -578,6 +582,8 @@ export interface SshFsApi {
   read(projectId: string, path: string): Promise<string>
   readBinary(projectId: string, path: string): Promise<string>
   write(projectId: string, path: string, content: string): Promise<boolean>
+  mkdir(projectId: string, path: string): Promise<boolean>
+  exists(projectId: string, path: string): Promise<boolean>
 }
 
 export interface GitFileChange {

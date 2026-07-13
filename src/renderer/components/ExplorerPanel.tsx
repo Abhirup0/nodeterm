@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DirEntry, FsApi } from '@shared/types'
 import { useProjects } from '../state/projects'
+import { useExplorer } from '../state/explorer'
 import { sshFs } from '../terminal/ssh-fs'
+import { promptDialog } from './promptDialog'
+import { ancestorDirs, createTargetDir, newEntryPath, parentDir } from '../lib/explorerCreate'
 
 interface ExplorerPanelProps {
   onClose: () => void
@@ -17,6 +20,11 @@ interface ExplorerPanelProps {
 type ContextFn = (x: number, y: number, path: string, isDir: boolean) => void
 type OpenFn = (path: string) => void
 type SelectFn = (path: string) => void
+
+// Surface a transient error message (matches the Canvas listener at Canvas.tsx:380).
+const toast = (message: string): void => {
+  window.dispatchEvent(new CustomEvent('nodeterm:toast', { detail: { kind: 'error', message } }))
+}
 
 function EntryIcon({ dir }: { dir: boolean }) {
   return dir ? (
@@ -36,9 +44,9 @@ function TreeEntry({
   path,
   depth,
   fs,
+  projectId,
+  version,
   selected,
-  forcedOpen,
-  revealNonce,
   onContext,
   onOpenFile,
   onSelect
@@ -47,36 +55,43 @@ function TreeEntry({
   path: string
   depth: number
   fs: FsApi
+  projectId: string
+  version: number
   selected: string | null
-  forcedOpen: Set<string>
-  revealNonce: number | undefined
   onContext: ContextFn
   onOpenFile: OpenFn
   onSelect: SelectFn
 }) {
-  const [open, setOpen] = useState(false)
+  const open = useExplorer((s) => (s.expandedByProject[projectId] ?? []).includes(path))
   const [children, setChildren] = useState<DirEntry[] | null>(null)
   const rowRef = useRef<HTMLDivElement>(null)
-  // The last reveal nonce this row force-opened for, so we honor each reveal edge exactly once
-  // and don't re-assert open afterwards (otherwise a manual collapse wouldn't stick).
-  const lastHonoredRef = useRef<number | undefined>(undefined)
 
-  const expandDir = useCallback(async () => {
-    const next = !open
-    setOpen(next)
-    if (next && children === null) setChildren(await fs.list(path))
-  }, [open, children, path, fs])
+  const toggleDir = useCallback(() => {
+    useExplorer.getState().setExpanded(projectId, path, !open)
+  }, [projectId, path, open])
 
-  // Reveal: when this directory is force-opened (an ancestor of the reveal target), expand it
-  // ONCE per reveal edge. After the edge, a manual collapse sticks because this effect won't
-  // re-fire for the same nonce. Lazy-load children (awaiting the list, like the click path).
+  // A version bump (create/refresh) invalidates every cached subtree; open dirs re-list
+  // through the children===null effect below. Initial mount is a no-op (ref seeded with the
+  // current version), so a collapsed dir never fetches eagerly.
+  const lastVersionRef = useRef(version)
   useEffect(() => {
-    if (!entry.dir || !forcedOpen.has(path)) return
-    if (revealNonce === lastHonoredRef.current) return
-    lastHonoredRef.current = revealNonce
-    if (children === null) void fs.list(path).then(setChildren)
-    setOpen(true)
-  }, [forcedOpen, path, entry.dir, children, revealNonce, fs])
+    if (lastVersionRef.current === version) return
+    lastVersionRef.current = version
+    setChildren(null)
+  }, [version])
+
+  // Lazy-load children whenever this dir is (or becomes) open with nothing loaded yet —
+  // covers click-to-expand, restored-from-storage, and reveal-forced expansion alike.
+  useEffect(() => {
+    if (!entry.dir || !open || children !== null) return
+    let cancelled = false
+    void fs.list(path).then((c) => {
+      if (!cancelled) setChildren(c)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [entry.dir, open, children, path, fs])
 
   // Reveal: scroll the selected (target) row into view once it has mounted.
   useEffect(() => {
@@ -88,13 +103,13 @@ function TreeEntry({
   const onClick = useCallback(() => {
     if (entry.dir) {
       onSelect(path)
-      void expandDir()
+      toggleDir()
     } else if (selected === path) {
       onOpenFile(path)
     } else {
       onSelect(path)
     }
-  }, [entry.dir, selected, path, onOpenFile, onSelect, expandDir])
+  }, [entry.dir, selected, path, onOpenFile, onSelect, toggleDir])
 
   return (
     <>
@@ -124,9 +139,9 @@ function TreeEntry({
             path={`${path}/${c.name}`}
             depth={depth + 1}
             fs={fs}
+            projectId={projectId}
+            version={version}
             selected={selected}
-            forcedOpen={forcedOpen}
-            revealNonce={revealNonce}
             onContext={onContext}
             onOpenFile={onOpenFile}
             onSelect={onSelect}
@@ -161,8 +176,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
-  const [forcedOpen, setForcedOpen] = useState<Set<string>>(new Set())
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string; dir: boolean } | null>(null)
 
   useEffect(() => {
     if (cwd) fs.list(cwd).then(setRoots)
@@ -187,12 +201,52 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
       acc = `${acc}/${parts[i]}`
       dirs.add(acc)
     }
-    setForcedOpen(dirs)
+    useExplorer.getState().expandMany(project!.id, [...dirs])
     setSelected(abs)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reveal?.nonce, cwd])
 
-  const onContext: ContextFn = (x, y, path) => setMenu({ x, y, path })
+  const onContext: ContextFn = (x, y, path, isDir) => setMenu({ x, y, path, dir: isDir })
+
+  // Create a file or folder under the clicked entry (a dir targets itself, a file its
+  // parent). Multi-segment names create intermediate dirs. Never overwrites: an existing
+  // path is surfaced as a toast and the prompt is abandoned.
+  const createEntry = useCallback(
+    async (targetPath: string, targetIsDir: boolean, kind: 'file' | 'folder') => {
+      const baseDir = createTargetDir(targetPath, targetIsDir)
+      const name = await promptDialog({
+        message: kind === 'file' ? 'New file name:' : 'New folder name:',
+        placeholder: kind === 'file' ? 'notes.md (subdirs ok: docs/notes.md)' : 'folder name',
+        confirmLabel: 'Create'
+      })
+      if (name === null) return
+      const dest = newEntryPath(baseDir, name)
+      if (!dest) {
+        toast(`Invalid name: “${name.trim()}”`)
+        return
+      }
+      if (await fs.exists(dest)) {
+        toast(`Already exists: ${dest}`)
+        return
+      }
+      const ok =
+        kind === 'folder'
+          ? await fs.mkdir(dest)
+          : (name.includes('/') ? await fs.mkdir(parentDir(dest)) : true) && (await fs.write(dest, ''))
+      if (!ok) {
+        toast(`Could not create ${dest}`)
+        return
+      }
+      // Keep the target (and any new intermediate dirs) expanded, then re-list the tree.
+      if (project) {
+        const dirs = [baseDir, ...ancestorDirs(baseDir, name)].filter((d) => d !== cwd)
+        useExplorer.getState().expandMany(project.id, dirs)
+      }
+      setVersion((v) => v + 1)
+      if (kind === 'file') handleOpenFile(dest)
+    },
+    [fs, cwd, project, handleOpenFile]
+  )
 
   return createPortal(
     <div className="drawer-overlay" onClick={onClose}>
@@ -216,7 +270,14 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
         )}
 
         {cwd && (
-          <div className="drawer__body ex-body">
+          <div
+            className="drawer__body ex-body"
+            onContextMenu={(e) => {
+              if (e.target !== e.currentTarget || !cwd) return
+              e.preventDefault()
+              setMenu({ x: e.clientX, y: e.clientY, path: cwd, dir: true })
+            }}
+          >
             {roots?.length === 0 && <p className="set-note">Empty folder.</p>}
             {roots?.map((e) => (
               <TreeEntry
@@ -225,9 +286,9 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 path={`${cwd}/${e.name}`}
                 depth={0}
                 fs={fs}
+                projectId={project!.id}
+                version={version}
                 selected={selected}
-                forcedOpen={forcedOpen}
-                revealNonce={reveal?.nonce}
                 onContext={onContext}
                 onOpenFile={handleOpenFile}
                 onSelect={setSelected}
@@ -242,6 +303,27 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
           <>
             <div className="tab-backdrop" style={{ zIndex: 78 }} onClick={() => setMenu(null)} />
             <div className="ctx-menu" style={{ top: menu.y, left: menu.x, zIndex: 80 }}>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  const m = menu
+                  setMenu(null)
+                  void createEntry(m.path, m.dir, 'file')
+                }}
+              >
+                New File…
+              </button>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  const m = menu
+                  setMenu(null)
+                  void createEntry(m.path, m.dir, 'folder')
+                }}
+              >
+                New Folder…
+              </button>
+              <div className="ctx-sep" />
               <button
                 className="ctx-item"
                 onClick={() => {

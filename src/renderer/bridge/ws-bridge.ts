@@ -261,7 +261,9 @@ export function buildFilesApi(
     list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
     read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
     readBinary: (filePath) => client.request(IPC.fsReadBinary, filePath) as Promise<string>,
-    write: (filePath, content) => client.request(IPC.fsWrite, filePath, content) as Promise<boolean>
+    write: (filePath, content) => client.request(IPC.fsWrite, filePath, content) as Promise<boolean>,
+    mkdir: (dirPath) => client.request(IPC.fsMkdir, dirPath) as Promise<boolean>,
+    exists: (p) => client.request(IPC.fsExists, p) as Promise<boolean>
   }
 
   const git: GitApi = {

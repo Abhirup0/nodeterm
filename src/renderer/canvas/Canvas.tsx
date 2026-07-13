@@ -87,8 +87,10 @@ import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
+import { sshFs } from '../terminal/ssh-fs'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { opensInEditor } from '../lib/openTarget'
+import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useChatSessions } from '../state/chatSessions'
@@ -1763,6 +1765,25 @@ export function Canvas() {
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
 
+  // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
+  // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
+  useEffect(() => {
+    const onOpen = (e: Event): void => {
+      const d = (e as CustomEvent<{ path: string; ssh?: boolean }>).detail
+      if (d?.path) openFile(d.path, undefined, d.ssh)
+    }
+    const onReveal = (e: Event): void => {
+      const d = (e as CustomEvent<{ path: string }>).detail
+      if (d?.path) revealProjectFile(d.path)
+    }
+    window.addEventListener('nodeterm:open-file', onOpen)
+    window.addEventListener('nodeterm:reveal-file', onReveal)
+    return () => {
+      window.removeEventListener('nodeterm:open-file', onOpen)
+      window.removeEventListener('nodeterm:reveal-file', onReveal)
+    }
+  }, [openFile, revealProjectFile])
+
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
     (relPath: string, staged: boolean, scopeCwd?: string) => {
@@ -1822,6 +1843,41 @@ export function Canvas() {
       if (f) openFile(f, center)
     },
     [openFile]
+  )
+
+  /** Create a new file under the project folder (relative name, subdirs auto-created) and
+   *  open it as an editor node. SSH projects create on the remote host. */
+  const newProjectFile = useCallback(
+    async (center?: { x: number; y: number }) => {
+      const project = useProjects.getState().getProject(activeProjectId ?? '')
+      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+      if (!project || !cwd) return
+      const name = await promptDialog({
+        message: 'New file — name (relative to the project folder):',
+        placeholder: 'src/notes.md',
+        confirmLabel: 'Create'
+      })
+      if (name === null) return
+      const dest = newEntryPath(cwd, name)
+      if (!dest) {
+        setCopyError(`Invalid name: “${name.trim()}”`)
+        return
+      }
+      const fsApi = project.ssh ? sshFs(project.id) : window.nodeTerminal.fs
+      if (await fsApi.exists(dest)) {
+        setCopyError(`Already exists: ${dest}`)
+        return
+      }
+      const ok =
+        (name.includes('/') ? await fsApi.mkdir(parentDir(dest)) : true) &&
+        (await fsApi.write(dest, ''))
+      if (!ok) {
+        setCopyError(`Could not create ${dest}`)
+        return
+      }
+      openFile(dest, center, !!project.ssh)
+    },
+    [activeProjectId, openFile]
   )
 
   /** Open the clone dialog; project creation happens in onRepoCloned below. */
@@ -3279,6 +3335,9 @@ export function Canvas() {
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
+      const project = useProjects.getState().getProject(activeProjectId)
+      const hasCwd = !!(project?.ssh?.remoteCwd ?? project?.cwd)
       setMenu({
         x: e.clientX,
         y: e.clientY,
@@ -3297,6 +3356,9 @@ export function Canvas() {
           { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
           { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
           { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
+          ...(hasCwd
+            ? [{ label: 'New file…', icon: <IconEditor />, onClick: () => void newProjectFile(at) }]
+            : []),
           { type: 'separator' },
           // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
           // Disabled (with the reason) on an SSH project — see WORKTREE_SSH_HINT.
@@ -3316,12 +3378,14 @@ export function Canvas() {
     },
     [
       screenToFlowPosition,
+      activeProjectId,
       addTerminal,
       agentCreationItems,
       addSticky,
       addDino,
       addBrowser,
       openFileDialog,
+      newProjectFile,
       openRemotePicker,
       openWorktreeDialog,
       isSshProject,
@@ -4533,6 +4597,8 @@ export function Canvas() {
 
   const buildCommands = useCallback((): Command[] => {
     const disabled = useSettings.getState().settings.disabledAgents
+    const activeProject = useProjects.getState().getProject(activeProjectId)
+    const newFileHasCwd = !!(activeProject?.ssh?.remoteCwd ?? activeProject?.cwd)
     const cmds: Command[] = [
       { id: 'new-term', label: 'New terminal', section: 'Create', icon: <IconTerminal />, run: () => addTerminal() },
       ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map(
@@ -4573,6 +4639,10 @@ export function Canvas() {
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
+      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
+      ...(newFileHasCwd
+        ? [{ id: 'new-file', label: 'New file…', icon: <IconEditor />, run: () => void newProjectFile() }]
+        : []),
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
       { id: 'open-browser', label: 'New browser', icon: <IconRemote />, run: () => addBrowser() },
       ...useSshServers.getState().servers.map(
@@ -4667,6 +4737,7 @@ export function Canvas() {
     openFileDialog,
     openWorktreeDialog,
     isSshProject,
+    newProjectFile,
     addProject,
     fitView,
     persist,

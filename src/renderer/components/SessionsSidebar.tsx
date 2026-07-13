@@ -221,7 +221,9 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                 {...dropProps(g.projectId, null)}
               >
                 <span className="ss-group__chev">{isCollapsed ? '▶' : '▼'}</span>
-                <span className="ss-group__dot" style={{ background: g.projectColor }} />
+                <span className="ss-group__monogram" style={{ background: g.projectColor }}>
+                  {(g.projectName.trim() || '?').charAt(0).toUpperCase()}
+                </span>
                 <span className="ss-group__name">{g.projectName}</span>
                 {branches[g.projectId] && (
                   <span className="ss-group__branch">⎇ {branches[g.projectId]}</span>

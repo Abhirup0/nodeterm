@@ -9,6 +9,8 @@ export function sshFs(projectId: string): FsApi {
     list: (path) => api.list(projectId, path),
     read: (path) => api.read(projectId, path),
     readBinary: (path) => api.readBinary(projectId, path),
-    write: (path, content) => api.write(projectId, path, content)
+    write: (path, content) => api.write(projectId, path, content),
+    mkdir: (path) => api.mkdir(projectId, path),
+    exists: (path) => api.exists(projectId, path)
   }
 }

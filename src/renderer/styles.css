@@ -4775,6 +4775,24 @@ body,
 
 .ss-group__head { display: flex; align-items: center; gap: 6px; padding: 6px 6px; cursor: pointer; border-radius: 6px; border: 1px solid transparent; }
 .ss-group__head:hover { background: var(--panel-header); }
+/* Project sections read as bands: monogram + heavier head + breathing room between projects. */
+.ss-group { margin: 2px 0; }
+.ss-group + .ss-group { margin-top: 10px; }
+.ss-group__head { background: rgba(255, 255, 255, 0.035); }
+.ss-group__head:hover { background: var(--panel-header); }
+.ss-group__monogram {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+  flex: 0 0 auto;
+}
 .ss-group__chev { font-size: 9px; color: rgba(180, 180, 185, 0.85); width: 10px; }
 .ss-group__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 .ss-group__name { font-size: 12px; font-weight: 600; color: var(--text); }
@@ -4793,7 +4811,11 @@ body,
 .ss-group__empty { padding: 4px 8px 6px 22px; font-size: 11px; color: rgba(180, 180, 185, 0.6); }
 
 /* Canvas-group sub-section inside a project */
-.ss-subgroup { margin: 2px 0 2px 10px; }
+.ss-subgroup {
+  margin: 2px 0 2px 15px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
 .ss-subgroup__head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
 .ss-subgroup__head:hover { background: var(--panel-header); }
 .ss-subgroup__dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
@@ -4805,7 +4827,7 @@ body,
 .ss-subgroup__head:hover .ss-subgroup__ai { opacity: 0.6; }
 .ss-subgroup__ai:hover { opacity: 1 !important; color: var(--accent); }
 .ss-subgroup__ai:disabled { opacity: 0.6; cursor: default; color: var(--accent); }
-.ss-ungrouped { margin-top: 2px; border: 1px solid transparent; border-radius: 6px; }
+.ss-ungrouped { margin: 2px 0 0 15px; border: 1px solid transparent; border-radius: 6px; }
 .ss-ungrouped__label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; color: rgba(180, 180, 185, 0.6); padding: 4px 6px 2px 8px; }
 /* Drop-target highlight while dragging a session onto a group / project header */
 .is-drop-target { border-color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 14%, transparent); }

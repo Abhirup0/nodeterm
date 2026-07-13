@@ -432,3 +432,29 @@ export function copyKeyAction(e: CopyShortcutEvent, hasSelection: boolean): Copy
   if (!isCopyShortcut(e)) return 'pass'
   return hasSelection ? 'copy' : 'swallow'
 }
+
+/**
+ * Shift+Enter → newline, not submit. xterm's default keymap sends a plain `\r` for
+ * Shift+Enter, which agent CLIs (Claude Code, Codex) read as "submit". We remap it to
+ * ESC+CR (`\x1b\r`): tmux forwards it unchanged (it reads as M-Enter, which tmux re-encodes
+ * identically), and the agent CLIs treat it as "insert newline" — their Alt/Option+Enter
+ * binding. CSI-u (`\x1b[13;2u`) was rejected: it only survives tmux with `extended-keys`.
+ * Sent in ALL terminals, agent or not — in a plain shell ESC+CR is at worst accept-line.
+ */
+export const SHIFT_ENTER_SEQ = '\x1b\r'
+
+export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
+
+/** Superset of `copyKeyAction` used by the terminal's custom key handler. */
+export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): TerminalKeyAction {
+  if (
+    e.type === 'keydown' &&
+    e.key === 'Enter' &&
+    e.shiftKey &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey
+  )
+    return 'shift-enter'
+  return copyKeyAction(e, hasSelection)
+}
