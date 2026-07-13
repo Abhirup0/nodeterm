@@ -2151,8 +2151,8 @@ export function Canvas() {
           // conversation (history intact, on both sides); the renderer's message store is
           // deliberately NOT dropped, so the user sees no interruption at all.
           if (n.type === 'chat') {
-            window.nodeTerminal.chat.dispose(n.id)
-            void window.nodeTerminal.chat.ensure(n.id, {
+            api.chat.dispose(n.id)
+            void api.chat.ensure(n.id, {
               cwd: fallbackCwd,
               sessionId: n.data.chatSessionId as string | undefined,
               accountId: n.data.accountId as string | undefined
@@ -2238,7 +2238,7 @@ export function Canvas() {
         // lives across project switches (only permanent delete kills it), so this belongs here,
         // not in node unmount.
         if (n.type === 'chat') {
-          window.nodeTerminal.chat.dispose(n.id)
+          api.chat.dispose(n.id)
           useChatSessions.getState().drop(n.id)
         }
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
@@ -4120,7 +4120,7 @@ export function Canvas() {
             transport.destroy(id)
             // Chat nodes in an inactive project keep their driver running across the switch;
             // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
-            window.nodeTerminal.chat.dispose(id)
+            api.chat.dispose(id)
             useChatSessions.getState().drop(id)
             useAgentStatus.getState().remove(id)
             useProjects.getState().removeNode(projectId, id)
@@ -4671,7 +4671,7 @@ export function Canvas() {
           transport.destroy(n.id)
         }
         if ((n.kind ?? 'terminal') === 'chat') {
-          window.nodeTerminal.chat.dispose(n.id)
+          api.chat.dispose(n.id)
           useChatSessions.getState().drop(n.id)
         }
         useAgentStatus.getState().remove(n.id)
