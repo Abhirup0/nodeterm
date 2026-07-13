@@ -114,8 +114,11 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
    \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then
    \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>"\`.
    Each stream now works on its own branch in its own worktree group — no tree conflicts.
-3. \`rename\` each group by subject and \`arrange\` its members; open extra sessions into the
-   same group with \`--group\` as a stream grows.
+3. Keep the kitchen tidy: members opened with \`--group\` land in neat grid slots inside the
+   frame automatically (the frame grows to fit), and successive \`open-worktree\` frames fan
+   out side by side — after opening all stations, align the frames with
+   \`arrange --nodes <groupId,groupId,…> --layout row\` (arrange/align work on top-level
+   nodes, so pass the GROUP ids, not the children). \`rename\` each group by subject.
 4. Track progress (their status badges show working/waiting) and coordinate: when a stream
    finishes, the user merges from the group's chip (never merge for them); release a finished
    station with \`close-worktree --group <id>\` (unbind keeps the directory).

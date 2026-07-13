@@ -1030,10 +1030,37 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             transport.write(sid, input)
           }).dispose
         )
+        // Type a command only after the fresh shell settles. Writing immediately raced shell
+        // startup: zsh's init (rc files / ZLE setup) resets the tty with a FLUSH, which can eat
+        // part of a queued command — a long agent launch line then sits at the prompt mangled
+        // (unbalanced quote → `quote>` on Enter) instead of running. Wait for the first output
+        // (the prompt painting) to go quiet for a beat; cap the wait so a silent shell (no rc
+        // output beyond the prompt already captured) still gets its command.
+        const writeWhenShellReady = (cmd: string): void => {
+          let done = false
+          let timer: ReturnType<typeof setTimeout>
+          const fire = (): void => {
+            if (done) return
+            done = true
+            unsub()
+            transport.write(sid, `${cmd}\n`)
+          }
+          const unsub = transport.onData(sid, () => {
+            if (done) return
+            clearTimeout(timer)
+            timer = setTimeout(fire, 200) // quiet for 200ms after output → prompt is up
+          })
+          timer = setTimeout(fire, 1500) // silence cap: no output at all → write anyway
+          cleanups.push(() => {
+            done = true
+            clearTimeout(timer)
+            unsub()
+          })
+        }
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
         if (data.initialCommand) {
-          transport.write(sid, `${data.initialCommand}\n`)
+          writeWhenShellReady(data.initialCommand)
           updateNodeData(id, { initialCommand: undefined })
         } else if (fresh && agentId && canResume(agentId)) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
@@ -1048,7 +1075,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           // because this fires on mount: right after a machine reboot it can beat the CLI version
           // probe, and an unanswered probe would conservatively drop `auto`.
           const cmd = base && withPermissionMode(base, agentId, await ensureActivePermissionMode())
-          if (cmd) transport.write(sid, `${cmd}\n`)
+          if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
         }
       })
     })()

@@ -145,7 +145,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'Orchestration ("Build with Nodeterm orchestration"): break the task into 2-5 independent',
     'workstreams; per stream `open-worktree --branch <slug>` then `open-agent --agent claude',
     '--group <groupId> --prompt "<concrete task>"` (each stream on its own branch, no tree',
-    'conflicts); `rename`/`arrange` the groups; the user merges when a stream is done, and',
+    'conflicts). Members land in grid slots inside the frame automatically; align the frames',
+    'themselves with `arrange --nodes <groupId,…> --layout row` (pass GROUP ids — arrange/align',
+    'are top-level only) and `rename` each by subject. The user merges when a stream is done;',
     '`close-worktree --group <id>` releases a finished station.'
   ].join('\n')
 }

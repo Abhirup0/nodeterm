@@ -270,10 +270,15 @@ const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
 // and never below 1 (zooming IN doesn't shrink them). Written as a CSS var once per
 // viewport frame (see onMove) — CSS does the scaling, no per-node re-render.
 const setGroupLabelBoost = (zoom: number): void => {
-  // Cap 4 = constant on-screen size down to 25% zoom; beyond that it shrinks again so
-  // pills can't blanket the canvas at extreme zoom-out (minZoom goes to 0.01).
-  const boost = Math.min(4, Math.max(1, 1 / (zoom || 1)))
+  // Cap 2.5 = constant on-screen size down to 40% zoom; beyond that it shrinks again so
+  // pills can't blanket the canvas at extreme zoom-out (minZoom goes to 0.01). The old cap
+  // of 4 let a WORKTREE group's wide pill (branch chip + counters + buttons) scale past its
+  // own 760px frame and swirl over the neighbors ("vortex").
+  const boost = Math.min(2.5, Math.max(1, 1 / (zoom || 1)))
   document.documentElement.style.setProperty('--group-label-boost', boost.toFixed(3))
+  // Far out, keep only the name: the worktree chip is unreadable/unclickable at that scale
+  // anyway, and it is what makes the pill wide enough to blanket adjacent frames.
+  document.documentElement.classList.toggle('group-labels-compact', boost >= 2)
 }
 
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
@@ -2698,7 +2703,10 @@ export function Canvas() {
   // carries no cwd of its own — the worktree's path is what its children inherit
   // (`cwdForNewNodeIn`), so the frame IS the binding.
   const attachWorktree = useCallback(
-    (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree): string => {
+    (
+      target: { groupId: string | null; at?: { x: number; y: number }; size?: { width: number; height: number } },
+      wt: GroupWorktree
+    ): string => {
       let groupId = target.groupId
       if (groupId) {
         setNodes((ns) =>
@@ -3950,11 +3958,31 @@ export function Canvas() {
       // (parentInto converts back to group-relative coords), so the control fan-out stays inside
       // the frame and moves with it.
       const addAndConnect = (node: CanvasNode) => {
-        const placed = src.parentId ? parentInto(node, src.parentId) : node
+        // A node that arrives ALREADY parented (open-agent --group placed it into a frame with
+        // relative coords) must pass through untouched — re-running parentInto would read its
+        // relative position as absolute and land it off-frame.
+        const placed = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
         setNodes((ns) => [...ns, placed])
         connect(placed.id)
         markDirty()
         return placed.id
+      }
+      // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
+      // cells under the header. Pure geometry — the frame is grown to fit before children land.
+      const GROUP_PAD_X = 24
+      const GROUP_PAD_TOP = 56
+      const GROUP_GAP = 24
+      const groupSlot = (slot: number, w: number, h: number) => ({
+        x: GROUP_PAD_X + (slot % 2) * (w + GROUP_GAP),
+        y: GROUP_PAD_TOP + Math.floor(slot / 2) * (h + GROUP_GAP)
+      })
+      const groupSizeFor = (children: number, w: number, h: number) => {
+        const cols = Math.min(2, Math.max(1, children))
+        const rows = Math.max(1, Math.ceil(children / 2))
+        return {
+          width: GROUP_PAD_X * 2 + cols * w + (cols - 1) * GROUP_GAP,
+          height: GROUP_PAD_TOP + rows * h + (rows - 1) * GROUP_GAP + GROUP_PAD_X
+        }
       }
 
       try {
@@ -4008,6 +4036,11 @@ export function Canvas() {
               projStore.getProject(projStore.activeProjectId ?? ''),
               useSettings.getState().settings.claudeAccounts
             )
+            // Members land in tidy 2-column grid slots inside the frame (after existing
+            // children), and the frame is grown FIRST so extent:'parent' cannot clamp them.
+            const existingChildren = intoGroupId
+              ? nodesRef.current.filter((nd) => nd.parentId === intoGroupId).length
+              : 0
             const ids: string[] = []
             for (let i = 0; i < count; i++) {
               const node = createAgentNode(
@@ -4020,7 +4053,33 @@ export function Canvas() {
                 account,
                 activePermissionMode()
               )
-              ids.push(addAndConnect(intoGroupId ? parentInto(node, intoGroupId) : node))
+              if (intoGroupId) {
+                const w = (node.width as number) ?? 600
+                const h = (node.height as number) ?? 400
+                if (i === 0) {
+                  const need = groupSizeFor(existingChildren + count, w, h)
+                  setNodes((ns) =>
+                    ns.map((nd) =>
+                      nd.id === intoGroupId
+                        ? {
+                            ...nd,
+                            width: Math.max((nd.width as number) ?? 0, need.width),
+                            height: Math.max((nd.height as number) ?? 0, need.height),
+                            style: {
+                              ...nd.style,
+                              width: Math.max((nd.width as number) ?? 0, need.width),
+                              height: Math.max((nd.height as number) ?? 0, need.height)
+                            }
+                          }
+                        : nd
+                    )
+                  )
+                }
+                node.position = groupSlot(existingChildren + i, w, h)
+                node.parentId = intoGroupId
+                node.extent = 'parent'
+              }
+              ids.push(addAndConnect(node))
             }
             reply({
               ok: true,
@@ -4245,8 +4304,17 @@ export function Canvas() {
               reply({ ok: false, error: `open-worktree: ${res.message}` })
               return
             }
+            // Fan successive frames out horizontally (frame width + gap) so several
+            // open-worktree calls in one orchestration land side by side, not stacked.
+            const groupFan = nodesRef.current.filter(
+              (nd) => nd.type === 'group' && !nd.parentId
+            ).length
+            const frameAt = {
+              x: placeBelow(0).x + groupFan * (WORKTREE_GROUP_SIZE.width + 60),
+              y: placeBelow(0).y
+            }
             const groupId = worktreeControlRef.current.attachWorktree(
-              { groupId: bindGroupId, at: placeBelow() },
+              { groupId: bindGroupId, at: frameAt },
               worktreeFromCreate({ repoPath: repoRoot, mode: 'new', branch, baseRef, path: wtPath })
             )
             reply({
