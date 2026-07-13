@@ -69,6 +69,8 @@ import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ConsentNotice } from '../remote/ConsentNotice'
+import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
@@ -246,6 +248,9 @@ interface MergeState {
 interface PendingPeerState {
   sas: string | null
   id: string
+  /** Human-facing peer name, if the tunnel carries one. The relay `RelayPeerPending` payload does
+   *  not yet, so this is undefined → the ConsentNotice falls back to a generic subject. */
+  label?: string
 }
 
 /**
@@ -1218,8 +1223,14 @@ export function Canvas() {
 
   // Host connection-approval gate: when a client finishes the handshake, prompt the host to
   // verify the SAS and allow/deny before any remote pty/fs RPC is served.
+  //
+  // Sourced off the NEW relay tunnel (`relayHost`, Stage 4 Task 2), NOT the legacy
+  // `remoteHost.onPeerPending`. Migrating means the old standing-host (phone) path no longer raises
+  // THIS dialog — deliberate: the phone is being moved to the relay tunnel separately
+  // (docs/ios-protocol-migration.md) and Task 10 deletes the `remoteHost` dialect outright. So we
+  // fully migrate rather than keep both sources alive (which would only complicate that removal).
   useEffect(() => {
-    return window.nodeTerminal.remoteHost.onPeerPending((info) => setPendingPeer(info))
+    return window.nodeTerminal.relayHost.onPeerPending((info) => setPendingPeer(info))
   }, [])
 
   // ---- canvas sync (team) ----
@@ -5523,12 +5534,10 @@ export function Canvas() {
 
       {pendingPeer && (
         <ConfirmDialog
-          message={
-            `A device wants to access this machine.\n\n` +
-            `Approve ONLY if you started this connection. The other device shows the same code:\n\n` +
-            `        ${pendingPeer.sas ?? '— — —'}\n\n` +
-            `If the codes don't match, deny it.`
-          }
+          // ConsentNotice → describeGrant: the human reads WHAT they grant ("<peer> will be able to
+          // run commands on this Mac — the same as SSH") above the SAS body, before confirming.
+          body={<ConsentNotice peerLabel={pendingPeer.label ?? 'This device'} />}
+          message={peerApprovalView(pendingPeer).message}
           confirmLabel="Allow"
           cancelLabel="Deny"
           // A REMOTE device raised this — the far side completing the pairing handshake pops it
@@ -5539,11 +5548,14 @@ export function Canvas() {
           enterConfirms={false}
           danger
           onConfirm={() => {
-            window.nodeTerminal.remoteHost.approve(pendingPeer.id)
+            window.nodeTerminal.relayHost.confirm(peerApprovalView(pendingPeer).confirmId)
             setPendingPeer(null)
           }}
+          // The relay host API offers no explicit reject (see main/remote/relay-host-service.ts):
+          // declining is simply NOT confirming — the peer is only ever admitted once the host
+          // confirms (`onOpen` fires after both humans match the SAS), so closing this dialog
+          // without confirming leaves the pending peer un-admitted and it times out server-side.
           onCancel={() => {
-            window.nodeTerminal.remoteHost.reject(pendingPeer.id)
             setPendingPeer(null)
           }}
         />
