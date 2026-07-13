@@ -894,7 +894,7 @@ export function Canvas() {
           .then(async (info) => {
             // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
             // Source Control panel's re-fetch (which keys off that entry) already hits the master.
-            await window.nodeTerminal.git.setActiveRemote(project.id)
+            await api.git.setActiveRemote(project.id)
             useSshConn.getState().setConn(project.id, info)
           })
           .catch(() => {
@@ -903,7 +903,7 @@ export function Canvas() {
       })
     } else {
       // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
-      void window.nodeTerminal.git.setActiveRemote(null)
+      void api.git.setActiveRemote(null)
     }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
@@ -2216,7 +2216,7 @@ export function Canvas() {
       resetDisplacedCwd(groupId, wt.path, false)
       // A failed prune must still let the binding go — dropping it is the user's ask, and a
       // registration we could not clean up is not a reason to trap them in a dead group.
-      await window.nodeTerminal.git
+      await api.git
         .worktreeRemove(wt.repoPath, wt.path, false, true)
         .catch(() => {})
     },
@@ -2498,7 +2498,7 @@ export function Canvas() {
       // button disabled by `busy`: no error, no way out but Escape. Fail closed — clear busy, say so
       // inline, and leave the dialog open so the user can retry. (The sibling READS in this feature
       // catch for exactly this reason; the three destructive calls did not.)
-      const res = await window.nodeTerminal.git
+      const res = await api.git
         .worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
         .catch((e: unknown) => ({
           ok: false as const,
@@ -2560,7 +2560,7 @@ export function Canvas() {
     // The probe is a courtesy (it only enriches the warning), so a rejected IPC (WS-RPC transport
     // error on the Server Edition) must not swallow the whole action: without this catch the dialog
     // silently never opens and Remove looks broken. Fail open — ask without the dirty-file count.
-    const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
+    const status = await api.git.status(wt.path).catch(() => null)
     const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
     const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
     // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
@@ -2631,7 +2631,7 @@ export function Canvas() {
     //    removed, touch no sessions" — the same fail-closed answer a refusal gets. Without the catch
     //    the rejection escaped the callback and the whole action became a silent no-op: no notice
     //    ever appeared, so the user could not tell it from a removal that quietly worked.
-    const res = await window.nodeTerminal.git
+    const res = await api.git
       .worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
       .catch((e: unknown) => ({
         ok: false as const,
@@ -2674,7 +2674,7 @@ export function Canvas() {
     setMergeTarget(null)
     if (!t) return
     const push = t.hasOrigin && mergePush
-    void window.nodeTerminal.git
+    void api.git
       .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
       .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
       // A rejected ipc (a WS drop mid-merge) otherwise produced NO notice at all — the merge looked
@@ -2849,7 +2849,7 @@ export function Canvas() {
     // is cosmetic; HERE it costs the user a running process. So probe the directory once, right
     // before the irreversible step. This is the second (and last) sanctioned direct git read outside
     // the worktrees store — cheap, one-shot, and only on an explicit destructive confirm.
-    const probe = await window.nodeTerminal.git.status(wtPath).catch(() => null)
+    const probe = await api.git.status(wtPath).catch(() => null)
     if (!probe?.hasRepo) {
       setNotice({
         kind: 'error',
@@ -3941,7 +3941,7 @@ export function Canvas() {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
               return
             }
-            const res = await window.nodeTerminal.git
+            const res = await api.git
               .worktreeAdd(repoRoot, wtPath, branch, baseRef, true)
               .catch((e: unknown) => ({
                 ok: false as const,
