@@ -64,6 +64,7 @@ import {
 } from './remote/host-service'
 import { initStandingHost } from './remote/standing-host'
 import { killRelayHostsByPeerKey } from './remote/relay-host'
+import { initRelayHost } from './remote/relay-host-service'
 import { createRevoker } from './remote/revocation'
 import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
 import { initRemoteClient } from './remote/client-service'
@@ -1015,6 +1016,11 @@ app.whenReady().then(async () => {
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager, listProjectsOutput)
+  // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
+  // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the
+  // phone still uses the legacy flow). Inert until `relay:host:start` — a solo user pays nothing.
+  // Revocation reaches its sessions via `killRelayHostsByPeerKey` (peerRevoker, above).
+  initRelayHost(win, corePlatform, {})
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
   // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
   standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)

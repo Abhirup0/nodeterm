@@ -493,7 +493,9 @@ interface PairTokenResponse {
 }
 
 // Mint a single-use pairing token from our API, proving entitlement with the stored token.
-async function mintPairingToken(entitlement: string): Promise<PairTokenResponse> {
+// Exported so the NEW interactive relay host (relay-host-service.ts) mints its offer token the same
+// way (same `POST /v1/pair/token`, same entitlement proof) instead of duplicating the call.
+export async function mintPairingToken(entitlement: string): Promise<PairTokenResponse> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8000)
   let res: Response
