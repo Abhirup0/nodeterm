@@ -247,10 +247,9 @@ export class UiSinkRegistry {
     // A provider that throws would otherwise be an unhandled rejection → process exit under Node's
     // default. `resync` already contains its own failures; this is the last line of defence.
     void this.resync(uiId, sessionId).catch((err) => {
-      console.warn(
-        '[nodeterm-server] resync failed',
-        err instanceof Error ? err.message : String(err)
-      )
+      // Shell-neutral prefix: this code runs in the Server Edition AND (Stage 4b) in the desktop
+      // shell for its relay peers, where "[nodeterm-server]" would be a lie.
+      console.warn('[ui-sink] resync failed', err instanceof Error ? err.message : String(err))
     })
   }
 

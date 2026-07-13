@@ -146,6 +146,33 @@ describe('ServerPlatform', () => {
     expect(p.clientIds()).toEqual([b])
   })
 
+  it('attach mints monotone ids into the shared registry, and detach unregisters (incl. flow state)', () => {
+    // Pins the delegation seam: ServerPlatform owns the id counter, UiSinkRegistry owns the sinks
+    // and their backpressure bookkeeping. attach → register, detach → unregister (which prunes).
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1' })
+    const a = p.attach(fakeSink().sink)
+    const b = p.attach(fakeSink().sink)
+    expect([a, b]).toEqual([1, 2])
+    expect(p.clientIds()).toEqual([1, 2])
+
+    // Pause (a, s1) via a high-water send, then detach: the pruning must delegate too — a fresh
+    // attach must not inherit a pause it never issued (and detach must not throw).
+    const flow: Array<{ uiId: number; sid: string; resume: boolean }> = []
+    p.setFlowController((uiId, sid, resume) => flow.push({ uiId, sid, resume }))
+    const slow = p.attach({
+      sendText: () => {}, sendBinary: () => {}, bufferedAmount: () => 2_000_000
+    })
+    p.sendTo(slow, 'pty:data:s1', 'x')
+    expect(flow).toEqual([{ uiId: slow, sid: 's1', resume: false }])
+    p.detach(slow)
+    expect(p.clientIds()).toEqual([1, 2])
+    p.sendTo(slow, 'pty:data:s1', 'x') // gone: no sink, no flow event
+    expect(flow).toEqual([{ uiId: slow, sid: 's1', resume: false }])
+
+    p.detach(a)
+    expect(p.clientIds()).toEqual([2])
+  })
+
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {
     const p = new ServerPlatform({ userDataDir: '/data', appVersion: '9.9.9' })
     expect(p.userDataDir).toBe('/data')
