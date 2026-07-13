@@ -1347,8 +1347,10 @@ export function Canvas() {
         order.onLocal(m)
         // Cast to the ACTIVE session's core — a relay tab publishes to the relay HOST, not to B's
         // own local core (the bug this fixes). Byte-identical on a local tab (`activeSession.api`
-        // IS `window.nodeTerminal`).
-        canvasSyncTarget(activeSession, activePresence.store.getState()).api.canvas.mutate(projectId, m)
+        // IS `window.nodeTerminal`). `canvasSyncTarget` decides the GATE (hasPeers) at bind time;
+        // the cast target is just the session's api, so reach it directly — no per-cast allocation
+        // on this ~20 Hz path.
+        activeSession.api.canvas.mutate(projectId, m)
         return true
       },
       { src, shouldPublish: () => hasPeersRef.current }
