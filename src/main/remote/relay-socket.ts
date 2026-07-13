@@ -80,6 +80,18 @@ export type RelaySocket = {
   // passed in; for a host it is learned from the client's `e2ee_hello`. Null before then. Used by
   // the standing (phone) host to look the connecting device up in its pin-once approval list.
   peerPublicKeyB64(): string | null
+  // --- 4c tunnel: the Server Edition's rpc.ts protocol, carried inside the E2EE box ------------
+  // Send one rpc.ts TEXT frame (a JSON RpcMessage). False if the channel is not ready — a tunnel
+  // frame is NEVER sent in the clear.
+  sendTunnelText(json: string): boolean
+  // Send one rpc.ts BINARY frame (encodePtyData bytes). False if the channel is not ready.
+  sendTunnelBinary(bytes: Uint8Array): boolean
+  // Bytes handed to the underlying socket but not yet flushed (ws.bufferedAmount + anything still
+  // sitting in the pre-open queue). This is the number Stage 2's per-client backpressure and the
+  // 8 MB WS_DROP_WATER drop-and-redraw ceiling key on (see src/core/ui-sink-registry.ts): a sink
+  // that reports 0 silently disables the ceiling, and a slow peer then queues pty output without
+  // bound until the host process dies. It must stay honest.
+  bufferedAmount(): number
   // Tear down: stops reconnects and closes the transport.
   close(): void
 }
@@ -103,11 +115,21 @@ export type ConnectRelayOptions = {
   onRpc(msg: RpcRequest): void
   onFrame(f: Frame): void
   onClose(): void
+  // An rpc.ts frame arrived over the ENCRYPTED, session-keyed, role-tagged, replay-checked
+  // channel. This is the ONLY inbound path 4c's trust + RPC layers may trust: anything that did
+  // not come out of the E2EE box never reaches here.
+  onTunnel?(kind: 'text' | 'binary', payload: Uint8Array): void
 }
 
 // Plaintext-tag bytes for decrypted peer payloads.
 const TAG_RPC = 0x01
 const TAG_FRAME = 0x02
+// 4c tunnel: the Server Edition's rpc.ts protocol, carried verbatim inside the E2EE box. Text = a
+// JSON RpcMessage; binary = an encodePtyData frame. Both ride the SAME encrypted stream as
+// everything else — same sendSeq counter, same FIFO delivery — because Stage 3's canvas
+// convergence needs a single ordered channel per client.
+const TAG_TUNNEL_TEXT = 0x03
+const TAG_TUNNEL_BIN = 0x04
 
 const RPC_TIMEOUT_MS = 30_000
 const KEEPALIVE_INTERVAL_MS = 25_000
@@ -393,6 +415,14 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
     }
     const tag = plain[0]
     const body = plain.subarray(1)
+    if (tag === TAG_TUNNEL_TEXT) {
+      opts.onTunnel?.('text', body)
+      return
+    }
+    if (tag === TAG_TUNNEL_BIN) {
+      opts.onTunnel?.('binary', body)
+      return
+    }
     if (tag === TAG_FRAME) {
       const frame = decodeFrame(body)
       if (frame) {
@@ -542,6 +572,18 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
       }
       return sendEncrypted(tagged(TAG_FRAME, encodeFrame(op, streamId, seq, payload)))
     },
+    sendTunnelText(json) {
+      return sendEncrypted(tagged(TAG_TUNNEL_TEXT, textEncoder.encode(json)))
+    },
+    sendTunnelBinary(bytes) {
+      return sendEncrypted(tagged(TAG_TUNNEL_BIN, bytes))
+    },
+    bufferedAmount() {
+      // Honest by construction: the transport reports what it has been handed and has not yet
+      // flushed. No backpressure decision is made here — the caller (ui-sink-registry) owns the
+      // thresholds; this only has to tell the truth. Not connected => nothing is queued => 0.
+      return transport?.bufferedAmount ?? 0
+    },
     sas() {
       return baseKey ? sasFromSharedKey(baseKey) : null
     },
@@ -648,21 +690,28 @@ function openWebSocketTransport(url: string): RelayTransport {
   // Buffer sends issued before 'open'.
   const queue: (string | Uint8Array)[] = []
   let open = false
+  // Bytes sitting in `queue`. They are real, un-flushed bytes that `ws.bufferedAmount` cannot see
+  // (the socket has not been handed them yet), so leaving them out would make bufferedAmount lie
+  // during exactly the window in which a burst can pile up — and a backpressure ceiling that
+  // believes the lie stops capping, letting the host queue pty output without bound.
+  let queuedBytes = 0
   ws.on('open', () => {
     open = true
     for (const item of queue.splice(0)) {
       ws.send(item)
     }
+    queuedBytes = 0
   })
   return {
     get bufferedAmount() {
-      return ws.bufferedAmount
+      return ws.bufferedAmount + queuedBytes
     },
     send: (data) => {
       if (open) {
         ws.send(data)
       } else {
         queue.push(data)
+        queuedBytes += typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength
       }
     },
     close: () => ws.close(),
