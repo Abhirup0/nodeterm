@@ -2,7 +2,7 @@
 // the relay host (src/main/remote), the renderer (Canvas), and the canvas-sync reflector
 // (src/core). Pure: no electron, no sockets, no disk.
 
-import { sanitizeInboundNode } from './node-exec'
+import { carryLocalNodeExec, sanitizeInboundNode } from './node-exec'
 import { REF_MAX_LEN } from './presence'
 import type { CanvasMutation, CanvasNodeState } from './types'
 
@@ -156,7 +156,9 @@ export function applyCanvasMutation(
   const idx = states.findIndex((n) => n.id === node.id)
   if (idx === -1) return [...states, node]
   const next = states.slice()
-  next[idx] = node
+  // …and OUR exec fields stay on the node the upsert replaces: they are per-machine, so a peer
+  // dragging our ssh terminal must not hand it back stripped of the jump host we configured.
+  next[idx] = carryLocalNodeExec(states[idx], node)
   return next
 }
 

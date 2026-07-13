@@ -1061,7 +1061,25 @@ export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): Can
     // Local-only data (initialCommand / respawnNonce / remote / forkFrom) is not serialized, so it
     // is not in `incoming` — carry it. Every serialized key IS present on incoming.data (as a value
     // or an explicit undefined), so the spread still applies the peer's clears.
-    data: { ...prev.data, ...incoming.data }
+    //
+    // The exec fields are the exception: they are PER-MACHINE and simply do not participate in the
+    // sync. Theirs were dropped by `sanitizeInboundNode` above; ours are carried across the upsert —
+    // otherwise a peer merely DRAGGING our ssh terminal would hand it back with no jump host, and
+    // the next save would erase it from our own machine-local index (@shared/node-exec).
+    data: {
+      ...prev.data,
+      ...incoming.data,
+      shell: prev.data.shell,
+      ...(incoming.data.ssh && prev.data.ssh?.extraArgs
+        ? {
+            ssh: {
+              ...incoming.data.ssh,
+              extraArgs: prev.data.ssh.extraArgs,
+              execTrusted: prev.data.ssh.execTrusted
+            }
+          }
+        : {})
+    }
   }
   return prev.parentId === incoming.parentId ? next : groupsFirst(next)
 }

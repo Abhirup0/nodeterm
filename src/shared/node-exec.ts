@@ -104,6 +104,29 @@ export function sanitizeInboundNode(node: CanvasNodeState): CanvasNodeState {
   return stripNodeExec(node)
 }
 
+/**
+ * Apply an inbound node OVER the copy we already hold, keeping OUR exec fields on it.
+ *
+ * Stripping the peer's values is only half of it: an upsert REPLACES the node, so a teammate merely
+ * dragging our ssh terminal would otherwise hand us back a copy with no `extraArgs` — and the next
+ * save would harvest that empty node and erase the jump host from our own machine-local index. The
+ * exec fields are per-machine, so they simply do not participate in the sync: theirs are dropped,
+ * ours are carried across every mutation that touches the node.
+ */
+export function carryLocalNodeExec(
+  prev: CanvasNodeState | undefined,
+  next: CanvasNodeState
+): CanvasNodeState {
+  if (!prev) return next
+  const extraArgs = prev.ssh?.extraArgs
+  if (prev.shell === undefined && extraArgs === undefined) return next
+  const out: CanvasNodeState = { ...next }
+  if (prev.shell !== undefined) out.shell = prev.shell
+  if (extraArgs !== undefined && out.ssh)
+    out.ssh = { ...out.ssh, extraArgs, execTrusted: prev.ssh?.execTrusted }
+  return out
+}
+
 /** `sanitizeInboundNode` for a whole mutation (the stamps — `src`, `seq` — are preserved). */
 export function sanitizeInboundMutation<T extends { op: 'upsert' | 'remove' }>(m: T): T {
   if (m.op !== 'upsert') return m
