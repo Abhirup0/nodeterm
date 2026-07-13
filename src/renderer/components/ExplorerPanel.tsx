@@ -98,7 +98,9 @@ function TreeEntry({
     if (selected === path) rowRef.current?.scrollIntoView({ block: 'center' })
   }, [selected, path])
 
-  // Files: first click selects, a second click (or double-click) opens the node.
+  // Files: first click selects, a second click opens the node. No separate dblclick
+  // handler — the second click of a double-click already lands in the `selected === path`
+  // branch here, so a dblclick handler would open the SAME file twice (two editor nodes).
   // Directories: a click toggles expansion (and selects for highlight).
   const onClick = useCallback(() => {
     if (entry.dir) {
@@ -118,7 +120,6 @@ function TreeEntry({
         className={`ex-row${entry.ignored ? ' ignored' : ''}${selected === path ? ' selected' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
-        onDoubleClick={() => !entry.dir && onOpenFile(path)}
         onContextMenu={(e) => {
           e.preventDefault()
           onSelect(path)
