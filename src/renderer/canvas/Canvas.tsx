@@ -1174,7 +1174,7 @@ export function Canvas() {
           return false
         }
         order.onLocal(m)
-        window.nodeTerminal.canvas.mutate(projectId, m)
+        api.canvas.mutate(projectId, m)
         return true
       },
       { src, shouldPublish: () => hasPeersRef.current }
@@ -1229,7 +1229,7 @@ export function Canvas() {
   // direct setNodes() bypasses handleNodesChange (which is where local edits mark dirty). Two
   // clients saving the same converged state is harmless; never saving it is not.
   useEffect(() => {
-    return window.nodeTerminal.canvas.onMutation((projectId, mutation) => {
+    return api.canvas.onMutation((projectId, mutation) => {
       hasPeersRef.current = true // proof of a peer, whatever the presence table says
       if (!orderRef.current?.accept(mutation)) return
       if (projectId !== useProjects.getState().activeProjectId) {
@@ -1405,7 +1405,7 @@ export function Canvas() {
         const note = async (selfId: string, otherId: string) => {
           if (status[selfId]?.state === 'working') return
           const { shimPath } = await window.nodeTerminal.contextLink.info()
-          void window.nodeTerminal.pty.sendText(
+          void api.pty.sendText(
             selfId,
             buildContextLinkNote(agentIdOf(selfId), titleOf(otherId), shimPath)
           )
@@ -1425,7 +1425,7 @@ export function Canvas() {
         (sticky?.data.text as string) ?? '',
         agentIdOf(target)
       )
-      if (msg) void window.nodeTerminal.pty.sendText(target, msg)
+      if (msg) void api.pty.sendText(target, msg)
     },
     [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
   )
@@ -2929,7 +2929,7 @@ export function Canvas() {
       const known = useAgentStatus.getState().byId[nodeId]?.sessionId
       let originalId = known
       if (known) {
-        await window.nodeTerminal.pty.sendText(nodeId, '/branch')
+        await api.pty.sendText(nodeId, '/branch')
       } else {
         const res = await branchClaudeSession(api, nodeId)
         if (!res.ok || !res.originalId) {
@@ -4027,7 +4027,7 @@ export function Canvas() {
             markDirty()
             const agentId = target.data.agentId as AgentId | undefined
             if (agentId && canRename(agentId)) {
-              void window.nodeTerminal.pty.sendText(id, `/rename ${title}`)
+              void api.pty.sendText(id, `/rename ${title}`)
             }
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
             return
@@ -4050,7 +4050,7 @@ export function Canvas() {
               onConfirm: async () => {
                 setConfirm(null)
                 try {
-                  const ok = await window.nodeTerminal.pty.sendText(args.node, args.text ?? '')
+                  const ok = await api.pty.sendText(args.node, args.text ?? '')
                   reply({
                     ok,
                     message: ok ? 'sent' : 'failed',
@@ -4155,7 +4155,7 @@ export function Canvas() {
       const agentId = liveAgent ?? storedAgent
       const name = title.trim()
       if (agentId && canRename(agentId) && name) {
-        void window.nodeTerminal.pty.sendText(id, `/rename ${name}`)
+        void api.pty.sendText(id, `/rename ${name}`)
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]
@@ -4169,7 +4169,7 @@ export function Canvas() {
       // unmounting mid-request; this Canvas-level call completes and applies the name anyway.
       useSessionNaming.getState().set(id, true)
       try {
-        const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
+        const r = await api.pty.generateName(id, cwd ?? '')
         if (r.ok) renameSession(projectId, id, r.message)
       } finally {
         useSessionNaming.getState().set(id, false)
@@ -4185,7 +4185,7 @@ export function Canvas() {
       if (memberIds.length === 0) return
       useSessionNaming.getState().set(groupId, true)
       try {
-        const r = await window.nodeTerminal.pty.generateGroupName(memberIds, cwd ?? '')
+        const r = await api.pty.generateGroupName(memberIds, cwd ?? '')
         if (r.ok) renameSession(projectId, groupId, r.message)
       } finally {
         useSessionNaming.getState().set(groupId, false)
@@ -4413,7 +4413,7 @@ export function Canvas() {
     if (!stale.length) return
     let cancelled = false
     void Promise.all(
-      stale.map(async (n) => [n.id, await window.nodeTerminal.pty.capture(n.id)] as const)
+      stale.map(async (n) => [n.id, await api.pty.capture(n.id)] as const)
     ).then((pairs) => {
       if (cancelled) return
       const ts = Date.now()
