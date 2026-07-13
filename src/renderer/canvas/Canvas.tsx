@@ -114,6 +114,7 @@ import {
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
 import { useWorktrees } from '../state/worktrees'
+import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
   hasHooks,
@@ -455,6 +456,10 @@ export function Canvas() {
   } | null>(null)
   const [worktreeBusy, setWorktreeBusy] = useState(false)
   const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  // Local branch names for the dialog's Base / existing-branch dropdown. Fetched fresh each time the
+  // dialog opens (a branch created in a terminal since the last store refresh should still show), so
+  // it is dialog-local state rather than a store fact.
+  const [worktreeBranches, setWorktreeBranches] = useState<string[]>([])
   // The store is filled asynchronously by the active-project effect, so the dialog subscribes
   // (rather than reading getState() once) — the repo may resolve after it's already open.
   const worktreeRepoRoot = useWorktrees((s) => s.repoRoot)
@@ -2553,6 +2558,16 @@ export function Canvas() {
       }
       setWorktreeError(null)
       setWorktreeDialog({ groupId, at, projectId })
+      // Fresh branch list for the Base / existing-branch dropdown. Clear first so a previous repo's
+      // branches can't flash; fetch fire-and-forget (a failed read just leaves the field free-text).
+      setWorktreeBranches([])
+      const root = useWorktrees.getState().repoRoot
+      if (root) {
+        void activeSessionApi()
+          .git.status(root)
+          .then((s) => setWorktreeBranches(s.branches ?? []))
+          .catch(() => setWorktreeBranches([]))
+      }
     },
     []
   )
@@ -5460,6 +5475,7 @@ export function Canvas() {
           repoPath={worktreeRepoRoot ?? ''}
           existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
           defaultBaseRef={resolveBaseRef(worktreeEntries)}
+          branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               userDataDir,

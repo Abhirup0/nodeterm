@@ -13,6 +13,10 @@ interface Props {
   existing: WorktreeEntry[]
   /** The repo's default branch (the main checkout's), used as the Base default. */
   defaultBaseRef: string
+  /** The repo's local branch names, offered as a dropdown for Base (and for the "existing branch"
+   *  field). A ref can still be anything (a tag, a SHA, `origin/x`), so the field stays free-text —
+   *  the list is a `<datalist>` of suggestions, not an exhaustive `<select>`. */
+  branches: string[]
   /** Suggested worktree path. Returns '' when no writable base dir is known — see `pathUnknown`. */
   defaultPath: (repoPath: string, branch: string) => string
   busy: boolean
@@ -28,6 +32,7 @@ export function WorktreeDialog({
   repoPath,
   existing,
   defaultBaseRef,
+  branches,
   defaultPath,
   busy,
   error,
@@ -37,6 +42,12 @@ export function WorktreeDialog({
 }: Props) {
   const [mode, setMode] = useState<'new' | 'existing'>('new')
   const [branch, setBranch] = useState('feature/')
+  // `feature/` is a head-start for typing, not a submittable value — it fails `isValidGitRef`
+  // (trailing slash). Showing the red "not a valid branch name" error on an untouched dialog reads
+  // as the app yelling before the user has done anything, so the error waits until the field is
+  // touched. (Create stays disabled meanwhile — see `valid` — so an unfinished `feature/` can't
+  // slip through either way.)
+  const [branchEdited, setBranchEdited] = useState(false)
   const [baseRef, setBaseRef] = useState(defaultBaseRef)
   const [path, setPath] = useState(() => defaultPath(repoPath, 'feature/'))
   const [pathEdited, setPathEdited] = useState(false)
@@ -73,12 +84,10 @@ export function WorktreeDialog({
   // tracks the FIELD, not `pathEdited`: clearing the box after editing it also leaves Create
   // disabled, and a disabled button with no explanation is a dead end.
   const pathUnknown = !path.trim()
-  // The default branch value ('feature/') is a STARTING POINT for typing, not a submittable one —
-  // it fails `isValidGitRef` (trailing slash), so a fresh dialog must not let Create through: the
-  // ops layer would reject it and the user would see "Invalid branch name." on the very first use
-  // of the feature. Gate the button on the same validator the ops layer uses, so "clickable" always
-  // means "will not be rejected for this reason." The hint only fires once the field is non-empty —
-  // an untouched-but-empty field needs no explanation, `!valid` alone covers it.
+  // Gate Create on the same validator the ops layer uses, so "clickable" always means "will not be
+  // rejected for this reason" — the button reflects the REAL validity (so an untouched `feature/`
+  // can't be submitted). The red error, by contrast, only appears once the user has touched the
+  // field (`branchEdited`): a fresh dialog must not accuse the user of a bad name they never typed.
   const branchInvalid = !!branch.trim() && !isValidGitRef(branch)
   const valid = !!repoPath.trim() && !!branch.trim() && !branchInvalid && !!path.trim() && !busy
   const title = intent === 'bind' ? 'Bind to worktree' : 'New worktree'
@@ -134,12 +143,29 @@ export function WorktreeDialog({
           </label>
         </div>
 
+        {/* Local branch names offered to Base and to the "existing branch" field. A ref can still
+            be any string (tag / SHA / origin/x), so these are datalist SUGGESTIONS, not a select. */}
+        <datalist id="wt-branch-list">
+          {branches.map((b) => (
+            <option key={b} value={b} />
+          ))}
+        </datalist>
+
         <label className="bind-field">
           Branch
-          <input value={branch} onChange={(e) => setBranch(e.target.value)} />
+          {/* New branch = a name that must NOT exist yet (no suggestions). Existing branch = pick one
+              that DOES exist, so offer the branch list there. */}
+          <input
+            value={branch}
+            list={mode === 'existing' ? 'wt-branch-list' : undefined}
+            onChange={(e) => {
+              setBranch(e.target.value)
+              setBranchEdited(true)
+            }}
+          />
         </label>
 
-        {branchInvalid && (
+        {branchEdited && branchInvalid && (
           <div className="bind-error">
             Not a valid branch name — finish typing one (no spaces, "..", or a leading/trailing
             slash).
@@ -151,6 +177,7 @@ export function WorktreeDialog({
             Base
             <input
               value={baseRef}
+              list="wt-branch-list"
               onChange={(e) => {
                 setBaseRef(e.target.value)
                 setBaseEdited(true)
