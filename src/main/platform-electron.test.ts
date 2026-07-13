@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const h: {
   handlers: Record<string, (...a: any[]) => unknown>
@@ -35,11 +35,44 @@ vi.mock('./main-window', () => ({
 }))
 
 import { electronPlatform } from './platform-electron'
+import {
+  registerPeerSink,
+  unregisterPeerSink,
+  peerRegistry,
+  wirePeerRegistry,
+  type UiSink
+} from './peer-registry'
+import { decodePtyData } from '../shared/rpc'
+
+/** A relay peer id, as allocateRelayClientId() would mint it (≥ 1_000_000 — never a webContents id). */
+const PEER = 1_000_000
+
+/** A fake peer sink recording everything the platform pushed at it. */
+function peerSink() {
+  const text: string[] = []
+  const binary: Uint8Array[] = []
+  const sink: UiSink = {
+    sendText: (json) => text.push(json),
+    sendBinary: (buf) => binary.push(buf),
+    bufferedAmount: () => 0
+  }
+  return { text, binary, sink }
+}
 
 beforeEach(() => {
   h.handlers = {}
   h.sent = []
   h.clientIds = []
+  wirePeerRegistry({
+    setFlow: () => {},
+    captureForResync: async () => '',
+    onPeerGone: () => {}
+  })
+})
+
+afterEach(() => {
+  // No cross-test leak: whatever a test registered is torn down (presence leave + registry prune).
+  for (const id of peerRegistry().ids()) unregisterPeerSink(id)
 })
 
 describe('electronPlatform', () => {
@@ -70,5 +103,73 @@ describe('electronPlatform', () => {
     p.sendTo(1, 'ev', 'a')
     p.sendTo(999, 'ev', 'b') // must not throw
     expect(h.sent).toEqual([{ id: 1, channel: 'ev', args: ['a'] }])
+  })
+})
+
+/**
+ * The seam that makes a relay peer a FIRST-CLASS client of this desktop's core: a peer has no
+ * webContents, so before this every sendTo/broadcast aimed at one silently no-op'd (the host saw the
+ * phone, the phone saw nothing). All three members are now peer-aware — and, with no peer
+ * registered, bit-identical to the webContents-only code they replaced.
+ */
+describe('electronPlatform + relay peers', () => {
+  it('clientIds = webContents ids ++ peer ids', () => {
+    const p = electronPlatform()
+    h.clientIds = [5]
+    registerPeerSink(PEER, peerSink().sink)
+    expect(p.clientIds()).toEqual([5, PEER])
+  })
+
+  it('sendTo dispatches a peer id to its sink and a webContents id natively', () => {
+    const p = electronPlatform()
+    const s = peerSink()
+    registerPeerSink(PEER, s.sink)
+
+    p.sendTo(PEER, 'presence:sync', [{ clientId: PEER }])
+    expect(JSON.parse(s.text[0]!)).toEqual({
+      t: 'ev',
+      channel: 'presence:sync',
+      args: [[{ clientId: PEER }]]
+    })
+    expect(h.sent).toEqual([]) // nothing of the peer's leaked onto the webContents path
+
+    p.sendTo(1, 'ev', 'a')
+    expect(h.sent).toEqual([{ id: 1, channel: 'ev', args: ['a'] }])
+    expect(s.text).toHaveLength(1) // …and the webContents send did not reach the peer
+  })
+
+  it('sendTo routes a pty:data frame to the peer sink as BINARY', () => {
+    const p = electronPlatform()
+    const s = peerSink()
+    registerPeerSink(PEER, s.sink)
+    p.sendTo(PEER, 'pty:data:s1', 'hi')
+    expect(s.binary).toHaveLength(1)
+    expect(decodePtyData(s.binary[0]!)).toEqual({ sessionId: 's1', data: 'hi' })
+  })
+
+  it('broadcast reaches the main window AND every peer sink', () => {
+    const p = electronPlatform()
+    h.clientIds = [1]
+    const s = peerSink()
+    registerPeerSink(PEER, s.sink)
+    p.broadcast('presence:peer', { op: 'join' })
+    expect(h.sent).toContainEqual({ channel: 'presence:peer', args: [{ op: 'join' }] })
+    expect(JSON.parse(s.text[0]!)).toEqual({
+      t: 'ev',
+      channel: 'presence:peer',
+      args: [{ op: 'join' }]
+    })
+  })
+
+  it('is BIT-IDENTICAL to the webContents-only path with no peer registered (merge gate)', () => {
+    const p = electronPlatform()
+    h.clientIds = [5]
+    expect(p.clientIds()).toEqual([5]) // no peer artefact appended
+    p.sendTo(1, 'ev', 'a')
+    p.sendTo(999, 'ev', 'b') // unknown id → silent, exactly as before
+    expect(h.sent).toEqual([{ id: 1, channel: 'ev', args: ['a'] }])
+    h.sent.length = 0
+    p.broadcast('x', 1)
+    expect(h.sent).toEqual([{ channel: 'x', args: [1] }]) // exactly sendToMain, nothing else
   })
 })
