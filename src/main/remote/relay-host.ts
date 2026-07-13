@@ -28,7 +28,10 @@ import type { KeyPair } from './e2ee'
 import type { ElectronPlatform } from '../platform-electron'
 import { registerPeerSink, unregisterPeerSink } from '../peer-registry'
 import { allocateRelayClientId, presenceHub } from '../../core/presence/hub'
-import { E_UNAUTHORIZED, parseRpcMessage } from '../../shared/rpc'
+import { E_UNAUTHORIZED, parseRpcMessage, type RpcErr, type RpcOk } from '../../shared/rpc'
+import { IPC } from '../../shared/ipc'
+import { scopeWorkspaceToProject } from '../../shared/relay-workspace-scope'
+import type { Workspace } from '../../shared/types'
 
 export interface RelayHostSession {
   /** The peer's presence/platform ClientId once it is open, else null. */
@@ -154,6 +157,16 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     opts.onOpen(session)
   }
 
+  /** UX scope, NOT a trust boundary: for the ONE `workspace:load` method, when this hosting session
+   *  is bound to a single project, narrow the successful response to that project (see
+   *  scopeWorkspaceToProject). Every other method — and an error response, and an unscoped session —
+   *  passes through byte-identical. This can only NARROW: it never exposes anything the core did not
+   *  already return, and it never touches a non-`workspace:load` response. */
+  const scopeResponse = (method: string, res: RpcOk | RpcErr): RpcOk | RpcErr => {
+    if (!opts.sharedProjectId || method !== IPC.workspaceLoad || res.ok !== true) return res
+    return { ...res, result: scopeWorkspaceToProject(res.result as Workspace, opts.sharedProjectId) }
+  }
+
   const socket = connectRelay({
     url: opts.url,
     token: opts.token,
@@ -210,7 +223,7 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
         const id = clientId
         void opts.platform
           .dispatch(id, m)
-          .then((res) => socket.sendTunnelText(JSON.stringify(res)))
+          .then((res) => socket.sendTunnelText(JSON.stringify(scopeResponse(m.method, res))))
       } else if (m.t === 'cast') {
         opts.platform.cast(clientId, m.method, m.args)
       }
