@@ -536,6 +536,10 @@ export interface SshProjectStatusEvent {
   status: SshProjectStatus
   error?: string
   claudeAutoPermissionMode?: boolean
+  /** The remote `claude --version` output the probe read, riding the same `connected` event as
+   *  `claudeAutoPermissionMode`. `null` = the probe ran but found no claude (distinguishable from
+   *  "old CLI" in the tab-menu hint); absent = nothing new. */
+  remoteClaudeVersion?: string | null
 }
 
 export interface SshProjectApi {
@@ -551,6 +555,8 @@ export interface SshProjectApi {
     remoteHome?: string
     /** Whether the REMOTE host's claude CLI accepts `--permission-mode auto` (probed on connect). */
     claudeAutoPermissionMode?: boolean
+    /** The probed remote `claude --version` output (`null` = probe failed; only on reused conns). */
+    remoteClaudeVersion?: string | null
   }>
   /** Tear down the master (remote tmux is unaffected). */
   disconnect(projectId: string): Promise<void>

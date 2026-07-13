@@ -8,7 +8,9 @@ import {
   activePermissionMode,
   ensureActivePermissionMode,
   ensureClaudeCliCaps,
-  resetClaudeCliCapsForTests
+  resetClaudeCliCapsForTests,
+  sshAutoModeHint,
+  SSH_AUTO_PROBE_WAIT_MS
 } from './permissionMode'
 
 /** Stand in for the preload/bridge `claude.cliCaps()` probe. */
@@ -26,7 +28,7 @@ const SSH_SERVER = { id: 's1', label: 'box', host: 'box', user: 'me' } as unknow
 beforeEach(() => {
   useProjects.getState().hydrate({ version: 2, activeProjectId: '', projects: [] })
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS }, hydrated: false })
-  useSshConn.setState({ byProject: {}, autoPermByProject: {} })
+  useSshConn.setState({ byProject: {}, autoPermByProject: {}, remoteClaudeVersionByProject: {} })
   resetClaudeCliCapsForTests()
   mockCliCaps(MODERN)
 })
@@ -203,5 +205,94 @@ describe('ensureActivePermissionMode', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// A cold-restore relaunch on an SSH project fires on mount, seconds before the REMOTE probe's
+// login shell answers. Without a bounded wait, every relaunch after a server reboot silently
+// dropped `auto` — the exact "the setting does nothing on SSH" report this exists to fix.
+describe('ensureActivePermissionMode — SSH projects wait for the remote probe', () => {
+  it('waits for the remote answer, so a relaunch racing the probe still gets auto', async () => {
+    mockCliCaps(OLD) // the LOCAL CLI is irrelevant for a remote launch
+    const p = activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
+
+    const pending = ensureActivePermissionMode()
+    // The probe answer lands ASYNCHRONOUSLY, after the relaunch already started waiting — the
+    // exact cold-restore race (mount beats the remote login-shell probe by seconds).
+    setTimeout(
+      () => useSshConn.getState().setClaudeAutoPermissionMode(p.id, true, '2.1.90 (Claude Code)'),
+      25
+    )
+
+    await expect(pending).resolves.toBe('auto')
+  })
+
+  it('resolves without waiting when the probe already answered', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCliCaps(MODERN)
+      const p = activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
+      useSshConn.getState().setClaudeAutoPermissionMode(p.id, false, null)
+
+      const pending = ensureActivePermissionMode()
+      await vi.advanceTimersByTimeAsync(0) // no timer must be needed
+
+      await expect(pending).resolves.toBe('manual') // probed 'no' ⇒ bare command
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('times out into the bare command when no probe answer ever arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCliCaps(MODERN)
+      activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
+
+      const pending = ensureActivePermissionMode()
+      await vi.advanceTimersByTimeAsync(SSH_AUTO_PROBE_WAIT_MS)
+
+      await expect(pending).resolves.toBe('manual')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not wait at all when the resolved mode is not auto', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCliCaps(MODERN)
+      const p = activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
+      useProjects.getState().setProjectDefaultPermissionMode(p.id, 'plan')
+
+      const pending = ensureActivePermissionMode()
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(pending).resolves.toBe('plan')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// The tab menu's Auto rows surface WHY Auto may not apply on an SSH project — the silent
+// degradation was indistinguishable from "the dropdown is broken".
+describe('sshAutoModeHint', () => {
+  it('no hint once the remote CLI is confirmed to support auto', () => {
+    expect(sshAutoModeHint('yes', '2.1.90 (Claude Code)')).toBeNull()
+  })
+
+  it('names the too-old remote version and the required minimum', () => {
+    const hint = sshAutoModeHint('no', '2.0.30 (Claude Code)')
+    expect(hint).toContain('2.0.30')
+    expect(hint).toContain('2.1.71')
+  })
+
+  it('says claude was not found when the probe failed', () => {
+    expect(sshAutoModeHint('no', null)).toMatch(/not found/i)
+  })
+
+  it('reads as unverified while the probe has not answered', () => {
+    expect(sshAutoModeHint('unknown', undefined)).toMatch(/not verified/i)
   })
 })

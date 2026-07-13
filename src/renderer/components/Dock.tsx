@@ -3,7 +3,7 @@ import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/co
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
-import { accountsForProject } from '../state/workspace'
+import { accountsForProject, sshAccountsHint } from '../state/workspace'
 
 interface DockProps {
   dirty: boolean
@@ -92,8 +92,21 @@ export function Dock({
                   <span>{AGENT_CONFIG[aid].label}</span>
                 </button>
               )
+              if (aid !== 'claude') return [base]
+              // SSH project with no accounts on its host: a disabled row saying where this
+              // host's accounts come from (local accounts are correctly invisible here).
+              const acctHint = sshAccountsHint(activeProject, localAccounts)
+              if (acctHint) {
+                return [
+                  base,
+                  <button key={`${aid}-acct-hint`} disabled title={acctHint}>
+                    <AgentIcon agentId={aid} size={18} />
+                    <span>No accounts on this host yet</span>
+                  </button>
+                ]
+              }
               // Claude picks up one flat entry per logged-in local account (dock can't nest).
-              if (aid !== 'claude' || localAccounts.length === 0) return [base]
+              if (localAccounts.length === 0) return [base]
               return [
                 base,
                 ...localAccounts.map((a) => (

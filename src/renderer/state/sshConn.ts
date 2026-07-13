@@ -19,7 +19,15 @@ export interface SshConnInfo {
    *  is usually absent here and arrives later on a `connected` status event. Absent/false ⇒ this
    *  project's Claude nodes launch with the bare command (no `auto` flag). */
   claudeAutoPermissionMode?: boolean
+  /** The probed remote `claude --version` output (`null` = probe ran, claude not found). Feeds
+   *  the tab menu's Auto hint; only present on a reused (already probed) connection. */
+  remoteClaudeVersion?: string | null
 }
+
+/** What the remote probe has said so far — the tab menu's Auto hint reads differently for "not
+ *  probed yet" vs "probed and unsupported". The LAUNCH gate stays `supportsAutoPermissionMode`
+ *  (boolean, conservative: unknown = no flag). */
+export type SshAutoPermAnswer = 'yes' | 'no' | 'unknown'
 
 /**
  * Transient map of SSH project id → its live connection info (ControlMaster `controlPath` +
@@ -34,9 +42,13 @@ interface SshConnState {
    *  because the remote probe runs after connect and can land before OR after the connect promise
    *  writes the entry — a separate map makes the two orders equivalent. */
   autoPermByProject: Record<string, boolean>
+  /** project id → the probed remote `claude --version` output (`null` = claude not found). Kept
+   *  beside `autoPermByProject` (same lifecycle) so the tab-menu hint can name the version. */
+  remoteClaudeVersionByProject: Record<string, string | null>
   setConn(projectId: string, info: SshConnInfo): void
-  /** Record the remote CLI probe's answer (pushed on a `connected` status event once it lands). */
-  setClaudeAutoPermissionMode(projectId: string, supported: boolean): void
+  /** Record the remote CLI probe's answer (pushed on a `connected` status event once it lands).
+   *  `version` rides the same event; undefined leaves the cached version untouched. */
+  setClaudeAutoPermissionMode(projectId: string, supported: boolean, version?: string | null): void
   getControlPath(projectId: string): string | undefined
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
@@ -44,6 +56,11 @@ interface SshConnState {
   /** True ONLY when the remote CLI was probed and is known to accept `--permission-mode auto`.
    *  Not connected / never probed / older CLI all answer false (conservative — omit the flag). */
   supportsAutoPermissionMode(projectId: string): boolean
+  /** Tri-state view of the probe for UI hints: 'unknown' until an answer lands (or after
+   *  invalidation), then 'yes'/'no'. The launch gate above stays boolean. */
+  autoPermAnswer(projectId: string): SshAutoPermAnswer
+  /** The probed remote version (`null` = probed, claude not found; undefined = never probed). */
+  getRemoteClaudeVersion(projectId: string): string | null | undefined
   /** Drop the cached probe answer WITHOUT touching the rest of the conn info (unlike `clear()`,
    *  which is for project deletion). Call this on a `disconnected` / `reconnecting` status: if the
    *  project's SSH server gets repointed to a different host, the previous host's cached `true`
@@ -56,6 +73,7 @@ interface SshConnState {
 export const useSshConn = create<SshConnState>((set, get) => ({
   byProject: {},
   autoPermByProject: {},
+  remoteClaudeVersionByProject: {},
   setConn(projectId, info) {
     set((s) => ({
       byProject: { ...s.byProject, [projectId]: info },
@@ -63,11 +81,21 @@ export const useSshConn = create<SshConnState>((set, get) => ({
       autoPermByProject:
         info.claudeAutoPermissionMode === undefined
           ? s.autoPermByProject
-          : { ...s.autoPermByProject, [projectId]: info.claudeAutoPermissionMode }
+          : { ...s.autoPermByProject, [projectId]: info.claudeAutoPermissionMode },
+      remoteClaudeVersionByProject:
+        info.remoteClaudeVersion === undefined
+          ? s.remoteClaudeVersionByProject
+          : { ...s.remoteClaudeVersionByProject, [projectId]: info.remoteClaudeVersion }
     }))
   },
-  setClaudeAutoPermissionMode(projectId, supported) {
-    set((s) => ({ autoPermByProject: { ...s.autoPermByProject, [projectId]: supported } }))
+  setClaudeAutoPermissionMode(projectId, supported, version) {
+    set((s) => ({
+      autoPermByProject: { ...s.autoPermByProject, [projectId]: supported },
+      remoteClaudeVersionByProject:
+        version === undefined
+          ? s.remoteClaudeVersionByProject
+          : { ...s.remoteClaudeVersionByProject, [projectId]: version }
+    }))
   },
   getControlPath(projectId) {
     return get().byProject[projectId]?.controlPath
@@ -84,12 +112,23 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   supportsAutoPermissionMode(projectId) {
     return get().autoPermByProject[projectId] === true
   },
+  autoPermAnswer(projectId) {
+    const v = get().autoPermByProject[projectId]
+    return v === undefined ? 'unknown' : v ? 'yes' : 'no'
+  },
+  getRemoteClaudeVersion(projectId) {
+    return get().remoteClaudeVersionByProject[projectId]
+  },
   invalidateAutoPermissionMode(projectId) {
     set((s) => {
-      if (!(projectId in s.autoPermByProject)) return s
+      if (!(projectId in s.autoPermByProject) && !(projectId in s.remoteClaudeVersionByProject)) {
+        return s
+      }
       const next = { ...s.autoPermByProject }
       delete next[projectId]
-      return { autoPermByProject: next }
+      const nextVersion = { ...s.remoteClaudeVersionByProject }
+      delete nextVersion[projectId]
+      return { autoPermByProject: next, remoteClaudeVersionByProject: nextVersion }
     })
   },
   clear(projectId) {
@@ -98,7 +137,9 @@ export const useSshConn = create<SshConnState>((set, get) => ({
       delete next[projectId]
       const nextAuto = { ...s.autoPermByProject }
       delete nextAuto[projectId]
-      return { byProject: next, autoPermByProject: nextAuto }
+      const nextVersion = { ...s.remoteClaudeVersionByProject }
+      delete nextVersion[projectId]
+      return { byProject: next, autoPermByProject: nextAuto, remoteClaudeVersionByProject: nextVersion }
     })
   }
 }))

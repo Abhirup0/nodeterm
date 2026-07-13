@@ -201,6 +201,7 @@ import {
   reparentNode,
   resolveNewNodeAccount,
   accountsForProject,
+  sshAccountsHint,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
@@ -3551,11 +3552,15 @@ export function Canvas() {
         : undefined
       const withDefaultMark = (label: string, id?: string): string =>
         id === defaultAccountId ? `${label} ✓` : label
+      // SSH project with no accounts on its host: keep the submenu, with a disabled row saying
+      // where this host's accounts come from — local accounts are correctly invisible here, and
+      // a bare flat entry read as "multi-account is broken on SSH".
+      const accountsHint = sshAccountsHint(project, accounts)
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
           // Claude gets an account picker submenu when ≥1 account exists; System = project
           // default (resolved). Other agents stay flat (accounts are Claude-only).
-          if (aid === 'claude' && accounts.length > 0) {
+          if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
             return {
               type: 'submenu',
               label: `New ${AGENT_CONFIG[aid].label}`,
@@ -3572,7 +3577,17 @@ export function Canvas() {
                     icon: <AgentIcon agentId="claude" />,
                     onClick: () => addAgentNode('claude', at, groupId, a.id)
                   })
-                )
+                ),
+                ...(accountsHint
+                  ? [
+                      {
+                        label: 'No accounts on this host yet',
+                        onClick: () => {},
+                        disabled: true,
+                        hint: accountsHint
+                      } satisfies MenuItem
+                    ]
+                  : [])
               ]
             }
           }
@@ -4856,7 +4871,9 @@ export function Canvas() {
       // on a later `connected` event — record it so this project's next Claude launch can use
       // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
       if (e.claudeAutoPermissionMode !== undefined) {
-        useSshConn.getState().setClaudeAutoPermissionMode(e.projectId, e.claudeAutoPermissionMode)
+        useSshConn
+          .getState()
+          .setClaudeAutoPermissionMode(e.projectId, e.claudeAutoPermissionMode, e.remoteClaudeVersion)
       }
       // A repointed server (different host, possibly an older claude CLI) reconnects under the
       // SAME project id. Drop any cached auto-mode answer on disconnect/reconnect so a launch in

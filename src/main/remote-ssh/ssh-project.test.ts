@@ -165,13 +165,21 @@ describe('SshProjectManager', () => {
   // would launch `--permission-mode auto` on a CLI that exits 1 on it.
   const BANNER = 'Welcome — Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-89-generic)\nkernel 6.8.0-106\n'
 
-  /** A manager whose remote claude probe answers with `banner + <markers>version</markers>`. */
-  function mgrWithClaude(versionOut: string | null) {
-    const events: { status: string; claudeAutoPermissionMode?: boolean }[] = []
+  /** A manager whose remote claude probe answers with `banner + <markers>version</markers>`.
+   *  Pass an array to script successive probe attempts (retry coverage); the last entry repeats. */
+  function mgrWithClaude(versionOut: string | null | (string | null)[], retryDelaysMs?: number[]) {
+    const outputs = Array.isArray(versionOut) ? versionOut : [versionOut]
+    let probeCalls = 0
+    const events: {
+      status: string
+      claudeAutoPermissionMode?: boolean
+      remoteClaudeVersion?: string | null
+    }[] = []
     const run = vi.fn(async (args: string[]) => {
       const cmd = args.join(' ')
       if (cmd.includes('__NT_V_START__')) {
-        return { code: 0, stdout: versionOut === null ? BANNER : `${BANNER}${versionOut}` }
+        const out = outputs[Math.min(probeCalls++, outputs.length - 1)]
+        return { code: 0, stdout: out === null ? BANNER : `${BANNER}${out}` }
       }
       if (cmd.includes('printf %s')) return { code: 0, stdout: '/home/u' }
       return { code: 0, stdout: '' }
@@ -182,13 +190,24 @@ describe('SshProjectManager', () => {
       run,
       runScp: vi.fn(async () => ({ code: 0 })),
       getHook: () => ({ port: 1, token: 't', version: '1' }),
-      onStatus: (e) => events.push({ status: e.status, claudeAutoPermissionMode: e.claudeAutoPermissionMode })
+      onStatus: (e) =>
+        events.push({
+          status: e.status,
+          claudeAutoPermissionMode: e.claudeAutoPermissionMode,
+          remoteClaudeVersion: e.remoteClaudeVersion
+        }),
+      ...(retryDelaysMs ? { probeRetryDelaysMs: retryDelaysMs } : {})
     })
-    return { mgr, events, run }
+    return { mgr, events, run, probeCallCount: () => probeCalls }
   }
 
-  const probeEvent = (events: { claudeAutoPermissionMode?: boolean }[]) =>
-    events.find((e) => e.claudeAutoPermissionMode !== undefined)
+  const probeEvent = (
+    events: { claudeAutoPermissionMode?: boolean; remoteClaudeVersion?: string | null }[]
+  ) => events.find((e) => e.claudeAutoPermissionMode !== undefined)
+
+  const probeEvents = (
+    events: { claudeAutoPermissionMode?: boolean; remoteClaudeVersion?: string | null }[]
+  ) => events.filter((e) => e.claudeAutoPermissionMode !== undefined)
 
   it('a login-shell BANNER around an OLD claude never reports auto support (merge blocker)', async () => {
     const { mgr, events } = mgrWithClaude('__NT_V_START__2.0.30 (Claude Code)__NT_V_END__')
@@ -210,6 +229,61 @@ describe('SshProjectManager', () => {
     await mgr.connect('p1', conn)
     await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
     expect(probeEvent(events)?.claudeAutoPermissionMode).toBe(true)
+  })
+
+  it('the status event carries the probed remote version (for the tab-menu hint)', async () => {
+    const { mgr, events } = mgrWithClaude('__NT_V_START__2.0.30 (Claude Code)__NT_V_END__')
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    expect(probeEvent(events)?.remoteClaudeVersion).toBe('2.0.30 (Claude Code)')
+  })
+
+  it('a FAILED probe reports version null (distinguishable from "old CLI") and retries', async () => {
+    // First attempt: markers absent (claude not found — e.g. a transient PATH/login-shell hiccup);
+    // second attempt: a modern CLI. The first answer must land immediately (fail-open `false`,
+    // version null) so launch paths never wait on retries, and the retry must upgrade it to `true`.
+    const { mgr, events } = mgrWithClaude(
+      [null, '__NT_V_START__2.1.90 (Claude Code)__NT_V_END__'],
+      [1]
+    )
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvents(events).length).toBeGreaterThanOrEqual(2))
+    const probes = probeEvents(events)
+    expect(probes[0]).toMatchObject({ claudeAutoPermissionMode: false, remoteClaudeVersion: null })
+    expect(probes[probes.length - 1]).toMatchObject({
+      claudeAutoPermissionMode: true,
+      remoteClaudeVersion: '2.1.90 (Claude Code)'
+    })
+  })
+
+  it('a definite version answer stops the retries (a CLI does not upgrade mid-connection)', async () => {
+    const { mgr, events, probeCallCount } = mgrWithClaude(
+      '__NT_V_START__2.0.30 (Claude Code)__NT_V_END__',
+      [1, 1, 1]
+    )
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    // Give any (wrong) retry loop time to fire before counting.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(probeCallCount()).toBe(1)
+  })
+
+  it('gives up retrying after the configured attempts when claude never appears', async () => {
+    const { mgr, events, probeCallCount } = mgrWithClaude(null, [1, 1])
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvents(events).length).toBeGreaterThanOrEqual(3))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(probeCallCount()).toBe(3) // initial attempt + 2 retries, then stop
+    expect(probeEvents(events).every((e) => e.claudeAutoPermissionMode === false)).toBe(true)
+  })
+
+  it('a reused connection returns the probed answer + version with the connect result', async () => {
+    const { mgr, events } = mgrWithClaude('__NT_V_START__2.1.90 (Claude Code)__NT_V_END__')
+    await mgr.connect('p1', conn)
+    await vi.waitFor(() => expect(probeEvent(events)).toBeDefined())
+    const res = await mgr.connect('p1', conn)
+    expect(res.claudeAutoPermissionMode).toBe(true)
+    expect(res.remoteClaudeVersion).toBe('2.1.90 (Claude Code)')
   })
 
   it('connect does NOT wait on the claude probe (it runs after `connected`)', async () => {

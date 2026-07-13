@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { accountChipLabel, isAccountLoginNode, systemAccountDisplay } from './workspace'
+import {
+  accountChipLabel,
+  accountsForProject,
+  isAccountLoginNode,
+  sshAccountsHint,
+  systemAccountDisplay
+} from './workspace'
 import type { ClaudeAccount } from '@shared/types'
 
 const acct = (over: Partial<ClaudeAccount>): ClaudeAccount => ({
@@ -79,5 +85,31 @@ describe('isAccountLoginNode', () => {
     expect(isAccountLoginNode({ title: 'My session', initialCommand: 'claude' })).toBe(false)
     expect(isAccountLoginNode({ title: 'Terminal' })).toBe(false)
     expect(isAccountLoginNode({})).toBe(false)
+  })
+})
+
+// An SSH project's account pickers list ONLY accounts created on that host — local accounts are
+// (correctly) invisible there, which read as "multi-account is broken on SSH" without a hint row
+// explaining where accounts for this host come from.
+describe('sshAccountsHint', () => {
+  const sshProject = { ssh: { server: { host: 'box', user: 'me' } } }
+
+  it('hints on an SSH project whose host has no eligible accounts', () => {
+    const localOnly = [acct({ id: 'a1' })] // no `host` → local → filtered out for SSH
+    const eligible = accountsForProject(localOnly, sshProject)
+    expect(eligible).toEqual([])
+    expect(sshAccountsHint(sshProject, eligible)).toMatch(/Settings → Accounts/)
+  })
+
+  it('is null once the host has a matching account', () => {
+    const hosted = [acct({ id: 'a2', host: 'me@box' })]
+    const eligible = accountsForProject(hosted, sshProject)
+    expect(eligible).toHaveLength(1)
+    expect(sshAccountsHint(sshProject, eligible)).toBeNull()
+  })
+
+  it('is null for local projects (empty list there just means no managed accounts)', () => {
+    expect(sshAccountsHint(undefined, [])).toBeNull()
+    expect(sshAccountsHint({}, [])).toBeNull()
   })
 })

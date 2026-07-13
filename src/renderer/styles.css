@@ -268,7 +268,7 @@ body,
   cursor: pointer;
 }
 
-.tab-menu button:hover {
+.tab-menu button:hover:not(:disabled) {
   background: var(--panel-header);
 }
 
@@ -437,8 +437,14 @@ body,
   cursor: pointer;
 }
 
-.dock-menu button:hover {
+.dock-menu button:hover:not(:disabled) {
   background: var(--panel-header);
+}
+
+/* Inert hint rows (e.g. "No accounts on this host yet" in an SSH project). */
+.dock-menu button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 .dock-menu svg {

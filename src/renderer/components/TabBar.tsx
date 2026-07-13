@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
-import { accountsForProject, systemAccountDisplay } from '../state/workspace'
+import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
+import { useSshConn } from '../state/sshConn'
+import { sshAutoModeHint } from '../state/permissionMode'
 import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
@@ -104,6 +106,25 @@ export function TabBar({
   // Accounts eligible as the caret-menu project's default: local accounts for a local project, this
   // host's accounts for an SSH project (pending logins always excluded).
   const menuAccounts = accountsForProject(claudeAccounts, menuProject)
+  // SSH project with no accounts on its host: say where accounts for this host come from instead
+  // of presenting a bare System-only list (which read as "multi-account is broken on SSH").
+  const menuAccountsHint = sshAccountsHint(menuProject, menuAccounts)
+  // Live remote-probe view for the Auto rows below: on an SSH project `auto` only applies once the
+  // REMOTE claude CLI is confirmed >= 2.1.71, and without a hint that silent fail-open degrade is
+  // indistinguishable from a broken dropdown. Subscribed (not getState) so the ⚠︎ clears the
+  // moment the probe answers while the menu is open.
+  const autoPermByProject = useSshConn((s) => s.autoPermByProject)
+  const remoteClaudeVersionByProject = useSshConn((s) => s.remoteClaudeVersionByProject)
+  const menuAutoHint = menuProject?.ssh
+    ? sshAutoModeHint(
+        autoPermByProject[menuProject.id] === undefined
+          ? 'unknown'
+          : autoPermByProject[menuProject.id]
+            ? 'yes'
+            : 'no',
+        remoteClaudeVersionByProject[menuProject.id]
+      )
+    : null
 
   const closeMenu = () => {
     setMenuId(null)
@@ -326,6 +347,12 @@ export function TabBar({
                         {a.label}
                       </button>
                     ))}
+                    {menuAccountsHint && (
+                      <button disabled title={menuAccountsHint}>
+                        <span className="tab-menu__check" />
+                        No accounts on this host yet
+                      </button>
+                    )}
                   </div>
                 )}
               </>
@@ -340,6 +367,9 @@ export function TabBar({
             {modeOpen && (
               <div className="tab-menu__sub">
                 <button
+                  // On an SSH project the global Auto only applies once the REMOTE CLI is
+                  // confirmed — surface why it may currently do nothing (see menuAutoHint).
+                  title={globalMode === 'auto' ? (menuAutoHint ?? undefined) : undefined}
                   onClick={() => {
                     onSetDefaultPermissionMode(menuProject.id, undefined)
                     closeMenu()
@@ -349,17 +379,23 @@ export function TabBar({
                     {menuProject.defaultPermissionMode ? '' : '✓'}
                   </span>
                   Use global ({PERMISSION_MODE_LABELS[globalMode]})
+                  {globalMode === 'auto' && menuAutoHint ? ' ⚠︎' : ''}
                 </button>
                 {ALL_PERMISSION_MODES.map((m) => (
                   <button
                     key={m}
                     // A project override is written to <cwd>/.nodeterm/project.json, which is
                     // git-shared and mirrored to SSH servers — spell out for "Bypass all" that
-                    // the choice travels to everyone who clones the repo.
+                    // the choice travels to everyone who clones the repo. The Auto row instead
+                    // explains when it will NOT apply on this SSH project's host (remote CLI too
+                    // old / not found / not probed yet) — still selectable: the setting is kept
+                    // and applies the moment the host's CLI qualifies.
                     title={
                       m === 'bypassPermissions'
                         ? 'Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs Claude without permission checks too.'
-                        : undefined
+                        : m === 'auto'
+                          ? (menuAutoHint ?? undefined)
+                          : undefined
                     }
                     onClick={() => {
                       onSetDefaultPermissionMode(menuProject.id, m)
@@ -369,7 +405,7 @@ export function TabBar({
                     <span className="tab-menu__check">
                       {menuProject.defaultPermissionMode === m ? '✓' : ''}
                     </span>
-                    {m === 'bypassPermissions'
+                    {m === 'bypassPermissions' || (m === 'auto' && menuAutoHint)
                       ? `${PERMISSION_MODE_LABELS[m]} ⚠︎`
                       : PERMISSION_MODE_LABELS[m]}
                   </button>

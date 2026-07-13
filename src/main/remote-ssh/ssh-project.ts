@@ -35,7 +35,16 @@ interface Runners {
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
   getHook: () => { port: number; token: string; version: string }
   onStatus: (e: SshProjectStatusEvent) => void
+  /** Delays between claude-probe retries after a FAILED attempt (claude not found). Injected so
+   *  tests don't wait on real backoff; production uses PROBE_RETRY_DELAYS_MS. */
+  probeRetryDelaysMs?: number[]
 }
+
+/** Backoff after a FAILED remote claude probe (no markers = claude not found on that attempt).
+ *  A transient login-shell hiccup (nvm cache warm-up, NFS home, corp wrapper) shouldn't disable
+ *  `--permission-mode auto` for the whole connection. A DEFINITE version answer never retries —
+ *  a CLI doesn't change under a live connection; the next connect re-probes anyway. */
+const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 
 interface Conn {
   conn: SshConnection
@@ -52,11 +61,15 @@ interface Conn {
   /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
    * connection's master. Undefined when the project has no folder selected. */
   remoteCwd?: string
-  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed once at
-   * connect: the remote CLI can be older than the local one, and the local answer must never be
-   * applied to a remote launch. Undefined/false ⇒ the renderer omits the flag for this project's
-   * Claude nodes (bare command — today's behavior), never a failed launch. */
+  /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed at
+   * connect (with bounded retries when claude wasn't found): the remote CLI can be older than the
+   * local one, and the local answer must never be applied to a remote launch. Undefined/false ⇒
+   * the renderer omits the flag for this project's Claude nodes (bare command — today's
+   * behavior), never a failed launch. */
   claudeAutoPermissionMode?: boolean
+  /** The probed remote `claude --version` output. `null` = the probe ran and found no claude
+   * (feeds the tab-menu hint); undefined = not probed yet. */
+  remoteClaudeVersion?: string | null
 }
 
 /**
@@ -134,6 +147,7 @@ export class SshProjectManager {
     tmuxConfPath?: string
     remoteHome?: string
     claudeAutoPermissionMode?: boolean
+    remoteClaudeVersion?: string | null
   }> {
     const existing = this.conns.get(projectId)
     if (existing) {
@@ -150,7 +164,8 @@ export class SshProjectManager {
           hookEndpointPath: existing.hookEndpointPath,
           tmuxConfPath: existing.tmuxConfPath,
           remoteHome: existing.remoteHome,
-          claudeAutoPermissionMode: existing.claudeAutoPermissionMode
+          claudeAutoPermissionMode: existing.claudeAutoPermissionMode,
+          remoteClaudeVersion: existing.remoteClaudeVersion
         }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
@@ -233,7 +248,8 @@ export class SshProjectManager {
           hookEndpointPath,
           tmuxConfPath,
           remoteHome,
-          claudeAutoPermissionMode: entry?.claudeAutoPermissionMode
+          claudeAutoPermissionMode: entry?.claudeAutoPermissionMode,
+          remoteClaudeVersion: entry?.remoteClaudeVersion
         }
       }
       await new Promise((res) => setTimeout(res, 100))
@@ -438,22 +454,43 @@ export class SshProjectManager {
    * inits — routinely hundreds of ms, sometimes seconds — and every remote terminal in the project
    * waits on connect. A node launched in the gap just omits the flag (the designed fail-open
    * fallback); the next launch, once the answer lands, gets `auto`.
+   *
+   * A FAILED attempt (no claude found) retries on a bounded backoff — a transient hiccup must not
+   * disable `auto` until the next reconnect. EVERY attempt pushes its answer immediately (the
+   * fail-open `false` first, a later success upgrading it): launch paths that wait on the first
+   * answer (`ensureActivePermissionMode`) must never be held hostage by the retry tail. A definite
+   * version — old or new — stops the retries: a CLI doesn't change under a live connection.
    */
   private async probeClaudeAutoPermissionMode(projectId: string, entry: Conn): Promise<void> {
-    // One remote `claude --version` feeds BOTH version gates (permission-mode auto >= 2.1.71 and
-    // fullscreen tui >= 2.1.89) — no second probe.
-    const version = await this.remoteClaudeVersion(entry.conn, entry.controlPath)
-    const supported = supportsAutoPermissionMode(version)
-    // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
-    // connection; drop it rather than write it onto the new one.
-    if (this.conns.get(projectId) !== entry) return
-    entry.claudeAutoPermissionMode = supported
-    this.r.onStatus({ projectId, status: 'connected', claudeAutoPermissionMode: supported })
-    // Ensure Claude's fullscreen TUI on the host's ~/.claude/settings.json (write-if-absent), so a
-    // remote Claude session behaves natively in the host's tmux. Gated on the same probed version;
-    // fail-open inside RemoteHooks. Needs the resolved $HOME for an absolute path.
-    if (entry.remoteHome && supportsFullscreenTui(version)) {
-      await this.remoteHooks.ensureFullscreenTui(entry.conn, entry.controlPath, entry.remoteHome)
+    const delays = this.r.probeRetryDelaysMs ?? PROBE_RETRY_DELAYS_MS
+    for (let attempt = 0; ; attempt++) {
+      // One remote `claude --version` feeds BOTH version gates (permission-mode auto >= 2.1.71 and
+      // fullscreen tui >= 2.1.89) — no second probe.
+      const version = await this.remoteClaudeVersion(entry.conn, entry.controlPath)
+      // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
+      // connection; drop it rather than write it onto the new one.
+      if (this.conns.get(projectId) !== entry) return
+      const supported = supportsAutoPermissionMode(version)
+      entry.claudeAutoPermissionMode = supported
+      entry.remoteClaudeVersion = version
+      this.r.onStatus({
+        projectId,
+        status: 'connected',
+        claudeAutoPermissionMode: supported,
+        remoteClaudeVersion: version
+      })
+      if (version !== null) {
+        // Ensure Claude's fullscreen TUI on the host's ~/.claude/settings.json (write-if-absent),
+        // so a remote Claude session behaves natively in the host's tmux. Gated on the same probed
+        // version; fail-open inside RemoteHooks. Needs the resolved $HOME for an absolute path.
+        if (entry.remoteHome && supportsFullscreenTui(version)) {
+          await this.remoteHooks.ensureFullscreenTui(entry.conn, entry.controlPath, entry.remoteHome)
+        }
+        return
+      }
+      if (attempt >= delays.length) return
+      await new Promise((r) => setTimeout(r, delays[attempt]))
+      if (this.conns.get(projectId) !== entry) return
     }
   }
 
