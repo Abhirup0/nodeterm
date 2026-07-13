@@ -74,6 +74,12 @@ Verbs:
 - \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
   open one agent per role (each prompt starts that member working), arrange them in a grid,
   wrap them in a labeled group, and connect each to you. Max 8 roles per call.
+- \`open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]\` — create a git
+  worktree (new branch off base, default: the repo's default branch) and wrap it in a bound
+  group frame (or bind it to an existing empty group). Terminals created inside the group
+  run in the worktree. Local projects only.
+- \`close-worktree --group <id> [--mode unbind|remove]\` — unbind (default) drops the binding
+  and keeps the directory; remove asks the user to confirm deleting the worktree.
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).

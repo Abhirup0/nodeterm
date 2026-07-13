@@ -72,6 +72,21 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('open-agent')).toBe(false)
   })
 
+  it('open-worktree requires --branch, close-worktree requires --group; neither destructive', () => {
+    expect(parseControlRequest('open-worktree', {})).toEqual({ error: 'open-worktree requires --branch <name>' })
+    expect(parseControlRequest('open-worktree', { branch: 'feat/x' })).toEqual({
+      verb: 'open-worktree',
+      args: { branch: 'feat/x' }
+    })
+    expect(parseControlRequest('close-worktree', {})).toEqual({ error: 'close-worktree requires --group <id>' })
+    expect(parseControlRequest('close-worktree', { group: 'g1' })).toEqual({
+      verb: 'close-worktree',
+      args: { group: 'g1' }
+    })
+    expect(isDestructiveVerb('open-worktree')).toBe(false)
+    expect(isDestructiveVerb('close-worktree')).toBe(false)
+  })
+
   it('branch requires --node, and is not destructive', () => {
     expect(parseControlRequest('branch', {})).toEqual({ error: 'branch requires --node <id>' })
     expect(parseControlRequest('branch', { node: 'n1' })).toEqual({

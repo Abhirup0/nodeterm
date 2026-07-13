@@ -15,6 +15,8 @@ export type ControlVerb =
   | 'arrange'
   | 'align'
   | 'spawn-team'
+  | 'open-worktree'
+  | 'close-worktree'
   | 'branch'
   | 'rename'
   | 'write'
@@ -38,6 +40,8 @@ const VERBS: ControlVerb[] = [
   'arrange',
   'align',
   'spawn-team',
+  'open-worktree',
+  'close-worktree',
   'branch',
   'rename',
   'write',
@@ -72,6 +76,8 @@ export function parseControlRequest(
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
   if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
+  if (v === 'open-worktree' && !args.branch) return { error: 'open-worktree requires --branch <name>' }
+  if (v === 'close-worktree' && !args.group) return { error: 'close-worktree requires --group <id>' }
   if (v === 'branch' && !args.node) return { error: 'branch requires --node <id>' }
   if (v === 'rename' && !args.node) return { error: 'rename requires --node <id>' }
   if (v === 'rename' && !args.title) return { error: 'rename requires --title' }
@@ -125,6 +131,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — organize the canvas.',
     '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
     '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected to you.',
+    '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
+    '  wrapped in a bound group frame (terminals inside it run in the worktree). Local projects only.',
+    '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
+    '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',

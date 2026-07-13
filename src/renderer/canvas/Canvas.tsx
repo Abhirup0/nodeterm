@@ -2455,7 +2455,7 @@ export function Canvas() {
   // carries no cwd of its own — the worktree's path is what its children inherit
   // (`cwdForNewNodeIn`), so the frame IS the binding.
   const attachWorktree = useCallback(
-    (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree) => {
+    (target: { groupId: string | null; at?: { x: number; y: number } }, wt: GroupWorktree): string => {
       let groupId = target.groupId
       if (groupId) {
         setNodes((ns) =>
@@ -2474,6 +2474,9 @@ export function Canvas() {
       }
       markDirty()
       refreshWorktreeStore({ bind: { groupId, worktree: wt } })
+      // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
+      // callers that need the id (agent-control's open-worktree reply) take it from here.
+      return groupId
     },
     [setNodes, markDirty, viewCenter, refreshWorktreeStore]
   )
@@ -2749,6 +2752,25 @@ export function Canvas() {
     setWorktreeActionHandler(onWorktreeAction)
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
+
+  // Latest worktree callbacks for the agent-control handler. That effect mounts ONCE (empty
+  // deps) and these callbacks' identities change with the active project (activeProjectId /
+  // isSshProject in their deps) — calling the first-render closures would run against project
+  // '' (refresh no-ops, wrong SSH gate). The ref always holds this render's instances.
+  const worktreeControlRef = useRef({
+    attachWorktree,
+    releaseWorktreeBinding,
+    clearWorktreeBinding,
+    requestRemoveWorktree
+  })
+  useEffect(() => {
+    worktreeControlRef.current = {
+      attachWorktree,
+      releaseWorktreeBinding,
+      clearWorktreeBinding,
+      requestRemoveWorktree
+    }
+  })
 
   // Move an existing terminal into its group's worktree. The "↪" header action requests it;
   // confirming respawns the node's session in the worktree cwd. We bump `respawnNonce` (a
@@ -3872,6 +3894,97 @@ export function Canvas() {
               message: `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}`,
               result: { groupId: teamGroup.id, memberIds }
             })
+            return
+          }
+          case 'open-worktree': {
+            // Mirrors createWorktreeAndGroup/attachWorktree minus the dialog: create the git
+            // worktree (new branch off base), then wrap a bound group frame below the source
+            // (or bind an existing empty group via --group).
+            const projStore = useProjects.getState()
+            const project = projStore.getProject(projStore.activeProjectId ?? '')
+            if (project?.ssh) {
+              reply({ ok: false, error: WORKTREE_SSH_NOTICE })
+              return
+            }
+            const branch = sanitizeWorktreeBranch(args.branch ?? '')
+            if (!branch) {
+              reply({ ok: false, error: `open-worktree: invalid branch name "${args.branch}"` })
+              return
+            }
+            const { repoRoot, entries } = useWorktrees.getState()
+            if (!repoRoot) {
+              reply({ ok: false, error: 'open-worktree: this project has no git repository (repo root unknown)' })
+              return
+            }
+            let bindGroupId: string | null = null
+            if (args.group) {
+              const g = nodesRef.current.find((nd) => nd.id === args.group)
+              if (!g || g.type !== 'group' || g.data.worktree) {
+                reply({ ok: false, error: 'open-worktree: --group must name an existing group without a worktree' })
+                return
+              }
+              bindGroupId = g.id
+            }
+            const baseRef = args.base?.trim() || resolveBaseRef(entries)
+            const wtPath =
+              args.path?.trim() ||
+              computeWorktreePath(
+                await window.nodeTerminal.userDataDir(),
+                repoRoot.split('/').pop() || 'repo',
+                branch
+              )
+            if (!wtPath) {
+              reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
+              return
+            }
+            const res = await window.nodeTerminal.git
+              .worktreeAdd(repoRoot, wtPath, branch, baseRef, true)
+              .catch((e: unknown) => ({
+                ok: false as const,
+                message: e instanceof Error ? e.message : String(e)
+              }))
+            if (!res.ok) {
+              reply({ ok: false, error: `open-worktree: ${res.message}` })
+              return
+            }
+            const groupId = worktreeControlRef.current.attachWorktree(
+              { groupId: bindGroupId, at: placeBelow() },
+              worktreeFromCreate({ repoPath: repoRoot, mode: 'new', branch, baseRef, path: wtPath })
+            )
+            reply({
+              ok: true,
+              message: `opened worktree ${branch} at ${wtPath} in group ${groupId}`,
+              result: { groupId, branch, path: wtPath, baseRef }
+            })
+            return
+          }
+          case 'close-worktree': {
+            const id = args.group ?? ''
+            const g = nodesRef.current.find((nd) => nd.id === id)
+            if (!g || g.type !== 'group' || !g.data.worktree) {
+              reply({ ok: false, error: `close-worktree: ${id} is not a worktree-bound group` })
+              return
+            }
+            const mode = args.mode ?? 'unbind'
+            const sshProject = !!useProjects.getState().getProject(useProjects.getState().activeProjectId ?? '')?.ssh
+            if (mode !== 'unbind' && sshProject) {
+              reply({ ok: false, error: WORKTREE_SSH_NOTICE })
+              return
+            }
+            const ctl = worktreeControlRef.current
+            if (mode === 'unbind') {
+              // Non-destructive: drops the binding, the worktree stays on disk as an orphan.
+              await ctl.releaseWorktreeBinding(id).finally(() => ctl.clearWorktreeBinding(id))
+              reply({ ok: true, message: `unbound worktree from ${id} (directory kept on disk)` })
+              return
+            }
+            if (mode === 'remove') {
+              // Destructive → the existing ask-first safety dialog decides; reply now (once).
+              void ctl.requestRemoveWorktree(id)
+              reply({ ok: true, message: 'removal confirmation shown to the user — they decide' })
+              return
+            }
+            reply({ ok: false, error: `close-worktree: unknown --mode ${mode} (unbind|remove)` })
             return
           }
           case 'branch': {
