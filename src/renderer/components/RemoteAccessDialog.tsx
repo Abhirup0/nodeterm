@@ -2,19 +2,18 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { useEntitlement } from '../state/entitlement'
-import { useRemoteHosting } from '../state/remoteHosting'
 import { Button } from '@renderer/ui/Button'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
 
 /**
  * Remote access dialog — a self-contained popup reachable from the project (tab) caret menu, so
- * remote access isn't buried in Settings. Mirrors the Settings RemoteSection flow:
+ * remote access isn't buried in Settings. Mirrors the Settings RemoteSection flow over the NEW
+ * relay tunnel (`relayHost` / `relayClient`):
  *  - Host "Allow remote access" (Pro): start → show the single-use pairing offer + copy/stop.
  *  - Non-Pro: hosting is gated — show the upgrade popup (Upgrade → Stripe checkout).
- *  - Client "Connect to a host" (free): paste an offer → open the live mirror.
- * It deliberately does NOT import RemoteSection (which the Settings redesign owns); the small
- * remote IPC flow is duplicated here. A future refactor can hoist it into a shared hook.
+ *  - Client "Connect to a host" (free): paste an offer → Canvas runs the SAS-compare + open-tab flow.
+ * It deliberately does NOT import RemoteSection (which the Settings redesign owns).
  */
 export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
   const isPremium = useEntitlement((s) => s.isPremium)
@@ -23,9 +22,6 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
   const [hostBusy, setHostBusy] = useState(false)
   const [error, setError] = useState('')
   const [clientCode, setClientCode] = useState('')
-  const [connecting, setConnecting] = useState(false)
-  const [clientSas, setClientSas] = useState<string | null>(null)
-  const [connectedId, setConnectedId] = useState<string | null>(null)
 
   // Only the topmost modal answers a key (./dialog-stack) — the host approval ConfirmDialog opens
   // on top of THIS dialog, and its Escape must not also close the one underneath.
@@ -42,49 +38,36 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
     return () => window.removeEventListener('keydown', onKey)
   }, [isTop, onClose])
 
+  // HOST side — the NEW relay tunnel (`relayHost`). `start()` returns the single-use pairing offer;
+  // a connecting peer's approval + canvas sync are handled globally by Canvas (`relayHost.onPeerPending`
+  // / `relayHost.confirm`, and the CorePlatform seq-stamped reflector).
   const startHosting = async () => {
     setError('')
     setHostBusy(true)
     try {
-      const { offer } = await window.nodeTerminal.remoteHost.start()
+      const { offer } = await window.nodeTerminal.relayHost.start()
       setHostOffer(offer)
-      useRemoteHosting.getState().setHosting(true) // Canvas starts mirroring the canvas to main
     } catch (err) {
       setError((err as Error).message)
       setHostBusy(false)
     }
   }
   const stopHosting = async () => {
-    await window.nodeTerminal.remoteHost.stop()
-    useRemoteHosting.getState().setHosting(false)
+    await window.nodeTerminal.relayHost.stop()
     setHostOffer('')
     setHostBusy(false)
   }
-  // Surface the channel SAS once the handshake completes, so the user can verify it matches the
-  // code the host shows before approving there. Keep the dialog open to display it.
-  useEffect(() => {
-    if (!connectedId) return
-    return window.nodeTerminal.remoteClient.onSas(connectedId, (sas) => setClientSas(sas))
-  }, [connectedId])
-
-  const connect = async () => {
+  // CLIENT side — hand the offer to Canvas, which runs the relay connect → SAS compare (window.confirm)
+  // → open-tab flow (the same `connectOffer` the dock/palette entry uses). No `relayClient.connect`
+  // here, so the SAS handshake lives in exactly one place.
+  const connect = () => {
     const code = clientCode.trim()
     if (!code) return
-    setError('')
-    setConnecting(true)
-    try {
-      const connectionId = await window.nodeTerminal.remoteClient.connect(code)
-      window.dispatchEvent(
-        new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
-      )
-      // Don't close yet: show the verification code + "waiting for host approval" status. The
-      // mirror node already opened; the user can close this dialog once approved.
-      setConnectedId(connectionId)
-    } catch (err) {
-      setError((err as Error).message)
-    } finally {
-      setConnecting(false)
-    }
+    setClientCode('')
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:open-remote-terminal', { detail: { offer: code } })
+    )
+    onClose()
   }
 
   return createPortal(
@@ -133,28 +116,17 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
         )}
 
         <h4 className="remote-dialog__head4">Connect to a host</h4>
-        {connectedId ? (
-          <div className="remote-dialog__block">
-            <p className="remote-dialog__hint">
-              Connected — waiting for the host to approve. Verify this code matches the one shown on
-              the host:
-            </p>
-            <Input className="w-full" readOnly value={clientSas ?? 'establishing…'} />
-            <Button onClick={onClose}>Done</Button>
-          </div>
-        ) : (
-          <div className="remote-dialog__block">
-            <Input
-              className="w-full"
-              placeholder="paste the host's code"
-              value={clientCode}
-              onChange={(e) => setClientCode(e.target.value)}
-            />
-            <Button disabled={connecting || !clientCode.trim()} onClick={() => void connect()}>
-              {connecting ? 'Connecting…' : 'Connect'}
-            </Button>
-          </div>
-        )}
+        <div className="remote-dialog__block">
+          <Input
+            className="w-full"
+            placeholder="paste the host's code"
+            value={clientCode}
+            onChange={(e) => setClientCode(e.target.value)}
+          />
+          <Button disabled={!clientCode.trim()} onClick={connect}>
+            Connect
+          </Button>
+        </div>
 
         {error ? <p className="remote-dialog__err">{error}</p> : null}
       </div>

@@ -2,6 +2,24 @@ import { app, ipcMain, shell, webContents } from 'electron'
 import type { CorePlatform } from '../core/platform'
 import { mainWindowClientIds, sendToMain } from './main-window'
 import { peerRegistry } from './peer-registry'
+import { E_NO_HANDLER, type RpcErr, type RpcOk, type RpcRequest } from '../shared/rpc'
+
+type Handler = { fn: (...args: any[]) => unknown; withSender: boolean }
+type Listener = { fn: (...args: any[]) => void; withSender: boolean }
+
+/**
+ * The Electron platform, with the two extra members a relay PEER needs (they are deliberately NOT
+ * on CorePlatform: the core never dispatches, only the shell that owns the socket does — exactly as
+ * attach/detach/dispatch are extras on ServerPlatform).
+ */
+export interface ElectronPlatform extends CorePlatform {
+  /** Answer one peer RPC request from the recorded handler table. The peer's clientId is the
+   *  sender, so handleWithSender attributes it correctly. Never rejects: a missing handler is
+   *  E_NO_HANDLER and a throwing handler is E_HANDLER, so the peer's `await` always settles. */
+  dispatch(clientId: number, req: RpcRequest): Promise<RpcOk | RpcErr>
+  /** Fire one peer cast at every listener on that channel, in registration order. */
+  cast(clientId: number, method: string, args: unknown[]): void
+}
 
 /**
  * The Electron shell's CorePlatform. Getters keep app.getPath lazy (safe pre-ready).
@@ -16,7 +34,30 @@ import { peerRegistry } from './peer-registry'
  * SOLO COST: zero. With no peer registered the registry holds an empty Map — `has` is a miss, `ids`
  * is empty — and the webContents path below is the code it replaced, byte for byte.
  */
-export function electronPlatform(): CorePlatform {
+export function electronPlatform(): ElectronPlatform {
+  // THE INVARIANT (4c): a channel is REACHABLE BY A REMOTE PEER if, and only if, it is registered
+  // through platform().handle/on. A raw `ipcMain.handle` is invisible to a peer — a peer has no
+  // webContents, so its request never travels through ipcMain at all; it is answered from THIS
+  // table by dispatch() below. When you add an IPC handler, that is the choice you are making:
+  //   - core-bound / acts on THIS machine's state (fs, git, pty, workspace, transcripts) → platform
+  //   - acts on the USER's own machine or is host-security-sensitive (dialogs, shell, notifications,
+  //     updater, pairing/relay control plane) → raw ipcMain, on purpose. See src/main/index.ts.
+  // handle/handleWithSender are ONE handler per channel (last wins, like ipcMain.handle);
+  // on/onWithSender are an ordered set of listeners. Mirrors ServerPlatform exactly — a divergence
+  // here would be a behavior difference between the two remote surfaces.
+  //
+  // SOLO COST: one Map.set per boot-time registration. With no peer connected nothing ever reads it.
+  const handlers = new Map<string, Handler>()
+  const listeners = new Map<string, Set<Listener>>()
+  const addListener = (channel: string, listener: Listener): void => {
+    let set = listeners.get(channel)
+    if (!set) {
+      set = new Set()
+      listeners.set(channel, set)
+    }
+    set.add(listener)
+  }
+
   return {
     get userDataDir() {
       return app.getPath('userData')
@@ -27,10 +68,60 @@ export function electronPlatform(): CorePlatform {
     get isPackaged() {
       return app.isPackaged
     },
-    handle: (ch, fn) => ipcMain.handle(ch, (_e, ...args) => fn(...args)),
-    on: (ch, fn) => ipcMain.on(ch, (_e, ...args) => fn(...args)),
-    handleWithSender: (ch, fn) => ipcMain.handle(ch, (e, ...args) => fn(e.sender.id, ...args)),
-    onWithSender: (ch, fn) => ipcMain.on(ch, (e, ...args) => fn(e.sender.id, ...args)),
+    // The ipcMain half of each registration is UNCHANGED — the local window's call is bit-identical
+    // to what it was before the table existed (same event-stripping, same sender id).
+    handle: (ch, fn) => {
+      handlers.set(ch, { fn, withSender: false })
+      ipcMain.handle(ch, (_e, ...args) => fn(...args))
+    },
+    on: (ch, fn) => {
+      addListener(ch, { fn, withSender: false })
+      ipcMain.on(ch, (_e, ...args) => fn(...args))
+    },
+    handleWithSender: (ch, fn) => {
+      handlers.set(ch, { fn, withSender: true })
+      ipcMain.handle(ch, (e, ...args) => fn(e.sender.id, ...args))
+    },
+    onWithSender: (ch, fn) => {
+      addListener(ch, { fn, withSender: true })
+      ipcMain.on(ch, (e, ...args) => fn(e.sender.id, ...args))
+    },
+    async dispatch(clientId, req) {
+      const h = handlers.get(req.method)
+      if (!h) {
+        return {
+          t: 'res', id: req.id, ok: false,
+          error: { code: E_NO_HANDLER, message: `no handler for ${req.method}` }
+        }
+      }
+      try {
+        const result = h.withSender ? await h.fn(clientId, ...req.args) : await h.fn(...req.args)
+        return { t: 'res', id: req.id, ok: true, result: result ?? null }
+      } catch (err) {
+        return {
+          t: 'res', id: req.id, ok: false,
+          error: { code: 'E_HANDLER', message: err instanceof Error ? err.message : String(err) }
+        }
+      }
+    },
+    cast(clientId, method, args) {
+      const set = listeners.get(method)
+      if (!set) return
+      for (const l of set) {
+        // A cast has no reply channel (unlike dispatch, which returns E_HANDLER), so isolate each
+        // listener: one throw must not skip the rest — a broken attribution listener would
+        // otherwise swallow the peer's keystrokes. Log it, keep going. (Mirrors ServerPlatform.)
+        try {
+          if (l.withSender) l.fn(clientId, ...args)
+          else l.fn(...args)
+        } catch (err) {
+          console.warn(
+            `[peer] cast listener for ${method} threw`,
+            err instanceof Error ? err.message : String(err)
+          )
+        }
+      }
+    },
     sendTo: (id, ch, ...args) => {
       // A peer id resolves to a UiSink (RPC-framed; pty:data goes out as a binary frame, with the
       // registry's WS backpressure). Everything else is a webContents, dispatched natively.

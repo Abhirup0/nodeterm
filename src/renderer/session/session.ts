@@ -1,5 +1,6 @@
 import { createContext, createElement, useContext, type ReactNode } from 'react'
 import type { NodeTerminalApi } from '@shared/types'
+import type { PeerIdentity } from '@shared/presence'
 import { createPresenceSession, type PresenceSession } from '../state/presence'
 import { agentStatusForApi, type AgentStatusSession } from '../state/agentStatus'
 
@@ -25,9 +26,16 @@ export interface SessionStores {
 interface Entry {
   session: WorkspaceSession
   stores: SessionStores
+  /** Teardowns the tab that owns this session owes on disconnect (obligation 1): the presence
+   *  `connect()` subscription, the relay socket close. Run exactly once by `disposeSession`. */
+  teardowns: Array<() => void>
+  disposed: boolean
 }
 
 const SESSIONS = new Map<string, Entry>()
+/** projectId → sessionId. Runtime-only (never persisted — see `sessionForProject`). A remote tab
+ *  binds here; a local tab is absent and resolves to the local session. */
+const PROJECT_BINDINGS = new Map<string, string>()
 let activeId: string | null = null
 let remoteSeq = 0
 
@@ -60,13 +68,70 @@ export function createSession(source: SessionSource, api: NodeTerminalApi, label
   const existing = SESSIONS.get(id)
   if (existing) return existing.session
   const session: WorkspaceSession = { id, source, label, api, status: 'connected' }
-  SESSIONS.set(id, { session, stores: buildStores(api) })
+  SESSIONS.set(id, { session, stores: buildStores(api), teardowns: [], disposed: false })
   return session
+}
+
+/** Register a teardown the owning tab owes when this session is disposed (obligation 1): the
+ *  presence `connect()` teardown, the relay socket close. `disposeSession` runs them once, in order.
+ *  Throws for an unknown id so a caller can never silently strand a live subscription. */
+export function holdSessionTeardown(sessionId: string, teardown: () => void): void {
+  const e = SESSIONS.get(sessionId)
+  if (!e) throw new Error(`[session] no session ${sessionId}`)
+  e.teardowns.push(teardown)
+}
+
+/** Run a session's held teardowns EXACTLY ONCE. splice() so a teardown that (re-entrantly) triggers
+ *  another run finds nothing left to re-run. Shared by disposeSession + takeSessionOffline. */
+function runTeardowns(e: Entry): void {
+  for (const t of e.teardowns.splice(0)) {
+    try {
+      t()
+    } catch (err) {
+      console.warn('[session] teardown failed', err)
+    }
+  }
+}
+
+/** Tear a session down (obligation 1 — the missing disposal path a remote tab needs on disconnect):
+ *  run every held teardown EXACTLY ONCE, drop the entry, and unbind its projects so their (now
+ *  dead) tabs resolve back to the local session. Idempotent and no-op for an unknown id — a double
+ *  close, or a revoke racing a socket drop, must touch nothing the second time. */
+export function disposeSession(sessionId: string): void {
+  const e = SESSIONS.get(sessionId)
+  if (!e || e.disposed) return
+  e.disposed = true
+  runTeardowns(e)
+  SESSIONS.delete(sessionId)
+  for (const [projectId, sid] of PROJECT_BINDINGS) if (sid === sessionId) PROJECT_BINDINGS.delete(projectId)
+  if (activeId === sessionId) activeId = SESSIONS.has('local') ? 'local' : null
+}
+
+/** Set a session's live status (Stage 4 Task 7 — a relay tab going offline / reconnecting). No-op
+ *  for an unknown id. This mutates the live session object in place, which is how the tab session
+ *  label (and the offline gate) read the current state without re-registering the session. */
+export function setSessionStatus(sessionId: string, status: WorkspaceSession['status']): void {
+  const e = SESSIONS.get(sessionId)
+  if (e) e.session.status = status
+}
+
+/** Take a session OFFLINE on an INVOLUNTARY socket drop (host/relay gone) — the counterpart of a
+ *  user close. Unlike disposeSession, this KEEPS the entry and its project binding: run the held
+ *  teardowns once (presence leaves every peer's facepile; the already-dead relay socket close is a
+ *  safe no-op) and flip status to 'offline', but leave the tab bound to a 'relay' source so the
+ *  greyed "unavailable" tab can reconnect IN PLACE (see relay-tab `handleRelayDrop` / `tabClickAction`).
+ *  Idempotent; no-op once offline/disposed/unknown. */
+export function takeSessionOffline(sessionId: string): void {
+  const e = SESSIONS.get(sessionId)
+  if (!e || e.disposed || e.session.status === 'offline') return
+  runTeardowns(e)
+  e.session.status = 'offline'
 }
 
 /** Test-only: clears the registry so each test starts with no sessions. */
 export function resetSessionsForTest(): void {
   SESSIONS.clear()
+  PROJECT_BINDINGS.clear()
   activeId = null
   remoteSeq = 0
 }
@@ -97,12 +162,41 @@ export function sessionCount(): number {
   return SESSIONS.size
 }
 
+/** Bind a project tab to a session (4c: a remote tab → its relay/server session). Runtime-only,
+ *  never persisted. Throws for an unknown session id so a tab can never bind to nothing. */
+export function bindProjectToSession(projectId: string, sessionId: string): void {
+  if (!SESSIONS.has(sessionId)) throw new Error(`[session] no session ${sessionId}`)
+  PROJECT_BINDINGS.set(projectId, sessionId)
+}
+
+/** The local session (the fallback every unbound tab resolves to), or the active one if — in a
+ *  node-environment test — no 'local' session was created. */
+function localOrActiveSession(): WorkspaceSession {
+  const local = SESSIONS.get('local')
+  return local ? local.session : getActiveSession()
+}
+
 /** Which session a project belongs to. Runtime-only — NEVER persisted (workspace.json /
  *  project.json are shared across machines; a session id is meaningless off this machine — see
- *  the toWorkspace tripwire in state/projects.test.ts). Today every project is on the local
- *  session; 4c returns the tab's bound session (local | relay | server). */
-export function sessionForProject(_projectId: string): WorkspaceSession {
-  return getActiveSession()
+ *  the toWorkspace tripwire in state/projects.test.ts). A remote tab resolves to its BOUND session;
+ *  every other (local) tab resolves to the local session — by binding, NOT by which tab is active,
+ *  so a focused remote tab never makes a background local tab resolve remote. A binding whose
+ *  session was disposed is pruned and falls back to local. */
+export function sessionForProject(projectId: string): WorkspaceSession {
+  const boundId = PROJECT_BINDINGS.get(projectId)
+  if (boundId) {
+    const e = SESSIONS.get(boundId)
+    if (e) return e.session
+    PROJECT_BINDINGS.delete(projectId) // stale binding (session disposed) → resolve local
+  }
+  return localOrActiveSession()
+}
+
+/** Re-broadcast the local human's identity on EVERY live session (obligation 2). Renaming yourself
+ *  must re-hello every connected core, not just the one the rename UI happened to read — otherwise a
+ *  remote peer keeps drawing your old name until reload. `setMe` saves + says hello per session. */
+export function setMeAll(identity: PeerIdentity): void {
+  for (const e of SESSIONS.values()) e.stores.presence.store.getState().setMe(identity)
 }
 
 /** Hook wrapper over `sessionForProject` for components. Subscribes via `useSession()` so a

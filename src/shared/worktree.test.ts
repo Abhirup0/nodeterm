@@ -5,6 +5,7 @@ import {
   isInsideDir,
   sanitizeWorktreeBranch,
   computeWorktreePath,
+  resolveWorktreePath,
   parseWorktreePorcelain,
   isDangerousWorktreeRemovalPath,
   decideMergeStrategy,
@@ -25,24 +26,19 @@ const entry = (path: string, branch: string | null): WorktreeEntry => ({
   isBare: false
 })
 
-// Worktrees are local-only in v1, and the gate that keeps a remote session out of one used to ask
-// about `data.remote` — a field ONLY a relay node (`createRemoteTerminalNode`) carries, and one that
-// can never occur inside an SSH project. So the exact node the gate exists to protect — an
-// SSH-PROJECT terminal, created by `createTerminalNode(…, project.ssh)` with `data.ssh` +
-// `data.sshRemoteTmux` — walked straight through it: ↪ destroyed its REMOTE tmux session (running
-// processes and all) and respawned it in a local path that does not exist on the host.
+// Worktrees are local-only in v1, and the gate that keeps a remote session out of one must ask
+// about BOTH SSH markers: the exact node it exists to protect — an SSH-PROJECT terminal, created by
+// `createTerminalNode(…, project.ssh)` with `data.ssh` + `data.sshRemoteTmux` — once walked straight
+// through a one-field guard: ↪ destroyed its REMOTE tmux session (running processes and all) and
+// respawned it in a local path that does not exist on the host.
 describe('isRemoteSessionNode', () => {
-  it('is true for an SSH-project terminal (data.ssh + data.sshRemoteTmux — never data.remote)', () => {
+  it('is true for an SSH-project terminal (data.ssh + data.sshRemoteTmux)', () => {
     expect(
       isRemoteSessionNode({
         ssh: { host: 'box', user: 'me' },
         sshRemoteTmux: true
       })
     ).toBe(true)
-  })
-
-  it('is true for a relay-bound remote terminal (data.remote)', () => {
-    expect(isRemoteSessionNode({ remote: { connectionId: 'c1' } })).toBe(true)
   })
 
   it('is true when only one of the two SSH markers survived a hand-edited project file', () => {
@@ -53,7 +49,7 @@ describe('isRemoteSessionNode', () => {
   it('is false for a plain local terminal (nothing changes for the local case)', () => {
     expect(isRemoteSessionNode({})).toBe(false)
     expect(isRemoteSessionNode(undefined)).toBe(false)
-    expect(isRemoteSessionNode({ ssh: undefined, remote: undefined, sshRemoteTmux: false })).toBe(false)
+    expect(isRemoteSessionNode({ ssh: undefined, sshRemoteTmux: false })).toBe(false)
   })
 })
 
@@ -89,6 +85,36 @@ describe('computeWorktreePath', () => {
   })
   it('drops a trailing slash on the base dir', () => {
     expect(computeWorktreePath('/u/', 'r', 'b')).toBe('/u/worktrees/r/b')
+  })
+})
+
+describe('resolveWorktreePath', () => {
+  it('derives the default UNDER the session core userData (the host, for a remote tab)', async () => {
+    // The provider is the SESSION core's `userDataDir()` — a remote tab hands the HOST's base, so
+    // the worktree lands on the machine `git worktree add` runs on, not this client.
+    const p = await resolveWorktreePath({
+      userDataDir: () => Promise.resolve('/home/host/.config/nodeterm'),
+      repoRoot: '/srv/repos/myapp',
+      branch: 'feature/x'
+    })
+    expect(p).toBe('/home/host/.config/nodeterm/worktrees/myapp/feature-x')
+  })
+  it('honors an explicit --path and never reads the userData provider', async () => {
+    const p = await resolveWorktreePath({
+      explicitPath: '  /custom/wt  ',
+      userDataDir: () => Promise.reject(new Error('provider must not be read when --path is given')),
+      repoRoot: '/srv/repos/x',
+      branch: 'b'
+    })
+    expect(p).toBe('/custom/wt')
+  })
+  it('yields "" when the base dir is unknown and no --path was given', async () => {
+    const p = await resolveWorktreePath({
+      userDataDir: () => Promise.resolve(''),
+      repoRoot: '/srv/repos/x',
+      branch: 'b'
+    })
+    expect(p).toBe('')
   })
 })
 

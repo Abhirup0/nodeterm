@@ -69,6 +69,8 @@ import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ConsentNotice } from '../remote/ConsentNotice'
+import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
@@ -83,7 +85,6 @@ import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { connectPresence, reportProject, usePresence } from '../state/presence'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
-import { RemoteSessionView } from './RemoteSessionView'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
@@ -100,6 +101,7 @@ import { LoopNode } from '../nodes/LoopNode'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
+  resolveWorktreePath,
   displacedByWorktree,
   isRemoteSessionNode,
   resolveBaseRef,
@@ -133,11 +135,22 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
-import { useSession } from '../session/session'
+import {
+  useSession,
+  SessionProvider,
+  sessionForProject,
+  setActiveSession,
+  disposeSession,
+} from '../session/session'
+import {
+  openRelayTab,
+  handleRelayDrop,
+  reconnectRelayTab,
+  type RelayTab,
+} from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
-import { useRemoteHosting } from '../state/remoteHosting'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
@@ -237,6 +250,9 @@ interface MergeState {
 interface PendingPeerState {
   sas: string | null
   id: string
+  /** Human-facing peer name, if the tunnel carries one. The relay `RelayPeerPending` payload does
+   *  not yet, so this is undefined → the ConsentNotice falls back to a generic subject. */
+  label?: string
 }
 
 /**
@@ -430,8 +446,27 @@ export function Canvas() {
   // When set, add a terminal to this project once its nodes have loaded into React Flow
   // (cross-project "add" from the sidebar, which must switch projects first).
   const pendingAddRef = useRef<string | null>(null)
-  // When set, a full-surface remote mirror of a connected host is shown over the local canvas.
-  const [remoteConnId, setRemoteConnId] = useState<string | null>(null)
+  // Live relay tabs, keyed by relay connectionId, so a host/relay drop can dispose the right one
+  // (a remote connection is now a project TAB, not a full-surface overlay — Stage 4 Task 6).
+  const relayTabsRef = useRef<Map<string, RelayTab>>(new Map())
+  // A relay tab is a live client of a remote core — closing/deleting its project must tear the
+  // relay session down (held presence teardown + socket close), or the peer lingers in the host's
+  // facepile and the socket leaks until quit. Runs on BOTH close and delete (unlike a local tmux
+  // project, there is nothing to keep warm). No-op for a non-relay project.
+  //
+  // Dispose by the project BINDING, not by iterating relayTabsRef: an INVOLUNTARY drop already
+  // removed the tab from relayTabsRef (it went offline) but KEPT the session bound, so only
+  // `sessionForProject` still reaches it — iterating relayTabsRef alone would orphan the offline
+  // session in the registry forever. `disposeSession` is idempotent: it runs the held teardowns for
+  // a still-live tab, no-ops them for an already-offline one, and unbinds + drops the entry either
+  // way. We also sweep any live relayTabsRef entry for the project so a dead connectionId can't linger.
+  const disposeRelayTabForProject = useCallback((projectId: string) => {
+    for (const [connectionId, tab] of relayTabsRef.current) {
+      if (tab.projectId === projectId) relayTabsRef.current.delete(connectionId)
+    }
+    const s = sessionForProject(projectId)
+    if (s.source === 'relay') disposeSession(s.id)
+  }, [])
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
   const [sshDialogOpen, setSshDialogOpen] = useState(false)
@@ -472,8 +507,12 @@ export function Canvas() {
   // resolves must re-render with the real base, or it would keep suggesting nothing.
   const [userDataDir, setUserDataDir] = useState('')
   useEffect(() => {
-    void window.nodeTerminal.userDataDir().then(setUserDataDir)
-  }, [])
+    // The SESSION core's writable base, not this client's: a remote tab's worktree default path
+    // must live on the machine `git worktree add` runs on (the host — obligation c), so it comes
+    // from the session api (`api.userDataDir()`), re-resolved when the active session changes.
+    // For the local session `api` IS window.nodeTerminal, so this stays byte-identical.
+    void api.userDataDir().then(setUserDataDir)
+  }, [api])
   // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
   // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
   // guard that stops the dialog from offering a worktree a second group could bind to.
@@ -966,6 +1005,10 @@ export function Canvas() {
     // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
     // and Canvas deliberately never READS the presence store (see the connectPresence effect).
     reportProject(activeProjectId || null)
+    // Track the active session by the tab we switched to, so non-component api accessors
+    // (activeSessionApi() in scmDraft/worktrees) hit the active tab's core — the local session for
+    // a local tab, the relay session for a remote tab. Resolution is by binding (never persisted).
+    setActiveSession(sessionForProject(activeProjectId || '').id)
     if (!activeProjectId) return
     const project = useProjects.getState().getProject(activeProjectId)
     if (!project) return
@@ -1026,10 +1069,10 @@ export function Canvas() {
     const t = setTimeout(() => {
       loadingRef.current = false
       // The broadcast effect early-returns while `loadingRef` is set and isn't re-triggered by the
-      // reset, so push the freshly-loaded project's canvas once now — otherwise a connected client
+      // reset, so push the freshly-loaded project's canvas once now — otherwise the connected phone
       // keeps mirroring the previous project until the host's next edit. Gated like the effect:
-      // when not hosting, the serialize itself is the waste (main would drop the payload anyway).
-      if (useRemoteHosting.getState().hosting) {
+      // without phone access on, the serialize itself is the waste (main would drop the payload).
+      if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
       }
       // Consume a cross-project focus request (notification click on a background node).
@@ -1156,21 +1199,23 @@ export function Canvas() {
     return () => clearTimeout(t)
   }, [dirty, conflict, persist])
 
-  // ---- remote canvas mirror (host side) ----
-  // While hosting, push the serialized active-project canvas to main (debounced ~120ms) on every
-  // change, so a connected client mirrors the layout. Gated on the hosting flag: without it every
-  // canvas edit paid a full flowToNodeStates serialize + IPC even with no client ever connecting.
-  // When hosting flips on, the effect fires once immediately, so main's snapshot is fresh before
-  // a client joins. Skips programmatic loads to avoid a redundant push on project switch (the
-  // post-load value is captured by the next real change).
-  const hosting = useRemoteHosting((s) => s.hosting)
+  // ---- remote canvas mirror (phone host side) ----
+  // While phone access is on, push the serialized active-project canvas to main (debounced ~120ms)
+  // on every change, so the connected phone mirrors the layout (main's host-canvas-hub feeds the
+  // standing host). Gated on `phoneAccessEnabled`: without it every canvas edit would pay a full
+  // flowToNodeStates serialize + IPC even with no phone ever connecting. When phone access flips on,
+  // the effect fires once immediately, so main's snapshot is fresh before the phone joins. Skips
+  // programmatic loads to avoid a redundant push on project switch (the post-load value is captured
+  // by the next real change). NOTE: desktop RELAY peers do NOT use this path — they sync via the
+  // CorePlatform canvas reflector (buildCanvasApi); this push is the phone feed only.
+  const phoneHosting = settings.phoneAccessEnabled
   useEffect(() => {
-    if (!hosting || loadingRef.current) return
+    if (!phoneHosting || loadingRef.current) return
     const t = setTimeout(() => {
       window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
     }, 120)
     return () => clearTimeout(t)
-  }, [nodes, hosting])
+  }, [nodes, phoneHosting])
 
   // Apply a client's mutation to React Flow — the host's single writer. Serialize the live nodes,
   // apply the mutation, and convert back. A direct `setNodes(...)` bypasses `handleNodesChange`,
@@ -1190,8 +1235,14 @@ export function Canvas() {
 
   // Host connection-approval gate: when a client finishes the handshake, prompt the host to
   // verify the SAS and allow/deny before any remote pty/fs RPC is served.
+  //
+  // Sourced off the NEW relay tunnel (`relayHost`, Stage 4 Task 2), NOT the legacy
+  // `remoteHost.onPeerPending`. Migrating means the old standing-host (phone) path no longer raises
+  // THIS dialog — deliberate: the phone is being moved to the relay tunnel separately
+  // (docs/ios-protocol-migration.md) and Task 10 deletes the `remoteHost` dialect outright. So we
+  // fully migrate rather than keep both sources alive (which would only complicate that removal).
   useEffect(() => {
-    return window.nodeTerminal.remoteHost.onPeerPending((info) => setPendingPeer(info))
+    return window.nodeTerminal.relayHost.onPeerPending((info) => setPendingPeer(info))
   }, [])
 
   // ---- canvas sync (team) ----
@@ -1780,35 +1831,128 @@ export function Canvas() {
     [addTerminal, scmCwd]
   )
 
-  /** Open a terminal node bound to a remote host (RemoteTransport) for a live relay connection. */
-  // Tear down the active remote mirror: hide the view and disconnect the relay connection (ends
-  // the host<->client bridge; the host-side tmux sessions survive). Safe to call when none active.
-  const disconnectRemote = useCallback(() => {
-    setRemoteConnId((id) => {
-      if (id) void window.nodeTerminal.remoteClient.disconnect(id)
-      return null
-    })
-  }, [])
+  // Turn an approved (or approving) relay connection into a project TAB (Stage 4 Task 6): build the
+  // bridged api, wait for mutual approval, then add a session-bound tab. `openRelayTab` guards the
+  // approval wait so a pre-approval socket drop rejects instead of hanging. On a later host/relay
+  // drop, dispose the tab's session (presence + relay socket teardown). Idempotent per connectionId.
+  // Connections the user deliberately abandoned (declined the SAS) — their bootstrap rejection is
+  // expected, not an error to alert about.
+  const cancelledConnsRef = useRef<Set<string>>(new Set())
 
-  // Mount the host mirror for an already-established connection. Wires `onClosed` so a dropped
-  // host/relay tears the view down without leaking the listener.
-  const mountRemoteMirror = useCallback((connectionId: string) => {
-    setRemoteConnId(connectionId)
-  }, [])
+  // `reconnectProjectId` (Stage 4 Task 7): when reconnecting an offline tab, bind the fresh session
+  // to the EXISTING project id (reuse the tab, clear its "unavailable" grey) instead of adding a new
+  // one — so a socket drop → greyed reconnectable tab, never a duplicate.
+  const mountRemoteMirror = useCallback(
+    (
+      connectionId: string,
+      label = 'Remote host',
+      reconnectProjectId?: string,
+      staleSessionId?: string
+    ) => {
+      if (relayTabsRef.current.has(connectionId)) return
+      void openRelayTab(connectionId, label, {
+        relayClient: window.nodeTerminal.relayClient,
+        addProject: reconnectProjectId
+          ? () => ({ id: reconnectProjectId }) // reconnect: reuse the existing tab, don't spawn one
+          : (name) => useProjects.getState().addProject(name),
+        setActiveProject: (id) => useProjects.getState().setActive(id),
+      })
+        .then((tab) => {
+          relayTabsRef.current.set(connectionId, tab)
+          if (reconnectProjectId) {
+            // The fresh session is now bound to the tab (openRelayTab rebound the SAME project id),
+            // so it is finally safe to drop the stale offline session it replaced. Disposing only
+            // AFTER a successful rebind is what keeps a FAILED reconnect reconnectable: if approval
+            // never lands, the offline session stays bound and the tab stays greyed-clickable.
+            if (staleSessionId) disposeSession(staleSessionId)
+            // Back online: un-grey the reused tab.
+            useProjects.getState().setProjectUnavailable(reconnectProjectId, false)
+          }
+          // A host/relay drop AFTER approval is INVOLUNTARY (not a user close): grey the tab to
+          // "unavailable" and take its session offline (presence teardown runs once) — but KEEP the
+          // project so a click can reconnect it in place. See relay-tab `handleRelayDrop`.
+          const un = window.nodeTerminal.relayClient.onClosed(connectionId, () => {
+            un()
+            relayTabsRef.current.delete(connectionId)
+            handleRelayDrop(tab, {
+              setProjectUnavailable: (id, v) => useProjects.getState().setProjectUnavailable(id, v),
+            })
+          })
+        })
+        .catch((err) => {
+          // A user who declined the SAS triggered this close themselves — don't cry error.
+          if (cancelledConnsRef.current.delete(connectionId)) return
+          window.alert(`Remote session did not open: ${(err as Error).message}`)
+        })
+    },
+    []
+  )
+
+  // Surface the SAS so this human can verify it matches the host's before confirming (the
+  // mutual-approval gate — the confirm rides the ENCRYPTED tunnel in main; see relay-client.ts),
+  // then build the tab (registers the one-shot onApproved listener BEFORE approval fires — see
+  // relay-api.ts gotcha 2). Shared by the first connect and the Task 7 reconnect (which passes the
+  // existing project id so the fresh session rebinds the SAME tab).
+  const confirmAndMount = useCallback(
+    (connectionId: string, label: string, reconnectProjectId?: string, staleSessionId?: string) => {
+      const unSas = window.nodeTerminal.relayClient.onSas(connectionId, (sas) => {
+        unSas()
+        if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
+          window.nodeTerminal.relayClient.confirm(connectionId)
+        } else {
+          // Deliberate decline: mark it so the bootstrap's close-reject isn't surfaced as an error.
+          cancelledConnsRef.current.add(connectionId)
+          window.nodeTerminal.relayClient.disconnect(connectionId)
+        }
+      })
+      mountRemoteMirror(connectionId, label, reconnectProjectId, staleSessionId)
+    },
+    [mountRemoteMirror]
+  )
+
+  // Connect to a host from an already-collected pairing offer: open the relay socket, then run the
+  // shared SAS-compare + mount flow. The SINGLE place `relayClient.connect` + `confirmAndMount` live,
+  // so every entry (dock/palette prompt below, and the Settings/tab-menu dialogs via the
+  // `nodeterm:open-remote-terminal` event) reuses it instead of re-implementing the SAS handshake.
+  const connectOffer = useCallback(
+    async (offer: string) => {
+      try {
+        const connectionId = await window.nodeTerminal.relayClient.connect(offer)
+        confirmAndMount(connectionId, 'Remote host')
+      } catch (err) {
+        window.alert(`Could not connect: ${(err as Error).message}`)
+      }
+    },
+    [confirmAndMount]
+  )
 
   // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
-  // and open the live mirror over the local canvas. This is the primary remote entry (it replaces
-  // B4's lone remote-terminal-on-connect flow).
+  // compare the SAS, confirm, and open the host as a project tab. This is the primary remote entry.
   const connectRemote = useCallback(async () => {
     const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
     if (!offer) return
-    try {
-      const connectionId = await window.nodeTerminal.remoteClient.connect(offer)
-      mountRemoteMirror(connectionId)
-    } catch (err) {
-      window.alert(`Could not connect: ${(err as Error).message}`)
-    }
-  }, [mountRemoteMirror])
+    void connectOffer(offer)
+  }, [connectOffer])
+
+  // Reconnect an offline (dropped) relay tab IN PLACE (Stage 4 Task 7). The relay offer is
+  // single-use (main/remote/pairing.ts), so v1 has no silent/pinned reconnect — prompt for a FRESH
+  // pairing code and mount the new connection onto the SAME tab. The stale offline session is
+  // captured here and disposed only AFTER the fresh session rebinds (in mountRemoteMirror's success
+  // path), so a cancelled/failed reconnect leaves the offline tab still bound and reconnectable.
+  const reconnectRelay = useCallback(
+    (projectId: string) => {
+      const label = useProjects.getState().getProject(projectId)?.name ?? 'Remote host'
+      const bound = sessionForProject(projectId)
+      const staleSessionId = bound.source === 'relay' ? bound.id : undefined
+      void reconnectRelayTab(projectId, {
+        promptForOffer: () => promptDialog({ message: "Paste the host's new pairing code:" }),
+        connect: (offer) => window.nodeTerminal.relayClient.connect(offer),
+        mount: (connectionId, projId) => confirmAndMount(connectionId, label, projId, staleSessionId),
+        onError: (message) => window.alert(`Could not reconnect: ${message}`),
+      })
+    },
+    [confirmAndMount]
+  )
 
   /** Open a file as a code editor node on the canvas. `sshFs` must be passed explicitly by the
    *  caller: only genuinely-remote, Explorer-opened files in an SSH project pass `true`; native
@@ -2188,25 +2332,17 @@ export function Canvas() {
     return () => window.removeEventListener('keydown', onKey)
   }, [addTerminal, addAgentNode])
 
-  // When a remote connection is established (from Settings' "Connect to a host"), open the live
-  // mirror of the host's canvas. Dispatched as a window event so Settings doesn't need a Canvas
-  // reference. This replaces B4's lone-remote-terminal behavior as the primary remote entry.
+  // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
+  // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME
+  // relay connect → SAS compare → mount-as-tab flow the dock/palette entry uses (`connectOffer`).
   useEffect(() => {
     const onOpenRemote = (e: Event) => {
-      const connectionId = (e as CustomEvent<{ connectionId: string }>).detail?.connectionId
-      if (connectionId) mountRemoteMirror(connectionId)
+      const offer = (e as CustomEvent<{ offer: string }>).detail?.offer?.trim()
+      if (offer) void connectOffer(offer)
     }
     window.addEventListener('nodeterm:open-remote-terminal', onOpenRemote)
     return () => window.removeEventListener('nodeterm:open-remote-terminal', onOpenRemote)
-  }, [mountRemoteMirror])
-
-  // Tear the mirror down if the host/relay drops the active connection.
-  useEffect(() => {
-    if (!remoteConnId) return
-    return window.nodeTerminal.remoteClient.onClosed(remoteConnId, () => {
-      setRemoteConnId((id) => (id === remoteConnId ? null : id))
-    })
-  }, [remoteConnId])
+  }, [connectOffer])
 
   /**
    * Move every node that was living in a worktree directory OFF that (now dead) path — back to the
@@ -2340,8 +2476,7 @@ export function Canvas() {
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
         // session is being destroyed right here). Also drops an already-parked entry.
         if (n.type === 'terminal') disposeTerminalOnUnmount(n.id)
-        // Remote terminals have no local persistent session — only destroy local ones.
-        if (n.type === 'terminal' && !n.data.remote) transport.destroy(n.id)
+        if (n.type === 'terminal') transport.destroy(n.id)
         // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
         // lives across project switches (only permanent delete kills it), so this belongs here,
         // not in node unmount.
@@ -2354,20 +2489,6 @@ export function Canvas() {
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearLoop(n.id)
-      })
-      // Tear down relay connections owned solely by the deleted remote node(s). The model is
-      // N:1 (one connection per remote node), but dedupe defensively: only disconnect a
-      // connectionId if no *surviving* remote node still uses it, so we never drop a live one.
-      const deletedConns = new Set<string>()
-      const survivingConns = new Set<string>()
-      nodesRef.current.forEach((n) => {
-        const conn = (n.data.remote as { connectionId: string } | undefined)?.connectionId
-        if (!conn) return
-        if (set.has(n.id)) deletedConns.add(conn)
-        else survivingConns.add(conn)
-      })
-      deletedConns.forEach((conn) => {
-        if (!survivingConns.has(conn)) void window.nodeTerminal.remoteClient.disconnect(conn)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
@@ -2984,9 +3105,7 @@ export function Canvas() {
     // silently (the confirm closing with nothing happening reads as a bug).
     //
     // The question is the PROJECT's (does its git — and its tmux — run over ssh?) and the NODE's
-    // (`isRemoteSessionNode`: relay `data.remote` OR an SSH project's `data.ssh`/`data.sshRemoteTmux`).
-    // Guarding `data.remote` alone asked only about relay nodes, which cannot occur in an SSH project
-    // at all — so the one node kind this exists to protect walked straight through it.
+    // (`isRemoteSessionNode`: an SSH project's `data.ssh`/`data.sshRemoteTmux`).
     if (isSshProject || isRemoteSessionNode(node.data)) {
       setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
       return
@@ -4104,13 +4223,14 @@ export function Canvas() {
               bindGroupId = g.id
             }
             const baseRef = args.base?.trim() || resolveBaseRef(entries)
-            const wtPath =
-              args.path?.trim() ||
-              computeWorktreePath(
-                await window.nodeTerminal.userDataDir(),
-                repoRoot.split('/').pop() || 'repo',
-                branch
-              )
+            // Path from the SESSION core's userData (the HOST for a remote tab), not the local
+            // client's — the git worktree op below runs on `api.git`, so the path must live there.
+            const wtPath = await resolveWorktreePath({
+              explicitPath: args.path,
+              userDataDir: api.userDataDir,
+              repoRoot,
+              branch
+            })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
               return
@@ -4751,10 +4871,11 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
   // Right-click on a sidebar project header: the same project actions as the tab caret menu,
@@ -4879,10 +5000,11 @@ export function Canvas() {
           .finally(() => void window.nodeTerminal.sshProject.disconnect(id))
         useSshConn.getState().clear(id)
       }
+      disposeRelayTabForProject(id)
       store.deleteProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
   const now = useMemo(() => Date.now(), [transcriptHits])
@@ -5066,6 +5188,7 @@ export function Canvas() {
     <div className="canvas-root">
       <TabBar
         onSwitch={switchProject}
+        onReconnect={reconnectRelay}
         onOpenWelcome={() => setWelcomeOpen(true)}
         onRename={renameProject}
         onSetFolder={setProjectFolder}
@@ -5242,6 +5365,12 @@ export function Canvas() {
       </div>
 
       <div className="flow-wrap" ref={flowWrapRef}>
+        {/* The active project's node subtree runs under ITS session (local for a local tab, the
+            relay session for a remote tab). Keyed by session id so an api swap REMOUNTS the nodes
+            (obligation 3): TerminalNode/EditorNode/ChatNode capture `api` in []-effects, so a live
+            api change must remount them or they keep talking to the old core. For an all-local user
+            the key is always 'local', so this never remounts — zero behavior change. */}
+        <SessionProvider session={sessionForProject(activeProjectId || '')} key={sessionForProject(activeProjectId || '').id}>
         <ReactFlow
           nodes={allNodes}
           edges={displayEdges}
@@ -5296,6 +5425,7 @@ export function Canvas() {
           <PresenceLayer />
           <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
+        </SessionProvider>
 
         {/* Mounted unconditionally, even when we are alone: the facepile renders null with no peers,
             but it is also what prunes the presence store's face cache — gating its mount on a peer
@@ -5330,12 +5460,6 @@ export function Canvas() {
           onClose={() => setCloneDialogOpen(false)}
           onCloned={onRepoCloned}
         />
-
-        {remoteConnId && (
-          <div className="remote-session-overlay">
-            <RemoteSessionView connectionId={remoteConnId} onClose={disconnectRemote} />
-          </div>
-        )}
       </div>
 
       {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}
@@ -5441,12 +5565,12 @@ export function Canvas() {
 
       {pendingPeer && (
         <ConfirmDialog
-          message={
-            `A device wants to access this machine.\n\n` +
-            `Approve ONLY if you started this connection. The other device shows the same code:\n\n` +
-            `        ${pendingPeer.sas ?? '— — —'}\n\n` +
-            `If the codes don't match, deny it.`
-          }
+          // ConsentNotice → describeGrant: the human reads WHAT they grant ("<peer> will be able to
+          // run commands on this Mac — the same as SSH") above the SAS body, before confirming.
+          // Everything the dialog needs (label, SAS body, confirm id) comes from the ONE pure
+          // view-model, so the peer label the user reads is the same field the test guards.
+          body={<ConsentNotice peerLabel={peerApprovalView(pendingPeer).peerLabel} />}
+          message={peerApprovalView(pendingPeer).message}
           confirmLabel="Allow"
           cancelLabel="Deny"
           // A REMOTE device raised this — the far side completing the pairing handshake pops it
@@ -5457,11 +5581,14 @@ export function Canvas() {
           enterConfirms={false}
           danger
           onConfirm={() => {
-            window.nodeTerminal.remoteHost.approve(pendingPeer.id)
+            window.nodeTerminal.relayHost.confirm(peerApprovalView(pendingPeer).confirmId)
             setPendingPeer(null)
           }}
+          // The relay host API offers no explicit reject (see main/remote/relay-host-service.ts):
+          // declining is simply NOT confirming — the peer is only ever admitted once the host
+          // confirms (`onOpen` fires after both humans match the SAS), so closing this dialog
+          // without confirming leaves the pending peer un-admitted and it times out server-side.
           onCancel={() => {
-            window.nodeTerminal.remoteHost.reject(pendingPeer.id)
             setPendingPeer(null)
           }}
         />

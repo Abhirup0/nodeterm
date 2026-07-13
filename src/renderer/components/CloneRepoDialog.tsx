@@ -19,7 +19,7 @@ interface CloneRepoDialogProps {
 
 /**
  * Clone dialog: URL (with owner/repo GitHub shorthand preview) + parent
- * folder (native picker, last-used remembered) + live progress + inline error.
+ * folder (session picker — host fs on a relay tab, last-used remembered) + live progress + inline error.
  * Cancel — or closing the dialog — aborts the in-flight clone; main cleans up the
  * half-cloned directory it claimed.
  */
@@ -27,7 +27,10 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
   // This dialog's core api (a stable context read): the clone runs on the session's core. The
   // effects below capture it in their CLOSURES and keep their `[open]` dep arrays — one of them
   // subscribes (onCloneProgress), and re-keying a resource effect on `api` is the 4c bomb the
-  // sub-stage rules forbid. (The native folder picker stays on the app-global `dialog`.)
+  // sub-stage rules forbid. The folder picker ALSO goes through `api.dialog` (not the global): the
+  // clone lands on the machine the git op runs on, so for a relay tab the picker must browse the
+  // HOST fs (obligation d — `buildRelayApi` overrides `dialog.selectFolder`). Local session → the
+  // native local dialog, byte-identical.
   const { api } = useSession()
   const [url, setUrl] = useState('')
   const [parent, setParent] = useState('')
@@ -144,7 +147,7 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
             title="Choose folder"
             disabled={cloning}
             onClick={() => {
-              void window.nodeTerminal.dialog.selectFolder().then((f) => {
+              void api.dialog.selectFolder().then((f) => {
                 if (f) setParent(f)
               })
             }}

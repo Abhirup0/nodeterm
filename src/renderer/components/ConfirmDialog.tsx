@@ -1,10 +1,13 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { confirmKeyAction } from './confirm-key'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from './dialog-stack'
 
 interface ConfirmDialogProps {
   message: string
+  /** Optional content rendered ABOVE the message (e.g. the remote-access ConsentNotice), so the
+   *  human reads what they are granting before the SAS body + buttons. */
+  body?: ReactNode
   confirmLabel?: string
   cancelLabel?: string
   danger?: boolean
@@ -30,6 +33,7 @@ interface ConfirmDialogProps {
  */
 export function ConfirmDialog({
   message,
+  body,
   confirmLabel = 'Delete',
   cancelLabel = 'Cancel',
   danger = true,
@@ -78,6 +82,7 @@ export function ConfirmDialog({
   return createPortal(
     <div className="confirm-overlay" onClick={onCancel}>
       <div className="confirm" ref={boxRef} onClick={(e) => e.stopPropagation()}>
+        {body}
         <p className="confirm__msg">{message}</p>
         {option && (
           <label className="confirm__option">

@@ -92,12 +92,6 @@ export interface NodeData {
   /** group-only: the git worktree this group is bound to (single source of truth). */
   worktree?: import('@shared/worktree').GroupWorktree
   /**
-   * When set, this terminal runs on a REMOTE host over the relay (RemoteTransport) rather than
-   * the local PTY (LocalTransport). Not persisted — remote nodes are transient to a live
-   * connection (see flowToNodeStates).
-   */
-  remote?: { connectionId: string }
-  /**
    * When set, this terminal runs `ssh` to a remote host on the LOCAL PTY (LocalTransport).
    * Unlike `remote` (relay), this IS persisted — the node auto-reconnects on relaunch.
    */
@@ -176,33 +170,6 @@ export function createTerminalNode(
       cwd: ssh ? ssh.remoteCwd : cwd,
       initialCommand,
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
-    }
-  }
-}
-
-/**
- * Creates a terminal node bound to a REMOTE host over the relay. Identical to a local terminal
- * except `data.remote.connectionId` is set, which makes TerminalNode pick RemoteTransport instead
- * of LocalTransport. Not persisted (see flowToNodeStates).
- */
-export function createRemoteTerminalNode(
-  connectionId: string,
-  index: number,
-  center?: { x: number; y: number }
-): CanvasNode {
-  return {
-    id: nextId('remote'),
-    type: 'terminal',
-    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
-    width: TERMINAL_SIZE.width,
-    height: TERMINAL_SIZE.height,
-    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
-    data: {
-      title: 'Remote terminal',
-      color: NODE_COLORS[index % NODE_COLORS.length],
-      group: null,
-      tags: [],
-      remote: { connectionId }
     }
   }
 }
@@ -976,9 +943,6 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                       ? CHAT_SIZE
                       : TERMINAL_SIZE
   return nodes
-    // Remote terminals are transient to a live relay connection — never persist them (their
-    // connectionId is dead after a restart, and they'd otherwise reattach to a stray local tmux).
-    .filter((n) => !n.data.remote)
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
       const collapsed = !!n.data.collapsed
@@ -1029,9 +993,6 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
  * every peer mutation — 20 times a second while a teammate drags:
  *   - SELECTION. `nodeStatesToFlow` never sets `selected`, so a teammate's drag wiped your
  *     box-select / shift-click / select-then-group the instant it landed.
- *   - REMOTE NODES. `flowToNodeStates` filters `!n.data.remote` (they are transient to a relay
- *     connection and must never persist), so round-tripping DELETED every relay terminal on your
- *     canvas.
  *   - LOCAL-ONLY DATA. `initialCommand`, `respawnNonce`, `forkFrom` never survive a serialize.
  *   - IDENTITY. Every node object was rebuilt → every node component re-rendered, per mutation.
  * Patching in place keeps all four: untouched nodes keep their object identity (React.memo holds),

@@ -1456,70 +1456,6 @@ body,
   position: relative;
 }
 
-/* ---- Remote session mirror (full-surface overlay over the local canvas) ---- */
-.remote-session-overlay {
-  position: absolute;
-  inset: 0;
-  /* Above all canvas chrome (dock z40, minimap, side buttons, panels up to z90) so the underlying
-     main canvas — and especially its dock zoom controls — can't bleed through or be clicked. */
-  z-index: 100;
-  background: var(--bg, #000);
-}
-
-.remote-session-view {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-}
-
-.remote-session-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  background: rgba(20, 22, 28, 0.92);
-  border-bottom: 1px solid var(--separator, rgba(255, 255, 255, 0.1));
-  font-size: 12px;
-}
-
-.remote-session-bar__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #30d158;
-  box-shadow: 0 0 6px #30d158;
-}
-
-.remote-session-bar__label {
-  font-weight: 600;
-  color: var(--label, #fff);
-}
-
-.remote-session-bar__hint {
-  color: var(--label-secondary, rgba(255, 255, 255, 0.55));
-}
-
-.remote-session-bar__leave {
-  margin-left: auto;
-  padding: 3px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--separator, rgba(255, 255, 255, 0.15));
-  background: transparent;
-  color: var(--label, #fff);
-  cursor: pointer;
-}
-
-.remote-session-bar__leave:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.remote-session-flow {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
 /* ---- Remote access dialog (from the project caret menu) ---- */
 .remote-dialog {
   width: 440px;
@@ -3416,6 +3352,21 @@ body,
      the newlines and still collapses runs of spaces, exactly as `normal` did — so the messages that
      carry no newlines at all are unchanged. */
   white-space: pre-line;
+}
+
+/* The grant disclosure (`ConsentNotice` → describeGrant) shown ABOVE the SAS body in the host
+   approval dialog: the human reads that they are handing the peer shell access before they Allow.
+   Styled as a distinct callout — accent-tinted panel — so a load-bearing security sentence does
+   not read as an unstyled default paragraph. */
+.remote-consent {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 /* Explicit opt-in inside a confirm dialog (e.g. "also delete the directory from disk"). */

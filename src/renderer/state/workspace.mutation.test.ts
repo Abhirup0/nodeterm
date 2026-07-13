@@ -55,16 +55,6 @@ describe('applyMutationToFlow', () => {
     expect(out[0].position).toEqual({ x: 50, y: 0 })
   })
 
-  // flowToNodeStates FILTERS remote nodes (transient to a relay connection, never persisted), so
-  // the round trip deleted every relay terminal on your canvas on each peer mutation.
-  it('keeps relay-remote nodes, which a serialize round trip would delete', () => {
-    const nodes = [flowNode('r1', 0, { data: { title: 'r', color: '#fff', group: null, remote: { connectionId: 'c1' } } } as Partial<CanvasNode>), flowNode('a', 0)]
-    expect(flowToNodeStates(nodes).map((n) => n.id)).toEqual(['a']) // …the lossy bit, pinned
-    const out = applyMutationToFlow(nodes, upsert(state('a', 5)))
-    expect(out.map((n) => n.id)).toEqual(['r1', 'a'])
-    expect(out[0]).toBe(nodes[0])
-  })
-
   // initialCommand / respawnNonce / forkFrom are deliberately not serialized. A peer's rename must
   // not silently drop them from a node that has not consumed them yet.
   it('keeps local-only node data (initialCommand) while applying the peer\'s fields', () => {

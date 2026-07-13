@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
 import { IPC } from '../shared/ipc'
-import * as fsOps from '../core/fs-ops'
+import { registerFsHandlers } from '../core/fs-handlers'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
@@ -63,7 +63,13 @@ import {
   RELAY_URL
 } from './remote/host-service'
 import { initStandingHost } from './remote/standing-host'
-import { initRemoteClient } from './remote/client-service'
+import { killRelayHostsByPeerKey } from './remote/relay-host'
+import { initRelayHost } from './remote/relay-host-service'
+import { createRevoker } from './remote/revocation'
+import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
+import { connectRelayClient, type RelayClientSession } from './remote/relay-client'
+import { decodeOffer } from './remote/pairing'
+import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs } from './ssh-fs'
@@ -87,7 +93,10 @@ if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT
 // First thing in bootstrap: install the Electron CorePlatform so anything in src/core
 // (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI
 // userData override so userDataDir reads the final path; nothing consumes it yet.
-initPlatform(electronPlatform())
+// Held: a relay peer's inbound RPC is answered from THIS instance's handler table (corePlatform
+// .dispatch / .cast — see platform-electron.ts). `platform()` only exposes the CorePlatform half.
+const corePlatform = electronPlatform()
+initPlatform(corePlatform)
 
 // Only hand the OS a URL with a vetted scheme. Blocks file://, smb://, and custom
 // protocol-handler schemes that could be smuggled in via remote announcement feeds or
@@ -374,7 +383,14 @@ app.whenReady().then(async () => {
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
   void claudeCliCaps()
 
-  ipcMain.handle(IPC.commitGenerate, (_e, cwd: string) =>
+  // REACHABILITY (4c): a handler registered through `corePlatform` serves BOTH the local window
+  // (it is still `ipcMain.handle`, bit-for-bit) AND a relay peer (answered from the platform's
+  // handler table — a peer has no webContents, so a raw `ipcMain.handle` is invisible to it).
+  // Everything core-bound — it acts on THIS machine's state, which is exactly what a remote tab
+  // is looking at — goes on the platform. The raw `ipcMain` registrations that remain further down
+  // are deliberate: each one must act on the USER's machine (dialogs, shell, notifications,
+  // updater) or is part of the host's own trust/relay control plane (pairing, remote:*, accounts).
+  corePlatform.handle(IPC.commitGenerate, (cwd: string) =>
     generateCommitMessage(cwd, settingsStore.get())
   )
 
@@ -395,7 +411,7 @@ app.whenReady().then(async () => {
   const localNamingCwd = (keys: string[], cwd: string): string =>
     keys.some((k) => ptyManager.sshRemoteForNode(k)) ? '' : cwd
 
-  ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
+  corePlatform.handle(IPC.ptyGenerateName, async (persistKey: string, cwd: string) =>
     generateTerminalName(
       await ptyManager.captureSession(persistKey),
       localNamingCwd([persistKey], cwd),
@@ -403,16 +419,16 @@ app.whenReady().then(async () => {
     )
   )
 
-  ipcMain.handle(IPC.ptyGenerateGroupName, async (_e, memberKeys: string[], cwd: string) => {
+  corePlatform.handle(IPC.ptyGenerateGroupName, async (memberKeys: string[], cwd: string) => {
     const contents = await Promise.all(memberKeys.map((k) => ptyManager.captureSession(k)))
     return generateGroupName(contents, localNamingCwd(memberKeys, cwd), settingsStore.get())
   })
 
-  ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
+  corePlatform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )
 
-  ipcMain.handle(IPC.ptyReadSessionName, (_e, sessionId: string, accountId?: string) =>
+  corePlatform.handle(IPC.ptyReadSessionName, (sessionId: string, accountId?: string) =>
     readSessionName(sessionId ?? '', accountId)
   )
 
@@ -480,8 +496,9 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.announcementsFetch, async () => (await fetchCheck()).messages)
   ipcMain.handle(IPC.appUpdatePolicy, async () => (await fetchCheck()).update)
 
-  // Writable base dir for app-managed files (e.g. default git worktree location).
-  ipcMain.handle(IPC.appUserDataDir, () => app.getPath('userData'))
+  // Writable base dir for app-managed files (e.g. default git worktree location). On the platform:
+  // a remote tab derives the default worktree path from it, and the worktree lives on THIS host.
+  corePlatform.handle(IPC.appUserDataDir, () => app.getPath('userData'))
 
   // Phone pairing (nodeterm iOS "scan a QR" flow): a one-shot LAN listener that installs the
   // phone's Ed25519 key into ~/.ssh/authorized_keys. The completion result is forwarded to the
@@ -505,6 +522,21 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
 
+  // Revoking a bridged PEER must CUT THE LIVE SESSION, not just unpin it (revocation.ts): unpinning
+  // refuses only the NEXT handshake, while the open relay socket keeps full shell access — "the
+  // person I just removed is still sitting in my terminal, typing". `killByPeerKey` closes every
+  // live session with that key, and each close runs the peer teardown (presence leave →
+  // PtyManager.dropClient → sink prune). Host-security control plane, so it stays on raw ipcMain:
+  // a remote peer must never be able to revoke anyone.
+  const peerRevoker = createRevoker({
+    load: loadApprovedDevices,
+    save: saveApprovedDevices,
+    onRevoke: (peerKeyB64) => killRelayHostsByPeerKey(peerKeyB64)
+  })
+  ipcMain.handle(IPC.remoteRevokePeer, (_e, peerKeyB64: string) =>
+    peerRevoker.revoke(String(peerKeyB64))
+  )
+
   ipcMain.on(IPC.shellReveal, (_e, p: string) => {
     if (p) shell.showItemInFolder(p)
   })
@@ -517,17 +549,10 @@ app.whenReady().then(async () => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url)
   })
 
-  // The local Explorer/Editor fs IPC: thin wrappers over the shared fs-ops (the SAME logic the
-  // remote `fs.*` RPC handlers reuse, so local and remote filesystem behaviour stay identical).
-  ipcMain.handle(IPC.fsList, (_e, dirPath: string) => fsOps.listDir(dirPath))
-  ipcMain.handle(IPC.fsRead, (_e, filePath: string) => fsOps.readText(filePath))
-  ipcMain.handle(IPC.fsReadBinary, (_e, filePath: string) => fsOps.readBinary(filePath))
-  ipcMain.handle(IPC.fsWrite, (_e, filePath: string, content: string) =>
-    fsOps.writeText(filePath, content)
-  )
-  ipcMain.handle(IPC.fsMkdir, (_e, dirPath: string) => fsOps.makeDir(dirPath))
-  ipcMain.handle(IPC.fsExists, (_e, p: string) => fsOps.pathExists(p))
-  ipcMain.handle(IPC.filesQuickOpen, (_e, cwd: string) => fsOps.listQuickOpenFiles(cwd))
+  // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
+  // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
+  // behaviour cannot drift. Registered on the platform, so a remote tab's Explorer/editor works.
+  registerFsHandlers(corePlatform)
 
   // SSH-project Explorer/Editor fs: the remote analog of the fs:* handlers above, scoped to a
   // project's ControlMaster. One SshFs bound to the SSH-project manager's own ssh runner (the SAME
@@ -695,10 +720,9 @@ app.whenReady().then(async () => {
   // the remote read fetches the tail over ssh, then reuses the SAME pure parsers as local, so
   // the returned shape is byte-identical to the local reader.
   const REMOTE_TRANSCRIPT_CAP = 5 * 1024 * 1024
-  ipcMain.handle(
+  corePlatform.handle(
     IPC.claudeReadTranscript,
     async (
-      _e,
       sessionId: string | undefined,
       cwd: string | undefined,
       accountId: string | undefined
@@ -713,10 +737,9 @@ app.whenReady().then(async () => {
     }
   )
 
-  ipcMain.handle(
+  corePlatform.handle(
     IPC.chatReadTranscript,
     async (
-      _e,
       sessionId: string | undefined,
       cwd: string | undefined,
       accountId: string | undefined
@@ -732,24 +755,20 @@ app.whenReady().then(async () => {
   )
 
   initTranscriptIndex(() => settingsStore.get().claudeAccounts ?? [])
-  ipcMain.handle(IPC.transcriptSearch, (_e, query: string) => searchTranscripts(query))
+  corePlatform.handle(IPC.transcriptSearch, (query: string) => searchTranscripts(query))
   // Populate the context meter without a live hook event: the renderer calls this on mount
   // (the continuing session may be idle after a restart). Track under the sessionId (the key
   // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
   // the 1s interval keeps it fresh while tracked.
-  ipcMain.on(
-    IPC.contextEnsure,
-    async (_e, sessionId?: string, cwd?: string, accountId?: string) => {
-      if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
-      let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
-      if (!p && cwd) p = await transcriptPathForCwd(cwd)
-      if (p) contextTail.track(sessionId, p)
-    }
-  )
-  ipcMain.handle(
+  corePlatform.on(IPC.contextEnsure, async (sessionId?: string, cwd?: string, accountId?: string) => {
+    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
+    let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
+    if (!p && cwd) p = await transcriptPathForCwd(cwd)
+    if (p) contextTail.track(sessionId, p)
+  })
+  corePlatform.handle(
     IPC.handoffBuild,
     (
-      _e,
       sessionId: string,
       agentId: string,
       sourceNodeId: string,
@@ -757,14 +776,17 @@ app.whenReady().then(async () => {
       accountId: string | undefined
     ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId })
   )
-  // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC.
-  ipcMain.handle(IPC.chatEnsure, (_e, nodeId: string, opts) => chatDriver.ensure(nodeId, opts))
-  ipcMain.on(IPC.chatSend, (_e, nodeId: string, text: string, images) => chatDriver.send(nodeId, text, images))
-  ipcMain.on(IPC.chatInterrupt, (_e, nodeId: string) => chatDriver.interrupt(nodeId))
-  ipcMain.on(IPC.chatPermissionReply, (_e, nodeId: string, requestId: string, decision) =>
+  // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC. On the
+  // platform: the driver runs on THIS host, and a remote tab's chat node drives the same one.
+  corePlatform.handle(IPC.chatEnsure, (nodeId: string, opts) => chatDriver.ensure(nodeId, opts))
+  corePlatform.on(IPC.chatSend, (nodeId: string, text: string, images) =>
+    chatDriver.send(nodeId, text, images))
+  corePlatform.on(IPC.chatInterrupt, (nodeId: string) => chatDriver.interrupt(nodeId))
+  corePlatform.on(IPC.chatPermissionReply, (nodeId: string, requestId: string, decision) =>
     chatDriver.permissionReply(nodeId, requestId, decision))
-  ipcMain.on(IPC.chatRemoveQueued, (_e, nodeId: string, queueId: string) => chatDriver.removeQueued(nodeId, queueId))
-  ipcMain.on(IPC.chatDispose, (_e, nodeId: string) => chatDriver.dispose(nodeId))
+  corePlatform.on(IPC.chatRemoveQueued, (nodeId: string, queueId: string) =>
+    chatDriver.removeQueued(nodeId, queueId))
+  corePlatform.on(IPC.chatDispose, (nodeId: string) => chatDriver.dispose(nodeId))
 
   installManagedAgentHooks()
   // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
@@ -939,8 +961,11 @@ app.whenReady().then(async () => {
       nodeSubagents.delete(nodeId)
     }
   }
-  ipcMain.on(IPC.ptyDestroy, (_e, nodeId: string) => releaseNodeTails(nodeId))
-  ipcMain.on(IPC.ptyRecycle, (_e, nodeId: string) => releaseNodeTails(nodeId))
+  // A SECOND listener on these channels (PtyManager registers its own): both fire, in registration
+  // order, on ipcMain AND in the platform's listener table — so a peer closing a node releases the
+  // host's tails too, instead of leaking them.
+  corePlatform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
+  corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
   // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
@@ -993,13 +1018,85 @@ app.whenReady().then(async () => {
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
   initRemoteHost(win, ptyManager, listProjectsOutput)
+  // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
+  // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the
+  // phone still uses the legacy flow). Inert until `relay:host:start` — a solo user pays nothing.
+  // Revocation reaches its sessions via `killRelayHostsByPeerKey` (peerRevoker, above).
+  initRelayHost(win, corePlatform, {})
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
   // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
   standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)
   ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost?.setEnabled(!!enabled))
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()
-  initRemoteClient(win, { isPackaged: app.isPackaged })
+  // Interactive relay CLIENT (Stage 4): connect OUT to another desktop's host. `connectRelayClient`
+  // runs the client half of mutual SAS approval and, once BOTH humans confirm, exposes the raw rpc.ts
+  // frame pipe (`relay:client:send`/`relay:client:frame`) that Task 4's RpcClient drives. This is the
+  // ONLY desktop client path now — the legacy `initRemoteClient` dialect was deleted in Task 10.
+  // Inert until `relay:client:connect` — a solo user pays nothing.
+  {
+    const relayClients = new Map<string, RelayClientSession>()
+    const sendTo = (channel: string, ...args: unknown[]): void => {
+      if (!win.isDestroyed()) win.webContents.send(channel, ...args)
+    }
+    ipcMain.handle(IPC.relayClientConnect, async (_e, offerCode: string): Promise<string> => {
+      // No Pro gate on the client: the paywall is the HOST minting the pairing token, so a valid offer
+      // is the credential (the paywall is host-side). The dev/relay gate still applies.
+      if (!relayAllowed()) {
+        throw new Error('Remote access is unavailable in development builds (set NODETERM_RELAY_URL).')
+      }
+      const offer = decodeOffer(String(offerCode ?? ''))
+      if (!offer) {
+        throw new Error('That pairing code is invalid or incomplete.')
+      }
+      // Our persistent peer identity (4d: pinned on both ends). A locked keyring rejects here as
+      // PeerKeyLockedError (E_PEER_KEY_LOCKED) — the identity on disk is intact and must NOT be rotated;
+      // the renderer tells the human to unlock and reconnect.
+      const keys = await loadOrCreatePeerKeyPair()
+      const connectionId = randomUUID()
+      const session = connectRelayClient({
+        url: offer.relayEndpoint,
+        token: offer.pairingToken,
+        hostKeyB64: offer.hostPublicKeyB64,
+        ourKeys: keys,
+        // The SAS is known — push it so this human can compare it before the host approves.
+        onSas: (s) => sendTo(IPC.relayClientSas(connectionId), s.sas()),
+        // Mutually approved — the frame pipe is live.
+        onApproved: () => sendTo(IPC.relayClientApproved(connectionId)),
+        // An inbound rpc frame from the host (res/ev) → the renderer's RpcClient.
+        onFrame: (json) => sendTo(IPC.relayClientFrame(connectionId), json),
+        // pty output arrives on the SAME per-session channel a local pty uses (ws-bridge binary path).
+        onPtyData: (sessionId, data) => sendTo(IPC.ptyData(sessionId), data),
+        onClose: () => {
+          relayClients.delete(connectionId)
+          sendTo(IPC.relayClientClosed(connectionId))
+        }
+      })
+      relayClients.set(connectionId, session)
+      return connectionId
+    })
+    // This human compared the SAS and pressed Confirm → advance the trust gate (confirm rides the
+    // ENCRYPTED tunnel). An unknown id (stale event) is a no-op.
+    // Preload sends `{ id }` (matching the host side's relayHostConfirm), so read the object — a
+    // positional `connectionId` here would stringify to "[object Object]" and match no session,
+    // silently breaking the client's half of the mutual approval (never covered by vitest — this
+    // send↔on boundary only runs under real Electron).
+    ipcMain.on(IPC.relayClientConfirm, (_e, msg: { id?: string } = {}) => {
+      if (msg?.id) relayClients.get(String(msg.id))?.confirm()
+    })
+    // The renderer casts an outbound rpc frame at the host (refused inside the session before approval).
+    ipcMain.on(IPC.relayClientSend, (_e, connectionId: string, json: string) => {
+      relayClients.get(String(connectionId))?.send(String(json))
+    })
+    // `on`, not `handle`: the preload calls this via `ipcRenderer.send` (fire-and-forget), which an
+    // `ipcMain.handle` would never receive — the socket would never close and the host-side presence
+    // leave would never fire (the peer lingers in the host facepile).
+    ipcMain.on(IPC.relayClientDisconnect, (_e, connectionId: string) => {
+      const id = String(connectionId)
+      relayClients.get(id)?.close()
+      relayClients.delete(id)
+    })
+  }
   sshProjectManager = initSshProject(win, (projectId) => {
     // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
     // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the

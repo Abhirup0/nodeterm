@@ -3,7 +3,6 @@ import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xy
 import { monaco } from '../editor/monaco-setup'
 import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
-import { remoteFs } from '../terminal/remote-fs'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
 import { useSession } from '../session/session'
@@ -48,17 +47,11 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const fileMissing = !!data.fileMissing
   // This node's core api (a stable context read — the local session's api IS window.nodeTerminal).
   const { api } = useSession()
-  // Backend pick (the `FsApi` shape is identical across all three, so the rest of the component is
-  // unchanged): a relay session operates on the HOST's filesystem via the relay; an SSH-project
-  // editor (`data.sshFs`) on the project's remote fs over the ControlMaster; otherwise the
-  // session's fs.
+  // Backend pick (the `FsApi` shape is identical across both, so the rest of the component is
+  // unchanged): an SSH-project editor (`data.sshFs`) operates on the project's remote fs over the
+  // ControlMaster; otherwise the session's fs.
   const activeProjectId = useProjects((s) => s.activeProjectId)
-  const connectionId = data.remote?.connectionId
-  const fs = connectionId
-    ? remoteFs(connectionId)
-    : data.sshFs && activeProjectId
-      ? sshFs(activeProjectId)
-      : api.fs
+  const fs = data.sshFs && activeProjectId ? sshFs(activeProjectId) : api.fs
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
   const isImage = ext in IMAGE_MIME

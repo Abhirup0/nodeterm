@@ -29,6 +29,34 @@ describe('bridge stubs', () => {
     }
   })
 
+  it('relay tunnel is a desktop-only unsupported degrade (subscriptions still safe)', async () => {
+    const s = buildStubApi()
+    // Entry points reject with the coded error so the renderer hides the affordance.
+    await expect(s.relayHost.start()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.relayHost.stop()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.relayClient.connect('offer')).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    // Subscriptions must return callable no-op unsubscribes (used as React effect cleanups).
+    for (const un of [
+      s.relayHost.onPeerPending(() => {}),
+      s.relayHost.onOpen(() => {}),
+      s.relayHost.onClosed(() => {}),
+      s.relayClient.onSas('c', () => {}),
+      s.relayClient.onApproved('c', () => {}),
+      s.relayClient.onFrame('c', () => {}),
+      s.relayClient.onClosed('c', () => {})
+    ]) {
+      expect(typeof un).toBe('function')
+      expect(() => un()).not.toThrow()
+    }
+    // Void gate/frame members are inert (no connection ever exists here).
+    expect(() => {
+      s.relayHost.confirm('id')
+      s.relayClient.confirm('c')
+      s.relayClient.send('c', '{}')
+      s.relayClient.disconnect('c')
+    }).not.toThrow()
+  })
+
   it('boot-path promise members resolve benignly', async () => {
     const s = buildStubApi()
     await expect(s.announcements.fetch()).resolves.toEqual([])

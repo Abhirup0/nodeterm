@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { NAME_MAX_LEN, PRESENCE_COLORS } from '@shared/presence'
 import { selectOthers, suggestIdentity, usePresence } from '../state/presence'
+import { setMeAll } from '../session/session'
 
 /**
  * First-connect identity prompt: pick a name + color. Saved to localStorage
@@ -17,7 +18,6 @@ import { selectOthers, suggestIdentity, usePresence } from '../state/presence'
 export function PresenceNamePrompt(): JSX.Element | null {
   const needsName = usePresence((s) => s.needsName)
   const otherCount = usePresence((s) => selectOthers(s).length)
-  const setMe = usePresence((s) => s.setMe)
   // suggestIdentity is read ONCE (lazy initializer): a peer joining later must not swap the
   // suggested color out from under a user who is mid-typing.
   const [draft] = useState(suggestIdentity)
@@ -30,7 +30,9 @@ export function PresenceNamePrompt(): JSX.Element | null {
   const submit = (): void => {
     const trimmed = name.trim()
     if (!trimmed) return
-    setMe({ name: trimmed, color }) // saves + says hello again, which renames us on the hub
+    // Re-hello EVERY live session, not just the local one (obligation 2): renaming yourself must
+    // rename you on every connected core, or a remote peer keeps drawing your old name until reload.
+    setMeAll({ name: trimmed, color }) // saves + says hello again on each session
   }
 
   return (

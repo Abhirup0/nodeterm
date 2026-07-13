@@ -250,26 +250,28 @@ export function buildStubApi(): Omit<
       reject: (_id: string) => {},
       setPhoneAccess: noop
     },
-    remoteClient: {
-      connect: U('remoteClient.connect'),
-      disconnect: U('remoteClient.disconnect'),
-      create: U('remoteClient.create'),
-      write: noop,
-      resize: noop,
-      kill: noop,
-      // Relay client mode is desktop-only (the whole `remoteClient` block is unsupported here), so
-      // there is no host session to hydrate from — '' is the same "nothing to seed" the local
-      // hydration degrades to, and it keeps TerminalNode's warm-attach path from rejecting.
-      onData: noopUnsub,
-      onExit: noopUnsub,
-      onClosed: noopUnsub,
-      onCanvasState: noopUnsub,
+    // New relay tunnel (Stage 4). Hosting/connecting a peer-to-peer relay is a desktop-only
+    // (Electron) capability — the Server Edition is itself the remote host, reached over its own WS
+    // bridge — so the entry points (`start`/`connect`) reject with E_UNSUPPORTED and the UI hides
+    // the affordance. Because those never yield a live connection, the gate/frame void members are
+    // inert no-ops (there is no connectionId to act on) and the subscriptions are no-op unsubscribes.
+    relayHost: {
+      start: U('relayHost.start'),
+      stop: U('relayHost.stop'),
+      onPeerPending: noopUnsub,
+      confirm: noop,
+      onOpen: noopUnsub,
+      onClosed: noopUnsub
+    },
+    relayClient: {
+      connect: U('relayClient.connect'),
       onSas: noopUnsub,
-      sendMutation: noop,
-      fsList: U('remoteClient.fsList'),
-      fsRead: U('remoteClient.fsRead'),
-      fsReadBinary: U('remoteClient.fsReadBinary'),
-      fsWrite: U('remoteClient.fsWrite')
+      confirm: noop,
+      onApproved: noopUnsub,
+      send: noop,
+      onFrame: noopUnsub,
+      onClosed: noopUnsub,
+      disconnect: noop
     },
     handoff: {
       build: U('handoff.build')

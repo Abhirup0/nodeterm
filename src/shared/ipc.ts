@@ -209,33 +209,43 @@ export const IPC = {
   // Standing (phone) relay host: renderer toggles it on/off (settings.phoneAccessEnabled). Main
   // starts/stops the always-on host connection so a paired phone can reach this Mac over the relay.
   remoteStandingHostSet: 'remote:standing-host:set',
-  // Remote-access CLIENT (drives a host's PTYs over the relay).
-  remoteClientConnect: 'remote:client:connect',
-  remoteClientDisconnect: 'remote:client:disconnect',
-  remoteClientCreate: 'remote:client:create',
-  remoteClientWrite: 'remote:client:write',
-  remoteClientResize: 'remote:client:resize',
-  remoteClientKill: 'remote:client:kill',
-  // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
-  // the client renderer sends its local mutations back for main to RPC to the host.
-  remoteClientMutate: 'remote:client:mutate',
-  // Remote filesystem: the client proxies the local `fs:*` shape onto the host over the relay.
-  remoteClientFsList: 'remote:client:fs-list',
-  remoteClientFsRead: 'remote:client:fs-read',
-  remoteClientFsReadBinary: 'remote:client:fs-read-binary',
-  remoteClientFsWrite: 'remote:client:fs-write',
-  // The channel SAS pushed main->renderer once the client handshake completes, so the client
-  // human can compare it with the code shown on the host before the host approves.
-  remoteClientSas: (connectionId: string) => `remote:client:sas:${connectionId}`,
-  // Host canvas snapshot pushed main->renderer for a connection (connectionId appended).
-  remoteClientCanvasState: (connectionId: string) => `remote:client:canvas-state:${connectionId}`,
-  // Per-session events broadcast main->renderer (connectionId + streamId appended).
-  remoteClientData: (connectionId: string, streamId: number) =>
-    `remote:client:data:${connectionId}:${streamId}`,
-  remoteClientExit: (connectionId: string, streamId: number) =>
-    `remote:client:exit:${connectionId}:${streamId}`,
-  // Fired when a connection's relay socket drops (host/relay gone).
-  remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
+  // Revoke a paired PEER (by its stable box public key). Unpinning alone only refuses the NEXT
+  // handshake — the open relay socket keeps full shell access — so this ALSO cuts the live session
+  // (revocation.ts's whole point; see relay-host.ts's killRelayHostsByPeerKey).
+  remoteRevokePeer: 'remote:revoke-peer',
+  // ── New E2EE relay tunnel (Stage 4) ─────────────────────────────────────────────────────────
+  // The successor to the legacy `remote:host:*` dialect above (the `remote:client:*` desktop-client
+  // channels were deleted in Task 10; the desktop client is now the `relay:*` tunnel). The phone
+  // still speaks `remote:host:*` until the iOS repo migrates (docs/ios-protocol-migration.md), so
+  // these deliberately use a distinct `relay:*` namespace. A connected peer is a first-class
+  // CorePlatform client: the client casts raw rpc.ts frames (JSON strings) at the host and receives
+  // frames back, rather than a bespoke per-verb channel set.
+  //
+  // HOST side: enter/leave host mode, and the mutual-approval gate. `relayHostPeerPending` fires
+  // main → renderer when a client finishes the encrypted handshake and is awaiting approval
+  // (payload `{ id, sas, peerKeyB64 }` — the SAS both humans compare, the peer's box key to pin);
+  // the host human answers with `relayHostConfirm` (id). `relayHostOpen` / `relayHostClosed` fire
+  // main → renderer when a bridged peer becomes a live client / drops (payload `{ id }`).
+  relayHostStart: 'relay:host:start',
+  relayHostStop: 'relay:host:stop',
+  relayHostPeerPending: 'relay:host:peer-pending',
+  relayHostConfirm: 'relay:host:confirm',
+  relayHostOpen: 'relay:host:open',
+  relayHostClosed: 'relay:host:closed',
+  // CLIENT side: connect to a host by its pairing offer (resolves a connectionId), the client half
+  // of the same mutual-approval gate, and the raw frame pipe. `relayClientSas` pushes the channel
+  // SAS main → renderer so the client human can compare it before the host approves;
+  // `relayClientConfirm` (id) is this human's confirmation; `relayClientApproved` fires once the
+  // host approves. `relayClientSend` casts an outbound rpc frame (JSON) at the host;
+  // `relayClientFrame` delivers an inbound one. `relayClientClosed` fires when the socket drops.
+  relayClientConnect: 'relay:client:connect',
+  relayClientConfirm: 'relay:client:confirm',
+  relayClientSend: 'relay:client:send',
+  relayClientDisconnect: 'relay:client:disconnect',
+  relayClientSas: (connectionId: string) => `relay:client:sas:${connectionId}`,
+  relayClientApproved: (connectionId: string) => `relay:client:approved:${connectionId}`,
+  relayClientFrame: (connectionId: string) => `relay:client:frame:${connectionId}`,
+  relayClientClosed: (connectionId: string) => `relay:client:closed:${connectionId}`,
   handoffBuild: 'handoff:build',
   // Phone pairing (nodeterm iOS "scan a QR" flow): renderer starts/stops the one-shot LAN
   // listener; main pushes the completion result back over `pairing:done`. The per-device

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   createSession,
   getSessionStores,
@@ -8,8 +8,23 @@ import {
   sessionForProject,
   sessionCount,
   resetSessionsForTest,
+  bindProjectToSession,
+  disposeSession,
+  holdSessionTeardown,
+  setMeAll,
+  setSessionStatus,
+  takeSessionOffline,
 } from './session'
 import type { NodeTerminalApi } from '@shared/types'
+import type { PeerIdentity } from '@shared/presence'
+
+/** A fake api whose `presence.hello` is a spy — so a re-hello is observable in node env
+ *  (createSession's presence store is built against this api by identity). */
+function apiWithHelloSpy(marker: string): { api: NodeTerminalApi; hello: ReturnType<typeof vi.fn> } {
+  const hello = vi.fn().mockResolvedValue({ clientId: `id-${marker}`, peers: [] })
+  const api = { marker, presence: { hello } } as unknown as NodeTerminalApi
+  return { api, hello }
+}
 
 // A distinctive object we can assert is preserved BY IDENTITY (the behavior-unchanged guarantee).
 const fakeApi = { marker: 'preload' } as unknown as NodeTerminalApi
@@ -104,5 +119,145 @@ describe('sessionForProject (runtime tab → session resolver, never persisted)'
     expect(sessionCount()).toBe(1)
     createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
     expect(sessionCount()).toBe(2)
+  })
+})
+
+describe('bindProjectToSession (4c remote-tab resolution)', () => {
+  it('a bound project resolves to its remote session; an unbound one resolves to local', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+
+    bindProjectToSession('remote-tab', relay.id)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+    // An unbound project stays on the LOCAL session even while a remote session exists — never the
+    // merely-active one (the resolver is by binding, not by which tab is focused).
+    expect(sessionForProject('some-local-tab')).toBe(local)
+    // Even after the remote tab is made active, a local tab still resolves local.
+    setActiveSession(relay.id)
+    expect(sessionForProject('some-local-tab')).toBe(local)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+  })
+
+  it('rejects a binding to an unknown session id', () => {
+    createSession('local', fakeApi, 'This Mac')
+    expect(() => bindProjectToSession('p', 'relay-999')).toThrow()
+  })
+})
+
+describe('disposeSession (obligation 1 — the missing disposal path)', () => {
+  it('runs every held teardown exactly once, drops the session, and unbinds its projects', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    const relayClose = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    holdSessionTeardown(relay.id, relayClose)
+    bindProjectToSession('remote-tab', relay.id)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+
+    disposeSession(relay.id)
+
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+    expect(sessionCount()).toBe(1) // only local remains
+    // The binding is gone → the (now-dead) tab resolves back to the local session, never a throw.
+    expect(sessionForProject('remote-tab')).toBe(local)
+
+    // Idempotent: a second dispose (double close, revoke racing a socket drop) touches nothing.
+    disposeSession(relay.id)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('disposing an unknown session id is a no-op', () => {
+    expect(() => disposeSession('relay-nope')).not.toThrow()
+  })
+})
+
+describe('takeSessionOffline (Stage 4 Task 7 — an INVOLUNTARY drop, not a user close)', () => {
+  it('runs held teardowns once and flips status offline, but KEEPS the entry + its binding', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    const relayClose = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    holdSessionTeardown(relay.id, relayClose)
+    bindProjectToSession('remote-tab', relay.id)
+
+    takeSessionOffline(relay.id)
+
+    // The peer left every facepile (presence teardown ran) and the dead socket was closed — ONCE.
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+    // Unlike disposeSession, the session survives (offline) and the tab stays bound to it — that is
+    // what lets the greyed tab resolve to a 'relay' source and reconnect in place.
+    expect(sessionCount()).toBe(2)
+    expect(sessionForProject('remote-tab')).toBe(relay)
+    expect(sessionForProject('remote-tab').status).toBe('offline')
+
+    // Idempotent: a second drop (a revoke racing the FIN) re-runs nothing.
+    takeSessionOffline(relay.id)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+    expect(relayClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('an OFFLINE session stays disposable by BINDING (the Task-7 leak fix) and disposeSession runs its teardowns only once', () => {
+    // Regression: the drop path removed the tab from the Canvas relayTabsRef, so a cleanup that
+    // iterated relayTabsRef could no longer reach the offline session — it leaked in the registry
+    // forever. The fix disposes by the project BINDING instead, which takeSessionOffline KEEPS. This
+    // proves the offline session is still reachable + fully removable that way.
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    const presenceTeardown = vi.fn()
+    holdSessionTeardown(relay.id, presenceTeardown)
+    bindProjectToSession('remote-tab', relay.id)
+    takeSessionOffline(relay.id) // teardown ran once here
+
+    // Resolve the offline session the way Canvas now does — through the binding, not relayTabsRef.
+    const bound = sessionForProject('remote-tab')
+    expect(bound.source).toBe('relay')
+    disposeSession(bound.id)
+
+    // Gone: entry dropped, binding pruned (falls back to local), and the teardown did NOT run twice.
+    expect(sessionCount()).toBe(1)
+    expect(sessionForProject('remote-tab')).toBe(local)
+    expect(presenceTeardown).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op for an unknown id', () => {
+    expect(() => takeSessionOffline('relay-nope')).not.toThrow()
+  })
+
+  it('setSessionStatus updates a live session and no-ops for an unknown id', () => {
+    const s = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, 'remote')
+    setSessionStatus(s.id, 'connecting')
+    expect(s.status).toBe('connecting')
+    setSessionStatus(s.id, 'connected')
+    expect(s.status).toBe('connected')
+    expect(() => setSessionStatus('nope', 'offline')).not.toThrow()
+  })
+})
+
+describe('setMeAll (obligation 2 — a rename re-helloes EVERY live session)', () => {
+  it('re-helloes and updates identity on all registered sessions, not just the active one', () => {
+    const a = apiWithHelloSpy('a')
+    const b = apiWithHelloSpy('b')
+    const s1 = createSession('local', a.api, 'This Mac')
+    const s2 = createSession('relay', b.api, "Ayşe's Mac")
+    setActiveSession(s1.id)
+
+    const me: PeerIdentity = { name: 'Ada', color: '#0af' }
+    setMeAll(me)
+
+    // Every live session re-announced (setMe → sayHello → api.presence.hello) with the new identity.
+    expect(a.hello).toHaveBeenCalledWith(me)
+    expect(b.hello).toHaveBeenCalledWith(me)
+    // …and each session's store reflects the new identity.
+    expect(getSessionStores(s1.id).presence.store.getState().me).toEqual(me)
+    expect(getSessionStores(s2.id).presence.store.getState().me).toEqual(me)
   })
 })

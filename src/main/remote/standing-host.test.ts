@@ -13,12 +13,16 @@ import { presenceHub } from '../../core/presence/hub'
 import type { HostSession, HostSessionOptions } from './host-service'
 
 const ipc: Record<string, (e: unknown, msg: unknown) => void> = {}
+const errorBoxes: Array<{ title: string; body: string }> = []
 
 vi.mock('electron', () => ({
   ipcMain: {
     on: (ch: string, fn: (e: unknown, msg: unknown) => void) => {
       ipc[ch] = fn
     }
+  },
+  dialog: {
+    showErrorBox: (title: string, body: string) => errorBoxes.push({ title, body })
   }
 }))
 vi.mock('../../core/pty-manager', () => ({ PtyManager: class {} }))
@@ -39,11 +43,18 @@ vi.mock('./e2ee', () => ({ publicKeyToB64: () => 'host-pub' }))
 
 const sessions: Array<{ opts: HostSessionOptions; session: HostSession; closed: number }> = []
 
+// Swappable: a locked OS keyring makes the host key unreadable, and loading it REJECTS rather than
+// rotating the pinned identity (host-identity.ts). The standing host must handle that, loudly.
+let keyError: Error | null = null
+
 vi.mock('./host-service', () => ({
   API_BASE: 'https://api.test',
   RELAY_URL: 'wss://relay.test',
   relayAllowed: () => true,
-  loadOrCreateKeyPair: async () => ({ publicKey: new Uint8Array(), secretKey: new Uint8Array() }),
+  loadOrCreateKeyPair: async () => {
+    if (keyError) throw keyError
+    return { publicKey: new Uint8Array(), secretKey: new Uint8Array() }
+  },
   connectHostSession: (opts: HostSessionOptions): HostSession => {
     const entry = { opts, closed: 0, session: null as unknown as HostSession }
     entry.session = {
@@ -94,6 +105,9 @@ function pendingApprovalId(): string {
 beforeEach(() => {
   initPlatform(fakePlatform())
   sessions.length = 0
+  sentToWin.length = 0
+  errorBoxes.length = 0
+  keyError = null
   for (const key of Object.keys(ipc)) delete ipc[key]
   vi.stubGlobal(
     'fetch',
@@ -178,5 +192,29 @@ describe('standing host presence peers', () => {
     presenceHub.join(id, 'phone')
     expect(phones()).toBe(1)
     presenceHub.leave(id)
+  })
+})
+
+describe('standing host: the host key cannot be read (locked keyring)', () => {
+  it('stops loudly instead of retrying into a dead listener', async () => {
+    keyError = Object.assign(new Error('the OS keyring is locked'), {
+      code: 'E_HOST_KEY_LOCKED'
+    })
+    const host = makeHost()
+    host.setEnabled(true)
+    await settle()
+
+    // Nothing was registered at the relay (no key ⇒ no identity to advertise) and, crucially,
+    // the failure is not swallowed: the user is told, once, what happened and how to recover.
+    expect(sessions).toHaveLength(0)
+    expect(errorBoxes).toHaveLength(1)
+    expect(errorBoxes[0].body).toMatch(/keyring/i)
+
+    // Bounded: no reconnect storm re-raising the dialog every second.
+    await settle()
+    expect(errorBoxes).toHaveLength(1)
+    expect(sessions).toHaveLength(0)
+
+    host.stop()
   })
 })

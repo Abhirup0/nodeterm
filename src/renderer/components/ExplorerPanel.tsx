@@ -158,10 +158,9 @@ function TreeEntry({
  * SSH projects browse the REMOTE filesystem (rooted at `project.ssh.remoteCwd`, listed via
  * `sshFs(projectId)` over the ControlMaster); local projects use the local fs rooted at `cwd`.
  *
- * NOTE (relay, Task 6): the RELAY path is still local-only — in a relay session the host's root cwd
- * isn't known client-side (the local project's `cwd` is the client's). Once `canvas:state` carries
- * the host cwd, this can also switch to `remoteFs(connectionId)` for relay projects (the Editor
- * already proxies over the relay via `data.remote.connectionId`). */
+ * NOTE (relay): a relay session's Explorer is still rooted at the local project's `cwd` — the host's
+ * root cwd isn't known client-side. A relay tab reaches the host fs through its bridged session api
+ * (the same seam TerminalNode/EditorNode use), not a separate per-connection fs client. */
 export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   // SSH projects browse the REMOTE filesystem: root at the project's `remoteCwd` and list over the

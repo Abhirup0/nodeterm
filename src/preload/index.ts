@@ -7,6 +7,7 @@ import type {
   Project,
   PtyCreateOptions,
   RecycledInfo,
+  RelayPeerPending,
   UpdateInfo,
   UpdateProgress,
   Workspace,
@@ -42,6 +43,12 @@ const subscribeMutation = subscribe<[CanvasMutation]>(IPC.remoteHostApplyMutatio
 // Fan-out subscriber for the connection-approval prompt (main → host renderer when a client
 // finishes the handshake; carries the SAS to show in the approval dialog).
 const subscribePeerPending = subscribe<[{ sas: string | null; id: string }]>(IPC.remoteHostPeerPending)
+
+// New relay tunnel (Stage 4). Non-per-id host events reuse the fan-out helper; per-connection
+// client events (sas/approved/frame/closed) attach directly per connectionId.
+const subscribeRelayPeerPending = subscribe<[RelayPeerPending]>(IPC.relayHostPeerPending)
+const subscribeRelayHostOpen = subscribe<[{ id: string }]>(IPC.relayHostOpen)
+const subscribeRelayHostClosed = subscribe<[{ id: string }]>(IPC.relayHostClosed)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -357,55 +364,43 @@ const api: NodeTerminalApi = {
     reject: (id: string) => ipcRenderer.send(IPC.remoteHostReject, { id }),
     setPhoneAccess: (enabled) => ipcRenderer.send(IPC.remoteStandingHostSet, enabled)
   },
-  remoteClient: {
-    connect: (offer) => ipcRenderer.invoke(IPC.remoteClientConnect, offer),
-    disconnect: (connectionId) => ipcRenderer.invoke(IPC.remoteClientDisconnect, connectionId),
-    create: (connectionId, options) =>
-      ipcRenderer.invoke(IPC.remoteClientCreate, connectionId, options),
-    write: (connectionId, sessionId, data) =>
-      ipcRenderer.send(IPC.remoteClientWrite, connectionId, sessionId, data),
-    resize: (connectionId, sessionId, cols, rows) =>
-      ipcRenderer.send(IPC.remoteClientResize, connectionId, sessionId, cols, rows),
-    kill: (connectionId, sessionId) =>
-      ipcRenderer.send(IPC.remoteClientKill, connectionId, sessionId),
-    onData: (connectionId, sessionId, listener) => {
-      const channel = IPC.remoteClientData(connectionId, Number(sessionId))
-      const handler = (_e: unknown, data: string) => listener(data)
-      ipcRenderer.on(channel, handler)
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    onExit: (connectionId, sessionId, listener) => {
-      const channel = IPC.remoteClientExit(connectionId, Number(sessionId))
-      const handler = (_e: unknown, code: number) => listener(code)
-      ipcRenderer.on(channel, handler)
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    onClosed: (connectionId, listener) => {
-      const channel = IPC.remoteClientClosed(connectionId)
-      const handler = () => listener()
-      ipcRenderer.on(channel, handler)
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    onCanvasState: (connectionId, listener) => {
-      const channel = IPC.remoteClientCanvasState(connectionId)
-      const handler = (_e: unknown, state: Parameters<typeof listener>[0]) => listener(state)
-      ipcRenderer.on(channel, handler)
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
+  relayHost: {
+    start: () => ipcRenderer.invoke(IPC.relayHostStart),
+    stop: () => ipcRenderer.invoke(IPC.relayHostStop),
+    onPeerPending: subscribeRelayPeerPending,
+    confirm: (id: string) => ipcRenderer.send(IPC.relayHostConfirm, { id }),
+    onOpen: subscribeRelayHostOpen,
+    onClosed: subscribeRelayHostClosed
+  },
+  relayClient: {
+    connect: (offer) => ipcRenderer.invoke(IPC.relayClientConnect, offer),
     onSas: (connectionId, listener) => {
-      const channel = IPC.remoteClientSas(connectionId)
+      const channel = IPC.relayClientSas(connectionId)
       const handler = (_e: unknown, sas: string | null) => listener(sas)
       ipcRenderer.on(channel, handler)
       return () => ipcRenderer.removeListener(channel, handler)
     },
-    sendMutation: (connectionId, mutation) =>
-      ipcRenderer.send(IPC.remoteClientMutate, connectionId, mutation),
-    fsList: (connectionId, path) => ipcRenderer.invoke(IPC.remoteClientFsList, connectionId, path),
-    fsRead: (connectionId, path) => ipcRenderer.invoke(IPC.remoteClientFsRead, connectionId, path),
-    fsReadBinary: (connectionId, path) =>
-      ipcRenderer.invoke(IPC.remoteClientFsReadBinary, connectionId, path),
-    fsWrite: (connectionId, path, content) =>
-      ipcRenderer.invoke(IPC.remoteClientFsWrite, connectionId, path, content)
+    confirm: (connectionId) => ipcRenderer.send(IPC.relayClientConfirm, { id: connectionId }),
+    onApproved: (connectionId, listener) => {
+      const channel = IPC.relayClientApproved(connectionId)
+      const handler = () => listener()
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    send: (connectionId, frame) => ipcRenderer.send(IPC.relayClientSend, connectionId, frame),
+    onFrame: (connectionId, listener) => {
+      const channel = IPC.relayClientFrame(connectionId)
+      const handler = (_e: unknown, frame: string) => listener(frame)
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    onClosed: (connectionId, listener) => {
+      const channel = IPC.relayClientClosed(connectionId)
+      const handler = () => listener()
+      ipcRenderer.on(channel, handler)
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    disconnect: (connectionId) => ipcRenderer.send(IPC.relayClientDisconnect, connectionId)
   },
   handoff: {
     build: (sessionId, agentId, sourceNodeId, cwd, accountId) =>
