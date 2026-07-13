@@ -5,9 +5,10 @@ import type { ClientId } from '@shared/presence'
  * Abstraction over the terminal session layer.
  *
  * The renderer/UI depends only on this interface; it does not know the concrete
- * implementation. The MVP has a single implementation, LocalTransport (IPC over
- * node-pty). A future RemoteTransport (a remote agent over WebSocket) implements
- * the same interface, so remote access can be added without changing the UI.
+ * implementation. There is a single implementation, LocalTransport, driven by the
+ * active session's `NodeTerminalApi` (`useSession().api`): the preload for a local
+ * session, or the ws-bridge over the relay tunnel for a remote tab. Remote access is
+ * "swap the api object", not "swap the transport" (see docs/remote-sessions.md).
  */
 export interface TerminalTransport {
   create(options: PtyCreateOptions): Promise<PtyCreateResult>
@@ -44,9 +45,8 @@ export interface TerminalTransport {
    * The authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers
    * ("smallest subscriber wins"). The terminal must render at this size (letterboxing the slack)
    * instead of its own FitAddon result, or the two viewers' screens diverge.
-   * OPTIONAL: a transport that cannot negotiate a shared size (RemoteTransport over the relay,
-   * whose frame protocol has no size frame) simply omits it, and the terminal falls back to
-   * driving its own FitAddon — today's behavior. Returns an unsubscribe function.
+   * OPTIONAL: a transport that cannot negotiate a shared size simply omits it, and the terminal
+   * falls back to driving its own FitAddon. Returns an unsubscribe function.
    */
   onSize?(sessionId: string, listener: (size: { cols: number; rows: number }) => void): () => void
   /**
