@@ -5408,7 +5408,13 @@ export function Canvas() {
           }
           confirmLabel="Allow"
           cancelLabel="Deny"
-          danger={false}
+          // A REMOTE device raised this — the far side completing the pairing handshake pops it
+          // under the user's hands. So it is answered by an explicit click, never by a stray Enter
+          // aimed at a terminal: a keystroke must not confirm approval and bypass the SAS
+          // match-check that is the whole MITM protection. `danger` also keeps autofocus off the
+          // consenting "Allow" button (it lands on "Deny" instead). See components/confirm-key.
+          enterConfirms={false}
+          danger
           onConfirm={() => {
             window.nodeTerminal.remoteHost.approve(pendingPeer.id)
             setPendingPeer(null)
