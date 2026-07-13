@@ -3125,6 +3125,44 @@ body,
   border-color: var(--accent);
 }
 
+/* Custom-dropdown trigger (BranchSelect) — matches `.bind-field input` so it reads as the same kind
+ * of field, with a chevron and a muted placeholder. The popover reuses the app's `.tab-menu`. */
+.bind-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: var(--panel-header);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.bind-select:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.bind-select__val {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bind-select__ph {
+  color: var(--muted);
+}
+.bind-select__chev {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+/* A branch list can be long — the app's menus don't cap height, so this instance does. */
+.bind-select__menu {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
 /* Repo root, resolved from the project cwd — read-only context, not a field. */
 .bind-repo {
   margin: 0 0 12px;
