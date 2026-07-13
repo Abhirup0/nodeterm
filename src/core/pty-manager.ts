@@ -6,6 +6,7 @@ import { promisify } from 'util'
 import { platform } from './platform'
 import * as pty from 'node-pty'
 import { IPC } from '../shared/ipc'
+import { safeSessionProgram } from '../shared/node-exec'
 import { REF_MAX_LEN } from '../shared/presence'
 import {
   DEFAULT_SETTINGS,
@@ -1030,7 +1031,15 @@ export class PtyManager {
 
     // Resolve the session program. A bare 'ssh' is resolved to an absolute path because GUI
     // apps don't inherit the shell PATH; its args come from options.shellArgs.
-    const reqShell = options.shell
+    //
+    // SECURITY — validate at the point the value becomes a command (same idiom as
+    // `permissionModeFlag`): a lone tmux `new-session` command argument is run THROUGH A SHELL, so
+    // a program string carrying shell metacharacters is command injection. The caller's provenance
+    // is not visible from here (a node's `shell` may have come from a project file, a peer canvas
+    // mutation, or the user), so an unsafe value degrades to `undefined` = the default shell —
+    // never to execution. @shared/node-exec keeps foreign values out of `options.shell` in the
+    // first place; this is the second layer.
+    const reqShell = safeSessionProgram(options.shell)
     const program = reqShell === 'ssh' ? findSsh() ?? 'ssh' : reqShell
     const programArgs = options.shellArgs ?? []
 
@@ -1071,8 +1080,11 @@ export class PtyManager {
         options.sshRemote.controlPath,
         sessionName(options.persistKey),
         options.sshRemote.remoteCwd,
-        // An agent preset may pass a remote program to run inside the remote tmux; usually undefined.
-        options.shell,
+        // An agent preset may pass a remote program to run inside the remote tmux; usually
+        // undefined. The VALIDATED program (see `reqShell`): the remote tmux runs it the same way
+        // the local one does, and an SSH project's project.json lives on the remote HOST — the one
+        // place a foreign value is most at home.
+        reqShell,
         options.shellArgs,
         [...hookExtraEnv, ...remoteAccountEnv],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start

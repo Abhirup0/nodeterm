@@ -1,5 +1,11 @@
 import path from 'path'
 import type { AgentPermissionMode } from '../shared/agents/config'
+import {
+  applyLocalNodeExec,
+  localNodeExec,
+  stripSharedNodeExec,
+  type LocalNodeExecMap
+} from '../shared/node-exec'
 import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '../shared/types'
 
 export const PROJECT_DIR = '.nodeterm'
@@ -39,6 +45,12 @@ export interface IndexEntryV3 {
   ssh?: Project['ssh']
   cache?: ProjectFileV1
   project?: Project
+  /** MACHINE-LOCAL per-node exec values (`shell`, `ssh.extraArgs`) for a ref'd project. They are
+   *  stripped from the shared project file precisely so a cloned/hostile one cannot run code
+   *  (@shared/node-exec), and kept here — in userData, never git-shared — so the user's own custom
+   *  shell / advanced ssh args still survive a restart. Inline (`project`) entries need none: they
+   *  live in this same machine-local file already. */
+  localExec?: LocalNodeExecMap
 }
 
 export interface WorkspaceIndexV3 {
@@ -70,6 +82,10 @@ export function resolveNodes(nodes: CanvasNodeState[], root: string): CanvasNode
 }
 
 export function projectToFile(p: Project, rev: number, savedAt: string): ProjectFileV1 {
+  // The project file is a SHARED document (git, or the remote host). Exec-enabling node fields
+  // (`shell`, `ssh.extraArgs`) never leave this machine in it — they ride the machine-local index
+  // entry instead (`localNodeExec` / `IndexEntryV3.localExec`). See @shared/node-exec.
+  const nodes = stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
   return {
     version: 1,
     rev,
@@ -78,7 +94,7 @@ export function projectToFile(p: Project, rev: number, savedAt: string): Project
     name: p.name,
     color: p.color,
     viewport: p.viewport,
-    nodes: p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes,
+    nodes,
     ...(p.bridges ? { bridges: p.bridges } : {}),
     ...(p.ropes ? { ropes: p.ropes } : {}),
     ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
@@ -89,14 +105,24 @@ export function projectToFile(p: Project, rev: number, savedAt: string): Project
 
 export function fileToProject(
   f: ProjectFileV1,
-  base: { cwd?: string; ssh?: Project['ssh']; closed?: boolean }
+  base: {
+    cwd?: string
+    ssh?: Project['ssh']
+    closed?: boolean
+    /** This machine's own exec values for these nodes (from the local index entry). A file read
+     *  WITHOUT them — an adopted/cloned folder, a probe — gets the safe defaults, never the file's
+     *  own `shell`/`ssh.extraArgs`. */
+    localExec?: LocalNodeExecMap
+  }
 ): Project {
   return {
     id: f.id,
     name: f.name,
     color: f.color,
     viewport: f.viewport,
-    nodes: base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes,
+    // applyLocalNodeExec DROPS whatever the file carried in the exec fields (it is not ours) and
+    // re-attaches only what this machine typed. See @shared/node-exec.
+    nodes: applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(f.defaultAccountId ? { defaultAccountId: f.defaultAccountId } : {}),
@@ -136,11 +162,20 @@ export function splitWorkspace(
       }
       continue
     }
+    // Exec-enabling node fields are stripped from every project file / ssh cache; the local user's
+    // own values are preserved HERE, in the machine-local index (@shared/node-exec).
+    const local = localNodeExec(p.nodes)
+    const localRef = local ? { localExec: local } : {}
     if (p.ssh) {
-      entries.push({ ...header, ssh: p.ssh, cache: projectToFile(p, revOf(p.id), savedAt) })
+      entries.push({
+        ...header,
+        ...localRef,
+        ssh: p.ssh,
+        cache: projectToFile(p, revOf(p.id), savedAt)
+      })
     } else if (p.cwd && !files.has(p.cwd)) {
       files.set(p.cwd, projectToFile(p, revOf(p.id), savedAt))
-      entries.push({ ...header, cwd: p.cwd })
+      entries.push({ ...header, ...localRef, cwd: p.cwd })
     } else if (p.cwd) {
       // Another project already claimed this cwd (two tabs on one folder). Keying `files` by cwd
       // would collapse them last-wins, and reload would resurrect BOTH entries from the one file

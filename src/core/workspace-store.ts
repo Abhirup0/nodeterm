@@ -104,14 +104,14 @@ export class WorkspaceStore {
         if (p) {
           this.revs.set(p.id, p.rev)
           this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(p))
-          projects.push(fileToProject(p, { cwd: e.cwd, closed: e.closed }))
+          projects.push(fileToProject(p, { cwd: e.cwd, closed: e.closed, localExec: e.localExec }))
         } else {
           projects.push(unavailableProject(e))
         }
       } else if (e.ssh) {
         if (e.cache) {
           this.revs.set(e.id, e.cache.rev)
-          projects.push(fileToProject(e.cache, { ssh: e.ssh, closed: e.closed }))
+          projects.push(fileToProject(e.cache, { ssh: e.ssh, closed: e.closed, localExec: e.localExec }))
         } else {
           projects.push(unavailableProject(e))
         }
@@ -164,6 +164,10 @@ export class WorkspaceStore {
         if (!unavailableIds.has(e.id)) continue
         const old = this.index?.entries.find((o) => o.id === e.id)
         if (old?.cache) e.cache = old.cache
+        // Same reasoning for the machine-local exec values: the placeholder has no nodes, so
+        // splitWorkspace could not carry them — restoring them keeps the user's own custom shell /
+        // ssh args for when the ref becomes readable again.
+        if (old?.localExec) e.localExec = old.localExec
       }
     }
 
@@ -222,6 +226,9 @@ export class WorkspaceStore {
 
   async probeFolder(folder: string): Promise<Project | null> {
     const f = await this.readProjectFile(folder, false)
+    // No `localExec`: this folder is being ADOPTED (its project.json may have been cloned from
+    // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
+    // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
     return f ? fileToProject(f, { cwd: folder }) : null
   }
 
@@ -240,7 +247,7 @@ export class WorkspaceStore {
     if (!f) return null
     this.revs.set(f.id, f.rev)
     this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(f))
-    return fileToProject(f, { cwd: e.cwd, closed: e.closed })
+    return fileToProject(f, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
   }
 
   /** Maps a watched file path back to its project and re-reads it. */
@@ -271,7 +278,7 @@ export class WorkspaceStore {
       this.revs.set(projectId, remote.rev)
       this.unmirrored.delete(projectId) // the server copy IS the truth now — nothing owed
       await writeAtomic(this.indexPath, JSON.stringify(this.index))
-      return fileToProject(remote, { ssh: e.ssh, closed: e.closed })
+      return fileToProject(remote, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
     }
     if (e.cache) {
       // Push-up runs with the master just up, but record the outcome anyway: a failed write
