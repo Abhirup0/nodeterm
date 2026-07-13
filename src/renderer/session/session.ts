@@ -1,6 +1,6 @@
 import { createContext, createElement, useContext, type ReactNode } from 'react'
 import type { NodeTerminalApi } from '@shared/types'
-import { createPresenceSession, defaultPresence, type PresenceSession } from '../state/presence'
+import { createPresenceSession, type PresenceSession } from '../state/presence'
 
 // Placeholder store-instance type. Task 4 replaces `AgentStatusSession` with the real
 // per-session agent-status store type (`../state/agentStatus`) — that store is not a
@@ -42,15 +42,17 @@ const SESSIONS = new Map<string, Entry>()
 let activeId: string | null = null
 let remoteSeq = 0
 
-/** The per-session store instances. The LOCAL session reuses the module's default presence
- *  instance — the exact object the ~40 historical `state/presence` imports resolve to — so
- *  there is ONE local presence store, never a parallel twin whose connect() would race the
- *  default's subscription for the bridge's first-subscriber replay buffer. A remote session
- *  gets a fresh instance bound to ITS api (a different core, a different peer-id space).
+/** The per-session store instances. `createPresenceSession` is memoized BY API IDENTITY, so the
+ *  one-store-per-core guarantee needs no source branch here: the local session's api is
+ *  `window.nodeTerminal`, which resolves to the module's default presence instance — the exact
+ *  object the ~40 historical `state/presence` imports use — and ANY session handed a repeat api
+ *  (a loopback debug session, a test double) shares that api's existing store rather than
+ *  racing it for the bridge's first-subscriber replay buffer. A different api (a different
+ *  core, a different peer-id space) gets a fresh instance.
  *  Task 4 replaces the agentStatus placeholder with the real default instance. */
-function buildStores(source: SessionSource, api: NodeTerminalApi): SessionStores {
+function buildStores(api: NodeTerminalApi): SessionStores {
   return {
-    presence: source === 'local' ? defaultPresence : createPresenceSession(api),
+    presence: createPresenceSession(api),
     agentStatus: {} as AgentStatusSession
   }
 }
@@ -66,7 +68,7 @@ export function createSession(source: SessionSource, api: NodeTerminalApi, label
   const existing = SESSIONS.get(id)
   if (existing) return existing.session
   const session: WorkspaceSession = { id, source, label, api, status: 'connected' }
-  SESSIONS.set(id, { session, stores: buildStores(source, api) })
+  SESSIONS.set(id, { session, stores: buildStores(api) })
   return session
 }
 

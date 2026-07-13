@@ -22,15 +22,19 @@ import {
  * connection: cursors, focus, chat. NONE of it is persisted — the only thing that survives a
  * reload is the local user's own {name, color} (ME_KEY below).
  *
- * ONE STORE PER SESSION (stage 4): `createPresenceSession(api)` builds an isolated instance
+ * ONE STORE PER CORE (stage 4): `createPresenceSession(api)` builds an isolated instance
  * around one core's api — every stateful piece (the store, the typing-sweep timer, the face
  * cache, the connect guard, the focus/project dedup, the hello-warned latch) is closed over
  * the instance, because peer ids from two different cores live in two different id spaces and
- * must never share a table or a cache. The module keeps a DEFAULT instance bound to
- * `window.nodeTerminal` (the local core) and re-exports its members under the historical names,
- * so the existing single-session consumers are untouched. Session instances are built ONLY by
- * the session registry (`session/session.ts` `createSession`, idempotent per id), never ad hoc —
- * that is what keeps the subscriber count below structural.
+ * must never share a table or a cache. The factory is MEMOIZED BY API IDENTITY (a WeakMap): a
+ * repeat call with the same api object returns the existing instance, never a second one. That
+ * is what makes the invariant structural rather than a caller convention — the browser bridge
+ * drains its pre-subscribe event buffer into the FIRST subscriber only (see SOLE SUBSCRIBER),
+ * so a second store on the same api would miss the join-time sync and silently diverge. The
+ * module keeps a DEFAULT instance bound to `window.nodeTerminal` (the local core) and
+ * re-exports its members under the historical names, so the existing single-session consumers
+ * are untouched; the memo means any path that asks for a store for `window.nodeTerminal` — the
+ * session registry included — gets that same instance back.
  *
  * SOLE SUBSCRIBER: a session's presence store is the ONLY place that may call its api's
  * presence.onSync / presence.onPeer, and connect() subscribes AT MOST ONCE (the per-instance
@@ -190,12 +194,33 @@ export interface PresenceSession {
   selectTypingFaces(s: PresenceStore, nodeId: string): PeerFace[]
 }
 
+/** One instance per api OBJECT — the one-store-per-core guarantee, keyed on identity (a WeakMap,
+ *  so a dropped api never pins its store). Seeded implicitly: `defaultPresence` below is built
+ *  through the memoizing factory, so `window.nodeTerminal` maps to it from module load on. */
+const instanceByApi = new WeakMap<NodeTerminalApi, PresenceSession>()
+
 /**
- * Build the presence store for ONE session (one core's api). Everything stateful lives in this
- * closure; `api` is dereferenced only at call time (hello/connect/focus/project), never here —
- * so constructing an instance costs nothing and touches no wire.
+ * The presence store for ONE core (one api). MEMOIZED BY API IDENTITY: a repeat call with the
+ * same api object returns the existing instance — building a second store on the same api would
+ * subscribe to the same channel SECOND, and the bridge replays its pre-subscribe buffer to the
+ * first subscriber only (see the module docblock). A nullish api (node-environment tests that
+ * exercise only the pure helpers) is not memoizable and gets a fresh, inert instance.
  */
 export function createPresenceSession(api: NodeTerminalApi): PresenceSession {
+  const existing = api ? instanceByApi.get(api) : undefined
+  if (existing) return existing
+  const session = buildPresenceSession(api)
+  if (api) instanceByApi.set(api, session)
+  return session
+}
+
+/**
+ * Build the presence store for ONE core's api. Everything stateful lives in this closure; `api`
+ * is dereferenced only at call time (hello/connect/focus/project), never here — so constructing
+ * an instance costs nothing and touches no wire. NEVER export this: every consumer must go
+ * through the memoizing `createPresenceSession` above.
+ */
+function buildPresenceSession(api: NodeTerminalApi): PresenceSession {
   /**
    * THE TYPING MARKS — why the ring does not read `PeerState.typing` off the wire.
    *
@@ -441,6 +466,18 @@ export function createPresenceSession(api: NodeTerminalApi): PresenceSession {
    * PROVISIONAL_IDENTITY): the prompt (`needsName`) then only renames us.
    */
   function connect(): () => void {
+    // FAIL OPEN on a missing api: the module-load capture of `window.nodeTerminal` is safe only
+    // by boot order (see defaultPresence below), and the `as NodeTerminalApi` cast hides a future
+    // violation from the compiler. If someone ever hoists a presence importer ahead of the bridge
+    // install, the failure mode must be "presence is off" (the same degradation the sayHello
+    // catch models) — not a TypeError inside Canvas's effect and a blank app.
+    if (!api?.presence) {
+      if (!helloWarned) {
+        helloWarned = true
+        console.warn('[presence] no presence api — presence is off for this session')
+      }
+      return () => {}
+    }
     if (live) return () => {}
 
     const unSync = api.presence.onSync((peers) => store.getState().applySync(peers))
@@ -546,10 +583,13 @@ export function createPresenceSession(api: NodeTerminalApi): PresenceSession {
  * (the same capture localSession.ts makes, and safe for the same boot-order reason documented
  * there: preload/bridge define nodeTerminal before any importer of this module runs). Every
  * historical export below resolves to this exact object, so the ~40 existing single-session
- * consumers are untouched; the session registry hands this same instance out for the 'local'
- * session, so there is ONE local store — never a parallel twin with its own subscription.
+ * consumers are untouched. Built through the MEMOIZING factory, so this line also seeds the
+ * WeakMap with `window.nodeTerminal → defaultPresence`: any later `createPresenceSession(
+ * window.nodeTerminal)` — the session registry's local session, a loopback debug session, an
+ * adversarial test double — resolves to this same instance, never a parallel twin whose
+ * connect() would race this one for the bridge's first-subscriber replay buffer.
  * The `typeof window` guard exists for node-environment unit tests that exercise only the pure
- * helpers: `api` is dereferenced at call time, so an undefined capture is harmless there.
+ * helpers: an undefined api is never memoized, and connect() fails open on it.
  */
 const defaultPresence = createPresenceSession(
   (typeof window === 'undefined' ? undefined : window.nodeTerminal) as NodeTerminalApi

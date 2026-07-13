@@ -48,16 +48,32 @@ describe('createSession', () => {
     expect(getSessionStores(first.id).presence).toBe(storesBefore.presence)
   })
 
-  it('gives distinct remote sessions distinct ids and distinct store objects', () => {
-    // The property Tasks 2/4 and 4c depend on: per-session stores are never shared.
-    const relay = createSession('relay', fakeApi, "Ayşe's Mac")
-    const server = createSession('server', fakeApi, 'prod-box')
+  it('gives distinct remote sessions (distinct apis) distinct ids and distinct store objects', () => {
+    // The property Tasks 2/4 and 4c depend on: stores for DIFFERENT cores are never shared.
+    // Each session gets its own api object here — presence is keyed by api identity, so two
+    // sessions on the same api deliberately share a presence store (see the adversarial test).
+    const relayApi = { marker: 'relay' } as unknown as NodeTerminalApi
+    const serverApi = { marker: 'server' } as unknown as NodeTerminalApi
+    const relay = createSession('relay', relayApi, "Ayşe's Mac")
+    const server = createSession('server', serverApi, 'prod-box')
     expect(relay.id).not.toBe(server.id)
     const relayStores = getSessionStores(relay.id)
     const serverStores = getSessionStores(server.id)
     expect(relayStores).not.toBe(serverStores)
     expect(relayStores.presence).not.toBe(serverStores.presence)
     expect(relayStores.agentStatus).not.toBe(serverStores.agentStatus)
+  })
+
+  it('ADVERSARIAL: a non-local session handed the local api shares the local presence store', () => {
+    // The one-store-per-core guarantee must rest on api IDENTITY, not on the source string a
+    // caller can get wrong. A relay/server session built against the SAME api (a loopback debug
+    // session, a careless test double handing over window.nodeTerminal) must resolve to the
+    // SAME presence store — a second store on the same bridge would subscribe second and miss
+    // the pre-subscribe replay buffer (Stage 1: first subscriber only), silently diverging.
+    const local = createSession('local', fakeApi, 'This Mac')
+    const relay = createSession('relay', fakeApi, 'loopback')
+    expect(relay.id).not.toBe(local.id) // still two sessions…
+    expect(getSessionStores(relay.id).presence).toBe(getSessionStores(local.id).presence) // …ONE store
   })
 
   it('tracks the active session and exposes its api to non-components', () => {

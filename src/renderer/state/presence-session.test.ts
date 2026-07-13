@@ -21,6 +21,23 @@ function fakeApi(clientId: number) {
   return { api: { presence } as any, calls, subs: () => syncSubs }
 }
 
+describe('createPresenceSession — one store per api (memoized by identity)', () => {
+  it('returns the SAME instance for a repeat api object', () => {
+    // Stage 1 invariant: the ws-bridge replays its pre-subscribe buffer to the FIRST subscriber
+    // only, so a second store against the same api would silently miss the join-time sync.
+    const a = fakeApi(1)
+    const first = createPresenceSession(a.api)
+    const second = createPresenceSession(a.api)
+    expect(second).toBe(first)
+  })
+
+  it('returns DIFFERENT instances for different apis', () => {
+    const a = fakeApi(1)
+    const b = fakeApi(2)
+    expect(createPresenceSession(a.api)).not.toBe(createPresenceSession(b.api))
+  })
+})
+
 describe('createPresenceSession — per-instance isolation', () => {
   it('two instances do not share the lastFocus dedup', () => {
     const a = fakeApi(1)
