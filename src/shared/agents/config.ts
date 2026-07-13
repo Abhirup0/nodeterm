@@ -141,19 +141,48 @@ export const AUTO_PERMISSION_MODE_MIN_VERSION = '2.1.71'
 const MIN_AUTO_VERSION: readonly number[] = AUTO_PERMISSION_MODE_MIN_VERSION.split('.').map(Number)
 
 /**
+ * Pure numeric-version gate shared by the Claude CLI capability checks: parse the first
+ * `major.minor.patch` out of a `claude --version` line and answer whether it is >= `min`.
+ * FAILS OPEN to `false` on anything unreadable — an unknown version is treated as "too old", so
+ * every caller degrades to the conservative, pre-feature behavior rather than a failed launch.
+ */
+function versionAtLeast(versionOutput: string | null | undefined, min: readonly number[]): boolean {
+  const m = (versionOutput ?? '').match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return false
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])]
+  for (let i = 0; i < min.length; i++) {
+    if (v[i] > min[i]) return true
+    if (v[i] < min[i]) return false
+  }
+  return true // exactly the minimum
+}
+
+/**
  * Does this `claude --version` output know `--permission-mode auto`? Pure (the probe that feeds it
  * lives in core/claude-cli.ts). FAILS OPEN to `false` on anything unreadable — an unknown version
  * means we omit the flag and launch the bare command (today's behavior), never a failed launch.
  */
 export function supportsAutoPermissionMode(versionOutput: string | null | undefined): boolean {
-  const m = (versionOutput ?? '').match(/(\d+)\.(\d+)\.(\d+)/)
-  if (!m) return false
-  const v = [Number(m[1]), Number(m[2]), Number(m[3])]
-  for (let i = 0; i < MIN_AUTO_VERSION.length; i++) {
-    if (v[i] > MIN_AUTO_VERSION[i]) return true
-    if (v[i] < MIN_AUTO_VERSION[i]) return false
-  }
-  return true // exactly the minimum
+  return versionAtLeast(versionOutput, MIN_AUTO_VERSION)
+}
+
+/**
+ * First Claude Code version whose `settings.json` understands `"tui": "fullscreen"` (the setting
+ * that makes a session take the alternate screen + mouse, so it behaves natively inside nodeterm's
+ * tmux instead of dropping drags into tmux copy-mode). Earlier CLIs don't know the key; writing it
+ * for them risks an unknown-setting warning, so the setting is only written when the CLI is known
+ * to be at least this version. MEASURED, not guessed.
+ */
+export const FULLSCREEN_TUI_MIN_VERSION = '2.1.89'
+
+const MIN_FULLSCREEN_TUI_VERSION: readonly number[] = FULLSCREEN_TUI_MIN_VERSION.split('.').map(Number)
+
+/**
+ * Does this `claude --version` output understand `"tui": "fullscreen"` in settings.json (>= 2.1.89)?
+ * Pure. FAILS OPEN to `false` — an unknown/older version means nodeterm does NOT write the key.
+ */
+export function supportsFullscreenTui(versionOutput: string | null | undefined): boolean {
+  return versionAtLeast(versionOutput, MIN_FULLSCREEN_TUI_VERSION)
 }
 
 /**

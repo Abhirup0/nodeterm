@@ -3,6 +3,8 @@
 import { homedir } from 'os'
 import path from 'path'
 import { installHooksInto, removeHooksFrom } from './install-helper'
+import { ensureFullscreenTuiInFile } from './claude-tui'
+import { claudeCliCaps } from '../../claude-cli'
 
 const CLAUDE_EVENTS = [
   'SessionStart',
@@ -42,6 +44,23 @@ export function installClaudeHooksInto(configDir: string): void {
     configPath: path.join(configDir, 'settings.json'),
     events: CLAUDE_EVENTS
   })
+}
+
+/**
+ * Ensure `"tui": "fullscreen"` in the SYSTEM `~/.claude/settings.json` — write-if-absent, and only
+ * when the local CLI is >= 2.1.89 (see FULLSCREEN_TUI_MIN_VERSION / claudeCliCaps.fullscreenTui).
+ * Best-effort: the probe is memoized + never rejects, the write fails open. Call it AFTER the hook
+ * install so the merge lands on a settings.json that already has the managed hooks.
+ */
+export async function ensureClaudeFullscreenTui(): Promise<void> {
+  if (!(await claudeCliCaps()).fullscreenTui) return
+  ensureFullscreenTuiInFile(configPath())
+}
+
+/** Same guardrails, for a managed account's config dir (`<dir>/settings.json`). */
+export async function ensureClaudeFullscreenTuiInto(configDir: string): Promise<void> {
+  if (!(await claudeCliCaps()).fullscreenTui) return
+  ensureFullscreenTuiInFile(path.join(configDir, 'settings.json'))
 }
 
 export function removeClaudeHooks(): void {

@@ -1000,10 +1000,18 @@ export interface ClaudeCliCaps {
   version: string | null
   /** `--permission-mode auto` is only accepted by Claude Code >= 2.1.71. */
   autoPermissionMode: boolean
+  /** `"tui": "fullscreen"` in settings.json is only understood by Claude Code >= 2.1.89. Gates
+   *  whether nodeterm writes that key (write-if-absent) so sessions render fullscreen in tmux. */
+  fullscreenTui: boolean
 }
 
-/** The answer whenever the CLI version can't be determined: no `auto` flag → bare command. */
-export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = { version: null, autoPermissionMode: false }
+/** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
+ *  fullscreen-tui write (an unknown settings key can warn on old CLIs — silence is safer). */
+export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
+  version: null,
+  autoPermissionMode: false,
+  fullscreenTui: false
+}
 
 export interface ClaudeApi {
   /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).

@@ -45,6 +45,55 @@ describe('RemoteHooks.setup', () => {
   })
 })
 
+describe('RemoteHooks.ensureFullscreenTui', () => {
+  // Paths are posixQuote'd (single-quoted) in the remote commands; a read is `cat '<path>' …`
+  // and a write is `… cat > '<path>'`, so we distinguish them by the presence of `cat >`.
+  const isWriteTo = (args: string[], p: string) => args.join(' ').includes(`cat > `) && args.join(' ').includes(p)
+  const isReadOf = (args: string[], p: string) =>
+    !args.join(' ').includes('cat > ') && args.join(' ').includes(`cat `) && args.join(' ').includes(p)
+
+  it('writes tui=fullscreen into the host settings when absent (preserving other keys)', async () => {
+    const target = '/home/u/.claude/settings.json'
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      if (isReadOf(args, target)) return { code: 0, stdout: JSON.stringify({ hooks: { Stop: [] } }) }
+      return { code: 0, stdout: '' }
+    })
+    const rh = new RemoteHooks({ run })
+    await rh.ensureFullscreenTui(conn, '/s.sock', '/home/u')
+    const write = calls.find((c) => isWriteTo(c.args, target))
+    expect(write).toBeTruthy()
+    expect(JSON.parse(write!.stdin!)).toEqual({ hooks: { Stop: [] }, tui: 'fullscreen' })
+  })
+
+  it('never overwrites an existing tui value (write-if-absent) — no write issued', async () => {
+    const target = '/home/u/.claude/settings.json'
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[]) => {
+      calls.push({ args })
+      if (isReadOf(args, target)) return { code: 0, stdout: JSON.stringify({ tui: 'default' }) }
+      return { code: 0, stdout: '' }
+    })
+    const rh = new RemoteHooks({ run })
+    await rh.ensureFullscreenTui(conn, '/s.sock', '/home/u')
+    expect(calls.some((c) => isWriteTo(c.args, target))).toBe(false)
+  })
+
+  it('writes into the absolute account-dir settings path', async () => {
+    const target = '/home/u/.nodeterm/claude-accounts/acc-1/settings.json'
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      return { code: 0, stdout: '{}' } // any read → empty settings
+    })
+    const rh = new RemoteHooks({ run })
+    await rh.ensureFullscreenTuiInAccountDir(conn, '/s.sock', '/home/u', 'acc-1')
+    expect(calls.some((c) => isWriteTo(c.args, target))).toBe(true)
+    expect(calls.some((c) => (c.stdin ?? '').includes('"tui": "fullscreen"'))).toBe(true)
+  })
+})
+
 describe('RemoteHooks.teardown', () => {
   it('cancels the reverse forward', async () => {
     const { rh, run } = mk()
