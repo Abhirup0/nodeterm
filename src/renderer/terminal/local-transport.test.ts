@@ -1,5 +1,32 @@
 import { describe, it, expect, vi } from 'vitest'
+import type { NodeTerminalApi } from '@shared/types'
 import { LocalTransport } from './local-transport'
+
+describe('LocalTransport injected api', () => {
+  it('delegates to the injected api, not the global', () => {
+    const create = vi.fn(async () => ({ sessionId: 's', fresh: true }) as never)
+    const api = {
+      pty: {
+        create,
+        write: vi.fn(),
+        resize: vi.fn(),
+        setFlow: vi.fn(),
+        kill: vi.fn(),
+        destroy: vi.fn(),
+        recycle: vi.fn(),
+        onData: vi.fn(),
+        onExit: vi.fn(),
+        onSize: vi.fn(),
+        onClosed: vi.fn(),
+        onRecycled: vi.fn(),
+        onResync: vi.fn()
+      }
+    } as unknown as NodeTerminalApi
+    const t = new LocalTransport(api)
+    void t.create({ persistKey: 'k' } as never)
+    expect(create).toHaveBeenCalledWith({ persistKey: 'k' })
+  })
+})
 
 describe('LocalTransport co-attach members', () => {
   it('subscribes to the authoritative size, the closed-by-peer event and the redraw', () => {

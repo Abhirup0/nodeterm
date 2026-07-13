@@ -4,6 +4,7 @@ import { ViewportPortal, useReactFlow, useStore } from '@xyflow/react'
 import { CHAT_MAX_LEN } from '@shared/presence'
 import { selectVisible, usePresence } from '../state/presence'
 import { useProjects } from '../state/projects'
+import { useSession } from '../session/session'
 import {
   CHAT_ANCHOR_OFFSET_PX,
   CURSOR_HOTSPOT_PX,
@@ -34,6 +35,10 @@ const CHAT_LINGER_MS = 5000
  * Canvas.
  */
 export function PresenceLayer(): JSX.Element | null {
+  // The session's core API — where cursor/chat casts go. A plain context read (no store
+  // subscription): the session object is stable for this component's lifetime, so the rAF
+  // callbacks and effect cleanups below may close over `api` directly.
+  const { api } = useSession()
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // Hard project filter — not a style: an off-project peer is not rendered at all.
   // useShallow: the selector derives a NEW array each call, and zustand's default Object.is
@@ -71,8 +76,8 @@ export function PresenceLayer(): JSX.Element | null {
   const sendChat = useCallback((text: string | null): void => {
     if (text === null && !publishedRef.current) return // nothing to retract — don't spam the wire
     publishedRef.current = text !== null
-    window.nodeTerminal.presence.chat(text)
-  }, [])
+    api.presence.chat(text)
+  }, [api])
 
   /** Close the input and drop the local state. `linger`: keep the bubble up for the readers for a
    *  few seconds (Enter), then retract it. Safe to call when nothing is open. */
@@ -120,7 +125,7 @@ export function PresenceLayer(): JSX.Element | null {
       const p = pending
       pending = null
       const flow = screenToFlowPosition({ x: p.x, y: p.y })
-      window.nodeTerminal.presence.cursor({ x: Math.round(flow.x), y: Math.round(flow.y) })
+      api.presence.cursor({ x: Math.round(flow.x), y: Math.round(flow.y) })
     }
 
     const onPointerMove = (e: PointerEvent): void => {
@@ -130,7 +135,7 @@ export function PresenceLayer(): JSX.Element | null {
     }
     const onPointerLeave = (): void => {
       pending = null
-      window.nodeTerminal.presence.cursor(null)
+      api.presence.cursor(null)
     }
 
     window.addEventListener('pointermove', onPointerMove)
@@ -139,9 +144,9 @@ export function PresenceLayer(): JSX.Element | null {
       window.removeEventListener('pointermove', onPointerMove)
       document.removeEventListener('pointerleave', onPointerLeave)
       if (raf) cancelAnimationFrame(raf)
-      window.nodeTerminal.presence.cursor(null)
+      api.presence.cursor(null)
     }
-  }, [hasOthers, screenToFlowPosition])
+  }, [hasOthers, screenToFlowPosition, api])
 
   // ---- "/" opens cursor chat (never while typing in xterm / Monaco / an input) ----
   useEffect(() => {
@@ -176,9 +181,9 @@ export function PresenceLayer(): JSX.Element | null {
   useEffect(
     () => () => {
       if (lingerRef.current) clearTimeout(lingerRef.current)
-      if (publishedRef.current) window.nodeTerminal.presence.chat(null)
+      if (publishedRef.current) api.presence.chat(null)
     },
-    []
+    [api]
   )
 
   if (!hasOthers) return null

@@ -3,6 +3,7 @@ import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 import { useAgentNodes } from '../state/agentNodes'
 import { useAgentStatus } from '../state/agentStatus'
+import { useSession } from '../session/session'
 
 /**
  * Loop/schedule/cron node — first-class (select/drag/resize). Shows the kind, schedule, full
@@ -10,6 +11,8 @@ import { useAgentStatus } from '../state/agentStatus'
  * parent terminal (manual trigger).
  */
 export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
+  // The parent terminal's core api — the manual trigger sends into ITS tmux session.
+  const { api } = useSession()
   const count = (data.loopCount as number) ?? 0
   const items = (data.loopItems as string[]) ?? []
   const active = !!data.loopActive
@@ -27,7 +30,7 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   const trigger = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (task) void window.nodeTerminal.pty.sendText(id.replace(/^loop-/, ''), task)
+    if (task) void api.pty.sendText(id.replace(/^loop-/, ''), task)
   }
 
   // Manual dismiss: cron/schedule cards persist across turns/sessions/restarts, so a job

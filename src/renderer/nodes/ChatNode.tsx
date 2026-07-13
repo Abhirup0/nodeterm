@@ -15,6 +15,7 @@ import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { MarkdownText } from './ChatPanel'
 import { useChatSessions } from '../state/chatSessions'
 import { useAgentStatus } from '../state/agentStatus'
+import { useSession } from '../session/session'
 import { accountChipLabel, createDiffNode, type CanvasNode } from '../state/workspace'
 import { useSettings } from '../state/settings'
 import type { ChatImageAttachment, ChatToolSummary } from '@shared/types'
@@ -23,6 +24,11 @@ const MAX_IMAGES = 5
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024 // 2 MB per image
 
 export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) {
+  // This node's core api (a stable context read — the local session's api IS window.nodeTerminal).
+  // The boot effect below captures it in its CLOSURE and keeps its `[id]` dep array: it subscribes
+  // to driver events and starts/reattaches the driver, and re-keying that on `api` would silently
+  // re-create the driver subscription when 4c makes a remote session's api replaceable.
+  const { api } = useSession()
   const chat = useChatSessions((s) => s.byId[id])
   const apply = useChatSessions((s) => s.apply)
   const seed = useChatSessions((s) => s.seed)
@@ -46,7 +52,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
 
   // Boot: subscribe to driver events, seed history from disk, start/reattach the driver.
   useEffect(() => {
-    const off = window.nodeTerminal.chat.onEvent(id, (e) => {
+    const off = api.chat.onEvent(id, (e) => {
       apply(id, e)
       if (e.kind === 'session') {
         // Persist the session id on the node so a relaunch resumes it.
@@ -59,8 +65,8 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
     // fork:true; once the driver's `session` event persists chatSessionId, forkFrom is ignored.
     const sessionId = own ?? forkFrom
     const accountId = data.accountId as string | undefined
-    if (sessionId) void window.nodeTerminal.chat.readTranscript(sessionId, data.cwd as string | undefined, accountId).then((m) => seed(id, m))
-    void window.nodeTerminal.chat.ensure(id, {
+    if (sessionId) void api.chat.readTranscript(sessionId, data.cwd as string | undefined, accountId).then((m) => seed(id, m))
+    void api.chat.ensure(id, {
       cwd: data.cwd as string | undefined,
       sessionId,
       fork: !own && !!forkFrom ? true : undefined,
@@ -84,13 +90,13 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   const send = useCallback(() => {
     const text = input.trim()
     if (!text && images.length === 0) return
-    window.nodeTerminal.chat.send(id, text, images.length ? images : undefined)
+    api.chat.send(id, text, images.length ? images : undefined)
     if (!chat?.working) addLocalUser(id, text)
     setInput('')
     setImages([])
     setAttachNote(null)
     setSlashDismissed(false)
-  }, [input, images, id, chat?.working, addLocalUser])
+  }, [api, input, images, id, chat?.working, addLocalUser])
 
   // --- Image attachments (paste + drag-drop) -------------------------------
   const addFiles = useCallback(
@@ -301,9 +307,9 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
             <div className="chat-node__permission-title">Allow {perm.toolName}?</div>
             <pre className="chat-node__permission-input">{JSON.stringify(perm.input, null, 2).slice(0, 600)}</pre>
             <div className="chat-node__permission-actions">
-              <button onClick={() => window.nodeTerminal.chat.permissionReply(id, perm.requestId, { behavior: 'allow' })}>Allow</button>
-              <button onClick={() => window.nodeTerminal.chat.permissionReply(id, perm.requestId, { behavior: 'allow', alwaysSession: true })}>Always (session)</button>
-              <button onClick={() => window.nodeTerminal.chat.permissionReply(id, perm.requestId, { behavior: 'deny' })}>Deny</button>
+              <button onClick={() => api.chat.permissionReply(id, perm.requestId, { behavior: 'allow' })}>Allow</button>
+              <button onClick={() => api.chat.permissionReply(id, perm.requestId, { behavior: 'allow', alwaysSession: true })}>Always (session)</button>
+              <button onClick={() => api.chat.permissionReply(id, perm.requestId, { behavior: 'deny' })}>Deny</button>
             </div>
           </div>
         )}
@@ -313,7 +319,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
           {chat.queue.map((q) => (
             <span key={q.id} className="chat-node__queue-item">
               {q.text.slice(0, 40)}
-              <button onClick={() => window.nodeTerminal.chat.removeQueued(id, q.id)}>×</button>
+              <button onClick={() => api.chat.removeQueued(id, q.id)}>×</button>
             </span>
           ))}
         </div>
@@ -336,7 +342,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
             className="chat-node__errorbar-reconnect"
             onClick={() => {
               clearError(id)
-              void window.nodeTerminal.chat.ensure(id, {
+              void api.chat.ensure(id, {
                 cwd: data.cwd as string | undefined,
                 sessionId: data.chatSessionId as string | undefined,
                 accountId: data.accountId as string | undefined
@@ -377,7 +383,7 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
           rows={2}
         />
         {/* Stop = interrupt: the driver's turn-done then auto-flushes the next queued item (Task 5). */}
-        {working && <button className="chat-node__stop" onClick={() => window.nodeTerminal.chat.interrupt(id)}>Stop</button>}
+        {working && <button className="chat-node__stop" onClick={() => api.chat.interrupt(id)}>Stop</button>}
       </div>
       )}
     </div>

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { activeSessionApi } from '../session/session'
 
 /**
  * Per-repo Source Control draft state — the commit message and the in-flight "generate"
@@ -31,7 +32,9 @@ export const useScmDraft = create<ScmDraftState>((set, get) => ({
       errors: { ...s.errors, [cwd]: '' }
     }))
     try {
-      const r = await window.nodeTerminal.git.generateMessage(cwd)
+      // Non-component consumer: git comes from the ACTIVE session's core (the local session's
+      // api is `window.nodeTerminal` by identity — same function reference as before Stage 4).
+      const r = await activeSessionApi().git.generateMessage(cwd)
       set((s) => ({
         generating: { ...s.generating, [cwd]: false },
         ...(r.ok

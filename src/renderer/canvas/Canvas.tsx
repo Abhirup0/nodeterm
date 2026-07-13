@@ -132,6 +132,7 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
+import { useSession } from '../session/session'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -347,6 +348,9 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
 }
 
 export function Canvas() {
+  // This canvas's core api (a context read — stable for the session, no store subscription).
+  // For the local session it IS window.nodeTerminal, so every call resolves identically.
+  const { api } = useSession()
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
@@ -937,11 +941,11 @@ export function Canvas() {
           useSettings.getState().update({ seenShortcuts: true })
         }
       })
-    window.nodeTerminal.workspace.load().then((ws) => {
+    api.workspace.load().then((ws) => {
       if (cancelled) return
       useProjects.getState().hydrate(ws)
       // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away.
-      void window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+      void api.workspace.save(useProjects.getState().toWorkspace())
     })
     return () => {
       cancelled = true
@@ -970,7 +974,7 @@ export function Canvas() {
           .then(async (info) => {
             // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
             // Source Control panel's re-fetch (which keys off that entry) already hits the master.
-            await window.nodeTerminal.git.setActiveRemote(project.id)
+            await api.git.setActiveRemote(project.id)
             useSshConn.getState().setConn(project.id, info)
           })
           .catch(() => {
@@ -979,7 +983,7 @@ export function Canvas() {
       })
     } else {
       // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
-      void window.nodeTerminal.git.setActiveRemote(null)
+      void api.git.setActiveRemote(null)
     }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
@@ -1072,7 +1076,7 @@ export function Canvas() {
   }, [])
 
   const writeDisk = useCallback(async () => {
-    await window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+    await api.workspace.save(useProjects.getState().toWorkspace())
     setDirty(false)
   }, [])
 
@@ -1098,7 +1102,7 @@ export function Canvas() {
 
   // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine).
   useEffect(() => {
-    return window.nodeTerminal.workspace.onExternalChange((project) => {
+    return api.workspace.onExternalChange((project) => {
       const { activeProjectId: current } = useProjects.getState()
       if (project.id !== current) {
         // Background project: adopt silently — it reloads into React Flow on next switch.
@@ -1119,7 +1123,7 @@ export function Canvas() {
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
   useEffect(() => {
-    return window.nodeTerminal.workspace.onMigrated((kind) => {
+    return api.workspace.onMigrated((kind) => {
       setMigrationNote(
         kind === 'exec'
           ? 'Custom shells and advanced SSH options (e.g. a ProxyCommand jump host) are no longer stored in the shared .nodeterm/project.json — a cloned repo could use them to run code. They still work here: they moved to this machine only, and your teammates no longer receive them.'
@@ -1253,7 +1257,7 @@ export function Canvas() {
           return false
         }
         order.onLocal(m)
-        window.nodeTerminal.canvas.mutate(projectId, m)
+        api.canvas.mutate(projectId, m)
         return true
       },
       { src, shouldPublish: () => hasPeersRef.current }
@@ -1308,7 +1312,7 @@ export function Canvas() {
   // direct setNodes() bypasses handleNodesChange (which is where local edits mark dirty). Two
   // clients saving the same converged state is harmless; never saving it is not.
   useEffect(() => {
-    return window.nodeTerminal.canvas.onMutation((projectId, mutation) => {
+    return api.canvas.onMutation((projectId, mutation) => {
       hasPeersRef.current = true // proof of a peer, whatever the presence table says
       if (!orderRef.current?.accept(mutation)) return
       if (projectId !== useProjects.getState().activeProjectId) {
@@ -1484,7 +1488,7 @@ export function Canvas() {
         const note = async (selfId: string, otherId: string) => {
           if (status[selfId]?.state === 'working') return
           const { shimPath } = await window.nodeTerminal.contextLink.info()
-          void window.nodeTerminal.pty.sendText(
+          void api.pty.sendText(
             selfId,
             buildContextLinkNote(agentIdOf(selfId), titleOf(otherId), shimPath)
           )
@@ -1504,7 +1508,7 @@ export function Canvas() {
         (sticky?.data.text as string) ?? '',
         agentIdOf(target)
       )
-      if (msg) void window.nodeTerminal.pty.sendText(target, msg)
+      if (msg) void api.pty.sendText(target, msg)
     },
     [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
   )
@@ -1965,7 +1969,7 @@ export function Canvas() {
         setCopyError(`Invalid name: “${name.trim()}”`)
         return
       }
-      const fsApi = project.ssh ? sshFs(project.id) : window.nodeTerminal.fs
+      const fsApi = project.ssh ? sshFs(project.id) : api.fs
       if (await fsApi.exists(dest)) {
         setCopyError(`Already exists: ${dest}`)
         return
@@ -2249,8 +2253,8 @@ export function Canvas() {
           // conversation (history intact, on both sides); the renderer's message store is
           // deliberately NOT dropped, so the user sees no interruption at all.
           if (n.type === 'chat') {
-            window.nodeTerminal.chat.dispose(n.id)
-            void window.nodeTerminal.chat.ensure(n.id, {
+            api.chat.dispose(n.id)
+            void api.chat.ensure(n.id, {
               cwd: fallbackCwd,
               sessionId: n.data.chatSessionId as string | undefined,
               accountId: n.data.accountId as string | undefined
@@ -2314,7 +2318,7 @@ export function Canvas() {
       resetDisplacedCwd(groupId, wt.path, false)
       // A failed prune must still let the binding go — dropping it is the user's ask, and a
       // registration we could not clean up is not a reason to trap them in a dead group.
-      await window.nodeTerminal.git
+      await api.git
         .worktreeRemove(wt.repoPath, wt.path, false, true)
         .catch(() => {})
     },
@@ -2336,7 +2340,7 @@ export function Canvas() {
         // lives across project switches (only permanent delete kills it), so this belongs here,
         // not in node unmount.
         if (n.type === 'chat') {
-          window.nodeTerminal.chat.dispose(n.id)
+          api.chat.dispose(n.id)
           useChatSessions.getState().drop(n.id)
         }
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
@@ -2596,7 +2600,7 @@ export function Canvas() {
       // button disabled by `busy`: no error, no way out but Escape. Fail closed — clear busy, say so
       // inline, and leave the dialog open so the user can retry. (The sibling READS in this feature
       // catch for exactly this reason; the three destructive calls did not.)
-      const res = await window.nodeTerminal.git
+      const res = await api.git
         .worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
         .catch((e: unknown) => ({
           ok: false as const,
@@ -2672,7 +2676,7 @@ export function Canvas() {
         // transport error on the Server Edition) must not swallow the whole action: without this
         // catch the dialog silently never opens and Remove looks broken. Fail open — ask without
         // the dirty-file count.
-        const status = await window.nodeTerminal.git.status(wt.path).catch(() => null)
+        const status = await api.git.status(wt.path).catch(() => null)
         const dirtyCount = (status?.staged.length ?? 0) + (status?.changes.length ?? 0)
         const warning = dirtyCount > 0 ? `${dirtyCount} uncommitted file(s) in the worktree.` : ''
         // A worktree the user created outside nodeterm is not ours to delete: Unbind is the default
@@ -2761,7 +2765,7 @@ export function Canvas() {
     //    removed, touch no sessions" — the same fail-closed answer a refusal gets. Without the catch
     //    the rejection escaped the callback and the whole action became a silent no-op: no notice
     //    ever appeared, so the user could not tell it from a removal that quietly worked.
-    const res = await window.nodeTerminal.git
+    const res = await api.git
       .worktreeRemove(wt.repoPath, wt.path, wt.createdByApp)
       .catch((e: unknown) => ({
         ok: false as const,
@@ -2804,7 +2808,7 @@ export function Canvas() {
     setMergeTarget(null)
     if (!t) return
     const push = t.hasOrigin && mergePush
-    void window.nodeTerminal.git
+    void api.git
       .worktreeMerge(t.repoPath, t.branch, t.baseRef, push)
       .then((res) => setNotice({ kind: res.ok ? 'info' : 'error', text: res.message }))
       // A rejected ipc (a WS drop mid-merge) otherwise produced NO notice at all — the merge looked
@@ -2983,7 +2987,7 @@ export function Canvas() {
     // is cosmetic; HERE it costs the user a running process. So probe the directory once, right
     // before the irreversible step. This is the second (and last) sanctioned direct git read outside
     // the worktrees store — cheap, one-shot, and only on an explicit destructive confirm.
-    const probe = await window.nodeTerminal.git.status(wtPath).catch(() => null)
+    const probe = await api.git.status(wtPath).catch(() => null)
     if (!probe?.hasRepo) {
       setNotice({
         kind: 'error',
@@ -3063,9 +3067,9 @@ export function Canvas() {
       const known = useAgentStatus.getState().byId[nodeId]?.sessionId
       let originalId = known
       if (known) {
-        await window.nodeTerminal.pty.sendText(nodeId, '/branch')
+        await api.pty.sendText(nodeId, '/branch')
       } else {
-        const res = await branchClaudeSession(nodeId)
+        const res = await branchClaudeSession(api, nodeId)
         if (!res.ok || !res.originalId) {
           const error = res.error ?? 'Branch failed.'
           // The error dialog is for humans; agent-CLI calls get the error in the reply instead.
@@ -3096,7 +3100,7 @@ export function Canvas() {
       markDirty()
       return { ok: true, newNodeId: copy.id }
     },
-    [setNodes, markDirty]
+    [api, setNodes, markDirty]
   )
 
   // Transfer this agent's full conversation to a different agent. We render the source
@@ -3769,9 +3773,9 @@ export function Canvas() {
   // reply on BOTH confirm and cancel. Every path replies EXACTLY ONCE so the awaiting CLI call in
   // main never hangs to its 120s timeout.
   useEffect(() => {
-    return window.nodeTerminal.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
+    return api.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
-        window.nodeTerminal.sendAgentControlResult({ requestId, ...r })
+        api.sendAgentControlResult({ requestId, ...r })
 
       // Authorization boundary: the source must be a live, control-capable agent node.
       // The `?? 'claude'` MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
@@ -4081,7 +4085,7 @@ export function Canvas() {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
               return
             }
-            const res = await window.nodeTerminal.git
+            const res = await api.git
               .worktreeAdd(repoRoot, wtPath, branch, baseRef, true)
               .catch((e: unknown) => ({
                 ok: false as const,
@@ -4174,7 +4178,7 @@ export function Canvas() {
             markDirty()
             const agentId = target.data.agentId as AgentId | undefined
             if (agentId && canRename(agentId)) {
-              void window.nodeTerminal.pty.sendText(id, `/rename ${title}`)
+              void api.pty.sendText(id, `/rename ${title}`)
             }
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
             return
@@ -4201,7 +4205,7 @@ export function Canvas() {
               onConfirm: async () => {
                 setConfirm(null)
                 try {
-                  const ok = await window.nodeTerminal.pty.sendText(args.node, args.text ?? '')
+                  const ok = await api.pty.sendText(args.node, args.text ?? '')
                   reply({
                     ok,
                     message: ok ? 'sent' : 'failed',
@@ -4273,7 +4277,7 @@ export function Canvas() {
             transport.destroy(id)
             // Chat nodes in an inactive project keep their driver running across the switch;
             // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
-            window.nodeTerminal.chat.dispose(id)
+            api.chat.dispose(id)
             useChatSessions.getState().drop(id)
             useAgentStatus.getState().remove(id)
             useProjects.getState().removeNode(projectId, id)
@@ -4308,7 +4312,7 @@ export function Canvas() {
       const agentId = liveAgent ?? storedAgent
       const name = title.trim()
       if (agentId && canRename(agentId) && name) {
-        void window.nodeTerminal.pty.sendText(id, `/rename ${name}`)
+        void api.pty.sendText(id, `/rename ${name}`)
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]
@@ -4322,7 +4326,7 @@ export function Canvas() {
       // unmounting mid-request; this Canvas-level call completes and applies the name anyway.
       useSessionNaming.getState().set(id, true)
       try {
-        const r = await window.nodeTerminal.pty.generateName(id, cwd ?? '')
+        const r = await api.pty.generateName(id, cwd ?? '')
         if (r.ok) renameSession(projectId, id, r.message)
       } finally {
         useSessionNaming.getState().set(id, false)
@@ -4338,7 +4342,7 @@ export function Canvas() {
       if (memberIds.length === 0) return
       useSessionNaming.getState().set(groupId, true)
       try {
-        const r = await window.nodeTerminal.pty.generateGroupName(memberIds, cwd ?? '')
+        const r = await api.pty.generateGroupName(memberIds, cwd ?? '')
         if (r.ok) renameSession(projectId, groupId, r.message)
       } finally {
         useSessionNaming.getState().set(groupId, false)
@@ -4433,7 +4437,7 @@ export function Canvas() {
   // Stream live subagent transcript chunks into the agent-nodes store.
   useEffect(
     () =>
-      window.nodeTerminal.onSubagentActivity((e) =>
+      api.onSubagentActivity((e) =>
         useAgentNodes.getState().appendActivity(e.toolUseId, e.chunk)
       ),
     []
@@ -4458,7 +4462,7 @@ export function Canvas() {
       const t = (s ?? '').replace(/\s+/g, ' ').trim()
       return t.length <= max ? t : `${t.slice(0, max - 1)}…`
     }
-    return window.nodeTerminal.onAgentStatus((e: NormalizedAgentEvent) => {
+    return api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
@@ -4566,7 +4570,7 @@ export function Canvas() {
     if (!stale.length) return
     let cancelled = false
     void Promise.all(
-      stale.map(async (n) => [n.id, await window.nodeTerminal.pty.capture(n.id)] as const)
+      stale.map(async (n) => [n.id, await api.pty.capture(n.id)] as const)
     ).then((pairs) => {
       if (cancelled) return
       const ts = Date.now()
@@ -4657,7 +4661,7 @@ export function Canvas() {
     } else {
       // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
       // another machine's project) — only a virgin folder gets a brand-new project.
-      const probed = await window.nodeTerminal.workspace.probeFolder(folder)
+      const probed = await api.workspace.probeFolder(folder)
       if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
       else useProjects.getState().openFolderProject(folder)
     }
@@ -4824,7 +4828,7 @@ export function Canvas() {
           transport.destroy(n.id)
         }
         if ((n.kind ?? 'terminal') === 'chat') {
-          window.nodeTerminal.chat.dispose(n.id)
+          api.chat.dispose(n.id)
           useChatSessions.getState().drop(n.id)
         }
         useAgentStatus.getState().remove(n.id)

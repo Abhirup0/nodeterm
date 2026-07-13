@@ -10,6 +10,7 @@ import { IconBellFilled, IconCircleCheck, IconPin } from './icons'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
+import { useSession } from '../session/session'
 
 export interface SessionsSidebarProps {
   open: boolean
@@ -43,6 +44,8 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
+  // This sidebar's core api (a stable context read — the branch lookups run on the session's git).
+  const { api } = useSession()
 
   const [filter, setFilter] = useState('')
   // Explicit per-project collapse choices (true = collapsed, false = expanded). Absent =
@@ -72,7 +75,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
     let cancelled = false
     projects.forEach((p) => {
       if (!p.cwd || branches[p.id] !== undefined) return
-      window.nodeTerminal.git
+      api.git
         .status(p.cwd)
         .then((st) => {
           if (cancelled) return
@@ -86,7 +89,9 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
     return () => {
       cancelled = true
     }
-  }, [open, projects, branches])
+    // `api` is a safe dep: this effect only fetches (cancellation flag, no resource), and the
+    // local session's api is referentially stable, so adding it changes nothing today.
+  }, [open, projects, branches, api])
 
   // Gated on `open`: this component stays mounted while the sidebar is closed (the common
   // case), and the O(projects × nodes) rebuild re-ran on every agent hook event otherwise.

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { TranscriptLine } from '@shared/types'
+import { useSession } from '../session/session'
 
 export interface SearchSnippet {
   source: 'terminal' | 'claude'
@@ -40,6 +41,9 @@ export function useTerminalSearch({
   open,
   readBuffer
 }: Args): TerminalSearch {
+  // The node's core api — the tmux capture must run on the core that owns the session.
+  // (Hook, so this runs in the calling component's context; the value is session-stable.)
+  const { api } = useSession()
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0) // 0-based index into `matches`
   const [source, setSource] = useState<SearchSnippet[]>([])
@@ -57,7 +61,7 @@ export function useTerminalSearch({
       const lines: SearchSnippet[] = []
       let captured = ''
       try {
-        captured = await window.nodeTerminal.pty.capture(nodeId, true)
+        captured = await api.pty.capture(nodeId, true)
       } catch {
         captured = ''
       }
@@ -85,7 +89,7 @@ export function useTerminalSearch({
       cancelled = true
     }
     // readBuffer must be stable (useCallback in the caller) to avoid rebuilds.
-  }, [open, nodeId, sessionId, cwd, accountId, searchTranscript, readBuffer])
+  }, [api, open, nodeId, sessionId, cwd, accountId, searchTranscript, readBuffer])
 
   // Lowercase once per snapshot, not per keystroke — the snapshot can be tens of thousands of
   // lines (full scrollback + transcript), and re-lowercasing all of it on every typed character

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useSession } from '../session/session'
 import {
   expandCloneUrl,
   isValidCloneUrl,
@@ -23,6 +24,11 @@ interface CloneRepoDialogProps {
  * half-cloned directory it claimed.
  */
 export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProps) {
+  // This dialog's core api (a stable context read): the clone runs on the session's core. The
+  // effects below capture it in their CLOSURES and keep their `[open]` dep arrays — one of them
+  // subscribes (onCloneProgress), and re-keying a resource effect on `api` is the 4c bomb the
+  // sub-stage rules forbid. (The native folder picker stays on the app-global `dialog`.)
+  const { api } = useSession()
   const [url, setUrl] = useState('')
   const [parent, setParent] = useState('')
   const [cloning, setCloning] = useState(false)
@@ -43,13 +49,13 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
     urlRef.current?.focus()
     const remembered = localStorage.getItem(PARENT_KEY)
     if (remembered) setParent(remembered)
-    else void window.nodeTerminal.git.cloneDefaultParent().then((p) => setParent((cur) => cur || p))
+    else void api.git.cloneDefaultParent().then((p) => setParent((cur) => cur || p))
   }, [open])
 
   // Progress stream — subscribed only while the dialog is open.
   useEffect(() => {
     if (!open) return
-    return window.nodeTerminal.git.onCloneProgress(setProgress)
+    return api.git.onCloneProgress(setProgress)
   }, [open])
 
   // Closing the dialog (open → false) while a clone is in flight aborts it (main
@@ -60,7 +66,7 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
   }, [cloning])
   useEffect(() => {
     if (open) return
-    if (cloningRef.current) void window.nodeTerminal.git.cloneAbort()
+    if (cloningRef.current) void api.git.cloneAbort()
   }, [open])
 
   if (!open) return null
@@ -70,9 +76,9 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
     setCloning(true)
     setError('')
     setProgress(null)
-    let r: Awaited<ReturnType<typeof window.nodeTerminal.git.clone>>
+    let r: Awaited<ReturnType<typeof api.git.clone>>
     try {
-      r = await window.nodeTerminal.git.clone(parent.trim(), expanded)
+      r = await api.git.clone(parent.trim(), expanded)
     } catch (err) {
       setError(String(err))
       return
@@ -92,7 +98,7 @@ export function CloneRepoDialog({ open, onClose, onCloned }: CloneRepoDialogProp
   }
 
   const cancel = (): void => {
-    if (cloning) void window.nodeTerminal.git.cloneAbort()
+    if (cloning) void api.git.cloneAbort()
     onClose()
   }
 
