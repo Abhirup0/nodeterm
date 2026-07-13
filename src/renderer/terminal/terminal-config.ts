@@ -120,33 +120,6 @@ export function shouldApplyResync(screen: string | null | undefined): screen is 
   return typeof screen === 'string' && screen.length > 0
 }
 
-/**
- * How long a terminal that scrolled out of the viewport keeps its WebGL context before releasing
- * it. WebGL contexts belong to terminals the user can actually SEE, not to every mounted node —
- * Chromium caps live contexts at ~16, and a busy canvas holds far more terminals than that, so an
- * IntersectionObserver acquires the context on entry and releases it on exit. The delay exists so a
- * pan that merely SWEEPS a node across the viewport does not churn contexts (acquire → immediately
- * release); a visibility=true event within the window cancels the pending release.
- */
-export const WEBGL_RELEASE_DELAY_MS = 2000
-
-/**
- * The visibility state machine behind the per-node WebGL context (the DOM glue — an
- * IntersectionObserver + a release timer — lives in `TerminalNode`, but the decision is pure so it
- * can be pinned by a test without a DOM):
- *  - `acquire`          — visible and we hold no context: load the WebGL addon.
- *  - `cancel-release`   — visible and we already hold one: cancel any pending release (a pan swept
- *    back before the timer fired).
- *  - `schedule-release` — not visible but we still hold a context: start the release timer.
- *  - `none`             — not visible and hold nothing: nothing to do.
- */
-export type WebglVisibilityAction = 'acquire' | 'cancel-release' | 'schedule-release' | 'none'
-
-export function webglVisibilityAction(visible: boolean, held: boolean): WebglVisibilityAction {
-  if (visible) return held ? 'cancel-release' : 'acquire'
-  return held ? 'schedule-release' : 'none'
-}
-
 /** Hard cap on xterm's in-memory scrollback: the cost is per node and one canvas holds many. */
 export const XTERM_SCROLLBACK_MAX = 10000
 

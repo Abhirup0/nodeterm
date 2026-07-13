@@ -40,12 +40,11 @@ import {
   takeRecycled,
   terminalKeyAction,
   toXtermText,
-  webglVisibilityAction,
   SHIFT_ENTER_SEQ,
-  WEBGL_RELEASE_DELAY_MS,
   xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
+import { registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -548,21 +547,22 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
     // GPU renderer: xterm's default DOM renderer doesn't scale to many terminals streaming
     // at once. Must load after open(). Browsers cap live WebGL contexts (~16), and a busy canvas
-    // holds far more terminals than that, so a context is NOT acquired per mounted node — it is
-    // scoped to VISIBILITY: an IntersectionObserver (below) acquires the addon when the node enters
-    // the viewport and releases it when the node leaves (after a short delay). The user rarely SEES
-    // more than ~16 terminals at once, so the cap stops being hit and the terminals actually being
-    // watched always get the GPU renderer; the rest fall back to the DOM renderer.
+    // holds far more terminals than that, so a context is NOT acquired per mounted node. The
+    // module-level BUDGET COORDINATOR (`webgl-budget.ts`) owns the grant decision and all timing:
+    // this node reports viewport visibility (via the IntersectionObserver below), and the
+    // coordinator calls back into `acquireWebgl`/`releaseWebgl`, keeping the total contexts WE hold
+    // under `WEBGL_BUDGET` so the browser never has to force-evict (which is what flashed the dead
+    // "lost context" placeholder). The callbacks stay dumb and idempotent.
     let webgl: WebglAddon | null = null
-    const acquireWebgl = () => {
-      if (webgl) return
+    let webglHandle: WebglClientHandle | null = null
+    const acquireWebgl = (): boolean => {
+      if (webgl) return true
       try {
         const addon = new WebglAddon()
-        // Browser evicted us anyway (two > 16-visible terminals can still race the cap): dispose and
-        // null the reference so the DOM renderer takes over. Do NOT re-acquire from here — two
-        // terminals fighting over the cap would evict each other in an infinite loop (exactly the
-        // "Too many active WebGL contexts" storm this feature exists to stop). Re-acquisition is left
-        // to the next visibility transition, which is naturally rate-limited by the user's panning.
+        // The browser lost this context out from under us. Dispose + null the reference so the DOM
+        // renderer takes over, and tell the coordinator so its accounting drops this grant. Do NOT
+        // re-acquire from here — the next visibility transition / reclaim decides (re-acquiring in a
+        // loop is exactly the "Too many active WebGL contexts" storm this feature exists to stop).
         addon.onContextLoss(() => {
           try {
             addon.dispose()
@@ -570,11 +570,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             // already disposed
           }
           if (webgl === addon) webgl = null
+          webglHandle?.contextLost()
         })
         term.loadAddon(addon)
         webgl = addon
+        return true
       } catch {
-        // WebGL2 unavailable — DOM renderer remains active.
+        // WebGL2 unavailable — DOM renderer remains active. Returning false tells the coordinator
+        // not to count this as a held context (it must not burn a budget slot).
+        return false
       }
     }
     const releaseWebgl = () => {
@@ -1076,21 +1080,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     })
     observer.observe(container)
 
-    // Viewport-scoped WebGL: acquire the GPU context when this node is visible, release it after a
-    // delay when it leaves. IntersectionObserver measures against the rendered box, so React Flow's
-    // pan/zoom CSS transform is accounted for natively — no coupling to the React Flow store, and it
-    // works identically in the browser Server Edition. `rootMargin` acquires slightly before a
-    // node panning into view fully enters. The observer's initial callback (queued shortly after
-    // `observe()`) is what (re)acquires the context on mount/adopt — this replaces the old
-    // unconditional `loadWebgl()` calls in both the parked and fresh paths above; the DOM renderer
-    // covers the brief gap until it fires.
-    let webglReleaseTimer: ReturnType<typeof setTimeout> | null = null
-    const cancelWebglRelease = () => {
-      if (webglReleaseTimer) {
-        clearTimeout(webglReleaseTimer)
-        webglReleaseTimer = null
-      }
-    }
+    // Viewport-scoped WebGL, coordinated by the module-level budget (`webgl-budget.ts`): the
+    // IntersectionObserver only REPORTS visibility to the coordinator, which owns the grant decision
+    // and all timing (acquire debounce, release delay, and LRU-hidden reclaim so we never exceed the
+    // budget). IntersectionObserver measures against the rendered box, so React Flow's pan/zoom CSS
+    // transform is accounted for natively — no coupling to the React Flow store, and it works
+    // identically in the browser Server Edition. `rootMargin` pre-announces a node panning into
+    // view. The observer's initial callback (queued shortly after `observe()`) is what reports
+    // visibility on mount/adopt — this replaces the old unconditional `loadWebgl()` calls in both
+    // the parked and fresh paths above; the DOM renderer covers the gap until a grant lands.
+    webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
         // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),
@@ -1098,24 +1097,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // context onto a parked/disposed terminal — the very leak this feature exists to prevent.
         if (disposed) return
         const visible = entries[entries.length - 1]?.isIntersecting ?? false
-        switch (webglVisibilityAction(visible, webgl !== null)) {
-          case 'acquire':
-            cancelWebglRelease()
-            acquireWebgl()
-            break
-          case 'cancel-release':
-            cancelWebglRelease()
-            break
-          case 'schedule-release':
-            if (!webglReleaseTimer)
-              webglReleaseTimer = setTimeout(() => {
-                webglReleaseTimer = null
-                releaseWebgl()
-              }, WEBGL_RELEASE_DELAY_MS)
-            break
-          case 'none':
-            break
-        }
+        webglHandle?.setVisible(visible)
       },
       { rootMargin: '256px' }
     )
@@ -1125,7 +1107,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       disposed = true
       observer.disconnect()
       visibilityObserver.disconnect()
-      cancelWebglRelease()
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       useAgentStatus.getState().setActive(id, false)
@@ -1144,10 +1125,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       fitRef.current = null
       searchAddonRef.current = null
       if (applyFitRef.current === applyFit) applyFitRef.current = null
-      // Free the GPU context on unmount (park or teardown) either way — the park path must keep
-      // releasing it as it always has (live WebGL contexts are capped ~16, and a parked terminal is
-      // by definition off-screen).
-      releaseWebgl()
+      // Free the GPU context on unmount (park or teardown) either way, and unregister from the
+      // budget coordinator (which releases any held grant + cancels its timers). The park path must
+      // keep releasing it as it always has (contexts are capped ~16, and a parked terminal is
+      // off-screen); a remount re-registers a fresh handle and the observer re-reports visibility.
+      webglHandle?.dispose()
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
       // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session
