@@ -83,6 +83,31 @@ export function isSafeLocalTranscriptPath(
 }
 
 /**
+ * Remote analogue of `isSafeLocalTranscriptPath`, for the transcript_path a REMOTE node's hooks
+ * POST over the reverse tunnel. Same threat (a forged POST must not make the app read an arbitrary
+ * file) and the same two-root shape, but resolved with POSIX semantics (remote hosts are POSIX)
+ * and rooted at the project's remote `$HOME`:
+ *   - the system default `<remoteHome>/.claude/projects`, and
+ *   - a managed REMOTE account's `<remoteHome>/.nodeterm/claude-accounts/<accountId>/projects`
+ *     (see `remoteAccountConfigDir`) — jailing to the default root alone dropped every payload
+ *     for a remote account, which silently killed the session-name sync, the context meter and
+ *     the subagent cards on those nodes.
+ * `remoteHome` unknown ⇒ false (fail closed: without a root there is nothing to jail against).
+ */
+export function isSafeRemoteTranscriptPath(abs: string, remoteHome: string | undefined): boolean {
+  if (!abs || !remoteHome) return false
+  const p = path.posix.resolve(abs)
+  const legacyRoot = path.posix.join(remoteHome, '.claude', 'projects')
+  if (p === legacyRoot || p.startsWith(legacyRoot + '/')) return true
+  const accountsRoot = path.posix.join(remoteHome, '.nodeterm', 'claude-accounts')
+  if (!p.startsWith(accountsRoot + '/')) return false
+  // Relative to the accounts root: expect `<accountId>/projects[/…]`. `p` is normalized and
+  // confirmed under `accountsRoot`, so `relative` yields no leading `..`.
+  const segs = path.posix.relative(accountsRoot, p).split('/')
+  return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+}
+
+/**
  * Claude Code ≥ 2.1 scopes its macOS Keychain service name per config dir:
  * 'Claude Code-credentials-' + first 8 hex chars of sha256(CLAUDE_CONFIG_DIR).
  * (Learned from REF's claude-accounts/keychain.ts — undocumented CLI behavior.)

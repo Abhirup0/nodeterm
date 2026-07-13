@@ -52,7 +52,7 @@ import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
-import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
+import { isSafeLocalTranscriptPath, isSafeRemoteTranscriptPath } from '../core/claude-accounts-core'
 import { installClaudeHooksInto } from '../core/agents/hooks/claude'
 import { createPairingService } from './pairing-service'
 import {
@@ -372,13 +372,24 @@ app.whenReady().then(async () => {
     browserGuests.delete(webContentsId)
   })
 
+  // The naming agent runs LOCALLY on captured output, so it needs a cwd that exists on THIS
+  // machine. An SSH-project node's `data.cwd` is a path on the REMOTE host — spawning there fails
+  // (ENOENT) and the ✦ button silently did nothing. The cwd carries no meaning for naming (the
+  // terminal output is in the prompt), so a remote node falls back to '' → runAgent's os.homedir().
+  const localNamingCwd = (keys: string[], cwd: string): string =>
+    keys.some((k) => ptyManager.sshRemoteForNode(k)) ? '' : cwd
+
   ipcMain.handle(IPC.ptyGenerateName, async (_e, persistKey: string, cwd: string) =>
-    generateTerminalName(await ptyManager.captureSession(persistKey), cwd, settingsStore.get())
+    generateTerminalName(
+      await ptyManager.captureSession(persistKey),
+      localNamingCwd([persistKey], cwd),
+      settingsStore.get()
+    )
   )
 
   ipcMain.handle(IPC.ptyGenerateGroupName, async (_e, memberKeys: string[], cwd: string) => {
     const contents = await Promise.all(memberKeys.map((k) => ptyManager.captureSession(k)))
-    return generateGroupName(contents, cwd, settingsStore.get())
+    return generateGroupName(contents, localNamingCwd(memberKeys, cwd), settingsStore.get())
   })
 
   ipcMain.handle(IPC.ptyCapture, (_e, persistKey: string, full?: boolean) =>
@@ -772,16 +783,15 @@ app.whenReady().then(async () => {
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
-  // Jail it under the project's remote `<remoteHome>/.claude/projects` using POSIX semantics
-  // (remote hosts are POSIX). The `+ '/'` boundary rejects sibling-prefix paths (…/projects-evil).
+  // The jail (both allowed roots, incl. a managed remote account's) is pure + unit-tested in
+  // claude-accounts-core.
   const safeRemoteTranscriptPath = (
     tp: string | undefined,
     remoteHome: string | undefined
   ): string | undefined => {
-    if (!tp || !remoteHome) return undefined
-    const root = posix.join(remoteHome, '.claude', 'projects')
+    if (!tp) return undefined
     const abs = posix.resolve(tp)
-    return abs === root || abs.startsWith(root + '/') ? abs : undefined
+    return isSafeRemoteTranscriptPath(abs, remoteHome) ? abs : undefined
   }
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   accountConfigDir,
   remoteAccountConfigDir,
+  isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs,
   claudeKeychainService,
   usageCredsPaths,
@@ -176,5 +177,40 @@ describe('isSafeLocalTranscriptPath', () => {
   it('rejects a sibling-prefix root (…/projects-evil)', () => {
     expect(isSafeLocalTranscriptPath(`${legacy}-evil/x.jsonl`, home, ud)).toBe(false)
     expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects-evil/x`, home, ud)).toBe(false)
+  })
+})
+
+// The remote analogue of isSafeLocalTranscriptPath. A remote node's managed account writes its
+// transcripts under `~/.nodeterm/claude-accounts/<id>/projects` (remoteAccountConfigDir), NOT
+// under `~/.claude/projects` — jailing to the latter alone silently dropped every hook payload
+// for a remote account, which killed the session-name sync, the context meter and subagent cards.
+describe('isSafeRemoteTranscriptPath', () => {
+  const home = '/home/enes'
+  const ok = (p: string) => isSafeRemoteTranscriptPath(p, home)
+
+  it('accepts the system-default remote root', () => {
+    expect(ok('/home/enes/.claude/projects/-srv-proj/abc.jsonl')).toBe(true)
+  })
+
+  it('accepts a managed REMOTE account root', () => {
+    expect(ok('/home/enes/.nodeterm/claude-accounts/a1/projects/-srv-proj/abc.jsonl')).toBe(true)
+  })
+
+  it('rejects an arbitrary remote file (forged POST over the reverse tunnel)', () => {
+    expect(ok('/home/enes/.ssh/id_rsa')).toBe(false)
+    expect(ok('/etc/passwd')).toBe(false)
+  })
+
+  it('rejects a sibling-prefix root', () => {
+    expect(ok('/home/enes/.claude/projects-evil/x.jsonl')).toBe(false)
+  })
+
+  it('rejects a non-projects dir inside the accounts root, and a traversing account id', () => {
+    expect(ok('/home/enes/.nodeterm/claude-accounts/a1/.ssh/id_rsa')).toBe(false)
+    expect(ok('/home/enes/.nodeterm/claude-accounts/../../.ssh/id_rsa')).toBe(false)
+  })
+
+  it('is false when the remote home is unknown', () => {
+    expect(isSafeRemoteTranscriptPath('/home/enes/.claude/projects/x.jsonl', undefined)).toBe(false)
   })
 })
