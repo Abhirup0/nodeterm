@@ -73,6 +73,15 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
   let clientId: number | null = null
   let gate: TrustGate | null = null
   let closed = false
+  // OBLIGATION (a) — defence in depth. The peer's ECDH public key at the moment the gate is created
+  // (the same key `emptyMutualApproval` is seeded with, and whose shared secret produced the SAS the
+  // humans compared). If the socket's live peer key ever diverges from this, the session key was
+  // swapped under us (a mid-session re-key by a relay MITM) — we then refuse to advance approval,
+  // dispatch peer traffic, or open the sink. relay-socket's layer-1 guard already prevents the swap;
+  // this is the second, independent check so the property does not rest on that one guard.
+  let sessionPeerKey: string | null = null
+  // True once we have detected a key swap and cut the session, so we don't do it twice.
+  let keySwapped = false
 
   /** The ONE teardown, mirroring src/server/ws.ts's close path exactly: `unregisterPeerSink` IS the
    *  three steps (presenceHub.leave → onPeerGone → PtyManager.dropClient → registry prune). Do NOT
@@ -97,9 +106,21 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     }
   }
 
+  /** The socket's live peer key still matches the one bound into the gate/approval state. A false
+   *  return means the session key was swapped under us — refuse everything and cut the session. */
+  const peerKeyIntact = (): boolean => {
+    if (keySwapped) return false
+    if (sessionPeerKey !== null && socket.peerPublicKeyB64() === sessionPeerKey) return true
+    keySwapped = true
+    session.close()
+    return false
+  }
+
   /** Both humans confirmed: the peer joins this core as a client. */
   const open = (): void => {
     if (closed || clientId !== null) return
+    // The key that keyed this session must still be the original peer's (belt to layer-1's brace).
+    if (!peerKeyIntact()) return
     const id = allocateRelayClientId()
     registerPeerSink(id, {
       // A DEAD socket must THROW (the registry evicts a sink after 2 consecutive throws and runs the
@@ -138,6 +159,8 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
       // the other end is who we think. Serve nothing yet: build the gate and ask for the SAS.
       const peerKey = socket.peerPublicKeyB64()
       if (!peerKey || gate) return
+      // Bind the session to THIS peer key. Every later approval/dispatch step re-asserts it.
+      sessionPeerKey = peerKey
       gate = createTrustGate({
         peerKeyB64: peerKey,
         sessionId: `${peerKey}:${Date.now()}`, // obligation (b): ONE state per pairing attempt
@@ -154,6 +177,10 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     onTunnel: (kind, payload) => {
       // Binary peer→host frames are ignored: pty input rides JSON casts, exactly as on the WS.
       if (kind !== 'text') return
+      // OBLIGATION (a) — before ANYTHING (advancing approval via the gate, or dispatching a peer
+      // RPC/cast): the session key must still belong to the ORIGINAL peer. A tunnel frame that
+      // decrypted under a swapped key must not advance confirmRemote or reach the core.
+      if (!peerKeyIntact()) return
       const json = new TextDecoder().decode(payload)
       // Trust frames are consumed BEFORE dispatch and never reach the core.
       if (gate?.onTunnelText(json)) return

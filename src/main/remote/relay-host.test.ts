@@ -378,6 +378,24 @@ describe('relay host — nothing is served before mutual approval', () => {
     expect(s.opens).toEqual([])
   })
 
+  it('a peer CAST before mutual approval is DROPPED (no dispatch, no sink, no presence)', async () => {
+    // The req case is covered above; a cast has no id to answer, so the code silently drops it. Prove
+    // it never reaches a handler: a pre-approval pty:write must not run a command on this machine.
+    const casts: Array<[number, string]> = []
+    platform.onWithSender('pty:write', (clientId: number, data: string) => casts.push([clientId, data]))
+    const s = openHostAgainstFakeRelay() // E2EE is up, approval is NOT given
+    expect(s.pending).toHaveLength(1)
+
+    s.peerSendsTunnelText(JSON.stringify({ t: 'cast', method: 'pty:write', args: ['rm -rf ~\r'] }))
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(casts).toEqual([]) // never dispatched
+    expect(s.session.clientId()).toBeNull()
+    expect(peerRegistry().ids()).toEqual([])
+    expect(presenceHub.peers()).toEqual([])
+    expect(s.opens).toEqual([])
+  })
+
   it('ONE human confirming is not enough — the peer is still not a client', async () => {
     const s = openHostAgainstFakeRelay()
     s.session.confirm() // only this side

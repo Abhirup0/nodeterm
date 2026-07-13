@@ -348,6 +348,21 @@ export function connectRelay(opts: ConnectRelayOptions): RelaySocket {
   }
 
   function handleControl(raw: string): void {
+    // SECURITY: a handshake control frame (`e2ee_hello` / `e2ee_ready`) is legitimate ONLY during the
+    // one handshake, i.e. before the session goes ready. Once ready, re-processing one would let a
+    // relay MITM RE-KEY a live session under its own keypair (re-deriving baseKey/sessionKey and
+    // overwriting peerPubB64) and then forge the peer's encrypted `trust:confirm` under the swapped
+    // key — degrading mutual approval to one-way (see docs/remote-sessions.md, obligation (a)). The
+    // real peer never re-sends a hello on an established session, so such a frame is an attack or a
+    // bug, never legitimate. Drop it WITHOUT re-keying: the derived session identity (SAS + peer key)
+    // stays frozen. We do NOT close the socket — the relay already fully controls the transport
+    // (it can drop us at will), so closing would add no real protection while handing a MITM a
+    // trivial way to tear down an established, mutually-approved session with one plaintext frame.
+    // Ignoring keeps the good session robust; layer 2 (relay-host key binding) independently
+    // guarantees no traffic or approval can advance under a swapped key even if this check regressed.
+    if (readyFired) {
+      return
+    }
     let control: HandshakeControl
     try {
       control = JSON.parse(raw) as HandshakeControl

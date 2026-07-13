@@ -4,7 +4,14 @@
 // it can inject anything it likes onto the wire, but it holds no session key.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { connectRelay, type RelaySocket, type RelayTransport } from './relay-socket'
-import { genKeyPair, publicKeyToB64 } from './e2ee'
+import {
+  deriveSessionKey,
+  deriveSharedKey,
+  encrypt,
+  genKeyPair,
+  publicKeyToB64,
+  randomSessionNonce
+} from './e2ee'
 import { emptyApprovedDevices, type ApprovedDevices } from './approved-devices-core'
 import { TRUST_CONFIRM, createTrustGate, type TrustGate } from './relay-trust'
 
@@ -186,6 +193,123 @@ describe('obligation (a): only the encrypted tunnel can confirm the peer', () =>
     const { hostGate, peerGate } = bridgedPair()
     expect(hostGate.sas()).toMatch(/^\d{3} \d{3}$/)
     expect(hostGate.sas()).toBe(peerGate.sas())
+  })
+
+  // The full attack obligation (a) exists to defeat: after the genuine handshake AND the host human's
+  // confirm, a relay MITM injects a plaintext e2ee_hello to re-key the LIVE session under its own
+  // keypair, then seals a trust:confirm under the swapped key. If the re-key were honoured, the box
+  // would decrypt, reach confirmRemote, mutually approve, and pin — forging the second human's
+  // consent. The MITM knows the host's session nonce (it saw e2ee_ready on the wire) and chooses its
+  // own, so it can compute the exact key the host WOULD adopt.
+  it('an attacker re-key + sealed trust:confirm does NOT confirm the peer or pin any key', async () => {
+    const hostKeys = genKeyPair()
+    const clientKeys = genKeyPair()
+    const attackerKeys = genKeyPair()
+
+    // Wire host<->client, capturing every frame the host emits (a real relay sees every byte).
+    let hostOnMsg: ((d: unknown) => void) | null = null
+    let clientOnMsg: ((d: unknown) => void) | null = null
+    const hostEmitted: unknown[] = []
+    const hostT: RelayTransport = {
+      bufferedAmount: 0,
+      send: (d) => {
+        hostEmitted.push(d)
+        clientOnMsg?.(d)
+      },
+      close: () => {},
+      onMessage: (cb) => (hostOnMsg = cb),
+      onClose: () => {}
+    }
+    const clientT: RelayTransport = {
+      bufferedAmount: 0,
+      send: (d) => hostOnMsg?.(d),
+      close: () => {},
+      onMessage: (cb) => (clientOnMsg = cb),
+      onClose: () => {}
+    }
+
+    const opened: string[] = []
+    let hostGate: TrustGate | null = null
+    const hostSocket = connectRelay({
+      url: 'x',
+      token: 't',
+      role: 'host',
+      ourKeys: hostKeys,
+      transport: hostT,
+      onReady: () => {},
+      onRpc: () => {},
+      onFrame: () => {},
+      onClose: () => {},
+      onTunnel: (kind, payload) => {
+        if (kind === 'text') hostGate?.onTunnelText(textDecoder.decode(payload))
+      }
+    })
+    connectRelay({
+      url: 'x',
+      token: 't',
+      role: 'client',
+      ourKeys: clientKeys,
+      theirPubB64: publicKeyToB64(hostKeys.publicKey),
+      transport: clientT,
+      onReady: () => {},
+      onRpc: () => {},
+      onFrame: () => {},
+      onClose: () => {},
+      onTunnel: () => {}
+    })
+
+    hostGate = createTrustGate({
+      peerKeyB64: hostSocket.peerPublicKeyB64()!,
+      sessionId: 'session-host',
+      sas: () => hostSocket.sas(),
+      sendConfirm: (json) => hostSocket.sendTunnelText(json),
+      onOpen: () => opened.push('host')
+    })
+
+    hostGate.confirmHere() // the HOST human confirmed — only the second human's consent is missing
+
+    // The MITM reads the host's own session nonce off the wire (from e2ee_ready).
+    const readyFrame = hostEmitted
+      .filter((f): f is string => typeof f === 'string')
+      .map((s) => JSON.parse(s) as { type?: string; nonceB64?: string })
+      .find((m) => m.type === 'e2ee_ready')
+    expect(readyFrame?.nonceB64).toBeTruthy()
+    const hostNonce = Uint8Array.from(Buffer.from(readyFrame!.nonceB64!, 'base64'))
+
+    // 1. Re-key attempt: a plaintext e2ee_hello with the attacker's keypair.
+    const attackerNonce = randomSessionNonce()
+    hostOnMsg!(
+      JSON.stringify({
+        type: 'e2ee_hello',
+        publicKeyB64: publicKeyToB64(attackerKeys.publicKey),
+        nonceB64: Buffer.from(attackerNonce).toString('base64')
+      })
+    )
+
+    // 2. Seal trust:confirm under the key the host WOULD derive from the attacker's hello. Plaintext
+    //    layout mirrors relay-socket withHeader+tagged: [role=2 (client)][seq:8 LE][TAG_TUNNEL_TEXT=3][json].
+    const attackerBase = deriveSharedKey(publicKeyToB64(hostKeys.publicKey), attackerKeys.secretKey)
+    const attackerSession = deriveSessionKey(attackerBase, hostNonce, attackerNonce)
+    const jsonBytes = new TextEncoder().encode(confirmJson)
+    const plain = new Uint8Array(1 + 8 + 1 + jsonBytes.length)
+    plain[0] = 2 // PEER_ROLE from the host's perspective (client)
+    const seq = 1000 // any value beyond the host's small handshake recvSeq
+    const view = new DataView(plain.buffer)
+    view.setUint32(1, Math.floor(seq / 0x100000000), true)
+    view.setUint32(5, seq >>> 0, true)
+    plain[9] = 0x03 // TAG_TUNNEL_TEXT
+    plain.set(jsonBytes, 10)
+    hostOnMsg!(encrypt(plain, attackerSession))
+
+    await new Promise((r) => setTimeout(r, 20))
+
+    // The forged confirm never landed: no mutual approval, no pin, and the session identity the two
+    // humans compared is unchanged (still the real peer, never the attacker).
+    expect(hostGate.isOpen()).toBe(false)
+    expect(opened).toEqual([])
+    expect((await loadApprovedDevices()).pubkeys).toEqual([])
+    expect(hostSocket.peerPublicKeyB64()).toBe(publicKeyToB64(clientKeys.publicKey))
+    expect(hostSocket.peerPublicKeyB64()).not.toBe(publicKeyToB64(attackerKeys.publicKey))
   })
 })
 
