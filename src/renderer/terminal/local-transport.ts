@@ -1,15 +1,25 @@
-import type { PtyCreateOptions, PtyCreateResult, RecycledInfo } from '@shared/types'
+import type { NodeTerminalApi, PtyCreateOptions, PtyCreateResult, RecycledInfo } from '@shared/types'
 import type { ClientId } from '@shared/presence'
 import type { TerminalTransport } from './transport'
 
 /**
- * Local transport: binds the IPC API exposed via preload (window.nodeTerminal.pty)
- * to the TerminalTransport interface. All real work happens in node-pty in the main
- * process.
+ * Local transport: binds a core's api (`api.pty`) to the TerminalTransport interface.
+ * The api is injected — for the local session it IS `window.nodeTerminal` (the preload
+ * IPC surface; all real work happens in node-pty in the main process), so behavior is
+ * identical to the pre-injection global reads.
  */
 export class LocalTransport implements TerminalTransport {
+  /** Lazy `window.nodeTerminal` fallback (not an eager default parameter): the module-scope
+   *  `transport` singleton below is constructed at import time, and under node (vitest, no
+   *  jsdom) `window` doesn't exist yet — it must only be touched on first use. */
+  constructor(private readonly injectedApi?: NodeTerminalApi) {}
+
+  private get api(): NodeTerminalApi {
+    return this.injectedApi ?? window.nodeTerminal
+  }
+
   private get pty() {
-    return window.nodeTerminal.pty
+    return this.api.pty
   }
 
   create(options: PtyCreateOptions): Promise<PtyCreateResult> {
