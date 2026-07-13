@@ -40,7 +40,9 @@ import {
   takeRecycled,
   terminalKeyAction,
   toXtermText,
+  webglVisibilityAction,
   SHIFT_ENTER_SEQ,
+  WEBGL_RELEASE_DELAY_MS,
   xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
@@ -540,20 +542,44 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     searchAddonRef.current = searchAddon
 
     // GPU renderer: xterm's default DOM renderer doesn't scale to many terminals streaming
-    // at once. Must load after open(). Browsers cap live WebGL contexts (~16), so with many
-    // mounted terminals the oldest context gets evicted — onContextLoss disposes the addon
-    // and that terminal falls back to the DOM renderer instead of going blank. A parked
-    // terminal gave its context up on park, so both paths (re)acquire one here.
+    // at once. Must load after open(). Browsers cap live WebGL contexts (~16), and a busy canvas
+    // holds far more terminals than that, so a context is NOT acquired per mounted node — it is
+    // scoped to VISIBILITY: an IntersectionObserver (below) acquires the addon when the node enters
+    // the viewport and releases it when the node leaves (after a short delay). The user rarely SEES
+    // more than ~16 terminals at once, so the cap stops being hit and the terminals actually being
+    // watched always get the GPU renderer; the rest fall back to the DOM renderer.
     let webgl: WebglAddon | null = null
-    const loadWebgl = () => {
+    const acquireWebgl = () => {
+      if (webgl) return
       try {
         const addon = new WebglAddon()
-        addon.onContextLoss(() => addon.dispose())
+        // Browser evicted us anyway (two > 16-visible terminals can still race the cap): dispose and
+        // null the reference so the DOM renderer takes over. Do NOT re-acquire from here — two
+        // terminals fighting over the cap would evict each other in an infinite loop (exactly the
+        // "Too many active WebGL contexts" storm this feature exists to stop). Re-acquisition is left
+        // to the next visibility transition, which is naturally rate-limited by the user's panning.
+        addon.onContextLoss(() => {
+          try {
+            addon.dispose()
+          } catch {
+            // already disposed
+          }
+          if (webgl === addon) webgl = null
+        })
         term.loadAddon(addon)
         webgl = addon
       } catch {
         // WebGL2 unavailable — DOM renderer remains active.
       }
+    }
+    const releaseWebgl = () => {
+      if (!webgl) return
+      try {
+        webgl.dispose()
+      } catch {
+        // already disposed via context loss
+      }
+      webgl = null
     }
 
     let sessionId: string | null = parked ? parked.sessionId : null
@@ -607,20 +633,19 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // Reattach the parked xterm's DOM element: the PTY never detached, so the screen is
       // already current — no spawn, no tmux redraw, no terminal-mode re-negotiation.
       if (term.element) container.appendChild(term.element)
-      loadWebgl()
       applyFit()
     } else {
       term.loadAddon(fit)
       term.loadAddon(searchAddon)
       term.open(container)
-      loadWebgl()
       applyFit()
       patchTerminalScale(term, getZoom)
-      // OSC 52 clipboard write: route the decoded text to the local clipboard. tmux's mouse is off,
-      // so tmux copy-mode no longer emits OSC 52 on our behalf — this handler is now the ONLY
-      // clipboard path for programs that emit OSC 52 themselves (vim "+y, gh, yazi), local and
-      // remote alike (both tmux confs keep `set-clipboard on` so those sequences pass through).
-      // Selection copy is xterm's own (see the Cmd+C / Ctrl+Shift+C handler below), not this.
+      // OSC 52 clipboard write: route the decoded text to the local clipboard. This is the PRIMARY
+      // copy path: tmux's mouse is ON, so a drag-select in copy-mode emits OSC 52 to us on the
+      // user's behalf (`set-clipboard on` + `terminal-features ",*:clipboard"`), and this handler is
+      // what receives it and writes the system clipboard — local and remote alike. Programs that
+      // emit OSC 52 themselves (vim "+y, gh, yazi) reach the clipboard through this same handler.
+      // The emulator's own Cmd+C / Ctrl+Shift+C chords (below) stay for a selection xterm owns.
       // WRITE-ONLY — `parseOsc52` returns null for a `?` read query so a remote program can never
       // read the local clipboard. Returning true swallows the sequence (also the read query).
       term.parser.registerOscHandler(52, (data) => {
@@ -1046,9 +1071,56 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     })
     observer.observe(container)
 
+    // Viewport-scoped WebGL: acquire the GPU context when this node is visible, release it after a
+    // delay when it leaves. IntersectionObserver measures against the rendered box, so React Flow's
+    // pan/zoom CSS transform is accounted for natively — no coupling to the React Flow store, and it
+    // works identically in the browser Server Edition. `rootMargin` acquires slightly before a
+    // node panning into view fully enters. The observer's initial callback (queued shortly after
+    // `observe()`) is what (re)acquires the context on mount/adopt — this replaces the old
+    // unconditional `loadWebgl()` calls in both the parked and fresh paths above; the DOM renderer
+    // covers the brief gap until it fires.
+    let webglReleaseTimer: ReturnType<typeof setTimeout> | null = null
+    const cancelWebglRelease = () => {
+      if (webglReleaseTimer) {
+        clearTimeout(webglReleaseTimer)
+        webglReleaseTimer = null
+      }
+    }
+    const visibilityObserver = new IntersectionObserver(
+      (entries) => {
+        // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),
+        // so a mount that unmounts within the initial-delivery window could otherwise acquire a
+        // context onto a parked/disposed terminal — the very leak this feature exists to prevent.
+        if (disposed) return
+        const visible = entries[entries.length - 1]?.isIntersecting ?? false
+        switch (webglVisibilityAction(visible, webgl !== null)) {
+          case 'acquire':
+            cancelWebglRelease()
+            acquireWebgl()
+            break
+          case 'cancel-release':
+            cancelWebglRelease()
+            break
+          case 'schedule-release':
+            if (!webglReleaseTimer)
+              webglReleaseTimer = setTimeout(() => {
+                webglReleaseTimer = null
+                releaseWebgl()
+              }, WEBGL_RELEASE_DELAY_MS)
+            break
+          case 'none':
+            break
+        }
+      },
+      { rootMargin: '256px' }
+    )
+    visibilityObserver.observe(container)
+
     return () => {
       disposed = true
       observer.disconnect()
+      visibilityObserver.disconnect()
+      cancelWebglRelease()
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       useAgentStatus.getState().setActive(id, false)
@@ -1067,12 +1139,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       fitRef.current = null
       searchAddonRef.current = null
       if (applyFitRef.current === applyFit) applyFitRef.current = null
-      // Free the GPU context while hidden either way (live WebGL contexts are capped ~16).
-      try {
-        webgl?.dispose()
-      } catch {
-        // already disposed via context loss
-      }
+      // Free the GPU context on unmount (park or teardown) either way — the park path must keep
+      // releasing it as it always has (live WebGL contexts are capped ~16, and a parked terminal is
+      // by definition off-screen).
+      releaseWebgl()
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
       // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session

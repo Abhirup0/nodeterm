@@ -20,6 +20,7 @@ import {
   takeRecycled,
   terminalKeyAction,
   toXtermText,
+  webglVisibilityAction,
   xtermScrollback,
   RESYNC_NOTICE,
   SHIFT_ENTER_SEQ,
@@ -616,5 +617,23 @@ describe('repaintResync', () => {
     expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
     expect(term.ops).toContain('write:ONE')
     expect(term.ops).toContain('write:TWO')
+  })
+})
+
+describe('webglVisibilityAction', () => {
+  it('visible + not held → acquire', () => {
+    expect(webglVisibilityAction(true, false)).toBe('acquire')
+  })
+
+  it('visible + held → cancel-release (a pan swept back before the release timer fired)', () => {
+    expect(webglVisibilityAction(true, true)).toBe('cancel-release')
+  })
+
+  it('hidden + held → schedule-release', () => {
+    expect(webglVisibilityAction(false, true)).toBe('schedule-release')
+  })
+
+  it('hidden + not held → none', () => {
+    expect(webglVisibilityAction(false, false)).toBe('none')
   })
 })
