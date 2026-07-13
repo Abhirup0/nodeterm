@@ -1903,18 +1903,29 @@ export function Canvas() {
     [mountRemoteMirror]
   )
 
+  // Connect to a host from an already-collected pairing offer: open the relay socket, then run the
+  // shared SAS-compare + mount flow. The SINGLE place `relayClient.connect` + `confirmAndMount` live,
+  // so every entry (dock/palette prompt below, and the Settings/tab-menu dialogs via the
+  // `nodeterm:open-remote-terminal` event) reuses it instead of re-implementing the SAS handshake.
+  const connectOffer = useCallback(
+    async (offer: string) => {
+      try {
+        const connectionId = await window.nodeTerminal.relayClient.connect(offer)
+        confirmAndMount(connectionId, 'Remote host')
+      } catch (err) {
+        window.alert(`Could not connect: ${(err as Error).message}`)
+      }
+    },
+    [confirmAndMount]
+  )
+
   // "New Remote Connection" entry point (dock / palette): paste a host's pairing offer, connect,
   // compare the SAS, confirm, and open the host as a project tab. This is the primary remote entry.
   const connectRemote = useCallback(async () => {
     const offer = (await promptDialog({ message: "Paste the host's pairing code:" }))?.trim()
     if (!offer) return
-    try {
-      const connectionId = await window.nodeTerminal.relayClient.connect(offer)
-      confirmAndMount(connectionId, 'Remote host')
-    } catch (err) {
-      window.alert(`Could not connect: ${(err as Error).message}`)
-    }
-  }, [confirmAndMount])
+    void connectOffer(offer)
+  }, [connectOffer])
 
   // Reconnect an offline (dropped) relay tab IN PLACE (Stage 4 Task 7). The relay offer is
   // single-use (main/remote/pairing.ts), so v1 has no silent/pinned reconnect — prompt for a FRESH
@@ -2314,17 +2325,17 @@ export function Canvas() {
     return () => window.removeEventListener('keydown', onKey)
   }, [addTerminal, addAgentNode])
 
-  // When a remote connection is established (from Settings' "Connect to a host"), open the live
-  // mirror of the host's canvas. Dispatched as a window event so Settings doesn't need a Canvas
-  // reference. This replaces B4's lone-remote-terminal behavior as the primary remote entry.
+  // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
+  // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME
+  // relay connect → SAS compare → mount-as-tab flow the dock/palette entry uses (`connectOffer`).
   useEffect(() => {
     const onOpenRemote = (e: Event) => {
-      const connectionId = (e as CustomEvent<{ connectionId: string }>).detail?.connectionId
-      if (connectionId) mountRemoteMirror(connectionId)
+      const offer = (e as CustomEvent<{ offer: string }>).detail?.offer?.trim()
+      if (offer) void connectOffer(offer)
     }
     window.addEventListener('nodeterm:open-remote-terminal', onOpenRemote)
     return () => window.removeEventListener('nodeterm:open-remote-terminal', onOpenRemote)
-  }, [mountRemoteMirror])
+  }, [connectOffer])
 
   /**
    * Move every node that was living in a worktree directory OFF that (now dead) path — back to the

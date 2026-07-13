@@ -213,36 +213,10 @@ export const IPC = {
   // handshake — the open relay socket keeps full shell access — so this ALSO cuts the live session
   // (revocation.ts's whole point; see relay-host.ts's killRelayHostsByPeerKey).
   remoteRevokePeer: 'remote:revoke-peer',
-  // Remote-access CLIENT (drives a host's PTYs over the relay).
-  remoteClientConnect: 'remote:client:connect',
-  remoteClientDisconnect: 'remote:client:disconnect',
-  remoteClientCreate: 'remote:client:create',
-  remoteClientWrite: 'remote:client:write',
-  remoteClientResize: 'remote:client:resize',
-  remoteClientKill: 'remote:client:kill',
-  // Client canvas mirror: main pushes the host's full canvas snapshot to the client renderer;
-  // the client renderer sends its local mutations back for main to RPC to the host.
-  remoteClientMutate: 'remote:client:mutate',
-  // Remote filesystem: the client proxies the local `fs:*` shape onto the host over the relay.
-  remoteClientFsList: 'remote:client:fs-list',
-  remoteClientFsRead: 'remote:client:fs-read',
-  remoteClientFsReadBinary: 'remote:client:fs-read-binary',
-  remoteClientFsWrite: 'remote:client:fs-write',
-  // The channel SAS pushed main->renderer once the client handshake completes, so the client
-  // human can compare it with the code shown on the host before the host approves.
-  remoteClientSas: (connectionId: string) => `remote:client:sas:${connectionId}`,
-  // Host canvas snapshot pushed main->renderer for a connection (connectionId appended).
-  remoteClientCanvasState: (connectionId: string) => `remote:client:canvas-state:${connectionId}`,
-  // Per-session events broadcast main->renderer (connectionId + streamId appended).
-  remoteClientData: (connectionId: string, streamId: number) =>
-    `remote:client:data:${connectionId}:${streamId}`,
-  remoteClientExit: (connectionId: string, streamId: number) =>
-    `remote:client:exit:${connectionId}:${streamId}`,
-  // Fired when a connection's relay socket drops (host/relay gone).
-  remoteClientClosed: (connectionId: string) => `remote:client:closed:${connectionId}`,
   // ── New E2EE relay tunnel (Stage 4) ─────────────────────────────────────────────────────────
-  // The successor to the legacy `remote:host:*` / `remote:client:*` dialect above. Both coexist
-  // during the migration (the phone still speaks the old channels until Task 10 deletes them), so
+  // The successor to the legacy `remote:host:*` dialect above (the `remote:client:*` desktop-client
+  // channels were deleted in Task 10; the desktop client is now the `relay:*` tunnel). The phone
+  // still speaks `remote:host:*` until the iOS repo migrates (docs/ios-protocol-migration.md), so
   // these deliberately use a distinct `relay:*` namespace. A connected peer is a first-class
   // CorePlatform client: the client casts raw rpc.ts frames (JSON strings) at the host and receives
   // frames back, rather than a bespoke per-verb channel set.

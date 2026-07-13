@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useEntitlement } from '../../../state/entitlement'
-import { useRemoteHosting } from '../../../state/remoteHosting'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -30,41 +29,39 @@ export function RemoteSection({
   const [remoteError, setRemoteError] = useState('')
   const [clientCode, setClientCode] = useState('')
   const [connecting, setConnecting] = useState(false)
+  // HOST side — the NEW relay tunnel (`relayHost`). `start()` returns the single-use pairing offer;
+  // a connecting peer's approval + canvas sync are handled globally by Canvas (`relayHost.onPeerPending`
+  // / `relayHost.confirm`, and the CorePlatform seq-stamped reflector — no old canvas-mirror flag).
   const startHosting = async () => {
     setRemoteError('')
     setHostBusy(true)
     try {
-      const { offer } = await window.nodeTerminal.remoteHost.start()
+      const { offer } = await window.nodeTerminal.relayHost.start()
       setHostOffer(offer)
-      useRemoteHosting.getState().setHosting(true) // Canvas starts mirroring the canvas to main
     } catch (err) {
       setRemoteError((err as Error).message)
       setHostBusy(false)
     }
   }
   const stopHosting = async () => {
-    await window.nodeTerminal.remoteHost.stop()
-    useRemoteHosting.getState().setHosting(false)
+    await window.nodeTerminal.relayHost.stop()
     setHostOffer('')
     setHostBusy(false)
   }
-  const connectToHost = async () => {
+  // CLIENT side — hand the offer to Canvas, which runs the relay connect → SAS compare → open-tab
+  // flow (the same `connectOffer` the dock/palette "New Remote Connection" uses). We deliberately do
+  // NOT call `relayClient.connect` here, so the SAS handshake lives in exactly one place.
+  const connectToHost = () => {
     const code = clientCode.trim()
     if (!code) return
     setRemoteError('')
     setConnecting(true)
-    try {
-      const connectionId = await window.nodeTerminal.remoteClient.connect(code)
-      setClientCode('')
-      window.dispatchEvent(
-        new CustomEvent('nodeterm:open-remote-terminal', { detail: { connectionId } })
-      )
-      onClose()
-    } catch (err) {
-      setRemoteError((err as Error).message)
-    } finally {
-      setConnecting(false)
-    }
+    setClientCode('')
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:open-remote-terminal', { detail: { offer: code } })
+    )
+    setConnecting(false)
+    onClose()
   }
   return (
     <SettingsSection

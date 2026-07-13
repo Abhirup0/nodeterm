@@ -67,7 +67,6 @@ import { killRelayHostsByPeerKey } from './remote/relay-host'
 import { initRelayHost } from './remote/relay-host-service'
 import { createRevoker } from './remote/revocation'
 import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
-import { initRemoteClient } from './remote/client-service'
 import { connectRelayClient, type RelayClientSession } from './remote/relay-client'
 import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
@@ -1030,11 +1029,11 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost?.setEnabled(!!enabled))
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()
-  initRemoteClient(win, { isPackaged: app.isPackaged })
-  // NEW interactive relay CLIENT (Stage 4): connect OUT to another desktop's host. `connectRelayClient`
+  // Interactive relay CLIENT (Stage 4): connect OUT to another desktop's host. `connectRelayClient`
   // runs the client half of mutual SAS approval and, once BOTH humans confirm, exposes the raw rpc.ts
-  // frame pipe (`relay:client:send`/`relay:client:frame`) that Task 4's RpcClient drives. Runs BESIDE
-  // the legacy client (initRemoteClient). Inert until `relay:client:connect` — a solo user pays nothing.
+  // frame pipe (`relay:client:send`/`relay:client:frame`) that Task 4's RpcClient drives. This is the
+  // ONLY desktop client path now — the legacy `initRemoteClient` dialect was deleted in Task 10.
+  // Inert until `relay:client:connect` — a solo user pays nothing.
   {
     const relayClients = new Map<string, RelayClientSession>()
     const sendTo = (channel: string, ...args: unknown[]): void => {
@@ -1042,7 +1041,7 @@ app.whenReady().then(async () => {
     }
     ipcMain.handle(IPC.relayClientConnect, async (_e, offerCode: string): Promise<string> => {
       // No Pro gate on the client: the paywall is the HOST minting the pairing token, so a valid offer
-      // is the credential (mirrors initRemoteClient). The dev/relay gate still applies.
+      // is the credential (the paywall is host-side). The dev/relay gate still applies.
       if (!relayAllowed()) {
         throw new Error('Remote access is unavailable in development builds (set NODETERM_RELAY_URL).')
       }
