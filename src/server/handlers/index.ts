@@ -2,7 +2,7 @@ import type { Settings } from '../../shared/types'
 import type { ServerPlatform } from '../platform-server'
 import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
-import { registerFsHandlers } from './fs'
+import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { IPC } from '../../shared/ipc'
 
