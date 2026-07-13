@@ -47,6 +47,23 @@ const RESYNC_SWEEP_MS = 250
 /** A capture that comes back empty is retried on this schedule (250 ms, 500, 1 s … capped), so a
  *  session that can never be captured cannot turn the sweep into a subprocess treadmill. */
 const RESYNC_BACKOFF_MAX_MS = 10_000
+/**
+ * How many CONSECUTIVE throwing sends make a sink DEAD (any successful send resets the count).
+ *
+ * A sink is a socket write. `ws.send` does not throw synchronously on a dead socket — which is why
+ * an unisolated send was survivable in the Server Edition — but a relay connection's sink CAN
+ * (writing to a half-closed stream throws ERR_STREAM_WRITE_AFTER_END / EPIPE), and that is a strong
+ * signal the connection is gone. Gone is exactly what the shell's teardown (presence leave,
+ * PtyManager.dropClient, unregister) is for, so we run it rather than shouting into a dead socket
+ * forever.
+ *
+ * Why not on the FIRST throw: a transient failure from a sink that is otherwise healthy would then
+ * kick a live teammate out of the session (dropping their pty subscriptions and their facepile
+ * entry). Two consecutive throws, across two separate sends, cannot be a blip. The real close hook
+ * (`unregisterPeerSink` / ws 'close') still evicts a dead peer on its own; this is the safety net
+ * for the case where it never fires.
+ */
+const SINK_FAILURE_LIMIT = 2
 
 /** One (client, session) whose backlog we discarded, and when its redraw may next be attempted. */
 type Desync = { attempts: number; nextAttemptAt: number }
@@ -108,6 +125,10 @@ export class UiSinkRegistry {
   /** Armed only while `desynced` is non-empty (see RESYNC_SWEEP_MS). */
   private sweepTimer?: ReturnType<typeof setInterval>
   private resyncProvider?: (sessionId: string) => Promise<string>
+  /** Consecutive throwing sends per sink (see SINK_FAILURE_LIMIT). Only ever touched on the failure
+   *  path — a healthy fan-out reads `size` and nothing else. */
+  private failures = new Map<number, number>()
+  private onSinkGone?: (id: number) => void
 
   register(id: number, sink: UiSink): void {
     this.sinks.set(id, sink)
@@ -117,9 +138,22 @@ export class UiSinkRegistry {
     return this.sinks.has(id)
   }
 
+  /** How many sinks are registered. The zero-peer fast path a shell's `broadcast` checks BEFORE
+   *  calling `ids()`, so a solo desktop user allocates no array per broadcast. */
+  get size(): number {
+    return this.sinks.size
+  }
+
   /** Every registered sink, in registration order (Map preserves insertion order). */
   ids(): number[] {
     return [...this.sinks.keys()]
+  }
+
+  /** The shell's full teardown for a sink that has proven dead (== what its socket-close handler
+   *  runs: presence leave + PtyManager.dropClient + unregister). Unset means the registry only
+   *  evicts its own state — see `noteSinkFailure`. */
+  setSinkGoneHandler(fn: (id: number) => void): void {
+    this.onSinkGone = fn
   }
 
   setFlowController(
@@ -146,6 +180,7 @@ export class UiSinkRegistry {
    *  connection owed is returned by PtyManager.dropClient (wired to the same close hook). */
   unregister(id: number): void {
     this.sinks.delete(id)
+    this.failures.delete(id)
     const prefix = `${id} `
     for (const key of this.paused) if (key.startsWith(prefix)) this.paused.delete(key)
     // Same for the drop-and-redraw state: a departing client leaves none behind (and an in-flight
@@ -161,7 +196,10 @@ export class UiSinkRegistry {
       const sessionId = channel.slice(PTY_DATA_PREFIX.length)
       // Bounded memory: read the socket backlog BEFORE queueing more, so the ceiling can refuse.
       if (this.dropOrDesync(uiId, sessionId, sink.bufferedAmount?.() ?? 0)) return
-      sink.sendBinary(encodePtyData(sessionId, String(args[0] ?? '')))
+      // A throwing sink must not unwind into the pty read loop, and a sink we could not write to
+      // tells us nothing about its socket backlog — so the flow-control block below is skipped.
+      if (!this.deliver(uiId, () => sink.sendBinary(encodePtyData(sessionId, String(args[0] ?? '')))))
+        return
       if (this.flowController) {
         const buffered = sink.bufferedAmount?.() ?? 0
         const key = UiSinkRegistry.flowKey(uiId, sessionId)
@@ -198,8 +236,48 @@ export class UiSinkRegistry {
       )
       if (deadPrefix)
         this.forgetFlowState(UiSinkRegistry.flowKey(uiId, channel.slice(deadPrefix.length)))
-      sink.sendText(JSON.stringify({ t: 'ev', channel, args }))
+      this.deliver(uiId, () => sink.sendText(JSON.stringify({ t: 'ev', channel, args })))
     }
+  }
+
+  /**
+   * The ONLY place a sink is written to. One bad sink must affect nothing but itself: a throw here
+   * would otherwise unwind out of the caller's fan-out loop (`broadcast`) — so the peers AFTER it
+   * never get the message — and on out of the EMITTER behind it (presenceHub.emit, the canvas-sync
+   * reflector), i.e. one peer's dead socket would freeze the HOST's own facepile and stop its canvas
+   * reflecting. Returns whether the write landed.
+   */
+  private deliver(uiId: number, write: () => void): boolean {
+    try {
+      write()
+    } catch (err) {
+      this.noteSinkFailure(uiId, err)
+      return false
+    }
+    // Healthy path: one Map.size read (the map is empty unless something has actually thrown).
+    if (this.failures.size) this.failures.delete(uiId)
+    return true
+  }
+
+  /** Book a strike against a sink that threw; past SINK_FAILURE_LIMIT consecutive ones it is dead. */
+  private noteSinkFailure(uiId: number, err: unknown): void {
+    const strikes = (this.failures.get(uiId) ?? 0) + 1
+    this.failures.set(uiId, strikes)
+    // Shell-neutral prefix: this runs in the Server Edition AND in the desktop shell (relay peers).
+    console.warn(
+      `[ui-sink] send to client ${uiId} threw (${strikes}/${SINK_FAILURE_LIMIT})`,
+      err instanceof Error ? err.message : String(err)
+    )
+    if (strikes < SINK_FAILURE_LIMIT) return
+    // Dead. Drop the sink FIRST, for two reasons:
+    //  - re-entrancy: the teardown below broadcasts (a presence `leave` diff fans out to every
+    //    client), which would come straight back through sendTo into this same dying sink;
+    //  - iteration safety: callers fan out over the `ids()` SNAPSHOT (an array), so removing this
+    //    entry cannot disturb their loop — a later `sendTo` for an evicted id is simply a miss.
+    this.sinks.delete(uiId)
+    this.failures.delete(uiId)
+    if (this.onSinkGone) this.onSinkGone(uiId) // full teardown (leave + dropClient + unregister)
+    else this.unregister(uiId) // nothing wired: at least leave none of OUR state behind
   }
 
   /** Drop every trace of one (client, session) from the backpressure bookkeeping. The pty-side

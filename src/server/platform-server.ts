@@ -71,11 +71,19 @@ export class ServerPlatform implements CorePlatform {
     this.registry.setResyncProvider(fn)
   }
 
+  /** What to run for a connection whose sink has proven DEAD (it threw on consecutive sends): the
+   *  same teardown its 'close' runs — presence leave + PtyManager.dropClient + detach. Wired in
+   *  ws.ts, which owns that teardown. */
+  setSinkGoneHandler(fn: (uiId: number) => void): void {
+    this.registry.setSinkGoneHandler(fn)
+  }
+
   sendTo(uiId: number, channel: string, ...args: any[]): void {
     this.registry.sendTo(uiId, channel, ...args)
   }
 
   broadcast(channel: string, ...args: any[]): void {
+    if (this.registry.size === 0) return // no connection: no ids() array, no loop
     for (const uiId of this.registry.ids()) this.registry.sendTo(uiId, channel, ...args)
   }
 

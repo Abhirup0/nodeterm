@@ -26,6 +26,13 @@ export type { UiSink }
 const registry = new UiSinkRegistry()
 let onPeerGone: ((id: number) => void) | null = null
 
+/** A peer sink that keeps THROWING is a dead connection (a half-closed relay socket), and the
+ *  registry hands it back here rather than shouting into it forever: a dead peer needs precisely
+ *  the teardown a closed socket gets. Registered at module scope so it holds even if `wirePeerRegistry`
+ *  never ran — the teardown then still leaves the hub and the sink set clean (only `onPeerGone`
+ *  warns). */
+registry.setSinkGoneHandler((id) => unregisterPeerSink(id))
+
 export function peerRegistry(): UiSinkRegistry {
   return registry
 }
@@ -51,7 +58,16 @@ export function registerPeerSink(id: number, sink: UiSink): void {
  */
 export function unregisterPeerSink(id: number): void {
   presenceHub.leave(id)
-  onPeerGone?.(id)
+  if (onPeerGone) onPeerGone(id)
+  // Never silent: an optional call would turn "the boot wiring regressed" into a no-op, and the
+  // damage (step 2 above: the pty layer never hears this subscriber left) is invisible until a
+  // shared terminal is frozen for every other viewer, with nothing pointing back at the cause.
+  else
+    console.warn(
+      `[peer-registry] peer ${id} left, but wirePeerRegistry() was never called: PtyManager.dropClient` +
+        ' did NOT run, so its pty subscriptions (and any pause it owed) leak — a shared terminal can' +
+        ' stay frozen for every other viewer. This is a boot-wiring bug in src/main/index.ts.'
+    )
   registry.unregister(id)
 }
 

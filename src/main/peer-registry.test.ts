@@ -127,6 +127,43 @@ describe('peer sink registry', () => {
     expect(peerRegistry().has(id)).toBe(false) // sink + flow/desync bookkeeping cleared
   })
 
+  it('a peer whose sink keeps throwing is torn down like a closed socket, and only IT is', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers()
+    const platform = fakePlatformWithPeers({ sent: [] })
+    const deadId = allocateRelayClientId()
+    const liveId = allocateRelayClientId()
+    const live = fakeSink()
+    registerPeerSink(deadId, {
+      sendText: () => {
+        throw new Error('EPIPE: relay socket half-closed')
+      },
+      sendBinary: () => {},
+      bufferedAmount: () => 0
+    })
+    registerPeerSink(liveId, live.sink)
+
+    // The hub's own emit fans out to every client: the dead sink throws on each of them, and must
+    // never unwind into presenceHub (that is the HOST's facepile freezing over a third peer's dead
+    // socket). Its strikes run out here and it is evicted mid-fan-out; the live peer keeps working.
+    expect(() => {
+      presenceHub.join(deadId, 'phone')
+      presenceHub.join(liveId, 'phone')
+      platform.broadcast(IPC.canvasMut, { seq: 1 })
+      platform.broadcast(IPC.canvasMut, { seq: 2 })
+    }).not.toThrow()
+
+    // The full unregisterPeerSink teardown ran for the dead peer, and only for it:
+    expect(presenceHub.peers().some((p) => p.clientId === deadId)).toBe(false) // no ghost peer
+    expect(gone).toEqual([deadId]) // PtyManager.dropClient — no leaked pty subscription
+    expect(peerRegistry().has(deadId)).toBe(false)
+    expect(vi.getTimerCount()).toBe(0) // no leaked sweep timer
+    expect(peerRegistry().has(liveId)).toBe(true)
+    expect(live.text.filter((m) => m.channel === IPC.canvasMut)).toHaveLength(2)
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it('teardown leaves no pause owed and no live sweep timer behind', () => {
     vi.useFakeTimers()
     const platform = fakePlatformWithPeers({ sent: [] })

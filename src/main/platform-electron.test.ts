@@ -161,6 +161,35 @@ describe('electronPlatform + relay peers', () => {
     })
   })
 
+  it('one peer whose sink throws does not starve the other peers, the window, or the emitter', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const p = electronPlatform()
+    h.clientIds = [1]
+    const dead: UiSink = {
+      sendText: () => {
+        throw new Error('EPIPE: relay socket half-closed')
+      },
+      sendBinary: () => {},
+      bufferedAmount: () => 0
+    }
+    const alive = peerSink()
+    registerPeerSink(PEER, dead)
+    registerPeerSink(PEER + 1, alive.sink)
+
+    // The exact 4c failure: a presence diff / canvas mutation fans out while peer B's socket is
+    // dead. It must not unwind out of broadcast (that would blow up presenceHub.emit / the canvas
+    // reflector on the HOST) and peer C must still be served.
+    expect(() => p.broadcast('presence:peer', { op: 'join' })).not.toThrow()
+    expect(h.sent).toContainEqual({ channel: 'presence:peer', args: [{ op: 'join' }] })
+    expect(JSON.parse(alive.text[0]!)).toEqual({
+      t: 'ev',
+      channel: 'presence:peer',
+      args: [{ op: 'join' }]
+    })
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it('is BIT-IDENTICAL to the webContents-only path with no peer registered (merge gate)', () => {
     const p = electronPlatform()
     h.clientIds = [5]

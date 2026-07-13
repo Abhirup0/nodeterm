@@ -47,7 +47,22 @@ export function electronPlatform(): CorePlatform {
       // …plus every relay peer. Not optional: presence diffs (presence:peer) and canvas mutations
       // fan out via broadcast, so a peer that only received sendTo would still see nothing.
       const peers = peerRegistry()
-      for (const id of peers.ids()) peers.sendTo(id, ch, ...args)
+      if (peers.size === 0) return // solo desktop: no ids() array, no loop — allocation-free
+      for (const id of peers.ids()) {
+        // One peer must never break the fan-out. UiSinkRegistry.sendTo already contains a throwing
+        // SINK (and evicts a dead one), so this only catches the rest of the path — the flow
+        // controller it may call into. Either way the invariant is the same: an exception here
+        // would skip every peer after this one AND unwind into the emitter (presenceHub.emit, the
+        // canvas reflector), freezing the HOST's own presence/canvas over someone else's socket.
+        try {
+          peers.sendTo(id, ch, ...args)
+        } catch (err) {
+          console.warn(
+            `[peer] broadcast of ${ch} to peer ${id} failed`,
+            err instanceof Error ? err.message : String(err)
+          )
+        }
+      }
     },
     clientIds: () => [...mainWindowClientIds(), ...peerRegistry().ids()],
     openExternal: (url) => shell.openExternal(url),
