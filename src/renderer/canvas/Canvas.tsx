@@ -3634,9 +3634,9 @@ export function Canvas() {
   // reply on BOTH confirm and cancel. Every path replies EXACTLY ONCE so the awaiting CLI call in
   // main never hangs to its 120s timeout.
   useEffect(() => {
-    return window.nodeTerminal.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
+    return api.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
-        window.nodeTerminal.sendAgentControlResult({ requestId, ...r })
+        api.sendAgentControlResult({ requestId, ...r })
 
       // Authorization boundary: the source must be a live, control-capable agent node.
       const src = nodesRef.current.find((n) => n.id === sourceNodeId)
@@ -4280,7 +4280,7 @@ export function Canvas() {
   // Stream live subagent transcript chunks into the agent-nodes store.
   useEffect(
     () =>
-      window.nodeTerminal.onSubagentActivity((e) =>
+      api.onSubagentActivity((e) =>
         useAgentNodes.getState().appendActivity(e.toolUseId, e.chunk)
       ),
     []
@@ -4305,7 +4305,7 @@ export function Canvas() {
       const t = (s ?? '').replace(/\s+/g, ' ').trim()
       return t.length <= max ? t : `${t.slice(0, max - 1)}…`
     }
-    return window.nodeTerminal.onAgentStatus((e: NormalizedAgentEvent) => {
+    return api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
