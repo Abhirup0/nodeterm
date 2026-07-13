@@ -2903,14 +2903,16 @@ export function Canvas() {
     attachWorktree,
     releaseWorktreeBinding,
     clearWorktreeBinding,
-    requestRemoveWorktree
+    requestRemoveWorktree,
+    cwdForNewNodeIn
   })
   useEffect(() => {
     worktreeControlRef.current = {
       attachWorktree,
       releaseWorktreeBinding,
       clearWorktreeBinding,
-      requestRemoveWorktree
+      requestRemoveWorktree,
+      cwdForNewNodeIn
     }
   })
 
@@ -3848,6 +3850,21 @@ export function Canvas() {
             // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
+            // --group parents the new node(s) into an existing group frame; a worktree-bound
+            // group also hands its worktree path down as the cwd (same inheritance as
+            // UI-created nodes — cwdForNewNodeIn is the one resolver for that).
+            let intoGroupId: string | undefined
+            if (args.group) {
+              const g = nodesRef.current.find((nd) => nd.id === args.group)
+              if (!g || g.type !== 'group') {
+                reply({ ok: false, error: `${verb}: --group must name an existing group frame` })
+                return
+              }
+              intoGroupId = g.id
+            }
+            const groupCwd = intoGroupId
+              ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
+              : undefined
             // Inherit the source node's managed account, else the project default, else system —
             // the same funnel as addAgentNode (the factory drops accounts on non-claude agents).
             const projStore = useProjects.getState()
@@ -3858,20 +3875,17 @@ export function Canvas() {
             )
             const ids: string[] = []
             for (let i = 0; i < count; i++) {
-              ids.push(
-                addAndConnect(
-                  createAgentNode(
-                    agentId,
-                    nodesRef.current.length + i,
-                    args.cwd || srcCwd,
-                    placeBelow(i),
-                    args.prompt,
-                    undefined,
-                    account,
-                    activePermissionMode()
-                  )
-                )
+              const node = createAgentNode(
+                agentId,
+                nodesRef.current.length + i,
+                args.cwd || groupCwd || srcCwd,
+                placeBelow(i),
+                args.prompt,
+                undefined,
+                account,
+                activePermissionMode()
               )
+              ids.push(addAndConnect(intoGroupId ? parentInto(node, intoGroupId) : node))
             }
             reply({
               ok: true,

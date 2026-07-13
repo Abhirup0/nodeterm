@@ -45,7 +45,7 @@ ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliScriptPath()}" "$@"
 function skillBody(): string {
   return `---
 name: manage-nodeterm-canvas
-description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, wrap nodes in labeled groups, arrange/align/rename them, show an image/video/web page, write to or close a terminal. Use whenever the user asks to create or open nodes/sessions, build something using multiple Claude (or other agent) sessions, split work across agents, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
+description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions, build something using multiple Claude (or other agent) sessions, split work across agents or worktrees, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
 ---
 
 # Manage the nodeterm canvas
@@ -62,8 +62,10 @@ sh "${shimPath()}" <verb> [args]
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
 - \`open-terminal [--cwd P] [--cmd C]\` — open a terminal node.
-- \`open-claude [--count N] [--cwd P] [--prompt T]\` — open N Claude sessions (default 1).
-- \`open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N sessions of any agent CLI.
+  \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
+  hands its worktree path down as the cwd.
 - \`show-image <path>\` — open an image file as a node.
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).
@@ -101,6 +103,22 @@ Typical requests this skill covers:
 - "Open a codex/gemini session" → \`open-agent --agent codex|gemini\`.
 - "Tidy up / group my terminals" → \`list\`, then \`group\` + \`arrange\` + \`align\`.
 - "Rename this node/group" → \`rename\`.
+
+## Nodeterm orchestration ("Build with Nodeterm orchestration")
+
+When the user says "Build with Nodeterm orchestration" (or asks you to orchestrate a build
+across Nodeterm sessions), be the orchestration chef — plan the kitchen, then run it:
+
+1. Break the task into 2–5 independent workstreams (by subsystem, not by file).
+2. Per workstream, give it its own branch + kitchen station:
+   \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then
+   \`open-agent --agent claude --group <groupId> --prompt "<concrete, self-contained task>"\`.
+   Each stream now works on its own branch in its own worktree group — no tree conflicts.
+3. \`rename\` each group by subject and \`arrange\` its members; open extra sessions into the
+   same group with \`--group\` as a stream grows.
+4. Track progress (their status badges show working/waiting) and coordinate: when a stream
+   finishes, the user merges from the group's chip (never merge for them); release a finished
+   station with \`close-worktree --group <id>\` (unbind keeps the directory).
 `
 }
 
