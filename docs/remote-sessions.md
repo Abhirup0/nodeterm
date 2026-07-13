@@ -383,6 +383,13 @@ the dialect deletion orphaned, blanking the phone; that flag is gone).
 - **The preload↔main relay IPC boundary is not covered by vitest** (it needs Electron). Two real
   send/handle + payload-shape bugs were found and fixed by inspection during 4c; the two-instance
   acceptance run is what exercises it live. A preload-shape unit guard would help.
+- **Per-peer revoke UI** — the revoke MECHANISM (`killRelayHostsByPeerKey`, `onRevoke` →
+  `createRevoker`) is built, tested, and cut-wired (`index.ts` handles `remote:revoke-peer` and
+  tears the live socket down), but there is NO preload method / renderer caller to trigger it. So
+  v1 cuts a live peer only via **host-stop** (all peers at once). A per-peer "remove this device"
+  action is a follow-up. **Not a security gap:** the desktop relay path never auto-approves from a
+  pin (`isPinned` is read only on the phone/`standing-host` path, never in `relay-host`/
+  `relay-trust`), so every desktop reconnect requires a fresh mutual SAS regardless of pin state.
 
 ## 4a → 4c interface (landed)
 
@@ -481,8 +488,10 @@ session):
   4. Sleep/wake A → the peer's terminal returns via co-attach (tmux still alive).
   5. Pull B's network → the tab **greys to "unavailable"**; restore + click → **reconnect**
      with a fresh code; disconnected edits are lost, nothing corrupts.
-  6. **Revoke** mid-session (from A) → B's peer is **cut immediately** (open socket dies, not
-     just the next handshake).
+  6. **Cut a live peer** — today via **host-stop** (New Remote Connection → stop hosting, or
+     `relay:host:stop`): B's session dies immediately (the open socket is torn down, not just the
+     next handshake). Per-peer revoke (`killRelayHostsByPeerKey`) is built + tested + cut-wired but
+     has no renderer trigger yet (see deferred follow-ups) — so v1 cuts *all* peers via host-stop.
   7. Confirm the **phone still works** on its own dialect (enable Settings → Phone on A,
      connect the iOS app) — the client-dialect deletion must not have touched it.
 
