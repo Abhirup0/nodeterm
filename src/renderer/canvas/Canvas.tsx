@@ -490,6 +490,9 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
+  // focusNodeById, for callbacks declared ABOVE its definition (openFile's dedupe focuses the
+  // already-open node). Assigned right after the definition, same render-mirror idiom as nodesRef.
+  const focusNodeRef = useRef<(nodeId: string) => void>(() => {})
   // Rolling record of popup-spawned browser nodes (url + source + timestamp) so the deps-[]
   // onBrowserNewWindow effect can dedup repeat opens and rate-cap a flood of window.open calls.
   const browserPopupSpawnsRef = useRef<{ url: string; source: string; t: number }[]>([])
@@ -1712,14 +1715,26 @@ export function Canvas() {
 
   /** Open a file as a code editor node on the canvas. `sshFs` must be passed explicitly by the
    *  caller: only genuinely-remote, Explorer-opened files in an SSH project pass `true`; native
-   *  dialog / quick-open paths are LOCAL and stay local (so their ⌘S never writes to the host). */
+   *  dialog / quick-open paths are LOCAL and stay local (so their ⌘S never writes to the host).
+   *  A file that is already open focuses its existing node instead of stacking a duplicate;
+   *  a fresh node is born `selected` so React Flow elevates it above the node stack. */
   const openFile = useCallback(
     (filePath: string, center?: { x: number; y: number }, sshFs?: boolean) => {
+      const existing = nodesRef.current.find(
+        (n) => (n.type === 'editor' || n.type === 'video') && n.data?.filePath === filePath
+      )
+      if (existing) {
+        focusNodeRef.current(existing.id)
+        return
+      }
       setNodes((ns) => [
-        ...ns,
-        isVideoFile(filePath)
-          ? createVideoNode(ns.length, filePath, center ?? viewCenter())
-          : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)
+        ...ns.map((n) => (n.selected ? { ...n, selected: false } : n)),
+        {
+          ...(isVideoFile(filePath)
+            ? createVideoNode(ns.length, filePath, center ?? viewCenter())
+            : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)),
+          selected: true
+        }
       ])
       markDirty()
     },
@@ -3525,6 +3540,7 @@ export function Canvas() {
     },
     [setNodes, goToNode, switchProject]
   )
+  focusNodeRef.current = focusNodeById
 
   const onPaletteQuery = useCallback((q: string) => {
     transcriptQueryRef.current = q
