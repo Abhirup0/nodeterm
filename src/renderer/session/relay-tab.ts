@@ -14,7 +14,7 @@
 //    forever — a dead tab that never errors. So we RACE `ready()` against the connection's real
 //    close signal (relayClient.onClosed) plus a timeout backstop, and reject on either.
 
-import type { RelayClientApi } from '@shared/types'
+import type { Project, RelayClientApi } from '@shared/types'
 import { buildRelayApi, type RelayApiHandle } from '../bridge/relay-api'
 import {
   createSession,
@@ -33,8 +33,14 @@ const APPROVAL_TIMEOUT_MS = 60_000
 export interface RelayTabDeps {
   /** The preload relay surface — only `onClosed` is needed here (to catch a pre-approval drop). */
   relayClient: Pick<RelayClientApi, 'onClosed'>
-  /** Add a project tab (`useProjects.getState().addProject`) → the new project's id. */
+  /** Add an EMPTY project tab (`useProjects.getState().addProject`) → the new project's id. The
+   *  fallback when the host shared nothing (no scoped project) and the reconnect lever (Canvas
+   *  overrides it to reuse the existing project id in place). */
   addProject: (label: string) => { id: string }
+  /** Adopt the host's shared project as a tab (`useProjects.getState().adoptProject`) → fresh
+   *  project id, node ids kept. Used on FIRST connect to populate the tab with the host's actual
+   *  nodes. Omitted on reconnect, where the existing tab (and its nodes) is reused via `addProject`. */
+  adoptProject?: (project: Project) => { id: string }
   /** Make the new tab active (`useProjects.getState().setActive`). */
   setActiveProject: (projectId: string) => void
   /** TEST SEAM: build the relay api handle. Production omits it → `buildRelayApi`. */
@@ -76,14 +82,25 @@ export async function openRelayTab(
   holdSessionTeardown(session.id, getSessionStores(session.id).presence.connect())
   holdSessionTeardown(session.id, () => handle.close())
 
-  const project = deps.addProject(label)
-  bindProjectToSession(project.id, session.id)
+  // Populate the tab from the host's workspace, which the relay boundary already SCOPED to the one
+  // shared project (Task 2). Adopt that single project — fresh project id, node ids kept — so the
+  // Canvas active-project effect loads the host's nodes and the SessionProvider routes their
+  // transport to the relay api; Stage-3 sync then keeps it live. If the host shared nothing (or the
+  // project was deleted), OR we're reconnecting (no `adoptProject` dep — the existing tab is reused),
+  // fall back to the labelled tab so it still opens rather than throwing.
+  const ws = await handle.api.workspace.load()
+  const hostProject = ws.projects[0]
+  const projectId =
+    hostProject && deps.adoptProject
+      ? deps.adoptProject({ ...hostProject, remote: true }).id
+      : deps.addProject(label).id
+  bindProjectToSession(projectId, session.id)
   setActiveSession(session.id)
-  deps.setActiveProject(project.id)
+  deps.setActiveProject(projectId)
 
   return {
     sessionId: session.id,
-    projectId: project.id,
+    projectId,
     dispose: () => disposeSession(session.id),
   }
 }

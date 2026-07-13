@@ -15,7 +15,7 @@ import {
   resetSessionsForTest,
 } from './session'
 import { LocalTransport } from '../terminal/local-transport'
-import type { NodeTerminalApi } from '@shared/types'
+import type { NodeTerminalApi, Project, Workspace } from '@shared/types'
 import type { RelayApiHandle } from '../bridge/relay-api'
 
 /** A fake relayClient.onClosed sink: keeps the callback so the test can fire a socket drop. */
@@ -35,36 +35,41 @@ function fakeRelayClient() {
 /** A bridged relay api whose `pty.create` is a spy — this is what `LocalTransport(api)` must hit.
  *  `presenceUnsub` is what the session's held presence teardown calls (onSync's unsubscribe), so a
  *  drop that "runs the presence teardown" is observable in node env. */
-function fakeBridgedApi() {
+function fakeBridgedApi(ws: Workspace = { version: 2, activeProjectId: '', projects: [] }) {
   const ptyCreate = vi.fn().mockResolvedValue({ sessionId: 's1', fresh: false })
   const presenceUnsub = vi.fn()
+  const workspaceLoad = vi.fn().mockResolvedValue(ws)
   const api = {
     marker: 'relay-bridged',
     pty: { create: ptyCreate },
+    workspace: { load: workspaceLoad },
     presence: {
       hello: vi.fn().mockResolvedValue({ clientId: 'x', peers: [] }),
       onSync: vi.fn(() => presenceUnsub),
       onPeer: vi.fn(() => () => {}),
     },
   } as unknown as NodeTerminalApi
-  return { api, ptyCreate, presenceUnsub }
+  return { api, ptyCreate, presenceUnsub, workspaceLoad }
 }
 
 function makeDeps(over: Partial<RelayTabDeps> & { handle: RelayApiHandle }): {
   deps: RelayTabDeps
   addProject: ReturnType<typeof vi.fn>
+  adoptProject: ReturnType<typeof vi.fn>
   setActiveProject: ReturnType<typeof vi.fn>
 } {
   const addProject = vi.fn((_label: string) => ({ id: 'proj-1' }))
+  const adoptProject = vi.fn((p: Project) => ({ id: `${p.id}-adopted` }))
   const setActiveProject = vi.fn()
   const deps: RelayTabDeps = {
     relayClient: over.relayClient ?? fakeRelayClient(),
     addProject: over.addProject ?? addProject,
+    adoptProject: 'adoptProject' in over ? over.adoptProject : adoptProject,
     setActiveProject: over.setActiveProject ?? setActiveProject,
     buildApi: () => over.handle,
     timeoutMs: over.timeoutMs,
   }
-  return { deps, addProject, setActiveProject }
+  return { deps, addProject, adoptProject, setActiveProject }
 }
 
 beforeEach(() => {
@@ -102,6 +107,50 @@ describe('openRelayTab (connect → tab → mount)', () => {
     expect(close).toHaveBeenCalledTimes(1)
     expect(sessionForProject(tab.projectId).source).toBe('local') // unbound → local
     expect(sessionCount()).toBe(1) // only local remains
+  })
+
+  it('populates the tab by ADOPTING the host\'s scoped project (nodes intact, remote:true)', async () => {
+    const hostProject = {
+      id: 'host-proj',
+      name: "Ayşe's Project",
+      color: '#fff',
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'terminal-a', kind: 'terminal', title: 'A', color: '#111', position: { x: 0, y: 0 } },
+        { id: 'terminal-b', kind: 'terminal', title: 'B', color: '#222', position: { x: 1, y: 1 } },
+      ],
+    } as unknown as Project
+    const { api } = fakeBridgedApi({ version: 2, activeProjectId: 'host-proj', projects: [hostProject] })
+    const handle: RelayApiHandle = { api, ready: () => Promise.resolve(), close: vi.fn() }
+    const { deps, addProject, adoptProject, setActiveProject } = makeDeps({ handle })
+
+    const tab = await openRelayTab('conn-1', "Ayşe's Mac", deps)
+
+    // Adopted (not an empty addProject) with the host's nodes and remote:true.
+    expect(addProject).not.toHaveBeenCalled()
+    expect(adoptProject).toHaveBeenCalledTimes(1)
+    const adopted = adoptProject.mock.calls[0][0] as Project
+    expect(adopted.remote).toBe(true)
+    expect(adopted.name).toBe("Ayşe's Project")
+    expect(adopted.nodes.map((n) => n.id)).toEqual(['terminal-a', 'terminal-b'])
+
+    // The relay session is bound to the ADOPTED (fresh) project id, and that tab is active.
+    expect(tab.projectId).toBe('host-proj-adopted')
+    expect(sessionForProject('host-proj-adopted').id).toBe(tab.sessionId)
+    expect(setActiveProject).toHaveBeenCalledWith('host-proj-adopted')
+  })
+
+  it('falls back to an empty labelled tab when the host shared nothing (no throw)', async () => {
+    const { api } = fakeBridgedApi({ version: 2, activeProjectId: '', projects: [] })
+    const handle: RelayApiHandle = { api, ready: () => Promise.resolve(), close: vi.fn() }
+    const { deps, addProject, adoptProject } = makeDeps({ handle })
+
+    const tab = await openRelayTab('conn-1', 'Empty host', deps)
+
+    expect(adoptProject).not.toHaveBeenCalled()
+    expect(addProject).toHaveBeenCalledWith('Empty host')
+    expect(tab.projectId).toBe('proj-1')
+    expect(sessionForProject('proj-1').source).toBe('relay')
   })
 
   it('GUARD: a pre-approval socket drop REJECTS the bootstrap (never hangs) and closes the handle', async () => {

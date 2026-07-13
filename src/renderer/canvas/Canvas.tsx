@@ -1860,6 +1860,11 @@ export function Canvas() {
         addProject: reconnectProjectId
           ? () => ({ id: reconnectProjectId }) // reconnect: reuse the existing tab, don't spawn one
           : (name) => useProjects.getState().addProject(name),
+        // First connect adopts the host's shared project (its nodes, fresh id). On reconnect the
+        // existing tab (with its nodes) is reused via addProject above, so no adopt lever is passed.
+        adoptProject: reconnectProjectId
+          ? undefined
+          : (p) => useProjects.getState().adoptProject(p),
         setActiveProject: (id) => useProjects.getState().setActive(id),
       })
         .then((tab) => {
