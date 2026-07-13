@@ -67,4 +67,57 @@ describe('key-file-codec', () => {
     const enc = encodeKeyFile(genKeyPair(), safe)
     expect(decodeKeyFile(enc, throwing)).toBeNull()
   })
+
+  // --- negative half: a corrupt file must NEVER decode to an accepted identity ---------------
+  // The caller treats null as "regenerate a fresh identity", so every malformed input below has to
+  // return null (and never throw) — an accepted-but-wrong keypair would surface much later as a
+  // tweetnacl "bad key size" throw deep inside the transport.
+
+  const b64 = (bytes: number) => Buffer.alloc(bytes, 7).toString('base64')
+
+  it('returns null on non-object JSON literals (including the `null` literal)', () => {
+    const safe = fakeSafe(false)
+    for (const raw of ['null', '[]', '123', '"str"', 'true', '']) {
+      expect(decodeKeyFile(raw, safe), `input: ${JSON.stringify(raw)}`).toBeNull()
+    }
+  })
+
+  it('returns null on a wrong-length public key (short or long)', () => {
+    const safe = fakeSafe(false)
+    const secretKey = b64(32)
+    expect(decodeKeyFile(JSON.stringify({ publicKey: b64(16), secretKey }), safe)).toBeNull()
+    expect(decodeKeyFile(JSON.stringify({ publicKey: b64(64), secretKey }), safe)).toBeNull()
+  })
+
+  it('returns null on a wrong-length secret key (short or long)', () => {
+    const safe = fakeSafe(false)
+    const publicKey = b64(32)
+    expect(decodeKeyFile(JSON.stringify({ publicKey, secretKey: b64(15) }), safe)).toBeNull()
+    expect(decodeKeyFile(JSON.stringify({ publicKey, secretKey: b64(48) }), safe)).toBeNull()
+  })
+
+  it('returns null on truncated / non-base64 garbage instead of accepting empty keys', () => {
+    const safe = fakeSafe(false)
+    // `Buffer.from(x, 'base64')` is lenient: it drops non-alphabet chars and truncates.
+    const garbage = ['x', 'y', '!!!!', '@@@ not base64 @@@', b64(32).slice(0, 10)]
+    for (const bad of garbage) {
+      expect(decodeKeyFile(JSON.stringify({ publicKey: bad, secretKey: b64(32) }), safe)).toBeNull()
+      expect(decodeKeyFile(JSON.stringify({ publicKey: b64(32), secretKey: bad }), safe)).toBeNull()
+    }
+    expect(decodeKeyFile('{"publicKey":"x","secretKey":"y"}', safe)).toBeNull()
+  })
+
+  it('returns null when the keychain decrypts to junk instead of throwing', () => {
+    // We cannot verify what real Electron safeStorage does on a keychain reset (throw vs. garbage),
+    // so the codec must be robust to BOTH.
+    const junk = (out: string): SafeStorageLike => ({
+      isEncryptionAvailable: () => true,
+      encryptString: (s) => Buffer.from(s, 'utf-8'),
+      decryptString: () => out
+    })
+    const enc = encodeKeyFile(genKeyPair(), fakeSafe(true))
+    expect(decodeKeyFile(enc, junk('garbage not base64'))).toBeNull()
+    expect(decodeKeyFile(enc, junk(''))).toBeNull()
+    expect(decodeKeyFile(enc, junk(b64(15)))).toBeNull() // right shape, wrong length
+  })
 })

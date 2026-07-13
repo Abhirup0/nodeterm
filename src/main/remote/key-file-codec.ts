@@ -7,7 +7,7 @@
 // NOTE (intentional duplication): host-service.ts still inlines the same format. We do NOT refactor it
 // to use this codec — that file is Stage 4c's to rewrite, and editing it here would collide. 4c may
 // adopt this codec when it rewrites the handshake.
-import type { KeyPair } from './e2ee'
+import { publicKeyFromB64, secretKeyFromB64, type KeyPair } from './e2ee'
 
 export interface SafeStorageLike {
   isEncryptionAvailable(): boolean
@@ -41,31 +41,37 @@ export function decodeKeyFile(
   raw: string,
   safe: SafeStorageLike
 ): { keys: KeyPair; migrate: boolean } | null {
-  let body: KeyFileBody
+  let body: unknown
   try {
-    body = JSON.parse(raw) as KeyFileBody
+    body = JSON.parse(raw)
   } catch {
     return null
   }
-  if (!body.publicKey) return null
-  const publicKey = Uint8Array.from(Buffer.from(body.publicKey, 'base64'))
-  if (body.secretKeyEnc && safe.isEncryptionAvailable()) {
-    try {
-      const secretB64 = safe.decryptString(Buffer.from(body.secretKeyEnc, 'base64'))
+  // `JSON.parse` happily yields null / arrays / numbers for a truncated or aborted write; only a
+  // plain object can be a key file. (Without this, the literal `null` threw a TypeError below.)
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  const file = body as KeyFileBody
+  if (!file.publicKey) return null
+
+  // Both key parsers are STRICT about the 32-byte length and throw otherwise — base64 decoding is
+  // lenient (drops junk chars, truncates), so a corrupt file would otherwise decode to a
+  // short/empty "identity" that the caller accepts and only fails much later inside nacl.
+  try {
+    const publicKey = publicKeyFromB64(file.publicKey)
+    if (file.secretKeyEnc && safe.isEncryptionAvailable()) {
+      // decryptString may throw (keychain reset) OR return junk — either way we return null.
+      const secretB64 = safe.decryptString(Buffer.from(file.secretKeyEnc, 'base64'))
+      return { keys: { publicKey, secretKey: secretKeyFromB64(secretB64) }, migrate: false }
+    }
+    if (file.secretKey) {
       return {
-        keys: { publicKey, secretKey: Uint8Array.from(Buffer.from(secretB64, 'base64')) },
-        migrate: false
+        keys: { publicKey, secretKey: secretKeyFromB64(file.secretKey) },
+        // Legacy plaintext but a keyring now exists → the caller should re-persist encrypted.
+        migrate: safe.isEncryptionAvailable()
       }
-    } catch {
-      return null
     }
-  }
-  if (body.secretKey) {
-    return {
-      keys: { publicKey, secretKey: Uint8Array.from(Buffer.from(body.secretKey, 'base64')) },
-      // Legacy plaintext but a keyring now exists → the caller should re-persist encrypted.
-      migrate: safe.isEncryptionAvailable()
-    }
+  } catch {
+    return null
   }
   return null
 }

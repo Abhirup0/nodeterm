@@ -27,6 +27,17 @@ export function publicKeyFromB64(b64: string): Uint8Array {
   return key
 }
 
+// Same strictness for a secret key: `Buffer.from(x, 'base64')` silently drops non-alphabet
+// characters and truncates, so a corrupt/short blob would otherwise decode to a short-but-accepted
+// key that only blows up ("bad secret key size") deep inside a later nacl.box call.
+export function secretKeyFromB64(b64: string): Uint8Array {
+  const key = Uint8Array.from(Buffer.from(b64, 'base64'))
+  if (key.length !== nacl.box.secretKeyLength) {
+    throw new Error(`Invalid secret key: expected ${nacl.box.secretKeyLength} bytes, got ${key.length}`)
+  }
+  return key
+}
+
 // Derive the shared secret (ECDH precompute) from the peer's base64 public key
 // and our secret key. Both sides arrive at the same value. This is the STABLE
 // per-device-pair key (both endpoints use static keys for pin-once), so it must
