@@ -604,6 +604,60 @@ describe('ssh lineage safety', () => {
     expect(files['~/app']).toContain('"id": "fresh1"')
   })
 
+  // The mobile companion appends its new sessions to the server's project.json while the desktop
+  // is running. The desktop polls the file (refreshSshProject with pushIfStanding:false) so those
+  // nodes land on the live canvas — the poll must be read-only when our cache stands, or every
+  // tick would spam a mirror write.
+  it('poll: adopts a same-lineage remote that grew a node, and never writes when nothing is owed', async () => {
+    const { files, io } = cwdIO()
+    const writes: string[] = []
+    const origWrite = io.write.bind(io)
+    io.write = async (id: string, ssh: any, c: string) => (writes.push(id), origWrite(id, ssh, c))
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])) // reconcile + push rev 1
+    const writesAfterSave = writes.length
+
+    // The phone appends a node and bumps rev (same project id = same lineage).
+    const f = JSON.parse(files['~/app'])
+    f.rev = 2
+    f.nodes = [...f.nodes, { id: 'term-mobile-1', kind: 'terminal', position: { x: 0, y: 700 }, size: { width: 1, height: 1 }, title: 'Mobile', color: '#fff', group: null }]
+    files['~/app'] = JSON.stringify(f)
+
+    const adopted = await store.refreshSshProject('ps', { pushIfStanding: false })
+    expect(adopted?.nodes.map((n) => n.id)).toContain('term-mobile-1')
+    expect(writes.length).toBe(writesAfterSave) // read-only poll
+
+    // Unchanged remote → the next poll decides nothing and writes nothing.
+    expect(await store.refreshSshProject('ps', { pushIfStanding: false })).toBeNull()
+    expect(writes.length).toBe(writesAfterSave)
+  })
+
+  it('poll: still retries a mirror write that is owed (pushIfStanding:false does not cancel debts)', async () => {
+    const files: Record<string, string> = {}
+    let up = false
+    const io = {
+      read: async (_id: string, ssh: any) => {
+        if (!up) return { status: 'error' as const }
+        return files[ssh.remoteCwd] != null
+          ? { status: 'ok' as const, content: files[ssh.remoteCwd] }
+          : { status: 'absent' as const }
+      },
+      write: async (_id: string, ssh: any, c: string) => (up ? ((files[ssh.remoteCwd] = c), true) : false)
+    }
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined })])) // down: owed
+    up = true
+    expect(await store.refreshSshProject('ps', { pushIfStanding: false })).toBeNull()
+    expect(files['~/app']).toContain('"id": "ps"') // the owed mirror landed on the poll
+  })
+
+  it('sshProjectIds lists the ssh entries (the poll iterates these)', async () => {
+    const { io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined }), project({ id: 'p2', name: 'inline' })]))
+    expect(store.sshProjectIds()).toEqual(['ps'])
+  })
+
   it('same-lineage reconcile is untouched: an emptier remote with a higher rev still wins (user cleared their canvas)', async () => {
     const { files, io } = cwdIO()
     const store = new WorkspaceStore(io)

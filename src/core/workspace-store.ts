@@ -334,17 +334,29 @@ export class WorkspaceStore {
   }
 
   /**
-   * Called when an SSH project's connection comes up. Reconciles the server's
-   * .nodeterm/project.json with our cached copy (see reconcileSsh): remote won →
-   * adopt (returned; caller broadcasts it); otherwise our cache pushed up.
+   * Reconciles the server's .nodeterm/project.json with our cached copy (see reconcileSsh):
+   * remote won → adopt (returned; caller broadcasts it); otherwise our cache pushed up.
+   * Called on connect, and periodically while connected (the POLL — how a session the mobile
+   * companion appended to the server file reaches the live canvas). The poll passes
+   * `pushIfStanding: false`: when our cache simply stands, a poll must be read-only — only an
+   * OWED mirror (a previously dropped write) may still push.
    */
-  async refreshSshProject(projectId: string): Promise<Project | null> {
+  async refreshSshProject(projectId: string, opts?: { pushIfStanding?: boolean }): Promise<Project | null> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.ssh)
     if (!e?.ssh || !this.remoteIO) return null
-    const adopted = await this.reconcileSsh(e)
-    // The reconcile may have moved cache/rev/name — persist the index either way (cheap, atomic).
-    await writeAtomic(this.indexPath, JSON.stringify(this.index))
+    const revBefore = e.cache?.rev
+    const adopted = await this.reconcileSsh(e, opts?.pushIfStanding ?? true)
+    // Persist the index only when the reconcile moved something — a quiet poll must not churn
+    // workspace.json every tick.
+    if (adopted || e.cache?.rev !== revBefore) {
+      await writeAtomic(this.indexPath, JSON.stringify(this.index))
+    }
     return adopted
+  }
+
+  /** The ssh entry ids of the current index — what the connected-project poll iterates. */
+  sshProjectIds(): string[] {
+    return (this.index?.entries ?? []).filter((e) => e.ssh).map((e) => e.id)
   }
 
   /** A throttled trailing mirror write was acked but later dropped (connection died inside the
@@ -367,7 +379,7 @@ export class WorkspaceStore {
    *   so the terminals reattach); a push outbids the losing lineage's rev so it stays beaten.
    * Returns the adopted project (for the caller to surface) or null when our cache stood/pushed.
    */
-  private async reconcileSsh(e: IndexEntryV3): Promise<Project | null> {
+  private async reconcileSsh(e: IndexEntryV3, pushIfStanding = true): Promise<Project | null> {
     if (!e.ssh || !this.remoteIO) return null
     const res = await this.remoteIO.read(e.id, e.ssh)
     if (res.status === 'error') {
@@ -400,7 +412,7 @@ export class WorkspaceStore {
       this.unmirrored.delete(e.id) // the server copy IS the truth now — nothing owed
       return fileToProject(adopted, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
     }
-    if (e.cache) {
+    if (e.cache && (pushIfStanding || this.unmirrored.has(e.id))) {
       // Our cache stood. If it just beat a FOREIGN lineage on the merits (not on rev), outbid that
       // lineage's rev so a later rev-only reconcile can't resurrect the losing side.
       if (remote && !sameLineage && remote.rev >= e.cache.rev) {

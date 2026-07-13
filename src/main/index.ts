@@ -1110,6 +1110,28 @@ app.whenReady().then(async () => {
       if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
     })
   })
+  // While connected, poll each SSH project's server file: the mobile companion appends the
+  // sessions it starts to <remoteCwd>/.nodeterm/project.json, and this is how those nodes reach
+  // the live canvas without a reconnect. Read-only unless a mirror write is owed
+  // (pushIfStanding:false), one `cat` per project per tick over the ControlMaster. The in-flight
+  // set keeps a hung read from stacking a second poll on the same project.
+  {
+    const REMOTE_WORKSPACE_POLL_MS = 15_000
+    const inFlight = new Set<string>()
+    setInterval(() => {
+      for (const projectId of workspaceStore.sshProjectIds()) {
+        if (inFlight.has(projectId) || !sshProjectManager?.refForProject(projectId)) continue
+        inFlight.add(projectId)
+        void workspaceStore
+          .refreshSshProject(projectId, { pushIfStanding: false })
+          .then((adopted) => {
+            if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
+          })
+          .catch(() => { /* fail-open: the next tick retries */ })
+          .finally(() => inFlight.delete(projectId))
+      }
+    }, REMOTE_WORKSPACE_POLL_MS)
+  }
   // Route git-service + commit-message git ops over the active SSH project's master only — and only
   // for that project's exact remoteCwd. Any other cwd (a local project, or a different connected
   // project) resolves to undefined, so the local path stays byte-identical.
