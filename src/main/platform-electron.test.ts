@@ -43,6 +43,7 @@ import {
   type UiSink
 } from './peer-registry'
 import { decodePtyData } from '../shared/rpc'
+import { allocateRelayClientId } from '../core/presence/hub'
 
 /** A relay peer id, as allocateRelayClientId() would mint it (≥ 1_000_000 — never a webContents id). */
 const PEER = 1_000_000
@@ -200,5 +201,96 @@ describe('electronPlatform + relay peers', () => {
     h.sent.length = 0
     p.broadcast('x', 1)
     expect(h.sent).toEqual([{ channel: 'x', args: [1] }]) // exactly sendToMain, nothing else
+  })
+})
+
+/**
+ * The INBOUND half (4c): a peer has no webContents, so its RPC request can never travel through
+ * ipcMain. It is answered from the platform's own recorded handler table — the SAME registrations
+ * the local window gets, so the two surfaces can never drift.
+ */
+describe('electronPlatform.dispatch / cast (the peer inbound path)', () => {
+  it('dispatch answers a peer request from the recorded handler table, with the peer as sender', async () => {
+    const p = electronPlatform()
+    p.handle('fs:list', (dir: string) => [{ name: 'a.txt', dir: false, path: `${dir}/a.txt` }])
+    p.handleWithSender('presence:hello', (senderId: number, id: unknown) => ({ senderId, id }))
+
+    const peer = allocateRelayClientId()
+    await expect(
+      p.dispatch(peer, { t: 'req', id: 7, method: 'fs:list', args: ['/w'] })
+    ).resolves.toEqual({
+      t: 'res',
+      id: 7,
+      ok: true,
+      result: [{ name: 'a.txt', dir: false, path: '/w/a.txt' }]
+    })
+    await expect(
+      p.dispatch(peer, { t: 'req', id: 8, method: 'presence:hello', args: [{ name: 'A' }] })
+    ).resolves.toEqual({ t: 'res', id: 8, ok: true, result: { senderId: peer, id: { name: 'A' } } })
+  })
+
+  it('an unknown method answers E_NO_HANDLER (never hangs the peer)', async () => {
+    const p = electronPlatform()
+    const res = await p.dispatch(PEER, { t: 'req', id: 1, method: 'nope', args: [] })
+    expect(res).toMatchObject({ ok: false, error: { code: 'E_NO_HANDLER' } })
+  })
+
+  it('a throwing handler answers an error frame, not a rejection', async () => {
+    const p = electronPlatform()
+    p.handle('boom', () => {
+      throw new Error('nope')
+    })
+    const res = await p.dispatch(PEER, { t: 'req', id: 2, method: 'boom', args: [] })
+    expect(res).toMatchObject({ ok: false, error: { code: 'E_HANDLER', message: 'nope' } })
+  })
+
+  it('a handler returning undefined answers null (JSON has no undefined)', async () => {
+    const p = electronPlatform()
+    p.handle('void', () => undefined)
+    await expect(p.dispatch(PEER, { t: 'req', id: 3, method: 'void', args: [] })).resolves.toEqual({
+      t: 'res',
+      id: 3,
+      ok: true,
+      result: null
+    })
+  })
+
+  it('cast fires every listener in registration order, with the peer as sender', () => {
+    const p = electronPlatform()
+    const seen: string[] = []
+    p.on('pty:write', (sid: unknown) => seen.push(`on:${sid}`))
+    p.onWithSender('pty:write', (senderId: number, sid: unknown) => seen.push(`ws:${senderId}:${sid}`))
+    p.cast(1_000_001, 'pty:write', ['s1', 'x'])
+    expect(seen).toEqual(['on:s1', 'ws:1000001:s1'])
+  })
+
+  it('one throwing cast listener does not swallow the peer keystroke for the rest', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const p = electronPlatform()
+    const seen: string[] = []
+    p.on('pty:write', () => {
+      throw new Error('attribution blew up')
+    })
+    p.onWithSender('pty:write', (_s: number, sid: unknown) => seen.push(`ws:${sid}`))
+    expect(() => p.cast(PEER, 'pty:write', ['s1', 'x'])).not.toThrow()
+    expect(seen).toEqual(['ws:s1'])
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('cast on a channel nobody listens to is a silent no-op', () => {
+    const p = electronPlatform()
+    expect(() => p.cast(PEER, 'nobody:home', [])).not.toThrow()
+  })
+
+  it('recording the table does not change what the LOCAL window gets (still ipcMain)', async () => {
+    const p = electronPlatform()
+    p.handle('c1', (a: number) => a + 1)
+    p.on('c2', () => {})
+    p.handleWithSender('c3', (senderId: number, a: string) => `${senderId}:${a}`)
+    // Same ipcMain registrations, same event-stripping, same sender id as before this feature.
+    expect(await h.handlers['c1']({ sender: { id: 1 } }, 41)).toBe(42)
+    expect(await h.handlers['c3']({ sender: { id: 7 } }, 'x')).toBe('7:x')
+    expect(Object.keys(h.handlers).sort()).toEqual(['c1', 'c2', 'c3'])
   })
 })

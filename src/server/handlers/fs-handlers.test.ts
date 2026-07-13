@@ -3,7 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { ServerPlatform } from '../platform-server'
-import { registerFsHandlers } from './fs'
+import { registerFsHandlers } from '../../core/fs-handlers'
 import { IPC } from '../../shared/ipc'
 
 let dir: string, platform: ServerPlatform, ui: number

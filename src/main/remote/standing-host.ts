@@ -18,13 +18,13 @@
 // unit-tested `approved-devices-core`.
 
 import { randomUUID } from 'crypto'
-import { ipcMain, type BrowserWindow } from 'electron'
+import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, Settings } from '../../shared/types'
 import { PtyManager } from '../../core/pty-manager'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { createPhonePresence, type PhonePresence } from './phone-presence'
-import { publicKeyToB64 } from './e2ee'
+import { publicKeyToB64, type KeyPair } from './e2ee'
 import {
   API_BASE,
   RELAY_URL,
@@ -74,6 +74,32 @@ async function mintHostToken(
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * The stored host identity is encrypted and the keyring is locked/unavailable right now (see
+ * host-identity.ts). Matched by `code`, not `instanceof`: the error crosses a module re-export and
+ * the code is the stable contract.
+ */
+function isHostKeyLocked(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'E_HOST_KEY_LOCKED'
+}
+
+/**
+ * A locked keyring is a LOUD, recoverable failure: the key on disk is intact, hosting simply
+ * cannot start until the OS can decrypt it. The standing host runs with no UI of its own, so
+ * without this the user would just find phone access mysteriously dead.
+ */
+function reportKeyLocked(err: Error): void {
+  try {
+    dialog.showErrorBox(
+      'Remote access could not start',
+      `${err.message}\n\nPhone access is off until then. Turn it back on in Settings → Phone once your keyring is unlocked.`
+    )
+  } catch {
+    // No dialog available (headless / very early boot): the console line is the fallback.
+  }
+  console.error('[standing-host] host identity is locked:', err.message)
 }
 
 export interface StandingHost {
@@ -247,7 +273,22 @@ export function initStandingHost(
       if (!isPremium()) return stop()
       const entitlement = getStoredEntitlement()
       if (!entitlement) return stop()
-      const keys = await loadOrCreateKeyPair()
+      // The host key is the identity every paired phone PINNED. If the OS keyring is locked we
+      // cannot READ it (host-identity refuses to regenerate over it — that would rotate the
+      // identity and force every phone to re-approve). There is nothing to advertise, so stop:
+      // retrying would spin a dead listener and swallow the reason. Tell the human instead.
+      let keys: KeyPair
+      try {
+        keys = await loadOrCreateKeyPair()
+      } catch (err) {
+        if (isHostKeyLocked(err)) {
+          stop()
+          reportKeyLocked(err as Error)
+          return
+        }
+        scheduleReconnect() // transient disk error: back off and try again
+        return
+      }
       const token = await mintHostToken(entitlement, publicKeyToB64(keys.publicKey))
       if (!running) return
       if (!token) {
