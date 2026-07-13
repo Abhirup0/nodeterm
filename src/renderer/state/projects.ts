@@ -345,6 +345,9 @@ export const useProjects = create<ProjectsState>((set, get) => ({
 
   toWorkspace() {
     const { projects, activeProjectId } = get()
-    return { version: 2, activeProjectId, projects }
+    // A relay tab (`remote`) is a live connection to another machine's project, never a
+    // workspace on this disk — exclude it so it can't be written into this client's
+    // workspace.json (the disk writer skips it too; see core/workspace-files.ts).
+    return { version: 2, activeProjectId, projects: projects.filter((p) => !p.remote) }
   }
 }))

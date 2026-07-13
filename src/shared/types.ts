@@ -223,6 +223,14 @@ export interface Project {
    * Unavailable projects show a greyed tab and cannot be activated.
    */
   unavailable?: boolean
+  /**
+   * This tab is a LIVE relay connection to another machine's project — not a workspace on
+   * THIS disk. Runtime-only, never persisted: set by `openRelayTab` (see relay-tab.ts) and
+   * excluded from both `toWorkspace()` and the on-disk index (see the `splitWorkspace` skip in
+   * core/workspace-files.ts). A relay tab is a connection bookmark, never a workspace on the
+   * peer's disk, so it must never land in this client's workspace.json.
+   */
+  remote?: boolean
 }
 
 /** The full workspace written to / read from disk. */

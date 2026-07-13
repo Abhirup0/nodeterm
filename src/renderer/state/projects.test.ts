@@ -56,6 +56,19 @@ describe('toWorkspace', () => {
     const json = JSON.stringify(ws)
     expect(json).not.toMatch(/"session/i)
   })
+
+  // A relay tab is a LIVE connection to another machine's project, not a workspace on this
+  // disk. `project.remote` is runtime-only; toWorkspace must drop the whole project so it can
+  // never be written into this client's workspace.json.
+  it('excludes remote (relay) projects but keeps normal ones', () => {
+    const normal = useProjects.getState().addProject('my-app', '/Users/me/dev/my-app')
+    const relay = useProjects.getState().addProject('shared')
+    useProjects.setState((s) => ({
+      projects: s.projects.map((p) => (p.id === relay.id ? { ...p, remote: true } : p))
+    }))
+    const ws = useProjects.getState().toWorkspace()
+    expect(ws.projects.map((p) => p.id)).toEqual([normal.id])
+  })
 })
 
 describe('setDinoHighScore', () => {

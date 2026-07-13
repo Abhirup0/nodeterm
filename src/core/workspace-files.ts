@@ -161,6 +161,10 @@ export function splitWorkspace(
   const entries: IndexEntryV3[] = []
   const files = new Map<string, ProjectFileV1>()
   for (const p of ws.projects) {
+    // A relay tab is a LIVE connection to another machine's project, not a workspace on this
+    // disk — it has no disk representation at all. Drop it entirely (no ref, no inline, no
+    // cache) BEFORE the unavailable handling, so it leaks in none of the branches below.
+    if (p.remote) continue
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real
