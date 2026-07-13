@@ -153,6 +153,25 @@ describe('openRelayTab (connect → tab → mount)', () => {
     expect(sessionForProject('proj-1').source).toBe('relay')
   })
 
+  it('GUARD: a POST-approval workspace.load() rejection disposes the just-created session (no leak)', async () => {
+    // The load runs AFTER createSession + the two held teardowns, so a host that vanishes between
+    // approval and load must dispose the session — else the SESSIONS entry, its presence
+    // subscription (the peer lingers in host facepiles), and the relay socket all leak.
+    const { api, presenceUnsub, workspaceLoad } = fakeBridgedApi()
+    workspaceLoad.mockRejectedValue(new Error('host gone before load'))
+    const close = vi.fn()
+    const handle: RelayApiHandle = { api, ready: () => Promise.resolve(), close }
+    const { deps } = makeDeps({ handle })
+
+    await expect(openRelayTab('conn-load-fail', 'doomed', deps)).rejects.toThrow(/host gone/)
+
+    // The session was disposed: presence teardown + relay socket close ran exactly once, and no
+    // relay session lingers in the registry.
+    expect(presenceUnsub).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(sessionCount()).toBe(1) // only the local session remains
+  })
+
   it('GUARD: a pre-approval socket drop REJECTS the bootstrap (never hangs) and closes the handle', async () => {
     const { api } = fakeBridgedApi()
     const close = vi.fn()

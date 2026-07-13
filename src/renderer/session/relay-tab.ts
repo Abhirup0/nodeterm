@@ -88,20 +88,29 @@ export async function openRelayTab(
   // transport to the relay api; Stage-3 sync then keeps it live. If the host shared nothing (or the
   // project was deleted), OR we're reconnecting (no `adoptProject` dep — the existing tab is reused),
   // fall back to the labelled tab so it still opens rather than throwing.
-  const ws = await handle.api.workspace.load()
-  const hostProject = ws.projects[0]
-  const projectId =
-    hostProject && deps.adoptProject
-      ? deps.adoptProject({ ...hostProject, remote: true }).id
-      : deps.addProject(label).id
-  bindProjectToSession(projectId, session.id)
-  setActiveSession(session.id)
-  deps.setActiveProject(projectId)
+  // The load runs AFTER createSession + the held teardowns, so a host that vanishes between approval
+  // and load would leave the SESSIONS entry, its presence subscription (the peer lingers in host
+  // facepiles) and the relay socket all leaking. Dispose the just-created session before rethrowing
+  // — `disposeSession` runs the held teardowns exactly once (idempotent).
+  try {
+    const ws = await handle.api.workspace.load()
+    const hostProject = ws.projects[0]
+    const projectId =
+      hostProject && deps.adoptProject
+        ? deps.adoptProject({ ...hostProject, remote: true }).id
+        : deps.addProject(label).id
+    bindProjectToSession(projectId, session.id)
+    setActiveSession(session.id)
+    deps.setActiveProject(projectId)
 
-  return {
-    sessionId: session.id,
-    projectId,
-    dispose: () => disposeSession(session.id),
+    return {
+      sessionId: session.id,
+      projectId,
+      dispose: () => disposeSession(session.id),
+    }
+  } catch (err) {
+    disposeSession(session.id)
+    throw err
   }
 }
 

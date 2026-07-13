@@ -1380,7 +1380,8 @@ export function Canvas() {
       if (projectId !== useProjects.getState().activeProjectId) {
         // Not on screen (a parked / background project): no terminal is mounted, but one may be
         // PARKED from a recent project switch — dispose it, as an active-project remove does.
-        if (mutation.op === 'remove') disposeTerminalOnUnmount(mutation.id)
+        if (mutation.op === 'remove')
+          disposeTerminalOnUnmount(sessionForProject(projectId).id, mutation.id)
         if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
         return
       }
@@ -1394,7 +1395,8 @@ export function Canvas() {
         // module-level state survives the node, and if the owner UNDOES the delete we are left
         // holding a node that reads "closed by another user" while its session is alive again.
         const gone = nodesRef.current.find((n) => n.id === mutation.id)
-        if (gone?.type === 'terminal') disposeTerminalOnUnmount(gone.id)
+        if (gone?.type === 'terminal')
+          disposeTerminalOnUnmount(sessionForProject(projectId).id, gone.id)
       }
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
@@ -2485,7 +2487,8 @@ export function Canvas() {
         if (!set.has(n.id)) return
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
         // session is being destroyed right here). Also drops an already-parked entry.
-        if (n.type === 'terminal') disposeTerminalOnUnmount(n.id)
+        if (n.type === 'terminal')
+          disposeTerminalOnUnmount(sessionForProject(useProjects.getState().activeProjectId ?? '').id, n.id)
         if (n.type === 'terminal') transport.destroy(n.id)
         // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
         // lives across project switches (only permanent delete kills it), so this belongs here,
@@ -4496,7 +4499,7 @@ export function Canvas() {
           if (projectId === activeProjectId) {
             deleteNodes([id])
           } else {
-            disposeTerminalOnUnmount(id) // node may be parked from the project switch
+            disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
             // Chat nodes in an inactive project keep their driver running across the switch;
             // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
@@ -5048,7 +5051,7 @@ export function Canvas() {
       const project = store.getProject(id)
       project?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') {
-          disposeTerminalOnUnmount(n.id) // may be parked from a recent switch away
+          disposeTerminalOnUnmount(sessionForProject(id).id, n.id) // may be parked from a recent switch away
           transport.destroy(n.id)
         }
         if ((n.kind ?? 'terminal') === 'chat') {

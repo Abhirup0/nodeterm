@@ -53,6 +53,22 @@ export function isLetterboxed(effective: TermSize, fitted: TermSize | null): boo
  * comparing the pty's size against the pre-park one, permanently letterboxing a terminal that
  * should fill its node (or un-letterboxing one that shouldn't).
  */
+/**
+ * Session-scope a renderer-global map that is keyed by node id.
+ *
+ * `TerminalNode`'s `parkedTerminals` / `coStates` / `coSubs` / `restartSubs` (and `noParkIds`) are
+ * module-global. A relay tab adopts the HOST's project KEEPING its node ids (they are tmux session
+ * names — see `adoptProject`), so a local node and a relay node can share a bare id and collide:
+ * switching from a local tab to a relay tab that share id `abc` would let the relay node adopt the
+ * local node's parked pty. Keying by `${sessionId}:${nodeId}` keeps them apart. The session id is
+ * stable while a tab is open — `'local'` for the local session, `relay-N` for a relay tab, both
+ * surviving project switches — so the key is STABLE across a park→remount of the same logical
+ * terminal yet DISTINCT across sessions.
+ */
+export function terminalKey(sessionId: string, nodeId: string): string {
+  return `${sessionId}:${nodeId}`
+}
+
 const fittedByNode = new Map<string, TermSize>()
 
 /** Record what this client last REPORTED it can render (called from every applyFit). */

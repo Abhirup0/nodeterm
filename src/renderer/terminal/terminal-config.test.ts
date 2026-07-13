@@ -18,6 +18,7 @@ import {
   shouldApplyResync,
   stripTrailingNewline,
   takeRecycled,
+  terminalKey,
   terminalKeyAction,
   toXtermText,
   xtermScrollback,
@@ -38,6 +39,23 @@ const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   altKey: false,
   shiftKey: false,
   ...p
+})
+
+describe('terminalKey (session-scope the node-keyed renderer-global maps)', () => {
+  it('same session + node → the same key (stable across a park→remount)', () => {
+    expect(terminalKey('local', 'abc')).toBe(terminalKey('local', 'abc'))
+    expect(terminalKey('relay-1', 'abc')).toBe(terminalKey('relay-1', 'abc'))
+  })
+
+  it('distinct sessions with the SAME node id → distinct keys (no local↔relay collision)', () => {
+    // The core bug: a relay tab adopts the host's project KEEPING node ids, so a local node and a
+    // relay node can share a bare id. Scoping by session id must keep them apart.
+    expect(terminalKey('local', 'abc')).not.toBe(terminalKey('relay-1', 'abc'))
+  })
+
+  it('distinct node ids in the same session → distinct keys', () => {
+    expect(terminalKey('local', 'abc')).not.toBe(terminalKey('local', 'def'))
+  })
 })
 
 describe('reportedSize', () => {
