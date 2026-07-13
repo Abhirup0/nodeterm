@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildFilesApi } from './ws-bridge'
+import { buildFilesApi, buildRealApi } from './ws-bridge'
 import { IPC } from '../../shared/ipc'
 
 function fakeClient() {
@@ -44,5 +44,28 @@ describe('buildFilesApi', () => {
     expect(c.calls[2]).toEqual({ kind: 'subscribe', method: IPC.gitCloneProgress, args: [] })
     expect(typeof un).toBe('function')
     expect(typeof un2).toBe('function')
+  })
+})
+
+describe('buildRealApi: workspace', () => {
+  // The server DOES serve workspace:probe-folder (WorkspaceStore.registerIpc, src/core). Stubbing
+  // it to `null` in the browser told "Open folder…" that a repo carrying a committed
+  // .nodeterm/project.json had no project in it — so addProjectFromFolder created an empty one and
+  // the next writeDisk() overwrote the team's shared canvas. It must hit the real channel.
+  it('probeFolder requests the real server channel (never a null stub)', async () => {
+    const c = fakeClient()
+    const api = buildRealApi(c as never)
+    await api.workspace.probeFolder('/repo')
+    expect(c.calls).toEqual([
+      { kind: 'request', method: IPC.workspaceProbeFolder, args: ['/repo'] }
+    ])
+  })
+
+  it('onMigrated subscribes to the channel core actually broadcasts', () => {
+    const c = fakeClient()
+    const api = buildRealApi(c as never)
+    const un = api.workspace.onMigrated(() => {})
+    expect(c.calls[0]).toEqual({ kind: 'subscribe', method: IPC.workspaceMigrated, args: [] })
+    expect(typeof un).toBe('function')
   })
 })

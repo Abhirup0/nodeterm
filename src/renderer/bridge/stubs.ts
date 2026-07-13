@@ -182,8 +182,12 @@ export function buildStubApi(): Omit<
       onNotAvailable: noopUnsub,
       check: noop,
       getVersion: U('updates.getVersion'),
-      // Boot path awaits this; null = "no policy" so the update card stays inert.
-      getPolicy: (): Promise<UpdatePolicy> => Promise.resolve(null as unknown as UpdatePolicy),
+      // Boot path awaits this and reads `p.mandatory` UNGUARDED (UpdateCard.tsx), so the old
+      // `null as unknown as UpdatePolicy` — a cast that also defeats this file's `satisfies`
+      // completeness gate — threw a TypeError on every Server Edition page load. There is no
+      // server handler for the update policy (the browser cannot self-install anyway), so the
+      // honest answer is the shape's own "no policy" value: nothing mandatory, no minimum.
+      getPolicy: (): Promise<UpdatePolicy> => Promise.resolve({ minSupported: null, mandatory: false }),
       restart: noop
     },
     announcements: {
@@ -202,7 +206,11 @@ export function buildStubApi(): Omit<
       info: U('contextLink.info')
     },
     usage: {
-      // Boot path awaits this; null = "no usage snapshot" so the indicator hides.
+      // Boot path awaits this; null = "no usage snapshot" so the indicator hides. The consumer
+      // (UsageIndicator) does guard for it, but the value still lies about its type: the
+      // `null as unknown as ClaudeUsage` cast is exactly the pattern that hid the getPolicy
+      // TypeError above. Fixing it properly means widening `UsageApi.fetch` to
+      // `Promise<ClaudeUsage | null>` (a public-API change) — tracked separately.
       fetch: (): Promise<ClaudeUsage> => Promise.resolve(null as unknown as ClaudeUsage),
       refresh: U('usage.refresh'),
       onUpdate: noopUnsub
