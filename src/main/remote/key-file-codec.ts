@@ -32,15 +32,23 @@ export function encodeKeyFile(keys: KeyPair, safe: SafeStorageLike): string {
 }
 
 /**
- * Parse a key file. Returns the keypair plus `migrate:true` when the file is legacy plaintext but
- * encryption is now available (caller should re-persist to upgrade in place, KEEPING the identity).
- * Returns null on malformed input or an undecryptable blob (e.g. keychain reset) — the caller then
- * generates a fresh identity, exactly as host-service.ts does.
+ * The three outcomes of reading a key file. They are NOT interchangeable — the caller must branch:
+ *
+ * - `{ keys, migrate }` — usable. `migrate:true` means the file is legacy plaintext but encryption
+ *   is now available: re-persist to upgrade in place, KEEPING the identity.
+ * - `null` — unusable: malformed JSON, a wrong-length key, or an encrypted blob the (available)
+ *   keychain cannot decrypt (keychain reset ⇒ the secret is gone for good). Regenerating is the
+ *   only way forward and is CORRECT here.
+ * - `'locked'` — the file is well-formed and holds an ENCRYPTED secret, but `isEncryptionAvailable()`
+ *   is false RIGHT NOW (keyring not yet unlocked, no session bus, safeStorage backend down). The
+ *   identity is intact on disk, merely unreadable at this moment. The caller MUST NOT write:
+ *   regenerating would replace a pinned identity with a fresh (plaintext) one, forcing re-approval
+ *   on every host that pinned it — unrecoverably. Fail the operation and tell the user to unlock.
  */
-export function decodeKeyFile(
-  raw: string,
-  safe: SafeStorageLike
-): { keys: KeyPair; migrate: boolean } | null {
+export type KeyFileDecoded = { keys: KeyPair; migrate: boolean } | null | 'locked'
+
+/** Parse a key file. See `KeyFileDecoded` — the three outcomes must not be collapsed into one. */
+export function decodeKeyFile(raw: string, safe: SafeStorageLike): KeyFileDecoded {
   let body: unknown
   try {
     body = JSON.parse(raw)
@@ -58,8 +66,12 @@ export function decodeKeyFile(
   // short/empty "identity" that the caller accepts and only fails much later inside nacl.
   try {
     const publicKey = publicKeyFromB64(file.publicKey)
-    if (file.secretKeyEnc && safe.isEncryptionAvailable()) {
-      // decryptString may throw (keychain reset) OR return junk — either way we return null.
+    if (file.secretKeyEnc) {
+      // An encrypted secret is AUTHORITATIVE: never silently fall back to a (possibly stale)
+      // plaintext one, and never mistake "no keyring right now" for corruption.
+      if (!safe.isEncryptionAvailable()) return 'locked'
+      // decryptString may throw (keychain reset) OR return junk — either way the secret is
+      // genuinely gone, so that is `null` (regenerate), not `'locked'`.
       const secretB64 = safe.decryptString(Buffer.from(file.secretKeyEnc, 'base64'))
       return { keys: { publicKey, secretKey: secretKeyFromB64(secretB64) }, migrate: false }
     }

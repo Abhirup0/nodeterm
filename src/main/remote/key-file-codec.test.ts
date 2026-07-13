@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { encodeKeyFile, decodeKeyFile, type SafeStorageLike } from './key-file-codec'
-import { genKeyPair, publicKeyToB64 } from './e2ee'
+import {
+  encodeKeyFile,
+  decodeKeyFile,
+  type KeyFileDecoded,
+  type SafeStorageLike
+} from './key-file-codec'
+import { genKeyPair, publicKeyToB64, type KeyPair } from './e2ee'
 
 // A reversible fake keychain: "encryption" is a byte-flip so we can prove the plaintext secret is
 // NOT stored verbatim, yet decode round-trips. isEncryptionAvailable is toggled per test.
@@ -13,6 +18,13 @@ function fakeSafe(available: boolean): SafeStorageLike {
   }
 }
 
+// Narrow the three-way result to the usable one. The union is deliberately NOT `T | null`, so a
+// caller cannot reach `.keys` without first ruling out 'locked' — that is the whole point.
+function usable(decoded: KeyFileDecoded): { keys: KeyPair; migrate: boolean } {
+  if (!decoded || decoded === 'locked') throw new Error(`expected a usable key file, got ${decoded}`)
+  return decoded
+}
+
 describe('key-file-codec', () => {
   it('round-trips an encrypted key file and never stores the raw secret', () => {
     const safe = fakeSafe(true)
@@ -22,12 +34,11 @@ describe('key-file-codec', () => {
     expect(parsed.publicKey).toBe(publicKeyToB64(keys.publicKey))
     expect(parsed.secretKeyEnc).toBeTypeOf('string')
     expect(parsed.secretKey).toBeUndefined() // secret is not on disk in the clear
-    const back = decodeKeyFile(raw, safe)
-    expect(back).not.toBeNull()
-    expect(Buffer.from(back!.keys.secretKey).toString('hex')).toBe(
+    const back = usable(decodeKeyFile(raw, safe))
+    expect(Buffer.from(back.keys.secretKey).toString('hex')).toBe(
       Buffer.from(keys.secretKey).toString('hex')
     )
-    expect(back!.migrate).toBe(false)
+    expect(back.migrate).toBe(false)
   })
 
   it('writes plaintext when encryption is unavailable and reads it back', () => {
@@ -37,20 +48,47 @@ describe('key-file-codec', () => {
     const parsed = JSON.parse(raw) as Record<string, string>
     expect(parsed.secretKey).toBeTypeOf('string')
     expect(parsed.secretKeyEnc).toBeUndefined()
-    const back = decodeKeyFile(raw, safe)
-    expect(Buffer.from(back!.keys.publicKey).toString('hex')).toBe(
+    const back = usable(decodeKeyFile(raw, safe))
+    expect(Buffer.from(back.keys.publicKey).toString('hex')).toBe(
       Buffer.from(keys.publicKey).toString('hex')
     )
-    expect(back!.migrate).toBe(false)
+    expect(back.migrate).toBe(false)
   })
 
   it('flags legacy plaintext for migration when encryption becomes available (same identity)', () => {
     const keys = genKeyPair()
     const legacy = encodeKeyFile(keys, fakeSafe(false)) // written on a machine with no keyring
-    const back = decodeKeyFile(legacy, fakeSafe(true)) // now a keyring exists
-    expect(back).not.toBeNull()
-    expect(back!.migrate).toBe(true)
-    expect(back!.keys.secretKey).toEqual(keys.secretKey) // identity preserved, never regenerated
+    const back = usable(decodeKeyFile(legacy, fakeSafe(true))) // now a keyring exists
+    expect(back.migrate).toBe(true)
+    expect(back.keys.secretKey).toEqual(keys.secretKey) // identity preserved, never regenerated
+  })
+
+  // --- the 'locked' outcome: encrypted file, keyring temporarily gone ------------------------
+  // This is NOT corruption. The bytes are fine; only the OS keyring is unavailable right now
+  // (gnome-keyring not yet unlocked, no session bus). Returning null here would make the caller
+  // regenerate and DESTROY a pinned identity, so the codec reports a distinct third outcome.
+
+  it("reports 'locked' for an encrypted file when encryption is currently unavailable", () => {
+    const enc = encodeKeyFile(genKeyPair(), fakeSafe(true))
+    expect(decodeKeyFile(enc, fakeSafe(false))).toBe('locked')
+  })
+
+  it("reports 'locked' even when a stale legacy plaintext secret is also present", () => {
+    // A half-migrated file: the encrypted secret is authoritative and the plaintext one may be
+    // stale, so with no keyring we must still refuse rather than fall back or regenerate.
+    const raw = JSON.stringify({
+      publicKey: Buffer.alloc(32, 7).toString('base64'),
+      secretKey: Buffer.alloc(32, 7).toString('base64'),
+      secretKeyEnc: Buffer.from('whatever').toString('base64')
+    })
+    expect(decodeKeyFile(raw, fakeSafe(false))).toBe('locked')
+  })
+
+  it("does NOT report 'locked' for a plain corrupt file (regenerating is correct there)", () => {
+    const safe = fakeSafe(false)
+    const pub = Buffer.alloc(32, 7).toString('base64')
+    expect(decodeKeyFile('not json', safe)).toBeNull()
+    expect(decodeKeyFile(JSON.stringify({ publicKey: pub }), safe)).toBeNull() // no secret at all
   })
 
   it('returns null on malformed JSON, missing fields, and an undecryptable blob', () => {
