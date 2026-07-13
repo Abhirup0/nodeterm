@@ -132,7 +132,7 @@ import {
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
-import { buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
+import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
 import { useRemoteHosting } from '../state/remoteHosting'
@@ -1583,7 +1583,14 @@ export function Canvas() {
         accountId: sticky ? undefined : ((n?.data.accountId as string) || undefined)
       }
     }
-    const map = buildLinkMap(valid, infoOf)
+    // Merge in the link maps of every OTHER project (from their serialized nodes + bridges):
+    // main clears all link files before writing the pushed map, so pushing only the active
+    // project's map would sever the links of background projects whose agents keep running.
+    const { projects, activeProjectId } = useProjects.getState()
+    const map = {
+      ...buildBackgroundLinkMaps(projects, activeProjectId, (id) => useAgentStatus.getState().byId[id]?.sessionId),
+      ...buildLinkMap(valid, infoOf)
+    }
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
     // linkSessionSig is read only as an effect trigger — infoOf re-reads sessionIds via getState().
