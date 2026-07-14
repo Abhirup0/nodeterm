@@ -263,6 +263,8 @@ export interface TmuxStatus {
   available: boolean
   /** One-shot install command for a terminal node; null = no known installer (text-only banner). */
   installCommand: string | null
+  /** Button caption for installCommand (e.g. "Install Homebrew + tmux" when brew must come first). */
+  installLabel: string | null
   platform: string
 }
 

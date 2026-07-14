@@ -50,7 +50,7 @@ export function TmuxBanner({ onInstall }: { onInstall: (command: string) => void
             setDismissed(true)
           }}
         >
-          Install tmux
+          {status.installLabel ?? 'Install tmux'}
         </button>
       )}
       <button className="announce-banner__close" title="Dismiss" onClick={() => setDismissed(true)}>

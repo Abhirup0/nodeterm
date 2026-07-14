@@ -210,7 +210,7 @@ export function buildRealApi(
     tmuxStatus: () =>
       client
         .request(IPC.ptyTmuxStatus)
-        .catch(() => ({ available: true, installCommand: null, platform: 'linux' })) as Promise<TmuxStatus>,
+        .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: 'linux' })) as Promise<TmuxStatus>,
     // No server handler — the session-name poll degrades to no adopted name.
     readSessionName: () => Promise.resolve(''),
     onData: (sessionId, listener) =>

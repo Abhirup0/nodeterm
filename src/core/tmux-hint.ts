@@ -3,23 +3,49 @@
 // can't attach — which users never discover on their own; the banner makes it visible and offers
 // a one-click install (run in a terminal node, gh-sign-in style).
 
-/** Suggested one-shot install command for the host, or null when no known package manager is
- *  present (the banner then shows text-only guidance). Order within linux is Debian-family first
- *  (the Server Edition's documented target), then the other majors. */
-export function tmuxInstallCommand(
+export interface TmuxInstallHint {
+  command: string
+  /** Button caption — tells the user up front when more than tmux is being installed. */
+  label: string
+}
+
+/** Suggested one-shot install for the host, or null when there is nothing sensible to run
+ *  (win32; a linux with no known package manager). Order within linux is Debian-family first
+ *  (the Server Edition's documented target), then the other majors.
+ *
+ *  darwin WITHOUT brew is never text-only: macOS has no built-in package manager, so the button
+ *  chains the OFFICIAL Homebrew installer (which itself prompts for confirmation + password —
+ *  the user watches it run in the terminal node) and then calls the fresh brew BY ABSOLUTE PATH
+ *  (Apple Silicon /opt/homebrew, Intel /usr/local): the just-installed brew is not on the
+ *  launching shell's PATH, so a bare `brew install tmux` would fail right after succeeding. */
+export function tmuxInstall(
   platform: NodeJS.Platform | string,
   hasCommand: (cmd: string) => boolean
-): string | null {
+): TmuxInstallHint | null {
   if (platform === 'darwin') {
-    return hasCommand('brew') ? 'brew install tmux' : null
+    if (hasCommand('brew')) return { command: 'brew install tmux', label: 'Install tmux' }
+    return {
+      command:
+        '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' +
+        ' && { b=/opt/homebrew/bin/brew; [ -x "$b" ] || b=/usr/local/bin/brew; "$b" install tmux; }',
+      label: 'Install Homebrew + tmux'
+    }
   }
   if (platform === 'linux') {
-    if (hasCommand('apt-get')) return 'sudo apt-get update && sudo apt-get install -y tmux'
-    if (hasCommand('dnf')) return 'sudo dnf install -y tmux'
-    if (hasCommand('yum')) return 'sudo yum install -y tmux'
-    if (hasCommand('pacman')) return 'sudo pacman -S --needed tmux'
-    if (hasCommand('zypper')) return 'sudo zypper install -y tmux'
-    if (hasCommand('apk')) return 'sudo apk add tmux'
+    const command = hasCommand('apt-get')
+      ? 'sudo apt-get update && sudo apt-get install -y tmux'
+      : hasCommand('dnf')
+        ? 'sudo dnf install -y tmux'
+        : hasCommand('yum')
+          ? 'sudo yum install -y tmux'
+          : hasCommand('pacman')
+            ? 'sudo pacman -S --needed tmux'
+            : hasCommand('zypper')
+              ? 'sudo zypper install -y tmux'
+              : hasCommand('apk')
+                ? 'sudo apk add tmux'
+                : null
+    return command ? { command, label: 'Install tmux' } : null
   }
   return null
 }

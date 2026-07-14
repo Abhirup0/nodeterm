@@ -1,24 +1,38 @@
 import { describe, it, expect } from 'vitest'
-import { findCommand, tmuxInstallCommand } from './tmux-hint'
+import { findCommand, tmuxInstall } from './tmux-hint'
 
-describe('tmuxInstallCommand', () => {
-  it('darwin: brew when present, else no one-click command (text-only banner)', () => {
-    expect(tmuxInstallCommand('darwin', (c) => c === 'brew')).toBe('brew install tmux')
-    expect(tmuxInstallCommand('darwin', () => false)).toBeNull()
+describe('tmuxInstall', () => {
+  it('darwin with brew: one-click brew install', () => {
+    expect(tmuxInstall('darwin', (c) => c === 'brew')).toEqual({
+      command: 'brew install tmux',
+      label: 'Install tmux'
+    })
+  })
+
+  it('darwin WITHOUT brew: bootstraps Homebrew first (official installer), then tmux — never text-only', () => {
+    const hint = tmuxInstall('darwin', () => false)
+    expect(hint?.label).toBe('Install Homebrew + tmux')
+    expect(hint?.command).toContain('https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh')
+    // The fresh brew is not on this shell's PATH — the chain must call it by absolute path
+    // (Apple Silicon first, Intel fallback) or the second step dies right after the first.
+    expect(hint?.command).toContain('/opt/homebrew/bin/brew')
+    expect(hint?.command).toContain('/usr/local/bin/brew')
+    expect(hint?.command).toContain('install tmux')
   })
 
   it('linux: picks the first known package manager, in order', () => {
-    expect(tmuxInstallCommand('linux', (c) => c === 'apt-get')).toContain('apt-get install -y tmux')
-    expect(tmuxInstallCommand('linux', (c) => c === 'dnf')).toBe('sudo dnf install -y tmux')
-    expect(tmuxInstallCommand('linux', (c) => c === 'pacman')).toBe('sudo pacman -S --needed tmux')
-    expect(tmuxInstallCommand('linux', (c) => c === 'apk')).toBe('sudo apk add tmux')
+    expect(tmuxInstall('linux', (c) => c === 'apt-get')?.command).toContain('apt-get install -y tmux')
+    expect(tmuxInstall('linux', (c) => c === 'dnf')?.command).toBe('sudo dnf install -y tmux')
+    expect(tmuxInstall('linux', (c) => c === 'pacman')?.command).toBe('sudo pacman -S --needed tmux')
+    expect(tmuxInstall('linux', (c) => c === 'apk')?.command).toBe('sudo apk add tmux')
     // apt-get outranks dnf when both exist (Debian-family first, matching the server docs' target).
-    expect(tmuxInstallCommand('linux', () => true)).toContain('apt-get')
-    expect(tmuxInstallCommand('linux', () => false)).toBeNull()
+    expect(tmuxInstall('linux', () => true)?.command).toContain('apt-get')
+    expect(tmuxInstall('linux', () => true)?.label).toBe('Install tmux')
+    expect(tmuxInstall('linux', () => false)).toBeNull()
   })
 
   it('win32 (no native tmux): never suggests a command', () => {
-    expect(tmuxInstallCommand('win32', () => true)).toBeNull()
+    expect(tmuxInstall('win32', () => true)).toBeNull()
   })
 })
 

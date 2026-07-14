@@ -15,7 +15,7 @@ import {
   type Settings,
   type TmuxStatus
 } from '../shared/types'
-import { findCommand, tmuxInstallCommand } from './tmux-hint'
+import { findCommand, tmuxInstall } from './tmux-hint'
 import { hookServer } from './agents/hook-server'
 import {
   remoteHookEnvArgs,
@@ -631,11 +631,13 @@ export class PtyManager {
    *  manager is present (run in a terminal node, gh-sign-in style). */
   tmuxStatus(): TmuxStatus {
     const available = !!this.tmuxPath
+    const hint = available
+      ? null
+      : tmuxInstall(process.platform, (cmd) => findCommand(cmd, process.env, fs.existsSync))
     return {
       available,
-      installCommand: available
-        ? null
-        : tmuxInstallCommand(process.platform, (cmd) => findCommand(cmd, process.env, fs.existsSync)),
+      installCommand: hint?.command ?? null,
+      installLabel: hint?.label ?? null,
       platform: process.platform
     }
   }
