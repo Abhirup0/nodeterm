@@ -428,6 +428,7 @@ export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'pres
     cursor: (cursor) => client.cast(IPC.presenceCursor, cursor),
     focus: (nodeId) => client.cast(IPC.presenceFocus, nodeId),
     chat: (text) => client.cast(IPC.presenceChat, text),
+    dino: (payload) => client.cast(IPC.presenceDino, payload),
     project: (projectId) => client.cast(IPC.presenceProject, projectId),
     onSync: (listener) => client.subscribe(IPC.presenceSync, listener as Listener),
     onPeer: (listener) => client.subscribe(IPC.presencePeer, listener as Listener)

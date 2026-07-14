@@ -32,8 +32,42 @@ export interface PeerState {
    *  project has its OWN node set and flow coordinate space, so cursor/focus only mean anything
    *  to a viewer on the same project — see peersOnProject. */
   projectId: string | null
+  /** The live dino game this peer is the AUTHORITY for, or null. Ephemeral like `chat`: cleared
+   *  when the peer stops playing / closes the node / leaves. A spectator renders `snap` for the
+   *  matching node id instead of running its own sim. Sanitized/clamped at the hub
+   *  (sanitizeDinoPayload) so a malformed/oversized cast can never flood the wire. */
+  dino: { nodeId: string; snap: DinoSnapshot } | null
   kind: 'browser' | 'phone' | 'desktop'
 }
+
+/** One on-screen obstacle in a dino snapshot (a cactus or a bird), with the sprite-sheet source
+ *  rect a spectator needs to draw it (sx/sw/sh) and the bird wing phase (flap). */
+export interface DinoObstacleSnap {
+  kind: 'cactus' | 'bird'
+  x: number
+  y: number
+  sx: number
+  sw: number
+  sh: number
+  flap: number
+}
+
+/** The minimal per-frame state a spectator needs to draw one dino frame. Small (a handful of
+ *  numbers + ≤ DINO_MAX_OBSTACLES obstacles); broadcast by the authority ~20 Hz, never persisted. */
+export interface DinoSnapshot {
+  y: number
+  ducking: boolean
+  crashed: boolean
+  started: boolean
+  score: number
+  speed: number
+  groundScroll: number
+  obstacles: DinoObstacleSnap[]
+}
+
+/** Max obstacles a snapshot may carry. The hub clamps to this (like CHAT_MAX_LEN) so a malformed
+ *  or oversized cast can't flood the wire — a real run only has a handful on screen at once. */
+export const DINO_MAX_OBSTACLES = 12
 
 export type PeerDiff =
   | { op: 'join'; peer: PeerState }
@@ -146,4 +180,60 @@ export function sanitizeIdentity(raw: unknown, fallback: PeerIdentity): PeerIden
   const color =
     typeof r.color === 'string' && PRESENCE_COLORS.includes(r.color) ? r.color : fallback.color
   return { name: name || fallback.name, color }
+}
+
+/** Coerce an untrusted value into a finite number: a non-number, NaN or ±Infinity → 0. Snapshot
+ *  numbers are drawn straight onto a canvas, so a NaN/Infinity off the wire must never survive. */
+function finiteNum(v: unknown): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+/** One obstacle off the wire → a safe DinoObstacleSnap, or null to DROP it (bad/absent kind). */
+function sanitizeDinoObstacle(raw: unknown): DinoObstacleSnap | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  if (o.kind !== 'cactus' && o.kind !== 'bird') return null
+  return {
+    kind: o.kind,
+    x: finiteNum(o.x),
+    y: finiteNum(o.y),
+    sx: finiteNum(o.sx),
+    sw: finiteNum(o.sw),
+    sh: finiteNum(o.sh),
+    flap: finiteNum(o.flap)
+  }
+}
+
+/** THE one door for an untrusted dino cast (the hub applies ONLY this value). Returns null unless
+ *  the payload is `{ nodeId: non-empty string, snap: {...} }`; caps the nodeId at REF_MAX_LEN like
+ *  focus, coerces every snap number to finite (garbage → 0) and every flag to boolean, and CLAMPS
+ *  obstacles to the first DINO_MAX_OBSTACLES (each sanitized; a bad-kind one is dropped). Anything
+ *  malformed → null, so the flood/garbage guard cannot be bypassed. */
+export function sanitizeDinoPayload(
+  payload: unknown
+): { nodeId: string; snap: DinoSnapshot } | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const p = payload as Record<string, unknown>
+  if (typeof p.nodeId !== 'string' || p.nodeId === '') return null
+  const nodeId = capCodePoints(p.nodeId, REF_MAX_LEN)
+  if (typeof p.snap !== 'object' || p.snap === null) return null
+  const s = p.snap as Record<string, unknown>
+  const rawObstacles = Array.isArray(s.obstacles) ? s.obstacles : []
+  const obstacles: DinoObstacleSnap[] = []
+  for (const raw of rawObstacles.slice(0, DINO_MAX_OBSTACLES)) {
+    const ob = sanitizeDinoObstacle(raw)
+    if (ob) obstacles.push(ob)
+  }
+  const snap: DinoSnapshot = {
+    y: finiteNum(s.y),
+    ducking: Boolean(s.ducking),
+    crashed: Boolean(s.crashed),
+    started: Boolean(s.started),
+    score: finiteNum(s.score),
+    speed: finiteNum(s.speed),
+    groundScroll: finiteNum(s.groundScroll),
+    obstacles
+  }
+  return { nodeId, snap }
 }

@@ -443,6 +443,34 @@ re-render `Canvas`, every mouse move would redraw a 4000-line component.
   that repo:** send `presence:hello` + `presence:focus`, and render received cursor chat as a
   banner (it has no cursor to anchor a bubble to). Mobile does not *send* cursor chat in v1.
 
+## Live dino (spectator mode)
+
+The dino node (a T-Rex runner easter-egg) is a live/shared game on a shared canvas: one authority
+plays, everyone else on that project watches the SAME game live — like cursors. It rides presence,
+adding NO new core channel.
+
+- **Wire.** `PeerState` carries an ephemeral `dino: { nodeId; snap: DinoSnapshot } | null` (like
+  `chat`), cast on `presence:dino` and cleared on leave. The hub `sanitizeDinoPayload`s every cast
+  (clamps `DINO_MAX_OBSTACLES`, coerces every number finite, validates each obstacle `kind`, caps
+  the nodeId) — a peer cannot inject unbounded/garbage state. The cast is rate-limited like the
+  cursor; only the genuine `null` stop is exempt (a dropped stop would strand a spectator).
+- **Engine** (`dino/dino-game.ts` + the pure `dino/dino-sync.ts`). The authority broadcasts
+  `currentSnapshot()` at `DINO_BROADCAST_HZ = 20`, and exactly ONE `null` on the run→idle/stop edge.
+  A spectator's `setRemote(snap)` suspends its own physics + input and renders the snapshot (the loop
+  runs even unfocused); `setRemote(null)` returns to local idle and is idempotent (calling it every
+  render while already local never resets a live game). A local key while spectating is a **take-over**:
+  the engine seeds from the last snapshot (no teleport) and becomes the authority.
+- **Node** (`DinoNode.tsx`). It's under the active-session provider, so `api.presence.dino` +
+  `selectDino` follow the active session (a **relay tab's** dino is live over the tunnel for free).
+  The lowest `clientId` wins the authority tiebreak (`dino/dino-authority.ts` `shouldSpectate`), so a
+  two-player Space race converges deterministically; a "▷ &lt;name&gt; is playing" pill (peer color)
+  marks a spectated node.
+- **Free when alone** — like `reportFocus`, the ~20 Hz snapshot cast is skipped with no peers (the
+  `null` stop always lands). A solo player's game is byte-identical to before this feature.
+- **Surfaces:** desktop / relay tab / Server-Edition browser all work via the hub + bridge. **Mobile:**
+  the phone is on the retained old dialect (no rpc presence) — it neither broadcasts nor watches dino;
+  a graceful degrade that rides the phone's eventual rpc migration.
+
 ## What Stage 1 changed relative to this spec
 
 The sections above are the design as approved. Stage 1 implemented them faithfully with three

@@ -1,4 +1,9 @@
+import type { DinoSnapshot } from '@shared/presence'
+import { DinoSync, type DinoSyncEmit } from './dino-sync'
 import spriteUrl from './sprite-1x.png'
+
+/** One obstacle as it rides a snapshot (no collision box — a spectator only draws). */
+type DinoObstacleSnap = DinoSnapshot['obstacles'][number]
 
 /**
  * A small, self-contained T-Rex–style endless runner rendered to a <canvas>.
@@ -10,11 +15,27 @@ import spriteUrl from './sprite-1x.png'
  * Chrome offline sprite sheet (`sprite-1x.png`), drawn frame-by-frame from its
  * real atlas coordinates and tinted light so it reads on the dark field. The
  * public interface matches DinoNode; high score is seeded in and reported out.
+ *
+ * Live/shared play (see docs/superpowers/specs/2026-07-14-dino-live-design.md): the
+ * game can BROADCAST its state as the authority (`opts.onSnapshot`, throttled to
+ * DINO_BROADCAST_HZ) and SPECTATE a remote authority (`setRemote(snap)` — the sim +
+ * input are suspended and the snapshot is drawn instead). A local key while spectating
+ * takes over (seeds from the last snapshot, then plays + broadcasts). With no
+ * `onSnapshot` and no `setRemote` call, behavior is byte-identical to solo play.
  */
 export function createDinoGame(
   host: HTMLElement,
-  opts: { initialHighScore: number; onHighScore: (score: number) => void }
-): { destroy: () => void } {
+  opts: {
+    initialHighScore: number
+    onHighScore: (score: number) => void
+    onSnapshot?: (snap: DinoSnapshot | null) => void
+  }
+): {
+  destroy: () => void
+  setRemote: (snap: DinoSnapshot | null) => void
+  isRemote: () => boolean
+  isAuthority: () => boolean
+} {
   const canvas = document.createElement('canvas')
   canvas.className = 'dino-canvas'
   host.appendChild(canvas)
@@ -132,6 +153,57 @@ export function createDinoGame(
   }
   let obstacles: Obstacle[] = []
 
+  // Live/shared play: local-authority vs. remote-spectator mode + broadcast throttle.
+  const sync = new DinoSync()
+
+  function emit(what: DinoSyncEmit) {
+    if (!opts.onSnapshot) return
+    if (what === 'snapshot') opts.onSnapshot(currentSnapshot())
+    else if (what === 'null') opts.onSnapshot(null)
+  }
+
+  // The minimal per-frame state a spectator needs to redraw this run.
+  function currentSnapshot(): DinoSnapshot {
+    return {
+      y: dinoY,
+      ducking,
+      crashed,
+      started,
+      score,
+      speed,
+      groundScroll,
+      obstacles: obstacles.map((o) => ({
+        kind: o.kind,
+        x: o.x,
+        y: o.y,
+        sx: o.sx,
+        sw: o.sw,
+        sh: o.sh,
+        flap: o.flap
+      }))
+    }
+  }
+
+  // Rebuild a full Obstacle (with its collision box) from a wire snapshot. The box is
+  // only needed once we take over and run our own sim; drawing ignores it.
+  function obstacleFromSnap(o: DinoObstacleSnap): Obstacle {
+    const col =
+      o.kind === 'bird' ? BIRD.col : o.sw === CACTUS_LARGE.w ? CACTUS_LARGE.col : CACTUS_SMALL.col
+    return { kind: o.kind, x: o.x, y: o.y, sx: o.sx, sw: o.sw, sh: o.sh, flap: o.flap, col }
+  }
+
+  // Adopt a remote snapshot as the live state so the shared draw() renders it verbatim.
+  function applyRemote(snap: DinoSnapshot) {
+    dinoY = snap.y
+    ducking = snap.ducking
+    crashed = snap.crashed
+    started = snap.started
+    score = snap.score
+    speed = snap.speed
+    groundScroll = snap.groundScroll
+    obstacles = snap.obstacles.map(obstacleFromSnap)
+  }
+
   function reset() {
     score = 0
     speed = 320
@@ -198,6 +270,7 @@ export function createDinoGame(
 
   // --- Update + draw --------------------------------------------------------
   function update(dt: number) {
+    if (sync.isRemote()) return // spectator: physics suspended, draw() renders the remote snap
     if (crashed || !started) return
     score += dt * 22
     speed += dt * 14
@@ -302,6 +375,7 @@ export function createDinoGame(
     last = now
     update(dt)
     draw()
+    emit(sync.tick(now, started || crashed)) // broadcast (throttled) while authoritative
     raf = requestAnimationFrame(frame)
   }
   function start() {
@@ -310,8 +384,36 @@ export function createDinoGame(
     raf = requestAnimationFrame(frame)
   }
   function stop() {
+    emit(sync.endBroadcast()) // one null on the stop edge (no-op while spectating)
     if (raf) cancelAnimationFrame(raf)
     raf = 0
+  }
+
+  // Enter/leave spectator mode. A remote snapshot keeps the loop running (to draw) even
+  // when unfocused; leaving returns the own sim to its pre-start idle frame.
+  function setRemote(snap: DinoSnapshot | null) {
+    if (snap) {
+      emit(sync.setRemote(snap)) // may emit one null on the authority→spectator (yield) edge
+      applyRemote(snap)
+      start()
+      draw()
+    } else {
+      const wasRemote = sync.isRemote()
+      sync.setRemote(null)
+      if (wasRemote) {
+        reset()
+        started = false
+      }
+      if (!focused) stop()
+      draw()
+    }
+  }
+
+  // A local key while spectating → take over: seed from the last remote snap for
+  // continuity (so the dino doesn't teleport), then the caller's input plays as authority.
+  function takeOverIfRemote() {
+    const seed = sync.takeOver()
+    if (seed) applyRemote(seed)
   }
 
   // --- Input (scoped to host focus) -----------------------------------------
@@ -319,10 +421,12 @@ export function createDinoGame(
     if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Spacebar') {
       e.preventDefault()
       e.stopPropagation()
+      takeOverIfRemote()
       jump()
     } else if (e.key === 'ArrowDown') {
       e.preventDefault()
       e.stopPropagation()
+      takeOverIfRemote()
       ducking = true
     }
   }
@@ -336,6 +440,10 @@ export function createDinoGame(
   const onBlur = () => {
     focused = false
     ducking = false
+    if (sync.isRemote()) {
+      draw() // spectator keeps watching without focus
+      return
+    }
     stop()
     draw() // leave a static idle frame
   }
@@ -369,6 +477,9 @@ export function createDinoGame(
         audio = null
       }
       canvas.remove()
-    }
+    },
+    setRemote,
+    isRemote: () => sync.isRemote(),
+    isAuthority: () => sync.isAuthority()
   }
 }

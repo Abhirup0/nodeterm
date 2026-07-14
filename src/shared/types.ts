@@ -4,7 +4,7 @@ import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
-import type { ClientId, PeerDiff, PeerIdentity, PeerState } from './presence'
+import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -1241,6 +1241,9 @@ export interface PresenceApi {
   focus(nodeId: string | null): void
   /** Publish live cursor-chat text (null closes the bubble). */
   chat(text: string | null): void
+  /** Publish the live dino game we are the authority for (null = stopped/idle). Spectators read
+   *  the matching peer's `dino` and render `snap` instead of running their own sim. */
+  dino(payload: { nodeId: string; snap: DinoSnapshot } | null): void
   /** Publish the project (canvas) we are looking at — peers on other projects are never drawn
    *  on our canvas, and we are never drawn on theirs (null = no project open). */
   project(projectId: string | null): void

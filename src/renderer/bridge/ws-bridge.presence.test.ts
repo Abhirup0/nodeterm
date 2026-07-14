@@ -24,7 +24,7 @@ function fakeClient() {
 }
 
 describe('buildPresenceApi', () => {
-  it('hello is a request; cursor/focus/chat/project are casts; onSync/onPeer subscribe', async () => {
+  it('hello is a request; cursor/focus/chat/dino/project are casts; onSync/onPeer subscribe', async () => {
     const c = fakeClient()
     const { presence } = buildPresenceApi(c as never)
 
@@ -40,12 +40,29 @@ describe('buildPresenceApi', () => {
     presence.cursor(null)
     presence.focus('node-a')
     presence.chat('hey')
+    const dinoPayload = {
+      nodeId: 'dino-a',
+      snap: {
+        y: 0,
+        ducking: false,
+        crashed: false,
+        started: true,
+        score: 1,
+        speed: 6,
+        groundScroll: 0,
+        obstacles: []
+      }
+    }
+    presence.dino(dinoPayload)
+    presence.dino(null)
     presence.project('web')
     expect(c.casts).toEqual([
       { method: IPC.presenceCursor, args: [{ x: 1, y: 2 }] },
       { method: IPC.presenceCursor, args: [null] },
       { method: IPC.presenceFocus, args: ['node-a'] },
       { method: IPC.presenceChat, args: ['hey'] },
+      { method: IPC.presenceDino, args: [dinoPayload] },
+      { method: IPC.presenceDino, args: [null] },
       { method: IPC.presenceProject, args: ['web'] }
     ])
 
