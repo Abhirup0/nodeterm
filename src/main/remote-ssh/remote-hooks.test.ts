@@ -20,12 +20,16 @@ describe('RemoteHooks.setup', () => {
   it('opens a reverse forward, writes the endpoint file, and installs the managed hook for claude', async () => {
     const { rh, calls } = mk()
     const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
-    expect(res?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint.env')
+    // Endpoint file is PER-PROJECT (was a single shared hook-endpoint.env): each connection —
+    // real project OR a transient folder-picker browse — has its own reverse-tunnel socket, so a
+    // shared file let the last writer (often a short-lived browse whose tunnel then died) point
+    // every session at a dead socket, silently killing hook delivery for all real projects.
+    expect(res?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
     const joined = calls.map((c) => c.args.join(' '))
     // reverse forward binds the ABSOLUTE remote socket (no unexpanded ~).
     expect(joined.some((j) => j.includes('-O forward') && j.includes('/home/u/.nodeterm/hook-p1.sock:127.0.0.1:51234'))).toBe(true)
-    // endpoint file written to the absolute path, with the absolute sock + token.
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint.env'))).toBe(true)
+    // endpoint file written to the absolute PER-PROJECT path, with the absolute sock + token.
+    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-p1.env'))).toBe(true)
     expect(
       calls.some(
         (c) =>
@@ -42,6 +46,18 @@ describe('RemoteHooks.setup', () => {
     expect(calls.some((c) => (c.stdin ?? '').includes('"hooks"'))).toBe(true)
     // no unexpanded tilde survives in any remote path/command.
     expect(joined.some((j) => j.includes('~/'))).toBe(false)
+  })
+
+  it('gives two different projects (or a browse) distinct endpoint files — no shared clobber', async () => {
+    const a = await mk().rh.setup('proj', conn, '/s', { port: 1, token: 't', version: '1' })
+    const { rh, calls } = mk()
+    const b = await rh.setup('ssh-browse-xyz', conn, '/s', { port: 2, token: 't', version: '1' })
+    expect(a?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-proj.env')
+    expect(b?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env')
+    // the browse writes ITS OWN endpoint file, never the real project's.
+    const joined = calls.map((c) => c.args.join(' '))
+    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'))).toBe(true)
+    expect(joined.some((j) => j.includes('hook-endpoint-proj.env'))).toBe(false)
   })
 })
 

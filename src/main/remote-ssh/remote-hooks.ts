@@ -53,7 +53,14 @@ export class RemoteHooks {
       if (code !== 0 || !home) return null // fail-open: nothing else would work
       const remoteDir = `${home}/.nodeterm`
       const sock = `${remoteDir}/hook-${projectId}.sock`
-      const endpoint = `${remoteDir}/hook-endpoint.env`
+      // PER-PROJECT endpoint file. The sock is already per-project, but the endpoint file used to
+      // be a single shared `hook-endpoint.env`: every connect — a real project AND every transient
+      // folder-picker browse (projectId `ssh-browse-*`, same connect() path) — overwrote it with
+      // its own sock. A browse's tunnel dies when the picker closes, leaving the shared file
+      // pointing at a dead socket, so every real project's hook POSTs (`curl --unix-socket`) failed
+      // silently → no status badge / context meter / subagent cards / session-name sync on ANY SSH
+      // node. A per-project file means each session sources ITS OWN project's live sock.
+      const endpoint = `${remoteDir}/hook-endpoint-${projectId}.env`
       // 1. reverse unix-socket forward (stale socket → remove first so -R can bind).
       await this.r.run(childArgs(conn, controlPath, `mkdir -p ${remoteDir} && rm -f ${sock}`))
       await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
