@@ -84,8 +84,11 @@ function isClearingCast(channel: string, payload: unknown): boolean {
   if (channel === IPC.presenceChat) return typeof payload !== 'string'
   if (channel === IPC.presenceFocus) return typeof payload !== 'string' || payload === ''
   // A dino "stop" (the authority quit / closed the node) is an EDGE — nothing supersedes it, and a
-  // dropped one leaves a frozen ghost game on every spectator. Mirror setDino's own null rule.
-  if (channel === IPC.presenceDino) return sanitizeDinoPayload(payload) === null
+  // dropped one leaves a frozen ghost game on every spectator, so the genuine stop (`null`) is
+  // exempt. A MALFORMED non-null cast is NOT a stop — it goes through the rate bucket (so a garbage
+  // flood is bounded), and setDino sanitizes it to null (a no-op if the peer wasn't playing). Cheap
+  // `== null` here, not a full sanitize, so the common exempt path allocates nothing.
+  if (channel === IPC.presenceDino) return payload == null
   return false
 }
 

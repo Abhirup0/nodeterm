@@ -458,7 +458,14 @@ describe('PresenceHub dino (live spectator cast)', () => {
     }
     expect(diffs().length - before).toBe(budget.burst) // the bucket, not one cast more
 
-    // A stop is an edge (a dropped one leaves a frozen ghost) → exempt, lands even when drained.
+    // A MALFORMED non-null cast is NOT an exempt stop — it spends a token like any snapshot, so a
+    // garbage flood is bounded by the same bucket (which is now drained → this drops, no diff).
+    const afterFlood = diffs().length
+    for (let i = 0; i < 50; i++) fake.senderListeners[IPC.presenceDino](1, { garbage: i })
+    expect(diffs().length).toBe(afterFlood) // all dropped by the rate limiter, not exempted
+
+    // A genuine stop (null) is an edge (a dropped one leaves a frozen ghost) → exempt, lands even
+    // when the bucket is drained.
     fake.senderListeners[IPC.presenceDino](1, null)
     expect(hub.peers()[0].dino).toBeNull()
     expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { dino: null } })
