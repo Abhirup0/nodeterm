@@ -68,6 +68,8 @@ import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
+import { BugReportDialog } from '../components/BugReportDialog'
+import { describeOs, REPO_URL } from '../lib/bugReport'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
@@ -440,6 +442,16 @@ export function Canvas() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [bugReportOpen, setBugReportOpen] = useState(false)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    // Server Edition's bridge rejects getVersion — unknown version is fine there.
+    window.nodeTerminal.updates
+      .getVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => {})
+  }, [])
   const [explorerOpen, setExplorerOpen] = useState(false)
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
@@ -5537,7 +5549,30 @@ export function Canvas() {
         >
           ⚙
         </button>
-        <button title="Keyboard shortcuts (⌘/)" onClick={() => setShortcutsOpen(true)}>
+        <button
+          title="Help"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            setMenu({
+              // Right-align the ~220px menu under the button; never off-screen left.
+              x: Math.max(8, r.right - 220),
+              y: r.bottom + 6,
+              items: [
+                { label: 'Keyboard shortcuts', hint: '⌘/', onClick: () => setShortcutsOpen(true) },
+                { label: 'Report a bug…', onClick: () => setBugReportOpen(true) },
+                {
+                  label: 'GitHub repository',
+                  onClick: () => window.nodeTerminal.shell.openExternal(REPO_URL)
+                },
+                { type: 'separator' },
+                {
+                  type: 'label',
+                  label: `nodeterm${appVersion ? ` v${appVersion}` : ''} · ${describeOs(navigator.userAgent)}`
+                }
+              ]
+            })
+          }}
+        >
           ?
         </button>
       </div>
@@ -5702,6 +5737,14 @@ export function Canvas() {
       )}
 
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
+
+      {bugReportOpen && (
+        <BugReportDialog
+          env={{ appVersion, userAgent: navigator.userAgent }}
+          onOpen={(url) => window.nodeTerminal.shell.openExternal(url)}
+          onClose={() => setBugReportOpen(false)}
+        />
+      )}
 
       {explorerOpen && (
         <ExplorerPanel
