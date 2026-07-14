@@ -611,16 +611,25 @@ describe('selectDino (the spectator picks THE authority broadcasting for a node)
 })
 
 describe('session.dino (casts the live snapshot on the api)', () => {
-  it('forwards the payload (and the clearing null) straight to api.presence.dino', async () => {
+  it('publishes a snapshot only when a peer is watching, but ALWAYS sends the clearing null', async () => {
     vi.stubGlobal('localStorage', memStorage(STORED_ME))
     const api = fakePresenceApi()
-    const { defaultPresence } = await import('./presence')
-
+    const { defaultPresence, usePresence } = await import('./presence')
     const payload = { nodeId: 'dino-a', snap: snap({ score: 42 }) }
+
+    // Alone: a solo player's ~20 Hz snapshot casts are FREE — skipped (like reportFocus). But the
+    // stop (null) still lands (an edge; and it costs nothing) so a spectator can never be stranded.
+    usePresence.setState({ myId: 7, peers: { 7: peer(7) } }) // just me
     defaultPresence.dino(payload)
     defaultPresence.dino(null)
+    expect(api.calls.filter((c) => c[0] === 'dino')).toEqual([['dino', null]])
 
+    // A peer shows up: the snapshot publishes, and its clearing null with it.
+    usePresence.setState({ peers: { 7: peer(7), 8: peer(8) } })
+    defaultPresence.dino(payload)
+    defaultPresence.dino(null)
     expect(api.calls.filter((c) => c[0] === 'dino')).toEqual([
+      ['dino', null],
       ['dino', payload],
       ['dino', null]
     ])

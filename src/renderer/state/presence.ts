@@ -588,8 +588,11 @@ function buildPresenceSession(api: NodeTerminalApi): PresenceSession {
 
   /** Broadcast the live dino game we are the authority for (null = stopped/idle). Unlike focus/
    *  project this is NOT deduped: the DinoNode throttles the snapshot rate itself, each frame is
-   *  distinct, and the clearing null must always reach the hub so spectators stop drawing. */
+   *  distinct. Presence is FREE when you are alone (like reportFocus): a solo player's ~20 Hz
+   *  snapshot casts are skipped when there is no peer to watch — but a clearing `null` ALWAYS lands
+   *  (a stop is an edge; and it costs nothing) so a spectator can never be left drawing a ghost. */
   function dino(payload: { nodeId: string; snap: DinoSnapshot } | null): void {
+    if (payload !== null && !hasPeers()) return
     api.presence.dino(payload)
   }
 
