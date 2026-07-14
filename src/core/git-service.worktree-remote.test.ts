@@ -107,3 +107,24 @@ describe('worktree ops on a REMOTE repo', () => {
     expect(listed.entries.map((e) => e.path)).toEqual([repo])
   })
 })
+
+// history() was the ONE GitService op that bypassed the ssh-routing `git()` executor and ran
+// LOCAL git directly against the scope cwd. For an SSH project that cwd is a REMOTE path, so the
+// panel's commit history always failed ("Failed to load history") — and, worse in principle, a
+// remote path that happens to exist locally would have served the WRONG machine's history.
+describe('history routing', () => {
+  it('a LOCAL repo lists its commits (the guard must not swallow the local path)', async () => {
+    const r = await svc.history(repo)
+    expect(r.items.map((i) => i.subject)).toContain('init')
+  })
+
+  it('a remote-claimed repo never gets LOCAL git run against its (remote) path', async () => {
+    claimAsRemote(repo) // bogus master socket → the remote git fails
+    // The invariant is "the local repo's commits are never served as if they were the host's".
+    // With every remote call failing, the loader lands on its empty result (or throws) — either
+    // reads as a failed load; what it must NOT contain is the LOCAL repo's history.
+    const r = await svc.history(repo).catch(() => ({ items: [] }))
+    expect(r.items.map((i) => i.subject)).not.toContain('init')
+    expect(r.items).toHaveLength(0)
+  })
+})

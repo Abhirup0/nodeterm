@@ -465,11 +465,16 @@ export class GitService {
     if (!cwd) {
       return { items: [], hasIncomingChanges: false, hasOutgoingChanges: false, hasMore: false, limit: opts.limit ?? 50 }
     }
-    // Adapt the shared executor (throws on failure) onto our env-configured git runner.
+    // Adapt the shared executor (throws on failure) onto the ssh-routing `git()` runner — NOT a
+    // direct local `run('git', …)`: for an SSH project the scope cwd is a REMOTE path, and local
+    // git against it fails every history load (or, if the path happens to exist here, serves the
+    // wrong machine's history). `git()` returns {ok,…} instead of throwing, so re-raise on !ok —
+    // the loader's per-probe catches (upstream ref, merge-base, …) rely on failures throwing.
     return loadGitHistoryFromExecutor(
       async (args, dir) => {
-        const { stdout } = await run('git', args, { cwd: dir, env: GIT_ENV, maxBuffer: 50 * 1024 * 1024 })
-        return { stdout }
+        const r = await git(dir, args)
+        if (!r.ok) throw new Error(r.err || `git ${args[0] ?? ''} failed`)
+        return { stdout: r.out }
       },
       cwd,
       opts
