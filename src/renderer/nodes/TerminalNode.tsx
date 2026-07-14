@@ -54,7 +54,6 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
-import { usePresence } from '../state/presence'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
@@ -463,7 +462,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // presence store is written at cursor rate and its perf contract reserves subscriptions for the
   // presence components — a per-terminal subscriber would run on every one of those writes. The
   // overlay is terminal state anyway, so resolving the name when `co.closed` appears is enough.
-  const closedName = co.closed ? closedByLabel(co.closed.by, usePresence.getState().peers) : ''
+  // `co.closed.by` is a ClientId from THIS node's active-session transport, and ClientIds are
+  // per-presence-session — so resolve the name against the ACTIVE session's peer table, not the
+  // local default (else a relay tab shows "another user" / a wrong name). Byte-identical on a
+  // local tab (active presence IS the default).
+  const closedName = co.closed ? closedByLabel(co.closed.by, presence.store.getState().peers) : ''
 
   // "Session ended" (a recycle whose replacement never came — see CoState.ended): the user asks for
   // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
