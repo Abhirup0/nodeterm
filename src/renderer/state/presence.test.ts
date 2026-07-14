@@ -1,5 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { PRESENCE_COLORS, type PeerState } from '@shared/presence'
+import { PRESENCE_COLORS, type DinoSnapshot, type PeerState } from '@shared/presence'
+
+/** A minimal live dino snapshot — the fields are irrelevant to these selector/cast tests. */
+function snap(over: Partial<DinoSnapshot> = {}): DinoSnapshot {
+  return {
+    y: 0,
+    ducking: false,
+    crashed: false,
+    started: true,
+    score: 0,
+    speed: 6,
+    groundScroll: 0,
+    obstacles: [],
+    ...over
+  }
+}
 
 // The store reads localStorage at call time; each test stubs a fresh in-memory storage and
 // re-imports the module (vi.resetModules) so nothing leaks between cases.
@@ -55,6 +70,7 @@ function fakePresenceApi(
     cursor: (c: unknown) => calls.push(['cursor', c]),
     focus: (n: unknown) => calls.push(['focus', n]),
     chat: (t: unknown) => calls.push(['chat', t]),
+    dino: (payload: unknown) => calls.push(['dino', payload]),
     project: (p: unknown) => calls.push(['project', p]),
     onSync: (cb: (peers: PeerState[]) => void) => {
       subs.sync++
@@ -548,5 +564,65 @@ describe('selectFocusedFaces (the node-header chips — one per node, so cursor 
     expect(selectFocusedFaces(usePresence.getState(), 'node-a', 'web')).toEqual([])
     expect(selectFocusedFaces(usePresence.getState(), 'node-b', 'web').map((f) => f.clientId)).toEqual([8])
     stop()
+  })
+})
+
+describe('selectDino (the spectator picks THE authority broadcasting for a node)', () => {
+  it('returns the peer broadcasting for this node, excludes self and other node ids, tiebreaks on lowest clientId', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi({ clientId: 7, peers: [peer(7)] })
+    const { connectPresence, usePresence, selectDino } = await import('./presence')
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    // Nobody broadcasting yet → null.
+    expect(selectDino(usePresence.getState(), 'dino-a')).toBeNull()
+
+    // A peer becomes the authority for dino-a → we spectate them.
+    api.emitPeer({ op: 'join', peer: peer(8, { dino: { nodeId: 'dino-a', snap: snap() } }) })
+    expect(selectDino(usePresence.getState(), 'dino-a')?.clientId).toBe(8)
+
+    // A peer broadcasting for a DIFFERENT node must not be picked for dino-a.
+    api.emitPeer({ op: 'join', peer: peer(9, { dino: { nodeId: 'dino-b', snap: snap() } }) })
+    expect(selectDino(usePresence.getState(), 'dino-a')?.clientId).toBe(8)
+    expect(selectDino(usePresence.getState(), 'dino-b')?.clientId).toBe(9)
+
+    // Take-over race: two peers broadcast for dino-a at once → lowest clientId wins.
+    api.emitPeer({ op: 'join', peer: peer(5, { dino: { nodeId: 'dino-a', snap: snap() } }) })
+    expect(selectDino(usePresence.getState(), 'dino-a')?.clientId).toBe(5)
+
+    stop()
+  })
+
+  it('never returns my OWN broadcast, even if I am the authority for the node', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    // My own peer (id 7) is broadcasting for dino-a in the table — I must not spectate myself.
+    const api = fakePresenceApi({
+      clientId: 7,
+      peers: [peer(7, { dino: { nodeId: 'dino-a', snap: snap() } })]
+    })
+    const { connectPresence, usePresence, selectDino } = await import('./presence')
+    const stop = connectPresence()
+    await vi.waitFor(() => expect(usePresence.getState().myId).toBe(7))
+
+    expect(selectDino(usePresence.getState(), 'dino-a')).toBeNull()
+    stop()
+  })
+})
+
+describe('session.dino (casts the live snapshot on the api)', () => {
+  it('forwards the payload (and the clearing null) straight to api.presence.dino', async () => {
+    vi.stubGlobal('localStorage', memStorage(STORED_ME))
+    const api = fakePresenceApi()
+    const { defaultPresence } = await import('./presence')
+
+    const payload = { nodeId: 'dino-a', snap: snap({ score: 42 }) }
+    defaultPresence.dino(payload)
+    defaultPresence.dino(null)
+
+    expect(api.calls.filter((c) => c[0] === 'dino')).toEqual([
+      ['dino', payload],
+      ['dino', null]
+    ])
   })
 })

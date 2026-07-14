@@ -425,6 +425,7 @@ const api: NodeTerminalApi = {
     cursor: (cursor) => ipcRenderer.send(IPC.presenceCursor, cursor),
     focus: (nodeId) => ipcRenderer.send(IPC.presenceFocus, nodeId),
     chat: (text) => ipcRenderer.send(IPC.presenceChat, text),
+    dino: (payload) => ipcRenderer.send(IPC.presenceDino, payload),
     project: (projectId) => ipcRenderer.send(IPC.presenceProject, projectId),
     onSync: (listener) => {
       const handler = (_e: unknown, peers: PeerState[]) => listener(peers)

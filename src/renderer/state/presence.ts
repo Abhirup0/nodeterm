@@ -4,6 +4,7 @@ import {
   nextFreeColor,
   peersOnProject,
   type ClientId,
+  type DinoSnapshot,
   type PeerDiff,
   type PeerIdentity,
   type PeerState
@@ -138,6 +139,24 @@ export function selectFocused(
   return selectVisible(s, projectId).filter((p) => p.focus === nodeId)
 }
 
+/** The OTHER peer (never me — filtered on `myId`, like selectOthers) who is the live dino
+ *  authority for `nodeId`: their `dino` is non-null and its `nodeId` matches. If several peers
+ *  broadcast for the same node during a brief take-over race, the one with the LOWEST clientId
+ *  wins (the authority tiebreak — same rule DinoNode applies), so every spectator converges on
+ *  one authority. Returns null when nobody is broadcasting for this node.
+ *  While `myId` is null (hello in flight) we cannot tell our own peer from a teammate's, so we
+ *  return null — same gate as every other selector here. */
+export function selectDino(s: PresenceStore, nodeId: string): PeerState | null {
+  if (s.myId === null) return null
+  let winner: PeerState | null = null
+  for (const p of Object.values(s.peers)) {
+    if (p.clientId === s.myId) continue
+    if (!p.dino || p.dino.nodeId !== nodeId) continue
+    if (winner === null || p.clientId < winner.clientId) winner = p
+  }
+  return winner
+}
+
 /** What the facepile draws — and NOTHING else. `applyDiff` replaces the whole PeerState object on
  *  every cursor patch (~20/s per peer), so a facepile subscribed to PeerState would re-render at
  *  cursor rate even under useShallow. selectFaces projects these five fields and reuses the
@@ -186,9 +205,13 @@ export interface PresenceSession {
   reportFocus(nodeId: string | null): void
   releaseFocus(nodeId: string): void
   reportProject(projectId: string | null): void
+  /** Broadcast the live dino game we are the authority for (null = stopped/idle). A pure cast on
+   *  the session's api — no dedup: the DinoNode already throttles to ~20 Hz and null-clears. */
+  dino(payload: { nodeId: string; snap: DinoSnapshot } | null): void
   selectOthers(s: PresenceStore): PeerState[]
   selectVisible(s: PresenceStore, projectId: string | null): PeerState[]
   selectFocused(s: PresenceStore, nodeId: string, projectId: string | null): PeerState[]
+  selectDino(s: PresenceStore, nodeId: string): PeerState | null
   selectFaces(s: PresenceStore): PeerFace[]
   selectFocusedFaces(s: PresenceStore, nodeId: string, projectId: string | null): PeerFace[]
   selectTypingFaces(s: PresenceStore, nodeId: string): PeerFace[]
@@ -563,15 +586,24 @@ function buildPresenceSession(api: NodeTerminalApi): PresenceSession {
     api.presence.project(projectId)
   }
 
+  /** Broadcast the live dino game we are the authority for (null = stopped/idle). Unlike focus/
+   *  project this is NOT deduped: the DinoNode throttles the snapshot rate itself, each frame is
+   *  distinct, and the clearing null must always reach the hub so spectators stop drawing. */
+  function dino(payload: { nodeId: string; snap: DinoSnapshot } | null): void {
+    api.presence.dino(payload)
+  }
+
   return {
     store,
     connect,
     reportFocus,
     releaseFocus,
     reportProject,
+    dino,
     selectOthers,
     selectVisible,
     selectFocused,
+    selectDino,
     selectFaces,
     selectFocusedFaces,
     selectTypingFaces
