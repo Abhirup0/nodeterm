@@ -5526,6 +5526,12 @@ export function Canvas() {
       </div>
 
       <div className="controls-cluster">
+        {/* First in the cluster so the "who's connected" faces sit to the LEFT of the toolbar on the
+            SAME row (flex, no hardcoded width) instead of colliding with it / hiding under the tab
+            bar. Mounted here unconditionally (the cluster always renders): the facepile is null with
+            no peers — taking no space — but must stay mounted to prune the presence face cache
+            (state/presence.ts → selectFaces). */}
+        <Facepile onJump={travelToNode} onSwitchProject={travelToProject} />
         <button
           className="cluster-search"
           title="Command palette"
@@ -5651,10 +5657,6 @@ export function Canvas() {
         </ReactFlow>
         </SessionProvider>
 
-        {/* Mounted unconditionally, even when we are alone: the facepile renders null with no peers,
-            but it is also what prunes the presence store's face cache — gating its mount on a peer
-            count would leak departed peers' faces forever (state/presence.ts → selectFaces). */}
-        <Facepile onJump={travelToNode} onSwitchProject={travelToProject} />
         <PresenceNamePrompt />
 
         {(!hasProjects || welcomeOpen) && (

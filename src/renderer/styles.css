@@ -1972,6 +1972,7 @@ body,
   right: 14px;
   z-index: 11;
   display: flex;
+  align-items: center; /* center the presence facepile (26px) against the 34px toolbar buttons */
   gap: 6px;
 }
 
@@ -2267,7 +2268,9 @@ body,
   background: rgba(255, 159, 10, 0.18);
 }
 
-.controls-cluster button {
+/* Direct children only — the presence facepile's face buttons are nested inside .presence-facepile
+   and must keep their own round, peer-colored styling, not the toolbar button chrome. */
+.controls-cluster > button {
   width: 34px;
   height: 34px;
   display: inline-flex;
@@ -2282,7 +2285,7 @@ body,
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
 }
 
-.controls-cluster button:hover {
+.controls-cluster > button:hover {
   background: var(--panel-header);
 }
 
@@ -5484,13 +5487,13 @@ body,
 }
 
 /* ---- facepile: who is connected (the one surface that shows off-project peers) ---- */
+/* Lives INSIDE .controls-cluster (see Canvas.tsx) as its first flex item, so the faces sit to the
+   LEFT of the top-right toolbar on the same row — not absolutely positioned into the tab-bar band
+   where they hid behind the chrome. Empty (no element) when alone, so it adds no gap. */
 .presence-facepile {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 6;
   display: flex;
   gap: 4px;
+  align-items: center;
 }
 
 .presence-face {
