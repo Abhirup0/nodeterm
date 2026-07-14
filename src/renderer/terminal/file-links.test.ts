@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchFileTokens, resolveFileToken } from './file-links'
+import { matchFileTokens, matchUrlTokens, resolveFileToken } from './file-links'
 
 describe('matchFileTokens', () => {
   it('finds absolute, dot-relative and bare relative paths', () => {
@@ -50,5 +50,26 @@ describe('resolveFileToken', () => {
     expect(resolveFileToken('../x.ts', '~/proj/sub')).toBe('~/proj/x.ts')
     expect(resolveFileToken('../../../x.ts', '~/proj')).toBeNull() // .. may not pop the ~
     expect(resolveFileToken('/abs/x.ts', '~/proj')).toBe('/abs/x.ts') // absolutes unaffected
+  })
+})
+
+describe('matchUrlTokens', () => {
+  it('finds http(s) URLs with their start index', () => {
+    const t = matchUrlTokens('open https://example.com/a/b and http://x.io/p here')
+    expect(t.map((x) => x.url)).toEqual(['https://example.com/a/b', 'http://x.io/p'])
+    expect(t[0].startIndex).toBe(5)
+  })
+
+  it('strips trailing sentence punctuation', () => {
+    expect(matchUrlTokens('see https://example.com/a.').map((x) => x.url)).toEqual([
+      'https://example.com/a'
+    ])
+    expect(matchUrlTokens('(https://example.com/a)').map((x) => x.url)).toEqual([
+      'https://example.com/a'
+    ])
+  })
+
+  it('ignores non-http schemes and bare paths', () => {
+    expect(matchUrlTokens('ftp://x.io file:///etc/hosts /usr/local plain')).toEqual([])
   })
 })

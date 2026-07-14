@@ -18,7 +18,11 @@ import { LocalTransport } from '../terminal/local-transport'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
-import { createFileLinkProvider, makeDirListingLookup } from '../terminal/file-links'
+import {
+  createFileLinkProvider,
+  installLinkClickFallback,
+  makeDirListingLookup
+} from '../terminal/file-links'
 import { sshFs } from '../terminal/ssh-fs'
 import type { FsApi } from '@shared/types'
 import {
@@ -698,20 +702,35 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const project = st.projects.find((p) => p.id === st.activeProjectId)
         return project?.ssh ? { fs: sshFs(project.id), ssh: true } : { fs: api.fs, ssh: false }
       }
+      // Relay-remote nodes have no client fs, so file-path links are skipped (URL-only) — mirrors
+      // the CLAUDE.md note. A relay project carries the runtime-only `remote` flag.
+      const isRelayProject = (): boolean => {
+        const st = useProjects.getState()
+        return !!st.projects.find((p) => p.id === st.activeProjectId)?.remote
+      }
       const lookup = makeDirListingLookup(async (dir) => projectFs().fs.list(dir))
-      term.registerLinkProvider(
-        createFileLinkProvider(term, {
-          getCwd: () => (data.cwd as string | undefined) || undefined,
+      const getCwd = (): string | undefined => (data.cwd as string | undefined) || undefined
+      const openFile = (abs: string, isDir: boolean): void => {
+        if (isDir) window.dispatchEvent(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } }))
+        else
+          window.dispatchEvent(
+            new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: projectFs().ssh } })
+          )
+      }
+      term.registerLinkProvider(createFileLinkProvider(term, { getCwd, lookup, activate: openFile }))
+      // The provider above (and the WebLinksAddon) rely on xterm's own click handling, which
+      // tmux/agent mouse-reporting swallows. This capture-phase mouse-up fallback restores
+      // Cmd/Ctrl+click for both URLs and file paths in that mode. Attached to `term.element` so
+      // it travels with the terminal across park/adopt; it dies with the terminal on dispose.
+      if (term.element) {
+        installLinkClickFallback(term, term.element, {
+          getCwd,
           lookup,
-          activate: (abs, isDir) => {
-            if (isDir) window.dispatchEvent(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } }))
-            else
-              window.dispatchEvent(
-                new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: projectFs().ssh } })
-              )
-          }
+          activateFile: openFile,
+          openUrl: (uri) => window.nodeTerminal.shell.openExternal(uri),
+          fileEnabled: () => !isRelayProject()
         })
-      )
+      }
     }
 
     // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
