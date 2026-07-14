@@ -352,4 +352,118 @@ describe('SshProjectManager', () => {
     expect(await mgr.uploadFile('p1', 'relative/path.png', 'x.png')).toBeNull()
     expect(scpCalls).toHaveLength(0) // scp never invoked for an unsafe localPath
   })
+
+  // --- leftover ControlMaster socket handling -----------------------------------------------
+  //
+  // A master socket FILE can outlive its process (app crash, `kill -9`, host sleep). ssh's
+  // ControlMaster=auto refuses to bind over an existing socket file, so a stale one makes every
+  // `-O check` fail and connect() time out with a generic error — the field-reported "SSH
+  // connection error" with no cause. A fresh connect must clear a dead leftover before spawning.
+  describe('leftover master socket', () => {
+    const isCheck = (args: string[]) => args[0] === '-O' && args[1] === 'check'
+
+    afterEach(() => vi.restoreAllMocks())
+
+    it('unlinks a DEAD leftover socket before spawning a fresh master', async () => {
+      const statuses: string[] = []
+      let masterUp = false
+      const spawnMaster = vi.fn(() => {
+        masterUp = true
+        return { kill: vi.fn(), on: vi.fn() }
+      })
+      // The leftover master is dead → `-O check` fails until we spawn our own.
+      const run = vi.fn(async (args: string[]) =>
+        isCheck(args) ? { code: masterUp ? 0 : 1, stdout: '' } : { code: 0, stdout: '' }
+      )
+      vi.spyOn(fs, 'stat').mockResolvedValue({ isSocket: () => true } as never)
+      const rmSpy = vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster,
+        run,
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: (e) => statuses.push(e.status)
+      })
+      const { controlPath } = await mgr.connect('p1', conn)
+      expect(rmSpy).toHaveBeenCalledWith(controlPathFor('p1'), { force: true })
+      expect(spawnMaster).toHaveBeenCalledTimes(1)
+      expect(controlPath).toBe(controlPathFor('p1'))
+      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+    })
+
+    it('adopts a LIVE orphan master instead of spawning a second one', async () => {
+      const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
+      const run = vi.fn(async (_args: string[]) => ({ code: 0, stdout: '' })) // live master answers
+      vi.spyOn(fs, 'stat').mockResolvedValue({ isSocket: () => true } as never)
+      const rmSpy = vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+      const statuses: string[] = []
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster,
+        run,
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: (e) => statuses.push(e.status)
+      })
+      await mgr.connect('p1', conn)
+      expect(spawnMaster).not.toHaveBeenCalled() // reused, not respawned
+      expect(rmSpy).not.toHaveBeenCalled() // a live socket is never unlinked
+      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+    })
+
+    it('skips the probe entirely when no socket file exists (the normal path)', async () => {
+      const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
+      const checks: string[][] = []
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === '-O' && args[1] === 'check') checks.push(args)
+        return { code: 0, stdout: '' }
+      })
+      vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+      const rmSpy = vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster,
+        run,
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn)
+      expect(spawnMaster).toHaveBeenCalledTimes(1)
+      expect(rmSpy).not.toHaveBeenCalled() // nothing to clean
+      // Only the connect loop's `-O check` runs — no extra leftover-probe round-trip.
+      expect(checks.length).toBeGreaterThanOrEqual(1)
+    })
+  })
+})
+
+describe('lastSshErrorLine', () => {
+  it('picks the actionable last line, skipping debug noise', () => {
+    const stderr = [
+      'debug1: Connecting to 95.217.38.239 port 22.',
+      'debug1: Authenticating to 95.217.38.239 as root',
+      'root@95.217.38.239: Permission denied (publickey).'
+    ].join('\n')
+    expect(lastSshErrorLine(stderr)).toBe('root@95.217.38.239: Permission denied (publickey).')
+  })
+
+  it('skips a trailing Warning line to keep the real cause', () => {
+    const stderr = 'ssh: Could not resolve hostname niova: nodename nor servname provided\nWarning: something'
+    expect(lastSshErrorLine(stderr)).toBe(
+      'ssh: Could not resolve hostname niova: nodename nor servname provided'
+    )
+  })
+
+  it('returns undefined for empty / whitespace-only stderr', () => {
+    expect(lastSshErrorLine('   \n\n  ')).toBeUndefined()
+    expect(lastSshErrorLine('')).toBeUndefined()
+  })
+
+  it('truncates a runaway line so the banner can not blow up', () => {
+    const long = 'x'.repeat(500)
+    const out = lastSshErrorLine(long)!
+    expect(out.endsWith('…')).toBe(true)
+    expect(out.length).toBeLessThanOrEqual(201)
+  })
 })
