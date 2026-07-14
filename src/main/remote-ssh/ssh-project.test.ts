@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
-import { SshProjectManager } from './ssh-project'
+import { promises as fs } from 'fs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
 
 const conn = { host: 'h', user: 'u' }

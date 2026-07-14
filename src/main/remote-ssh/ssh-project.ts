@@ -26,8 +26,14 @@ import { sessionName } from '../../core/tmux-naming'
 
 interface Runners {
   userDataDir: string
-  /** Spawn the long-lived master; returns a handle we can kill. */
-  spawnMaster: (args: string[]) => { kill: () => void; on: (ev: string, cb: (...a: unknown[]) => void) => void }
+  /** Spawn the long-lived master; returns a handle we can kill. `stderr()` (when the spawner wires
+   *  it) returns the master's captured stderr so a failed connect can surface the REAL ssh error
+   *  (auth denied, host unreachable, host-key mismatch) instead of a generic timeout. */
+  spawnMaster: (args: string[]) => {
+    kill: () => void
+    on: (ev: string, cb: (...a: unknown[]) => void) => void
+    stderr?: () => string
+  }
   /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
   /** Run a one-shot scp (file upload over the master); resolves its exit code. */
@@ -45,6 +51,27 @@ interface Runners {
  *  `--permission-mode auto` for the whole connection. A DEFINITE version answer never retries —
  *  a CLI doesn't change under a live connection; the next connect re-probes anyway. */
 const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
+
+/** Cap on how much master stderr we retain (a misconfigured host can spew) — enough for the error. */
+const MASTER_STDERR_CAP = 8 * 1024
+
+/**
+ * Pick the most informative line from an ssh master's stderr for the error banner. `-v` isn't
+ * passed, so ordinary stderr has no `debug` noise, but we still skip `debug*`/`Warning:` lines and
+ * take the LAST real line — ssh prints the actionable cause last ("Permission denied (publickey).",
+ * "ssh: Could not resolve hostname …", "Host key verification failed."). Falls back to the last
+ * non-empty line. Truncated so a runaway banner can't blow up the UI.
+ */
+export function lastSshErrorLine(stderr: string): string | undefined {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  if (!lines.length) return undefined
+  const meaningful = lines.filter((l) => !/^(debug\d*:|warning:)/i.test(l))
+  const pick = (meaningful.length ? meaningful : lines).at(-1) ?? lines.at(-1)!
+  return pick.length > 200 ? `${pick.slice(0, 200)}…` : pick
+}
 
 interface Conn {
   conn: SshConnection
@@ -181,7 +208,35 @@ export class SshProjectManager {
       // ignore — keeps the manager unit-testable
     }
     this.r.onStatus({ projectId, status: 'connecting' })
-    const master = this.r.spawnMaster(masterArgs(conn, controlPath))
+    // A master socket FILE can outlive its process (app crash, `kill -9`, host sleep/resume — a
+    // plain `kill()` on quit doesn't always let ssh unlink it). ssh's `ControlMaster=auto` REFUSES
+    // to bind over an existing socket file ("ControlSocket … already exists, disabling
+    // multiplexing"), so a leftover DEAD socket makes every `-O check` below fail and connect()
+    // time out with a generic error — the "SSH connection error" a user sees with no cause. Only a
+    // FRESH connect reaches here (an existing entry returned above), so any socket on disk is a
+    // leftover: probe it once — a still-answering master is a live orphan (its `ControlPersist`
+    // outlived us) → adopt it; a dead one gets unlinked so the fresh master can bind. The common
+    // case (no leftover) skips straight to spawn with no extra round-trip.
+    let master: Conn['master']
+    let leftover = false
+    try {
+      leftover = (await fs.stat(controlPath)).isSocket()
+    } catch {
+      // absent → no leftover (the normal path)
+    }
+    if (leftover && (await this.r.run(checkMasterArgs(conn, controlPath))).code === 0) {
+      // Live orphan: reuse it. `kill()` sends `-O exit` (what `disconnect` does anyway); the loop
+      // below succeeds on its first `-O check` and runs the normal post-connect setup.
+      master = {
+        kill: () => {
+          void this.r.run(exitMasterArgs(conn, controlPath)).catch(() => {})
+        },
+        on: () => {}
+      }
+    } else {
+      if (leftover) await fs.rm(controlPath, { force: true }).catch(() => {})
+      master = this.r.spawnMaster(masterArgs(conn, controlPath))
+    }
     this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
     // Wait until the master answers `-O check`, retrying briefly.
     for (let i = 0; i < 50; i++) {
@@ -254,9 +309,17 @@ export class SshProjectManager {
       }
       await new Promise((res) => setTimeout(res, 100))
     }
+    // Capture the master's real ssh error BEFORE disconnect tears it down — that stderr
+    // ("Permission denied (publickey)", "Could not resolve hostname", "Host key verification
+    // failed", …) is the actual cause, and is otherwise thrown away by the master's ignored stdio.
+    const stderr = master.stderr?.().trim()
     await this.disconnect(projectId)
-    this.r.onStatus({ projectId, status: 'error', error: 'Could not establish the SSH connection.' })
-    throw new Error('Could not establish the SSH connection.')
+    const detail = stderr ? lastSshErrorLine(stderr) : undefined
+    const message = detail
+      ? `Could not establish the SSH connection: ${detail}`
+      : 'Could not establish the SSH connection.'
+    this.r.onStatus({ projectId, status: 'error', error: message })
+    throw new Error(message)
   }
 
   async listDir(projectId: string, dir: string): Promise<{ path: string; dirs: string[] }> {
@@ -532,7 +595,23 @@ export function initSshProject(
   const scp = scpBin()
   const mgr = new SshProjectManager({
     userDataDir: app.getPath('userData'),
-    spawnMaster: (args) => spawn(ssh, args, { stdio: 'ignore' }),
+    spawnMaster: (args) => {
+      // Capture the master's stderr (stdin/stdout stay ignored) so a failed connect can report the
+      // real ssh error instead of a generic timeout. Buffer is capped so a chatty host can't grow it
+      // unbounded; the master is long-lived and mostly silent, so this holds only the connect-time
+      // diagnostics we actually want.
+      const child = spawn(ssh, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''
+      child.stderr?.on('data', (chunk: Buffer) => {
+        if (stderr.length < MASTER_STDERR_CAP) stderr += chunk.toString('utf-8')
+      })
+      // A spawn failure (ssh binary missing/unexecutable) surfaces on 'error' — fold it into the
+      // same stderr channel so the connect error still has a cause. Prevents an unhandled 'error'.
+      child.on('error', (e: Error) => {
+        if (stderr.length < MASTER_STDERR_CAP) stderr += `${e.message}\n`
+      })
+      return { kill: () => child.kill(), on: (ev, cb) => child.on(ev, cb), stderr: () => stderr }
+    },
     run: (args, stdin) =>
       new Promise((resolve) => {
         // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
