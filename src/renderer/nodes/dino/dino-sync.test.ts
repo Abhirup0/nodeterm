@@ -81,9 +81,25 @@ describe('DinoSync', () => {
   it('setRemote(null) returns to local authority', () => {
     const s = new DinoSync()
     s.setRemote(snap())
-    s.setRemote(null)
+    expect(s.setRemote(null)).toBe('none')
     expect(s.isAuthority()).toBe(true)
     expect(s.remoteSnap).toBe(null)
+  })
+
+  it('yielding authority (broadcasting → remote) owes ONE null so the hub does not keep a stale game', () => {
+    const s = new DinoSync()
+    s.tick(0, true) // start authoring → broadcasting = true
+    // We lose the tiebreak and go spectate a peer: the transition owes a clearing null.
+    expect(s.setRemote(snap())).toBe('null')
+    expect(s.isRemote()).toBe(true)
+    // And no further null is owed (broadcasting was cleared): a later stop emits nothing.
+    expect(s.setRemote(null)).toBe('none')
+    expect(s.endBroadcast()).toBe('none')
+  })
+
+  it('an idle spectator entering remote owes nothing (was never broadcasting)', () => {
+    const s = new DinoSync()
+    expect(s.setRemote(snap())).toBe('none')
   })
 
   it('takeOver() flips remote→local and returns the seed snapshot', () => {

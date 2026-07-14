@@ -66,15 +66,24 @@ export class DinoSync {
     return 'none'
   }
 
-  /** Enter remote spectator mode with `snap`, or return to local authority with null. */
-  setRemote(snap: DinoSnapshot | null): void {
+  /**
+   * Enter remote spectator mode with `snap`, or return to local authority with null.
+   * Returns the emit owed by the transition: entering remote WHILE we were the authority
+   * (e.g. we lost the lowest-clientId tiebreak) owes ONE `null` so our last snapshot stops
+   * lingering on the hub — otherwise a third peer that later loses ITS authority could be
+   * left watching our frozen frame forever. Any other transition owes nothing.
+   */
+  setRemote(snap: DinoSnapshot | null): DinoSyncEmit {
     if (snap) {
+      const owed: DinoSyncEmit = this.broadcasting ? 'null' : 'none'
       this._mode = 'remote'
       this._remote = snap
-    } else {
-      this._mode = 'local'
-      this._remote = null
+      this.broadcasting = false // we stopped authoring; the owed null (if any) clears the hub
+      return owed
     }
+    this._mode = 'local'
+    this._remote = null
+    return 'none'
   }
 
   /**

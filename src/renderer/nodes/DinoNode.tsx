@@ -3,7 +3,7 @@ import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { useShallow } from 'zustand/react/shallow'
 import { type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
-import { useSession, useActiveSessionPresence } from '../session/session'
+import { useActiveSessionPresence } from '../session/session'
 import { createDinoGame } from './dino/dino-game'
 import { shouldSpectate } from './dino/dino-authority'
 
@@ -16,10 +16,10 @@ import { shouldSpectate } from './dino/dino-authority'
  * while this node is focused and stays silent when you're on another node.
  *
  * Live/shared play (docs/superpowers/specs/2026-07-14-dino-live-design.md): while WE author a run
- * the engine broadcasts each frame over presence (`api.presence.dino`); while a peer authors this
+ * the engine broadcasts each frame over presence (`presence.dino`); while a peer authors this
  * node we SPECTATE their snapshots (`game.setRemote`). A lowest-clientId tiebreak (shouldSpectate)
  * settles a brief take-over race so every client converges on one authority. Solo (no peers) →
- * `selectDino` is null → we never spectate and the broadcast casts are hub no-ops, so play is
+ * `selectDino` is null → we never spectate and `presence.dino` skips the cast, so play is
  * byte-identical to before.
  */
 export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
@@ -27,10 +27,9 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const hostRef = useRef<HTMLDivElement>(null)
   const gameRef = useRef<ReturnType<typeof createDinoGame> | null>(null)
 
-  // The active session's api + presence. DinoNode renders under Canvas's active-session provider,
-  // which is KEYED on `session.id` (Canvas.tsx), so this node REMOUNTS on a session swap — the
-  // mount-time `api` capture below is therefore always the current session's, no ref needed.
-  const { api } = useSession()
+  // The active session's presence. DinoNode renders under Canvas's active-session provider, which is
+  // KEYED on `session.id` (Canvas.tsx), so this node REMOUNTS on a session swap — the mount-time
+  // `presence` capture below is therefore always the current session's, no ref needed.
   const presence = useActiveSessionPresence()
   // The peer (if any) broadcasting a live dino for THIS node, and our own id for the tiebreak.
   // selectDino excludes self and already applies the lowest-clientId rule, so `peer` is the one
@@ -51,9 +50,11 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
         const s = useProjects.getState()
         s.setDinoHighScore(s.activeProjectId, score)
       },
-      // Authority broadcast: each throttled frame while we play, one null on stop/idle. Solo → a
-      // hub no-op (no peers). `api` is captured once at mount (safe — see the remount note above).
-      onSnapshot: (snap) => api.presence.dino(snap ? { nodeId: id, snap } : null)
+      // Authority broadcast: each throttled frame while we play, one null on stop/idle. Cast through
+      // the SESSION wrapper `presence.dino` (not raw `api.presence.dino`), so a solo player's ~20 Hz
+      // snapshots are SKIPPED with no peer to watch (the `null` stop always lands). `presence` is
+      // captured once at mount (safe — DinoNode remounts on session change; see the note above).
+      onSnapshot: (snap) => presence.dino(snap ? { nodeId: id, snap } : null)
     })
     gameRef.current = game
     return () => {
@@ -61,7 +62,7 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
       // broadcast was mid-run (destroy() already emits null via onSnapshot when mid-broadcast; a
       // repeat null is an idempotent hub no-op).
       game.destroy()
-      api.presence.dino(null)
+      presence.dino(null)
       gameRef.current = null
     }
     // Mount once; never re-run (would respawn the game). data.highScore is read

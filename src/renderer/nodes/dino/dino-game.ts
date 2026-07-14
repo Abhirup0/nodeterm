@@ -393,7 +393,7 @@ export function createDinoGame(
   // when unfocused; leaving returns the own sim to its pre-start idle frame.
   function setRemote(snap: DinoSnapshot | null) {
     if (snap) {
-      sync.setRemote(snap)
+      emit(sync.setRemote(snap)) // may emit one null on the authority→spectator (yield) edge
       applyRemote(snap)
       start()
       draw()
