@@ -1,8 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { useShallow } from 'zustand/react/shallow'
 import { type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
+import { useSession, useActiveSessionPresence } from '../session/session'
 import { createDinoGame } from './dino/dino-game'
+import { shouldSpectate } from './dino/dino-authority'
 
 /**
  * A dino node: a small self-contained T-Rex–style runner on a canvas. No PTY.
@@ -11,10 +14,30 @@ import { createDinoGame } from './dino/dino-game'
  * data.highScore — we seed the game with it and store new records back. The game
  * scopes its own keyboard/sound to the focusable host element, so it only reacts
  * while this node is focused and stays silent when you're on another node.
+ *
+ * Live/shared play (docs/superpowers/specs/2026-07-14-dino-live-design.md): while WE author a run
+ * the engine broadcasts each frame over presence (`api.presence.dino`); while a peer authors this
+ * node we SPECTATE their snapshots (`game.setRemote`). A lowest-clientId tiebreak (shouldSpectate)
+ * settles a brief take-over race so every client converges on one authority. Solo (no peers) →
+ * `selectDino` is null → we never spectate and the broadcast casts are hub no-ops, so play is
+ * byte-identical to before.
  */
 export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements } = useReactFlow()
   const hostRef = useRef<HTMLDivElement>(null)
+  const gameRef = useRef<ReturnType<typeof createDinoGame> | null>(null)
+
+  // The active session's api + presence. DinoNode renders under Canvas's active-session provider,
+  // which is KEYED on `session.id` (Canvas.tsx), so this node REMOUNTS on a session swap — the
+  // mount-time `api` capture below is therefore always the current session's, no ref needed.
+  const { api } = useSession()
+  const presence = useActiveSessionPresence()
+  // The peer (if any) broadcasting a live dino for THIS node, and our own id for the tiebreak.
+  // selectDino excludes self and already applies the lowest-clientId rule, so `peer` is the one
+  // authority to consider. useShallow: a new PeerState object arrives ~20 Hz while spectating.
+  const peer = presence.store(useShallow((s) => presence.selectDino(s, id)))
+  const myId = presence.store((s) => s.myId)
+  const [spectating, setSpectating] = useState(false)
 
   useEffect(() => {
     const host = hostRef.current
@@ -27,13 +50,44 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
         // closed) starts from it. Dino only runs while its project is active.
         const s = useProjects.getState()
         s.setDinoHighScore(s.activeProjectId, score)
-      }
+      },
+      // Authority broadcast: each throttled frame while we play, one null on stop/idle. Solo → a
+      // hub no-op (no peers). `api` is captured once at mount (safe — see the remount note above).
+      onSnapshot: (snap) => api.presence.dino(snap ? { nodeId: id, snap } : null)
     })
-    return () => game.destroy()
+    gameRef.current = game
+    return () => {
+      // Belt-and-suspenders: guarantee our authority stop reaches the hub even if the last frame we
+      // broadcast was mid-run (destroy() already emits null via onSnapshot when mid-broadcast; a
+      // repeat null is an idempotent hub no-op).
+      game.destroy()
+      api.presence.dino(null)
+      gameRef.current = null
+    }
     // Mount once; never re-run (would respawn the game). data.highScore is read
     // as the seed only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Spectate vs. play. Reacts to the broadcasting peer + our id: when we should spectate, feed the
+  // peer's snapshot to the engine; otherwise LOCAL. `setRemote(null)` is idempotent while already
+  // LOCAL (it does NOT reset a live local run), so calling it on every non-spectating render is safe.
+  useEffect(() => {
+    const game = gameRef.current
+    if (!game) return
+    const spectate = shouldSpectate({
+      myId,
+      peerClientId: peer?.clientId ?? null,
+      iAmAuthority: game.isAuthority()
+    })
+    if (spectate && peer?.dino) {
+      game.setRemote(peer.dino.snap)
+      setSpectating(true)
+    } else {
+      game.setRemote(null)
+      setSpectating(false)
+    }
+  }, [peer, myId])
 
   return (
     <div className={`dino-node${selected ? ' selected' : ''}`} style={{ borderColor: data.color }}>
@@ -47,6 +101,15 @@ export function DinoNode({ id, data, selected }: NodeProps<CanvasNode>) {
           spellCheck={false}
           onChange={(e) => updateNodeData(id, { title: e.target.value })}
         />
+        {spectating && peer && (
+          <span
+            className="dino-node__watching nodrag"
+            style={{ color: peer.color, borderColor: `${peer.color}66` }}
+            title={`${peer.name} is playing this dino`}
+          >
+            ▷ {peer.name} is playing
+          </span>
+        )}
         <button
           className="term-node__close"
           title="Close"
