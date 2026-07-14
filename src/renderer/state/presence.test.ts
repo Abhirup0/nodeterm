@@ -27,6 +27,7 @@ function peer(clientId: number, over: Partial<PeerState> = {}): PeerState {
     chat: null,
     typing: null,
     projectId: 'web',
+    dino: null,
     kind: 'browser',
     ...over
   }

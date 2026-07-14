@@ -8,7 +8,14 @@ import {
   TYPING_THROTTLE_MS
 } from './hub'
 import { IPC } from '../../shared/ipc'
-import { PRESENCE_COLORS, REF_MAX_LEN, type PeerDiff, type PeerState } from '../../shared/presence'
+import {
+  PRESENCE_COLORS,
+  REF_MAX_LEN,
+  DINO_MAX_OBSTACLES,
+  type DinoSnapshot,
+  type PeerDiff,
+  type PeerState
+} from '../../shared/presence'
 
 let fake: FakePlatform
 
@@ -44,6 +51,7 @@ describe('PresenceHub join/leave', () => {
         chat: null,
         typing: null,
         projectId: null,
+        dino: null,
         kind: 'browser'
       },
       {
@@ -55,6 +63,7 @@ describe('PresenceHub join/leave', () => {
         chat: null,
         typing: null,
         projectId: null,
+        dino: null,
         kind: 'phone'
       }
     ])
@@ -318,6 +327,141 @@ describe('PresenceHub signals', () => {
     expect(joined.op).toBe('join')
     hub.setFocus(2, 'node-z')
     expect(joined.peer.focus).toBeNull() // a live reference would have followed the setter
+  })
+})
+
+describe('PresenceHub dino (live spectator cast)', () => {
+  function snap(over: Partial<DinoSnapshot> = {}): DinoSnapshot {
+    return {
+      y: -12,
+      ducking: false,
+      crashed: false,
+      started: true,
+      score: 42,
+      speed: 6,
+      groundScroll: 100,
+      obstacles: [{ kind: 'cactus', x: 300, y: 0, sx: 0, sw: 20, sh: 40, flap: 0 }],
+      ...over
+    }
+  }
+
+  it('a valid dino cast sets the sender dino and broadcasts an update diff carrying { dino }', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    const payload = { nodeId: 'dino-a', snap: snap() }
+    hub.setDino(1, payload)
+    expect(hub.peers()[0].dino).toEqual(payload)
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { dino: payload } })
+  })
+
+  it('clamps obstacles to the first DINO_MAX_OBSTACLES in the table AND the broadcast diff', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    const many = Array.from({ length: DINO_MAX_OBSTACLES + 8 }, (_, i) => ({
+      kind: 'cactus' as const,
+      x: i,
+      y: 0,
+      sx: 0,
+      sw: 20,
+      sh: 40,
+      flap: 0
+    }))
+    hub.setDino(1, { nodeId: 'dino-a', snap: snap({ obstacles: many }) })
+    expect(hub.peers()[0].dino?.snap.obstacles).toHaveLength(DINO_MAX_OBSTACLES)
+    // The first N are kept (x: 0..N-1), the tail is dropped.
+    expect(hub.peers()[0].dino?.snap.obstacles.map((o) => o.x)).toEqual(
+      Array.from({ length: DINO_MAX_OBSTACLES }, (_, i) => i)
+    )
+    const diff = diffs().at(-1) as { patch: { dino: { snap: DinoSnapshot } } }
+    expect(diff.patch.dino.snap.obstacles).toHaveLength(DINO_MAX_OBSTACLES)
+  })
+
+  it('drops a malformed payload — dino becomes null (never applied garbage)', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setDino(1, { nodeId: 'dino-a', snap: snap() })
+    expect(hub.peers()[0].dino).not.toBeNull()
+
+    // Missing nodeId → the whole cast is invalid → the field clears.
+    hub.setDino(1, { snap: snap() })
+    expect(hub.peers()[0].dino).toBeNull()
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { dino: null } })
+
+    // A non-object and a bad-number snap likewise never apply garbage.
+    hub.setDino(1, { nodeId: 'dino-a', snap: snap() })
+    hub.setDino(1, 'nope')
+    expect(hub.peers()[0].dino).toBeNull()
+  })
+
+  it('coerces non-finite snap numbers to 0 and drops a bad-kind obstacle', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setDino(1, {
+      nodeId: 'dino-a',
+      snap: {
+        y: Number.NaN,
+        ducking: 1,
+        crashed: false,
+        started: true,
+        score: Number.POSITIVE_INFINITY,
+        speed: 6,
+        groundScroll: 0,
+        obstacles: [
+          { kind: 'ufo', x: 1, y: 0, sx: 0, sw: 1, sh: 1, flap: 0 },
+          { kind: 'bird', x: 2, y: 0, sx: 0, sw: 1, sh: 1, flap: 1 }
+        ]
+      }
+    })
+    const dino = hub.peers()[0].dino
+    expect(dino?.snap.y).toBe(0)
+    expect(dino?.snap.score).toBe(0)
+    expect(dino?.snap.ducking).toBe(true)
+    // The 'ufo' obstacle is dropped; only the valid 'bird' survives.
+    expect(dino?.snap.obstacles).toEqual([{ kind: 'bird', x: 2, y: 0, sx: 0, sw: 1, sh: 1, flap: 1 }])
+  })
+
+  it('leave drops the peer and its dino from the table', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setDino(1, { nodeId: 'dino-a', snap: snap() })
+    hub.leave(1)
+    expect(hub.peers()).toEqual([])
+  })
+
+  it('a repeated stop (null → null) is a silent no-op, and an unknown client is ignored', () => {
+    const hub = new PresenceHub()
+    hub.join(1, 'browser')
+    hub.setDino(1, null)
+    const after = diffs().length // never played → still null → nothing broadcast
+    expect(diffs()).toHaveLength(after)
+    hub.setDino(1, { nodeId: 'dino-a', snap: snap() })
+    hub.setDino(1, null) // real stop → broadcasts once
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { dino: null } })
+    const stopped = diffs().length
+    hub.setDino(1, null) // repeat stop → no-op
+    expect(diffs()).toHaveLength(stopped)
+    hub.setDino(42, { nodeId: 'x', snap: snap() }) // never joined → no ghost peer
+    expect(hub.peers()).toHaveLength(1)
+  })
+
+  it('the cast entry point is rate-limited, and a stop is an exempt clear (drains no token)', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const hub = new PresenceHub()
+    hub.registerIpc()
+    hub.join(1, 'browser')
+    const budget = PRESENCE_RATE_BUDGETS[IPC.presenceDino]
+
+    const before = diffs().length
+    for (let i = 0; i < 1000; i++) {
+      fake.senderListeners[IPC.presenceDino](1, { nodeId: 'dino-a', snap: snap({ score: i }) })
+    }
+    expect(diffs().length - before).toBe(budget.burst) // the bucket, not one cast more
+
+    // A stop is an edge (a dropped one leaves a frozen ghost) → exempt, lands even when drained.
+    fake.senderListeners[IPC.presenceDino](1, null)
+    expect(hub.peers()[0].dino).toBeNull()
+    expect(diffs().at(-1)).toEqual({ op: 'update', clientId: 1, patch: { dino: null } })
   })
 })
 
@@ -694,10 +838,11 @@ describe('registerIpc', () => {
       IPC.presenceCursor,
       IPC.presenceFocus,
       IPC.presenceChat,
+      IPC.presenceDino,
       IPC.presenceProject
     ])
     hub.registerIpc()
-    expect(registered).toHaveLength(5)
+    expect(registered).toHaveLength(6)
   })
 })
 

@@ -78,6 +78,7 @@ describe('createPresenceSession — per-instance isolation', () => {
       chat: null,
       typing: null,
       projectId: 'web',
+      dino: null,
       kind: 'browser'
     })
     sa.store.setState({ myId: 1, peers: { 1: peer(1), 5: peer(5) } })

@@ -6,6 +6,9 @@ import {
   nextFreeColor,
   peersOnProject,
   sanitizeIdentity,
+  sanitizeDinoPayload,
+  DINO_MAX_OBSTACLES,
+  REF_MAX_LEN,
   CHAT_MAX_LEN,
   NAME_MAX_LEN,
   type PeerDiff,
@@ -22,6 +25,7 @@ function peer(clientId: number, projectId: string | null): PeerState {
     chat: null,
     typing: null,
     projectId,
+    dino: null,
     kind: 'browser'
   }
 }
@@ -200,5 +204,102 @@ describe('peersOnProject (the one project filter: cursors, bubbles, node chips)'
     expect(peersOnProject(peers, null)).toEqual([])
     // A peer with no project open must not leak onto anyone's canvas.
     expect(peersOnProject(peers, 'web').some((p) => p.projectId === null)).toBe(false)
+  })
+})
+
+describe('sanitizeDinoPayload (the one door for an untrusted dino cast)', () => {
+  const validSnap = {
+    y: -10,
+    ducking: false,
+    crashed: false,
+    started: true,
+    score: 7,
+    speed: 6,
+    groundScroll: 33,
+    obstacles: [{ kind: 'cactus', x: 200, y: 0, sx: 4, sw: 20, sh: 40, flap: 0 }]
+  }
+
+  it('passes a well-formed payload through, capping the nodeId', () => {
+    const out = sanitizeDinoPayload({ nodeId: 'dino-a', snap: validSnap })
+    expect(out).toEqual({ nodeId: 'dino-a', snap: validSnap })
+    // The nodeId is a reflected ref like focus → capped at REF_MAX_LEN.
+    const long = sanitizeDinoPayload({ nodeId: 'n'.repeat(REF_MAX_LEN + 500), snap: validSnap })
+    expect(long?.nodeId).toBe('n'.repeat(REF_MAX_LEN))
+  })
+
+  it('clamps obstacles to the first DINO_MAX_OBSTACLES', () => {
+    const many = Array.from({ length: DINO_MAX_OBSTACLES + 10 }, (_, i) => ({
+      kind: 'bird' as const,
+      x: i,
+      y: 0,
+      sx: 0,
+      sw: 1,
+      sh: 1,
+      flap: 0
+    }))
+    const out = sanitizeDinoPayload({ nodeId: 'd', snap: { ...validSnap, obstacles: many } })
+    expect(out?.snap.obstacles).toHaveLength(DINO_MAX_OBSTACLES)
+    expect(out?.snap.obstacles.map((o) => o.x)).toEqual(
+      Array.from({ length: DINO_MAX_OBSTACLES }, (_, i) => i)
+    )
+  })
+
+  it('coerces non-finite numbers to 0 and booleans, for the snap and each obstacle', () => {
+    const out = sanitizeDinoPayload({
+      nodeId: 'd',
+      snap: {
+        y: Number.NaN,
+        ducking: 'yes',
+        crashed: 0,
+        started: 1,
+        score: Number.POSITIVE_INFINITY,
+        speed: '6',
+        groundScroll: null,
+        obstacles: [{ kind: 'cactus', x: 'oops', y: Number.NaN, sx: 1, sw: 2, sh: 3, flap: 4 }]
+      }
+    })
+    expect(out?.snap).toMatchObject({
+      y: 0,
+      ducking: true,
+      crashed: false,
+      started: true,
+      score: 0,
+      speed: 6, // Number('6') → 6
+      groundScroll: 0
+    })
+    expect(out?.snap.obstacles[0]).toEqual({ kind: 'cactus', x: 0, y: 0, sx: 1, sw: 2, sh: 3, flap: 4 })
+  })
+
+  it('drops an obstacle whose kind is not cactus|bird', () => {
+    const out = sanitizeDinoPayload({
+      nodeId: 'd',
+      snap: {
+        ...validSnap,
+        obstacles: [
+          { kind: 'ufo', x: 1, y: 0, sx: 0, sw: 1, sh: 1, flap: 0 },
+          { kind: 'bird', x: 2, y: 0, sx: 0, sw: 1, sh: 1, flap: 0 },
+          { x: 3, y: 0, sx: 0, sw: 1, sh: 1, flap: 0 } // no kind
+        ]
+      }
+    })
+    expect(out?.snap.obstacles).toEqual([{ kind: 'bird', x: 2, y: 0, sx: 0, sw: 1, sh: 1, flap: 0 }])
+  })
+
+  it('returns null for anything malformed (missing/empty nodeId, non-object, missing snap)', () => {
+    expect(sanitizeDinoPayload(null)).toBeNull()
+    expect(sanitizeDinoPayload('nope')).toBeNull()
+    expect(sanitizeDinoPayload(42)).toBeNull()
+    expect(sanitizeDinoPayload({})).toBeNull()
+    expect(sanitizeDinoPayload({ snap: validSnap })).toBeNull() // no nodeId
+    expect(sanitizeDinoPayload({ nodeId: '', snap: validSnap })).toBeNull() // empty nodeId
+    expect(sanitizeDinoPayload({ nodeId: 5, snap: validSnap })).toBeNull() // non-string nodeId
+    expect(sanitizeDinoPayload({ nodeId: 'd' })).toBeNull() // no snap
+    expect(sanitizeDinoPayload({ nodeId: 'd', snap: null })).toBeNull() // null snap
+    expect(sanitizeDinoPayload({ nodeId: 'd', snap: 'bad' })).toBeNull() // non-object snap
+  })
+
+  it('tolerates a missing/non-array obstacles field (empty list, not null)', () => {
+    expect(sanitizeDinoPayload({ nodeId: 'd', snap: { ...validSnap, obstacles: undefined } })?.snap.obstacles).toEqual([])
+    expect(sanitizeDinoPayload({ nodeId: 'd', snap: { ...validSnap, obstacles: 'x' } })?.snap.obstacles).toEqual([])
   })
 })

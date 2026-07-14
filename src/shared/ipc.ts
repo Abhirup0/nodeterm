@@ -79,6 +79,9 @@ export const IPC = {
   presenceCursor: 'presence:cursor',
   presenceFocus: 'presence:focus',
   presenceChat: 'presence:chat',
+  // The authority's live dino game snapshot (a cast, ~20 Hz). Ephemeral, like chat: spectators on
+  // the same project render it; the hub sanitizes/clamps it (sanitizeDinoPayload).
+  presenceDino: 'presence:dino',
   // Which project (canvas) the client is looking at. Cursors/focus are only meaningful to a
   // viewer on the same project — each project has its own nodes and coordinate space.
   presenceProject: 'presence:project',

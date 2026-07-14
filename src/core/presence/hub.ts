@@ -16,6 +16,7 @@ import {
   capCodePoints,
   defaultNameFor,
   nextFreeColor,
+  sanitizeDinoPayload,
   sanitizeIdentity,
   type ClientId,
   type PeerDiff,
@@ -52,6 +53,8 @@ export const TYPING_THROTTLE_MS = 500
 export const PRESENCE_RATE_BUDGETS: Record<string, { perSec: number; burst: number }> = {
   [IPC.presenceCursor]: { perSec: 20, burst: 40 },
   [IPC.presenceChat]: { perSec: 25, burst: 50 },
+  // The dino snapshot is a ~20 Hz cast like chat/cursor; sized the same as chat.
+  [IPC.presenceDino]: { perSec: 25, burst: 50 },
   [IPC.presenceFocus]: { perSec: 10, burst: 20 },
   [IPC.presenceProject]: { perSec: 20, burst: 60 },
   [IPC.presenceHello]: { perSec: 2, burst: 5 }
@@ -80,6 +83,9 @@ function isClearingCast(channel: string, payload: unknown): boolean {
   if (channel === IPC.presenceCursor) return !payload
   if (channel === IPC.presenceChat) return typeof payload !== 'string'
   if (channel === IPC.presenceFocus) return typeof payload !== 'string' || payload === ''
+  // A dino "stop" (the authority quit / closed the node) is an EDGE — nothing supersedes it, and a
+  // dropped one leaves a frozen ghost game on every spectator. Mirror setDino's own null rule.
+  if (channel === IPC.presenceDino) return sanitizeDinoPayload(payload) === null
   return false
 }
 
@@ -92,14 +98,17 @@ export function allocateRelayClientId(): ClientId {
   return nextRelayId++
 }
 
-/** A peer copy safe to hand out: the nested `cursor`/`typing` objects are cloned too, so a caller
- *  holding a peers()/join-diff result cannot reach back into the hub's table through them.
- *  (The setters already assign fresh objects, so these two are the only nested state.) */
+/** A peer copy safe to hand out: the nested `cursor`/`typing`/`dino` objects are cloned too, so a
+ *  caller holding a peers()/join-diff result cannot reach back into the hub's table through them.
+ *  (The setters already assign fresh objects, so these are the only nested state.) */
 function copyPeer(p: PeerState): PeerState {
   return {
     ...p,
     cursor: p.cursor ? { ...p.cursor } : null,
-    typing: p.typing ? { ...p.typing } : null
+    typing: p.typing ? { ...p.typing } : null,
+    dino: p.dino
+      ? { nodeId: p.dino.nodeId, snap: { ...p.dino.snap, obstacles: [...p.dino.snap.obstacles] } }
+      : null
   }
 }
 
@@ -125,6 +134,7 @@ export class PresenceHub {
       // Unknown until the client reports its active project (a phone never does in Stage 1) —
       // so it is drawn on nobody's canvas and lives in the facepile only.
       projectId: null,
+      dino: null,
       kind
     }
     this.table.set(clientId, peer)
@@ -248,6 +258,22 @@ export class PresenceHub {
     this.emit({ op: 'update', clientId, patch: { chat: next } })
   }
 
+  /** The live dino game this client is the AUTHORITY for; a malformed/absent payload clears it
+   *  (stopped playing / closed the node / took-over elsewhere). THE single ingest point, so the
+   *  sanitize + obstacle clamp (sanitizeDinoPayload) lives here and cannot drift — the hub applies
+   *  ONLY the sanitized value, never the raw cast. Spectators render `snap` for the matching node
+   *  id. A repeated clear (null → null) is a silent no-op, exactly like the other setters. */
+  setDino(clientId: ClientId, payload: unknown): void {
+    const peer = this.table.get(clientId)
+    if (!peer) return
+    const next = sanitizeDinoPayload(payload)
+    // Stop repeats (null → null) fan out nothing. A non-null snapshot changes every frame, so it
+    // is always reflected — no deep compare (that would cost more than the broadcast it saves).
+    if (next === null && peer.dino === null) return
+    peer.dino = next
+    this.emit({ op: 'update', clientId, patch: { dino: next } })
+  }
+
   /** Which project (canvas) this client is on. Everyone else uses it to decide whether this
    *  peer's cursor/focus belongs on THEIR screen (peersOnProject) — a project is a separate
    *  canvas with its own nodes and its own flow coordinates. null = no project open.
@@ -345,6 +371,12 @@ export class PresenceHub {
     p.onWithSender(IPC.presenceChat, (senderId: number, text: string | null) => {
       if (!this.allow(senderId, IPC.presenceChat, text)) return
       this.setChat(senderId, text)
+    })
+    // The dino snapshot is a dumb-reflector cast like chat: rate-limit (a stop is an exempt clear —
+    // see isClearingCast), then sanitize/clamp and set. The sanitize guard cannot be bypassed.
+    p.onWithSender(IPC.presenceDino, (senderId: number, payload: unknown) => {
+      if (!this.allow(senderId, IPC.presenceDino, payload)) return
+      this.setDino(senderId, payload)
     })
     p.onWithSender(IPC.presenceProject, (senderId: number, projectId: string | null) => {
       // NOT exempted, unlike the clears: every project cast may carry a NEW id, so it always
