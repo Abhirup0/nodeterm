@@ -257,6 +257,7 @@ export const IPC = {
   pairingStart: 'pairing:start',
   pairingStop: 'pairing:stop',
   pairingDone: 'pairing:done',
+  pairingProbeSsh: 'pairing:probe-ssh',
   pairingListDevices: 'pairing:listDevices',
   pairingRevokeDevice: 'pairing:revokeDevice'
 } as const

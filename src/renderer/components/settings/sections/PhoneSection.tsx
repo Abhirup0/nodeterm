@@ -37,10 +37,25 @@ function formatPairedAt(ms: number): string {
 
 type Phase = 'idle' | 'waiting' | 'paired' | 'timeout'
 
+/** How often the Remote Login warning re-probes sshd while it is showing. */
+const SSH_RECHECK_MS = 2000
+
+/** Deep link straight to System Settings → General → Sharing (the Remote Login toggle lives
+ *  there). The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and
+ *  is harmless on newer macOS, which opens the Sharing pane either way. macOS-only. */
+const REMOTE_LOGIN_SETTINGS_URL =
+  'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
+
+/** The pairing host is this machine, so the renderer's own UA answers "is this a Mac?". */
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+
 export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const [phase, setPhase] = useState<Phase>('idle')
   const [qr, setQr] = useState('')
   const [sshOpen, setSshOpen] = useState(true)
+  // Went from unreachable → reachable while the warning was showing: show a green confirmation
+  // instead of silently dropping the warning (the user just flipped a toggle; acknowledge it).
+  const [sshHealed, setSshHealed] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [devices, setDevices] = useState<PairedDevice[]>([])
@@ -66,6 +81,32 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
     }
   }, [])
 
+  // Live re-check while the Remote Login warning is visible: the initial probe runs once at
+  // pairing start, so without this the warning could never clear — the user enables Remote Login
+  // in System Settings and nothing changes on screen. Poll only in that exact state (waiting +
+  // unreachable); the interval dies with the warning.
+  useEffect(() => {
+    if (phase !== 'waiting' || sshOpen) return
+    let cancelled = false
+    const timer = setInterval(() => {
+      void window.nodeTerminal.pairing
+        .probeSsh()
+        .then((open) => {
+          if (!cancelled && open) {
+            setSshOpen(true)
+            setSshHealed(true)
+          }
+        })
+        .catch(() => {
+          // transient probe error: keep the warning, try again on the next tick
+        })
+    }, SSH_RECHECK_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [phase, sshOpen])
+
   const startPairing = async (): Promise<void> => {
     setError('')
     setBusy(true)
@@ -74,6 +115,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
       const dataUrl = await toDataURL(payload, { margin: 1, width: 240 })
       setQr(dataUrl)
       setSshOpen(open)
+      setSshHealed(false)
       setPhase('waiting')
       runningRef.current = true
     } catch (err) {
@@ -195,9 +237,21 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               />
               <p className="text-sm text-muted">Waiting for your phone… (2 min)</p>
               {!sshOpen ? (
-                <p className="text-sm" style={{ color: '#ff9f0a' }}>
-                  SSH doesn&apos;t appear to be reachable. Enable Remote Login in System Settings →
-                  General → Sharing so your phone can connect after pairing.
+                <div className="space-y-2">
+                  <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                    SSH doesn&apos;t appear to be reachable — your phone won&apos;t be able to
+                    connect after pairing. Turn on <strong>Remote Login</strong>
+                    {isMac ? ' (watching — this notice clears by itself once it is on).' : '.'}
+                  </p>
+                  {isMac ? (
+                    <Button onClick={() => window.nodeTerminal.shell.openExternal(REMOTE_LOGIN_SETTINGS_URL)}>
+                      Open System Settings
+                    </Button>
+                  ) : null}
+                </div>
+              ) : sshHealed ? (
+                <p className="text-sm" style={{ color: '#30d158' }}>
+                  ✓ Remote Login is on — your phone can connect after pairing.
                 </p>
               ) : null}
               <Button onClick={stopPairing}>Cancel</Button>

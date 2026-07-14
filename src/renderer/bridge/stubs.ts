@@ -280,6 +280,7 @@ export function buildStubApi(): Omit<
       start: U('pairing.start'),
       stop: U('pairing.stop'),
       onDone: noopUnsub,
+      probeSsh: U('pairing.probeSsh'),
       listDevices: U('pairing.listDevices'),
       revokeDevice: U('pairing.revokeDevice')
     },

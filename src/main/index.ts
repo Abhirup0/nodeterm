@@ -524,6 +524,7 @@ app.whenReady().then(async () => {
     })
   )
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
+  ipcMain.handle(IPC.pairingProbeSsh, () => pairingService.probeSsh())
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
 

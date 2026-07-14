@@ -145,6 +145,8 @@ export interface PairingService {
   listDevices(): Promise<PublicDevice[]>
   /** Revoke a device: drop its agent.json entry AND delete its authorized_keys line. */
   revokeDevice(id: string): Promise<void>
+  /** Live re-probe of sshd (127.0.0.1:22), for the Remote Login warning's auto-clear. */
+  probeSsh(): Promise<boolean>
 }
 
 /** ~/.nodeterm holds the host-agent config (agent.json). Created 0700 if missing. */
@@ -499,5 +501,5 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     await removeAuthorizedKeysForDevice(id)
   }
 
-  return { start, stop, listDevices, revokeDevice }
+  return { start, stop, listDevices, revokeDevice, probeSsh }
 }
