@@ -2,7 +2,10 @@
 
 **Date:** 2026-07-14
 **Branch:** `feat/dino-live` (worktree `/root/nodeterm-dino`, off `main`)
-**Status:** approved (control model + mechanism), spec for review.
+**Status:** LANDED on `feat/dino-live` (full suite + typecheck green). Two-instance acceptance:
+A opens a dino on the shared canvas + presses Space → B watches the SAME dino run live with a
+"▷ A is playing" pill; B presses Space → control moves to B (A becomes spectator); A closes the
+node / disconnects → B's dino falls back to idle ("Click, then Space to play"). Solo play unchanged.
 
 ## Problem
 
