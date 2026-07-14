@@ -38,4 +38,31 @@ describe('loadGitHistoryFromExecutor', () => {
   it('uses the documented commit format', () => {
     expect(GIT_HISTORY_COMMIT_FORMAT).toContain('%H%n')
   })
+
+  // Gits older than ~2.25 (Ubuntu 18.04 / Debian 10 era — still common on SSH hosts) reject
+  // `--end-of-options` with "unknown option", which made the HEAD probe read as "no commits":
+  // a silently EMPTY history panel while the rest of Source Control worked. The flag only guards
+  // refs that start with '-', which every caller already refuses, so falling back without it
+  // loses no safety.
+  it('falls back for old gits that reject --end-of-options instead of showing empty history', async () => {
+    const head = 'c'.repeat(40)
+    const record = [head, 'Dev', 'd@e.f', '1700000000', '1700000000', '', 'HEAD -> refs/heads/main', 'Init'].join('\n')
+    const flagless = makeGit({
+      'rev-parse --verify HEAD^{commit}': head,
+      'symbolic-ref --quiet --short HEAD': 'main',
+      'for-each-ref': '',
+      'rev-parse --symbolic-full-name': '',
+      'log': record + '\0'
+    })
+    const oldGit = async (args: string[]) => {
+      if (args.includes('--end-of-options')) throw new Error("error: unknown option `end-of-options'")
+      return flagless(args)
+    }
+
+    const result = await loadGitHistoryFromExecutor(oldGit, '/repo', { limit: 10 })
+
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]!.subject).toBe('Init')
+    expect(result.currentRef?.name).toBe('main')
+  })
 })
