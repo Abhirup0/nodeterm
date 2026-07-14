@@ -1,6 +1,6 @@
 import { useShallow } from 'zustand/react/shallow'
-import { selectFaces, selectOthers, usePresence } from '../state/presence'
 import { useProjects } from '../state/projects'
+import { useActiveSessionPresence } from '../session/session'
 import { faceClickTarget, facepileEntries, type FacepileFocus } from '../lib/facepile'
 
 /**
@@ -28,14 +28,17 @@ export function Facepile({
   onJump: (nodeId: string) => void
   onSwitchProject: (projectId: string) => void
 }): JSX.Element | null {
+  // Read the ACTIVE session's presence (provider-independent — this stays mounted OUTSIDE the
+  // Canvas SessionProvider, and prunes the face cache; see the mount comment in Canvas.tsx).
+  const presence = useActiveSessionPresence()
   // useShallow: the selector derives a new array each call (its ELEMENTS are cached — that is what
   // makes cursor traffic invisible here). See PresenceLayer for the same pattern.
-  const faces = usePresence(useShallow(selectFaces))
+  const faces = presence.store(useShallow(presence.selectFaces))
   // Where each peer is working. A record of strings, so useShallow can actually compare it.
-  const focus = usePresence(
+  const focus = presence.store(
     useShallow((s): FacepileFocus => {
       const map: Record<number, string | null> = {}
-      for (const p of selectOthers(s)) map[p.clientId] = p.focus ?? null
+      for (const p of presence.selectOthers(s)) map[p.clientId] = p.focus ?? null
       return map
     })
   )
@@ -73,7 +76,7 @@ export function Facepile({
             if (!e.actionable) return
             // Read focus live: the subscribed map above is what decided actionability, but by
             // click time the peer may well have moved to another node.
-            const live = usePresence.getState().peers[e.clientId]?.focus ?? null
+            const live = presence.store.getState().peers[e.clientId]?.focus ?? null
             const target = faceClickTarget(e, live)
             if (target?.kind === 'node') onJump(target.nodeId)
             else if (target?.kind === 'project') onSwitchProject(target.projectId)

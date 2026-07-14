@@ -377,6 +377,25 @@ users before 4d is wired (it grants `pty.create` to peers).
   session — now disposed on the failure path. Sharing is **fixed per hosting session** (change the
   shared project = stop + restart hosting); re-fetching the host's current nodes on reconnect is a
   follow-up (the tab keeps its last-seen nodes until the next live mutation).
+- **Live collaboration follows the active session** (branch `feat/relay-collab-session`) — with the
+  tab populated, the LIVE layer now crosses the tunnel too: cursors, facepile, chat, focus chips, and
+  canvas mutations (a node one side opens appears on the other). The root cause it fixed: Canvas's
+  collaboration layer was bound to the LOCAL session — static `connectPresence`/`usePresence` imports
+  plus `[]`/mount-bound effects that captured the mount-time (local) `api` — so on a relay tab presence
+  never published/read over the tunnel and the canvas-mutation publisher cast to B's own core (and its
+  publish gate saw no peers). The fix routes the whole layer through the ACTIVE session, re-bound on
+  tab switch: a provider-independent `useActiveSessionPresence()` / `presenceForProject(activeProjectId)`
+  (resolves the memoized per-core `PresenceSession`; unbound/local → `defaultPresence`, so LOCAL
+  behavior is byte-identical); the presence components (Facepile/PresenceChips/PresenceLayer/
+  PresenceNamePrompt) + the cursor/chat WRITE read/write the active session; Canvas's
+  `connect`/`reportProject`/`reportFocus` and the `canvas:mut` publisher + `onMutation` re-key on the
+  active session's **api object** (stable per core — so a local↔local tab switch does NOT reset the
+  total-order/reconnect state, the documented invariant, while a local↔relay switch re-binds to the
+  relay core). **Perf contract preserved:** Canvas reads presence IMPERATIVELY
+  (`store.getState()`/`subscribe`), never a reactive `usePresence(selector)`, so a 20 Hz cursor frame
+  never re-renders Canvas (`usePresence` was removed from Canvas entirely). Deferred: a background
+  RELAY project (while a LOCAL tab is active) isn't live — only the active session's `onMutation` is
+  subscribed; it re-syncs on reactivation.
 
 **Retained on the OLD dialect (do NOT delete — a shipped feature):** the phone server path —
 `host-service.ts`, `standing-host.ts`, `host-canvas-hub.ts`, `framing.ts`, `snapshot.ts`,
@@ -512,6 +531,10 @@ session):
      the shared project, not A's other projects.
   3. Type in a terminal on the tab → it runs on A (the host) and both painters show it
      (**co-attach**). Add/move a node on either side → it syncs to the other (Stage-3 mutations).
+     **Live-collaboration check:** B sees A's **cursor** (Figma-style, with name) and A's **face**
+     in the facepile, and vice-versa; a node opened/moved/deleted on EITHER side appears on the
+     other; chat bubbles cross. (If the canvas populated but cursors/broadcast are missing, the
+     active-session collab wiring regressed — see "Live collaboration follows the active session".)
   4. Sleep/wake A → the peer's terminal returns via co-attach (tmux still alive).
   5. Pull B's network → the tab **greys to "unavailable"**; restore + click → **reconnect**
      with a fresh code; disconnected edits are lost, nothing corrupts.

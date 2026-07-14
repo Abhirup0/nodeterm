@@ -14,7 +14,10 @@ import {
   setMeAll,
   setSessionStatus,
   takeSessionOffline,
+  activeSessionPresence,
+  presenceForProject,
 } from './session'
+import { defaultPresence } from '../state/presence'
 import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
 
@@ -239,6 +242,67 @@ describe('takeSessionOffline (Stage 4 Task 7 — an INVOLUNTARY drop, not a user
     setSessionStatus(s.id, 'connected')
     expect(s.status).toBe('connected')
     expect(() => setSessionStatus('nope', 'offline')).not.toThrow()
+  })
+})
+
+describe('activeSessionPresence (Task 1 — the ACTIVE session presence, non-hook accessor)', () => {
+  it('returns the ACTIVE relay session\'s presence — a distinct instance from local', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    setActiveSession(relay.id)
+    const p = activeSessionPresence()
+    expect(p).toBe(getSessionStores(relay.id).presence)
+    expect(p).not.toBe(getSessionStores(local.id).presence)
+  })
+
+  it('returns the LOCAL session\'s presence when local is active', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    setActiveSession(local.id)
+    expect(activeSessionPresence()).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to the local session\'s presence when no session is active (never throws)', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    // activeId is null (setActiveSession never called) — must not throw, resolves to local.
+    expect(() => activeSessionPresence()).not.toThrow()
+    expect(activeSessionPresence()).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to defaultPresence when there is neither an active nor a local session', () => {
+    // node-env safety: with an empty registry the accessor must still return a usable presence.
+    expect(() => activeSessionPresence()).not.toThrow()
+    expect(activeSessionPresence()).toBe(defaultPresence)
+  })
+})
+
+describe('presenceForProject (Task 2 — the provider-INDEPENDENT resolver the active-session presence hook is built on)', () => {
+  it('resolves a project BOUND to a relay session to that relay session\'s presence', () => {
+    // This is what makes Facepile / PresenceNamePrompt (rendered OUTSIDE the SessionProvider) and
+    // the presence-reading components see the ACTIVE (relay) session without moving in the tree:
+    // the hook passes the store's activeProjectId here, and a relay tab's project is bound to it.
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    const relay = createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    bindProjectToSession('remote-tab', relay.id)
+
+    const p = presenceForProject('remote-tab')
+    expect(p).toBe(getSessionStores(relay.id).presence)
+    expect(p).not.toBe(getSessionStores(local.id).presence)
+  })
+
+  it('resolves an unbound (local) project to the LOCAL session\'s presence — byte-identical to today', () => {
+    const local = createSession('local', fakeApi, 'This Mac')
+    setActiveSession(local.id)
+    createSession('relay', { marker: 'relay' } as unknown as NodeTerminalApi, "Ayşe's Mac")
+    // A local project is never bound — it must resolve to the local session's presence (the exact
+    // store the historical components read today), NOT the merely-active or relay one.
+    expect(presenceForProject('some-local-tab')).toBe(getSessionStores(local.id).presence)
+  })
+
+  it('falls back to defaultPresence for an empty/unknown project id with no local session (node-env safe)', () => {
+    expect(() => presenceForProject('')).not.toThrow()
+    expect(presenceForProject('')).toBe(defaultPresence)
   })
 })
 

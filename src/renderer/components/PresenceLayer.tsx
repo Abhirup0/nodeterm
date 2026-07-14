@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { ViewportPortal, useReactFlow, useStore } from '@xyflow/react'
 import { CHAT_MAX_LEN } from '@shared/presence'
-import { selectVisible, usePresence } from '../state/presence'
 import { useProjects } from '../state/projects'
-import { useSession } from '../session/session'
+import { useActiveSessionApi, useActiveSessionPresence } from '../session/session'
 import {
   CHAT_ANCHOR_OFFSET_PX,
   CURSOR_HOTSPOT_PX,
@@ -35,16 +34,18 @@ const CHAT_LINGER_MS = 5000
  * Canvas.
  */
 export function PresenceLayer(): JSX.Element | null {
-  // The session's core API — where cursor/chat casts go. A plain context read (no store
-  // subscription): the session object is stable for this component's lifetime, so the rAF
-  // callbacks and effect cleanups below may close over `api` directly.
-  const { api } = useSession()
+  // The ACTIVE session's core API — where cursor/chat casts go — and its presence store, both
+  // resolved provider-independently (reactive on the active project) so they always agree on the
+  // session. Stable per active session, and both are listed in the effect/callback deps below, so
+  // a tab switch that changes the active session rebinds the rAF sampler and effect cleanups.
+  const api = useActiveSessionApi()
+  const presence = useActiveSessionPresence()
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // Hard project filter — not a style: an off-project peer is not rendered at all.
   // useShallow: the selector derives a NEW array each call, and zustand's default Object.is
   // equality would make React 18's useSyncExternalStore complain (and re-render on every store
   // write). Shallow-compare the array instead.
-  const others = usePresence(useShallow((s) => selectVisible(s, activeProjectId || null)))
+  const others = presence.store(useShallow((s) => presence.selectVisible(s, activeProjectId || null)))
   const hasOthers = others.length > 0
   const { screenToFlowPosition } = useReactFlow()
   // Live viewport zoom, straight from React Flow's store: this subscribes THIS component, so a

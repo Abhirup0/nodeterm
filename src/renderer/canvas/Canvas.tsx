@@ -83,7 +83,6 @@ import { UsageIndicator } from '../components/UsageIndicator'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
-import { connectPresence, reportProject, usePresence } from '../state/presence'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -139,6 +138,7 @@ import {
   useSession,
   SessionProvider,
   sessionForProject,
+  presenceForProject,
   setActiveSession,
   disposeSession,
 } from '../session/session'
@@ -169,6 +169,7 @@ import {
 } from '@shared/canvas-publish'
 import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
 import { createMutationGuard } from '@shared/canvas-mutations'
+import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
@@ -609,6 +610,19 @@ export function Canvas() {
     useReactFlow()
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  // The ACTIVE session + its presence — what the canvas-sync publisher and onMutation subscriber
+  // must follow (Task 4). `sessionForProject` / `presenceForProject` are plain, allocation-free
+  // resolves of the memoized (per-core) session/presence — NOT reactive subscriptions to the peer
+  // table — so these are STABLE references per session (a relay tab → the relay core; a local tab →
+  // `window.nodeTerminal` / `defaultPresence`, byte-identical to today) and the sync effects below
+  // re-key on `activeSession.api` (the api OBJECT, stable per core): local→local tab switches keep
+  // the SAME api → the effects do NOT re-run → the per-node `order`/reconnect state survives the
+  // switch (the documented invariant); a local↔relay switch changes the api → they re-bind on the
+  // new core. Deliberately NOT keyed on `activeProjectId` — that would reset `order` on every local
+  // tab switch. Reading presence imperatively via `.store.getState()`/`.subscribe` (never a reactive
+  // `usePresence(sel)` hook) is the PERF CONTRACT: a peer's 20 Hz cursor never re-renders Canvas.
+  const activeSession = sessionForProject(activeProjectId || '')
+  const activePresence = presenceForProject(activeProjectId || '')
   // "Has projects" = at least one OPEN (non-closed) tab. With only closed projects left, the
   // welcome screen shows (and lists them under "Recently closed" for reopening).
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
@@ -1009,8 +1023,10 @@ export function Canvas() {
     // tab switch). Peers only draw each other's cursors and node chips when the project matches —
     // each project is its own canvas with its own coordinate space. No project open (welcome
     // screen) → null, which is exactly what the early returns below mean. reportProject dedups,
-    // and Canvas deliberately never READS the presence store (see the connectPresence effect).
-    reportProject(activeProjectId || null)
+    // and Canvas deliberately never READS the presence store (see the connect effect). Route to the
+    // ACTIVE session's presence (a relay tab tells its host, over the right core; a local tab hits
+    // `defaultPresence` — byte-identical to before), resolved by binding from the project we switched to.
+    presenceForProject(activeProjectId || '').reportProject(activeProjectId || null)
     // Track the active session by the tab we switched to, so non-component api accessors
     // (activeSessionApi() in scmDraft/worktrees) hit the active tab's core — the local session for
     // a local tab, the relay session for a remote tab. Resolution is by binding (never persisted).
@@ -1288,14 +1304,23 @@ export function Canvas() {
     // everyone else's canvas. There is nothing to forget at the first hello — an empty `seen` map
     // cannot be stale. (Nor on a project switch: this Canvas keeps applying mutations for
     // loaded-but-inactive projects, so their order state has to survive a tab switch.)
-    const reconnected = createReconnectWatch(usePresence.getState().myId)
+    // Gate + reconnect are read off the ACTIVE session's presence store, imperatively (never a
+    // reactive `usePresence(sel)` hook — the PERF CONTRACT), so a relay tab counts the RELAY core's
+    // peers instead of the always-empty local table (the bug: `hasPeers` was false → nothing cast).
+    // Peer reality is PER SESSION: this effect now re-binds when the active core changes, so the
+    // accumulated gate must start clean on each (re-)bind — otherwise a relay tab's `hasPeers=true`
+    // would LEAK onto a subsequent solo local tab and make it cast to its own local core. `readPresence`
+    // below re-derives it immediately from THIS session's presence. (No-op on a local→local switch:
+    // the api is unchanged, so the effect does not re-run and the gate — like `order` — survives.)
+    hasPeersRef.current = false
+    const reconnected = createReconnectWatch(activePresence.store.getState().myId)
     const readPresence = (): void => {
       hasPeersRef.current =
-        hasPeersRef.current || Object.keys(usePresence.getState().peers).length > 1
-      if (reconnected(usePresence.getState().myId)) order.reset()
+        hasPeersRef.current || canvasSyncTarget(activeSession, activePresence.store.getState()).hasPeers
+      if (reconnected(activePresence.store.getState().myId)) order.reset()
     }
     readPresence()
-    const unsub = usePresence.subscribe(readPresence)
+    const unsub = activePresence.store.subscribe(readPresence)
     // `isCanvasMutation`, with a refusal remembered per node: a refused node is re-emitted on every
     // publish (that is what makes it sync the moment the sticky is trimmed) and a drag publishes at
     // ~20 Hz, so the size check re-serialized the one oversized node 20×/s, at a cost proportional to
@@ -1320,7 +1345,12 @@ export function Canvas() {
           return false
         }
         order.onLocal(m)
-        api.canvas.mutate(projectId, m)
+        // Cast to the ACTIVE session's core — a relay tab publishes to the relay HOST, not to B's
+        // own local core (the bug this fixes). Byte-identical on a local tab (`activeSession.api`
+        // IS `window.nodeTerminal`). `canvasSyncTarget` decides the GATE (hasPeers) at bind time;
+        // the cast target is just the session's api, so reach it directly — no per-cast allocation
+        // on this ~20 Hz path.
+        activeSession.api.canvas.mutate(projectId, m)
         return true
       },
       { src, shouldPublish: () => hasPeersRef.current }
@@ -1332,7 +1362,10 @@ export function Canvas() {
       publisherRef.current = null
       orderRef.current = null
     }
-  }, [])
+    // Keyed on the api OBJECT (stable per core): a local↔relay switch re-binds order + subscription
+    // on the new core; a local→local switch keeps the SAME api so the effect does NOT re-run and the
+    // per-node order/reconnect state survives the tab switch (the documented invariant).
+  }, [activeSession.api])
 
   // Publish on every settled node change. While dragging we throttle to ~20 Hz (position frames);
   // the drag-stop handlers flush, and every other change (add / remove / color / title / collapse /
@@ -1375,7 +1408,11 @@ export function Canvas() {
   // direct setNodes() bypasses handleNodesChange (which is where local edits mark dirty). Two
   // clients saving the same converged state is harmless; never saving it is not.
   useEffect(() => {
-    return api.canvas.onMutation((projectId, mutation) => {
+    // Subscribe the ACTIVE session's core — inbound relay mutations arrive on the relay api, not the
+    // mount-time local one (the bug). Byte-identical on a local tab (`activeSession.api` IS
+    // `window.nodeTerminal`). Re-keyed on the api OBJECT below, in lockstep with the publisher, so a
+    // tab switch tears down + re-binds both together (and a local→local switch does neither).
+    return activeSession.api.canvas.onMutation((projectId, mutation) => {
       hasPeersRef.current = true // proof of a peer, whatever the presence table says
       if (!orderRef.current?.accept(mutation)) return
       if (projectId !== useProjects.getState().activeProjectId) {
@@ -1413,7 +1450,7 @@ export function Canvas() {
       setNodes(flow)
       markDirty()
     })
-  }, [setNodes, markDirty, publishableNow])
+  }, [activeSession.api, setNodes, markDirty, publishableNow])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
@@ -3890,12 +3927,19 @@ export function Canvas() {
 
   useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
 
-  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session ([] deps —
-  // connectPresence is idempotent, but a second live connection whose teardown ran first would tear
-  // the shared one down under the survivor). Canvas deliberately does NOT read the presence store:
-  // only PresenceLayer / Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never
-  // re-renders this component (docs/team-presence.md → UI).
-  useEffect(() => connectPresence(), [])
+  // Team presence: subscribe to the peer stream and announce ourselves ONCE per session. Bound to
+  // the ACTIVE session's presence (a relay tab connects the relay core; a local tab hits
+  // `defaultPresence` — byte-identical to before), re-keyed on `presence` so a tab switch tears the
+  // old session's connection down and connects the new one. `presenceForProject` is a plain,
+  // allocation-free resolve of the memoized (WeakMap-per-core) PresenceSession from the project we
+  // switched to — NOT a reactive subscription to the peer table — so `presence` is a stable
+  // reference per session and the effect re-runs ONLY when the active session changes. connect() is
+  // idempotent, and a second live connection whose teardown ran first would tear the shared one down
+  // under the survivor. Canvas deliberately does NOT read the presence store: only PresenceLayer /
+  // Facepile / PresenceChips subscribe, so a peer's 20 Hz cursor never re-renders this component
+  // (docs/team-presence.md → UI, PERF CONTRACT).
+  const presence = presenceForProject(activeProjectId || '')
+  useEffect(() => presence.connect(), [presence])
 
   // A browser guest's new-window (target=_blank / window.open) request → open another browser node
   // (never a real popup; main denies the real one) roped below/right of the source. Reads the

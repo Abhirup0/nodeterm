@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { NAME_MAX_LEN, PRESENCE_COLORS } from '@shared/presence'
-import { selectOthers, suggestIdentity, usePresence } from '../state/presence'
-import { setMeAll } from '../session/session'
+import { suggestIdentity } from '../state/presence'
+import { setMeAll, useActiveSessionPresence } from '../session/session'
 
 /**
  * First-connect identity prompt: pick a name + color. Saved to localStorage
@@ -16,8 +16,12 @@ import { setMeAll } from '../session/session'
  * the count) cannot re-render this.
  */
 export function PresenceNamePrompt(): JSX.Element | null {
-  const needsName = usePresence((s) => s.needsName)
-  const otherCount = usePresence((s) => selectOthers(s).length)
+  // Read the ACTIVE session's presence (provider-independent — this prompt renders OUTSIDE the
+  // Canvas SessionProvider), so a relay tab prompts on the relay session's peers. The WRITE below
+  // is `setMeAll`, which re-helloes EVERY live session, so no per-session write is needed here.
+  const presence = useActiveSessionPresence()
+  const needsName = presence.store((s) => s.needsName)
+  const otherCount = presence.store((s) => presence.selectOthers(s).length)
   // suggestIdentity is read ONCE (lazy initializer): a peer joining later must not swap the
   // suggested color out from under a user who is mid-typing.
   const [draft] = useState(suggestIdentity)

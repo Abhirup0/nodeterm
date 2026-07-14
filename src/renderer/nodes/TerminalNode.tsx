@@ -54,7 +54,6 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
-import { reportFocus, releaseFocus, usePresence } from '../state/presence'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
@@ -62,7 +61,7 @@ import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
-import { useSession } from '../session/session'
+import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -314,6 +313,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
   const session = useSession()
   const { api } = session
+  // The ACTIVE session's presence — where our focus/blur casts go. This node renders under Canvas's
+  // active-session provider, so a relay tab reports focus over the relay core and a local tab hits
+  // `defaultPresence` (byte-identical to before). Stable for the node's lifetime (a tab switch
+  // unmounts the node), so capturing it in the once-mounted lifecycle effect below is safe, like `api`.
+  const presence = useActiveSessionPresence()
   // Session-scope the module-global node-keyed maps (parkedTerminals / coStates / coSubs /
   // restartSubs / noParkIds): a relay tab adopts the host's project KEEPING node ids, so a local
   // node and a relay node can share a bare id. `session.id` is stable for this node's lifetime
@@ -458,7 +462,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // presence store is written at cursor rate and its perf contract reserves subscriptions for the
   // presence components — a per-terminal subscriber would run on every one of those writes. The
   // overlay is terminal state anyway, so resolving the name when `co.closed` appears is enough.
-  const closedName = co.closed ? closedByLabel(co.closed.by, usePresence.getState().peers) : ''
+  // `co.closed.by` is a ClientId from THIS node's active-session transport, and ClientIds are
+  // per-presence-session — so resolve the name against the ACTIVE session's peer table, not the
+  // local default (else a relay tab shows "another user" / a wrong name). Byte-identical on a
+  // local tab (active presence IS the default).
+  const closedName = co.closed ? closedByLabel(co.closed.by, presence.store.getState().peers) : ''
 
   // "Session ended" (a recycle whose replacement never came — see CoState.ended): the user asks for
   // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
@@ -1140,7 +1148,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
       // project switch every node unmounts, and an unconditional clear could undo the focus the
       // node we just moved into already published.
-      releaseFocus(id)
+      presence.releaseFocus(id)
       // Unmount happens on a project switch (a detach — the tmux session keeps running) as
       // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
       // persisted status (that would drop the sessionId the context meter looks up on remount,
@@ -1256,7 +1264,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // "I am working in this node" — the same signal the agent-status active flag uses, i.e. the
       // dwell has elapsed and the terminal actually took the keyboard (a mouse merely passing over
       // never gets here). Deduped in the store, so re-entering the same node costs nothing.
-      reportFocus(id)
+      presence.reportFocus(id)
     }
     dwellRef.current = setTimeout(enter, panHoverDelay)
   }
@@ -1265,7 +1273,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     setArmed(true)
     termRef.current?.blur()
     useAgentStatus.getState().setActive(id, false)
-    releaseFocus(id)
+    presence.releaseFocus(id)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
   // terminal doesn't grab focus mid-drag; restart it on release.
@@ -1318,7 +1326,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.focus()
     term.paste(paths.join(' ') + ' ')
     useAgentStatus.getState().setActive(id, true)
-    reportFocus(id)
+    presence.reportFocus(id)
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into

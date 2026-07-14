@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { selectFocusedFaces, selectTypingFaces, usePresence } from '../state/presence'
 import { useProjects } from '../state/projects'
+import { useActiveSessionPresence } from '../session/session'
 import { chipStrip } from '../lib/presenceChips'
 
 /**
@@ -27,12 +27,13 @@ import { chipStrip } from '../lib/presenceChips'
  * touch the typing marks, so it returns the very same (usually empty and shared) array.
  */
 export function PresenceChips({ nodeId }: { nodeId: string }): JSX.Element | null {
+  const presence = useActiveSessionPresence()
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // useShallow: the array is derived fresh each call — its ELEMENTS are the cached faces.
-  const faces = usePresence(
-    useShallow((s) => selectFocusedFaces(s, nodeId, activeProjectId || null))
+  const faces = presence.store(
+    useShallow((s) => presence.selectFocusedFaces(s, nodeId, activeProjectId || null))
   )
-  const typists = usePresence(useShallow((s) => selectTypingFaces(s, nodeId)))
+  const typists = presence.store(useShallow((s) => presence.selectTypingFaces(s, nodeId)))
   if (faces.length === 0 && typists.length === 0) return null
 
   const { chips, overflow, overflowTitle } = chipStrip(faces, typists)
