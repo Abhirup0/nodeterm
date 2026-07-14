@@ -258,6 +258,14 @@ export const EMPTY_WORKSPACE: Workspace = {
 
 // ---- Contract for the API exposed to the renderer via preload ----
 
+/** Wire shape of pty:tmux-status — behind the "tmux not found" banner. */
+export interface TmuxStatus {
+  available: boolean
+  /** One-shot install command for a terminal node; null = no known installer (text-only banner). */
+  installCommand: string | null
+  platform: string
+}
+
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly
    *  created (cold start) vs reattached to a still-running tmux session (warm). */
@@ -290,6 +298,9 @@ export interface PtyApi {
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
   sendText(persistKey: string, text: string): Promise<boolean>
+  /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
+   *  install command for the "tmux not found" banner. */
+  tmuxStatus(): Promise<TmuxStatus>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
    *  resolved strictly by sessionId; null if unknown. Keeps a node title in sync with the
    *  `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.

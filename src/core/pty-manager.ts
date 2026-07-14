@@ -12,8 +12,10 @@ import {
   DEFAULT_SETTINGS,
   type PtyCreateOptions,
   type PtyCreateResult,
-  type Settings
+  type Settings,
+  type TmuxStatus
 } from '../shared/types'
+import { findCommand, tmuxInstallCommand } from './tmux-hint'
 import { hookServer } from './agents/hook-server'
 import {
   remoteHookEnvArgs,
@@ -620,6 +622,22 @@ export class PtyManager {
     platform().handle(IPC.ptySendText, (persistKey: string, text: string) =>
       this.sendText(persistKey, text)
     )
+    platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
+  }
+
+  /** Feeds the renderer's "tmux not found" banner. Without tmux the app silently degrades to a
+   *  plain shell (no cross-restart continuity, no mobile attach) — users never discover that on
+   *  their own, so the banner surfaces it with a one-click install command when a known package
+   *  manager is present (run in a terminal node, gh-sign-in style). */
+  tmuxStatus(): TmuxStatus {
+    const available = !!this.tmuxPath
+    return {
+      available,
+      installCommand: available
+        ? null
+        : tmuxInstallCommand(process.platform, (cmd) => findCommand(cmd, process.env, fs.existsSync)),
+      platform: process.platform
+    }
   }
 
   /**

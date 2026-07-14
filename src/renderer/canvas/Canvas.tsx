@@ -70,6 +70,7 @@ import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { TmuxBanner } from '../components/TmuxBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
@@ -5376,6 +5377,7 @@ export function Canvas() {
 
       <div className="top-banners">
         <AnnouncementBanner />
+        <TmuxBanner onInstall={runInTerminal} />
         {migrationNote && (
           <div className="announce-banner announce-banner--info">
             <span className="announce-banner__dot" />

@@ -28,6 +28,7 @@ import {
   type PtyCreateOptions,
   type SettingsApi,
   type Settings,
+  type TmuxStatus,
   type Workspace,
   type WorkspaceApi
 } from '../../shared/types'
@@ -205,6 +206,11 @@ export function buildRealApi(
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text) =>
       client.request(IPC.ptySendText, persistKey, text) as Promise<boolean>,
+    // Fail-open: an errored status must not raise the banner in the browser.
+    tmuxStatus: () =>
+      client
+        .request(IPC.ptyTmuxStatus)
+        .catch(() => ({ available: true, installCommand: null, platform: 'linux' })) as Promise<TmuxStatus>,
     // No server handler — the session-name poll degrades to no adopted name.
     readSessionName: () => Promise.resolve(''),
     onData: (sessionId, listener) =>
