@@ -57,15 +57,11 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nodeterm-mac
-          path: |
-            dist/*.dmg
-            dist/*.zip
-            dist/*.yml
-            dist/*.blockmap
+      # NOTE: there is deliberately no actions/upload-artifact step. Each release is ~800 MB of
+      # DMGs + zips, and Actions artifact storage is a small, billed quota that those copies filled
+      # up (the release then failed with "Artifact storage quota has been hit"). The GitHub Release
+      # below is the canonical store — it does not consume that quota — so the extra 90-day copy
+      # bought nothing. Don't add it back.
 
       # Canonical copy of every release on GitHub. The update feed itself lives on
       # nodeterm.dev (see the deploy step below), but keeping a GitHub Release means
