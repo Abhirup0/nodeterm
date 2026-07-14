@@ -4,6 +4,7 @@ import {
   applyEdgeChanges,
   Background,
   BackgroundVariant,
+  ControlButton,
   Controls,
   MarkerType,
   MiniMap,
@@ -47,6 +48,7 @@ import {
   IconChat,
   IconDino,
   IconJump,
+  IconLock,
   IconMarkdown,
   IconNote,
   IconProject,
@@ -57,7 +59,8 @@ import {
   IconSwitch,
   IconTerminal,
   IconTrash,
-  IconUngroup
+  IconUngroup,
+  IconUnlock
 } from '../components/icons'
 import { SettingsPage } from '../components/settings/SettingsPage'
 import type { SettingsSectionId } from '../components/settings/nav'
@@ -412,6 +415,12 @@ export function Canvas() {
     return () => clearTimeout(t)
   }, [notice])
   const [zoomPct, setZoomPct] = useState(100)
+  // Canvas lock (bottom-left Controls): freezes the viewport against GESTURES — pan (drag +
+  // scroll), zoom (pinch / Cmd+wheel / double-click), node dragging and edge connecting.
+  // Deliberate button clicks (Controls +/−/fit, dock zoom, ⌘K fit) still work, matching React
+  // Flow's own lock convention. Transient by design: a lock that survives restart reads as
+  // "the app is frozen" to whoever opens it next.
+  const [canvasLocked, setCanvasLocked] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -760,7 +769,9 @@ export function Canvas() {
         // frame border without being clamped into it.
         ...(parent.parentId ? { parentId: parent.parentId } : {}),
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
-        draggable: true,
+        // Node-level `draggable` overrides the global nodesDraggable, so the canvas lock
+        // must be threaded in here or the ephemeral cards would keep moving while locked.
+        draggable: !canvasLocked,
         selected: !!ephSel[lid],
         ...dims(lid, 230, 460, 92, 320),
         data: {
@@ -808,7 +819,7 @@ export function Canvas() {
             x: parent.position.x + (i % COLS) * COL_W,
             y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
           },
-          draggable: true,
+          draggable: !canvasLocked,
           selected: !!ephSel[cid],
           ...dims(cid, 230, 480, 96, 340),
           data: {
@@ -837,7 +848,7 @@ export function Canvas() {
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
-  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes, canvasLocked])
 
   // Merge the persisted nodes with the ephemeral ones once per change (not per render),
   // so React Flow's array-identity short-circuit holds while panning/zooming.
@@ -1750,6 +1761,7 @@ export function Canvas() {
     const wrap = flowWrapRef.current
     if (!wrap) return
     const onWheel = (e: WheelEvent) => {
+      if (canvasLocked) return
       if (!e.ctrlKey && !e.metaKey) {
         // pinch (ctrl+wheel) / Cmd/Ctrl+scroll always zoom; plain wheel only when opted in
         if (!wheelZoom) return
@@ -1770,7 +1782,7 @@ export function Canvas() {
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport, wheelZoom])
+  }, [getViewport, setViewport, wheelZoom, canvasLocked])
 
   /** Flow-space point at the center of the visible canvas (for dock-added nodes). */
   const viewCenter = useCallback(() => {
@@ -5568,10 +5580,13 @@ export function Canvas() {
           deleteKeyCode={null}
           selectionOnDrag
           selectionMode={SelectionMode.Partial}
-          panOnDrag={[1]}
-          panOnScroll={!wheelZoom}
+          nodesDraggable={!canvasLocked}
+          nodesConnectable={!canvasLocked}
+          panOnDrag={canvasLocked ? false : [1]}
+          panOnScroll={canvasLocked ? false : !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
+          zoomOnDoubleClick={!canvasLocked}
           zoomActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
@@ -5582,7 +5597,15 @@ export function Canvas() {
             size={2.5}
             color="#4a4a4a"
           />
-          <Controls showInteractive={false} position="bottom-left" />
+          <Controls showInteractive={false} position="bottom-left">
+            <ControlButton
+              className={`canvas-lock-btn${canvasLocked ? ' locked' : ''}`}
+              title={canvasLocked ? 'Unlock canvas' : 'Lock canvas'}
+              onClick={() => setCanvasLocked((v) => !v)}
+            >
+              {canvasLocked ? <IconLock /> : <IconUnlock />}
+            </ControlButton>
+          </Controls>
           <UsageIndicator />
           {/* Peer cursors live INSIDE <ReactFlow>: PresenceLayer uses ViewportPortal +
               useReactFlow, which throw outside the provider — and cursors are flow coordinates. */}

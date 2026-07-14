@@ -4268,6 +4268,13 @@ body,
   background: var(--panel-header);
 }
 
+/* Canvas lock toggle (in the bottom-left Controls). The icon is stroke-based
+   (stroke = currentColor), so the locked state tints via `color`. */
+.react-flow__controls-button.canvas-lock-btn.locked {
+  color: var(--accent);
+  background: rgba(10, 132, 255, 0.14);
+}
+
 /* ---- Claude usage indicator (bottom-left, right of React Flow Controls) ---- */
 .usage-indicator {
   position: absolute;
