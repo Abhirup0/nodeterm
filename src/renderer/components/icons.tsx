@@ -231,3 +231,12 @@ export const IconBellFilled = () => (
     <path d="M9.7 18.7a2.4 2.4 0 0 0 4.6 0z" />
   </svg>
 )
+
+/* Smartphone outline — the quick phone-pairing button in the top-right cluster. */
+export const IconPhone = () => (
+  <svg {...S}>
+    <rect x="7" y="2.5" width="10" height="19" rx="2.5" />
+    <path d="M10.5 5h3" />
+    <circle cx="12" cy="18" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+)

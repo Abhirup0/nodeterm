@@ -5728,3 +5728,102 @@ body,
   line-height: 1.5;
   color: var(--muted);
 }
+
+/* ---- quick phone-pair popover (top-right phone button) ---- */
+.phone-pair__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+.phone-pair {
+  position: fixed;
+  z-index: 91;
+  width: 264px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(20, 20, 22, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color: var(--label, #fff);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.phone-pair__title {
+  align-self: flex-start;
+  font-size: 13px;
+  font-weight: 600;
+}
+.phone-pair__qr {
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+}
+.phone-pair__hint {
+  font-size: 12px;
+  color: var(--muted, rgba(255, 255, 255, 0.55));
+  text-align: center;
+}
+.phone-pair__warn {
+  font-size: 12px;
+  color: #ff9f0a;
+  text-align: center;
+}
+.phone-pair__ok {
+  font-size: 12px;
+  color: #30d158;
+  text-align: center;
+}
+.phone-pair__btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--label, #fff);
+  cursor: pointer;
+}
+.phone-pair__btn:hover { background: rgba(255, 255, 255, 0.14); }
+.phone-pair__divider {
+  align-self: stretch;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.phone-pair__row {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.phone-pair__row-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.phone-pair__pro {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--accent, #0a84ff);
+  border: 1px solid var(--accent, #0a84ff);
+}
+.phone-pair__row-sub {
+  font-size: 11px;
+  color: var(--muted, rgba(255, 255, 255, 0.55));
+  margin-top: 2px;
+}
+.phone-pair__link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--accent, #0a84ff);
+  cursor: pointer;
+}
+.phone-pair__footer { align-self: flex-start; }

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { toDataURL } from 'qrcode'
+import { useCallback, useEffect, useState } from 'react'
 import type { PairedDevice } from '@shared/types'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
@@ -8,6 +7,7 @@ import { Button } from '@renderer/ui/Button'
 import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { useEntitlement } from '@renderer/state/entitlement'
+import { usePhonePairing } from '../usePhonePairing'
 
 const ROWS = {
   remote: {
@@ -35,11 +35,6 @@ function formatPairedAt(ms: number): string {
   })
 }
 
-type Phase = 'idle' | 'waiting' | 'paired' | 'timeout'
-
-/** How often the Remote Login warning re-probes sshd while it is showing. */
-const SSH_RECHECK_MS = 2000
-
 /** Deep link straight to System Settings → General → Sharing (the Remote Login toggle lives
  *  there). The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and
  *  is harmless on newer macOS, which opens the Sharing pane either way. macOS-only. */
@@ -50,18 +45,8 @@ const REMOTE_LOGIN_SETTINGS_URL =
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Element {
-  const [phase, setPhase] = useState<Phase>('idle')
-  const [qr, setQr] = useState('')
-  const [sshOpen, setSshOpen] = useState(true)
-  // Went from unreachable → reachable while the warning was showing: show a green confirmation
-  // instead of silently dropping the warning (the user just flipped a toggle; acknowledge it).
-  const [sshHealed, setSshHealed] = useState(false)
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
   const [devices, setDevices] = useState<PairedDevice[]>([])
   const [pendingRevoke, setPendingRevoke] = useState<PairedDevice | null>(null)
-  // Track whether a pairing listener is currently running so unmount can stop it.
-  const runningRef = useRef(false)
 
   const isPremium = useEntitlement((s) => s.isPremium)
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
@@ -81,69 +66,11 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
     }
   }, [])
 
-  // Live re-check while the Remote Login warning is visible: the initial probe runs once at
-  // pairing start, so without this the warning could never clear — the user enables Remote Login
-  // in System Settings and nothing changes on screen. Poll only in that exact state (waiting +
-  // unreachable); the interval dies with the warning.
-  useEffect(() => {
-    if (phase !== 'waiting' || sshOpen) return
-    let cancelled = false
-    const timer = setInterval(() => {
-      void window.nodeTerminal.pairing
-        .probeSsh()
-        .then((open) => {
-          if (!cancelled && open) {
-            setSshOpen(true)
-            setSshHealed(true)
-          }
-        })
-        .catch(() => {
-          // transient probe error: keep the warning, try again on the next tick
-        })
-    }, SSH_RECHECK_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [phase, sshOpen])
-
-  const startPairing = async (): Promise<void> => {
-    setError('')
-    setBusy(true)
-    try {
-      const { payload, sshOpen: open } = await window.nodeTerminal.pairing.start()
-      const dataUrl = await toDataURL(payload, { margin: 1, width: 240 })
-      setQr(dataUrl)
-      setSshOpen(open)
-      setSshHealed(false)
-      setPhase('waiting')
-      runningRef.current = true
-    } catch (err) {
-      setError((err as Error).message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const stopPairing = (): void => {
-    if (runningRef.current) {
-      runningRef.current = false
-      void window.nodeTerminal.pairing.stop()
-    }
-    setPhase('idle')
-    setQr('')
-  }
-
-  // Subscribe to the completion event; drives paired/timeout state.
-  useEffect(() => {
-    const off = window.nodeTerminal.pairing.onDone((result) => {
-      runningRef.current = false
-      setQr('')
-      setPhase(result.ok ? 'paired' : 'timeout')
-      if (result.ok) void refreshDevices()
-    })
-    return off
-  }, [refreshDevices])
+  // The shared pairing machine (also behind the top-right quick-pair popover); a completed
+  // pairing refreshes the device list below.
+  const { phase, qr, sshOpen, sshHealed, error, busy, start, stop, reset } = usePhonePairing(
+    () => void refreshDevices()
+  )
 
   // Load the paired-device list on mount.
   useEffect(() => {
@@ -158,16 +85,6 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
       void refreshDevices()
     }
   }
-
-  // Stop any in-flight pairing when the section unmounts (settings closed / navigated away).
-  useEffect(() => {
-    return () => {
-      if (runningRef.current) {
-        runningRef.current = false
-        void window.nodeTerminal.pairing.stop()
-      }
-    }
-  }, [])
 
   return (
     <SettingsSection
@@ -220,7 +137,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                   Pairing timed out. Start again and scan the new code within two minutes.
                 </p>
               ) : null}
-              <Button variant="primary" disabled={busy} onClick={() => void startPairing()}>
+              <Button variant="primary" disabled={busy} onClick={() => void start()}>
                 {busy ? 'Starting…' : 'Start pairing'}
               </Button>
             </div>
@@ -254,7 +171,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                   ✓ Remote Login is on — your phone can connect after pairing.
                 </p>
               ) : null}
-              <Button onClick={stopPairing}>Cancel</Button>
+              <Button onClick={stop}>Cancel</Button>
             </div>
           ) : null}
 
@@ -263,7 +180,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               <p className="text-sm font-medium" style={{ color: '#30d158' }}>
                 ✓ Paired. Your phone can now connect with its own key.
               </p>
-              <Button onClick={() => setPhase('idle')}>Pair another phone</Button>
+              <Button onClick={reset}>Pair another phone</Button>
             </div>
           ) : null}
 

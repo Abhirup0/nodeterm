@@ -51,6 +51,7 @@ import {
   IconLock,
   IconMarkdown,
   IconNote,
+  IconPhone,
   IconProject,
   IconRemote,
   IconSave,
@@ -73,6 +74,7 @@ import { describeOs, REPO_URL } from '../lib/bugReport'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
+import { PhonePairPopover } from '../components/PhonePairPopover'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
@@ -436,6 +438,8 @@ export function Canvas() {
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Quick phone-pair popover (top-right phone button); non-null = open, anchored to the button.
+  const [phonePairAnchor, setPhonePairAnchor] = useState<{ right: number; bottom: number } | null>(null)
   // "+" opens the start screen (WelcomeScreen) on demand over existing projects.
   const [welcomeOpen, setWelcomeOpen] = useState(false)
   // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
@@ -5547,6 +5551,15 @@ export function Canvas() {
           <IconBranch />
         </button>
         <button
+          title="Pair phone"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            setPhonePairAnchor((cur) => (cur ? null : { right: r.right, bottom: r.bottom }))
+          }}
+        >
+          <IconPhone />
+        </button>
+        <button
           title="Settings (⌘,)"
           onClick={() => {
             setSettingsSection(undefined)
@@ -5687,6 +5700,18 @@ export function Canvas() {
           onCloned={onRepoCloned}
         />
       </div>
+
+      {phonePairAnchor && (
+        <PhonePairPopover
+          anchor={phonePairAnchor}
+          onClose={() => setPhonePairAnchor(null)}
+          onOpenSettings={() => {
+            setPhonePairAnchor(null)
+            setSettingsSection('phone')
+            setSettingsOpen(true)
+          }}
+        />
+      )}
 
       {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}
 
