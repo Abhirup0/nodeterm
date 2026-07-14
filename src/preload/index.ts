@@ -415,6 +415,7 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.pairingDone, handler)
       return () => ipcRenderer.removeListener(IPC.pairingDone, handler)
     },
+    probeSsh: () => ipcRenderer.invoke(IPC.pairingProbeSsh),
     listDevices: () => ipcRenderer.invoke(IPC.pairingListDevices),
     revokeDevice: (id) => ipcRenderer.invoke(IPC.pairingRevokeDevice, id)
   },
