@@ -47,6 +47,30 @@ function clampHistoryLimit(limit: number | undefined): number {
   )
 }
 
+/**
+ * `git rev-parse <flags> --end-of-options <ref>`, retrying WITHOUT the flag when the first call
+ * fails: gits older than ~2.25 (Ubuntu 18.04 / Debian 10 era — still common on the SSH hosts
+ * this loader now reaches) reject `--end-of-options` as an unknown option, and a rejected HEAD
+ * probe reads as "no commits" — a silently empty history panel. The flag only guards
+ * option-injection via a ref that starts with '-', and every caller refuses those refs before
+ * calling, so the fallback loses no safety. A legitimately missing ref costs one extra rev-parse
+ * and still throws, which is what callers expect.
+ */
+async function revParseCompat(
+  git: GitHistoryExecutor,
+  cwd: string,
+  flags: string[],
+  ref: string
+): Promise<string> {
+  try {
+    const { stdout } = await git(['rev-parse', ...flags, '--end-of-options', ref], cwd)
+    return stdout
+  } catch {
+    const { stdout } = await git(['rev-parse', ...flags, ref], cwd)
+    return stdout
+  }
+}
+
 async function resolveCommit(
   git: GitHistoryExecutor,
   cwd: string,
@@ -56,10 +80,7 @@ async function resolveCommit(
     return null
   }
   try {
-    const { stdout } = await git(
-      ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
-      cwd
-    )
+    const stdout = await revParseCompat(git, cwd, ['--verify'], `${ref}^{commit}`)
     const oid = stdout.trim()
     return oid || null
   } catch {
@@ -76,10 +97,7 @@ async function resolveSymbolicFullName(
     return null
   }
   try {
-    const { stdout } = await git(
-      ['rev-parse', '--symbolic-full-name', '--end-of-options', ref],
-      cwd
-    )
+    const stdout = await revParseCompat(git, cwd, ['--symbolic-full-name'], ref)
     return stdout.trim().split(/\r?\n/).find(Boolean) ?? null
   } catch {
     return null

@@ -17,6 +17,7 @@ export const IPC = {
   ptyCapture: 'pty:capture',
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
+  ptyTmuxStatus: 'pty:tmux-status',
   ptyReadSessionName: 'pty:read-session-name',
   claudeReadTranscript: 'claude:read-transcript',
   chatReadTranscript: 'chat:read-transcript',

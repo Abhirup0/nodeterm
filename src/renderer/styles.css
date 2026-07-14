@@ -4268,6 +4268,13 @@ body,
   background: var(--panel-header);
 }
 
+/* Canvas lock toggle (in the bottom-left Controls). The padlock fills with
+   currentColor, so the locked state tints via `color`. */
+.react-flow__controls-button.canvas-lock-btn.locked {
+  color: var(--accent);
+  background: rgba(10, 132, 255, 0.14);
+}
+
 /* ---- Claude usage indicator (bottom-left, right of React Flow Controls) ---- */
 .usage-indicator {
   position: absolute;
@@ -5684,4 +5691,37 @@ body,
   background: transparent;
   color: var(--muted);
   border: 1px solid var(--border);
+}
+
+/* ---- Bug report dialog (help menu → Report a bug…) ---- */
+.bug-report {
+  width: 440px;
+}
+
+.bug-report__desc {
+  min-height: 110px;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.45;
+}
+
+/* Read-only preview of the environment block appended to the issue body. */
+.bug-report__env {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+
+.bug-report__note {
+  margin: 10px 0 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
 }

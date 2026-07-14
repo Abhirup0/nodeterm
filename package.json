@@ -1,6 +1,6 @@
 {
   "name": "node-terminal",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": "enes",
   "license": "BUSL-1.1",
