@@ -203,17 +203,23 @@ export const IconCircleCheck = () => (
   </svg>
 )
 
+/* Filled padlocks (like the bell below): they live in the React Flow controls, whose
+   default icons are filled glyphs capped at 12px — a stroked lock collapses there. */
 export const IconLock = () => (
-  <svg {...S}>
-    <rect x="5" y="11" width="14" height="9" rx="2" />
-    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <path
+      fillRule="evenodd"
+      d="M6 10V7a6 6 0 0 1 12 0v3h.5A2.5 2.5 0 0 1 21 12.5v7A2.5 2.5 0 0 1 18.5 22h-13A2.5 2.5 0 0 1 3 19.5v-7A2.5 2.5 0 0 1 5.5 10H6zm2.4 0h7.2V7a3.6 3.6 0 0 0-7.2 0v3zM12 14.2a1.8 1.8 0 0 0-.9 3.36V19a.9.9 0 0 0 1.8 0v-1.44a1.8 1.8 0 0 0-.9-3.36z"
+    />
   </svg>
 )
 
 export const IconUnlock = () => (
-  <svg {...S}>
-    <rect x="5" y="11" width="14" height="9" rx="2" />
-    <path d="M8 11V7a4 4 0 0 1 7.6-1.7" />
+  <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <path
+      fillRule="evenodd"
+      d="M6 10V7a6 6 0 0 1 11.7-1.9l-2.3.8A3.6 3.6 0 0 0 8.4 7v3h10.1A2.5 2.5 0 0 1 21 12.5v7A2.5 2.5 0 0 1 18.5 22h-13A2.5 2.5 0 0 1 3 19.5v-7A2.5 2.5 0 0 1 5.5 10H6zM12 14.2a1.8 1.8 0 0 0-.9 3.36V19a.9.9 0 0 0 1.8 0v-1.44a1.8 1.8 0 0 0-.9-3.36z"
+    />
   </svg>
 )
 
