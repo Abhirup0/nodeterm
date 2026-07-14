@@ -56,6 +56,33 @@ export function matchFileTokens(lineText: string): FileToken[] {
   return out
 }
 
+// http(s) URLs, matched the way the WebLinksAddon's click path would see them. Kept here so
+// the mouse-up click fallback (below) can hit-test URLs and file paths in one pass — under
+// tmux/agent mouse-reporting the addon's own click never fires (see installLinkClickFallback).
+const URL_RE = /\bhttps?:\/\/[^\s"'`<>()[\]{}|\\^]+/gi
+
+export interface UrlToken {
+  text: string
+  startIndex: number
+  url: string
+}
+
+export function matchUrlTokens(lineText: string): UrlToken[] {
+  const out: UrlToken[] = []
+  for (const m of lineText.matchAll(URL_RE)) {
+    const text = m[0].replace(TRAILING_PUNCT, '')
+    if (text.length < 8) continue // "http://x" is the shortest sane URL
+    try {
+      const u = new URL(text)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue
+    } catch {
+      continue
+    }
+    out.push({ text, startIndex: m.index, url: text })
+  }
+  return out
+}
+
 /** Absolute path for a token: absolutes pass through, relatives resolve against cwd,
  *  `.`/`..` segments normalized. Null when unresolvable or when `..` escapes the root.
  *  A home-relative cwd (`~` or `~/proj`, the SSH-project default) keeps its leading `~` as
@@ -164,5 +191,106 @@ export function makeDirListingLookup(
     if (!hit || Date.now() - (hit?.at ?? 0) >= ttlMs) cache.set(dir, { at: Date.now(), entries })
     const e = entries.find((x) => x.name === name)
     return { exists: !!e, dir: !!e?.dir }
+  }
+}
+
+// Walk up from an arbitrary buffer row to the first non-wrapped row, then join the whole
+// soft-wrapped logical line from there. Lets a click on ANY wrapped row of a long path resolve
+// to the same logical string the hover provider builds from the line's first row.
+function logicalLineContaining(term: Terminal, row: number): { text: string; startRow: number } | null {
+  const buf = term.buffer.active
+  let start = row
+  while (start > 0 && buf.getLine(start)?.isWrapped) start -= 1
+  const l = logicalLine(term, start)
+  return l ? { text: l.text, startRow: start } : null
+}
+
+// Cell (0-based col, 0-based buffer row) under a mouse event. The canvas applies zoom as a CSS
+// transform, so getBoundingClientRect() is already the on-screen (scaled) size — dividing the
+// scaled offset by the scaled cell size cancels the zoom, keeping cols/rows constant.
+function bufferPosFromEvent(term: Terminal, ev: MouseEvent): { col: number; row: number } | null {
+  const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
+  if (!screen || term.cols <= 0 || term.rows <= 0) return null
+  const rect = screen.getBoundingClientRect()
+  const x = ev.clientX - rect.left
+  const y = ev.clientY - rect.top
+  if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null
+  const cw = rect.width / term.cols
+  const ch = rect.height / term.rows
+  if (cw <= 0 || ch <= 0) return null
+  return {
+    col: Math.floor(x / cw),
+    row: Math.floor(y / ch) + term.buffer.active.viewportY
+  }
+}
+
+export interface LinkClickDeps {
+  getCwd(): string | undefined
+  lookup(abs: string): Promise<{ exists: boolean; dir: boolean }>
+  activateFile(abs: string, dir: boolean): void
+  openUrl(url: string): void
+  /** false for relay-remote nodes (no client fs) — they stay URL-only. */
+  fileEnabled(): boolean
+}
+
+/**
+ * Cmd/Ctrl+click link opening that works INSIDE tmux / an agent's fullscreen TUI. There, the
+ * app has mouse-reporting on, so xterm consumes a click as a mouse escape and never runs the
+ * registered link provider's `activate` (xterm: `areMouseEventsActive && !shouldForceSelection`
+ * ⇒ early return). This capture-phase `mouseup` listener runs BEFORE xterm's mouse handler:
+ * gated on the modifier, it hit-tests the buffer itself, opens the link, and stops propagation
+ * so the mouse report is never sent. Non-modifier clicks/drags fall through untouched, so tmux
+ * copy-mode selection and scrolling are unaffected. Attach to `term.element` so the listener
+ * travels with the terminal across park/adopt. Returns a disposer.
+ */
+export function installLinkClickFallback(
+  term: Terminal,
+  host: HTMLElement,
+  deps: LinkClickDeps
+): { dispose(): void } {
+  const onMouseUp = (ev: MouseEvent): void => {
+    if (ev.button !== 0 || !(ev.metaKey || ev.ctrlKey)) return
+    // Only take over when the app has mouse-reporting on (tmux mouse / agent TUI) — that is the
+    // exact case where xterm's own link `activate` never fires. With reporting OFF (a plain shell
+    // when tmux is unavailable) xterm's provider + WebLinksAddon handle the click, so stepping in
+    // here would open the link twice.
+    if (term.modes.mouseTrackingMode === 'none') return
+    const pos = bufferPosFromEvent(term, ev)
+    if (!pos) return
+    const logical = logicalLineContaining(term, pos.row)
+    if (!logical) return
+    const idx = (pos.row - logical.startRow) * term.cols + pos.col
+    const inRange = (startIndex: number, len: number): boolean =>
+      idx >= startIndex && idx < startIndex + len
+
+    for (const u of matchUrlTokens(logical.text)) {
+      if (inRange(u.startIndex, u.text.length)) {
+        ev.preventDefault()
+        ev.stopPropagation()
+        term.clearSelection()
+        deps.openUrl(u.url)
+        return
+      }
+    }
+    if (!deps.fileEnabled()) return
+    for (const t of matchFileTokens(logical.text)) {
+      if (inRange(t.startIndex, t.text.length)) {
+        const abs = resolveFileToken(t.path, deps.getCwd())
+        if (!abs) return
+        // Swallow the click NOW so tmux never gets the mouse report; existence is async and a
+        // Cmd/Ctrl+click on a path-shaped token is a deliberate open regardless of the outcome.
+        ev.preventDefault()
+        ev.stopPropagation()
+        term.clearSelection()
+        void deps.lookup(abs).then((f) => {
+          if (f.exists) deps.activateFile(abs, f.dir)
+        })
+        return
+      }
+    }
+  }
+  host.addEventListener('mouseup', onMouseUp, { capture: true })
+  return {
+    dispose: () => host.removeEventListener('mouseup', onMouseUp, { capture: true })
   }
 }
