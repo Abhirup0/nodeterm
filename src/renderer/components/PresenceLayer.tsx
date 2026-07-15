@@ -54,6 +54,11 @@ export function PresenceLayer(): JSX.Element | null {
 
   // Cursor-chat input (local). `null` = closed.
   const [chat, setChat] = useState<string | null>(null)
+  // Our OWN sent line, shown back to US as a timed bubble at the spot we typed it — the same thing
+  // our peers see, so a chat feels like a conversation, not a fire-and-forget. Cleared after
+  // CHAT_LINGER_MS (in step with the peer-side retraction), the fade handled by a CSS life animation.
+  const [sent, setSent] = useState<{ text: string; x: number; y: number } | null>(null)
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Where the input is pinned on screen: a SNAPSHOT of the pointer taken when the chat opened, not
   // the live pointer. Read during render, so it must be state — reading the live pointer ref here
   // would make the "anchor" chase the mouse whenever a peer's cursor happened to re-render us.
@@ -182,6 +187,7 @@ export function PresenceLayer(): JSX.Element | null {
   useEffect(
     () => () => {
       if (lingerRef.current) clearTimeout(lingerRef.current)
+      if (sentTimerRef.current) clearTimeout(sentTimerRef.current)
       if (publishedRef.current) api.presence.chat(null)
     },
     [api]
@@ -241,6 +247,17 @@ export function PresenceLayer(): JSX.Element | null {
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
+              // Show our own line back to us as a timed bubble (mirrors what peers see), pinned where
+              // we typed it. Escape cancels with no bubble; only a real Enter'd line lingers.
+              const text = chat.trim()
+              if (text && anchor) {
+                if (sentTimerRef.current) clearTimeout(sentTimerRef.current)
+                setSent({ text, x: anchor.x, y: anchor.y })
+                sentTimerRef.current = setTimeout(() => {
+                  sentTimerRef.current = null
+                  setSent(null)
+                }, CHAT_LINGER_MS)
+              }
               closeChat(true)
             } else if (e.key === 'Escape') {
               e.preventDefault()
@@ -250,6 +267,15 @@ export function PresenceLayer(): JSX.Element | null {
           }}
           onBlur={() => closeChat(false)}
         />
+      )}
+
+      {sent && (
+        <div
+          className="presence-chat-sent nodrag"
+          style={{ left: sent.x + CHAT_ANCHOR_OFFSET_PX, top: sent.y + CHAT_ANCHOR_OFFSET_PX }}
+        >
+          {sent.text}
+        </div>
       )}
     </>
   )

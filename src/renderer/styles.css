@@ -5486,6 +5486,41 @@ body,
   outline: none;
 }
 
+/* Our OWN sent cursor-chat line, shown back to us at the spot we typed it — same look as the peer
+   bubble (.presence-cursor__chat), timed: it fades in, holds, then fades out over CHAT_LINGER_MS. */
+.presence-chat-sent {
+  position: fixed;
+  z-index: 20;
+  max-width: 320px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  background: rgba(28, 28, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  animation: presence-chat-sent-life 5000ms ease forwards;
+}
+
+@keyframes presence-chat-sent-life {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  6% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 /* ---- facepile: who is connected (the one surface that shows off-project peers) ---- */
 /* Lives INSIDE .controls-cluster (see Canvas.tsx) as its first flex item, so the faces sit to the
    LEFT of the top-right toolbar on the same row — not absolutely positioned into the tab-bar band
