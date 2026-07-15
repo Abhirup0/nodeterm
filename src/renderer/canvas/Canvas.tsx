@@ -101,6 +101,7 @@ import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useTeamAccessEvents } from '../state/teamAccess'
 import { useChatSessions } from '../state/chatSessions'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
@@ -1294,6 +1295,10 @@ export function Canvas() {
   useEffect(() => {
     return window.nodeTerminal.relayHost.onPeerPending((info) => setPendingPeer(info))
   }, [])
+
+  // Team Access seat table (docs/…/team-access, Task 3): a SEPARATE relay-host subscription set from
+  // the SAS-approval effect above — one feeds the dialog, this one feeds the live/pending seats store.
+  useTeamAccessEvents()
 
   // ---- canvas sync (team) ----
   // Emitting side: diff each settled node snapshot against the last one we published and cast the
