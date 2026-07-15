@@ -63,7 +63,7 @@ Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent claude|codex|gemini|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N sessions of any agent CLI.
+- \`open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
 - \`show-image <path>\` — open an image file as a node.
@@ -141,15 +141,16 @@ export function installCanvasSkillInto(configDir: string): void {
   }
 }
 
-// Codex/Gemini have no skill system — merge the canvas-control block into their global
+// Codex/Gemini/opencode have no skill system — merge the canvas-control block into their global
 // instruction files (marker-delimited, idempotent, other content preserved). Same pattern
 // as context-link's get-linked-context block. The CLI env-gate keeps the block inert in
-// the user's normal (non-nodeterm) codex/gemini sessions.
+// the user's normal (non-nodeterm) codex/gemini/opencode sessions.
 function installAgentInstructions(): void {
   const block = buildCanvasControlInstructions(shimPath())
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
-    path.join(os.homedir(), '.gemini', 'GEMINI.md')
+    path.join(os.homedir(), '.gemini', 'GEMINI.md'),
+    path.join(os.homedir(), '.config', 'opencode', 'AGENTS.md')
   ]
   for (const p of targets) {
     try {

@@ -98,13 +98,14 @@ to read — do not retry.
   }
 }
 
-// Codex/Gemini have no skill system — merge an instructions block into their global
+// Codex/Gemini/opencode have no skill system — merge an instructions block into their global
 // instruction files instead (marker-delimited, idempotent, other content preserved).
 function installAgentInstructions(): void {
   const block = buildLinkedContextInstructions(cliShimPath())
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
-    path.join(os.homedir(), '.gemini', 'GEMINI.md')
+    path.join(os.homedir(), '.gemini', 'GEMINI.md'),
+    path.join(os.homedir(), '.config', 'opencode', 'AGENTS.md')
   ]
   for (const p of targets) {
     try {
