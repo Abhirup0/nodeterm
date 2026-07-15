@@ -42,7 +42,9 @@ import {
   IconBranch,
   IconDuplicate,
   IconEditor,
+  IconExplorer,
   IconFit,
+  IconGear,
   IconGrid,
   IconGroup,
   IconChat,
@@ -5564,7 +5566,7 @@ export function Canvas() {
           <span className="kbd">⌘K</span>
         </button>
         <button title="Explorer (⌘⇧E)" onClick={() => setExplorerOpen(true)}>
-          🗂
+          <IconExplorer />
         </button>
         <button title="Source Control (⌘⇧G)" onClick={() => setScOpen(true)}>
           <IconBranch />
@@ -5585,7 +5587,7 @@ export function Canvas() {
             setSettingsOpen(true)
           }}
         >
-          ⚙
+          <IconGear />
         </button>
         <button
           title="Help"
@@ -5598,6 +5600,10 @@ export function Canvas() {
               items: [
                 { label: 'Keyboard shortcuts', hint: '⌘/', onClick: () => setShortcutsOpen(true) },
                 { label: 'Report a bug…', onClick: () => setBugReportOpen(true) },
+                {
+                  label: 'Documentation',
+                  onClick: () => window.nodeTerminal.shell.openExternal(`${REPO_URL}#readme`)
+                },
                 {
                   label: 'GitHub repository',
                   onClick: () => window.nodeTerminal.shell.openExternal(REPO_URL)

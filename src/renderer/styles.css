@@ -2309,6 +2309,17 @@ body,
   background: var(--panel-header);
 }
 
+/* Icons read as 15px glyphs before — too small/ambiguous (field report). 18px for every
+   SVG in the cluster (Explorer, Source Control, Phone, Gear) keeps the 34px buttons. */
+.controls-cluster > button svg {
+  width: 18px;
+  height: 18px;
+}
+.sessions-icon-cluster > button svg {
+  width: 18px;
+  height: 18px;
+}
+
 /* Search button shows the ⌘K shortcut so its purpose is obvious */
 .cluster-search {
   width: auto !important;
