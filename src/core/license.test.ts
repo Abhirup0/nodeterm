@@ -21,15 +21,17 @@ vi.mock('./entitlement-key', () => ({
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
 h.publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
 
-/** Mint a token the same way the server does: base64url(payload).base64url(sig). */
-function mint(ttlSeconds: number, deviceId = 'test-device'): string {
+/** Mint a token the same way the server does: base64url(payload).base64url(sig).
+ * `seats` is included only when provided, so an old token (no seats field) can be simulated. */
+function mint(ttlSeconds: number, deviceId = 'test-device', seats?: number): string {
   const payload = Buffer.from(
     JSON.stringify({
       deviceId,
       tier: 'pro',
       licenseId: 'lic_test',
       iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + ttlSeconds
+      exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+      ...(seats !== undefined ? { seats } : {})
     })
   ).toString('base64url')
   const sig = crypto.sign(null, Buffer.from(payload), privateKey).toString('base64url')
@@ -166,5 +168,83 @@ describe('license entitlement refresh', () => {
     vi.setSystemTime(Date.now() - 9 * 24 * HOUR)
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
     expect(status.active).toBe(false)
+  })
+})
+
+describe('license seats entitlement', () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+  let fake: import('./platform-fake').FakePlatform
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
+    h.userData = mkdtempSync(path.join(tmpdir(), 'nt-license-seats-'))
+    writeFileSync(path.join(h.userData, 'device-id'), 'test-device')
+    delete process.env.DO_NOT_TRACK
+    delete process.env.NODETERM_TELEMETRY_DISABLED
+    process.env.NODETERM_API_BASE = 'http://127.0.0.1:1'
+    // Reject any refresh call → offline grace keeps the stored token intact for the assertions.
+    fetchMock = vi.fn().mockRejectedValue(new Error('offline'))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.resetModules()
+    const { initPlatform } = await import('./platform')
+    const { fakePlatform } = await import('./platform-fake')
+    fake = fakePlatform({ userDataDir: h.userData, isPackaged: false })
+    initPlatform(fake)
+  })
+
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    const { resetPlatformForTests } = await import('./platform')
+    resetPlatformForTests()
+    rmSync(h.userData, { recursive: true, force: true })
+  })
+
+  function storeToken(token?: string): void {
+    writeFileSync(path.join(h.userData, 'license.json'), JSON.stringify({ token }))
+  }
+
+  it('a premium token carrying seats:5 surfaces seats 5', async () => {
+    storeToken(mint(7 * 24 * 60 * 60, 'test-device', 5))
+    const { initLicense, licensedSeats } = await import('./license')
+    initLicense()
+    await flush()
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.active).toBe(true)
+    expect(status.seats).toBe(5)
+    expect(licensedSeats()).toBe(5)
+  })
+
+  it('a premium token with no seats field defaults to 1 seat (backward compat)', async () => {
+    storeToken(mint(7 * 24 * 60 * 60))
+    const { initLicense, licensedSeats } = await import('./license')
+    initLicense()
+    await flush()
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.active).toBe(true)
+    expect(status.seats).toBe(1)
+    expect(licensedSeats()).toBe(1)
+  })
+
+  it('an absent / non-premium token has 0 seats', async () => {
+    storeToken(undefined)
+    const { initLicense, licensedSeats } = await import('./license')
+    initLicense()
+    await flush()
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.active).toBe(false)
+    expect(status.seats).toBe(0)
+    expect(licensedSeats()).toBe(0)
+  })
+
+  it('an expired token is not premium and has 0 seats', async () => {
+    storeToken(mint(-60, 'test-device', 5))
+    const { initLicense, licensedSeats } = await import('./license')
+    initLicense()
+    await flush()
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.active).toBe(false)
+    expect(status.seats).toBe(0)
+    expect(licensedSeats()).toBe(0)
   })
 })

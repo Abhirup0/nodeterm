@@ -17,6 +17,7 @@ import { CommitSection } from './sections/CommitSection'
 import { TmuxSection } from './sections/TmuxSection'
 import { LicenseSection } from './sections/LicenseSection'
 import { RemoteSection } from './sections/RemoteSection'
+import { TeamAccessSection } from './sections/TeamAccessSection'
 import { SshSection } from './sections/SshSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { PrivacySection } from './sections/PrivacySection'
@@ -75,6 +76,7 @@ export function SettingsPage({
             <TmuxSection isActive={active === 'tmux'} />
             <LicenseSection isActive={active === 'license'} />
             <RemoteSection isActive={active === 'remote'} onClose={onClose} />
+            <TeamAccessSection isActive={active === 'team-access'} onClose={onClose} />
             <SshSection isActive={active === 'ssh'} />
             <UpdatesSection isActive={active === 'updates'} />
             <PrivacySection isActive={active === 'privacy'} />

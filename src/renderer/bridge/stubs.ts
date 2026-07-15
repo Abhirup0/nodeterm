@@ -257,7 +257,9 @@ export function buildStubApi(): Omit<
     // inert no-ops (there is no connectionId to act on) and the subscriptions are no-op unsubscribes.
     relayHost: {
       start: U('relayHost.start'),
+      invite: U('relayHost.invite'),
       stop: U('relayHost.stop'),
+      revoke: noop,
       onPeerPending: noopUnsub,
       confirm: noop,
       onOpen: noopUnsub,

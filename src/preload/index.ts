@@ -47,7 +47,7 @@ const subscribePeerPending = subscribe<[{ sas: string | null; id: string }]>(IPC
 // New relay tunnel (Stage 4). Non-per-id host events reuse the fan-out helper; per-connection
 // client events (sas/approved/frame/closed) attach directly per connectionId.
 const subscribeRelayPeerPending = subscribe<[RelayPeerPending]>(IPC.relayHostPeerPending)
-const subscribeRelayHostOpen = subscribe<[{ id: string }]>(IPC.relayHostOpen)
+const subscribeRelayHostOpen = subscribe<[{ id: string; email?: string }]>(IPC.relayHostOpen)
 const subscribeRelayHostClosed = subscribe<[{ id: string }]>(IPC.relayHostClosed)
 
 const api: NodeTerminalApi = {
@@ -367,7 +367,10 @@ const api: NodeTerminalApi = {
   },
   relayHost: {
     start: (projectId?: string) => ipcRenderer.invoke(IPC.relayHostStart, projectId),
+    invite: (opts?: { projectId?: string; email?: string }) =>
+      ipcRenderer.invoke(IPC.relayHostInvite, opts ?? {}),
     stop: () => ipcRenderer.invoke(IPC.relayHostStop),
+    revoke: (id: string) => ipcRenderer.send(IPC.relayHostRevoke, { id }),
     onPeerPending: subscribeRelayPeerPending,
     confirm: (id: string) => ipcRenderer.send(IPC.relayHostConfirm, { id }),
     onOpen: subscribeRelayHostOpen,

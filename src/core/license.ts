@@ -58,6 +58,9 @@ interface Payload {
   tier: string
   licenseId: string
   exp: number
+  /** Seat cap for the relay host (Team Access). Rides the same signed token; an old token
+   * lacks it, in which case it resolves to 1 seat. See `seatsFrom`. */
+  seats?: number
 }
 
 // Offline verification of our compact Ed25519 token: base64url(payload).base64url(sig).
@@ -84,11 +87,27 @@ function verify(token: string | undefined): Payload | null {
   }
 }
 
+// Resolve the seat cap from a (possibly null) verified payload — the single source of truth so
+// statusFrom() and licensedSeats() can't drift: premium token → its seats ?? 1 (a premium token
+// with no seats field = today's single-peer behavior), inactive/free/invalid → 0.
+function seatsFrom(p: Payload | null): number {
+  return p ? p.seats ?? 1 : 0
+}
+
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
   const p = verify(token)
   return p
-    ? { tier: p.tier, active: true, expiresAt: p.exp, error: null }
-    : { tier: null, active: false, expiresAt: null, error }
+    ? { tier: p.tier, active: true, expiresAt: p.exp, seats: seatsFrom(p), error: null }
+    : { tier: null, active: false, expiresAt: null, seats: 0, error }
+}
+
+/**
+ * The seat cap the current stored entitlement grants: premium → its `seats` (absent → 1), else 0.
+ * The relay host reads this to enforce how many devices may connect at once. Kept consistent with
+ * `statusFrom` by sharing `seatsFrom`/`verify` — do not reimplement the resolution here.
+ */
+export function licensedSeats(): number {
+  return seatsFrom(verify(load().token))
 }
 
 async function call(path: string, body: unknown): Promise<{ token?: string; error?: string }> {

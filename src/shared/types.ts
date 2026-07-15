@@ -1083,6 +1083,8 @@ export interface LicenseStatus {
   active: boolean
   /** Unix seconds when the entitlement expires, or null. */
   expiresAt: number | null
+  /** Seat cap for the relay host (Team Access): premium → the token's seats (absent → 1), free/inactive → 0. */
+  seats: number
   /** Last activation/refresh error reason code, or null. */
   error: string | null
 }
@@ -1147,6 +1149,9 @@ export interface RelayPeerPending {
   id: string
   sas: string | null
   peerKeyB64: string
+  /** Team Access: the invitee email this seat was invited with, if any. DISPLAY label only (never
+   *  trust/identity — the SAS is the gate); used to tag the row in the connected-devices list. */
+  email?: string
 }
 
 /**
@@ -1161,9 +1166,22 @@ export interface RelayHostApi {
    * Rejects if the device is not entitled (or a dev build without the relay URL). `projectId` is the
    * single project this hosting session shares with the peer; omit for the legacy whole-workspace view.
    */
-  start(projectId?: string): Promise<{ offer: string }>
-  /** Leave host mode: close the relay connection (drops every bridged peer). */
+  start(projectId?: string): Promise<{ offer: string; id: string }>
+  /**
+   * Team Access: ADD a seat — mint a fresh pairing offer for one more device (no supersede), tagged
+   * with the optional invitee `email` (display label only). Rejects `E_SEATS_FULL` when the licensed
+   * seat cap is reached, and with the Pro / dev-build errors `start` uses. `projectId` scopes the
+   * shared project as in `start`. Resolves with the offer AND the seat's `id` — the settings UI uses
+   * it to show the pending row immediately and to `revoke` a seat whose peer never connects.
+   */
+  invite(opts?: { projectId?: string; email?: string }): Promise<{ offer: string; id: string }>
+  /** Leave host mode: close every bridged peer in the pool. */
   stop(): Promise<void>
+  /**
+   * Team Access: per-peer revoke — cut ONE bridged peer's live session immediately (by its id) and
+   * free its seat. Distinct from `stop()` (which drops all).
+   */
+  revoke(id: string): void
   /**
    * Fires when a client finishes the handshake and is awaiting approval. The host must `confirm()`
    * before the peer is admitted as a client. Returns an unsubscribe function.
@@ -1171,8 +1189,9 @@ export interface RelayHostApi {
   onPeerPending(listener: (info: RelayPeerPending) => void): () => void
   /** Approve the pending peer (by its pending id) after comparing the SAS → it joins as a client. */
   confirm(id: string): void
-  /** Fires when a bridged peer becomes a live client (both humans confirmed). Returns unsubscribe. */
-  onOpen(listener: (info: { id: string }) => void): () => void
+  /** Fires when a bridged peer becomes a live client (both humans confirmed). Returns unsubscribe.
+   *  `email` is the seat's invite label, if any (Team Access). */
+  onOpen(listener: (info: { id: string; email?: string }) => void): () => void
   /** Fires when a bridged peer's connection drops. Returns an unsubscribe function. */
   onClosed(listener: (info: { id: string }) => void): () => void
 }
