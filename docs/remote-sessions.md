@@ -426,13 +426,41 @@ the dialect deletion orphaned, blanking the phone; that flag is gone).
 - **The preload↔main relay IPC boundary is not covered by vitest** (it needs Electron). Two real
   send/handle + payload-shape bugs were found and fixed by inspection during 4c; the two-instance
   acceptance run is what exercises it live. A preload-shape unit guard would help.
-- **Per-peer revoke UI** — the revoke MECHANISM (`killRelayHostsByPeerKey`, `onRevoke` →
-  `createRevoker`) is built, tested, and cut-wired (`index.ts` handles `remote:revoke-peer` and
-  tears the live socket down), but there is NO preload method / renderer caller to trigger it. So
-  v1 cuts a live peer only via **host-stop** (all peers at once). A per-peer "remove this device"
-  action is a follow-up. **Not a security gap:** the desktop relay path never auto-approves from a
-  pin (`isPinned` is read only on the phone/`standing-host` path, never in `relay-host`/
-  `relay-trust`), so every desktop reconnect requires a fresh mutual SAS regardless of pin state.
+- **Per-peer revoke UI** — LANDED with Team Access (below): each connected-device row's **Remove**
+  calls `relayHost.revoke(id)` → `killRelayHostsByPeerKey` cuts that one live socket (the device
+  must re-pair). Not a security gap either way — the desktop relay path never auto-approves from a
+  pin (`isPinned` is phone/`standing-host` only), so every desktop reconnect needs a fresh mutual SAS.
+
+## Team Access — multi-seat relay (paid, device-seat + email invite)
+
+The single-peer relay host is now **Team Access**: the paying host shares this Mac with up to
+`seats` teammates (one seat per connected device), $5/seat (Stripe, backend). The core
+(`CorePlatform.clientIds()`, presence, canvas-sync, dino, cursor-chat) was already N-client; this
+made the **host listener** multi-peer and packaged it.
+
+- **Multi-peer pool.** `relay-host-service.ts` replaced the single `current` listener with a pool
+  keyed by a renderer id: `byId: Map<id, { session|null, email? }>`. `relayHost.invite({projectId?,
+  email?}) → { offer, id }` mints ONE pairing (one seat), ADDS to the pool (does not supersede), and
+  is **cap-checked**; `relayHost.revoke(id)` cuts one; `stop()` closes all. The two legacy host
+  dialogs route through the additive `invite` (via `start`). Each seat still goes through the full
+  **mutual-SAS + ConsentNotice** — inviting N people is N deliberate shell-access grants.
+- **Seat cap = the entitlement.** `core/license.ts` `Payload.seats?` (backend signs it; **absent →
+  1** = today's single-peer; free → 0); the pure `canAcceptSeat(byId.size, licensedSeats())` refuses
+  the (seats+1)th with `E_SEATS_FULL`. **The seat is reserved SYNCHRONOUSLY at mint (before the
+  await) with a revocable id** — closes a cap race (concurrent invites) and makes an invited-but-
+  never-connected seat reclaimable via `revoke(id)` (no ghost seat). Host-side enforcement is UX; a
+  host bypassing its own cap only cheats itself — **v2 = server-side** (relay refuses per account).
+- **Settings → Team Access** (`TeamAccessSection`) — not premium → the pitch + the shell-access
+  disclosure ("a seat grants shell access, like SSH; every connection is SAS-verified") + a checkout
+  CTA; premium → `Used X / N` (X = pending+connected, matching the cap), the connected-device list
+  (email label + **Remove** → revoke), and **Invite** (email → `{offer, id}` → a pending row +
+  Copy / Open-in-Mail share; the email is a display LABEL only, never trust). A renderer store
+  (`state/teamAccess.ts`) tracks seats off the `relay:host:peer-pending/open/closed` events.
+- **Backend contract (separate repo, api.nodeterm.dev):** the `seats` signer (Stripe per-seat
+  subscription → webhook → the Ed25519 payload), optional real email delivery of invites (v1 the app
+  generates + the user shares), and v2 server-side seat enforcement. Documented, not built here.
+- **Follow-up:** a seat row shows the invite email + generic connected/pending state; joining a seat
+  to its presence name/color (different id spaces — renderer UUID vs ClientId) is deferred.
 
 ## 4a → 4c interface (landed)
 

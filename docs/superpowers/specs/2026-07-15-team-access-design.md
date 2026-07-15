@@ -2,7 +2,12 @@
 
 **Date:** 2026-07-15
 **Branch:** `feat/team-access` (worktree `/root/nodeterm-team`, off `main`)
-**Status:** approved (model + design), spec for review.
+**Status:** LANDED (app side) on `feat/team-access` — full suite + typecheck green, no crypto/handshake
+file touched. Backend (Stripe per-seat `seats` signer, real email delivery, v2 server-side seat
+enforcement) is the separate api.nodeterm.dev follow-up. N-instance acceptance: a host with seats≥3
+invites 2 teammates (2 pairing codes), both connect via SAS+ConsentNotice, Settings → Team Access
+shows both with email labels + `Used 2 / 3`, **Remove** drops one (its socket cut, must re-pair), a
+4th invite past the cap is refused (`E_SEATS_FULL`), and cursors/chat/dino from all connected peers.
 
 ## Problem / goal
 
