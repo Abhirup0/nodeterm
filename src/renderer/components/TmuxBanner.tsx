@@ -48,18 +48,23 @@ export function TmuxBanner({ onInstall }: { onInstall: (command: string) => void
   // While installing, poll tmuxStatus. The raw install output is visible in the spawned
   // terminal node either way — the banner only reports the outcome.
   useEffect(() => {
-    if (phase !== 'installing') return
+    if (phase !== 'installing' || dismissed) return
+    let cancelled = false
     const t = setInterval(() => {
       localSession.api.pty
         .tmuxStatus()
         .then((s) => {
+          if (cancelled) return
           const next = pollOutcome(s.available, Date.now() - startedAtRef.current)
           if (next !== 'installing') setPhase(next)
         })
         .catch(() => {})
     }, INSTALL_POLL_MS)
-    return () => clearInterval(t)
-  }, [phase])
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [phase, dismissed])
 
   // The success note has said what it needed to — take itself down.
   useEffect(() => {
