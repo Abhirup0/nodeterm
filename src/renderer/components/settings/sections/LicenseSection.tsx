@@ -3,13 +3,25 @@ import { useEntitlement } from '../../../state/entitlement'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
+import { ProCompare } from './ProCompare'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 
 const ROWS = {
   license: {
     title: 'License',
-    keywords: ['pro', 'upgrade', 'license', 'key', 'subscription', 'activate']
+    keywords: [
+      'pro',
+      'upgrade',
+      'license',
+      'key',
+      'subscription',
+      'activate',
+      'compare',
+      'core',
+      'remote access',
+      'quota'
+    ]
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -29,6 +41,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
       <SearchableRow {...ROWS.license}>
         {ent.isPremium ? (
           <div className="space-y-3">
+            <ProCompare />
             <p className="text-sm text-muted">
               Pro — active
               {ent.status.expiresAt
@@ -40,6 +53,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
           </div>
         ) : (
           <div className="space-y-3">
+            <ProCompare />
             <Button
               variant="primary"
               onClick={() => {
