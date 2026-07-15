@@ -92,29 +92,28 @@ export function initRelayHost(
   const getEntitlement = deps.getEntitlement ?? getStoredEntitlement
   const licensedSeats = deps.licensedSeats ?? licenseSeats
 
-  // Renderer-facing token → the pending/live session it names. Populated once the peer is pending
-  // (its SAS is known); the confirm/revoke/close paths resolve the session through it so a stray IPC
-  // event can only ever act on the session it addresses. Mirrors initRemoteHost's `pendingApprovalId`.
-  const byId = new Map<string, RelayHostSession>()
-  // The POOL of minted listeners (Team Access): a session JOINS at mint and LEAVES on close. Its size
-  // is the live+pending seat count the cap compares against `licensedSeats()`. The value holds the
-  // invite `email` label (display only) that rides this seat's peer-pending/open events. Replaces the
-  // old single `current` slot — a pool of N is the whole point of Team Access.
-  const pool = new Map<RelayHostSession, { email?: string }>()
+  // The POOL, keyed by renderer id (Team Access). One entry per SEAT — inserted SYNCHRONOUSLY when the
+  // seat is minted (reserve-before-await; see addSeat) and removed on close/revoke/stop. `byId.size` is
+  // the reserved+pending+live seat count the cap compares against `licensedSeats()`. `session` is
+  // `null` while the seat is reserved but its listener has not been wired yet (the brief window across
+  // the token mint), then the live `RelayHostSession`; `email` is the invite label (display only) that
+  // rides this seat's peer-pending/open events. The renderer id is the SAME token from mint through
+  // peer-pending/open/close and revoke, so a stray IPC event can only ever act on the seat it names,
+  // and a pending-never-connected seat is revocable from the moment it is minted. Replaces the old
+  // dual `byId`/`pool` bookkeeping — one map keyed by the id the UI and revoke already use.
+  const byId = new Map<string, { session: RelayHostSession | null; email?: string }>()
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
   }
 
-  function forget(session: RelayHostSession): void {
-    for (const [id, s] of byId) if (s === session) byId.delete(id)
-  }
-
   /**
    * Mint ONE pairing + open ONE relay host listener, ADDING it to the pool (no supersede). Cap-checked
-   * against the licensed seats. Returns the offer to hand to the invited device.
+   * against the licensed seats. The seat is RESERVED synchronously (with its revocable id) before any
+   * await, then filled in once the listener is wired. Returns the offer to hand to the invited device
+   * plus the seat's renderer `id`.
    */
-  async function addSeat({ projectId, email }: AddSeatOptions): Promise<{ offer: string }> {
+  async function addSeat({ projectId, email }: AddSeatOptions): Promise<{ offer: string; id: string }> {
     if (!isPremium()) {
       throw new Error('Remote access requires nodeterm Pro.')
     }
@@ -126,111 +125,127 @@ export function initRelayHost(
       throw new Error('No entitlement found — please re-activate nodeterm Pro.')
     }
 
-    // SEAT CAP — count minted (pending + live) sessions in the pool. This is HOST-SIDE / UX
-    // enforcement, NOT a server-guaranteed limit: a host that patched it out only cheats itself (it
-    // is paying for the seats). Real, un-bypassable enforcement is v2, server-side (the relay refuses
-    // the (seats+1)th bridge per account). Do NOT close others here — Team Access is ADDITIVE.
-    if (!canAcceptSeat(pool.size, licensedSeats())) {
+    // SEAT CAP + RESERVATION — atomic (no await between reading the count and reserving). The count is
+    // minted (reserved + pending + live) seats. This is HOST-SIDE / UX enforcement, NOT a
+    // server-guaranteed limit: a host that patched it out only cheats itself (it is paying for the
+    // seats). Real, un-bypassable enforcement is v2, server-side (the relay refuses the (seats+1)th
+    // bridge per account). Do NOT close others here — Team Access is ADDITIVE.
+    if (!canAcceptSeat(byId.size, licensedSeats())) {
       throw new Error(E_SEATS_FULL)
     }
+    // Reserve the seat SYNCHRONOUSLY — with a revocable id — before any await, so two concurrent
+    // invites can't both pass the cap across the token-mint latency (Finding 1), and so a
+    // pending-never-connected seat is revocable from the moment it's minted (Finding 2). `session` is
+    // filled in once `connect()` wires the listener below.
+    const rendererId = randomUUID()
+    byId.set(rendererId, { session: null, email })
 
-    // A locked keyring surfaces here as a rejected invite (PeerKeyLockedError / E_PEER_KEY_LOCKED):
-    // the identity on disk is intact and must not be rotated — the renderer tells the human to unlock.
-    const keys = await loadKeys()
-    const { pairingToken } = await mintToken(entitlement)
+    try {
+      // A locked keyring surfaces here as a rejected invite (PeerKeyLockedError / E_PEER_KEY_LOCKED):
+      // the identity on disk is intact and must not be rotated — the renderer tells the human to unlock.
+      const keys = await loadKeys()
+      const { pairingToken } = await mintToken(entitlement)
 
-    // The renderer token for THIS listener's eventual peer. Minted when the peer becomes pending, so
-    // onOpen/onClose reference the same id the peer-pending event carried.
-    let rendererId: string | null = null
-
-    const session = connect({
-      url,
-      token: pairingToken,
-      ourKeys: keys,
-      platform,
-      transport: deps.transport,
-      // The single project this hosting session shares with the peer. Absent → unscoped, as before.
-      sharedProjectId: projectId,
-      // The SAS is known — ask the human to compare it. NOTHING is served yet. The invite `email`
-      // tags this seat in the renderer (display only).
-      onPeerPending: (s) => {
-        rendererId = randomUUID()
-        byId.set(rendererId, s)
-        send(IPC.relayHostPeerPending, {
-          id: rendererId,
-          sas: s.sas(),
-          peerKeyB64: s.peerKeyB64() ?? '',
-          email
-        })
-      },
-      // Both humans confirmed: the peer is a live CorePlatform client now.
-      onOpen: () => {
-        if (rendererId) send(IPC.relayHostOpen, { id: rendererId, email })
-      },
-      // The relay socket dropped (the peer is already torn down when this fires). Free the seat.
-      onClose: () => {
-        forget(session)
-        pool.delete(session)
-        if (rendererId) send(IPC.relayHostClosed, { id: rendererId })
-      }
-    })
-    // Join the pool immediately (before any peer connects) so the cap counts this seat from mint.
-    pool.set(session, { email })
-
-    return {
-      offer: encodeOffer({
-        relayEndpoint: url,
-        pairingToken,
-        hostPublicKeyB64: publicKeyToB64(keys.publicKey)
+      const session = connect({
+        url,
+        token: pairingToken,
+        ourKeys: keys,
+        platform,
+        transport: deps.transport,
+        // The single project this hosting session shares with the peer. Absent → unscoped, as before.
+        sharedProjectId: projectId,
+        // The SAS is known — ask the human to compare it. NOTHING is served yet. Reuse the reserved
+        // id (do NOT mint a fresh one) so onOpen/onClose/revoke all name the same seat.
+        onPeerPending: (s) => {
+          const entry = byId.get(rendererId)
+          if (entry) entry.session = s
+          send(IPC.relayHostPeerPending, {
+            id: rendererId,
+            sas: s.sas(),
+            peerKeyB64: s.peerKeyB64() ?? '',
+            email
+          })
+        },
+        // Both humans confirmed: the peer is a live CorePlatform client now.
+        onOpen: () => {
+          send(IPC.relayHostOpen, { id: rendererId, email })
+        },
+        // The relay socket dropped (the peer is already torn down when this fires). Free the seat.
+        onClose: () => {
+          byId.delete(rendererId)
+          send(IPC.relayHostClosed, { id: rendererId })
+        }
       })
+
+      // Fill the reserved slot with the live session. If it was revoked during the await window the
+      // entry is gone — don't leak a live listener; close it.
+      const entry = byId.get(rendererId)
+      if (entry) entry.session = session
+      else session.close()
+
+      return {
+        offer: encodeOffer({
+          relayEndpoint: url,
+          pairingToken,
+          hostPublicKeyB64: publicKeyToB64(keys.publicKey)
+        }),
+        id: rendererId
+      }
+    } catch (err) {
+      // Mint/keyring/connect failed after we reserved the slot — roll the reservation back so a failed
+      // invite doesn't leak a seat.
+      byId.delete(rendererId)
+      throw err
     }
   }
 
   // Legacy entry point (RemoteAccessDialog / RemoteSection). Now ADDITIVE + cap-checked (no supersede)
   // — with cap 1 this is bit-for-bit today's single-peer behavior (a 2nd start is refused until the
-  // first drops), and with cap N it adds a seat.
-  ipcMain.handle(IPC.relayHostStart, (_e, projectId?: string): Promise<{ offer: string }> =>
+  // first drops), and with cap N it adds a seat. Returns `{ offer, id }`; the legacy dialogs
+  // destructure `{ offer }` and ignore `id` (additive, non-breaking).
+  ipcMain.handle(IPC.relayHostStart, (_e, projectId?: string): Promise<{ offer: string; id: string }> =>
     addSeat({ projectId })
   )
 
   // Team Access entry point (Settings → Team Access, Task 4): add a seat tagged with the invitee email.
+  // Returns `{ offer, id }` — the settings UI uses `id` to show the pending row immediately and revoke it.
   ipcMain.handle(
     IPC.relayHostInvite,
-    (_e, opts: AddSeatOptions = {}): Promise<{ offer: string }> =>
+    (_e, opts: AddSeatOptions = {}): Promise<{ offer: string; id: string }> =>
       addSeat({ projectId: opts?.projectId, email: opts?.email })
   )
 
   // The human compared the SAS and pressed Confirm → advance the trust gate for THAT peer. Only the
-  // session named by the id is touched; an unknown id (stale event) is a no-op.
+  // session named by the id is touched; an unknown id (stale event) or a reserved-not-yet-open seat is
+  // a no-op.
   ipcMain.on(IPC.relayHostConfirm, (_e, msg: { id?: string } = {}) => {
-    const session = msg?.id ? byId.get(msg.id) : undefined
-    session?.confirm()
+    const entry = msg?.id ? byId.get(msg.id) : undefined
+    entry?.session?.confirm()
   })
 
   // Per-peer revoke (Team Access, closes the 4c follow-up): cut ONE bridged peer's LIVE socket
-  // immediately and free its seat. Only the session named by the id is touched; an unknown/stale id is
-  // a no-op.
+  // immediately and free its seat. Works for BOTH a live peer AND a reserved-but-never-connected seat
+  // (the id exists from mint). Only the seat named by the id is touched; an unknown/stale id is a no-op.
   ipcMain.on(IPC.relayHostRevoke, (_e, msg: { id?: string } = {}) => {
-    const session = msg?.id ? byId.get(msg.id) : undefined
-    if (!session) return
-    const peerKeyB64 = session.peerKeyB64()
-    // Cut the live socket by peer IDENTITY — the same primitive index.ts's 4c revoker uses
-    // (killRelayHostsByPeerKey, relay-host.ts). It closes every live session holding that key, which
-    // is the right "remove this device" semantic. Host-side revoke + the seat cap above are UX/host
-    // enforcement, NOT a server-guaranteed limit (v2 = server-side). On the desktop relay path a pin
-    // never auto-admits (isPinned is phone-only), so cutting the socket already forces a fresh
-    // SAS+consent re-pair — no separate unpin is needed to keep the removed device out.
-    if (peerKeyB64) killRelayHostsByPeerKey(peerKeyB64)
+    const entry = msg?.id ? byId.get(msg.id) : undefined
+    if (!entry) return
+    // A reserved-but-not-yet-open seat has no live socket to cut (`session` null, or a session with no
+    // peer key yet) — freeing the reservation is all that's owed. A live peer is cut by IDENTITY, the
+    // same primitive index.ts's 4c revoker uses (killRelayHostsByPeerKey, relay-host.ts): it closes
+    // every live session holding that key, the right "remove this device" semantic. Host-side revoke +
+    // the seat cap are UX/host enforcement, NOT a server-guaranteed limit (v2 = server-side). On the
+    // desktop relay path a pin never auto-admits (isPinned is phone-only), so cutting the socket
+    // already forces a fresh SAS+consent re-pair — no separate unpin is needed.
+    const peerKeyB64 = entry.session?.peerKeyB64()
     // killRelayHostsByPeerKey → session.close() does NOT fire our `onClose` (that runs only on a wire
     // drop, not a local close), so free the seat and notify the renderer here.
-    forget(session)
-    pool.delete(session)
+    if (peerKeyB64) killRelayHostsByPeerKey(peerKeyB64)
+    byId.delete(msg.id!)
     send(IPC.relayHostClosed, { id: msg.id })
   })
 
   const stop = (): void => {
-    for (const session of pool.keys()) session.close()
-    pool.clear()
+    for (const { session } of byId.values()) session?.close()
     byId.clear()
   }
 

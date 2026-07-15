@@ -395,7 +395,7 @@ function makeFakeSession(n: number): FakeSession {
 
 /** Wire an `initRelayHost` whose `connect` returns controllable fake sessions, capped at `seats`. */
 function wirePool(seats: number): {
-  invite: (opts?: { projectId?: string; email?: string }) => Promise<{ offer: string }>
+  invite: (opts?: { projectId?: string; email?: string }) => Promise<{ offer: string; id: string }>
   captured: Array<{ opts: any; session: FakeSession }>
 } {
   const win = fakeWin()
@@ -414,7 +414,8 @@ function wirePool(seats: number): {
     }
   })
   return {
-    invite: (opts = {}) => h.handlers[IPC.relayHostInvite]({}, opts) as Promise<{ offer: string }>,
+    invite: (opts = {}) =>
+      h.handlers[IPC.relayHostInvite]({}, opts) as Promise<{ offer: string; id: string }>,
     captured
   }
 }
@@ -454,6 +455,94 @@ describe('initRelayHost — Team Access pool (invite/cap)', () => {
     await host.invite()
     // Not even pending yet — no onPeerPending fired — and the seat is already taken.
     await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+  })
+})
+
+describe('initRelayHost — Task-2 review: reserve-at-mint with a revocable id', () => {
+  // Finding 1 — the seat is RESERVED synchronously (before the token-mint await), so two concurrent
+  // invites can't both pass the cap. Fire both without awaiting the first, then settle.
+  it('closes the seat-cap race: two concurrent invites at cap 1 → exactly one succeeds, one E_SEATS_FULL', async () => {
+    const host = wirePool(1)
+    const results = await Promise.allSettled([host.invite(), host.invite()])
+    const statuses = results.map((r) => r.status)
+    expect(statuses.filter((s) => s === 'fulfilled').length).toBe(1)
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined
+    expect(String(rejected?.reason)).toContain(E_SEATS_FULL)
+  })
+
+  it('invite resolves with a seat id (the same id its peer-pending event later carries)', async () => {
+    const host = wirePool(3)
+    const { id } = await host.invite({ email: 'a@x.com' })
+    expect(id).toBeTruthy()
+    host.captured[0].opts.onPeerPending(host.captured[0].session)
+    expect(openedIds(IPC.relayHostPeerPending).at(-1)?.id).toBe(id)
+  })
+
+  // Finding 2 — a minted invite whose peer never connects is revocable by its returned id (no ghost
+  // seat). Before this fix `revoke` couldn't reach it (no id until onPeerPending) and only stop() freed
+  // it. A reserved-but-never-handshaked session reports no peer key yet, so revoke has nothing live to
+  // cut — it just frees the reservation and tells the renderer. Wire a null-peer-key session to model it.
+  it('a pending-never-connected seat is revocable by its returned id and frees the seat', async () => {
+    vi.mocked(killRelayHostsByPeerKey).mockClear()
+    const win = fakeWin()
+    const invite = (): Promise<{ offer: string; id: string }> =>
+      h.handlers[IPC.relayHostInvite]({}, {}) as Promise<{ offer: string; id: string }>
+    initRelayHost(win as never, platform, {
+      loadKeys: async () => genKeyPair(),
+      mintToken: async () => ({ pairingToken: 'tok' }),
+      isPremium: () => true,
+      relayAllowed: () => true,
+      getEntitlement: () => 'ent',
+      licensedSeats: () => 1,
+      // A reserved seat whose peer never completes the handshake: no SAS, no peer key.
+      connect: () =>
+        ({
+          clientId: () => null,
+          sas: () => null,
+          peerKeyB64: () => null,
+          sharedProjectId: () => undefined,
+          confirm: vi.fn(),
+          close: vi.fn()
+        }) as unknown as RelayHostSession
+    })
+    const { id } = await invite()
+    // The peer never connects — no onPeerPending fired — yet the cap is already taken.
+    await expect(invite()).rejects.toThrow(E_SEATS_FULL)
+
+    h.handlers[IPC.relayHostRevoke]({}, { id })
+    // No live socket to cut (the session never opened), but the seat frees and the renderer is told.
+    expect(killRelayHostsByPeerKey).not.toHaveBeenCalled()
+    expect(openedIds(IPC.relayHostClosed).at(-1)).toEqual({ id })
+
+    // The freed seat is reusable: a fresh invite succeeds.
+    await expect(invite()).resolves.toHaveProperty('offer')
+  })
+
+  // Rollback — a mint failure AFTER the synchronous reservation must not leak a seat.
+  it('rolls the reservation back on a mint failure (no seat leak)', async () => {
+    const win = fakeWin()
+    let fail = true
+    const captured: FakeSession[] = []
+    initRelayHost(win as never, platform, {
+      loadKeys: async () => genKeyPair(),
+      mintToken: async () => {
+        if (fail) throw new Error('mint boom')
+        return { pairingToken: 'tok' }
+      },
+      isPremium: () => true,
+      relayAllowed: () => true,
+      getEntitlement: () => 'ent',
+      licensedSeats: () => 1,
+      connect: () => {
+        const s = makeFakeSession(captured.length)
+        captured.push(s)
+        return s as unknown as RelayHostSession
+      }
+    })
+    await expect(h.handlers[IPC.relayHostInvite]({}, {})).rejects.toThrow('mint boom')
+    // The reservation was rolled back — at cap 1 a fresh (now-succeeding) invite still fits.
+    fail = false
+    await expect(h.handlers[IPC.relayHostInvite]({}, {})).resolves.toHaveProperty('offer')
   })
 })
 

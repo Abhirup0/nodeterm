@@ -1166,14 +1166,15 @@ export interface RelayHostApi {
    * Rejects if the device is not entitled (or a dev build without the relay URL). `projectId` is the
    * single project this hosting session shares with the peer; omit for the legacy whole-workspace view.
    */
-  start(projectId?: string): Promise<{ offer: string }>
+  start(projectId?: string): Promise<{ offer: string; id: string }>
   /**
    * Team Access: ADD a seat — mint a fresh pairing offer for one more device (no supersede), tagged
    * with the optional invitee `email` (display label only). Rejects `E_SEATS_FULL` when the licensed
    * seat cap is reached, and with the Pro / dev-build errors `start` uses. `projectId` scopes the
-   * shared project as in `start`.
+   * shared project as in `start`. Resolves with the offer AND the seat's `id` — the settings UI uses
+   * it to show the pending row immediately and to `revoke` a seat whose peer never connects.
    */
-  invite(opts?: { projectId?: string; email?: string }): Promise<{ offer: string }>
+  invite(opts?: { projectId?: string; email?: string }): Promise<{ offer: string; id: string }>
   /** Leave host mode: close every bridged peer in the pool. */
   stop(): Promise<void>
   /**
