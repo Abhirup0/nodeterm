@@ -44,6 +44,14 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
     'ControlPersist=300',
     '-o',
     'BatchMode=no',
+    // Keepalives on the ONE connection every terminal multiplexes over: keep NAT/firewall
+    // entries warm, and detect a dead link in ~60s (15s × 4) instead of hanging half-dead
+    // after sleep/wake or a network change. The client then exits 255 and the renderer's
+    // SshReconnector takes over.
+    '-o',
+    'ServerAliveInterval=15',
+    '-o',
+    'ServerAliveCountMax=4',
     ...portArgs(conn)
   ]
   if (conn.identityFile) args.push('-i', conn.identityFile)

@@ -145,6 +145,17 @@ export function setMoveIntoWorktreeHandler(fn: ((nodeId: string) => void) | null
 }
 
 /**
+ * SSH-drop handler bridge (same pattern as the move-into-worktree bridge above). Canvas
+ * registers the SshReconnector's reportDrop here; an SSH-project terminal whose ssh client
+ * exits 255 (connection drop — the remote tmux session survives) reports (projectId, nodeId)
+ * so the coordinator can re-establish the master and respawn the node.
+ */
+let sshDropHandler: ((projectId: string, nodeId: string) => void) | null = null
+export function setSshDropHandler(fn: ((projectId: string, nodeId: string) => void) | null): void {
+  sshDropHandler = fn
+}
+
+/**
  * Parked terminals: when a node unmounts (project switch), its xterm instance and live PTY
  * session are kept — the `.xterm` element is detached from the DOM and held here — so a remount
  * within TERM_PARK_MS re-adopts them instead of respawning. This makes switching back to a
@@ -800,6 +811,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // `ssh` as a LOCAL pty program. Only the latter sets shell:'ssh' + buildSshArgs.
     const sshRemoteTmux = !!data.sshRemoteTmux
     const localSsh = !!ssh && !sshRemoteTmux
+    // Owning project of an SSH-project terminal, captured at spawn time for the exit-255 drop
+    // report below (a node only exists in the active project's React Flow, so the active
+    // project is its owner — same assumption as resolveSshRemote).
+    const sshProjectId = sshRemoteTmux ? useProjects.getState().activeProjectId : null
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
@@ -1063,6 +1078,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
+            // ssh exiting 255 on an SSH-project terminal is a CONNECTION drop (sleep/wake,
+            // network change, NAT idle) — the remote tmux session survives. Report it so the
+            // reconnect coordinator can re-establish the master and respawn this node.
+            if (code === 255 && sshProjectId) sshDropHandler?.(sshProjectId, id)
           })
         )
         cleanups.push(

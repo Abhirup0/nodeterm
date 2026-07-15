@@ -50,6 +50,8 @@ describe('masterArgs', () => {
       '-o', 'ControlPath=/ud/ssh-cm/p.sock',
       '-o', 'ControlPersist=300',
       '-o', 'BatchMode=no',
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=4',
       '-p', '2222',
       '-i', '/k/id',
       'deploy@h.example.com'
