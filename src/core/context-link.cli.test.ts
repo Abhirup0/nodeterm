@@ -1,15 +1,35 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CLI_SCRIPT } from './context-link-core'
 
 let dir: string
+let binDir: string
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'ctxlink-'))
   writeFileSync(join(dir, 'context-cli.mjs'), CLI_SCRIPT)
+  // A fake `opencode` on PATH: `opencode export <id>` prints a session-export JSON blob.
+  // opencode stores sessions in SQLite, so the CLI shells out to `opencode export` instead
+  // of reading a file — we stub that binary to return a fixture payload.
+  binDir = mkdtempSync(join(tmpdir(), 'ctxlink-bin-'))
+  const opencodeExport = JSON.stringify({
+    messages: [
+      { role: 'user', parts: [{ type: 'text', text: 'add rerank' }] },
+      {
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'done, added rerank.ts' },
+          { type: 'tool', tool: 'bash', state: { input: { command: 'npm test' } } }
+        ]
+      }
+    ]
+  })
+  writeFileSync(join(binDir, 'export.json'), opencodeExport)
+  writeFileSync(join(binDir, 'opencode'), `#!/bin/sh\ncat "${join(binDir, 'export.json')}"\n`)
+  chmodSync(join(binDir, 'opencode'), 0o755)
   const transcript = [
     JSON.stringify({ type: 'user', message: { content: 'deploy the app' } }),
     JSON.stringify({
@@ -55,6 +75,8 @@ beforeAll(() => {
         { id: 'node-X', title: 'Coder', cwd: '', transcriptPath: join(dir, 'codex.jsonl'), tmux: 'nt-node-X', agent: 'codex' },
         { id: 'node-G', title: 'Gem', cwd: '', transcriptPath: join(dir, 'gemini.jsonl'), tmux: 'nt-node-G', agent: 'gemini' },
         { id: 'node-Y', title: 'ColdCoder', cwd: '/nowhere', transcriptPath: '', tmux: 'nt-node-Y', agent: 'codex' },
+        { id: 'node-O', title: 'OpenCoder', cwd: '', transcriptPath: '', tmux: 'nt-node-O', agent: 'opencode', sessionId: 'ses_abc' },
+        { id: 'node-O2', title: 'NoSession', cwd: '', transcriptPath: '', tmux: 'nt-node-O2', agent: 'opencode' },
         { id: 'note-1', title: 'Deploy notes', cwd: '', transcriptPath: '', tmux: '', note: 'use the staging key' }
       ],
       tmuxBin: null,
@@ -63,12 +85,15 @@ beforeAll(() => {
   )
 })
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }))
+afterAll(() => {
+  rmSync(dir, { recursive: true, force: true })
+  rmSync(binDir, { recursive: true, force: true })
+})
 
 function run(nodeId: string, args: string[]): string {
   return execFileSync(process.execPath, [join(dir, 'context-cli.mjs'), ...args], {
     encoding: 'utf-8',
-    env: { ...process.env, NODETERM_NODE_ID: nodeId }
+    env: { ...process.env, NODETERM_NODE_ID: nodeId, PATH: `${binDir}:${process.env.PATH ?? ''}` }
   })
 }
 
@@ -130,5 +155,15 @@ describe('context-cli', () => {
   it('non-claude agent without a resolved path gets no cwd fallback', () => {
     const out = run('node-A', ['summary', '--node', 'node-Y'])
     expect(out).toContain('no conversation transcript yet')
+  })
+  it('renders an opencode transcript via `opencode export`', () => {
+    const out = run('node-A', ['transcript', '--node', 'node-O'])
+    expect(out).toContain('user: add rerank')
+    expect(out).toContain('assistant: done, added rerank.ts')
+    expect(out).toContain('$ bash npm test')
+  })
+  it('opencode without a session id reports friendly, does not throw', () => {
+    const out = run('node-A', ['summary', '--node', 'node-O2'])
+    expect(out).toContain('has no session id yet')
   })
 })

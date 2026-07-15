@@ -67,6 +67,23 @@ describe('buildLinkDoc agent field', () => {
   })
 })
 
+describe('buildLinkDoc sessionId field', () => {
+  it('copies sessionId onto the entry (opencode exports by id); notes get none', () => {
+    const doc = buildLinkDoc(
+      'node-A',
+      [
+        { id: 'node-O', title: 'O', cwd: '', agentId: 'opencode', sessionId: 'ses_1' },
+        { id: 'node-B', title: 'B', cwd: '', agentId: 'codex' },
+        { id: 'note-1', title: 'N', note: 'txt' }
+      ],
+      { transcriptOf: () => '', tmuxBin: null, tmuxSocket: 's' }
+    )
+    expect(doc.links[0].sessionId).toBe('ses_1')
+    expect(doc.links[1].sessionId).toBeUndefined()
+    expect(doc.links[2].sessionId).toBeUndefined()
+  })
+})
+
 describe('resolveLinkTranscript', () => {
   const locators = {
     claude: async (sid: string, acct?: string) => `/c/${acct ?? 'default'}/${sid}.jsonl`,

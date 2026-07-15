@@ -83,8 +83,10 @@ export interface LinkDocEntry {
   cwd: string
   transcriptPath: string
   tmux: string
-  /** Which agent CLI produced the transcript ('claude' | 'codex' | 'gemini') — selects the parser. */
+  /** Which agent CLI produced the transcript ('claude' | 'codex' | 'gemini' | 'opencode') — selects the parser. */
   agent?: string
+  /** Provider session id — opencode has no transcript file, so the CLI exports it by id. */
+  sessionId?: string
   /** Present when this entry is a sticky note: its text. Note entries have no transcript/terminal. */
   note?: string
 }
@@ -113,6 +115,7 @@ export function buildLinkDoc(
         tmux: isNote ? '' : sessionName(n.id)
       }
       if (!isNote && n.agentId) entry.agent = n.agentId
+      if (!isNote && n.sessionId) entry.sessionId = n.sessionId
       if (isNote) entry.note = n.note
       return entry
     }),
@@ -239,6 +242,40 @@ function linesFromGeminiFile(buf) {
   return res
 }
 
+// opencode >=1.18 stores sessions in SQLite — never parse its disk. The CLI exports a
+// session as JSON: 'opencode export <sessionID>'. Shape read defensively: a messages array
+// whose items carry role + parts[] (text / tool) or a plain content string.
+function linesFromOpencodeExport(node) {
+  if (!node.sessionId) { out('"' + node.title + '" has no session id yet.'); return [] }
+  var raw
+  try {
+    raw = execFileSync('opencode', ['export', String(node.sessionId)], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch (e) { out('Could not export "' + node.title + '" session (is opencode installed?).'); return [] }
+  var o
+  try { o = JSON.parse(raw) } catch (e) { out('Unreadable opencode export for "' + node.title + '".'); return [] }
+  var msgs = Array.isArray(o) ? o : (o && (o.messages || (o.data && o.data.messages))) || []
+  var res = []
+  msgs.forEach(function (m) {
+    if (!m) return
+    var role = (m.role || (m.info && m.info.role)) === 'user' ? 'user' : 'assistant'
+    var parts = m.parts || (Array.isArray(m.content) ? m.content : null)
+    if (typeof m.content === 'string' && m.content) { res.push(role + ': ' + m.content); return }
+    if (!Array.isArray(parts)) return
+    parts.forEach(function (c) {
+      if (!c) return
+      if (typeof c.text === 'string' && c.text && (c.type === 'text' || !c.type)) res.push(role + ': ' + c.text)
+      else if (c.type === 'tool' || c.type === 'tool_use' || c.tool) {
+        var name = c.tool || c.name || 'tool'
+        var input = c.state && c.state.input ? c.state.input : c.input
+        var a = input && (input.command || input.filePath || input.file_path || input.pattern || input.description)
+        res.push('  $ ' + name + (typeof a === 'string' ? ' ' + a.slice(0, 200) : ''))
+      }
+    })
+  })
+  if (!res.length) out('"' + node.title + '" export contained no readable messages.')
+  return res
+}
+
 // Parse one transcript JSONL line into 0..n display strings.
 function linesFrom(raw) {
   var o
@@ -265,6 +302,8 @@ function linesFrom(raw) {
 }
 
 function readTranscript(node) {
+  // opencode has no transcript file (SQLite) — export by session id before any path resolution.
+  if (node.agent === 'opencode') return linesFromOpencodeExport(node)
   var p = resolveTranscript(node)
   if (!p) { out('"' + node.title + '" has no conversation transcript yet.'); return [] }
   var buf
