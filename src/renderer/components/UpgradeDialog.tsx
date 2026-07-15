@@ -16,8 +16,9 @@ export function UpgradeDialog() {
       <div className="confirm" onClick={(e) => e.stopPropagation()}>
         <p className="confirm__msg">{feature} is a Pro feature</p>
         <p className="confirm__msg">
-          Unlock remote SSH terminals and other Pro features. Complete your purchase in the
-          browser — Pro unlocks here automatically.
+          Pro unlocks unlimited remote access from your phone (free plan: 5 connections/month),
+          Team Access, and nodeterm mobile Pro. Complete your purchase in the browser — Pro
+          unlocks here automatically.
         </p>
         <div className="confirm__actions">
           <button className="confirm__btn" onClick={hide}>

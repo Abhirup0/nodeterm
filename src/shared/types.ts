@@ -1103,6 +1103,19 @@ export interface LicenseApi {
   onChange(listener: (s: LicenseStatus) => void): () => void
 }
 
+/** Free-tier relay remote-access quota (spec 2026-07-15). Pro reports `unlimited: true`. */
+export interface RelayQuotaStatus {
+  month: string // '2026-07'
+  used: number // distinct (peer, local day) pairs consumed this month
+  limit: number // RELAY_QUOTA_LIMIT
+  unlimited: boolean // true when Pro
+}
+
+export interface RelayQuotaApi {
+  getStatus(): Promise<RelayQuotaStatus>
+  onChange(listener: (s: RelayQuotaStatus) => void): () => void
+}
+
 export interface RemoteHostApi {
   /**
    * Enter host mode: mint a pairing token, connect to the relay as the host, and return the
@@ -1299,6 +1312,7 @@ export interface NodeTerminalApi {
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi
+  relayQuota: RelayQuotaApi
   contextLink: ContextLinkApi
   usage: UsageApi
   context: ContextApi

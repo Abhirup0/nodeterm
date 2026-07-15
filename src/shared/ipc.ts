@@ -66,6 +66,8 @@ export const IPC = {
   licenseStatus: 'license:status',
   licenseChanged: 'license:changed',
   licenseUpgrade: 'license:upgrade',
+  relayQuotaStatus: 'relay-quota:status',
+  relayQuotaChanged: 'relay-quota:changed',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   usageFetch: 'usage:fetch',

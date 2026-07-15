@@ -49,6 +49,7 @@ import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
+import { initRelayQuota, broadcastRelayQuota, relayQuotaAvailable } from '../core/relay-quota'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
@@ -511,6 +512,7 @@ app.whenReady().then(async () => {
   const pairingService = createPairingService({
     getSettings: () => settingsStore.get(),
     isPremium,
+    quotaAvailable: relayQuotaAvailable,
     getEntitlement: getStoredEntitlement,
     loadHostKeyPair: loadOrCreateKeyPair,
     relayEndpoint: RELAY_URL,
@@ -1019,7 +1021,12 @@ app.whenReady().then(async () => {
   // async launch-time entitlement refresh settles (fixes the boot race where Pro isn't yet valid
   // when syncFromSettings first runs).
   let standingHost: ReturnType<typeof initStandingHost> | undefined
-  initLicense(() => standingHost?.syncFromSettings())
+  initRelayQuota()
+  initLicense(() => {
+    standingHost?.syncFromSettings()
+    // A Pro flip changes `unlimited` in the quota status — push the fresh value.
+    broadcastRelayQuota()
+  })
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
