@@ -49,6 +49,7 @@ import {
   type SessionLife
 } from '../terminal/terminal-config'
 import { registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import { deliverCommand } from '../terminal/command-delivery'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -1073,12 +1074,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             transport.write(sid, input)
           }).dispose
         )
-        // Type a command only after the fresh shell settles. Writing immediately raced shell
-        // startup: zsh's init (rc files / ZLE setup) resets the tty with a FLUSH, which can eat
-        // part of a queued command — a long agent launch line then sits at the prompt mangled
-        // (unbalanced quote → `quote>` on Enter) instead of running. Wait for the first output
-        // (the prompt painting) to go quiet for a beat; cap the wait so a silent shell (no rc
-        // output beyond the prompt already captured) still gets its command.
+        // Deliver a command only after the fresh shell settles, and never blind: zsh's init
+        // (rc files / ZLE setup) resets the tty with a FLUSH that can eat part of a queued
+        // line — a long agent launch line then sat at the prompt mangled (unbalanced quote →
+        // `quote>` on Enter) instead of running. The settle wait below minimizes wasted
+        // attempts; deliverCommand (echo-verify + retry, fail-open) guarantees a mangled
+        // line is never submitted. See command-delivery.ts.
         const writeWhenShellReady = (cmd: string): void => {
           let done = false
           let timer: ReturnType<typeof setTimeout>
@@ -1086,7 +1087,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             if (done) return
             done = true
             unsub()
-            transport.write(sid, `${cmd}\n`)
+            cleanups.push(
+              deliverCommand(
+                {
+                  write: (d) => transport.write(sid, d),
+                  onData: (cb) => transport.onData(sid, cb)
+                },
+                cmd
+              )
+            )
           }
           const unsub = transport.onData(sid, () => {
             if (done) return
