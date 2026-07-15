@@ -12,7 +12,7 @@ interface EntitlementState {
   deactivate(): Promise<void>
 }
 
-const EMPTY: LicenseStatus = { tier: null, active: false, expiresAt: null, error: null }
+const EMPTY: LicenseStatus = { tier: null, active: false, expiresAt: null, seats: 0, error: null }
 
 export const useEntitlement = create<EntitlementState>((set) => {
   const apply = (status: LicenseStatus) => set({ status, isPremium: status.active })

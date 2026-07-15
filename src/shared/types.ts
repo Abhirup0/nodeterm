@@ -1083,6 +1083,8 @@ export interface LicenseStatus {
   active: boolean
   /** Unix seconds when the entitlement expires, or null. */
   expiresAt: number | null
+  /** Seat cap for the relay host (Team Access): premium → the token's seats (absent → 1), free/inactive → 0. */
+  seats: number
   /** Last activation/refresh error reason code, or null. */
   error: string | null
 }
