@@ -54,9 +54,13 @@ added). Regression-tested: claude/codex/gemini command strings unchanged.
   `~/.config/opencode/plugins/nodeterm-status.js`, overwriting only a file that carries the
   nodeterm marker comment (first line `// nodeterm managed plugin — do not edit`); remove
   deletes only a marker-bearing file. No JSON merging — the plugin is a whole owned file.
-- **Plugin body** (generated string, plain JS, no deps): reads `process.env.NODETERM_NODE_ID`,
-  `NODETERM_HOOK_TOKEN`, `NODETERM_HOOK_ENDPOINT` — any missing → return `{}` (no-op in the
-  user's normal opencode sessions; plugins load on every command, so this gate is mandatory).
+- **Plugin body** (generated string, plain JS, no deps): mirrors the managed POSIX script's
+  wire contract — gates on `process.env.NODETERM_NODE_ID` (missing → return `{}`; no-op in the
+  user's normal opencode sessions — plugins load on every command, so this gate is mandatory),
+  and per POST re-reads the `NODETERM_HOOK_ENDPOINT` FILE (KEY=VALUE lines) for the live
+  port/token (restart handoff; falls back to `NODETERM_HOOK_PORT`/`NODETERM_HOOK_TOKEN` env).
+  Wire format: urlencoded `nodeId` + `version` + `payload` (JSON) with the
+  `x-nodeterm-hook-token` header to `http://127.0.0.1:<port>/hook/opencode`.
   Otherwise returns handlers for: `session.created`, `session.idle`, `session.error`,
   `permission.asked`, `permission.replied`, `tool.execute.before`, `message.updated`. Each
   handler POSTs `{ event, sessionID?, role?, extra? }` to
