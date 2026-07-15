@@ -73,6 +73,7 @@ import { BugReportDialog } from '../components/BugReportDialog'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { RelayQuotaBanner } from '../components/RelayQuotaBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
 import { PhonePairPopover } from '../components/PhonePairPopover'
 import { ConflictBar } from '../components/ConflictBar'
@@ -5397,6 +5398,7 @@ export function Canvas() {
       />
 
       <div className="top-banners">
+        <RelayQuotaBanner />
         <AnnouncementBanner />
         <TmuxBanner onInstall={runInTerminal} />
         {migrationNote && (
