@@ -29,4 +29,11 @@ describe('resumeCommand', () => {
     expect(resumeCommand('claude', 'a$(whoami)')).toBeNull()
     expect(resumeCommand('claude', 'a b')).toBeNull()
   })
+
+  it('resumes opencode via --session', () => {
+    expect(resumeCommand('opencode', 'ses_a1b2c3')).toBe('opencode --session ses_a1b2c3')
+  })
+  it('rejects an unsafe opencode session id', () => {
+    expect(resumeCommand('opencode', 'x; rm -rf /')).toBeNull()
+  })
 })

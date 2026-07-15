@@ -2,7 +2,7 @@
 // Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
-export type BuiltinAgentId = 'claude' | 'codex' | 'gemini'
+export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode'
 // Open type — custom agents are any string ('custom:<uuid>'). Never restrict the set.
 export type AgentId = BuiltinAgentId | (string & {})
 
@@ -16,7 +16,7 @@ export interface AgentConfig {
   expectedProcess: string
 }
 
-export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = ['claude', 'codex', 'gemini']
+export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = ['claude', 'codex', 'gemini', 'opencode']
 
 export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
   claude: {
@@ -39,17 +39,26 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     launchCmd: 'gemini',
     promptInjectionMode: 'stdin-after-start',
     expectedProcess: 'gemini'
+  },
+  opencode: {
+    label: 'opencode',
+    color: '#a78bfa',
+    launchCmd: 'opencode',
+    // A bare positional is a PROJECT PATH for opencode, so the initial prompt must go
+    // through --prompt (see createAgentNode's flag-prompt branch).
+    promptInjectionMode: 'flag-prompt',
+    expectedProcess: 'opencode'
   }
 }
 
 // Capabilities = const membership lists. A custom agent is in no list, so it
 // automatically gets only spawn + terminal-title + process status.
-export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini'] as const
-export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini'] as const
+export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode'] as const
+export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini'] as const
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
 export const USAGE_CAPABLE = ['claude'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 export const CHAT_CAPABLE = ['claude'] as const
@@ -59,9 +68,10 @@ export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // into the node title, and accept `/rename <name>` to push a renamed node title back. Claude-only.
 export const RENAME_CAPABLE = ['claude'] as const
 // Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
-// Discovery differs per agent: claude gets the manage-nodeterm-canvas skill, codex/gemini a
-// marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md (see canvas-control.ts).
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini'] as const
+// Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
+// opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /
+// ~/.config/opencode/AGENTS.md (see canvas-control.ts).
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
 // (--approval-mode) join by being added here with their own flag mapping.
@@ -104,6 +114,8 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
   switch (id) {
     case 'codex':
       return `codex resume ${sid}`
+    case 'opencode':
+      return `opencode --session ${sid}`
     case 'claude':
     case 'gemini':
       return `${id} --resume ${sid}`
