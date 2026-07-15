@@ -24,6 +24,7 @@ import {
   transcriptPathOf
 } from './context-link-core'
 import { locateClaude, locateCodex, locateGemini } from './handoff/locate'
+import { opencodeConfigDir } from './agents/hooks/opencode'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -105,7 +106,7 @@ function installAgentInstructions(): void {
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
     path.join(os.homedir(), '.gemini', 'GEMINI.md'),
-    path.join(os.homedir(), '.config', 'opencode', 'AGENTS.md')
+    path.join(opencodeConfigDir(), 'AGENTS.md')
   ]
   for (const p of targets) {
     try {

@@ -12,6 +12,7 @@ import {
   buildCanvasControlInstructions,
   mergeCanvasControlBlock
 } from './canvas-control-core'
+import { opencodeConfigDir } from '../core/agents/hooks/opencode'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -150,7 +151,7 @@ function installAgentInstructions(): void {
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
     path.join(os.homedir(), '.gemini', 'GEMINI.md'),
-    path.join(os.homedir(), '.config', 'opencode', 'AGENTS.md')
+    path.join(opencodeConfigDir(), 'AGENTS.md')
   ]
   for (const p of targets) {
     try {

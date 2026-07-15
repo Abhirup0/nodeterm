@@ -10,8 +10,17 @@ import path from 'path'
 
 export const PLUGIN_MARKER = '// nodeterm managed plugin — do not edit (reinstalled at app launch)'
 
+/** opencode is XDG-respecting: its config dir is $XDG_CONFIG_HOME/opencode when the env var
+ *  is set (Linux/Server Edition users do this), else ~/.config/opencode. */
+export function opencodeConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME
+  return xdg && path.isAbsolute(xdg)
+    ? path.join(xdg, 'opencode')
+    : path.join(os.homedir(), '.config', 'opencode')
+}
+
 export function pluginPath(): string {
-  return path.join(os.homedir(), '.config', 'opencode', 'plugins', 'nodeterm-status.js')
+  return path.join(opencodeConfigDir(), 'plugins', 'nodeterm-status.js')
 }
 
 /** The managed plugin body. Mirrors the managed POSIX script's wire contract exactly
