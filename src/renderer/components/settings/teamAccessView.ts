@@ -47,7 +47,7 @@ export function inviteShare({ offer, email }: { offer: string; email?: string })
   const query = `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   return {
     copyText,
-    mailtoUrl: `mailto:${encodeURIComponent(recipient)}?${query}`
+    mailtoUrl: `mailto:${recipient}?${query}`
   }
 }
 
