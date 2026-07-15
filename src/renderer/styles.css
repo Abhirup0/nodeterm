@@ -1040,6 +1040,20 @@ body,
   height: 100%;
 }
 
+/* FitAddon subtracts the viewport's measured scrollbar width from the grid when scrollback > 0
+   (FitAddon.ts availableWidth math), leaving a dead ~14px band on the RIGHT of every terminal —
+   "the terminal isn't centered" field report. tmux owns the wheel, so the emulator scrollbar is
+   pure reserve: zero its width and the measurement — and the band — disappear. Wheel scrolling
+   is untouched (tmux history in tmux sessions; xterm buffer still wheel-scrolls in the
+   plain-shell fallback, just without a visible bar). */
+.term-node__xterm .xterm-viewport {
+  scrollbar-width: none;
+}
+.term-node__xterm .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 /* Co-attach: the pty runs at the SMALLEST subscriber's grid, so the terminal can be smaller than
    this node's body. Center the leftover space instead of stretching — letterboxing, not
    distortion. Only applied while a smaller peer is actually clamping us: a solo user's grid IS the
