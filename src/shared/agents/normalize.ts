@@ -243,9 +243,39 @@ export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | nu
   return null
 }
 
+// opencode plugin payload (see core/agents/hooks/opencode.ts). The managed plugin forwards
+// { event, sessionID?, role? } per hook; field names beyond `event` are read defensively —
+// opencode's event payload shapes are not a contract, so the event NAME carries the mapping.
+interface OpencodePayload {
+  event?: string
+  sessionID?: string
+  session_id?: string
+  role?: string
+}
+
+export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as OpencodePayload
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.sessionID ?? p.session_id }
+
+  if (p.event === 'session.created') return { ...base, kind: 'session', sessionPhase: 'start' }
+  // The plugin forwards message.updated only for user messages — opencode's turn start
+  // (mirrors Claude's UserPromptSubmit), so per-turn fan-out clears once per turn.
+  if (p.event === 'message.updated' && p.role === 'user') {
+    return { ...base, kind: 'state', state: 'working', newTurn: true }
+  }
+  if (p.event === 'tool.execute.before') return { ...base, kind: 'state', state: 'working' }
+  if (p.event === 'permission.asked') return { ...base, kind: 'state', state: 'blocked' }
+  if (p.event === 'permission.replied') return { ...base, kind: 'state', state: 'working' }
+  if (p.event === 'session.idle' || p.event === 'session.error') {
+    return { ...base, kind: 'state', state: 'done' }
+  }
+  return null
+}
+
 export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): NormalizedAgentEvent | null {
   if (agentId === 'claude') return normalizeClaude(env)
   if (agentId === 'codex') return normalizeCodex(env)
   if (agentId === 'gemini') return normalizeGemini(env)
+  if (agentId === 'opencode') return normalizeOpencode(env)
   return null
 }

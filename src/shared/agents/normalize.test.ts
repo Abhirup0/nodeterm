@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeClaude, type RawHookEnvelope } from './normalize'
+import { normalizeClaude, normalizeFor, type RawHookEnvelope } from './normalize'
 
 function env(payload: Record<string, unknown>): RawHookEnvelope {
   return { nodeId: 'n1', agentId: 'claude', payload }
@@ -139,5 +139,49 @@ describe('normalizeClaude — permission signals', () => {
       const e = normalizeClaude(env({ hook_event_name: 'Notification', notification_type: t }))
       expect(e).toBeNull()
     }
+  })
+})
+
+describe('normalizeOpencode', () => {
+  const ocEnv = (payload: Record<string, unknown>): RawHookEnvelope => ({
+    nodeId: 'n1',
+    agentId: 'opencode',
+    payload
+  })
+
+  it('maps session.created to a session start with the id', () => {
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.created', sessionID: 'ses_1' }))).toEqual({
+      nodeId: 'n1',
+      agentId: 'opencode',
+      sessionId: 'ses_1',
+      kind: 'session',
+      sessionPhase: 'start'
+    })
+  })
+
+  it('maps a user message.updated to working + newTurn', () => {
+    expect(
+      normalizeFor('opencode', ocEnv({ event: 'message.updated', role: 'user', sessionID: 'ses_1' }))
+    ).toMatchObject({ kind: 'state', state: 'working', newTurn: true })
+  })
+
+  it('maps tool.execute.before to working (no newTurn)', () => {
+    const e = normalizeFor('opencode', ocEnv({ event: 'tool.execute.before' }))
+    expect(e).toMatchObject({ kind: 'state', state: 'working' })
+    expect(e?.newTurn).toBeUndefined()
+  })
+
+  it('maps permission.asked to blocked and permission.replied back to working', () => {
+    expect(normalizeFor('opencode', ocEnv({ event: 'permission.asked' }))).toMatchObject({ state: 'blocked' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'permission.replied' }))).toMatchObject({ state: 'working' })
+  })
+
+  it('maps session.idle and session.error to done', () => {
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.idle' }))).toMatchObject({ state: 'done' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'session.error' }))).toMatchObject({ state: 'done' })
+  })
+
+  it('ignores unknown events', () => {
+    expect(normalizeFor('opencode', ocEnv({ event: 'tui.toast.show' }))).toBeNull()
   })
 })
