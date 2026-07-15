@@ -88,6 +88,33 @@ describe('relay-quota', () => {
     expect(quota.relayQuotaAvailable()).toBe(false)
   })
 
+  it('peek returns ok with the projected used but persists nothing', async () => {
+    const { quota } = await boot()
+    expect(quota.peekRelayUse('phoneA')).toEqual({ kind: 'ok', used: 1, limit: 5 })
+    // Nothing was charged: a real consume still counts and returns the same projected used.
+    expect(quota.consumeRelayUse('phoneA')).toEqual({ kind: 'ok', used: 1, limit: 5 })
+  })
+
+  it("peek reports 'already' for a peer counted today", async () => {
+    const { quota } = await boot()
+    quota.consumeRelayUse('phoneA')
+    expect(quota.peekRelayUse('phoneA')).toEqual({ kind: 'already', used: 1, limit: 5 })
+  })
+
+  it("peek reports 'exhausted' at the cap without charging", async () => {
+    const { quota } = await boot()
+    for (const p of ['a', 'b', 'c', 'd', 'e']) quota.consumeRelayUse(p)
+    expect(quota.peekRelayUse('f')).toEqual({ kind: 'exhausted', used: 5, limit: 5 })
+    // Still exhausted (peek didn't add an entry), and a fresh consume also refuses.
+    expect(quota.peekRelayUse('f')).toEqual({ kind: 'exhausted', used: 5, limit: 5 })
+  })
+
+  it("peek reports 'unlimited' when premium", async () => {
+    h.premium = true
+    const { quota } = await boot()
+    expect(quota.peekRelayUse('phoneA')).toEqual({ kind: 'unlimited' })
+  })
+
   it('status handler + change broadcast go over CorePlatform', async () => {
     const { fake, quota } = await boot()
     quota.initRelayQuota()

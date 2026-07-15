@@ -24,7 +24,7 @@ import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, Settings } from '../../shared/types'
 import { PtyManager } from '../../core/pty-manager'
 import { getStoredEntitlement, isPremium } from '../../core/license'
-import { consumeRelayUse, relayQuotaAvailable } from '../../core/relay-quota'
+import { consumeRelayUse, peekRelayUse, relayQuotaAvailable } from '../../core/relay-quota'
 import { getDeviceId } from '../../core/device-id'
 import { createPhonePresence, type PhonePresence } from './phone-presence'
 import { publicKeyToB64, type KeyPair } from './e2ee'
@@ -215,6 +215,27 @@ export function initStandingHost(
     if (running && pendingCount() < TARGET_PENDING) void connectOne()
   }
 
+  // Charge a (peer, day) slot at APPROVAL time (auto-approve for a pinned device, or the human's
+  // OK for an unknown one) — never at bridge time, so a declined/timed-out prompt costs nothing.
+  // Returns whether the peer is admitted. On an exhausted race (another peer took the last slot
+  // between the earlier peek and now) it drops the session and refuses; 2nd+ use of the month
+  // notifies; 1st use / already-counted / Pro (unlimited) is silent.
+  function chargeAndAdmit(pooled: Pooled, pub: string | null): boolean {
+    const q = consumeRelayUse(pub ?? 'unknown-peer')
+    if (q.kind === 'exhausted') {
+      notifyQuota(
+        `Remote access limit reached (${q.limit}/${q.limit} this month). Upgrade to Pro for unlimited access.`
+      )
+      removeFromPool(pooled)
+      ensurePool()
+      return false
+    }
+    if (q.kind === 'ok' && q.used >= 2) {
+      notifyQuota(`Remote access ${q.used}/${q.limit} this month`)
+    }
+    return true
+  }
+
   function scheduleReconnect(): void {
     if (!running || reconnectTimer) return
     const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
@@ -258,10 +279,11 @@ export function initStandingHost(
     }
     const s = pooled.session
     const pub = s.peerPublicKeyB64()
-    // Free-tier metering: every bridged phone consumes a (peer, local-day) slot — pinned
-    // or not. 1st use of the month is silent, 2nd+ notifies, over-limit is refused
-    // BEFORE any approval so an exhausted free host never serves a new pair.
-    const q = consumeRelayUse(pub ?? 'unknown-peer')
+    // Free-tier admission GATE (non-mutating): refuse an over-limit free host a NEW pair before any
+    // approval, but DON'T charge yet — the slot is spent only when the pair is actually approved
+    // (pinned auto-approve, or the human's OK), never merely by bridging. A peer already counted
+    // today ('already') or Pro ('unlimited') falls straight through to the approval flow.
+    const q = peekRelayUse(pub ?? 'unknown-peer')
     if (q.kind === 'exhausted') {
       notifyQuota(
         `Remote access limit reached (${q.limit}/${q.limit} this month). Upgrade to Pro for unlimited access.`
@@ -269,9 +291,6 @@ export function initStandingHost(
       removeFromPool(pooled)
       ensurePool()
       return
-    }
-    if (q.kind === 'ok' && q.used >= 2) {
-      notifyQuota(`Remote access ${q.used}/${q.limit} this month`)
     }
     let store
     try {
@@ -281,6 +300,9 @@ export function initStandingHost(
     }
     if (!pool.has(pooled)) return // torn down while the disk read was in flight
     if (pub && isPinned(store, pub)) {
+      // Auto-approve → this is the charge point for a pinned device. An exhausted race here drops
+      // the session inside the helper; only a genuine admission approves.
+      if (!chargeAndAdmit(pooled, pub)) return
       s.approve()
       return
     }
@@ -403,6 +425,9 @@ export function initStandingHost(
     // browse socket may have already closed. Prefer the live peer's key, else the remembered one.
     const pub = p.session.peerPublicKeyB64() ?? p.approvalPub
     clearApproval(p)
+    // Charge the slot at the human's OK (a reject/timeout never reaches here → costs nothing). An
+    // exhausted race drops the session inside the helper; don't pin or approve a refused peer.
+    if (!chargeAndAdmit(p, pub)) return
     if (pub) {
       void loadApprovedDevices()
         .then((store) => saveApprovedDevices(pinDevice(store, pub)))
@@ -418,6 +443,14 @@ export function initStandingHost(
     removeFromPool(p) // drop this rejected session
     ensurePool()
   })
+
+  // Month rollover / quota changes can re-admit a stopped free-tier host (or retire an exhausted
+  // one). reconcile() is idempotent, so a slow hourly tick is safe and cheap.
+  // NOT cleared in stop(): stop() also fires transiently (exhaustion, lapsed Pro), and this tick is
+  // exactly what must revive hosting later. The interval is unref'd and dies with the process, and
+  // initStandingHost is constructed once, so there is nothing to clean up.
+  const reconcileTimer = setInterval(() => reconcile(), 60 * 60 * 1000)
+  reconcileTimer.unref?.()
 
   return {
     setEnabled(next) {

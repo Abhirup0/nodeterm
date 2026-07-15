@@ -110,6 +110,20 @@ export function consumeRelayUse(peerKey: string): RelayConsume {
   return { kind: 'ok', used: s.entries.length, limit: RELAY_QUOTA_LIMIT }
 }
 
+/** Non-mutating admission check: what consumeRelayUse WOULD return, persisting nothing. */
+export function peekRelayUse(peerKey: string): RelayConsume {
+  if (isPremium()) return { kind: 'unlimited' }
+  const s = normalized()
+  const day = dayOf(effectiveNow(s))
+  if (s.entries.some((e) => e.peer === peerKey && e.day === day)) {
+    return { kind: 'already', used: s.entries.length, limit: RELAY_QUOTA_LIMIT }
+  }
+  if (s.entries.length >= RELAY_QUOTA_LIMIT) {
+    return { kind: 'exhausted', used: s.entries.length, limit: RELAY_QUOTA_LIMIT }
+  }
+  return { kind: 'ok', used: s.entries.length + 1, limit: RELAY_QUOTA_LIMIT }
+}
+
 export function initRelayQuota(): void {
   platform().handle(IPC.relayQuotaStatus, () => relayQuotaStatus())
 }
