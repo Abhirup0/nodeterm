@@ -323,3 +323,18 @@ describe('createAgentNode permission mode', () => {
     expect(node.data.initialCommand).toBe('codex')
   })
 })
+
+describe('createAgentNode prompt injection', () => {
+  it('uses --prompt for flag-prompt agents (opencode)', () => {
+    const n = createAgentNode('opencode', 0, undefined, undefined, "rerank the results")
+    expect(n.data.initialCommand).toBe("opencode --prompt 'rerank the results'")
+  })
+  it('shell-quotes a flag-prompt safely', () => {
+    const n = createAgentNode('opencode', 0, undefined, undefined, "it's tricky")
+    expect(n.data.initialCommand).toBe("opencode --prompt 'it'\\''s tricky'")
+  })
+  it('keeps argv injection byte-identical for codex and gemini', () => {
+    expect(createAgentNode('codex', 0, undefined, undefined, 'do X').data.initialCommand).toBe("codex 'do X'")
+    expect(createAgentNode('gemini', 0, undefined, undefined, 'do X').data.initialCommand).toBe("gemini 'do X'")
+  })
+})

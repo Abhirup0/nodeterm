@@ -296,8 +296,17 @@ export function createAgentNode(
 ): CanvasNode {
   const { label, color, launchCmd } = resolveAgent(agentId)
   const baseCmd = agentId === 'claude' ? claudeLaunchCommand() : launchCmd
-  const withPrompt = initialPrompt
-    ? `${baseCmd} ${shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())}`
+  // A flag-prompt agent (opencode) takes the initial prompt via its flag — a bare positional
+  // would be misread (opencode treats it as a project path). Everything else keeps the
+  // historical argv append, INCLUDING stdin-after-start agents (gemini has always launched
+  // via argv here; changing that is a separate decision).
+  const promptArg = initialPrompt
+    ? shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())
+    : null
+  const withPrompt = promptArg
+    ? agentConfig(agentId)?.promptInjectionMode === 'flag-prompt'
+      ? `${baseCmd} --prompt ${promptArg}`
+      : `${baseCmd} ${promptArg}`
     : baseCmd
   // Flag goes last: the prompt is claude's positional argv and must stay adjacent to the binary.
   // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
