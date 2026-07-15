@@ -37,6 +37,7 @@ import {
 import type { Settings } from '../shared/types'
 import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
+import { getDeviceId } from '../core/device-id'
 
 const execFileAsync = promisify(execFile)
 
@@ -51,6 +52,8 @@ export interface PairingRelayDeps {
   getSettings(): Settings
   isPremium(): boolean
   getEntitlement(): string | null
+  /** Free-tier relay taster: true while the monthly quota could still admit a bridge. */
+  quotaAvailable(): boolean
   loadHostKeyPair(): Promise<KeyPair>
   /** The relay WebSocket endpoint advertised to the phone. */
   relayEndpoint: string
@@ -69,7 +72,7 @@ interface RelayDeviceResponse {
 /** Mint a relay device token so a freshly-paired phone can reach this host over the relay. */
 async function mintRelayDevice(
   apiBase: string,
-  body: { entitlement: string; deviceId: string; hostPublicKeyB64: string; label?: string }
+  body: { entitlement: string | null; deviceId: string; hostPublicKeyB64: string; label?: string }
 ): Promise<RelayDeviceResponse | null> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8000)
@@ -77,7 +80,11 @@ async function mintRelayDevice(
     const res = await fetch(`${apiBase}/v1/relay/device`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(
+        body.entitlement
+          ? body
+          : { deviceId: body.deviceId, hostDeviceId: getDeviceId(), hostPublicKeyB64: body.hostPublicKeyB64, label: body.label }
+      ),
       signal: ctrl.signal
     })
     if (!res.ok) return null
@@ -93,16 +100,17 @@ async function mintRelayDevice(
 
 /**
  * Compute this host's relay reachability block WITHOUT any network call (just the host key →
- * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off, not Pro,
- * blocked in dev, or no entitlement is stored.
+ * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off, not Pro
+ * and no free quota, blocked in dev, or (on Pro) no entitlement is stored.
  */
 async function buildRelayContext(
   deps: PairingRelayDeps | undefined
-): Promise<{ block: RelayPairingBlock; entitlement: string } | null> {
+): Promise<{ block: RelayPairingBlock; entitlement: string | null } | null> {
   if (!deps || !deps.relayAllowed()) return null
-  if (!deps.getSettings().phoneAccessEnabled || !deps.isPremium()) return null
-  const entitlement = deps.getEntitlement()
-  if (!entitlement) return null
+  if (!deps.getSettings().phoneAccessEnabled) return null
+  if (!deps.isPremium() && !deps.quotaAvailable()) return null
+  const entitlement = deps.getEntitlement() // null on free tier → mint by deviceId
+  if (deps.isPremium() && !entitlement) return null
   try {
     const keys = await deps.loadHostKeyPair()
     const hostPublicKeyB64 = publicKeyToB64(keys.publicKey)

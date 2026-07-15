@@ -49,7 +49,7 @@ import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
-import { initRelayQuota, broadcastRelayQuota } from '../core/relay-quota'
+import { initRelayQuota, broadcastRelayQuota, relayQuotaAvailable } from '../core/relay-quota'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
@@ -512,6 +512,7 @@ app.whenReady().then(async () => {
   const pairingService = createPairingService({
     getSettings: () => settingsStore.get(),
     isPremium,
+    quotaAvailable: relayQuotaAvailable,
     getEntitlement: getStoredEntitlement,
     loadHostKeyPair: loadOrCreateKeyPair,
     relayEndpoint: RELAY_URL,
