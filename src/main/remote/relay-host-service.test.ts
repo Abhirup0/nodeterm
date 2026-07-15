@@ -41,8 +41,17 @@ vi.mock('./approved-devices', () => ({
   }
 }))
 
-import { initRelayHost } from './relay-host-service'
-import type { RelayHostSession } from './relay-host'
+// Keep `connectRelayHost` (the reviewed handshake) REAL — the crypto tests below exercise it for
+// real — but spy `killRelayHostsByPeerKey` so the revoke test can assert the identity-based cut is
+// fired with the right peer key (the module-level `live` set it reads is only populated by real
+// sessions, so a pass-through spy is the clean way to observe it with a fake `connect`).
+vi.mock('./relay-host', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./relay-host')>()
+  return { ...mod, killRelayHostsByPeerKey: vi.fn(mod.killRelayHostsByPeerKey) }
+})
+
+import { initRelayHost, E_SEATS_FULL } from './relay-host-service'
+import { killRelayHostsByPeerKey, type RelayHostSession } from './relay-host'
 import { connectRelay, type RelayTransport } from './relay-socket'
 import { createTrustGate, type TrustGate } from './relay-trust'
 import { genKeyPair, publicKeyToB64 } from './e2ee'
@@ -120,7 +129,8 @@ function wireHost(): {
     mintToken: async () => ({ pairingToken: 'tok-123' }),
     isPremium: () => true,
     relayAllowed: () => true,
-    getEntitlement: () => 'ent-abc'
+    getEntitlement: () => 'ent-abc',
+    licensedSeats: () => 3
   })
 
   let peerGate: TrustGate | null = null
@@ -225,6 +235,7 @@ describe('initRelayHost — start()', () => {
       isPremium: () => true,
       relayAllowed: () => true,
       getEntitlement: () => 'ent',
+      licensedSeats: () => 3,
       loadKeys: async () => {
         throw Object.assign(new Error('locked'), { code: 'E_PEER_KEY_LOCKED' })
       },
@@ -298,6 +309,7 @@ describe('initRelayHost — sharedProjectId threads start → connect', () => {
       isPremium: () => true,
       relayAllowed: () => true,
       getEntitlement: () => 'ent-abc',
+      licensedSeats: () => 3,
       connect: (o) => {
         captured = o
         // A no-op session; start() only needs the offer, which it builds itself.
@@ -358,5 +370,188 @@ describe('initRelayHost — teardown', () => {
     expect(presenceHub.peers()).toEqual([])
     const closed = h.sent.filter((x) => x.channel === IPC.relayHostClosed).at(-1)
     expect(closed?.args[0]).toEqual({ id })
+  })
+})
+
+// Team Access — the POOL. A fake `connect` gives full, synchronous control over each seat's
+// pending/open/close callbacks (the reviewed handshake is exercised for real in the crypto tests
+// above and in relay-host.test.ts — it is UNCHANGED). Each fake session has a distinct peer key so
+// the identity-based revoke can be asserted per seat.
+interface FakeSession extends RelayHostSession {
+  close: ReturnType<typeof vi.fn>
+  confirm: ReturnType<typeof vi.fn>
+}
+
+function makeFakeSession(n: number): FakeSession {
+  return {
+    clientId: () => null,
+    sas: () => '123 456',
+    peerKeyB64: () => `peer-${n}`,
+    sharedProjectId: () => undefined,
+    confirm: vi.fn(),
+    close: vi.fn()
+  }
+}
+
+/** Wire an `initRelayHost` whose `connect` returns controllable fake sessions, capped at `seats`. */
+function wirePool(seats: number): {
+  invite: (opts?: { projectId?: string; email?: string }) => Promise<{ offer: string }>
+  captured: Array<{ opts: any; session: FakeSession }>
+} {
+  const win = fakeWin()
+  const captured: Array<{ opts: any; session: FakeSession }> = []
+  initRelayHost(win as never, platform, {
+    loadKeys: async () => genKeyPair(),
+    mintToken: async () => ({ pairingToken: 'tok' }),
+    isPremium: () => true,
+    relayAllowed: () => true,
+    getEntitlement: () => 'ent',
+    licensedSeats: () => seats,
+    connect: (o) => {
+      const session = makeFakeSession(captured.length)
+      captured.push({ opts: o, session })
+      return session as unknown as RelayHostSession
+    }
+  })
+  return {
+    invite: (opts = {}) => h.handlers[IPC.relayHostInvite]({}, opts) as Promise<{ offer: string }>,
+    captured
+  }
+}
+
+function openedIds(channel: string): Array<{ id: string; email?: string }> {
+  return h.sent.filter((x) => x.channel === channel).map((x) => x.args[0])
+}
+
+describe('initRelayHost — Team Access pool (invite/cap)', () => {
+  it('invite adds a session (no supersede) and returns a decodable offer', async () => {
+    const host = wirePool(3)
+    const { offer } = await host.invite({ email: 'a@x.com' })
+    expect(decodeOffer(offer)?.pairingToken).toBe('tok')
+    expect(host.captured.length).toBe(1)
+  })
+
+  it('three invites succeed at cap 3; a 4th is refused with E_SEATS_FULL (no close of others)', async () => {
+    const host = wirePool(3)
+    await host.invite()
+    await host.invite()
+    await host.invite()
+    expect(host.captured.length).toBe(3)
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+    // The cap does NOT supersede — every existing seat stays live.
+    for (const c of host.captured) expect(c.session.close).not.toHaveBeenCalled()
+    expect(host.captured.length).toBe(3)
+  })
+
+  it('cap 1 refuses a 2nd invite (backward-compat single-peer)', async () => {
+    const host = wirePool(1)
+    await host.invite()
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+  })
+
+  it('the seat cap counts from mint (pending), before the peer opens', async () => {
+    const host = wirePool(1)
+    await host.invite()
+    // Not even pending yet — no onPeerPending fired — and the seat is already taken.
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+  })
+})
+
+describe('initRelayHost — Team Access email label rides the events', () => {
+  it('email is carried on peer-pending and open', async () => {
+    const host = wirePool(3)
+    await host.invite({ email: 'ayse@x.com' })
+    host.captured[0].opts.onPeerPending(host.captured[0].session)
+    host.captured[0].opts.onOpen()
+
+    const pending = openedIds(IPC.relayHostPeerPending).at(-1)
+    expect(pending?.email).toBe('ayse@x.com')
+    const open = openedIds(IPC.relayHostOpen).at(-1)
+    expect(open?.email).toBe('ayse@x.com')
+    expect(open?.id).toBe(pending?.id)
+  })
+})
+
+describe('initRelayHost — Team Access revoke + seat freeing', () => {
+  it('revoke(id) cuts only that peer by identity and frees exactly one seat', async () => {
+    vi.mocked(killRelayHostsByPeerKey).mockClear()
+    const host = wirePool(3)
+    await host.invite()
+    await host.invite()
+    await host.invite()
+    // Make seat 0 pending so it has a renderer id to address.
+    host.captured[0].opts.onPeerPending(host.captured[0].session)
+    const id0 = openedIds(IPC.relayHostPeerPending).at(-1)!.id
+
+    // At cap: a fresh invite is refused...
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+
+    h.handlers[IPC.relayHostRevoke]({}, { id: id0 })
+
+    // Cut by the revoked peer's identity only.
+    expect(killRelayHostsByPeerKey).toHaveBeenCalledTimes(1)
+    expect(killRelayHostsByPeerKey).toHaveBeenCalledWith('peer-0')
+    // The renderer is told this seat closed.
+    expect(openedIds(IPC.relayHostClosed).at(-1)).toEqual({ id: id0 })
+
+    // Exactly one seat freed: one fresh invite succeeds, the next is refused again.
+    await expect(host.invite()).resolves.toHaveProperty('offer')
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+  })
+
+  it('revoke with an unknown id is a no-op (no throw, no cut)', async () => {
+    vi.mocked(killRelayHostsByPeerKey).mockClear()
+    const host = wirePool(3)
+    await host.invite()
+    expect(() => h.handlers[IPC.relayHostRevoke]({}, { id: 'nope' })).not.toThrow()
+    expect(killRelayHostsByPeerKey).not.toHaveBeenCalled()
+  })
+
+  it('a peer dropping (onClose) frees its seat', async () => {
+    const host = wirePool(1)
+    await host.invite()
+    await expect(host.invite()).rejects.toThrow(E_SEATS_FULL)
+    // The relay socket drops under seat 0.
+    host.captured[0].opts.onClose()
+    await expect(host.invite()).resolves.toHaveProperty('offer')
+  })
+})
+
+describe('initRelayHost — Team Access stop() closes the whole pool', () => {
+  it('stop() closes every session and clears the pool', async () => {
+    const host = wirePool(3)
+    await host.invite()
+    await host.invite()
+    await host.invite()
+
+    await h.handlers[IPC.relayHostStop]()
+
+    for (const c of host.captured) expect(c.session.close).toHaveBeenCalledTimes(1)
+    // The pool is empty again — fresh invites succeed up to the cap.
+    await expect(host.invite()).resolves.toHaveProperty('offer')
+  })
+})
+
+describe('initRelayHost — Team Access start() aliases invite (additive)', () => {
+  it('start() adds a seat (no supersede) and is cap-checked', async () => {
+    const win = fakeWin()
+    const captured: Array<{ session: FakeSession }> = []
+    initRelayHost(win as never, platform, {
+      loadKeys: async () => genKeyPair(),
+      mintToken: async () => ({ pairingToken: 'tok' }),
+      isPremium: () => true,
+      relayAllowed: () => true,
+      getEntitlement: () => 'ent',
+      licensedSeats: () => 1,
+      connect: () => {
+        const session = makeFakeSession(captured.length)
+        captured.push({ session })
+        return session as unknown as RelayHostSession
+      }
+    })
+    await h.handlers[IPC.relayHostStart]({})
+    // A second start does NOT supersede the first (which would close it); it is refused at cap 1.
+    await expect(h.handlers[IPC.relayHostStart]({})).rejects.toThrow(E_SEATS_FULL)
+    expect(captured[0].session.close).not.toHaveBeenCalled()
   })
 })

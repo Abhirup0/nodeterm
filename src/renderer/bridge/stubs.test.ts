@@ -33,6 +33,7 @@ describe('bridge stubs', () => {
     const s = buildStubApi()
     // Entry points reject with the coded error so the renderer hides the affordance.
     await expect(s.relayHost.start()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.relayHost.invite({ email: 'a@b.com' })).rejects.toMatchObject({ code: E_UNSUPPORTED })
     await expect(s.relayHost.stop()).rejects.toMatchObject({ code: E_UNSUPPORTED })
     await expect(s.relayClient.connect('offer')).rejects.toMatchObject({ code: E_UNSUPPORTED })
     // Subscriptions must return callable no-op unsubscribes (used as React effect cleanups).
@@ -51,6 +52,7 @@ describe('bridge stubs', () => {
     // Void gate/frame members are inert (no connection ever exists here).
     expect(() => {
       s.relayHost.confirm('id')
+      s.relayHost.revoke('id')
       s.relayClient.confirm('c')
       s.relayClient.send('c', '{}')
       s.relayClient.disconnect('c')

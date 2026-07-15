@@ -231,6 +231,12 @@ export const IPC = {
   // the host human answers with `relayHostConfirm` (id). `relayHostOpen` / `relayHostClosed` fire
   // main → renderer when a bridged peer becomes a live client / drops (payload `{ id }`).
   relayHostStart: 'relay:host:start',
+  // Team Access (multi-seat): `relayHostInvite` ADDS a seat (invoke, `{ projectId?, email? }` →
+  // `{ offer }`, cap-checked → rejects `E_SEATS_FULL`); `relayHostRevoke` (send, `{ id }`) cuts one
+  // bridged peer's live session. `relayHostPeerPending`/`relayHostOpen` now also carry the seat
+  // `email` label. Host-side cap/revoke are UX/host enforcement, not a server-guaranteed limit (v2).
+  relayHostInvite: 'relay:host:invite',
+  relayHostRevoke: 'relay:host:revoke',
   relayHostStop: 'relay:host:stop',
   relayHostPeerPending: 'relay:host:peer-pending',
   relayHostConfirm: 'relay:host:confirm',
