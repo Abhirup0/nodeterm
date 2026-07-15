@@ -2,13 +2,15 @@ import type { AgentId } from '@shared/agents/config'
 import claudeIcon from '../assets/claude.svg'
 import codexIcon from '../assets/codex-color.svg'
 import geminiIcon from '../assets/gemini-color.svg'
+import opencodeIcon from '../assets/opencode.svg'
 import { IconTerminal } from '../components/icons'
 
 // Brand logo per builtin agent; custom/unknown agents fall back to the terminal glyph.
 const AGENT_LOGO: Partial<Record<string, string>> = {
   claude: claudeIcon,
   codex: codexIcon,
-  gemini: geminiIcon
+  gemini: geminiIcon,
+  opencode: opencodeIcon
 }
 
 export function AgentIcon({ agentId, size = 16 }: { agentId: AgentId; size?: number }): React.JSX.Element {
