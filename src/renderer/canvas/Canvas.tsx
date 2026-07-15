@@ -5616,6 +5616,18 @@ export function Canvas() {
       </div>
 
       <div className="flow-wrap" ref={flowWrapRef}>
+        {/* First-contact guidance: an empty canvas used to be a black void (field report:
+            "didn't know what to do first"). Pointer-events-none so it can never eat a
+            right-click or box-select; keyed off the LIVE nodes array, so it reappears on
+            any emptied project, not just first run (no persisted seen-flag — YAGNI). */}
+        {nodes.length === 0 && (
+          <div className="empty-canvas-hint" aria-hidden>
+            <div>Right-click to add a terminal or agent</div>
+            <div>
+              <span className="kbd">⌘K</span> command palette · <span className="kbd">+</span> in the dock below
+            </div>
+          </div>
+        )}
         {/* The active project's node subtree runs under ITS session (local for a local tab, the
             relay session for a remote tab). Keyed by session id so an api swap REMOUNTS the nodes
             (obligation 3): TerminalNode/EditorNode/ChatNode capture `api` in []-effects, so a live
