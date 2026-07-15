@@ -1,0 +1,20 @@
+# Keep the build context to what `npm run build` + `npm run server:build` actually read:
+# src/, package*.json, the tsconfigs and electron.vite.config.ts.
+node_modules
+out
+dist
+.git
+.claude
+.nodeterm
+build
+site
+docs
+test
+scripts
+Dockerfile
+.dockerignore
+*.md
+*.png
+*.tsbuildinfo
+*.log
+LICENSE

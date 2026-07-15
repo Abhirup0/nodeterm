@@ -104,6 +104,43 @@ proxy forwards HTTPS (detected via `X-Forwarded-Proto` / the request being TLS).
 `--insecure-http` only exists as an explicit, eyes-open escape hatch for trusted
 private networks — prefer the proxy.
 
+### Docker / Dokploy
+
+The repo ships a multi-stage `Dockerfile` (root) that builds the renderer + server bundle and
+produces a slim runtime image with `tmux`, `git` and `curl` (the managed hook scripts POST
+through curl). Any Dockerfile-based PaaS (Dokploy, Coolify, plain compose) can deploy it:
+
+```bash
+docker build -t nodeterm-server .
+docker run -d -p 8443:8443 \
+  -e NODETERM_SERVER_PASSWORD='choose-a-strong-one' \
+  -v nodeterm-data:/data \
+  nodeterm-server
+```
+
+On Dokploy specifically: create an app from this repo (Dockerfile build), attach a volume at
+`/data`, set `NODETERM_SERVER_PASSWORD`, and point a domain at container port `8443` — Traefik
+terminates TLS and forwards `X-Forwarded-Proto`, so the session cookie gets its `Secure` flag
+and the clipboard runs in a secure context.
+
+Things the image decides for you (see the Dockerfile comments for the full why):
+
+- **node-pty is compiled against Node's ABI, not Electron's.** The repo's `postinstall` runs
+  `electron-rebuild`, which targets Electron — every install in the image uses
+  `--ignore-scripts` plus an explicit `npm rebuild node-pty`. Don't "simplify" that away.
+- **`--insecure-http` is passed** because the container must bind `0.0.0.0` for the proxy to
+  reach it, and TLS lives in the proxy. Never publish the port directly on a public interface.
+- **A container restart/redeploy kills the tmux server** (it lives inside the container). The
+  cold-restore path bridges it — scrollback replays from the `/data` snapshot and resumable
+  agents relaunch with `--resume` — but running processes die with each deploy. This is the one
+  behavioral difference from a long-lived host install, where only a machine reboot does that.
+- **`/data` must be a volume** — auth, sessions, workspace and scrollback snapshots live there;
+  without it every restart forgets the password and the canvas.
+
+Agent CLIs (`claude` etc.) are not baked into the image — install them into the running
+container (or extend the image) and authenticate inside a terminal node; their config lives
+under the container user's home, so consider a volume there too if you rely on them.
+
 ### CSP
 
 The inline login/setup pages carry a strict CSP. The built `index.html` ships with a
