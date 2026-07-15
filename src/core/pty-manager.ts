@@ -536,16 +536,25 @@ export class PtyManager {
     this.getSettings = getSettings
     // Prewarm the login-shell PATH probe now so the first terminal spawn doesn't wait on it.
     void resolveShellPath()
-    this.tmuxPath = findTmux()
-    if (!this.tmuxPath) return
+    this.ensureTmux()
+  }
+
+  /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
+   *  successful probe (e.g. right after the banner's install command finishes) brings tmux
+   *  up for NEW sessions without an app restart — existing plain-shell sessions are left
+   *  alone. No-op while tmux is already resolved or before init() provided settings. */
+  ensureTmux(): void {
+    if (this.tmuxPath || !this.getSettings) return
+    const found = findTmux()
+    if (!found) return
     this.confPath = path.join(platform().userDataDir, 'tmux.conf')
     try {
-      fs.writeFileSync(this.confPath, tmuxConf(getSettings().tmuxScrollback))
+      fs.writeFileSync(this.confPath, tmuxConf(this.getSettings().tmuxScrollback))
     } catch {
-      // If we can't write the config, disable tmux and fall back to a plain shell.
-      this.tmuxPath = null
+      // If we can't write the config, stay on the plain-shell fallback.
       return
     }
+    this.tmuxPath = found
     // The tmux server outlives the app, so it won't re-read `-f` on relaunch. Push the
     // (possibly updated) config into a running server now so new bindings apply immediately;
     // a no-op error when no server exists yet (the next session loads it fresh via `-f`).
@@ -630,6 +639,9 @@ export class PtyManager {
    *  their own, so the banner surfaces it with a one-click install command when a known package
    *  manager is present (run in a terminal node, gh-sign-in style). */
   tmuxStatus(): TmuxStatus {
+    // Re-probe when unavailable: the banner polls this while its install command runs, and a
+    // successful probe here is what makes new sessions tmux-backed without a restart.
+    if (!this.tmuxPath) this.ensureTmux()
     const available = !!this.tmuxPath
     const hint = available
       ? null
