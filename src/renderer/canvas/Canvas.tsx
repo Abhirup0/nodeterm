@@ -21,8 +21,12 @@ import type { Edge, Node } from '@xyflow/react'
 import {
   TerminalNode,
   setMoveIntoWorktreeHandler,
-  disposeTerminalOnUnmount
+  setSshDropHandler,
+  disposeTerminalOnUnmount,
+  disposeParkedTerminal
 } from '../nodes/TerminalNode'
+import { SshReconnector } from '../lib/sshReconnect'
+import { terminalKey } from '../terminal/terminal-config'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -4966,10 +4970,70 @@ export function Canvas() {
     void useSshServers.getState().hydrate()
   }, [])
 
+  // SSH auto-reconnect: TerminalNode reports each remote terminal whose ssh client died with the
+  // CONNECTION (exit 255 — sleep/wake, network change, NAT idle drop; the remote tmux sessions
+  // survive). The coordinator re-establishes the project's master on a bounded backoff, then
+  // respawns the dead nodes (bump respawnNonce → the lifecycle effect re-creates → `new-session
+  // -A` reattaches). Any successful connect — the loop's own or the tab-switch connect — flushes
+  // via onConnected (wired into the status subscription below).
+  const sshReconnectorRef = useRef<SshReconnector | null>(null)
+  useEffect(() => {
+    const rec = new SshReconnector({
+      connect: async (projectId) => {
+        const project = useProjects.getState().getProject(projectId)
+        if (!project?.ssh) return false
+        const ssh = project.ssh
+        // Same post-connect sequence as the active-project effect: arm remote git routing first
+        // (only if this project is still the active tab), then record the connection info.
+        const info = await window.nodeTerminal.sshProject.connect(projectId, ssh.server, ssh.remoteCwd)
+        if (useProjects.getState().activeProjectId === projectId) {
+          await api.git.setActiveRemote(projectId)
+        }
+        useSshConn.getState().setConn(projectId, info)
+        return true
+      },
+      respawn: (projectId, nodeIds) => {
+        if (useProjects.getState().activeProjectId !== projectId) {
+          // The project was switched away between the drop and the reconnect: nothing is mounted,
+          // and any park is holding the DEAD pty (the node unmount-parked before the master came
+          // back). Drop those parks so switching back mounts fresh sessions over the new master —
+          // adopting one would hand the user a frozen corpse for TERM_PARK_MS.
+          const sessionId = sessionForProject(projectId).id
+          for (const nid of nodeIds) disposeParkedTerminal(terminalKey(sessionId, nid))
+          return
+        }
+        const ids = new Set(nodeIds)
+        setNodes((ns) =>
+          ns.map((n) =>
+            ids.has(n.id) && n.type === 'terminal'
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+                  }
+                }
+              : n
+          )
+        )
+      }
+    })
+    sshReconnectorRef.current = rec
+    setSshDropHandler((projectId, nodeId) => rec.reportDrop(projectId, nodeId))
+    return () => {
+      setSshDropHandler(null)
+      rec.dispose()
+      sshReconnectorRef.current = null
+    }
+  }, [setNodes, api])
+
   // Track SSH project connection status for the thin connection banner (keyed by project id).
   useEffect(() => {
     return window.nodeTerminal.sshProject.onStatus((e) => {
       setSshStatus((prev) => ({ ...prev, [e.projectId]: e.status }))
+      // Feed the auto-reconnect coordinator: ANY successful connect (its own loop, the
+      // active-project effect on a tab switch) respawns that project's dropped terminals.
+      if (e.status === 'connected') sshReconnectorRef.current?.onConnected(e.projectId)
       // The remote claude probe runs AFTER connect (its login shell is slow) and pushes its answer
       // on a later `connected` event — record it so this project's next Claude launch can use
       // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
