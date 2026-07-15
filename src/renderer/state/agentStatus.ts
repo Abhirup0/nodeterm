@@ -45,6 +45,8 @@ export interface AgentNodeStatus {
   session?: string
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
+  /** SessionId the one-shot canvas-control discovery note was already pushed for. */
+  controlNoted?: string
   /** Set when running /loop, /schedule or /cron (heuristic); shown as a connected node. */
   loop?: {
     count: number
@@ -69,6 +71,8 @@ export interface AgentStatusStore {
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
+  /** Record that the canvas-control discovery note went out for this session. */
+  setControlNoted(id: string, sessionId: string): void
   markUnread(id: string): void
   clearUnread(id: string): void
   /** Start (active=true, resets) or stop a /loop, /schedule or /cron indicator. */
@@ -145,7 +149,12 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
       const data = JSON.parse(raw) as Record<string, Partial<AgentNodeStatus>>
       const out: Record<string, AgentNodeStatus> = {}
       for (const [id, v] of Object.entries(data)) {
-        out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId }
+        out[id] = {
+          unread: !!v.unread,
+          session: v.session,
+          sessionId: v.sessionId,
+          controlNoted: v.controlNoted
+        }
         // A recurring job (cron/schedule — and tmux keeps in-session loops alive too) outlives
         // the app: restore its card. Minimal shape check so a corrupt entry can't break load.
         if (v.loop && typeof v.loop === 'object' && v.loop.kind) {
@@ -170,8 +179,14 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
     try {
       const out: Record<string, Partial<AgentNodeStatus>> = {}
       for (const [id, v] of Object.entries(byId)) {
-        if (v.unread || v.session || v.sessionId || v.loop) {
-          out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId, loop: v.loop }
+        if (v.unread || v.session || v.sessionId || v.loop || v.controlNoted) {
+          out[id] = {
+            unread: v.unread,
+            session: v.session,
+            sessionId: v.sessionId,
+            loop: v.loop,
+            controlNoted: v.controlNoted
+          }
         }
       }
       localStorage.setItem(persistKey, JSON.stringify(out))
@@ -244,6 +259,15 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
         const prev = s.byId[id] ?? EMPTY
         if (prev.sessionId === sessionId) return s
         const byId = { ...s.byId, [id]: { ...prev, sessionId } }
+        save(byId)
+        return { byId }
+      }),
+
+    setControlNoted: (id, sessionId) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        if (prev.controlNoted === sessionId) return s
+        const byId = { ...s.byId, [id]: { ...prev, controlNoted: sessionId } }
         save(byId)
         return { byId }
       }),

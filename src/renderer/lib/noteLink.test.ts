@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildBackgroundLinkMaps,
+  buildCanvasControlNote,
   buildContextLinkNote,
   buildLinkMap,
   buildNotePushMessage,
-  classifyLink
+  classifyLink,
+  shouldPushControlNote
 } from './noteLink'
 import type { CanvasNodeState } from '@shared/types'
 
@@ -124,6 +126,37 @@ describe('buildContextLinkNote', () => {
       expect(msg, `agent=${agent}`).toMatch(/[Nn]o action/)
       expect(msg, `agent=${agent}`).not.toContain('\n')
     }
+  })
+})
+
+describe('buildCanvasControlNote', () => {
+  it('points claude at the skill and self-defuses', () => {
+    const msg = buildCanvasControlNote('claude')
+    expect(msg).toContain('manage-nodeterm-canvas')
+    expect(msg).toContain('No action needed now')
+    expect(msg).not.toContain('\n') // pty.sendText submits — a newline would split the prompt
+  })
+  it('points codex/gemini at their global instructions section', () => {
+    const msg = buildCanvasControlNote('codex')
+    expect(msg).toContain('manage-nodeterm-canvas')
+    expect(msg).toContain('global agent instructions')
+    expect(msg).not.toContain('\n')
+  })
+})
+
+describe('shouldPushControlNote', () => {
+  it('pushes once per session for a controllable agent', () => {
+    expect(shouldPushControlNote({ sessionId: 's1', canControl: true })).toBe(true)
+  })
+  it('never re-pushes the same session', () => {
+    expect(shouldPushControlNote({ sessionId: 's1', controlNoted: 's1', canControl: true })).toBe(false)
+  })
+  it('pushes again for a NEW session of the same node', () => {
+    expect(shouldPushControlNote({ sessionId: 's2', controlNoted: 's1', canControl: true })).toBe(true)
+  })
+  it('skips non-controllable agents and unknown sessions', () => {
+    expect(shouldPushControlNote({ sessionId: 's1', canControl: false })).toBe(false)
+    expect(shouldPushControlNote({ canControl: true })).toBe(false)
   })
 })
 

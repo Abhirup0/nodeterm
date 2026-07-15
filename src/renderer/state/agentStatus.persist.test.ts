@@ -48,6 +48,19 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     })
   })
 
+  it('round-trips controlNoted (canvas-control discovery, once per session)', async () => {
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setControlNoted('n4', 'sess-1')
+    const saved = JSON.parse(store.getItem('nodeterm.agentStatus')!)
+    expect(saved.n4.controlNoted).toBe('sess-1')
+    // A fresh module load restores it, so a restart never re-pushes the note.
+    vi.resetModules()
+    const reloaded = await import('./agentStatus')
+    expect(reloaded.useAgentStatus.getState().byId['n4']?.controlNoted).toBe('sess-1')
+  })
+
   it('tolerates a persisted entry without loop (older format)', async () => {
     vi.stubGlobal(
       'localStorage',

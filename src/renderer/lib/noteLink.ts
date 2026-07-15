@@ -63,6 +63,30 @@ export function buildContextLinkNote(
   return `[nodeterm] You are now linked to "${otherTitle}". When you need its context (and only then) run: sh "${shimPath}" list — then summary | transcript | terminal --node <id>. Details are in the get-linked-context section of your global agent instructions. No action needed now — acknowledge briefly and do not run these commands yet.`
 }
 
+/** One-shot discovery note: tells a canvas-controllable agent it can drive the canvas.
+ *  Pushed on the session's FIRST completed turn (the node is idle then — pty.sendText
+ *  appends Enter, so a mid-turn push would interrupt), once per sessionId. Model-agnostic
+ *  on purpose: skill auto-triggering is Claude-Code behavior an alternative backend (GLM
+ *  et al.) may never exercise, so the session is told directly. Same self-defusing tail
+ *  as buildContextLinkNote — an agent that reads this as a task starts an unsolicited
+ *  canvas reorganization. */
+export function buildCanvasControlNote(agentId: string | undefined): string {
+  if (!agentId || agentId === 'claude') {
+    return `[nodeterm] This session can control the nodeterm canvas: open agent/terminal nodes, spawn a team that divides up a task, create worktree groups, organize nodes. Use the manage-nodeterm-canvas skill when asked to parallelize, delegate or organize work. No action needed now — just acknowledge briefly.`
+  }
+  return `[nodeterm] This session can control the nodeterm canvas: open agent/terminal nodes, spawn a team that divides up a task, group and arrange nodes. See the "Managing the nodeterm canvas (manage-nodeterm-canvas)" section of your global agent instructions for the CLI. No action needed now — acknowledge briefly.`
+}
+
+/** Gate for the discovery push: controllable agent, session known, not yet noted for THIS
+ *  session (a resumed session keeps its id → no re-push; a fresh session gets one). */
+export function shouldPushControlNote(s: {
+  sessionId?: string
+  controlNoted?: string
+  canControl: boolean
+}): boolean {
+  return s.canControl && !!s.sessionId && s.controlNoted !== s.sessionId
+}
+
 export interface LinkNodeInfo {
   id: string
   title: string
