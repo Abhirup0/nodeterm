@@ -7,9 +7,53 @@
 // session under its own keypair and then forge the second human's `trust:confirm` under the swapped
 // key (see docs/remote-sessions.md, obligation (a)). This suite drives REAL relay sockets over an
 // in-process transport that also models the relay's own injection capability.
-import { describe, expect, it } from 'vitest'
-import { connectRelay, type RelaySocket, type RelayTransport } from './relay-socket'
+import { describe, expect, it, vi } from 'vitest'
+import { connectRelay, wrapWebSocket, type RelaySocket, type RelayTransport } from './relay-socket'
 import { genKeyPair, publicKeyToB64, randomSessionNonce } from './e2ee'
+
+// A minimal `ws`-shaped fake: a listener registry + an `emit` helper, enough for wrapWebSocket.
+function fakeWs() {
+  const listeners: Record<string, ((...a: unknown[]) => void)[]> = {}
+  return {
+    binaryType: '',
+    bufferedAmount: 0,
+    on(event: string, cb: (...a: unknown[]) => void) {
+      ;(listeners[event] ??= []).push(cb)
+    },
+    send() {},
+    close() {},
+    emit(event: string, ...args: unknown[]) {
+      for (const cb of listeners[event] ?? []) cb(...args)
+    }
+  }
+}
+
+describe('wrapWebSocket: a ws error must not be an uncaught crash', () => {
+  it('routes a ws `error` to onClose exactly once (never both, never a re-throw)', () => {
+    const ws = fakeWs()
+    const wrapped = wrapWebSocket(ws as unknown as import('ws').WebSocket)
+    const onClose = vi.fn()
+    wrapped.onClose(onClose)
+
+    // A 504 upgrade timeout / TLS failure surfaces as a ws 'error'. Without a listener Node would
+    // re-throw it as an uncaught exception and crash the app; wrapWebSocket must catch it here.
+    expect(() => ws.emit('error', new Error('Unexpected server response: 504'))).not.toThrow()
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    // A 'close' that follows the error must NOT fire onClose a second time (the once-guard).
+    ws.emit('close')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('a plain close (no error) still fires onClose once', () => {
+    const ws = fakeWs()
+    const wrapped = wrapWebSocket(ws as unknown as import('ws').WebSocket)
+    const onClose = vi.fn()
+    wrapped.onClose(onClose)
+    ws.emit('close')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
 
 // A pair of in-process transports wired host<->client, PLUS the relay's injection ports: the relay
 // is untrusted and forwards opaque bytes, so it can also ORIGINATE traffic in either direction.

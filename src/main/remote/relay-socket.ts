@@ -688,7 +688,21 @@ export function wrapWebSocket(ws: import('ws').WebSocket): RelayTransport {
       ws.on('message', (data: Buffer, isBinary: boolean) =>
         cb(isBinary ? data : data.toString('utf-8'))
       ),
-    onClose: (cb) => ws.on('close', () => cb())
+    onClose: (cb) => {
+      // Fire `cb` on EITHER a close OR an error, exactly once. A ws `error` (a 504 upgrade timeout,
+      // a TLS/DNS failure, connection refused) is otherwise an UNHANDLED 'error' event, which Node
+      // re-throws as an uncaught exception that crashes the whole app. Treat it as a close so the
+      // caller tears the session down / reconnects gracefully instead. The caller registers this
+      // synchronously right after opening (relay-socket connectRelay), before any async error fires.
+      let fired = false
+      const fire = (): void => {
+        if (fired) return
+        fired = true
+        cb()
+      }
+      ws.on('close', fire)
+      ws.on('error', fire)
+    }
   }
 }
 
