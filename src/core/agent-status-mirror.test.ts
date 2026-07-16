@@ -6,6 +6,8 @@ import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   reduceEntry,
   buildFile,
+  filterMirrorForNodes,
+  onMirrorFlush,
   recordAgentEvent,
   clearNode,
   flush,
@@ -14,7 +16,8 @@ import {
   _snapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
-  type MirrorEntry
+  type MirrorEntry,
+  type MirrorFile
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -171,5 +174,52 @@ describe('recordAgentEvent + atomic write', () => {
     await flush()
     const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
     expect(Object.keys(doc.nodes)).toEqual(['b'])
+  })
+
+  it('onMirrorFlush delivers the built doc on every flush; unsubscribe stops it', async () => {
+    const seen: MirrorFile[] = []
+    const off = onMirrorFlush((doc) => seen.push(doc))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working' }))
+    await flush()
+    expect(seen).toHaveLength(1)
+    expect(seen[0].nodes.n1.state).toBe('working')
+    off()
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done' }))
+    await flush()
+    expect(seen).toHaveLength(1)
+  })
+
+  it('onMirrorFlush still fires when the local disk write fails', async () => {
+    initAgentStatusMirror(path.join(dir, 'no-such-dir', 'x', 'agent-status.json'))
+    const seen: MirrorFile[] = []
+    onMirrorFlush((doc) => seen.push(doc))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working' }))
+    await flush()
+    expect(seen).toHaveLength(1)
+  })
+})
+
+describe('filterMirrorForNodes', () => {
+  it('keeps only the given node ids, preserving header fields', () => {
+    const doc: MirrorFile = {
+      v: 1,
+      updatedAt: 99,
+      nodes: {
+        a: { state: 'working', updatedAt: 1 },
+        b: { state: 'done', updatedAt: 2 },
+        c: { updatedAt: 3 }
+      }
+    }
+    const out = filterMirrorForNodes(doc, new Set(['b', 'c', 'ghost']))
+    expect(out.v).toBe(1)
+    expect(out.updatedAt).toBe(99)
+    expect(Object.keys(out.nodes).sort()).toEqual(['b', 'c'])
+    expect(out.nodes.b.state).toBe('done')
+  })
+
+  it('does not mutate the input doc', () => {
+    const doc: MirrorFile = { v: 1, updatedAt: 1, nodes: { a: { updatedAt: 1 } } }
+    filterMirrorForNodes(doc, new Set())
+    expect(Object.keys(doc.nodes)).toEqual(['a'])
   })
 })

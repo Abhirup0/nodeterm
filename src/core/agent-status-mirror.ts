@@ -91,6 +91,17 @@ export function reduceEntry(
   return next
 }
 
+/**
+ * Restrict a mirror doc to the given node ids. Pure. Used by the SSH-host status push: each
+ * connected host receives ONLY its own project's nodes — the full mirror would leak other
+ * projects' node/session ids to every host the user is connected to.
+ */
+export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<string>): MirrorFile {
+  const nodes: MirrorFile['nodes'] = {}
+  for (const [id, e] of Object.entries(doc.nodes)) if (nodeIds.has(id)) nodes[id] = e
+  return { v: doc.v, updatedAt: doc.updatedAt, nodes }
+}
+
 /** Prune expired entries and shape the on-disk file. Pure; `now` injected for testability. */
 export function buildFile(
   nodes: Record<string, MirrorEntry>,
@@ -113,6 +124,17 @@ const state = new Map<string, MirrorEntry>()
 let targetFile: string | null = null
 let writeTimer: NodeJS.Timeout | null = null
 let writeSeq = 0
+const flushListeners = new Set<(doc: MirrorFile) => void>()
+
+/**
+ * Subscribe to every flush's built doc (fires even when the local disk write fails — the doc is
+ * the product, the file is one consumer of it). Returns an unsubscribe. Feeds the SSH-host
+ * status push, which mirrors each connected project's slice of this doc onto its host.
+ */
+export function onMirrorFlush(cb: (doc: MirrorFile) => void): () => void {
+  flushListeners.add(cb)
+  return () => flushListeners.delete(cb)
+}
 
 /**
  * Point the mirror at its file. Called once from main on launch; the path defaults to
@@ -162,6 +184,13 @@ export async function flush(): Promise<void> {
   const doc = buildFile(Object.fromEntries(state), now)
   // Also drop expired entries from memory so the map itself can't grow without bound.
   for (const [id, e] of state) if (now - e.updatedAt > EXPIRE_MS) state.delete(id)
+  for (const cb of flushListeners) {
+    try {
+      cb(doc)
+    } catch {
+      // A listener must never break the local write (or its sibling listeners).
+    }
+  }
   const tmp = `${file}.${process.pid}.${++writeSeq}.tmp`
   try {
     await fs.promises.writeFile(tmp, JSON.stringify(doc), { mode: 0o600 })
@@ -173,12 +202,13 @@ export async function flush(): Promise<void> {
 
 // ---- Test helpers --------------------------------------------------------------------------
 
-/** Reset all module state (in-memory map + config). Test-only. */
+/** Reset all module state (in-memory map + config + listeners). Test-only. */
 export function _resetForTest(): void {
   state.clear()
   targetFile = null
   if (writeTimer) clearTimeout(writeTimer)
   writeTimer = null
+  flushListeners.clear()
 }
 
 /** Snapshot the in-memory map. Test-only. */

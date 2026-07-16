@@ -17,7 +17,13 @@ import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
-import { initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
+import {
+  initAgentStatusMirror,
+  onMirrorFlush,
+  flush as flushAgentStatusMirror,
+  recordAgentEvent
+} from '../core/agent-status-mirror'
+import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
@@ -614,6 +620,18 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+  // And push each connected SSH project's slice of it onto its host
+  // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS
+  // process, so that file is the only agent-status source a phone browsing the host directly
+  // can read. sshProjectManager is created below — the closures look it up per call.
+  initRemoteStatusPush({
+    onFlush: onMirrorFlush,
+    flush: flushAgentStatusMirror,
+    sshProjectIds: () => workspaceStore.sshProjectIds(),
+    nodeIdsFor: (projectId) => workspaceStore.sshProjectNodeIds(projectId),
+    push: (projectId, json) =>
+      sshProjectManager ? sshProjectManager.pushAgentStatus(projectId, json) : Promise.resolve()
+  })
   // Canvas sync: the same reflector the Server Edition boots. With a single window clientIds()
   // returns one id, so on the desktop today it is a no-op — wired for parity (and for the
   // relay-host / multi-window futures), not because Electron needs it right now.

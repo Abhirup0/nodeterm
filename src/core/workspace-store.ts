@@ -359,6 +359,13 @@ export class WorkspaceStore {
     return (this.index?.entries ?? []).filter((e) => e.ssh).map((e) => e.id)
   }
 
+  /** Node ids of an ssh project's cached file — the slice of the agent-status mirror its host
+   *  receives (see remote-status-push.ts). Empty when the project isn't an ssh entry. */
+  sshProjectNodeIds(projectId: string): Set<string> {
+    const e = this.index?.entries.find((x) => x.id === projectId && x.ssh)
+    return new Set((e?.cache?.nodes ?? []).map((n) => n.id))
+  }
+
   /** A throttled trailing mirror write was acked but later dropped (connection died inside the
    *  throttle window): re-owe it so the next save retries. Wired from makeRemoteWorkspaceIO. */
   markUnmirrored(projectId: string): void {

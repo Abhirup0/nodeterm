@@ -160,6 +160,9 @@ export class SshProjectManager {
   private remoteHooks: RemoteHooks
   /** Per-manager counter mixed into each upload token so concurrent drops never collide. */
   private uploadSeq = 0
+  /** Projects whose agent-status mirror was actually pushed — gates the disconnect cleanup so a
+   *  transient folder-picker browse (never pushed) doesn't pay an extra rm round-trip. */
+  private statusPushed = new Set<string>()
   constructor(private r: Runners) {
     this.remoteHooks = new RemoteHooks({ run: r.run })
   }
@@ -428,6 +431,40 @@ export class SshProjectManager {
     return this.conns.get(projectId)?.remoteHome
   }
 
+  /** Remote path of this project's pushed agent-status mirror (`~`-relative when the remote
+   *  home never resolved — the shell expands it in the commands below). */
+  private statusFilePath(projectId: string, c: Conn): string {
+    const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm` : '~/.nodeterm'
+    return `${dir}/agent-status-${projectId}.json`
+  }
+
+  /**
+   * Mirror this project's slice of the agent-status doc onto its host as
+   * `~/.nodeterm/agent-status-<projectId>.json` (atomic tmp+mv, 0600 via umask). This is the
+   * ONLY status source that exists on an SSH host — hook events tunnel from the host to the
+   * desktop's loopback hook server — so it's what the mobile companion reads when it browses
+   * the host directly. No-ops when the project isn't connected; best-effort otherwise (a failed
+   * write only means stale/absent badges on the phone).
+   */
+  async pushAgentStatus(projectId: string, json: string): Promise<void> {
+    const c = this.conns.get(projectId)
+    if (!c) return
+    const file = this.statusFilePath(projectId, c)
+    const q = quoteRemotePath(file)
+    const qTmp = quoteRemotePath(`${file}.tmp`)
+    this.statusPushed.add(projectId)
+    await this.r
+      .run(
+        childArgs(
+          c.conn,
+          c.controlPath,
+          `umask 077; mkdir -p ${quoteRemotePath(file.slice(0, file.lastIndexOf('/')))} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+        ),
+        json
+      )
+      .catch(() => {})
+  }
+
   /**
    * The resolved remote `$HOME` for the project owning this `controlPath`, if known. The hook
    * raw-listener only has the node's `{ controlPath, conn }` (from `sshRemoteForNode`), so it
@@ -560,6 +597,15 @@ export class SshProjectManager {
   async disconnect(projectId: string): Promise<void> {
     const c = this.conns.get(projectId)
     if (!c) return
+    // Remove the pushed agent-status mirror while the master is still alive: a file left behind
+    // would freeze the phone's badges at the last event (the heartbeat that lets the phone detect
+    // staleness dies with this connection). Best-effort.
+    if (this.statusPushed.delete(projectId)) {
+      const f = this.statusFilePath(projectId, c)
+      await this.r
+        .run(childArgs(c.conn, c.controlPath, `rm -f ${quoteRemotePath(f)} ${quoteRemotePath(`${f}.tmp`)}`))
+        .catch(() => {})
+    }
     // Cancel the reverse hook tunnel (over the still-live master) BEFORE tearing the master down.
     await this.remoteHooks.teardown(projectId, c.conn, c.controlPath)
     void this.r.run(exitMasterArgs(c.conn, c.controlPath))
