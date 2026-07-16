@@ -377,6 +377,39 @@ describe('projects.list relay blob (iOS wire contract)', () => {
   })
 })
 
+describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
+  it('appends into a local ref project file as an OUTSIDE edit (watcher must see it)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const ok = await store.appendRemoteNode('p1', { id: 'term-zz1-1', title: 'Mobile' })
+    expect(ok).toBe(true)
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const raw = await fs.readFile(file, 'utf-8')
+    const f = JSON.parse(raw)
+    expect(f.rev).toBe(2)
+    expect(f.nodes.map((n: { id: string }) => n.id)).toContain('term-zz1-1')
+    // NOT a self-write: the workspace watcher must treat this as an outside edit and broadcast
+    // it, so the renderer adopts the node onto the live canvas.
+    expect(store.isSelfWrite(file, raw)).toBe(false)
+  })
+
+  it('refuses unknown / ssh / cwd-less projects and corrupt files (nothing written)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([
+      project({ cwd: projRoot }),
+      project({ id: 'ssh1', ssh: { server: { host: 'h', user: 'u' } as never, remoteCwd: '~/x' }, cwd: undefined }),
+      project({ id: 'inline1' })
+    ]))
+    expect(await store.appendRemoteNode('nope', { id: 'term-a1-1' })).toBe(false)
+    expect(await store.appendRemoteNode('ssh1', { id: 'term-a1-1' })).toBe(false)
+    expect(await store.appendRemoteNode('inline1', { id: 'term-a1-1' })).toBe(false)
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    await fs.writeFile(file, '{ not json')
+    expect(await store.appendRemoteNode('p1', { id: 'term-a1-1' })).toBe(false)
+    expect(await fs.readFile(file, 'utf-8')).toBe('{ not json') // untouched
+  })
+})
+
 describe('refreshSshProject', () => {
   const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
   const remoteFileOf = async (store: WorkspaceStore, p: Project) => {

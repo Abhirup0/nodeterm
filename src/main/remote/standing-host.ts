@@ -34,6 +34,7 @@ import {
   connectHostSession,
   loadOrCreateKeyPair,
   relayAllowed,
+  type HostBridgeDeps,
   type HostSession
 } from './host-service'
 import { currentCanvas, initHostCanvasHub, subscribeCanvas } from './host-canvas-hub'
@@ -138,7 +139,8 @@ export function initStandingHost(
   win: BrowserWindow,
   ptyManager: PtyManager,
   getSettings: () => Settings,
-  listProjects: () => Promise<string> = async () => ''
+  listProjects: () => Promise<string> = async () => '',
+  bridge: HostBridgeDeps = {}
 ): StandingHost {
   initHostCanvasHub()
 
@@ -371,6 +373,8 @@ export function initStandingHost(
         subscribeCanvas,
         applyMutation: (mutation: CanvasMutation) => send(IPC.remoteHostApplyMutation, mutation),
         listProjects,
+        git: bridge.git,
+        registerNode: bridge.registerNode,
         // Typing attribution: this pooled session's input frames are ITS phone's keystrokes.
         getClientId: () => pooled.presence.id(),
         onPeerReady: () => void onPeerReady(pooled),

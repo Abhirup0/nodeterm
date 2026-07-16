@@ -1048,7 +1048,16 @@ app.whenReady().then(async () => {
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
-  initRemoteHost(win, ptyManager, listProjectsOutput)
+  // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
+  // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
+  // through the workspace store (written as an outside edit, so the watcher broadcasts it and
+  // the canvas adopts the node live).
+  const hostBridge = {
+    git: gitService,
+    registerNode: (projectId: string, node: { id: string; title?: string; agentId?: string }) =>
+      workspaceStore.appendRemoteNode(projectId, node)
+  }
+  initRemoteHost(win, ptyManager, listProjectsOutput, hostBridge)
   // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
   // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the
   // phone still uses the legacy flow). Inert until `relay:host:start` — a solo user pays nothing.
@@ -1056,7 +1065,7 @@ app.whenReady().then(async () => {
   initRelayHost(win, corePlatform, {})
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
   // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
-  standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput)
+  standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput, hostBridge)
   ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost?.setEnabled(!!enabled))
   // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
   standingHost.syncFromSettings()

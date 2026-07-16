@@ -100,6 +100,21 @@ export interface HostFsOps {
   writeText(filePath: string, content: string): Promise<boolean>
 }
 
+// The slice of GitService the host serves over `git.*` RPC — the jailed core bridge that lets a
+// relay-only phone (no direct SSH) run the source-control sheet in ONE round trip per operation
+// instead of N ssh execs. Strictly TYPED verbs: a free-form `git.run` would be remote command
+// execution. Same cwd jail as `fs.*` (isWithinRoots); no injected instance ⇒ not served at all.
+export interface HostGitOps {
+  status(cwd: string): Promise<unknown>
+  diff(cwd: string, path: string, staged: boolean, untracked: boolean): Promise<string>
+  stage(cwd: string, paths: string[]): Promise<unknown>
+  unstage(cwd: string, paths: string[]): Promise<unknown>
+  commit(cwd: string, message: string): Promise<unknown>
+  push(cwd: string): Promise<unknown>
+  pull(cwd: string): Promise<unknown>
+  history(cwd: string): Promise<unknown>
+}
+
 interface Stream {
   sessionId: string
   /** The node id (tmux persistKey) this stream attached to. The ONLY tmux target a client can
@@ -162,7 +177,12 @@ export function createHostHandlers(
   // session's PhonePresence outlives none of it. It makes the phone's keystrokes attributable —
   // the "X is typing" badge for a relay peer costs the iOS app exactly nothing, because the sender
   // is the identified HostSession, not something the client claims.
-  getClientId: () => number | null = () => null
+  getClientId: () => number | null = () => null,
+  // Typed git bridge (jailed to the shared roots). Absent ⇒ `git.*` verbs are not served.
+  git?: HostGitOps,
+  // Registers a phone-started session as a project node (WorkspaceStore.appendRemoteNode).
+  // Absent ⇒ `projects.registerNode` is not served.
+  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -335,6 +355,78 @@ export function createHostHandlers(
     socket.respond(req.id, true, {})
   }
 
+  // Serve a typed `git.*` verb against the injected GitService slice, jailed to the shared roots
+  // like `fs.*`. Unlike fs (silent empty degrade — the Explorer just shows nothing), a denied or
+  // failed git op answers with an EXPLICIT error: the source-control sheet must say why.
+  function handleGit(req: RpcRequest): void {
+    if (!git) {
+      socket.respond(req.id, false, { message: 'git is not served on this host.' })
+      return
+    }
+    const p = asRecord(req.params)
+    const cwd = str(p.cwd) ?? ''
+    if (!isWithinRoots(cwd, getRoots())) {
+      socket.respond(req.id, false, { message: 'cwd is outside the shared project roots.' })
+      return
+    }
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+    const run = (): Promise<unknown> => {
+      switch (req.method) {
+        case 'git.status':
+          return git.status(cwd)
+        case 'git.diff':
+          return git.diff(cwd, str(p.path) ?? '', p.staged === true, p.untracked === true)
+        case 'git.stage':
+          return git.stage(cwd, strings(p.paths))
+        case 'git.unstage':
+          return git.unstage(cwd, strings(p.paths))
+        case 'git.commit':
+          return git.commit(cwd, str(p.message) ?? '')
+        case 'git.push':
+          return git.push(cwd)
+        case 'git.pull':
+          return git.pull(cwd)
+        case 'git.history':
+          return git.history(cwd)
+        default:
+          return Promise.reject(new Error(`Unknown git verb: ${req.method}`))
+      }
+    }
+    void run()
+      .then((body) => socket.respond(req.id, true, body ?? {}))
+      .catch((err: unknown) =>
+        socket.respond(req.id, false, { message: (err as Error)?.message ?? 'git failed' })
+      )
+  }
+
+  // Register a phone-started session as a project node. Validation (safe id shape, duplicate,
+  // parsable local project file) lives in the registrar (WorkspaceStore.appendRemoteNode →
+  // appendProjectNode); a refusal is an ok:{registered:false} answer, not a protocol error —
+  // the phone opened its session either way and just stays unregistered.
+  function handleRegisterNode(req: RpcRequest): void {
+    if (!registerNode) {
+      socket.respond(req.id, false, { message: 'projects.registerNode is not served on this host.' })
+      return
+    }
+    const p = asRecord(req.params)
+    const node = asRecord(p.node)
+    const id = str(node.id)
+    const projectId = str(p.projectId)
+    if (!id || !projectId) {
+      socket.respond(req.id, false, { message: 'projects.registerNode requires projectId and node.id.' })
+      return
+    }
+    const input: { id: string; title?: string; agentId?: string } = { id }
+    const title = str(node.title)
+    if (title !== undefined) input.title = title
+    const agentId = str(node.agentId)
+    if (agentId !== undefined) input.agentId = agentId
+    void registerNode(projectId, input)
+      .then((registered) => socket.respond(req.id, true, { registered }))
+      .catch(() => socket.respond(req.id, true, { registered: false }))
+  }
+
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
@@ -368,6 +460,19 @@ export function createHostHandlers(
         case 'fs.readBinary':
         case 'fs.write':
           handleFs(req)
+          break
+        case 'git.status':
+        case 'git.diff':
+        case 'git.stage':
+        case 'git.unstage':
+        case 'git.commit':
+        case 'git.push':
+        case 'git.pull':
+        case 'git.history':
+          handleGit(req)
+          break
+        case 'projects.registerNode':
+          handleRegisterNode(req)
           break
         case 'projects.list':
           // Read-only enumeration of the host's projects/sessions/agent-status (no client params —
@@ -586,6 +691,10 @@ export interface HostSessionOptions {
    * presence slot serves input exactly as before, unbadged.
    */
   getClientId?: () => number | null
+  /** Typed, jailed `git.*` bridge (see HostGitOps). Optional: absent ⇒ the verbs are not served. */
+  git?: HostGitOps
+  /** Registers a phone-started session as a project node (`projects.registerNode`). Optional. */
+  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
   /**
    * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
    * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
@@ -700,7 +809,9 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     fsOps,
     () => rootsFromCanvas(opts.getLatestCanvas()),
     opts.listProjects ?? (async () => ''),
-    opts.getClientId ?? (() => null)
+    opts.getClientId ?? (() => null),
+    opts.git,
+    opts.registerNode
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -715,10 +826,18 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
  * the relay as host, and returns the offer string. `remote:host:stop` closes the relay socket
  * (which kills the served PTYs and drops the client's access).
  */
+/** The optional core-bridge deps both hosts thread into connectHostSession (jailed git verbs +
+ *  phone node registration). One bag so the init signatures stop growing positionally. */
+export interface HostBridgeDeps {
+  git?: HostGitOps
+  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+}
+
 export function initRemoteHost(
   win: BrowserWindow,
   ptyManager: PtyManager,
-  listProjects: () => Promise<string> = async () => ''
+  listProjects: () => Promise<string> = async () => '',
+  bridge: HostBridgeDeps = {}
 ): void {
   initHostCanvasHub()
   let session: HostSession | null = null
@@ -777,6 +896,8 @@ export function initRemoteHost(
       subscribeCanvas,
       applyMutation: (mutation) => send(IPC.remoteHostApplyMutation, mutation),
       listProjects,
+      git: bridge.git,
+      registerNode: bridge.registerNode,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),
       // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.

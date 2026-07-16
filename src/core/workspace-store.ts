@@ -12,6 +12,7 @@ import {
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
+import { appendProjectNode, type RemoteNodeInput } from './project-node-append'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -370,6 +371,34 @@ export class WorkspaceStore {
    *  throttle window): re-owe it so the next save retries. Wired from makeRemoteWorkspaceIO. */
   markUnmirrored(projectId: string): void {
     this.unmirrored.add(projectId)
+  }
+
+  /**
+   * Registers a PHONE-STARTED session as a node in a LOCAL ref project's file — the host side of
+   * the relay `projects.registerNode` verb. Deliberately written as an OUTSIDE edit
+   * (`lastWritten` untouched): the workspace watcher then broadcasts the change and the renderer
+   * adopts the node onto the live canvas, exactly like a git pull would. v1 scope: local-cwd
+   * projects only (an ssh ref's file lives on another machine; the phone reaches that one over
+   * its own SSH path).
+   */
+  async appendRemoteNode(projectId: string, input: RemoteNodeInput, now = new Date()): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
+    if (!e?.cwd) return false
+    const file = projectFilePath(e.cwd)
+    let raw: string
+    try {
+      raw = await fs.readFile(file, 'utf-8')
+    } catch {
+      return false
+    }
+    const updated = appendProjectNode(raw, input, now)
+    if (updated === null) return false
+    try {
+      await writeAtomic(file, updated)
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**
