@@ -3,7 +3,7 @@ import path from 'path'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, type SshConnection } from '../../shared/ssh'
+import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { SshProjectStatusEvent } from '../../shared/types'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
 import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
@@ -429,6 +429,18 @@ export class SshProjectManager {
   /** The resolved remote `$HOME` for a connected project, if known. */
   remoteHomeFor(projectId: string): string | undefined {
     return this.conns.get(projectId)?.remoteHome
+  }
+
+  /** The connection's cached remote `--permission-mode auto` capability (undefined = not
+   *  probed / not connected). Feeds the agent-status settings block the phone reads. */
+  remoteAutoPermFor(projectId: string): boolean | undefined {
+    return this.conns.get(projectId)?.claudeAutoPermissionMode
+  }
+
+  /** `user@host` key of a connected project (matches ClaudeAccount.host). */
+  hostKeyFor(projectId: string): string | undefined {
+    const c = this.conns.get(projectId)
+    return c ? sshHostKey(c.conn) : undefined
   }
 
   /** Remote path of this project's pushed agent-status mirror (`~`-relative when the remote

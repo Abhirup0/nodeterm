@@ -47,10 +47,24 @@ export interface MirrorEntry {
   updatedAt: number
 }
 
+/** Host-level launch settings the phone consumes (spec: mobile-agent-launch-parity).
+ *  Additive to MirrorFile v1 — absent on old files, ignored by old readers. */
+export interface MirrorSettings {
+  claudePermissionMode?: string
+  /** Can `--permission-mode auto` be emitted for launches on THIS host? */
+  autoSupported?: boolean
+  /** Managed accounts usable on THIS host; dirs are absolute on that host. */
+  claudeAccounts?: { id: string; dir: string }[]
+}
+
 export interface MirrorFile {
   v: 1
   updatedAt: number
   nodes: Record<string, { state?: AgentState; agentId?: AgentId; sessionId?: string; updatedAt: number }>
+  /** Host-level launch settings (permission mode, managed accounts). Additive/optional: absent
+   *  on old files and whenever no settings provider is wired — the file shape is then byte-for-byte
+   *  identical to before this block existed. */
+  settings?: MirrorSettings
 }
 
 /**
@@ -95,6 +109,9 @@ export function reduceEntry(
  * Restrict a mirror doc to the given node ids. Pure. Used by the SSH-host status push: each
  * connected host receives ONLY its own project's nodes — the full mirror would leak other
  * projects' node/session ids to every host the user is connected to.
+ *
+ * Deliberately drops the local `settings` block: a slice carries per-host settings that the SSH
+ * push injects itself (Task 2 of mobile-agent-launch-parity), never this host's local block.
  */
 export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<string>): MirrorFile {
   const nodes: MirrorFile['nodes'] = {}
@@ -102,11 +119,14 @@ export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<strin
   return { v: doc.v, updatedAt: doc.updatedAt, nodes }
 }
 
-/** Prune expired entries and shape the on-disk file. Pure; `now` injected for testability. */
+/** Prune expired entries and shape the on-disk file. Pure; `now` injected for testability.
+ *  `settings`, when given, is attached as the additive host-level block (absent otherwise, so the
+ *  file shape is identical to before this block existed). */
 export function buildFile(
   nodes: Record<string, MirrorEntry>,
   now: number,
-  expireMs = EXPIRE_MS
+  expireMs = EXPIRE_MS,
+  settings?: MirrorSettings
 ): MirrorFile {
   const out: MirrorFile = { v: 1, updatedAt: now, nodes: {} }
   for (const [id, e] of Object.entries(nodes)) {
@@ -115,6 +135,7 @@ export function buildFile(
     // without a `state` key.
     out.nodes[id] = { state: e.state, agentId: e.agentId, sessionId: e.sessionId, updatedAt: e.updatedAt }
   }
+  if (settings) out.settings = settings
   return out
 }
 
@@ -125,6 +146,27 @@ let targetFile: string | null = null
 let writeTimer: NodeJS.Timeout | null = null
 let writeSeq = 0
 const flushListeners = new Set<(doc: MirrorFile) => void>()
+// Supplies the host-level settings block, consulted fresh on every flush (so a mid-session
+// permission-mode / account change is picked up without re-wiring). Null = no block written.
+let settingsProvider: (() => MirrorSettings | undefined) | null = null
+
+/**
+ * Wire (or clear with `null`) the provider for the additive host-level settings block. Called
+ * once from main on launch; absent ⇒ the mirror writes no `settings` key at all.
+ */
+export function setMirrorSettingsProvider(p: (() => MirrorSettings | undefined) | null): void {
+  settingsProvider = p
+}
+
+/** Read the settings provider, failing open: a throwing/absent provider yields no block and must
+ *  never break the flush. */
+function safeSettings(): MirrorSettings | undefined {
+  try {
+    return settingsProvider?.() ?? undefined
+  } catch {
+    return undefined // provider must never break the flush
+  }
+}
 
 /**
  * Subscribe to every flush's built doc (fires even when the local disk write fails — the doc is
@@ -181,7 +223,7 @@ export async function flush(): Promise<void> {
   const file = resolveFile()
   if (!file) return
   const now = Date.now()
-  const doc = buildFile(Object.fromEntries(state), now)
+  const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings())
   // Also drop expired entries from memory so the map itself can't grow without bound.
   for (const [id, e] of state) if (now - e.updatedAt > EXPIRE_MS) state.delete(id)
   for (const cb of flushListeners) {
@@ -209,6 +251,7 @@ export function _resetForTest(): void {
   if (writeTimer) clearTimeout(writeTimer)
   writeTimer = null
   flushListeners.clear()
+  settingsProvider = null
 }
 
 /** Snapshot the in-memory map. Test-only. */

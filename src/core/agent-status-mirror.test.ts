@@ -12,6 +12,7 @@ import {
   clearNode,
   flush,
   initAgentStatusMirror,
+  setMirrorSettingsProvider,
   _resetForTest,
   _snapshot,
   DONE_HOLDOFF_MS,
@@ -221,5 +222,62 @@ describe('filterMirrorForNodes', () => {
     const doc: MirrorFile = { v: 1, updatedAt: 1, nodes: { a: { updatedAt: 1 } } }
     filterMirrorForNodes(doc, new Set())
     expect(Object.keys(doc.nodes)).toEqual(['a'])
+  })
+})
+
+describe('settings block', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    _resetForTest()
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-'))
+  })
+
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('buildFile includes the settings block when given one', () => {
+    const doc = buildFile({}, 1000, undefined, {
+      claudePermissionMode: 'auto',
+      autoSupported: true,
+      claudeAccounts: [{ id: 'a1', dir: '/data/claude-accounts/a1' }]
+    })
+    expect(doc.settings).toEqual({
+      claudePermissionMode: 'auto',
+      autoSupported: true,
+      claudeAccounts: [{ id: 'a1', dir: '/data/claude-accounts/a1' }]
+    })
+  })
+
+  it('buildFile omits the settings key entirely when none given (old-file shape)', () => {
+    const doc = buildFile({}, 1000)
+    expect('settings' in doc).toBe(false)
+  })
+
+  it('filterMirrorForNodes drops settings from slices', () => {
+    const doc = buildFile({}, 1000, undefined, { claudePermissionMode: 'plan' })
+    expect('settings' in filterMirrorForNodes(doc, new Set())).toBe(false)
+  })
+
+  it('flush consults the provider at flush time', async () => {
+    const file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+    let mode = 'plan'
+    setMirrorSettingsProvider(() => ({ claudePermissionMode: mode }))
+    await flush()
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8')).settings.claudePermissionMode).toBe('plan')
+    mode = 'acceptEdits'
+    await flush()
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8')).settings.claudePermissionMode).toBe('acceptEdits')
+  })
+
+  it('a throwing provider fails open (no settings, file still written)', async () => {
+    const file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+    setMirrorSettingsProvider(() => { throw new Error('boom') })
+    await flush()
+    expect('settings' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
   })
 })

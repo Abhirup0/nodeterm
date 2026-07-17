@@ -1,4 +1,4 @@
-import type { MirrorFile } from '../../core/agent-status-mirror'
+import type { MirrorFile, MirrorSettings } from '../../core/agent-status-mirror'
 import { filterMirrorForNodes } from '../../core/agent-status-mirror'
 
 /**
@@ -32,6 +32,9 @@ interface Deps {
   nodeIdsFor: (projectId: string) => ReadonlySet<string>
   /** Write one project's slice to its host. Best-effort (failures only stale the phone). */
   push: (projectId: string, json: string) => Promise<void>
+  /** Per-host settings block for one project's slice (remote CLI caps + host-matched
+   *  accounts — see index.ts wiring). undefined ⇒ the slice ships without settings. */
+  settingsFor?: (projectId: string) => MirrorSettings | undefined
   throttleMs?: number
   /** 0 disables the heartbeat (tests drive flushes explicitly). */
   heartbeatMs?: number
@@ -46,6 +49,13 @@ export function initRemoteStatusPush(deps: Deps): { dispose: () => void } {
   const pushProject = (id: string): void => {
     if (!latest) return
     const slice = filterMirrorForNodes(latest, deps.nodeIdsFor(id))
+    let s: MirrorSettings | undefined
+    try {
+      s = deps.settingsFor?.(id)
+    } catch {
+      s = undefined // settings must never break a status push
+    }
+    if (s) slice.settings = s
     void deps.push(id, JSON.stringify(slice))
     const t = setTimeout(() => {
       timers.delete(id)

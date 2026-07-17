@@ -21,7 +21,9 @@ import {
   initAgentStatusMirror,
   onMirrorFlush,
   flush as flushAgentStatusMirror,
-  recordAgentEvent
+  recordAgentEvent,
+  setMirrorSettingsProvider,
+  type MirrorSettings
 } from '../core/agent-status-mirror'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -60,9 +62,13 @@ import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initRelayQuota, broadcastRelayQuota, relayQuotaAvailable } from '../core/relay-quota'
 import { initClaudeAccounts } from './claude-accounts'
-import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
+import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
-import { isSafeLocalTranscriptPath, isSafeRemoteTranscriptPath } from '../core/claude-accounts-core'
+import {
+  isSafeLocalTranscriptPath,
+  isSafeRemoteTranscriptPath,
+  remoteAccountConfigDirAbs
+} from '../core/claude-accounts-core'
 import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
 import { createPairingService } from './pairing-service'
 import {
@@ -653,6 +659,26 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+  // Advertise launch settings to the mobile companion through the mirror. The provider is
+  // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
+  // plumbing. Caps arrive async: re-flush once the memoized probe answers.
+  let localClaudeCaps: ClaudeCliCaps | undefined
+  void claudeCliCaps()
+    .then((c) => {
+      localClaudeCaps = c
+      void flushAgentStatusMirror()
+    })
+    .catch(() => {})
+  setMirrorSettingsProvider((): MirrorSettings => {
+    const s = settingsStore.get()
+    return {
+      claudePermissionMode: s.claudePermissionMode,
+      autoSupported: localClaudeCaps?.autoPermissionMode === true,
+      claudeAccounts: (s.claudeAccounts ?? [])
+        .filter((a) => !a.host && !a.pending)
+        .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))
+    }
+  })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS
   // process, so that file is the only agent-status source a phone browsing the host directly
@@ -663,7 +689,24 @@ app.whenReady().then(async () => {
     sshProjectIds: () => workspaceStore.sshProjectIds(),
     nodeIdsFor: (projectId) => workspaceStore.sshProjectNodeIds(projectId),
     push: (projectId, json) =>
-      sshProjectManager ? sshProjectManager.pushAgentStatus(projectId, json) : Promise.resolve()
+      sshProjectManager ? sshProjectManager.pushAgentStatus(projectId, json) : Promise.resolve(),
+    settingsFor: (projectId) => {
+      const s = settingsStore.get()
+      const home = sshProjectManager?.remoteHomeFor(projectId)
+      const hostKey = sshProjectManager?.hostKeyFor(projectId)
+      return {
+        claudePermissionMode: s.claudePermissionMode,
+        // The phone launches claude on the REMOTE host — its CLI is the gate, never the local one.
+        autoSupported: sshProjectManager?.remoteAutoPermFor(projectId) === true,
+        ...(home && hostKey
+          ? {
+              claudeAccounts: (s.claudeAccounts ?? [])
+                .filter((a) => a.host === hostKey && !a.pending)
+                .map((a) => ({ id: a.id, dir: remoteAccountConfigDirAbs(home, a.id) }))
+            }
+          : {}) // unresolved home ⇒ no accounts advertised (fail-open), autoSupported still ships
+      }
+    }
   })
   // Canvas sync: the same reflector the Server Edition boots. With a single window clientIds()
   // returns one id, so on the desktop today it is a no-op — wired for parity (and for the

@@ -75,6 +75,18 @@ export function exitMasterArgs(conn: SshConnection, controlPath: string): string
 export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
   return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`)
 }
+/**
+ * Did a FAILED `tmux has-session` probe actually say the session is absent? Only tmux's own
+ * exit 1 ("can't find session" / "no server running") does. Anything else — ssh's 255 (a dead
+ * or mid-reconnect ControlMaster), 127 (tmux off the remote PATH), a spawn error with no
+ * numeric code — is a failed READ, and a failed read is never evidence of absence. Reading a
+ * transport failure as "cold" made the desktop replay scrollback and type `claude --resume …`
+ * into a LIVE fullscreen Claude session; the mangled line then landed in the agent's
+ * conversation as a user prompt (field report). Unknown ⇒ warm attach, which types nothing.
+ */
+export function probeSaysAbsent(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 1
+}
 export function remoteTmuxKillArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
   return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} kill-session -t ${sessionId}`)
 }
