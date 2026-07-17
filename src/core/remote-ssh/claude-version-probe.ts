@@ -20,11 +20,20 @@ export const CLAUDE_VERSION_END = '__NT_V_END__'
 /**
  * The remote shell command that prints `claude --version` between the markers, or nothing.
  * Login shell first, plain exec shell as the fallback (some hosts have no usable `$SHELL -l`).
+ *
+ * The PATH prepend covers claude's own install locations that a login shell may still miss —
+ * measured, not hypothetical: the official installer targets `~/.local/bin`, and a stock
+ * Debian/Ubuntu ROOT `.profile` (the old 161-byte skeleton) never adds `~/.local/bin` to PATH,
+ * so the probe found nothing on a host where every interactive shell (via .bashrc) runs claude
+ * fine — and `auto` silently degraded to manual on every project pointing at that host. Same
+ * philosophy as `findTmux()`: known absolute locations beat inherited-PATH luck.
+ * `~/.claude/local` is `claude migrate-installer`'s wrapper location.
  */
 export function claudeVersionProbeCommand(): string {
   // `[ -n "$v" ]` keeps the exit code non-zero when claude is missing or prints nothing, so the
   // `||` fallback still gets its turn — the same two-step lookup as before the markers.
   const emit =
+    `PATH="$HOME/.local/bin:$HOME/.claude/local:$PATH"; ` +
     `v=$(claude --version 2>/dev/null) && [ -n "$v" ] && ` +
     `printf '${CLAUDE_VERSION_START}%s${CLAUDE_VERSION_END}' "$v"`
   const q = posixQuote(emit)

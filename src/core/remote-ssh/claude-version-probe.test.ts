@@ -19,6 +19,14 @@ describe('claudeVersionProbeCommand', () => {
     expect(cmd).toContain(CLAUDE_VERSION_END)
     expect(cmd).toContain('claude --version')
   })
+
+  it("prepends claude's own install locations to PATH (a stock root .profile misses ~/.local/bin)", () => {
+    const cmd = claudeVersionProbeCommand()
+    expect(cmd).toContain('$HOME/.local/bin')
+    expect(cmd).toContain('$HOME/.claude/local')
+    // The prepend must sit INSIDE the quoted login-shell command, before the claude lookup.
+    expect(cmd.indexOf('$HOME/.local/bin')).toBeLessThan(cmd.indexOf('claude --version'))
+  })
 })
 
 describe('parseClaudeVersionProbe', () => {
