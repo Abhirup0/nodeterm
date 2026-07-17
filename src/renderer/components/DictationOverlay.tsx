@@ -28,6 +28,15 @@ export interface DictationTarget {
 interface DictationOverlayProps {
   target: DictationTarget | null
   onClose: () => void
+  /** Routes to Settings → License (same section SpeechSection's own Pro upsells use) — invoked
+   *  from the "See nodeterm Pro" action shown beside a Pro-model transcribe error. */
+  onOpenLicense: () => void
+}
+
+/** A Pro-gated model was picked but the account isn't premium — see SpeechService.transcribeNow,
+ *  which throws exactly this shape. Matched by substring since the model id is interpolated in. */
+export function isProGateError(message: string): boolean {
+  return message.includes('requires nodeterm Pro')
 }
 
 type Phase = 'idle' | 'recording' | 'transcribing' | 'text'
@@ -62,7 +71,7 @@ export function isAtRecordingCap(elapsedMs: number): boolean {
   return elapsedMs >= MAX_RECORDING_MS
 }
 
-export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
+export function DictationOverlay({ target, onClose, onOpenLicense }: DictationOverlayProps) {
   const { api } = useSession()
   const addLocalUser = useChatSessions((s) => s.addLocalUser)
   const chatWorking = useChatSessions((s) =>
@@ -137,7 +146,9 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
       try {
         const ok = await window.nodeTerminal.speech.micConsent()
         if (!ok) {
-          setError('Microphone access was not granted.')
+          setError(
+            'Microphone access was not granted — allow it in System Settings (or your browser site settings) and try again.'
+          )
           return
         }
       } catch (err) {
@@ -325,7 +336,16 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
         )}
       </div>
 
-      {error && <div className="dictation__error">{error}</div>}
+      {error && (
+        <div className="dictation__error">
+          <span>{error}</span>
+          {isProGateError(error) && (
+            <button type="button" className="dictation__error-action" onClick={onOpenLicense}>
+              See nodeterm Pro
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="dictation__actions">
         <button type="button" className="dictation__btn" onClick={copy} disabled={!hasText}>

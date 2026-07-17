@@ -5908,7 +5908,15 @@ export function Canvas() {
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
       {dictationOpen && (
-        <DictationOverlay target={dictationTarget} onClose={() => setDictationOpen(false)} />
+        <DictationOverlay
+          target={dictationTarget}
+          onClose={() => setDictationOpen(false)}
+          onOpenLicense={() => {
+            setDictationOpen(false)
+            setSettingsSection('license')
+            setSettingsOpen(true)
+          }}
+        />
       )}
 
       {bugReportOpen && (
