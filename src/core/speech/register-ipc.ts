@@ -1,3 +1,4 @@
+import { IPC } from '../../shared/ipc'
 import { WHISPER_MODELS } from '../../shared/speech'
 import type { Settings } from '../../shared/types'
 import { cloudTranscribe } from './cloud-speech'
@@ -19,7 +20,7 @@ export function registerSpeechIpc(deps: {
   apiBase: string
   fetchFn?: typeof fetch
 }): void {
-  deps.handle('speech:transcribe', async (payload: { pcm: ArrayBuffer | string; language?: string }) => {
+  deps.handle(IPC.speechTranscribe, async (payload: { pcm: ArrayBuffer | string; language?: string }) => {
     const speech = deps.settings().speech
     const pcm = decodePcmPayload(payload.pcm)
     const language = payload.language ?? speech.language
@@ -34,7 +35,7 @@ export function registerSpeechIpc(deps: {
     return { text }
   })
 
-  deps.handle('speech:models', async () => {
+  deps.handle(IPC.speechModels, async () => {
     const onDisk = await deps.models.list()
     return WHISPER_MODELS.map((m) => ({
       ...m,
@@ -43,6 +44,6 @@ export function registerSpeechIpc(deps: {
     }))
   })
 
-  deps.handle('speech:model-download', async ({ id }: { id: string }) => { await deps.models.download(id) })
-  deps.handle('speech:model-delete', async ({ id }: { id: string }) => { await deps.models.delete(id) })
+  deps.handle(IPC.speechModelDownload, async ({ id }: { id: string }) => { await deps.models.download(id) })
+  deps.handle(IPC.speechModelDelete, async ({ id }: { id: string }) => { await deps.models.delete(id) })
 }
