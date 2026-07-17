@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { MirrorFile } from '../../core/agent-status-mirror'
+import type { MirrorFile, MirrorSettings } from '../../core/agent-status-mirror'
 import { initRemoteStatusPush } from './remote-status-push'
 
 function doc(updatedAt: number, ids: string[]): MirrorFile {
@@ -87,6 +87,45 @@ describe('initRemoteStatusPush', () => {
     expect(d.flush).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(120_000)
     expect(d.flush).toHaveBeenCalledTimes(3)
+  })
+
+  it('injects per-project settings into the pushed slice', () => {
+    const settings: MirrorSettings = { claudePermissionMode: 'auto', autoSupported: true }
+    disposer = initRemoteStatusPush(
+      deps({
+        nodeIdsFor: () => new Set(['n1']),
+        settingsFor: (id: string) => ({ claudePermissionMode: 'auto', autoSupported: id === 'p1' })
+      })
+    )
+    flushCb!({ v: 1, updatedAt: 1, nodes: { n1: { updatedAt: 1 } } })
+    const slice = JSON.parse(pushes.find((p) => p.id === 'p1')!.json)
+    expect(slice.settings).toEqual(settings)
+    expect(Object.keys(slice.nodes)).toEqual(['n1'])
+  })
+
+  it('omits settings when settingsFor is absent or returns undefined', () => {
+    disposer = initRemoteStatusPush(
+      deps({
+        nodeIdsFor: () => new Set(),
+        settingsFor: () => undefined
+      })
+    )
+    flushCb!({ v: 1, updatedAt: 1, nodes: {} })
+    expect('settings' in JSON.parse(pushes.find((p) => p.id === 'p1')!.json)).toBe(false)
+  })
+
+  it('a throwing settingsFor never breaks the push (fails open, no settings key)', () => {
+    disposer = initRemoteStatusPush(
+      deps({
+        nodeIdsFor: () => new Set(),
+        settingsFor: () => {
+          throw new Error('boom')
+        }
+      })
+    )
+    flushCb!({ v: 1, updatedAt: 1, nodes: {} })
+    expect(pushes).toHaveLength(1)
+    expect('settings' in JSON.parse(pushes[0].json)).toBe(false)
   })
 
   it('dispose unsubscribes and stops timers', () => {
