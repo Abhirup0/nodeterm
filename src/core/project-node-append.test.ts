@@ -68,6 +68,28 @@ describe('appendProjectNode', () => {
     expect(plain.nodes[0].agentId).toBeUndefined()
   })
 
+  it('an agent node adopts the agent color + label default, like createAgentNode', () => {
+    const claude = JSON.parse(appendProjectNode(baseFile([]), { id: 'term-c-1', agentId: 'claude' }, NOW)!)
+    expect(claude.nodes[0].color).toBe('#d97757')
+    expect(claude.nodes[0].title).toBe('Claude Code') // no title sent → agent label, not "Mobile session"
+    const codex = JSON.parse(appendProjectNode(baseFile([]), { id: 'term-c-2', agentId: 'codex' }, NOW)!)
+    expect(codex.nodes[0].color).toBe('#10a37f')
+    // A sent title always wins (the phone's own naming) — only the color is agent-derived.
+    const titled = JSON.parse(
+      appendProjectNode(baseFile([]), { id: 'term-c-3', agentId: 'claude', title: 'Claude Code' }, NOW)!
+    )
+    expect(titled.nodes[0].title).toBe('Claude Code')
+    expect(titled.nodes[0].color).toBe('#d97757')
+  })
+
+  it('a custom/unknown agent and a plain terminal keep the mobile defaults', () => {
+    const custom = JSON.parse(appendProjectNode(baseFile([]), { id: 'term-c-1', agentId: 'aider' }, NOW)!)
+    expect(custom.nodes[0].color).toBe('#7aa2f7')
+    expect(custom.nodes[0].title).toBe('Mobile session')
+    const plain = JSON.parse(appendProjectNode(baseFile([]), { id: 'term-c-2' }, NOW)!)
+    expect(plain.nodes[0].color).toBe('#7aa2f7')
+  })
+
   it('round-trips fields it does not understand (future schema, bridges, dino score…)', () => {
     const raw = baseFile([sibling], { bridges: [{ id: 'b1' }], dinoHighScore: 42, futureField: { deep: true } })
     const f = JSON.parse(appendProjectNode(raw, { id: 'term-bbb-2' }, NOW)!)

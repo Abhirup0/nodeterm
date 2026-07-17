@@ -8,6 +8,8 @@
 // parse must never be invented or overwritten), a duplicate id (a retry must not churn rev), or
 // an unsafe id (it becomes a tmux session name).
 
+import { agentConfig } from '../shared/agents/config'
+
 /** What the phone is allowed to choose; everything else is host-derived. */
 export interface RemoteNodeInput {
   id: string
@@ -56,14 +58,21 @@ export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date
     y = lowest.y + (typeof lh === 'number' ? lh : 560) + 40
   }
 
+  // An agent node looks exactly like one minted by the canvas (createAgentNode): the agent's
+  // label as the starting title and the agent's color — titleAuto then lets the agent's own
+  // session name take over, same as desktop. A plain terminal keeps the mobile defaults.
+  const agent = typeof input.agentId === 'string' ? agentConfig(input.agentId) : undefined
   const node: Record<string, unknown> = {
     id: input.id,
     kind: 'terminal',
     position: { x, y },
     size: { width: 900, height: 560 },
-    title: typeof input.title === 'string' ? input.title.slice(0, TITLE_MAX) : 'Mobile session',
+    title:
+      typeof input.title === 'string'
+        ? input.title.slice(0, TITLE_MAX)
+        : (agent?.label ?? 'Mobile session'),
     titleAuto: true,
-    color: '#7aa2f7',
+    color: agent?.color ?? '#7aa2f7',
     group: null,
     tags: [],
     collapsed: false,
