@@ -2016,7 +2016,7 @@ body,
   top: 46px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 12;
+  z-index: 26; /* above the kanban overlay (25), below the tab bar (30) */
   display: flex;
   flex-direction: column;
   align-items: center;

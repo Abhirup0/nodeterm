@@ -4,6 +4,7 @@ import {
   toPortableNodes, resolveNodes, projectToFile, fileToProject,
   sameProjectContent, splitWorkspace, serializeProjectFile
 } from './workspace-files'
+import type { ProjectFileV1 } from './workspace-files'
 
 const node = (over: Partial<CanvasNodeState> = {}): CanvasNodeState => ({
   id: 'term-abc', kind: 'terminal', position: { x: 0, y: 0 },
@@ -269,5 +270,12 @@ describe('kanban board persistence', () => {
     const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [project({ cwd: '/a/b', kanban: board })] }
     const { files } = splitWorkspace(ws, () => 1, '2026-01-01T00:00:00.000Z')
     expect(files.get('/a/b')?.kanban).toEqual(board)
+  })
+  it('a malformed kanban shape from a hand-edited file is dropped, not carried', () => {
+    const f = projectToFile(project(), 1, '2026-07-18T00:00:00.000Z')
+    const evil1 = { ...f, kanban: {} } as unknown as ProjectFileV1
+    const evil2 = { ...f, kanban: { columns: 42, cards: [] } } as unknown as ProjectFileV1
+    expect('kanban' in fileToProject(evil1, {})).toBe(false)
+    expect('kanban' in fileToProject(evil2, {})).toBe(false)
   })
 })

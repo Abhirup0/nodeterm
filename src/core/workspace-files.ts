@@ -142,7 +142,9 @@ export function fileToProject(
     ...(f.defaultAccountId ? { defaultAccountId: f.defaultAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
-    ...(f.kanban ? { kanban: f.kanban } : {}),
+    ...(f.kanban && Array.isArray(f.kanban.columns) && Array.isArray(f.kanban.cards)
+      ? { kanban: f.kanban }
+      : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {})
