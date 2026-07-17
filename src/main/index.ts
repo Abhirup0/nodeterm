@@ -2,7 +2,7 @@ import { join, resolve, posix } from 'path'
 import { readFile } from 'fs/promises'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { PtyManager } from '../core/pty-manager'
@@ -55,6 +55,9 @@ import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
+import { WhisperModelStore } from '../core/speech/whisper-models'
+import { SpeechService } from '../core/speech/speech-service'
+import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initRelayQuota, broadcastRelayQuota, relayQuotaAvailable } from '../core/relay-quota'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc } from '../core/claude-cli'
@@ -121,6 +124,14 @@ function isSafeExternalUrl(url: unknown): url is string {
 const settingsStore = new SettingsStore()
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
+// Dictation: local whisper.cpp models live under userData, one dir per install (same convention
+// as the tmux config / scrollback-store). onProgress pushes { id, pct } to the renderer the same
+// way agent-status events do (sendToMain — resolves the live window at send time).
+const whisperModels = new WhisperModelStore({
+  dir: join(app.getPath('userData'), 'speech-models'),
+  onProgress: (id, pct) => sendToMain(IPC.speechProgress, { id, pct })
+})
+const speechService = new SpeechService({ models: whisperModels, isPremium })
 
 // Relay PEER sinks (docs/remote-sessions.md 4b) — the desktop mirror of src/server/index.ts's
 // setFlowController / setResyncProvider / onClientGone. Wired at boot, BEFORE any peer can register
@@ -389,6 +400,20 @@ app.whenReady().then(async () => {
   workspaceStore.registerIpc()
   gitService.registerIpc()
   presenceHub.registerIpc()
+  registerSpeechIpc({
+    handle: (channel, fn) => corePlatform.handle(channel, fn),
+    service: speechService,
+    models: whisperModels,
+    settings: () => settingsStore.get(),
+    licenseToken: () => getStoredEntitlement(),
+    apiBase: RELAY_API_BASE
+  })
+  // Electron-only mic consent: not core-bound (systemPreferences is main-process-only), so it's
+  // a raw ipcMain handler like the other Electron-only surfaces (dialogs, shell, media) rather
+  // than going through registerSpeechIpc/corePlatform.
+  ipcMain.handle(IPC.speechMicConsent, async () =>
+    process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
+  )
   registerClaudeCliIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent

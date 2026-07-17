@@ -267,5 +267,16 @@ export const IPC = {
   pairingDone: 'pairing:done',
   pairingProbeSsh: 'pairing:probe-ssh',
   pairingListDevices: 'pairing:listDevices',
-  pairingRevokeDevice: 'pairing:revokeDevice'
+  pairingRevokeDevice: 'pairing:revokeDevice',
+  // Dictation (desktop/server). speechProgress is a main/server → renderer broadcast of
+  // { id, pct } while a whisper model downloads (WhisperModelStore.onProgress).
+  speechTranscribe: 'speech:transcribe',
+  speechModels: 'speech:models',
+  speechModelDownload: 'speech:model-download',
+  speechModelDelete: 'speech:model-delete',
+  speechProgress: 'speech:progress',
+  // Electron-only: registered in src/main/index.ts (systemPreferences.askForMediaAccess) and
+  // stubbed `async () => true` in src/server/index.ts (browser mic permission is the browser's
+  // own prompt, not ours to gate).
+  speechMicConsent: 'speech:mic-consent'
 } as const

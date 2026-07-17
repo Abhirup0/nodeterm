@@ -20,6 +20,14 @@ import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { IPC } from '@shared/ipc'
+import { WhisperModelStore } from '../core/speech/whisper-models'
+import { SpeechService } from '../core/speech/speech-service'
+import { registerSpeechIpc } from '../core/speech/register-ipc'
+import { isPremium, getStoredEntitlement } from '../core/license'
+
+// Same env-override + default as src/core/check.ts / license.ts / src/main/telemetry.ts — each
+// shell derives it locally rather than sharing an import (src/server must not import src/main).
+const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
 /**
  * App version fed to ServerPlatform (surfaced to the renderer as the desktop app's
@@ -75,6 +83,24 @@ export async function startServer(
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
+  // Dictation: same construction as src/main/index.ts, with the server's data dir. onProgress
+  // broadcasts to every attached browser tab the same way wireAgentStatus pushes agent-status.
+  const whisperModels = new WhisperModelStore({
+    dir: path.join(config.dataDir, 'speech-models'),
+    onProgress: (id, pct) => platform.broadcast(IPC.speechProgress, { id, pct })
+  })
+  const speechService = new SpeechService({ models: whisperModels, isPremium })
+  registerSpeechIpc({
+    handle: (channel, fn) => platform.handle(channel, fn),
+    service: speechService,
+    models: whisperModels,
+    settings: () => settingsStore.get(),
+    licenseToken: () => getStoredEntitlement(),
+    apiBase: API_BASE
+  })
+  // Browser mic permission is the browser's own prompt (getUserMedia), not ours to gate —
+  // unlike Electron's systemPreferences.askForMediaAccess, there is nothing server-side to ask.
+  platform.handle(IPC.speechMicConsent, async () => true)
   // Canvas sync: reflect each browser tab's node mutations to the other attached tabs, so every
   // client converges on the same node set (and no tab writes back a node another tab deleted).
   initCanvasSync()
