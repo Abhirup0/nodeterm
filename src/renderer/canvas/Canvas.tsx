@@ -797,9 +797,7 @@ export function Canvas() {
         // frame border without being clamped into it.
         ...(parent.parentId ? { parentId: parent.parentId } : {}),
         position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
-        // Node-level `draggable` overrides the global nodesDraggable, so the canvas lock
-        // must be threaded in here or the ephemeral cards would keep moving while locked.
-        draggable: !canvasLocked,
+        draggable: true,
         selected: !!ephSel[lid],
         ...dims(lid, 230, 460, 92, 320),
         data: {
@@ -847,7 +845,7 @@ export function Canvas() {
             x: parent.position.x + (i % COLS) * COL_W,
             y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
           },
-          draggable: !canvasLocked,
+          draggable: true,
           selected: !!ephSel[cid],
           ...dims(cid, 230, 480, 96, 340),
           data: {
@@ -876,7 +874,7 @@ export function Canvas() {
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
-  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes, canvasLocked])
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
 
   // Merge the persisted nodes with the ephemeral ones once per change (not per render),
   // so React Flow's array-identity short-circuit holds while panning/zooming.
@@ -5752,8 +5750,8 @@ export function Canvas() {
           deleteKeyCode={null}
           selectionOnDrag
           selectionMode={SelectionMode.Partial}
-          nodesDraggable={!canvasLocked}
-          nodesConnectable={!canvasLocked}
+          // The lock freezes the CAMERA only (pan/zoom) — nodes stay draggable, resizable and
+          // connectable: the point is "stop the map sliding under me", not "freeze my work".
           panOnDrag={canvasLocked ? false : [1]}
           panOnScroll={canvasLocked ? false : !wheelZoom}
           zoomOnScroll={false}
@@ -5772,7 +5770,7 @@ export function Canvas() {
           <Controls showInteractive={false} position="bottom-left">
             <ControlButton
               className={`canvas-lock-btn${canvasLocked ? ' locked' : ''}`}
-              title={canvasLocked ? 'Unlock canvas' : 'Lock canvas'}
+              title={canvasLocked ? 'Unlock view (pan/zoom)' : 'Lock view (pan/zoom) — nodes stay movable'}
               onClick={() => setCanvasLocked((v) => !v)}
             >
               {canvasLocked ? <IconLock /> : <IconUnlock />}
