@@ -520,6 +520,9 @@ export function Canvas() {
   const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
+  // One-shot: the next active-project load keeps the CURRENT camera instead of applying the
+  // project's saved viewport. Set by reloadActiveProject (in-place external-change reload).
+  const preserveViewportRef = useRef(false)
   const [consentOpen, setConsentOpen] = useState(false)
   // Drives WorktreeDialog. `groupId` null = create the group frame around the new worktree;
   // set = bind an existing group (the group context menu). `at` is the pane cursor, if any.
@@ -1119,10 +1122,16 @@ export function Canvas() {
     pastRef.current = []
     futureRef.current = []
     bumpHist((v) => v + 1)
-    viewportRef.current = project.viewport
-    setViewport(project.viewport)
-    setZoomPct(Math.round(project.viewport.zoom * 100))
-    setGroupLabelBoost(project.viewport.zoom)
+    if (preserveViewportRef.current) {
+      // In-place reload (external change / SSH reconcile): keep the user's current camera —
+      // the file's viewport is where another machine last saved, not where this user looks.
+      preserveViewportRef.current = false
+    } else {
+      viewportRef.current = project.viewport
+      setViewport(project.viewport)
+      setZoomPct(Math.round(project.viewport.zoom * 100))
+      setGroupLabelBoost(project.viewport.zoom)
+    }
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
       loadingRef.current = false
@@ -1200,9 +1209,16 @@ export function Canvas() {
   }, [dirty])
 
   /** Re-runs the active-project load effect by nudging its dependency: flip the active id
-   *  to '' (the effect early-returns) then back to the same id on a microtask. */
+   *  to '' (the effect early-returns) then back to the same id on a microtask.
+   *
+   *  An in-place reload PRESERVES the current camera (preserveViewportRef): the incoming
+   *  file's viewport is wherever ANOTHER machine/surface last left it, and SSH projects
+   *  reconcile on connect + on a periodic poll — restoring the saved viewport here yanked
+   *  the camera away mid-work, most visibly right after a cross-project focus (the sidebar
+   *  click centered the node, then the connect-time reconcile teleported the view). */
   const reloadActiveProject = useCallback(() => {
     const id = useProjects.getState().activeProjectId
+    preserveViewportRef.current = true
     useProjects.getState().setActive('')
     queueMicrotask(() => useProjects.getState().setActive(id))
   }, [])
