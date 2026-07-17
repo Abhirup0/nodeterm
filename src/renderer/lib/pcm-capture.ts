@@ -50,8 +50,8 @@ function rms(chunk: Float32Array): number {
 
 /**
  * Captures the default microphone as mono 16 kHz PCM until `stop()`.
- * One-shot: create a fresh instance per recording (`start()` after a
- * `stop()`/`cancel()` on the same instance is not supported).
+ * `teardown()` resets to constructor state, so a fresh `start()` after
+ * `stop()`/`cancel()` is fully supported.
  */
 export class PcmCapture {
   private chunks: Float32Array[] = []
@@ -70,28 +70,39 @@ export class PcmCapture {
   async start(): Promise<void> {
     if (this.running) return
 
-    const stream = await this.acquireStream()
-    const audioContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE })
-    const sourceNode = audioContext.createMediaStreamSource(stream)
-
-    this.stream = stream
-    this.audioContext = audioContext
-    this.sourceNode = sourceNode
-
-    const onChunk = (chunk: Float32Array): void => {
-      this.lastChunk = chunk
-      this.chunks.push(chunk)
-    }
+    // Set the flag synchronously before the first await to guard against
+    // re-entry: a second `start()` called during setup will see this.running
+    // true and return early. Doubled as an in-flight guard so it must flip
+    // before any suspension point.
+    this.running = true
 
     try {
-      await this.startWorklet(audioContext, sourceNode, onChunk)
-    } catch {
-      // `addModule` (or worklet construction) failed — fall back to the
-      // deprecated-but-universal ScriptProcessorNode. Same chunk flow.
-      this.startScriptProcessor(audioContext, sourceNode, onChunk)
-    }
+      const stream = await this.acquireStream()
+      const audioContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE })
+      const sourceNode = audioContext.createMediaStreamSource(stream)
 
-    this.running = true
+      this.stream = stream
+      this.audioContext = audioContext
+      this.sourceNode = sourceNode
+
+      const onChunk = (chunk: Float32Array): void => {
+        this.lastChunk = chunk
+        this.chunks.push(chunk)
+      }
+
+      try {
+        await this.startWorklet(audioContext, sourceNode, onChunk)
+      } catch {
+        // `addModule` (or worklet construction) failed — fall back to the
+        // deprecated-but-universal ScriptProcessorNode. Same chunk flow.
+        this.startScriptProcessor(audioContext, sourceNode, onChunk)
+      }
+    } catch (err) {
+      // On any failure, reset running and tear down partial state.
+      this.running = false
+      this.teardown()
+      throw err
+    }
   }
 
   /** Stops capture, tears everything down, and returns the concatenated take. */
@@ -169,6 +180,7 @@ export class PcmCapture {
   }
 
   private teardown(): void {
+    if (this.workletNode) this.workletNode.port.onmessage = null
     this.workletNode?.disconnect()
     this.workletNode = null
 
