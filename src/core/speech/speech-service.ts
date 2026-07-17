@@ -65,7 +65,7 @@ export class SpeechService {
 async function defaultEngineFactory(modelPath: string): Promise<WhisperEngineHandle> {
   let mod: any
   try {
-    // @ts-expect-error -- optional native dep, installed in Task 7
+    // @ts-ignore -- optional native dep: absent until installed, and @ts-ignore stays valid either way (an expect-error would break the build the moment it resolves)
     mod = await import('smart-whisper')
   } catch {
     throw new Error(
