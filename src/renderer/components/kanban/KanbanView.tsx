@@ -22,6 +22,8 @@ export function KanbanView({ board, onChange }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
 
   const requestDeleteColumn = (columnId: string) => {
+    // The last column is never deletable — don't offer a confirm that cannot act.
+    if (board.columns.length <= 1) return
     if (cardsInColumn(board, columnId).length === 0) {
       const next = deleteColumn(board, columnId)
       if (next) onChange(next)
