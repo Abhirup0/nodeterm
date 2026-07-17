@@ -378,8 +378,8 @@ describe('initRelayHost — teardown', () => {
 // above and in relay-host.test.ts — it is UNCHANGED). Each fake session has a distinct peer key so
 // the identity-based revoke can be asserted per seat.
 interface FakeSession extends RelayHostSession {
-  close: ReturnType<typeof vi.fn>
-  confirm: ReturnType<typeof vi.fn>
+  close: () => void
+  confirm: () => void
 }
 
 function makeFakeSession(n: number): FakeSession {

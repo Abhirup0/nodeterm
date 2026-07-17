@@ -5,12 +5,12 @@
 // requires a signed + notarized build; unsigned builds still surface the card for a manual
 // download.
 import { app, ipcMain, Notification } from 'electron'
-import electronUpdater from 'electron-updater'
+// Named import — the default-import + destructure pattern returns undefined under
+// electron-vite v5's CJS interop.
+import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
-
-const { autoUpdater } = electronUpdater
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
 
