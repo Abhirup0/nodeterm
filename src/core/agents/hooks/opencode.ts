@@ -39,7 +39,10 @@ export function pluginPath(): string {
  *  with normalizeOpencode (permission.updated is posted as `permission.asked`);
  *  sessionID/role are extracted defensively per the SDK payload shapes. message.updated
  *  forwards ONLY user messages (turn start) so assistant token streaming never floods the
- *  hook server.
+ *  hook server — and only ONCE per messageID: measured on 1.18.3 (TUI), the user message
+ *  record is updated again after session.idle (title/bookkeeping), and re-forwarding that
+ *  as a turn start resurrected `working` right after `done` (newTurn bypasses the
+ *  done-holdoff by design), pinning the node on RUNNING forever.
  *  Transport: an SSH host advertises a UNIX SOCKET (NODETERM_HOOK_SOCK, no PORT line in the
  *  endpoint file) — the socket wins over TCP, like the POSIX script's `curl --unix-socket`
  *  branch. opencode runs on Bun, whose fetch takes a `unix` option; the node:http
@@ -97,6 +100,7 @@ export const NodetermStatus = async () => {
       }
     } catch {}
   }
+  const seenUserMsgs = new Set()
   return {
     event: async (input) => {
       const ev = input && input.event
@@ -113,10 +117,17 @@ export const NodetermStatus = async () => {
           return post('permission.asked', { sessionID: p.sessionID })
         case 'permission.replied':
           return post('permission.replied', { sessionID: p.sessionID })
-        case 'message.updated':
-          if ((info.role || p.role) === 'user')
-            post('message.updated', { sessionID: info.sessionID || p.sessionID, role: 'user' })
-          return
+        case 'message.updated': {
+          if ((info.role || p.role) !== 'user') return
+          if (info.id) {
+            if (seenUserMsgs.has(info.id)) return
+            seenUserMsgs.add(info.id)
+            if (seenUserMsgs.size > 500) {
+              for (const first of seenUserMsgs) { seenUserMsgs.delete(first); break }
+            }
+          }
+          return post('message.updated', { sessionID: info.sessionID || p.sessionID, role: 'user' })
+        }
       }
     },
     'tool.execute.before': async (input) =>

@@ -121,6 +121,27 @@ describe('generated plugin behavior (executed)', () => {
     expect(posts.map((p) => p.payload)).toEqual([{ event: 'message.updated', sessionID: 'ses_1', role: 'user' }])
   })
 
+  it('posts a user message.updated ONCE per messageID — later updates of the same message are not new turns', async () => {
+    // Measured on opencode 1.18.3 (TUI): the user message record is updated again both at
+    // turn start (created → completed) and AFTER session.idle (title/bookkeeping touch).
+    // Each re-forward became working+newTurn, which bypasses the done-holdoff by design —
+    // so the node bounced back to RUNNING right after done and stuck there forever.
+    const hooks = await loadHooks()
+    const user = (id: string) => ({
+      event: { type: 'message.updated', properties: { info: { id, sessionID: 'ses_1', role: 'user' } } }
+    })
+    await hooks.event(user('m1'))
+    await hooks.event(user('m1')) // turn-start double fire
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    await hooks.event(user('m1')) // post-idle bookkeeping touch — must NOT resurrect the turn
+    await hooks.event(user('m2')) // a genuinely new prompt still counts
+    expect(posts.map((p) => p.payload)).toEqual([
+      { event: 'message.updated', sessionID: 'ses_1', role: 'user' },
+      { event: 'session.idle', sessionID: 'ses_1' },
+      { event: 'message.updated', sessionID: 'ses_1', role: 'user' }
+    ])
+  })
+
   it('ignores unrelated bus events (token-stream deltas never reach the hook server)', async () => {
     const hooks = await loadHooks()
     await hooks.event({ event: { type: 'message.part.delta', properties: {} } })
