@@ -15,7 +15,14 @@ import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
 import { hookServer } from '../core/agents/hook-server'
 import { installManagedAgentHooks } from '../core/agents/hooks'
-import { initAgentStatusMirror } from '../core/agent-status-mirror'
+import {
+  initAgentStatusMirror,
+  flush as flushAgentStatusMirror,
+  setMirrorSettingsProvider,
+  type MirrorSettings
+} from '../core/agent-status-mirror'
+import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
+import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
@@ -121,6 +128,28 @@ export async function startServer(
   // scripts → start the loopback hook server. The hook server binds its own port independent of
   // the main HTTP server below.
   initAgentStatusMirror()
+  // Advertise launch settings to the mobile companion through the mirror (same provider the
+  // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
+  // provider applies. The provider is consulted at every flush (heartbeat ≤60s), so a settings
+  // change propagates without extra plumbing. Caps arrive async: re-flush once the memoized
+  // probe answers.
+  let localClaudeCaps: ClaudeCliCaps | undefined
+  void claudeCliCaps()
+    .then((c) => {
+      localClaudeCaps = c
+      void flushAgentStatusMirror()
+    })
+    .catch(() => {})
+  setMirrorSettingsProvider((): MirrorSettings => {
+    const s = settingsStore.get()
+    return {
+      claudePermissionMode: s.claudePermissionMode,
+      autoSupported: localClaudeCaps?.autoPermissionMode === true,
+      claudeAccounts: (s.claudeAccounts ?? [])
+        .filter((a) => !a.host && !a.pending)
+        .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))
+    }
+  })
   wireAgentStatus(platform)
   // `installHooks: false` (tests) skips the merge into the user's real ~/.claude et al —
   // the hook it would write points into `dataDir`, which a test then deletes.
