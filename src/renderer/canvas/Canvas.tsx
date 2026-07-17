@@ -188,7 +188,6 @@ import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shar
 import { createMutationGuard } from '@shared/canvas-mutations'
 import { matchesShortcut } from '@shared/shortcut'
 
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
@@ -226,6 +225,8 @@ import {
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
+
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 const GRID = 24
 
