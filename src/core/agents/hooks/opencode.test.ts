@@ -54,6 +54,193 @@ describe('opencode plugin install', () => {
   })
 })
 
+// Execute the generated plugin body against SDK-shaped inputs. opencode delivers bus
+// events (session.created/idle/error, message.updated, permission.*) ONLY through the
+// `event` catch-all hook — a hook keyed by the event name itself is never called (the
+// original bug: every handler was dead, so no status ever reached the hook server).
+describe('generated plugin behavior (executed)', () => {
+  let posts: Array<{ url: string; payload: Record<string, unknown>; nodeId: string }>
+
+  async function loadHooks(): Promise<Record<string, (input: unknown) => Promise<void>>> {
+    posts = []
+    vi.stubGlobal('fetch', (url: string, init: { body: string }) => {
+      const params = new URLSearchParams(init.body)
+      posts.push({
+        url,
+        nodeId: params.get('nodeId') ?? '',
+        payload: JSON.parse(params.get('payload') ?? '{}')
+      })
+      return Promise.resolve(new Response())
+    })
+    vi.stubEnv('NODETERM_NODE_ID', 'node-1')
+    vi.stubEnv('NODETERM_HOOK_PORT', '43210')
+    vi.stubEnv('NODETERM_HOOK_TOKEN', 'tok')
+    vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
+    const file = path.join(tmp, `plugin-under-test-${Math.random().toString(36).slice(2)}.mjs`)
+    fs.writeFileSync(file, buildOpencodePlugin())
+    const mod = await import(/* @vite-ignore */ `file://${file}`)
+    return mod.NodetermStatus()
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('forwards bus events through the `event` catch-all with the wire-contract names', async () => {
+    const hooks = await loadHooks()
+    expect(typeof hooks.event).toBe('function')
+
+    await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_1' } } } })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    await hooks.event({ event: { type: 'session.error', properties: { sessionID: 'ses_1' } } })
+    await hooks.event({ event: { type: 'permission.updated', properties: { id: 'perm1', sessionID: 'ses_1' } } })
+    await hooks.event({
+      event: { type: 'permission.replied', properties: { sessionID: 'ses_1', permissionID: 'perm1', response: 'once' } }
+    })
+
+    expect(posts.map((p) => p.payload)).toEqual([
+      { event: 'session.created', sessionID: 'ses_1' },
+      { event: 'session.idle', sessionID: 'ses_1' },
+      { event: 'session.error', sessionID: 'ses_1' },
+      { event: 'permission.asked', sessionID: 'ses_1' },
+      { event: 'permission.replied', sessionID: 'ses_1' }
+    ])
+    expect(posts[0].url).toBe('http://127.0.0.1:43210/hook/opencode')
+    expect(posts[0].nodeId).toBe('node-1')
+  })
+
+  it('forwards message.updated only for user messages (turn start)', async () => {
+    const hooks = await loadHooks()
+    await hooks.event({
+      event: { type: 'message.updated', properties: { info: { id: 'm1', sessionID: 'ses_1', role: 'user' } } }
+    })
+    await hooks.event({
+      event: { type: 'message.updated', properties: { info: { id: 'm2', sessionID: 'ses_1', role: 'assistant' } } }
+    })
+    expect(posts.map((p) => p.payload)).toEqual([{ event: 'message.updated', sessionID: 'ses_1', role: 'user' }])
+  })
+
+  it('ignores unrelated bus events (token-stream deltas never reach the hook server)', async () => {
+    const hooks = await loadHooks()
+    await hooks.event({ event: { type: 'message.part.delta', properties: {} } })
+    await hooks.event({ event: { type: 'session.updated', properties: { info: { id: 'ses_1' } } } })
+    expect(posts).toEqual([])
+  })
+
+  it('posts tool.execute.before from the real plugin hook of that name', async () => {
+    const hooks = await loadHooks()
+    await hooks['tool.execute.before']({ tool: 'bash', sessionID: 'ses_1', callID: 'c1' })
+    expect(posts.map((p) => p.payload)).toEqual([{ event: 'tool.execute.before', sessionID: 'ses_1' }])
+  })
+})
+
+// SSH hosts advertise a UNIX SOCKET (NODETERM_HOOK_SOCK), not a TCP port — the endpoint
+// file on a remote host has no PORT line at all. The POSIX managed script posts with
+// `curl --unix-socket`; the plugin must speak the socket too or every opencode status
+// on an SSH project silently vanishes (fetch can't do unix sockets in Node — node:http
+// socketPath is the fallback; under Bun (opencode's runtime) fetch takes `unix`).
+describe('generated plugin unix-socket transport', () => {
+  let sockDir: string
+  beforeEach(() => {
+    sockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-oc-sock-'))
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+    fs.rmSync(sockDir, { recursive: true, force: true })
+  })
+
+  async function importPlugin(): Promise<Record<string, (input: unknown) => Promise<void>>> {
+    const file = path.join(tmp, `plugin-sock-${Math.random().toString(36).slice(2)}.mjs`)
+    fs.writeFileSync(file, buildOpencodePlugin())
+    const mod = await import(/* @vite-ignore */ `file://${file}`)
+    return mod.NodetermStatus()
+  }
+
+  it('posts over the unix socket via node:http when NODETERM_HOOK_SOCK is set (no port)', async () => {
+    const { createServer } = await import('node:http')
+    const sock = path.join(sockDir, 'hook.sock')
+    const received: Array<{ url: string; token: string; body: string }> = []
+    const server = createServer((req, res) => {
+      let body = ''
+      req.on('data', (c: Buffer) => (body += c))
+      req.on('end', () => {
+        received.push({ url: req.url ?? '', token: String(req.headers['x-nodeterm-hook-token']), body })
+        res.end('ok')
+      })
+    })
+    await new Promise<void>((r) => server.listen(sock, r))
+    try {
+      vi.stubEnv('NODETERM_NODE_ID', 'node-ssh')
+      vi.stubEnv('NODETERM_HOOK_SOCK', sock)
+      vi.stubEnv('NODETERM_HOOK_TOKEN', 'socktok')
+      vi.stubEnv('NODETERM_HOOK_PORT', '')
+      vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
+      const hooks = await importPlugin()
+      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+      await vi.waitFor(() => expect(received.length).toBe(1))
+      expect(received[0].url).toBe('/hook/opencode')
+      expect(received[0].token).toBe('socktok')
+      const params = new URLSearchParams(received[0].body)
+      expect(params.get('nodeId')).toBe('node-ssh')
+      expect(JSON.parse(params.get('payload') ?? '{}')).toEqual({ event: 'session.idle', sessionID: 'ses_ssh' })
+    } finally {
+      server.close()
+    }
+  })
+
+  it('reads NODETERM_HOOK_SOCK from the live endpoint file (restart handoff) and prefers it over a TCP port', async () => {
+    const { createServer } = await import('node:http')
+    const sock = path.join(sockDir, 'hook2.sock')
+    const received: string[] = []
+    const server = createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        received.push(req.url ?? '')
+        res.end('ok')
+      })
+    })
+    await new Promise<void>((r) => server.listen(sock, r))
+    const tcpFetch = vi.fn(() => Promise.resolve(new Response()))
+    vi.stubGlobal('fetch', tcpFetch)
+    try {
+      const envFile = path.join(sockDir, 'hook-endpoint.env')
+      fs.writeFileSync(envFile, `NODETERM_HOOK_SOCK=${sock}\nNODETERM_HOOK_TOKEN=filetok\nNODETERM_HOOK_VERSION=1\n`)
+      vi.stubEnv('NODETERM_NODE_ID', 'node-ssh')
+      vi.stubEnv('NODETERM_HOOK_ENDPOINT', envFile)
+      vi.stubEnv('NODETERM_HOOK_PORT', '59999') // stale env port — socket from the file must win
+      vi.stubEnv('NODETERM_HOOK_TOKEN', 'stale')
+      vi.stubEnv('NODETERM_HOOK_SOCK', '')
+      const hooks = await importPlugin()
+      await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+      await vi.waitFor(() => expect(received.length).toBe(1))
+      expect(tcpFetch).not.toHaveBeenCalled()
+    } finally {
+      server.close()
+    }
+  })
+
+  it('uses Bun fetch with the `unix` option when running under Bun', async () => {
+    const calls: Array<{ url: string; init: Record<string, unknown> }> = []
+    vi.stubGlobal('Bun', {})
+    vi.stubGlobal('fetch', (url: string, init: Record<string, unknown>) => {
+      calls.push({ url, init })
+      return Promise.resolve(new Response())
+    })
+    vi.stubEnv('NODETERM_NODE_ID', 'node-ssh')
+    vi.stubEnv('NODETERM_HOOK_SOCK', '/tmp/some.sock')
+    vi.stubEnv('NODETERM_HOOK_TOKEN', 'tok')
+    vi.stubEnv('NODETERM_HOOK_PORT', '')
+    vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
+    const hooks = await importPlugin()
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_ssh' } } })
+    expect(calls.length).toBe(1)
+    expect(calls[0].url).toBe('http://localhost/hook/opencode')
+    expect(calls[0].init.unix).toBe('/tmp/some.sock')
+  })
+})
+
 describe('opencodeConfigDir honors XDG_CONFIG_HOME', () => {
   it('lands the plugin under $XDG_CONFIG_HOME/opencode when the (absolute) env var is set', () => {
     const xdg = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-xdg-'))
