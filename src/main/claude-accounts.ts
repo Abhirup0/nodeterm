@@ -36,6 +36,9 @@ interface AccountCtx {
 const waiters = new Map<string, { cancelled: boolean }>()
 
 async function checkClaudeVersion(): Promise<boolean> {
+  // The < 2.1 warning is about the shared macOS Keychain service; on Linux/Windows
+  // credentials are files inside each config dir, so no version collides.
+  if (process.platform !== 'darwin') return true
   try {
     const claude = await findInLoginPath('claude')
     if (!claude) return false
