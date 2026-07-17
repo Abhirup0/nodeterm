@@ -49,7 +49,8 @@ export class WhisperModelStore {
     const info = whisperModel(id)
     if (!info) return Promise.reject(new Error(`unknown whisper model: ${id}`))
     const abort = new AbortController()
-    const promise = this.run(id, info.file, abort).finally(() => {
+    const genId = Math.random().toString(36).slice(2)
+    const promise = this.run(id, info.file, abort, genId).finally(() => {
       // Only clear our own slot — a delete already removed it.
       if (this.inFlight.get(id)?.abort === abort) this.inFlight.delete(id)
     })
@@ -57,9 +58,9 @@ export class WhisperModelStore {
     return promise
   }
 
-  private async run(id: string, file: string, abort: AbortController): Promise<void> {
+  private async run(id: string, file: string, abort: AbortController, genId: string): Promise<void> {
     await mkdir(this.dir, { recursive: true })
-    const partPath = this.modelPath(id) + '.part'
+    const partPath = this.modelPath(id) + '.part.' + genId
     const res = await this.fetchFn(WHISPER_DOWNLOAD_BASE + file, { signal: abort.signal })
     if (!res.ok || !res.body) throw new Error(`model download failed (${res.status})`)
     const total = Number(res.headers.get('content-length')) || 0
@@ -94,6 +95,12 @@ export class WhisperModelStore {
       inFlight.abort.abort()
       await inFlight.promise.catch(() => {}) // wait out the writer's cleanup
     }
+    // A new download may have started while we awaited the old one's
+    // cleanup — its .part is live; removing files now would yank them out
+    // from under the new writer. The delete's intent (kill the OLD download,
+    // remove the OLD files) is already done: the abort's error path removed
+    // the old .part, and no completed file can exist mid-download.
+    if (this.inFlight.has(id)) return
     await rm(this.modelPath(id), { force: true })
     await rm(this.modelPath(id) + '.part', { force: true })
   }
