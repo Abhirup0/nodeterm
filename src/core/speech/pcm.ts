@@ -47,7 +47,12 @@ export function pcmToWav(pcm: Float32Array, sampleRate = 16000): Uint8Array {
 export function decodePcmPayload(payload: ArrayBuffer | string): Float32Array {
   if (typeof payload === 'string') {
     const raw = Buffer.from(payload, 'base64')
-    return int16ToFloat32(new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2))
+    // Copy out of the Buffer pool: a typed-array view over raw.buffer would
+    // depend on the pool's (undocumented) alignment — an odd byteOffset makes
+    // Int16Array throw. The copy also detaches us from pool reuse.
+    const bytes = new Uint8Array(raw.byteLength)
+    bytes.set(raw)
+    return int16ToFloat32(new Int16Array(bytes.buffer))
   }
   return new Float32Array(payload)
 }

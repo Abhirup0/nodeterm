@@ -30,6 +30,8 @@ describe('pcm helpers', () => {
     expect(Array.from(fromBuffer)).toEqual(Array.from(src))
     const b64 = Buffer.from(float32ToInt16(src).buffer).toString('base64')
     const fromB64 = decodePcmPayload(b64)
+    expect(fromB64[0]).toBeCloseTo(0.25, 2)
+    expect(fromB64[1]).toBeCloseTo(-0.25, 2)
     expect(fromB64[2]).toBeCloseTo(0.75, 2)
   })
 })
