@@ -243,3 +243,31 @@ describe('exec-enabling node fields never travel in the shared project file', ()
     expect(index.entries[0].localExec).toBeUndefined()
   })
 })
+
+describe('kanban board persistence', () => {
+  const board = {
+    columns: [
+      { id: 'kcol-a', title: 'To Do', color: '#0a84ff' },
+      { id: 'kcol-b', title: 'Done', color: '#32d74b' }
+    ],
+    cards: [{ id: 'kcard-1', columnId: 'kcol-a', title: 'ship it', description: '**md**', createdAt: 1752800000000 }]
+  }
+  it('rides the project file round-trip', () => {
+    const f = projectToFile(project({ kanban: board }), 1, '2026-07-18T00:00:00.000Z')
+    expect(f.kanban).toEqual(board)
+    expect(fileToProject(f, {}).kanban).toEqual(board)
+  })
+  it('absent stays absent — no key is written (lazy default rule)', () => {
+    const f = projectToFile(project(), 1, '2026-07-18T00:00:00.000Z')
+    expect('kanban' in f).toBe(false)
+    expect('kanban' in fileToProject(f, {})).toBe(false)
+  })
+  it('board edits break content equality (rev bumps) and survive splitWorkspace (both shells + ssh cache)', () => {
+    const a = projectToFile(project({ kanban: board }), 1, '2026-01-01T00:00:00.000Z')
+    const b = projectToFile(project(), 1, '2026-01-01T00:00:00.000Z')
+    expect(sameProjectContent(a, b)).toBe(false)
+    const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [project({ cwd: '/a/b', kanban: board })] }
+    const { files } = splitWorkspace(ws, () => 1, '2026-01-01T00:00:00.000Z')
+    expect(files.get('/a/b')?.kanban).toEqual(board)
+  })
+})

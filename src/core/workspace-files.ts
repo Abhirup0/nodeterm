@@ -6,7 +6,7 @@ import {
   stripSharedNodeExec,
   type LocalNodeExecMap
 } from '../shared/node-exec'
-import type { BridgeLink, CanvasNodeState, Project, Viewport, Workspace } from '../shared/types'
+import type { BridgeLink, CanvasNodeState, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
@@ -30,6 +30,7 @@ export interface ProjectFileV1 {
   defaultAccountId?: string
   defaultPermissionMode?: AgentPermissionMode
   dinoHighScore?: number
+  kanban?: ProjectKanban
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -111,7 +112,8 @@ export function projectToFile(p: Project, rev: number, savedAt: string): Project
     ...(p.ropes ? { ropes: p.ropes } : {}),
     ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
     ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
-    ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {})
+    ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
+    ...(p.kanban ? { kanban: p.kanban } : {})
   }
 }
 
@@ -140,6 +142,7 @@ export function fileToProject(
     ...(f.defaultAccountId ? { defaultAccountId: f.defaultAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
+    ...(f.kanban ? { kanban: f.kanban } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {})
