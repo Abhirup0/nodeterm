@@ -149,6 +149,10 @@ The inline login/setup pages carry a strict CSP. The built `index.html` ships wi
 WebSocket. If that marker is ever missing, the server logs a loud warning (the WS
 would otherwise be blocked) — rebuild the renderer or update the rewrite.
 
+### Dictation
+
+Voice-to-text input works in the browser via the **same core speech service** the desktop app uses. Dictate with ⌘⇧D (or the dock mic button), and transcribed text lands in the active terminal. **Browser constraints:** `getUserMedia` requires a **secure context** — HTTPS or `localhost`; the microphone permission prompt is the browser's own. **Model storage:** Downloaded models (tiny free tier; larger Pro models) are stored on the **server's data dir** under `speech-models/`, persisted across sessions and server restarts.
+
 ## Documented deviations from the spec
 
 Two intentional departures from `docs/superpowers/specs/2026-07-10-server-edition-design.md`:
