@@ -47,6 +47,9 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "nodeterm uses the microphone so you can dictate into your terminals."
+      },
       "target": [
         {
           "target": "dmg",
