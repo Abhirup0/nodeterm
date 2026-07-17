@@ -85,3 +85,38 @@ jobs:
       #     ssh-keyscan nodeterm.dev >> ~/.ssh/known_hosts
       #     rsync -avz dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap \
       #       deploy@nodeterm.dev:/var/www/nodeterm.dev/updates/
+
+  # Linux build: unsigned, so it runs on a plain GitHub runner (fast + free tier), in
+  # parallel with the self-hosted mac job — it must never queue behind notarization.
+  # Publishes AppImage + deb + latest-linux.yml to the SAME tag's GitHub Release; the
+  # nodeterm.dev update feed serves latest-linux.yml alongside the mac files.
+  release-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Linux packages
+        run: |
+          npm run make-icon
+          npm run build
+          npx electron-builder --linux --publish never
+
+      # Both jobs target the release for the same tag; softprops updates an existing
+      # release rather than failing, so mac/linux artifact sets merge. (A same-instant
+      # creation race is theoretically possible — rerunning the failed job resolves it.)
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/latest-linux.yml
+            dist/*.blockmap
