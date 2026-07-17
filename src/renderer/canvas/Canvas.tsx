@@ -186,6 +186,9 @@ import {
 } from '@shared/canvas-publish'
 import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
 import { createMutationGuard } from '@shared/canvas-mutations'
+import { matchesShortcut } from '@shared/shortcut'
+
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
@@ -2442,13 +2445,18 @@ export function Canvas() {
     requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
   }, [])
 
-  // ⌘T = new terminal, ⌘⇧C = new default agent, ⌘⇧D = toggle dictation (ignored while typing in
-  // a field/terminal).
+  // ⌘T = new terminal, ⌘⇧C = new default agent, configured dictation shortcut (default ⌘⇧D) =
+  // toggle dictation (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
+      if (matchesShortcut(e, useSettings.getState().settings.speech.shortcut, isMac)) {
+        e.preventDefault()
+        toggleDictation()
+        return
+      }
       const k = e.key.toLowerCase()
       if (k === 't' && !e.shiftKey) {
         e.preventDefault()
@@ -2456,9 +2464,6 @@ export function Canvas() {
       } else if (k === 'c' && e.shiftKey) {
         e.preventDefault()
         addAgentNode(useSettings.getState().settings.defaultAgent)
-      } else if (k === 'd' && e.shiftKey) {
-        e.preventDefault()
-        toggleDictation()
       }
     }
     window.addEventListener('keydown', onKey)

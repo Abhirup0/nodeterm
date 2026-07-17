@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { formatShortcut } from '@shared/shortcut'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { accountsForProject, sshAccountsHint } from '../state/workspace'
+
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 interface DockProps {
   dirty: boolean
@@ -55,6 +58,7 @@ export function Dock({
   dictateActive
 }: DockProps) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const dictationShortcut = useSettings((s) => s.settings.speech.shortcut)
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
@@ -183,7 +187,7 @@ export function Dock({
         </button>
         <button
           className={`dock-btn${dictateActive ? ' active' : ''}`}
-          title="Dictate (⌘⇧D)"
+          title={`Dictate (${formatShortcut(dictationShortcut, isMac)})`}
           onClick={onDictate}
         >
           <MicIcon />

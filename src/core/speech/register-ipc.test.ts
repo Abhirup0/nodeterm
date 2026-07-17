@@ -19,7 +19,10 @@ function setup(engine: 'whisper' | 'cloud' = 'whisper') {
   registerSpeechIpc({
     handle: (ch, fn) => handlers.set(ch, fn),
     service, models,
-    settings: () => ({ ...DEFAULT_SETTINGS, speech: { engine, model: 'tiny', language: 'auto' } }),
+    settings: () => ({
+      ...DEFAULT_SETTINGS,
+      speech: { engine, model: 'tiny', language: 'auto', shortcut: DEFAULT_SETTINGS.speech.shortcut }
+    }),
     licenseToken: () => null,
     apiBase: 'https://api.example.dev',
     fetchFn: (async () => ({ ok: false, status: 404, json: async () => ({}) })) as any,

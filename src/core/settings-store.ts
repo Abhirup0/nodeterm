@@ -5,6 +5,20 @@ import { platform } from './platform'
 import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
 
 /**
+ * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
+ * `{ ...DEFAULT_SETTINGS, ...saved }` shallow merge is right for top-level keys (a missing key
+ * picks up the default), but WRONG for nested objects: an old `settings.json` that has a
+ * `speech` object without a newly-added key (e.g. `shortcut`) would have its whole `speech`
+ * object override the default one-for-one, silently dropping the new key. `speech` is merged
+ * one level deeper so old files still pick up new nested defaults.
+ */
+function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
+  const merged = { ...DEFAULT_SETTINGS, ...saved }
+  merged.speech = { ...DEFAULT_SETTINGS.speech, ...saved?.speech }
+  return merged
+}
+
+/**
  * Stores user settings in settings.json. Keeps a synchronous cache so the PtyManager
  * can read shell/tmux preferences immediately at terminal creation.
  */
@@ -19,7 +33,7 @@ export class SettingsStore {
   init(): void {
     try {
       const raw = readFileSync(this.filePath, 'utf-8')
-      this.cache = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+      this.cache = mergeSettings(JSON.parse(raw))
     } catch {
       this.cache = DEFAULT_SETTINGS
     }
@@ -32,7 +46,7 @@ export class SettingsStore {
   registerIpc(): void {
     platform().handle(IPC.settingsLoad, () => this.cache)
     platform().handle(IPC.settingsSave, async (settings: Settings) => {
-      this.cache = { ...DEFAULT_SETTINGS, ...settings }
+      this.cache = mergeSettings(settings)
       // Atomic write (temp + rename) so a mid-write crash can't corrupt settings.json.
       const tmp = `${this.filePath}.tmp`
       await fs.writeFile(tmp, JSON.stringify(this.cache, null, 2), 'utf-8')

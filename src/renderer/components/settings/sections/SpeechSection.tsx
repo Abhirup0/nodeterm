@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SpeechModelInfo } from '@shared/types'
+import { DEFAULT_SETTINGS } from '@shared/types'
+import { captureToShortcut, formatShortcut, type ShortcutKeyEvent } from '@shared/shortcut'
 import { useSettings } from '../../../state/settings'
 import { useEntitlement } from '../../../state/entitlement'
 import { SettingsSection } from '../SettingsSection'
@@ -10,10 +12,17 @@ import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import type { SettingsSectionId } from '../nav'
 
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+const DEFAULT_SHORTCUT = DEFAULT_SETTINGS.speech.shortcut
+
 const ROWS = {
   engine: {
     title: 'Speech engine',
     keywords: ['speech', 'dictation', 'whisper', 'cloud', 'engine', 'voice', 'microphone']
+  },
+  shortcut: {
+    title: 'Dictation shortcut',
+    keywords: ['shortcut', 'dictation', 'hotkey', 'keybinding', 'press-to-talk', 'microphone']
   },
   models: {
     title: 'Whisper models',
@@ -35,6 +44,72 @@ const ROWS = {
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+/** Focus -> "Press keys…" -> keydown capture (must include Cmd/Ctrl + a non-modifier key) ->
+ *  saves the canonical combo. Esc cancels; blur cancels; a separate Reset button restores the
+ *  default. Pure combo logic lives in `@shared/shortcut` (parse/match/format/capture). */
+function ShortcutCaptureField({
+  value,
+  onChange
+}: {
+  value: string
+  onChange: (combo: string) => void
+}): React.JSX.Element {
+  const [capturing, setCapturing] = useState(false)
+  const [hint, setHint] = useState('')
+
+  const stopCapturing = (): void => {
+    setCapturing(false)
+    setHint('')
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (!capturing) return
+    e.preventDefault()
+    if (e.key === 'Escape') {
+      stopCapturing()
+      return
+    }
+    const evt: ShortcutKeyEvent = {
+      metaKey: e.metaKey,
+      ctrlKey: e.ctrlKey,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      key: e.key
+    }
+    const combo = captureToShortcut(evt, isMac)
+    if (!combo) {
+      setHint(isMac ? `Hold ⌘ and press a key` : `Hold Ctrl and press a key`)
+      return
+    }
+    onChange(combo)
+    stopCapturing()
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        className="min-w-[140px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]"
+        onClick={() => {
+          setCapturing(true)
+          setHint('')
+        }}
+        onKeyDown={onKeyDown}
+        onBlur={stopCapturing}
+      >
+        {capturing ? hint || 'Press keys…' : formatShortcut(value, isMac)}
+      </button>
+      <Button
+        variant="ghost"
+        disabled={value === DEFAULT_SHORTCUT}
+        onClick={() => onChange(DEFAULT_SHORTCUT)}
+      >
+        Reset
+      </Button>
+    </div>
+  )
+}
 
 const LANGUAGES: { value: string; label: string }[] = [
   { value: 'auto', label: 'Auto-detect' },
@@ -116,6 +191,9 @@ export function SpeechSection({
   const setLanguage = (language: string): void => {
     update({ speech: { ...settings.speech, language } })
   }
+  const setShortcut = (shortcut: string): void => {
+    update({ speech: { ...settings.speech, shortcut } })
+  }
 
   const selectModel = (m: SpeechModelInfo): void => {
     if (m.pro && !isPremium) {
@@ -187,6 +265,14 @@ export function SpeechSection({
               onChange={setEngine}
             />
           }
+        />
+      </SearchableRow>
+
+      <SearchableRow {...ROWS.shortcut}>
+        <FieldRow
+          label="Shortcut"
+          description="Press-to-talk: starts recording immediately, press again to stop and insert. The Dock mic uses the same shortcut."
+          control={<ShortcutCaptureField value={settings.speech.shortcut} onChange={setShortcut} />}
         />
       </SearchableRow>
 
