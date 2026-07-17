@@ -20,6 +20,9 @@ interface TabBarProps {
   /** Reconnect an offline (dropped) relay tab in place (Stage 4 Task 7). Called when an
    *  "unavailable" tab whose session is a relay/server source is clicked. */
   onReconnect: (id: string) => void
+  /** Reorder a project to sit before another (null = to the end). Shared with the sessions
+   *  sidebar: both surfaces render the projects array, so one drag updates both. */
+  onReorder: (draggedId: string, beforeId: string | null) => void
   /** Open the start screen (New project / Open folder / Clone repo) — what "+" now shows. */
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
@@ -59,6 +62,7 @@ function TabSessionLabel({ projectId }: { projectId: string }) {
 export function TabBar({
   onSwitch,
   onReconnect,
+  onReorder,
   onOpenWelcome,
   onRename,
   onSetFolder,
@@ -85,6 +89,9 @@ export function TabBar({
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  // Tab drag-reorder: the project id being dragged + the current drop target ('' = end zone).
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropId, setDropId] = useState<string | null>(null)
   // Whether the caret menu's "Default Claude account" group is expanded (inline, in-place).
   const [acctOpen, setAcctOpen] = useState(false)
   // Whether the caret menu's "Default permission mode" group is expanded (same idiom as acctOpen).
@@ -207,6 +214,19 @@ export function TabBar({
             // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
             if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
           }}
+          // The strip itself is the "drop at the end" zone (per-tab handlers stopPropagation).
+          onDragOver={(e) => {
+            if (!dragId) return
+            e.preventDefault()
+            if (dropId !== '') setDropId('')
+          }}
+          onDrop={(e) => {
+            if (!dragId) return
+            e.preventDefault()
+            onReorder(dragId, null)
+            setDragId(null)
+            setDropId(null)
+          }}
         >
           {projects.map((p) => {
             const active = p.id === activeId
@@ -214,8 +234,35 @@ export function TabBar({
             return (
               <div
                 key={p.id}
-                className={`tab${active ? ' active' : ''}${p.unavailable ? ' unavailable' : ''}`}
+                className={`tab${active ? ' active' : ''}${p.unavailable ? ' unavailable' : ''}${dropId === p.id ? ' is-drop-before' : ''}`}
                 style={active ? { color: p.color } : undefined}
+                draggable={editingId !== p.id}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = 'move'
+                  setDragId(p.id)
+                }}
+                onDragEnd={() => {
+                  setDragId(null)
+                  setDropId(null)
+                }}
+                onDragOver={(e) => {
+                  if (!dragId) return
+                  // Swallow even over the dragged tab itself, so the strip's end-zone
+                  // highlight doesn't flicker on while passing over it.
+                  e.stopPropagation()
+                  if (dragId === p.id) return
+                  e.preventDefault()
+                  if (dropId !== p.id) setDropId(p.id)
+                }}
+                onDragLeave={() => setDropId((d) => (d === p.id ? null : d))}
+                onDrop={(e) => {
+                  if (!dragId || dragId === p.id) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onReorder(dragId, p.id)
+                  setDragId(null)
+                  setDropId(null)
+                }}
                 onClick={() => {
                   if (editingId) return
                   // An unavailable tab distinguishes by its bound session source: a dropped RELAY

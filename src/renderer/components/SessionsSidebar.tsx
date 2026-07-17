@@ -32,6 +32,9 @@ export interface SessionsSidebarProps {
   onAiNameGroup(projectId: string, groupId: string, memberIds: string[], cwd?: string): void | Promise<void>
   /** Reorder a session to sit immediately before another (within/across containers). */
   onReorder(projectId: string, draggedId: string, beforeId: string): void
+  /** Reorder a project to sit before another (null = to the end). Shared order with the
+   *  tab bar: both render the projects array, so one drag updates both surfaces. */
+  onReorderProject(draggedId: string, beforeId: string | null): void
   onMouseEnter?(): void
   onMouseLeave?(): void
 }
@@ -57,6 +60,10 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   // Drag-to-group: the session being dragged, and the current drop target for highlighting.
   const [drag, setDrag] = useState<{ projectId: string; nodeId: string } | null>(null)
   const [dropKey, setDropKey] = useState<string | null>(null)
+  // Project reorder: the project being dragged (by its header) + the project it would land
+  // before ('' = end of the list). Distinct from the session drag above — one at a time.
+  const [dragProj, setDragProj] = useState<string | null>(null)
+  const [dropProj, setDropProj] = useState<string | null>(null)
   // Inline group rename: the group node id being edited + its draft title.
   const [editGroup, setEditGroup] = useState<{ id: string; draft: string } | null>(null)
 
@@ -135,6 +142,27 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const dropClass = (projectId: string, groupId: string | null): string =>
     dropKey === dropTargetKey(projectId, groupId) ? ' is-drop-target' : ''
 
+  // Project-header drop wiring while a PROJECT drag is in flight (the session dropProps above
+  // take the header otherwise — only one kind of drag happens at a time).
+  const projDropProps = (projectId: string): React.HTMLAttributes<HTMLDivElement> => ({
+    onDragOver: (e) => {
+      if (!dragProj) return
+      e.stopPropagation()
+      if (dragProj === projectId) return
+      e.preventDefault()
+      if (dropProj !== projectId) setDropProj(projectId)
+    },
+    onDragLeave: () => setDropProj((d) => (d === projectId ? null : d)),
+    onDrop: (e) => {
+      if (!dragProj || dragProj === projectId) return
+      e.preventDefault()
+      e.stopPropagation()
+      props.onReorderProject(dragProj, projectId)
+      setDragProj(null)
+      setDropProj(null)
+    }
+  })
+
   // A row is both draggable and a drop target: dropping another row onto it reorders the
   // dragged session to sit immediately before this one. stopPropagation keeps the enclosing
   // group/ungrouped drop zone (which appends) from also firing.
@@ -211,18 +239,49 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         />
       </div>
 
-      <div className="sessions-sidebar__body">
+      <div
+        className="sessions-sidebar__body"
+        // The body's empty space is the project drag's "drop at the end" zone (headers
+        // stopPropagation their own drops).
+        onDragOver={(e) => {
+          if (!dragProj) return
+          e.preventDefault()
+          if (dropProj !== '') setDropProj('')
+        }}
+        onDrop={(e) => {
+          if (!dragProj) return
+          e.preventDefault()
+          props.onReorderProject(dragProj, null)
+          setDragProj(null)
+          setDropProj(null)
+        }}
+      >
         {groups.length === 0 && <div className="sessions-sidebar__empty">No sessions yet.</div>}
         {groups.map((g) => {
           const isCollapsed = isGroupCollapsed(overrides, g.projectId, g.isActive)
           const signals = projectSignalCounts(g)
           return (
-            <div key={g.projectId} className={`ss-group${g.isActive ? ' is-active' : ''}`}>
+            <div
+              key={g.projectId}
+              className={`ss-group${g.isActive ? ' is-active' : ''}${dropProj === g.projectId ? ' is-drop-before' : ''}`}
+              // While a project drag is in flight the whole block is a REORDER target (the
+              // session drop handlers below no-op and let the events bubble up here).
+              {...(dragProj ? projDropProps(g.projectId) : {})}
+            >
               <div
                 className={`ss-group__head${dropClass(g.projectId, null)}`}
                 onClick={() => toggleCollapse(g.projectId, isCollapsed)}
                 onContextMenu={(e) => props.onProjectContextMenu(e, g.projectId)}
                 title={drag?.projectId === g.projectId ? 'Drop here to remove from group' : undefined}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = 'move'
+                  setDragProj(g.projectId)
+                }}
+                onDragEnd={() => {
+                  setDragProj(null)
+                  setDropProj(null)
+                }}
                 {...dropProps(g.projectId, null)}
               >
                 <span className="ss-group__chev">{isCollapsed ? '▶' : '▼'}</span>

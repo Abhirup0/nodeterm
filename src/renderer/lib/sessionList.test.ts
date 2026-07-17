@@ -44,10 +44,10 @@ describe('isGroupCollapsed', () => {
 })
 
 describe('buildSessionList', () => {
-  it('groups by project with the active project first', () => {
+  it('keeps store order (mirrors the tab bar) regardless of which project is active', () => {
     const groups = buildSessionList(projects(), null, 'p2', {}, '')
-    expect(groups.map((g) => g.projectId)).toEqual(['p2', 'p1'])
-    expect(groups[0].isActive).toBe(true)
+    expect(groups.map((g) => g.projectId)).toEqual(['p1', 'p2'])
+    expect(groups.find((g) => g.projectId === 'p2')!.isActive).toBe(true)
   })
 
   it('keeps only terminal/agent nodes and flags agents', () => {

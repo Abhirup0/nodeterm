@@ -81,6 +81,9 @@ interface ProjectsState {
   /** Reorders a node to sit immediately before another (sidebar order = array order),
    *  joining the target's container if they differ. */
   reorderNode(projectId: string, draggedId: string, beforeId: string): void
+  /** Reorders a project to sit immediately before another (tab bar + sidebar order = array
+   *  order), or to the end with beforeId = null. Closed projects keep their slots. */
+  reorderProject(draggedId: string, beforeId: string | null): void
   /** Removes a project permanently; returns the id that should become active ('' = welcome). */
   deleteProject(id: string): string
   /** Hides a project from the tab bar without destroying it; returns the next active open
@@ -325,6 +328,19 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         return [...without.slice(0, idx), moved, ...without.slice(idx)]
       })
     }))
+  },
+
+  reorderProject(draggedId, beforeId) {
+    set((s) => {
+      if (draggedId === beforeId) return s
+      const dragged = s.projects.find((p) => p.id === draggedId)
+      if (!dragged) return s
+      const without = s.projects.filter((p) => p.id !== draggedId)
+      const idx = beforeId ? without.findIndex((p) => p.id === beforeId) : -1
+      // Unknown/null target → append (the "drop at the end" zone).
+      const at = idx === -1 ? without.length : idx
+      return { projects: [...without.slice(0, at), dragged, ...without.slice(at)] }
+    })
   },
 
   deleteProject(id) {

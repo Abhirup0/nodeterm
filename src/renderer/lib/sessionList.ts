@@ -184,8 +184,7 @@ export function buildSessionList(
     }
   })
 
-  const ordered = [...groups.filter((g) => g.isActive), ...groups.filter((g) => !g.isActive)]
-  return needle
-    ? ordered.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0)
-    : ordered
+  // Store order, NOT active-first: the sidebar mirrors the tab bar (both read the projects
+  // array), and hoisting the active project to the top made every click reshuffle the list.
+  return needle ? groups.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0) : groups
 }

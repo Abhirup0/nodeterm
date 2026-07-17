@@ -4732,6 +4732,16 @@ export function Canvas() {
 
   // Sidebar reorder: place draggedId immediately before beforeId (sidebar order = node order),
   // joining the target's container if they differ.
+  // Reorder a project (tab-bar drag or sidebar header drag — both surfaces share the projects
+  // array, so a change in one immediately reflects in the other). Persisted like reorderNode.
+  const reorderProject = useCallback(
+    (draggedId: string, beforeId: string | null) => {
+      useProjects.getState().reorderProject(draggedId, beforeId)
+      void writeDisk()
+    },
+    [writeDisk]
+  )
+
   const reorderSession = useCallback(
     (projectId: string, draggedId: string, beforeId: string) => {
       if (projectId === activeProjectId) {
@@ -5454,6 +5464,7 @@ export function Canvas() {
       <TabBar
         onSwitch={switchProject}
         onReconnect={reconnectRelay}
+        onReorder={reorderProject}
         onOpenWelcome={() => setWelcomeOpen(true)}
         onRename={renameProject}
         onSetFolder={setProjectFolder}
@@ -5883,6 +5894,7 @@ export function Canvas() {
         onFocusNode={focusNodeById}
         onCloseSession={closeSession}
         onRenameSession={renameSession}
+        onReorderProject={reorderProject}
         onAiNameSession={aiNameSession}
         onAiNameGroup={aiNameGroup}
         onMoveToGroup={moveSessionToGroup}
