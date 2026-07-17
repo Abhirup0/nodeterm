@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WhisperModelStore } from './whisper-models'
@@ -78,5 +78,32 @@ describe('WhisperModelStore', () => {
     await del
     await expect(second).resolves.toBeUndefined()
     expect(await store.has('tiny')).toBe(true)
+  })
+
+  it('sweeps orphaned .part.<genId> files on download', async () => {
+    const store = new WhisperModelStore({ dir, fetchFn: fakeFetch(new Uint8Array(64)) })
+    // Pre-create a fake orphan from a previous crash
+    writeFileSync(join(dir, 'ggml-tiny.bin.part.deadbeef'), 'junk')
+    expect(existsSync(join(dir, 'ggml-tiny.bin.part.deadbeef'))).toBe(true)
+
+    await store.download('tiny')
+
+    // Orphan should be gone, model should exist
+    expect(existsSync(join(dir, 'ggml-tiny.bin.part.deadbeef'))).toBe(false)
+    expect(await store.has('tiny')).toBe(true)
+  })
+
+  it('delete() removes orphaned .part.<genId> files when nothing is in flight', async () => {
+    const store = new WhisperModelStore({ dir, fetchFn: fakeFetch(new Uint8Array(64)) })
+    // Pre-create the model and an orphan
+    writeFileSync(store.modelPath('tiny'), 'model')
+    writeFileSync(store.modelPath('tiny') + '.part.orphan123', 'junk')
+    expect(await store.has('tiny')).toBe(true)
+
+    await store.delete('tiny')
+
+    // Both should be gone
+    expect(await store.has('tiny')).toBe(false)
+    expect(existsSync(store.modelPath('tiny') + '.part.orphan123')).toBe(false)
   })
 })

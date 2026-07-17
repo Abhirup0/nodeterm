@@ -1,12 +1,12 @@
 import { createWriteStream } from 'node:fs'
-import { mkdir, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { WHISPER_DOWNLOAD_BASE, WHISPER_MODELS, whisperModel } from '../../shared/speech'
 
 /** Downloads and manages the local ggml whisper models. The fences here are
- * lessons already paid for on iOS: a download streams to `<file>.part` and
- * renames only on completion; delete() aborts an in-flight download and a
+ * lessons already paid for on iOS: a download streams to a per-download `<file>.part.<genId>`
+ * and renames only on completion; delete() aborts an in-flight download and a
  * late chunk can never resurrect a deleted model; concurrent download() of
  * the same id joins the same promise instead of racing two writers. */
 export class WhisperModelStore {
@@ -49,6 +49,7 @@ export class WhisperModelStore {
     const info = whisperModel(id)
     if (!info) return Promise.reject(new Error(`unknown whisper model: ${id}`))
     const abort = new AbortController()
+    // Math.random suffices: not a security boundary, just a scratch-name de-collider.
     const genId = Math.random().toString(36).slice(2)
     const promise = this.run(id, info.file, abort, genId).finally(() => {
       // Only clear our own slot — a delete already removed it.
@@ -58,8 +59,26 @@ export class WhisperModelStore {
     return promise
   }
 
+  /** Remove every .part.<genId> variant for this id. Part names are
+   * per-download (see run()), so a hard crash can strand orphans that no
+   * deterministic rm would ever find — sweep by prefix instead. */
+  private async removeParts(id: string): Promise<void> {
+    const base = this.modelPath(id)
+    const prefix = `${base.split('/').pop()}.part`
+    const entries = await readdir(this.dir).catch(() => [] as string[])
+    await Promise.all(
+      entries.filter((e) => e.startsWith(prefix)).map((e) => rm(join(this.dir, e), { force: true })),
+    )
+  }
+
   private async run(id: string, file: string, abort: AbortController, genId: string): Promise<void> {
     await mkdir(this.dir, { recursive: true })
+    // Sweep stale .part.<*> orphans before creating the new part file. The
+    // in-flight dedupe guarantees no OTHER live writer for this id exists, so
+    // we can only ever remove abandoned fragments from prior hard crashes.
+    if (this.inFlight.get(id)?.abort === abort) {
+      await this.removeParts(id)
+    }
     const partPath = this.modelPath(id) + '.part.' + genId
     const res = await this.fetchFn(WHISPER_DOWNLOAD_BASE + file, { signal: abort.signal })
     if (!res.ok || !res.body) throw new Error(`model download failed (${res.status})`)
@@ -102,6 +121,6 @@ export class WhisperModelStore {
     // the old .part, and no completed file can exist mid-download.
     if (this.inFlight.has(id)) return
     await rm(this.modelPath(id), { force: true })
-    await rm(this.modelPath(id) + '.part', { force: true })
+    await this.removeParts(id)
   }
 }
