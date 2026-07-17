@@ -184,7 +184,7 @@ export function Dock({
         </button>
         <button
           className={`dock-btn${dictateActive ? ' active' : ''}`}
-          title="Dictate (⌘⇧D)"
+          title={hintLabel('Dictate (⌘⇧D)')}
           onClick={onDictate}
         >
           <MicIcon />
