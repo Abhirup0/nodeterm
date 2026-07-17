@@ -3,14 +3,18 @@ import { RemoteHooks } from './remote-hooks'
 
 const conn = { host: 'h', user: 'u' }
 
-function mk() {
+function mk(opts: { verifyAnswers?: string[] } = {}) {
   const calls: { args: string[]; stdin?: string }[] = []
+  // Tunnel-verify curl answers, consumed in order (default: healthy on the first try).
+  const verifyAnswers = [...(opts.verifyAnswers ?? ['204'])]
   const run = vi.fn(async (args: string[], stdin?: string) => {
     calls.push({ args, stdin })
     const joined = args.join(' ')
     // resolve the remote $HOME probe → absolute remote paths build from this.
     if (joined.includes('$HOME')) return { code: 0, stdout: '/home/u' }
     if (joined.includes('cat /home/u/.claude/settings.json')) return { code: 0, stdout: '{}' }
+    // the end-to-end tunnel verification curl (runs in ARGS, unlike the script's stdin curl).
+    if (joined.includes('%{http_code}')) return { code: 0, stdout: verifyAnswers.shift() ?? '204' }
     return { code: 0, stdout: '' }
   })
   return { rh: new RemoteHooks({ run }), calls, run }
@@ -46,6 +50,46 @@ describe('RemoteHooks.setup', () => {
     expect(calls.some((c) => (c.stdin ?? '').includes('"hooks"'))).toBe(true)
     // no unexpanded tilde survives in any remote path/command.
     expect(joined.some((j) => j.includes('~/'))).toBe(false)
+  })
+
+  it('verifies the tunnel end-to-end and heals a stale forward with one rebind', async () => {
+    // First verify sees a dead target (a reused live-orphan master serving a previous run's
+    // forward — the field case that killed remote statuses for hours); the rebind fixes it.
+    const { rh, calls } = mk({ verifyAnswers: ['000', '204'] })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+    const joined = calls.map((c) => c.args.join(' '))
+    expect(joined.filter((j) => j.includes('-O forward')).length).toBe(2)
+    // The retry clears our own possibly-registered spec before rebinding.
+    expect(joined.some((j) => j.includes('-O cancel'))).toBe(true)
+    // The verify curl runs on the HOST through the sock with the fresh token.
+    expect(joined.some((j) => j.includes('--unix-socket') && j.includes('x-nodeterm-hook-token: tok'))).toBe(true)
+  })
+
+  it('refuses to advertise a tunnel that never verifies — no endpoint file, null result', async () => {
+    const { rh, calls } = mk({ verifyAnswers: ['000', '000'] })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res).toBeNull()
+    // The endpoint file must NOT be written: sessions would source a socket that answers nothing.
+    expect(calls.map((c) => c.args.join(' ')).some((j) => j.includes('hook-endpoint-p1.env'))).toBe(false)
+  })
+
+  it('a failed -O forward bind is retried, never trusted', async () => {
+    const calls: { args: string[] }[] = []
+    let forwards = 0
+    const run = vi.fn(async (args: string[]) => {
+      calls.push({ args })
+      const joined = args.join(' ')
+      if (joined.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+      if (joined.includes('-O forward')) return { code: ++forwards === 1 ? 1 : 0, stdout: '' }
+      if (joined.includes('%{http_code}')) return { code: 0, stdout: '204' }
+      if (joined.includes('cat /home/u/.claude/settings.json')) return { code: 0, stdout: '{}' }
+      return { code: 0, stdout: '' }
+    })
+    const rh = new RemoteHooks({ run })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+    expect(forwards).toBe(2)
   })
 
   it('gives two different projects (or a browse) distinct endpoint files — no shared clobber', async () => {

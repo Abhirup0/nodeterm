@@ -45,7 +45,12 @@ export class RemoteHooks {
     controlPath: string,
     hook: { port: number; token: string; version: string }
   ): Promise<{ endpointPath: string } | null> {
-    if (!hook.port || !hook.token) return null
+    if (!hook.port || !hook.token) {
+      // Not just fail-open noise: on a reused live-orphan ControlMaster this leaves the master
+      // serving a PREVIOUS app run's forward (dead port) with nothing ever rebinding it.
+      console.warn('[remote-hooks] hook server not ready at connect — remote agents run without hooks')
+      return null
+    }
     try {
       // 0. resolve the remote $HOME once → build all remote paths absolute (no unexpanded ~).
       const { code, stdout } = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
@@ -61,11 +66,34 @@ export class RemoteHooks {
       // silently → no status badge / context meter / subagent cards / session-name sync on ANY SSH
       // node. A per-project file means each session sources ITS OWN project's live sock.
       const endpoint = `${remoteDir}/hook-endpoint-${projectId}.env`
-      // 1. reverse unix-socket forward (stale socket → remove first so -R can bind).
-      await this.r.run(childArgs(conn, controlPath, `mkdir -p ${remoteDir} && rm -f ${sock}`))
-      await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
+      // 1. reverse unix-socket forward, VERIFIED end-to-end before anything advertises it.
+      // A reused live-orphan master (app relaunch; ControlMaster children outlive the app) can
+      // carry a stale forward from the previous run — same path, DEAD port. sshd even serves
+      // several listeners for one path across rm+rebind cycles (observed in the field: two fds
+      // on one sshd). Binding is therefore not evidence of a working tunnel; only an HTTP
+      // answer from THIS app run's hook server is. Field case: every remote hook POST died
+      // against a dead port for hours — no badges, no context meter — with zero symptoms,
+      // because every step here was silently fail-open.
+      let verified = false
+      for (let attempt = 0; attempt < 2 && !verified; attempt++) {
+        if (attempt > 0) {
+          // Our own spec may already be registered (a reconnect this run) — clear it first.
+          await this.r.run(hookForwardCancelArgs(conn, controlPath, sock, hook.port)).catch(() => {})
+        }
+        await this.r.run(childArgs(conn, controlPath, `mkdir -p ${remoteDir} && rm -f ${sock}`))
+        const fwd = await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
+        if (fwd.code !== 0) continue
+        verified = await this.verifyTunnel(conn, controlPath, sock, hook.token)
+      }
+      if (!verified) {
+        console.warn(
+          `[remote-hooks] reverse hook tunnel failed verification for ${projectId} — remote agents run without status hooks`
+        )
+        return null
+      }
       this.specs.set(projectId, { sock, port: hook.port })
-      // 2. remote endpoint file (0600 via umask).
+      // 2. remote endpoint file (0600 via umask) — written only after the tunnel proved live,
+      // so sessions are never pointed at a socket that answers nothing.
       await this.r.run(
         childArgs(conn, controlPath, `umask 077; cat > ${endpoint}`),
         remoteEndpointFileContents(sock, hook.token, hook.version)
@@ -190,6 +218,30 @@ export class RemoteHooks {
       )
     } catch {
       /* fail-open: a failed remote read/write must never break the connect */
+    }
+  }
+
+  /**
+   * Prove the forward reaches THIS app run: POST through the remote sock with the fresh token
+   * and require the hook server's own 204 — the same transport (`curl --unix-socket`) the
+   * managed hook script uses, run ON the host. `000`/curl-fail = the listener's target is dead
+   * (a stale forward from a previous run). No `payload` field is sent, so the server records
+   * nothing (its listener path needs one).
+   */
+  private async verifyTunnel(
+    conn: SshConnection,
+    controlPath: string,
+    sock: string,
+    token: string
+  ): Promise<boolean> {
+    try {
+      const cmd =
+        `curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST --unix-socket ${posixQuote(sock)} ` +
+        `-H ${posixQuote(`x-nodeterm-hook-token: ${token}`)} http://localhost/hook/verify --data nodeId=verify`
+      const r = await this.r.run(childArgs(conn, controlPath, cmd))
+      return r.code === 0 && r.stdout.trim() === '204'
+    } catch {
+      return false
     }
   }
 
