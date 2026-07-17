@@ -360,6 +360,13 @@ export class WorkspaceStore {
     return (this.index?.entries ?? []).filter((e) => e.ssh).map((e) => e.id)
   }
 
+  /** The local ref cwds of the current index — the workspace half of the phone bridge's fs/git
+   *  jail. The phone browses EVERY project over `projects.list`, so jailing to only the active
+   *  canvas's node cwds denied any project the desktop didn't happen to have focused. */
+  localProjectCwds(): string[] {
+    return (this.index?.entries ?? []).filter((e) => e.cwd).map((e) => e.cwd!)
+  }
+
   /** Node ids of an ssh project's cached file — the slice of the agent-status mirror its host
    *  receives (see remote-status-push.ts). Empty when the project isn't an ssh entry. */
   sshProjectNodeIds(projectId: string): Set<string> {

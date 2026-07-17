@@ -1055,7 +1055,11 @@ app.whenReady().then(async () => {
   const hostBridge = {
     git: gitService,
     registerNode: (projectId: string, node: { id: string; title?: string; agentId?: string }) =>
-      workspaceStore.appendRemoteNode(projectId, node)
+      workspaceStore.appendRemoteNode(projectId, node),
+    // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
+    // its fs/git access spans every local project root — not just the tab the desktop happens
+    // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
+    workspaceRoots: () => workspaceStore.localProjectCwds()
   }
   initRemoteHost(win, ptyManager, listProjectsOutput, hostBridge)
   // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class

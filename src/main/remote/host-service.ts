@@ -695,6 +695,10 @@ export interface HostSessionOptions {
   git?: HostGitOps
   /** Registers a phone-started session as a project node (`projects.registerNode`). Optional. */
   registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
+   *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
+   *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
+  extraRoots?: () => string[]
   /**
    * A peer completed the E2EE handshake and awaits an approval decision. The caller inspects the
    * session (sas / peerPublicKeyB64) and either approves immediately (pin-once) or prompts the
@@ -807,7 +811,7 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     opts.pty,
     socket,
     fsOps,
-    () => rootsFromCanvas(opts.getLatestCanvas()),
+    () => [...rootsFromCanvas(opts.getLatestCanvas()), ...(opts.extraRoots?.() ?? [])],
     opts.listProjects ?? (async () => ''),
     opts.getClientId ?? (() => null),
     opts.git,
@@ -831,6 +835,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
 export interface HostBridgeDeps {
   git?: HostGitOps
   registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  /** Workspace-level jail roots (local project cwds) merged with the canvas node cwds. */
+  workspaceRoots?: () => string[]
 }
 
 export function initRemoteHost(
@@ -898,6 +904,7 @@ export function initRemoteHost(
       listProjects,
       git: bridge.git,
       registerNode: bridge.registerNode,
+      extraRoots: bridge.workspaceRoots,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),
       // Interactive host: surface the SAS + a fresh pending id so the human can verify + approve.

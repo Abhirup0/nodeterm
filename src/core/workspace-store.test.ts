@@ -377,6 +377,22 @@ describe('projects.list relay blob (iOS wire contract)', () => {
   })
 })
 
+describe('localProjectCwds (the phone bridge jail roots)', () => {
+  it('lists local ref cwds only — inline and ssh entries carry no host-local root', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([
+      project({ cwd: projRoot }),
+      project({ id: 'inline1', name: 'inline' }),
+      project({ id: 'ssh1', ssh: { server: { host: 'h', user: 'u' } as never, remoteCwd: '~/x' }, cwd: undefined })
+    ]))
+    expect(store.localProjectCwds()).toEqual([projRoot])
+  })
+
+  it('empty before any load/save', () => {
+    expect(new WorkspaceStore().localProjectCwds()).toEqual([])
+  })
+})
+
 describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
   it('appends into a local ref project file as an OUTSIDE edit (watcher must see it)', async () => {
     const store = new WorkspaceStore()

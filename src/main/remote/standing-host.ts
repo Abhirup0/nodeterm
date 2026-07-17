@@ -375,6 +375,7 @@ export function initStandingHost(
         listProjects,
         git: bridge.git,
         registerNode: bridge.registerNode,
+        extraRoots: bridge.workspaceRoots,
         // Typing attribution: this pooled session's input frames are ITS phone's keystrokes.
         getClientId: () => pooled.presence.id(),
         onPeerReady: () => void onPeerReady(pooled),
