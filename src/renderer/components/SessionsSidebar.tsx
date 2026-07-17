@@ -8,6 +8,7 @@ import {
 import { SessionRow } from './SessionRow'
 import { IconBellFilled, IconCircleCheck, IconPin } from './icons'
 import { useProjects } from '../state/projects'
+import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSession } from '../session/session'
@@ -70,9 +71,13 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   // Switching the active project resets the manual collapse choices, so the default takes
   // over again: the newly active project expands, everything else collapses. Without this,
   // one manual toggle stuck forever and project switches stopped re-focusing the list.
+  // Gated on settings.sidebarAutoCollapse — with it OFF, a project switch changes nothing:
+  // every project defaults to expanded (see isGroupCollapsed) and the user's toggles stick.
+  const autoCollapse = useSettings((s) => s.settings.sidebarAutoCollapse)
   useEffect(() => {
+    if (!autoCollapse) return
     setOverrides((prev) => (Object.keys(prev).length === 0 ? prev : {}))
-  }, [activeProjectId])
+  }, [activeProjectId, autoCollapse])
 
   // Look up the current git branch for each project cwd (best-effort, cached). Gated on `open`
   // and caches a NEGATIVE result too — without the '' fallback a non-git cwd re-fired a git
@@ -258,7 +263,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       >
         {groups.length === 0 && <div className="sessions-sidebar__empty">No sessions yet.</div>}
         {groups.map((g) => {
-          const isCollapsed = isGroupCollapsed(overrides, g.projectId, g.isActive)
+          const isCollapsed = isGroupCollapsed(overrides, g.projectId, g.isActive, autoCollapse)
           const signals = projectSignalCounts(g)
           return (
             <div

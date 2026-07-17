@@ -34,17 +34,20 @@ const STATE_LABEL: Record<StatusKind, string> = {
 }
 
 /**
- * Whether a project group is collapsed in the sessions sidebar. The default keeps the active
- * project expanded and every other project collapsed (so the list stays uncluttered); an
- * explicit user toggle, recorded in `overrides` (true = collapsed, false = expanded), wins
- * over that default.
+ * Whether a project group is collapsed in the sessions sidebar. With `autoCollapse` (the
+ * default, `settings.sidebarAutoCollapse`) the default keeps the active project expanded and
+ * every other project collapsed (so the list stays uncluttered); with it off, every project
+ * defaults to expanded and nothing changes on a project switch. An explicit user toggle,
+ * recorded in `overrides` (true = collapsed, false = expanded), always wins over the default.
  */
 export function isGroupCollapsed(
   overrides: Record<string, boolean>,
   projectId: string,
-  isActive: boolean
+  isActive: boolean,
+  autoCollapse = true
 ): boolean {
-  return projectId in overrides ? overrides[projectId] : !isActive
+  if (projectId in overrides) return overrides[projectId]
+  return autoCollapse ? !isActive : false
 }
 
 /**

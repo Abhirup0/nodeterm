@@ -453,6 +453,10 @@ export interface Settings {
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
   defaultNodeHeight: number
+  /** Sessions sidebar: collapse inactive projects and re-focus the list on every project
+   *  switch (the historical behavior). Off = every project defaults to expanded and a
+   *  project switch never touches the user's expand/collapse choices. */
+  sidebarAutoCollapse: boolean
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
@@ -510,6 +514,7 @@ export const DEFAULT_SETTINGS: Settings = {
   snapToGrid: false,
   defaultNodeWidth: 600,
   defaultNodeHeight: 400,
+  sidebarAutoCollapse: true,
   panHoverDelay: 600,
   doubleClickFocus: true,
   wheelZoom: false,

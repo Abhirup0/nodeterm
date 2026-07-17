@@ -14,6 +14,10 @@ const ROWS = {
   snap: { title: 'Snap to grid', keywords: ['snap', 'grid', 'align'] },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
+  sidebarCollapse: {
+    title: 'Sidebar: focus active project',
+    keywords: ['sidebar', 'sessions', 'collapse', 'expand', 'project', 'switch']
+  },
   wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] }
 }
 const ENTRIES = Object.values(ROWS)
@@ -95,6 +99,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.doubleClickFocus}
               onChange={(v) => update({ doubleClickFocus: v })}
               ariaLabel="Double-click to focus"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.sidebarCollapse}>
+        <FieldRow
+          label="Sidebar: focus active project"
+          description="Collapse inactive projects in the sessions sidebar when switching projects. Off: everything stays as you left it."
+          control={
+            <Switch
+              checked={settings.sidebarAutoCollapse}
+              onChange={(v) => update({ sidebarAutoCollapse: v })}
+              ariaLabel="Sidebar: focus active project"
             />
           }
         />

@@ -41,6 +41,12 @@ describe('isGroupCollapsed', () => {
     expect(isGroupCollapsed({ p1: true }, 'p1', true)).toBe(true) // active but user collapsed
     expect(isGroupCollapsed({ p2: false }, 'p2', false)).toBe(false) // inactive but user expanded
   })
+
+  it('with autoCollapse off, everything defaults to expanded (overrides still win)', () => {
+    expect(isGroupCollapsed({}, 'p1', true, false)).toBe(false)
+    expect(isGroupCollapsed({}, 'p2', false, false)).toBe(false) // inactive stays expanded
+    expect(isGroupCollapsed({ p2: true }, 'p2', false, false)).toBe(true) // user collapsed
+  })
 })
 
 describe('buildSessionList', () => {
