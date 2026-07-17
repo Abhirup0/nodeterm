@@ -612,6 +612,14 @@ app.whenReady().then(async () => {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
+  // The hook server starts BEFORE the window exists: an SSH project the renderer auto-reconnects
+  // on load calls remoteHooks.setup with getHook()'s LIVE port/token, and a start racing behind
+  // that connect hands it port 0 — setup then bails fail-open and, on a reused live-orphan
+  // ControlMaster, the master keeps serving a PREVIOUS app run's `-R` hook forward: every remote
+  // hook POST dies against a dead port with zero symptoms beyond "statuses stay idle". The
+  // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
+  // tolerates — early hook POSTs are simply dropped, never mis-routed.
+  await hookServer.start()
   const win = createWindow()
   // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
@@ -1028,7 +1036,6 @@ app.whenReady().then(async () => {
       target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })
   })
-  await hookServer.start()
   initMediaProtocol()
 
   initContextLink(ptyManager)
