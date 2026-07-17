@@ -93,6 +93,24 @@ describe('WhisperModelStore', () => {
     expect(await store.has('tiny')).toBe(true)
   })
 
+  it('delete() rejects an unknown model id', async () => {
+    const store = new WhisperModelStore({ dir, fetchFn: fakeFetch(new Uint8Array(1)) })
+    await expect(store.delete('nope')).rejects.toThrow(/unknown/i)
+  })
+
+  it('delete() rejects a path-traversal-looking id without touching the fs', async () => {
+    const store = new WhisperModelStore({ dir, fetchFn: fakeFetch(new Uint8Array(1)) })
+    // Pre-create a file just outside `dir` that a naive `${id}.bin` join could otherwise reach.
+    const outside = join(dir, '..', 'traversal-canary.bin')
+    writeFileSync(outside, 'do not delete me')
+    try {
+      await expect(store.delete('../traversal-canary')).rejects.toThrow(/unknown/i)
+      expect(existsSync(outside)).toBe(true)
+    } finally {
+      rmSync(outside, { force: true })
+    }
+  })
+
   it('delete() removes orphaned .part.<genId> files when nothing is in flight', async () => {
     const store = new WhisperModelStore({ dir, fetchFn: fakeFetch(new Uint8Array(64)) })
     // Pre-create the model and an orphan

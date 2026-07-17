@@ -108,6 +108,11 @@ export class WhisperModelStore {
   }
 
   async delete(id: string): Promise<void> {
+    // modelPath() falls back to `${id}.bin` for an unrecognized id — reachable here (and via
+    // has()) — so an unvalidated id let the authed delete IPC (register-ipc.ts) rm an arbitrary
+    // path under this.dir, e.g. `../../etc/passwd`. Reject up front, same as download() already
+    // does via whisperModel().
+    if (!whisperModel(id)) throw new Error(`unknown whisper model: ${id}`)
     const inFlight = this.inFlight.get(id)
     if (inFlight) {
       this.inFlight.delete(id)
