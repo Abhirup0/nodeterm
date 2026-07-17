@@ -31,14 +31,26 @@ export function pluginPath(): string {
  *    restart (the restart handoff); fall back to the env vars;
  *  - POST application/x-www-form-urlencoded `nodeId` + `version` + `payload` (JSON) with
  *    the x-nodeterm-hook-token header to http://127.0.0.1:<port>/hook/opencode.
- *  Payload fields are extracted defensively — the event NAME is the contract with
- *  normalizeOpencode; sessionID/role are best-effort. message.updated forwards ONLY user
- *  messages (turn start) so assistant token streaming never floods the hook server.
- *  (NODETERM_HOOK_SOCK unix-socket transport is not implemented here — desktop buildPtyEnv
- *  advertises the TCP port; if only a socket is available the plugin no-ops, fail-open.) */
+ *  Bus events (session.created/idle/error, message.updated, permission.updated/replied)
+ *  reach a plugin ONLY through the `event` catch-all hook as { event: { type, properties } }
+ *  — opencode never calls a hook keyed by the event name itself, so per-event-name exports
+ *  are dead code (the bug that made every status silently missing). `tool.execute.before`
+ *  is the exception: it IS a real named plugin hook. The event NAME posted is the contract
+ *  with normalizeOpencode (permission.updated is posted as `permission.asked`);
+ *  sessionID/role are extracted defensively per the SDK payload shapes. message.updated
+ *  forwards ONLY user messages (turn start) so assistant token streaming never floods the
+ *  hook server — and only ONCE per messageID: measured on 1.18.3 (TUI), the user message
+ *  record is updated again after session.idle (title/bookkeeping), and re-forwarding that
+ *  as a turn start resurrected `working` right after `done` (newTurn bypasses the
+ *  done-holdoff by design), pinning the node on RUNNING forever.
+ *  Transport: an SSH host advertises a UNIX SOCKET (NODETERM_HOOK_SOCK, no PORT line in the
+ *  endpoint file) — the socket wins over TCP, like the POSIX script's `curl --unix-socket`
+ *  branch. opencode runs on Bun, whose fetch takes a `unix` option; the node:http
+ *  socketPath fallback covers any non-Bun runtime (and is what the tests exercise). */
 export function buildOpencodePlugin(): string {
   return `${PLUGIN_MARKER}
 import fs from 'node:fs'
+import http from 'node:http'
 
 export const NodetermStatus = async () => {
   const nodeId = process.env.NODETERM_NODE_ID
@@ -46,6 +58,7 @@ export const NodetermStatus = async () => {
   const live = () => {
     const conf = {
       port: process.env.NODETERM_HOOK_PORT,
+      sock: process.env.NODETERM_HOOK_SOCK,
       token: process.env.NODETERM_HOOK_TOKEN,
       version: process.env.NODETERM_HOOK_VERSION
     }
@@ -53,7 +66,7 @@ export const NodetermStatus = async () => {
       const file = process.env.NODETERM_HOOK_ENDPOINT
       if (file) {
         for (const line of fs.readFileSync(file, 'utf8').split('\\n')) {
-          const m = line.match(/^NODETERM_HOOK_(PORT|TOKEN|VERSION)=(.*)$/)
+          const m = line.match(/^NODETERM_HOOK_(PORT|SOCK|TOKEN|VERSION)=(.*)$/)
           if (m) conf[m[1].toLowerCase()] = m[2]
         }
       }
@@ -62,35 +75,63 @@ export const NodetermStatus = async () => {
   }
   const post = (event, extra) => {
     try {
-      const { port, token, version } = live()
-      if (!port || !token) return
+      const { port, sock, token, version } = live()
+      if (!token || (!sock && !port)) return
       const payload = JSON.stringify({ event, ...extra })
-      fetch('http://127.0.0.1:' + port + '/hook/opencode', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded',
-          'x-nodeterm-hook-token': token
-        },
-        body:
-          'nodeId=' + encodeURIComponent(nodeId) +
-          '&version=' + encodeURIComponent(version || '') +
-          '&payload=' + encodeURIComponent(payload)
-      }).catch(() => {})
+      const headers = {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-nodeterm-hook-token': token
+      }
+      const body =
+        'nodeId=' + encodeURIComponent(nodeId) +
+        '&version=' + encodeURIComponent(version || '') +
+        '&payload=' + encodeURIComponent(payload)
+      if (sock && typeof Bun !== 'undefined') {
+        fetch('http://localhost/hook/opencode', { method: 'POST', unix: sock, headers, body }).catch(() => {})
+      } else if (sock) {
+        const req = http.request(
+          { socketPath: sock, path: '/hook/opencode', method: 'POST', headers },
+          (res) => res.resume()
+        )
+        req.on('error', () => {})
+        req.end(body)
+      } else {
+        fetch('http://127.0.0.1:' + port + '/hook/opencode', { method: 'POST', headers, body }).catch(() => {})
+      }
     } catch {}
   }
-  const sid = (x) =>
-    (x && (x.sessionID || x.session_id || (x.session && x.session.id) || (x.info && x.info.sessionID))) || undefined
+  const seenUserMsgs = new Set()
   return {
-    'session.created': async (input) => post('session.created', { sessionID: sid(input) }),
-    'session.idle': async (input) => post('session.idle', { sessionID: sid(input) }),
-    'session.error': async (input) => post('session.error', { sessionID: sid(input) }),
-    'permission.asked': async (input) => post('permission.asked', { sessionID: sid(input) }),
-    'permission.replied': async (input) => post('permission.replied', { sessionID: sid(input) }),
-    'tool.execute.before': async (input) => post('tool.execute.before', { sessionID: sid(input) }),
-    'message.updated': async (input) => {
-      const role = input && ((input.info && input.info.role) || input.role)
-      if (role === 'user') post('message.updated', { sessionID: sid(input), role: 'user' })
-    }
+    event: async (input) => {
+      const ev = input && input.event
+      if (!ev || !ev.type) return
+      const p = ev.properties || {}
+      const info = p.info || {}
+      switch (ev.type) {
+        case 'session.created':
+          return post('session.created', { sessionID: info.id || p.sessionID })
+        case 'session.idle':
+        case 'session.error':
+          return post(ev.type, { sessionID: p.sessionID })
+        case 'permission.updated':
+          return post('permission.asked', { sessionID: p.sessionID })
+        case 'permission.replied':
+          return post('permission.replied', { sessionID: p.sessionID })
+        case 'message.updated': {
+          if ((info.role || p.role) !== 'user') return
+          if (info.id) {
+            if (seenUserMsgs.has(info.id)) return
+            seenUserMsgs.add(info.id)
+            if (seenUserMsgs.size > 500) {
+              for (const first of seenUserMsgs) { seenUserMsgs.delete(first); break }
+            }
+          }
+          return post('message.updated', { sessionID: info.sessionID || p.sessionID, role: 'user' })
+        }
+      }
+    },
+    'tool.execute.before': async (input) =>
+      post('tool.execute.before', { sessionID: input && input.sessionID })
   }
 }
 `

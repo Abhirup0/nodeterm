@@ -17,6 +17,7 @@ import {
   type AgentPermissionMode
 } from '@shared/agents/config'
 import { AgentIcon } from '../../../lib/agentIcons'
+import { hintLabel } from '@shared/platform-utils'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import { Select } from '@renderer/ui/Select'
@@ -81,7 +82,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
     <SettingsSection
       id="agents"
       title="Agents"
-      description="Enable or disable agents in the Add menus, and pick the default (⌘⇧C)."
+      description={hintLabel('Enable or disable agents in the Add menus, and pick the default (⌘⇧C).')}
       isActive={isActive}
       searchEntries={ENTRIES}
     >
