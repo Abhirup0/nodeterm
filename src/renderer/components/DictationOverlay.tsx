@@ -112,6 +112,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   const consentAskedRef = useRef(false)
   const startedAtRef = useRef(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const discardedRef = useRef(false)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
 
@@ -146,6 +147,9 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
         onClose()
         return
       }
+      // An in-flight transcription can't be aborted — dropping the result honors the user's
+      // dismissal (nothing may land after a cancel).
+      if (discardedRef.current) return
       if (target.kind === 'terminal') {
         const ok = await api.pty.sendText(target.nodeId, transcribed, { enter: false })
         if (!ok) {
@@ -231,6 +235,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   }, [])
 
   const handleClose = useCallback(() => {
+    discardedRef.current = true
     if (phase === 'recording') {
       clearTimer()
       captureRef.current?.cancel()
