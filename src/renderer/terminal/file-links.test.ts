@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { matchFileTokens, matchUrlTokens, resolveFileToken } from './file-links'
+import {
+  matchFileTokens,
+  matchUrlTokens,
+  paragraphContaining,
+  resolveFileToken,
+  type BufferView
+} from './file-links'
 
 describe('matchFileTokens', () => {
   it('finds absolute, dot-relative and bare relative paths', () => {
@@ -50,6 +56,77 @@ describe('resolveFileToken', () => {
     expect(resolveFileToken('../x.ts', '~/proj/sub')).toBe('~/proj/x.ts')
     expect(resolveFileToken('../../../x.ts', '~/proj')).toBeNull() // .. may not pop the ~
     expect(resolveFileToken('/abs/x.ts', '~/proj')).toBe('/abs/x.ts') // absolutes unaffected
+  })
+})
+
+/** Fake buffer: each entry is a row's content; `w:` prefix marks it soft-wrapped. Rows are
+ *  stored untrimmed exactly as given (pad to `cols` yourself to simulate a full row). */
+function view(cols: number, rows: string[]): BufferView {
+  const parsed = rows.map((r) =>
+    r.startsWith('w:') ? { wrapped: true, text: r.slice(2) } : { wrapped: false, text: r }
+  )
+  return {
+    cols,
+    length: parsed.length,
+    line: (row) => {
+      const p = parsed[row]
+      return p
+        ? { isWrapped: p.wrapped, text: (trim) => (trim ? p.text.replace(/\s+$/, '') : p.text) }
+        : undefined
+    }
+  }
+}
+
+describe('paragraphContaining', () => {
+  it('joins soft-wrapped rows from any row of the paragraph', () => {
+    const v = view(10, ['prompt>   ', 'https://x.', 'w:io/abc'])
+    for (const row of [1, 2]) {
+      const p = paragraphContaining(v, row)!
+      expect(p.startRow).toBe(1)
+      expect(p.text).toBe('https://x.io/abc')
+      expect(p.rows).toBe(2)
+    }
+    // row 0 does not run into row 1 (it has trailing spaces) — separate paragraph
+    expect(paragraphContaining(v, 0)!.text).toBe('prompt>')
+  })
+
+  it('joins HARD-wrapped rows (tmux repaint / TUI): full last column + non-space next start', () => {
+    // 10-col screen painting "https://claude.com/oauth?x=1" as three hard rows
+    const v = view(10, ['https://cl', 'aude.com/o', 'auth?x=1'])
+    for (const row of [0, 1, 2]) {
+      const p = paragraphContaining(v, row)!
+      expect(p.startRow).toBe(0)
+      expect(p.text).toBe('https://claude.com/oauth?x=1')
+    }
+    expect(matchUrlTokens(paragraphContaining(v, 1)!.text)[0].url).toBe(
+      'https://claude.com/oauth?x=1'
+    )
+  })
+
+  it('does NOT join when the row is not full to the last column', () => {
+    const v = view(10, ['https://x ', 'unrelated'])
+    expect(paragraphContaining(v, 0)!.text).toBe('https://x')
+  })
+
+  it('does NOT join when the next row starts with a space', () => {
+    const v = view(10, ['aaaaaaaaaa', ' indented'])
+    expect(paragraphContaining(v, 0)!.text).toBe('aaaaaaaaaa')
+  })
+
+  it('index math holds across hard rows (every joined row contributes exactly cols chars)', () => {
+    const v = view(10, ['see https:', '//x.io/abc', 'd now'])
+    const p = paragraphContaining(v, 0)!
+    const [u] = matchUrlTokens(p.text)
+    expect(u.url).toBe('https://x.io/abcd')
+    // token starts at index 4 → row 0 col 4; ends at index 20 → row 2 col 0
+    expect(Math.floor(u.startIndex / 10)).toBe(0)
+    expect(Math.floor((u.startIndex + u.text.length - 1) / 10)).toBe(2)
+  })
+
+  it('caps runaway joins at MAX_JOIN_ROWS', () => {
+    const wall = Array.from({ length: 80 }, () => 'x'.repeat(10))
+    const p = paragraphContaining(view(10, wall), 0)!
+    expect(p.rows).toBeLessThanOrEqual(32)
   })
 })
 

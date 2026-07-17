@@ -11,7 +11,6 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { WebLinksAddon } from '@xterm/addon-web-links'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
 import { LocalTransport } from '../terminal/local-transport'
@@ -20,6 +19,7 @@ import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
 import {
   createFileLinkProvider,
+  createUrlLinkProvider,
   installLinkClickFallback,
   makeDirListingLookup
 } from '../terminal/file-links'
@@ -701,13 +701,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (text !== null) window.nodeTerminal.clipboard.writeText(text)
         return true
       })
-      // Cmd (mac) / Ctrl+click link opening. URLs → default browser via the WebLinksAddon;
-      // file paths → editor node / Explorer reveal via the custom provider. Both are
-      // modifier-gated inside their activate handlers, so plain clicks stay selections.
-      term.loadAddon(
-        new WebLinksAddon((event, uri) => {
-          if (event.metaKey || event.ctrlKey) window.nodeTerminal.shell.openExternal(uri)
-        })
+      // Cmd (mac) / Ctrl+click link opening. URLs → default browser via createUrlLinkProvider
+      // (NOT the WebLinksAddon — the addon can't join the hard-wrapped rows a tmux repaint /
+      // agent TUI paints, so a long OAuth URL matched only its first row's fragment); file
+      // paths → editor node / Explorer reveal via the file provider. Both are modifier-gated
+      // inside their activate handlers, so plain clicks stay selections.
+      term.registerLinkProvider(
+        createUrlLinkProvider(term, (uri) => window.nodeTerminal.shell.openExternal(uri))
       )
       const projectFs = (): { fs: FsApi; ssh: boolean } => {
         const st = useProjects.getState()
@@ -730,7 +730,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           )
       }
       term.registerLinkProvider(createFileLinkProvider(term, { getCwd, lookup, activate: openFile }))
-      // The provider above (and the WebLinksAddon) rely on xterm's own click handling, which
+      // Both providers above rely on xterm's own click handling, which
       // tmux/agent mouse-reporting swallows. This capture-phase mouse-up fallback restores
       // Cmd/Ctrl+click for both URLs and file paths in that mode. Attached to `term.element` so
       // it travels with the terminal across park/adopt; it dies with the terminal on dispose.
