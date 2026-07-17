@@ -75,6 +75,7 @@ import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
+import { DictationOverlay, type DictationTarget } from '../components/DictationOverlay'
 import { BugReportDialog } from '../components/BugReportDialog'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { UpdateCard } from '../components/UpdateCard'
@@ -454,6 +455,11 @@ export function Canvas() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [dictationOpen, setDictationOpen] = useState(false)
+  // Target = the first selected terminal/chat node AT OPEN TIME (not live-tracked while the
+  // overlay is up — the design explicitly freezes it so a stray click elsewhere mid-dictation
+  // can't retarget an in-progress recording).
+  const [dictationTarget, setDictationTarget] = useState<DictationTarget | null>(null)
   const [bugReportOpen, setBugReportOpen] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
@@ -971,6 +977,24 @@ export function Canvas() {
       setSessionsDismissed(false)
     }
   }, [sessionsPinned])
+
+  // ⌘⇧D / Dock mic button: opens the dictation overlay targeting the first selected
+  // terminal/chat node (agent nodes are `type: 'terminal'` with `data.agentId` set — no separate
+  // case needed). Closing and reopening re-resolves the target from the CURRENT selection.
+  const toggleDictation = useCallback(() => {
+    setDictationOpen((open) => {
+      if (open) return false
+      const sel = nodesRef.current.find(
+        (n) => n.selected && (n.type === 'terminal' || n.type === 'chat')
+      )
+      setDictationTarget(
+        sel
+          ? { kind: sel.type === 'chat' ? 'chat' : 'terminal', nodeId: sel.id, title: (sel.data.title as string) || 'Untitled' }
+          : null
+      )
+      return true
+    })
+  }, [])
 
   // Hover-peek: the sidebar overlaps its trigger icon, so leaving the icon (mouseleave)
   // must not close the peek while the cursor moves onto the sidebar body. A single shared
@@ -2418,7 +2442,8 @@ export function Canvas() {
     requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
   }, [])
 
-  // ⌘T = new terminal, ⌘⇧C = new default agent (ignored while typing in a field/terminal).
+  // ⌘T = new terminal, ⌘⇧C = new default agent, ⌘⇧D = toggle dictation (ignored while typing in
+  // a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return
@@ -2431,11 +2456,14 @@ export function Canvas() {
       } else if (k === 'c' && e.shiftKey) {
         e.preventDefault()
         addAgentNode(useSettings.getState().settings.defaultAgent)
+      } else if (k === 'd' && e.shiftKey) {
+        e.preventDefault()
+        toggleDictation()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [addTerminal, addAgentNode])
+  }, [addTerminal, addAgentNode, toggleDictation])
 
   // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
   // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME
@@ -5879,6 +5907,10 @@ export function Canvas() {
 
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
 
+      {dictationOpen && (
+        <DictationOverlay target={dictationTarget} onClose={() => setDictationOpen(false)} />
+      )}
+
       {bugReportOpen && (
         <BugReportDialog
           env={{ appVersion, userAgent: navigator.userAgent }}
@@ -6122,6 +6154,8 @@ export function Canvas() {
         onFitView={() => fitView({ padding: 0.2, duration: 300 })}
         onZoomIn={() => zoomIn({ duration: 150 })}
         onZoomOut={() => zoomOut({ duration: 150 })}
+        onDictate={toggleDictation}
+        dictateActive={dictationOpen}
       />
     </div>
   )

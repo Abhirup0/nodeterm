@@ -24,6 +24,8 @@ interface DockProps {
   onFitView: () => void
   onZoomIn: () => void
   onZoomOut: () => void
+  onDictate: () => void
+  dictateActive: boolean
 }
 
 /**
@@ -48,7 +50,9 @@ export function Dock({
   onSave,
   onFitView,
   onZoomIn,
-  onZoomOut
+  onZoomOut,
+  onDictate,
+  dictateActive
 }: DockProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const customAgents = useSettings((s) => s.settings.customAgents)
@@ -177,6 +181,13 @@ export function Dock({
         <button className="dock-btn" title="Fit view" onClick={onFitView}>
           <FrameIcon />
         </button>
+        <button
+          className={`dock-btn${dictateActive ? ' active' : ''}`}
+          title="Dictate (⌘⇧D)"
+          onClick={onDictate}
+        >
+          <MicIcon />
+        </button>
 
         <span className="dock-sep" />
 
@@ -286,6 +297,14 @@ function EditorIcon() {
   return (
     <svg {...S}>
       <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
+    </svg>
+  )
+}
+function MicIcon() {
+  return (
+    <svg {...S}>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" />
     </svg>
   )
 }

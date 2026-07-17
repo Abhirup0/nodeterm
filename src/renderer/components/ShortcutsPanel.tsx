@@ -17,6 +17,7 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
       { keys: ['⌘', 'K'], label: 'Command palette' },
       { keys: ['⌘', ','], label: 'Settings' },
       { keys: ['⌘', '/'], label: 'This shortcuts panel' },
+      { keys: ['⌘', '⇧', 'D'], label: 'Dictate' },
       { keys: ['⌘', 'Z'], label: 'Undo' },
       { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }
     ]
