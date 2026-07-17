@@ -51,6 +51,17 @@ export function appendTake(existing: string, take: string): string {
 
 const LEVEL_POLL_MS = 100 // ~10Hz
 
+// Base64-encoded int16 PCM runs ~2.6 MB/min. The ws bridge caps a single frame at
+// WS_MAX_PAYLOAD (8 MiB, see src/server/ws.ts) — a take left running past ~3 minutes would
+// produce a transcribe payload big enough to blow that budget, and `ws` drops the WHOLE
+// connection on an oversized frame, not just the one message. Auto-stop well under that line.
+const MAX_RECORDING_MS = 150_000 // 2:30
+
+/** Whether elapsed recording time has crossed the hard cap (see MAX_RECORDING_MS above). Pure. */
+export function isAtRecordingCap(elapsedMs: number): boolean {
+  return elapsedMs >= MAX_RECORDING_MS
+}
+
 export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
   const { api } = useSession()
   const addLocalUser = useChatSessions((s) => s.addLocalUser)
@@ -64,6 +75,7 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
   const [elapsedMs, setElapsedMs] = useState(0)
   const [level, setLevel] = useState(0)
   const [sending, setSending] = useState(false)
+  const [capped, setCapped] = useState(false)
 
   const captureRef = useRef<PcmCapture | null>(null)
   const consentAskedRef = useRef(false)
@@ -85,6 +97,7 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
     setError(null)
     setElapsedMs(0)
     setLevel(0)
+    setCapped(false)
   }, [target?.nodeId])
 
   // Belt-and-braces: if this component unmounts mid-recording (parent flips `open` without going
@@ -97,8 +110,28 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
     }
   }, [clearTimer])
 
+  const stopRecording = useCallback(async () => {
+    clearTimer()
+    const capture = captureRef.current
+    captureRef.current = null
+    if (!capture) return
+    const pcm = capture.stop()
+    setPhase('transcribing')
+    try {
+      const { text: transcribed } = await window.nodeTerminal.speech.transcribe(pcm)
+      setText((prev) => appendTake(prev, transcribed))
+      setPhase('text')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Transcription failed.')
+      // Fall back to the text state (editable) if a prior take already produced some, else back
+      // to idle so the mic button reappears.
+      setPhase(text.trim() ? 'text' : 'idle')
+    }
+  }, [clearTimer, text])
+
   const startRecording = useCallback(async () => {
     setError(null)
+    setCapped(false)
     if (!consentAskedRef.current) {
       consentAskedRef.current = true
       try {
@@ -127,29 +160,17 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
     setLevel(0)
     setPhase('recording')
     timerRef.current = setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current)
+      const elapsed = Date.now() - startedAtRef.current
+      setElapsedMs(elapsed)
       setLevel(captureRef.current?.level() ?? 0)
+      if (isAtRecordingCap(elapsed)) {
+        // clearTimer() inside stopRecording fires synchronously before any await, so this can't
+        // re-enter on the next tick.
+        setCapped(true)
+        void stopRecording()
+      }
     }, LEVEL_POLL_MS)
-  }, [])
-
-  const stopRecording = useCallback(async () => {
-    clearTimer()
-    const capture = captureRef.current
-    captureRef.current = null
-    if (!capture) return
-    const pcm = capture.stop()
-    setPhase('transcribing')
-    try {
-      const { text: transcribed } = await window.nodeTerminal.speech.transcribe(pcm)
-      setText((prev) => appendTake(prev, transcribed))
-      setPhase('text')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Transcription failed.')
-      // Fall back to the text state (editable) if a prior take already produced some, else back
-      // to idle so the mic button reappears.
-      setPhase(text.trim() ? 'text' : 'idle')
-    }
-  }, [clearTimer, text])
+  }, [stopRecording])
 
   const handleClose = useCallback(() => {
     if (phase === 'recording') {
@@ -278,7 +299,7 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
         {phase === 'transcribing' && (
           <div className="dictation__transcribing">
             <span className="dictation__spinner" />
-            <span>Transcribing…</span>
+            <span>{capped ? 'Recording capped at 2:30 — transcribing.' : 'Transcribing…'}</span>
           </div>
         )}
 
