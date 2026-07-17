@@ -4453,6 +4453,13 @@ body,
   cursor: pointer;
 }
 .ctx-pill:hover { background: rgba(255, 255, 255, 0.12); }
+.ctx-pill__model {
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-secondary, rgba(255, 255, 255, 0.7));
+}
 .ctx-pill__bar {
   display: inline-block;
   width: 28px;

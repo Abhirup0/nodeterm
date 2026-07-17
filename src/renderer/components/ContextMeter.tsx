@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useContextWindow } from '../state/contextWindow'
-import { formatTimeAgo } from '../lib/usageFormat'
+import { formatModelLabel, formatTimeAgo } from '../lib/usageFormat'
 
 /** Fullness scale (inverse of the usage indicator): green low, yellow mid, red near-full. */
 function meterColor(usedPercent: number): string {
@@ -37,6 +37,7 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
   if (!usage) return null
   const pct = Math.round(usage.usedPercent)
   const color = meterColor(usage.usedPercent)
+  const modelLabel = formatModelLabel(usage.model)
 
   return (
     <div className="ctx-meter nodrag" ref={ref}>
@@ -62,6 +63,7 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
           setOpen((v) => !v)
         }}
       >
+        {modelLabel && <span className="ctx-pill__model">{modelLabel}</span>}
         <span className="ctx-pill__bar">
           <span className="ctx-pill__fill" style={{ width: `${usage.usedPercent}%`, background: color }} />
         </span>

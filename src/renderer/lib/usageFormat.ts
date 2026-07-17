@@ -27,6 +27,23 @@ export function formatResetCountdown(resetsAt: number | null): string {
   return mins > 0 ? `Resets in ${hours}h ${mins}m` : `Resets in ${hours}h`
 }
 
+/**
+ * Short display label for a Claude model id: "claude-opus-4-8" → "Opus 4.8",
+ * "claude-haiku-4-5-20251001" → "Haiku 4.5" (date segments dropped), "claude-3-5-sonnet-…"
+ * → "Sonnet 3.5". An id with no known family is returned as-is; null stays null.
+ */
+export function formatModelLabel(model: string | null): string | null {
+  if (!model) return null
+  const fam = /(opus|sonnet|haiku|fable|mythos)/i.exec(model)
+  if (!fam) return model
+  const family = fam[1][0].toUpperCase() + fam[1].slice(1).toLowerCase()
+  const version = model
+    .split(/[^a-zA-Z0-9]+/)
+    .filter((p) => /^\d{1,3}$/.test(p))
+    .join('.')
+  return version ? `${family} ${version}` : family
+}
+
 /** Bar color by remaining quota: green > 40%, yellow 20–40%, red < 20%. */
 export function barColor(leftPercent: number): string {
   if (leftPercent > 40) return '#30d158'
