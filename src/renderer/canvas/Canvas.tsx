@@ -3980,7 +3980,10 @@ export function Canvas() {
     [focusNodeById, setNodes, markDirty, goToNode, viewCenter]
   )
 
-  useEffect(() => window.nodeTerminal.onFocusNode(focusNodeById), [focusNodeById])
+  // The notification-click listener is registered further down, on travelToNode — NOT here on
+  // focusNodeById: a notification can point into a CLOSED project (its tmux sessions and hooks
+  // keep running), and focusNodeById would set that hidden project active without reopening its
+  // tab. travelToNode handles open/closed/unavailable uniformly (same as a peer jump).
 
   // Team presence: subscribe to the peer stream and announce ourselves ONCE per session. Bound to
   // the ACTIVE session's presence (a relay tab connects the relay core; a local tab hits
@@ -5252,6 +5255,10 @@ export function Canvas() {
     },
     [focusNodeById, reopenProject]
   )
+
+  // OS-notification click → focus the originating node (see the note beside focusNodeById:
+  // travelToNode, not focusNodeById, so a closed project's tab is reopened first).
+  useEffect(() => window.nodeTerminal.onFocusNode(travelToNode), [travelToNode])
 
   // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux
   // session, drop persisted agent status, tear down any SSH master, then delete it from disk.
