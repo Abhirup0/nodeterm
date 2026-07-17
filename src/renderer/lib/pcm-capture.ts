@@ -78,11 +78,14 @@ export class PcmCapture {
 
     try {
       const stream = await this.acquireStream()
-      const audioContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE })
-      const sourceNode = audioContext.createMediaStreamSource(stream)
-
+      // Adopt the stream IMMEDIATELY: if AudioContext construction or
+      // createMediaStreamSource throws below, the catch's teardown() must be
+      // able to stop these tracks — a live mic (OS indicator lit) must never
+      // outlive a failed start().
       this.stream = stream
+      const audioContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE })
       this.audioContext = audioContext
+      const sourceNode = audioContext.createMediaStreamSource(stream)
       this.sourceNode = sourceNode
 
       const onChunk = (chunk: Float32Array): void => {
