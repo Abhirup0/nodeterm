@@ -440,6 +440,14 @@ export interface ClaudeAccount {
   createdAt: number
 }
 
+export interface SpeechSettings {
+  engine: 'whisper' | 'cloud'
+  /** WhisperModelInfo id — meaningful while engine === 'whisper'. */
+  model: string
+  /** BCP-47-ish hint or 'auto'. */
+  language: string
+}
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
@@ -503,6 +511,8 @@ export interface Settings {
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
    *  (end-to-end encrypted). Pro-only; default off. Toggle in Settings → Phone. */
   phoneAccessEnabled: boolean
+  /** Dictation (desktop/server). Written as a whole object by the renderer. */
+  speech: SpeechSettings
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -539,7 +549,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
   telemetryEnabled: false,
-  phoneAccessEnabled: false
+  phoneAccessEnabled: false,
+  speech: { engine: 'whisper', model: 'tiny', language: 'auto' },
 }
 
 export interface SettingsApi {
