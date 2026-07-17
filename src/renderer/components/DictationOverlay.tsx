@@ -4,18 +4,15 @@
 //
 // NOTHING here auto-submits: only the explicit Send button ever pushes text into a session.
 //
-// Insert-without-Enter gap (read before "fixing" this): the design wants Insert to write into a
-// terminal WITHOUT the trailing Enter that `pty.sendText` always appends (it runs two separate
-// `tmux send-keys` calls server-side — literal text, then a separate Enter — with no way to skip
-// the second one). The only primitive that writes without an Enter is `pty.write(sessionId, data)`,
-// but that takes the PTY's own ephemeral session id (`pty-<n>`, assigned in PtyManager.spawnSession),
-// which is NOT the node id and is only ever known inside the mounted TerminalNode component (its
-// `sessionId` local variable, set from `pty.create()`'s result) — nothing outside that component
-// exposes it. Reaching it from here would mean either a new IPC channel keyed by persistKey (out of
-// scope for this task) or modifying TerminalNode.tsx to publish a lookup (also out of this task's
-// file list). Chat has the same shape of gap: ChatNode's compose box is local component state with
-// no externally settable draft. So Insert is disabled for both target kinds, with a tooltip
-// explaining why — Send (which already has an explicit-submission story) is the one working action.
+// Insert (terminal): `pty.sendText(persistKey, text, { enter: false })` writes the literal text
+// into the node's tmux session without the trailing Enter, so the user can edit/append before
+// running it themselves (Task 10b — `enter` defaults to true everywhere else, so every other
+// caller of sendText is untouched).
+//
+// Insert (chat): ChatNode's compose box is local component state with no externally settable
+// draft, so there's no seam to write into without submitting — Insert stays disabled for chat
+// targets, with a tooltip explaining why. Send (which already has an explicit-submission story)
+// is the working action there.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PcmCapture } from '../lib/pcm-capture'
@@ -207,13 +204,36 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
     window.nodeTerminal.clipboard.writeText(value)
   }, [text])
 
+  const insert = useCallback(async () => {
+    if (!target || target.kind !== 'terminal') return
+    const value = text.trim()
+    if (!value) return
+    setSending(true)
+    setError(null)
+    try {
+      const ok = await api.pty.sendText(target.nodeId, value, { enter: false })
+      if (!ok) {
+        setError('Could not insert — the terminal session is not available.')
+        return
+      }
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to insert.')
+    } finally {
+      setSending(false)
+    }
+  }, [target, text, api, onClose])
+
+  // Chat has no external draft field to write into without submitting (see the header comment) —
+  // Insert stays disabled there. A terminal target is always insertable once there's text.
   const insertDisabledReason = !target
     ? 'Select a terminal or chat node first.'
     : target.kind === 'chat'
-      ? "Chat has no external draft field — use Send."
-      : "Inserting without submitting isn't available yet (needs the terminal's live session) — use Send."
+      ? 'Chat has no external draft field — use Send.'
+      : null
 
   const hasText = !!text.trim()
+  const insertDisabled = !target || !hasText || sending || insertDisabledReason !== null
 
   return createPortal(
     <div className="dictation nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
@@ -290,9 +310,22 @@ export function DictationOverlay({ target, onClose }: DictationOverlayProps) {
         <button type="button" className="dictation__btn" onClick={copy} disabled={!hasText}>
           Copy
         </button>
-        <button type="button" className="dictation__btn" disabled title={insertDisabledReason}>
-          Insert
-        </button>
+        {insertDisabledReason ? (
+          <span title={insertDisabledReason}>
+            <button type="button" className="dictation__btn" disabled>
+              Insert
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="dictation__btn"
+            onClick={() => void insert()}
+            disabled={insertDisabled}
+          >
+            Insert
+          </button>
+        )}
         <button
           type="button"
           className="dictation__btn dictation__btn--primary"

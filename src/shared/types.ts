@@ -299,8 +299,10 @@ export interface PtyApi {
   capture(persistKey: string, full?: boolean): Promise<string>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
-  /** Send literal text + Enter into a session (e.g. a slash command). Returns false if unavailable. */
-  sendText(persistKey: string, text: string): Promise<boolean>
+  /** Send literal text into a session, by default followed by Enter (e.g. a slash command).
+   *  `opts.enter: false` writes the text without submitting it (dictation's Insert). Returns
+   *  false if unavailable. */
+  sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>

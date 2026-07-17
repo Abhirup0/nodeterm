@@ -628,8 +628,8 @@ export class PtyManager {
     platform().handle(IPC.ptyReadScrollback, (persistKey: string) =>
       readScrollback(persistKey)
     )
-    platform().handle(IPC.ptySendText, (persistKey: string, text: string) =>
-      this.sendText(persistKey, text)
+    platform().handle(IPC.ptySendText, (persistKey: string, text: string, enter?: boolean) =>
+      this.sendText(persistKey, text, enter === undefined ? undefined : { enter })
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
   }
@@ -1720,17 +1720,25 @@ export class PtyManager {
   }
 
   /**
-   * Send literal text followed by Enter into a node's tmux session (e.g. a slash command).
-   * Works whether or not a client is attached. Returns false if tmux is unavailable or the
-   * session doesn't exist yet.
+   * Send literal text, by default followed by Enter, into a node's tmux session (e.g. a slash
+   * command). Works whether or not a client is attached. Returns false if tmux is unavailable or
+   * the session doesn't exist yet.
+   *
+   * `opts.enter` defaults to `true` — every existing caller (slash commands, /rename, /branch,
+   * note pushes) relies on the Enter being sent, so this stays bit-for-bit unless a caller opts
+   * out. `enter: false` is for dictation's Insert action: it writes text into the terminal
+   * WITHOUT submitting it, so the user can edit/append before running it themselves.
    */
-  async sendText(persistKey: string, text: string): Promise<boolean> {
+  async sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean> {
     if (!this.tmuxPath) return false
     const target = sessionName(persistKey)
+    const enter = opts?.enter ?? true
     try {
-      // The literal text and the Enter must be sent in order, so await sequentially.
+      // The literal text and the Enter (when sent) must go in order, so await sequentially.
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text])
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
+      if (enter) {
+        await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
+      }
       return true
     } catch {
       return false

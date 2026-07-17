@@ -64,7 +64,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.ptyGenerateGroupName, memberKeys, cwd),
     capture: (persistKey, full) => ipcRenderer.invoke(IPC.ptyCapture, persistKey, full),
     readScrollback: (persistKey) => ipcRenderer.invoke(IPC.ptyReadScrollback, persistKey),
-    sendText: (persistKey, text) => ipcRenderer.invoke(IPC.ptySendText, persistKey, text),
+    sendText: (persistKey, text, opts) =>
+      ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
     readSessionName: (sessionId, accountId) =>
       ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId),
