@@ -4,6 +4,7 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
+import { hintLabel } from '@shared/platform-utils'
 
 const ROWS = {
   gridSize: { title: 'Grid size', keywords: ['grid', 'size', 'snap'] },
@@ -119,7 +120,7 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.wheelZoom}>
         <FieldRow
           label="Scroll wheel zooms"
-          description="Zoom with a plain mouse wheel (no ⌘). Turns off scroll-to-pan — pan by dragging."
+          description={hintLabel('Zoom with a plain mouse wheel (no ⌘). Turns off scroll-to-pan — pan by dragging.')}
           control={
             <Switch
               checked={settings.wheelZoom}

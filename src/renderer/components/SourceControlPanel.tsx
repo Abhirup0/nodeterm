@@ -14,6 +14,7 @@ import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { PublishDialog } from './PublishDialog'
 import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
+import { hintLabel } from '@shared/platform-utils'
 
 interface SourceControlPanelProps {
   onClose: () => void
@@ -477,7 +478,7 @@ export function SourceControlPanel({
                 <div className="scm-compose">
                   <textarea
                     className="scm-message"
-                    placeholder="Message (⌘↵ to commit)"
+                    placeholder={hintLabel('Message (⌘↵ to commit)')}
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={(e) => {

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
+import { keyLabel } from '@shared/platform-utils'
 
 interface ShortcutsPanelProps {
   onClose: () => void
@@ -83,7 +84,7 @@ export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
                   <span className="shortcut-keys">
                     {r.keys.map((k, i) => (
                       <kbd key={i} className="kbd">
-                        {k}
+                        {keyLabel(k)}
                       </kbd>
                     ))}
                   </span>

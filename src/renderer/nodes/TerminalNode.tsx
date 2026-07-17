@@ -71,6 +71,7 @@ import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
+import { hintLabel } from '@shared/platform-utils'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -1706,7 +1707,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           </button>
         </Tooltip>
         {showChat && (
-          <Tooltip label="Chat / markdown view (⌘M)">
+          <Tooltip label={hintLabel('Chat / markdown view (⌘M)')}>
             <button
               className="term-node__chat nodrag"
               aria-pressed={!!data.mdMode}
@@ -1791,7 +1792,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">
                 <span>Markdown</span>
-                <span className="term-md__hint">⌘M to exit</span>
+                <span className="term-md__hint">{hintLabel('⌘M to exit')}</span>
               </div>
               <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
             </div>

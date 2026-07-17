@@ -8,6 +8,7 @@ import { useProjects } from '../state/projects'
 import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
+import { hintLabel } from '@shared/platform-utils'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
 const IMAGE_MIME: Record<string, string> = {
@@ -206,7 +207,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           <>
             <button
               className="editor-node__toggle"
-              title="Toggle markdown preview (⌘M)"
+              title={hintLabel('Toggle markdown preview (⌘M)')}
               onClick={togglePreview}
             >
               {preview ? 'Edit' : 'Preview'}
@@ -214,7 +215,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             <button
               className="editor-node__save"
               disabled={!dirty}
-              title="Save (⌘S)"
+              title={hintLabel('Save (⌘S)')}
               onClick={save}
             >
               Save
@@ -263,7 +264,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
               <div className="term-md nodrag nowheel">
                 <div className="term-md__bar">
                   <span>Preview</span>
-                  <span className="term-md__hint">⌘M to edit</span>
+                  <span className="term-md__hint">{hintLabel('⌘M to edit')}</span>
                 </div>
                 <div
                   className="term-md__content"

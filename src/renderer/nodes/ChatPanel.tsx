@@ -3,6 +3,7 @@ import { renderMarkdown } from '../lib/markdown'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSession } from '../session/session'
 import type { ChatMessage } from '@shared/types'
+import { hintLabel } from '@shared/platform-utils'
 
 // Memoized bubble: marked+DOMPurify re-ran for EVERY message on each ChatPanel render (each
 // turn-finish reload, each keystroke re-render). Text is stable per message, so cache per text.
@@ -83,7 +84,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
     <div className="term-chat nodrag nowheel">
       <div className="term-chat__bar">
         <span>Chat</span>
-        <span className="term-chat__hint">⌘M to exit</span>
+        <span className="term-chat__hint">{hintLabel('⌘M to exit')}</span>
       </div>
       <div className="term-chat__msgs" ref={msgsRef}>
         {messages.length === 0 && <div className="term-chat__empty">No conversation yet.</div>}

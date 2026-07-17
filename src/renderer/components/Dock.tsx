@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { hintLabel } from '@shared/platform-utils'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
@@ -165,10 +166,10 @@ export function Dock({
 
         <span className="dock-sep" />
 
-        <button className="dock-btn" title="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo}>
+        <button className="dock-btn" title={hintLabel('Undo (⌘Z)')} disabled={!canUndo} onClick={onUndo}>
           <UndoIcon />
         </button>
-        <button className="dock-btn" title="Redo (⌘⇧Z)" disabled={!canRedo} onClick={onRedo}>
+        <button className="dock-btn" title={hintLabel('Redo (⌘⇧Z)')} disabled={!canRedo} onClick={onRedo}>
           <RedoIcon />
         </button>
 
