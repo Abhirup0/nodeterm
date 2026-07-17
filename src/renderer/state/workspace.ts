@@ -144,6 +144,23 @@ function placeAt(center: { x: number; y: number } | undefined, index: number, w:
 }
 
 /**
+ * Default size for NEW terminal/agent nodes: the user's setting (Settings → Canvas), clamped
+ * to sane canvas bounds — settings.json is hand-editable, and a 0×0 or NaN node would be
+ * unclickable/ungrabbable forever. Falls back to the historical 600×400.
+ */
+function terminalNodeSize(): { width: number; height: number } {
+  const s = useSettings.getState().settings
+  const clamp = (v: unknown, lo: number, hi: number, dflt: number): number => {
+    const n = typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : dflt
+    return Math.min(hi, Math.max(lo, n))
+  }
+  return {
+    width: clamp(s.defaultNodeWidth, 280, 2400, TERMINAL_SIZE.width),
+    height: clamp(s.defaultNodeHeight, 160, 1600, TERMINAL_SIZE.height)
+  }
+}
+
+/**
  * Creates a new terminal node. `cwd` comes from the active project's default folder. When `ssh`
  * (the active SSH project's binding) is given, the node runs in REMOTE tmux on that host: its
  * `data.ssh`/`data.sshRemoteTmux`/`data.cwd` are stamped from the binding instead of `cwd`.
@@ -155,13 +172,14 @@ export function createTerminalNode(
   initialCommand?: string,
   ssh?: Project['ssh']
 ): CanvasNode {
+  const size = terminalNodeSize()
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
-    width: TERMINAL_SIZE.width,
-    height: TERMINAL_SIZE.height,
-    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    position: placeAt(center, index, size.width, size.height),
+    width: size.width,
+    height: size.height,
+    style: { width: size.width, height: size.height },
     data: {
       title: `Terminal ${index + 1}`,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -183,13 +201,14 @@ export function createSshTerminalNode(
   index: number,
   center?: { x: number; y: number }
 ): CanvasNode {
+  const size = terminalNodeSize()
   return {
     id: nextId('ssh'),
     type: 'terminal',
-    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
-    width: TERMINAL_SIZE.width,
-    height: TERMINAL_SIZE.height,
-    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    position: placeAt(center, index, size.width, size.height),
+    width: size.width,
+    height: size.height,
+    style: { width: size.width, height: size.height },
     data: {
       title: server.label,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -313,13 +332,14 @@ export function createAgentNode(
   const initialCommand = permissionMode
     ? withPermissionMode(withPrompt, agentId, permissionMode)
     : withPrompt
+  const size = terminalNodeSize()
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, TERMINAL_SIZE.width, TERMINAL_SIZE.height),
-    width: TERMINAL_SIZE.width,
-    height: TERMINAL_SIZE.height,
-    style: { width: TERMINAL_SIZE.width, height: TERMINAL_SIZE.height },
+    position: placeAt(center, index, size.width, size.height),
+    width: size.width,
+    height: size.height,
+    style: { width: size.width, height: size.height },
     data: {
       title: label,
       // Adopt the agent's own session name into the title until the user renames it by hand.

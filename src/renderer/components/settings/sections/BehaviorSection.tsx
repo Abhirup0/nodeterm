@@ -7,6 +7,10 @@ import { NumberField } from '@renderer/ui/NumberField'
 
 const ROWS = {
   gridSize: { title: 'Grid size', keywords: ['grid', 'size', 'snap'] },
+  nodeSize: {
+    title: 'Default node size',
+    keywords: ['node', 'size', 'width', 'height', 'terminal', 'default']
+  },
   snap: { title: 'Snap to grid', keywords: ['snap', 'grid', 'align'] },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
@@ -29,6 +33,31 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               max={96}
               onChange={(v) => update({ gridSize: v || 24 })}
             />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.nodeSize}>
+        <FieldRow
+          label="Default node size (px)"
+          description="Size new terminal and agent nodes open at. Existing nodes keep their size."
+          control={
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <NumberField
+                value={settings.defaultNodeWidth}
+                min={280}
+                max={2400}
+                step={20}
+                onChange={(v) => update({ defaultNodeWidth: v || 600 })}
+              />
+              <span style={{ opacity: 0.6 }}>×</span>
+              <NumberField
+                value={settings.defaultNodeHeight}
+                min={160}
+                max={1600}
+                step={20}
+                onChange={(v) => update({ defaultNodeHeight: v || 400 })}
+              />
+            </div>
           }
         />
       </SearchableRow>

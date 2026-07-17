@@ -449,6 +449,10 @@ export interface Settings {
   defaultShell: string
   gridSize: number
   snapToGrid: boolean
+  /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
+   *  whatever size they were saved with; other node kinds keep their own defaults. */
+  defaultNodeWidth: number
+  defaultNodeHeight: number
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
@@ -504,6 +508,8 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
+  defaultNodeWidth: 600,
+  defaultNodeHeight: 400,
   panHoverDelay: 600,
   doubleClickFocus: true,
   wheelZoom: false,
