@@ -788,6 +788,12 @@ export interface GitApi {
 export interface UpdateInfo {
   version: string
   notes?: string
+  /**
+   * The update cannot self-install and must be downloaded manually (Linux .deb/.rpm: no
+   * APPIMAGE env, so electron-updater's quitAndInstall would throw). The card shows a
+   * download link instead of the download-progress/restart flow. Absent/false = self-installs.
+   */
+  manual?: boolean
 }
 
 export interface UpdatePolicy {

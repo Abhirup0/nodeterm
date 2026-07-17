@@ -8,6 +8,8 @@ type Status =
   | { kind: 'idle' }
   | { kind: 'checking' }
   | { kind: 'available'; version: string; percent: number }
+  // A .deb/.rpm Linux install can't self-install — show a manual download link, no progress/restart.
+  | { kind: 'manual'; version: string }
   | { kind: 'downloaded'; version: string }
   | { kind: 'upToDate' }
   | { kind: 'required'; minSupported: string | null }
@@ -22,7 +24,11 @@ export function UpdateCard(): JSX.Element | null {
 
   useEffect(() => {
     const offAvailable = window.nodeTerminal.updates.onAvailable((info) => {
-      setStatus({ kind: 'available', version: info.version, percent: 0 })
+      setStatus(
+        info.manual
+          ? { kind: 'manual', version: info.version }
+          : { kind: 'available', version: info.version, percent: 0 }
+      )
       setMinimized(false)
     })
     const offProgress = window.nodeTerminal.updates.onProgress((p: UpdateProgress) => {
@@ -60,7 +66,10 @@ export function UpdateCard(): JSX.Element | null {
   useEffect(() => {
     const onChecking = () => {
       setStatus((s) =>
-        s.kind === 'available' || s.kind === 'downloaded' || s.kind === 'required'
+        s.kind === 'available' ||
+        s.kind === 'manual' ||
+        s.kind === 'downloaded' ||
+        s.kind === 'required'
           ? s
           : { kind: 'checking' }
       )
@@ -77,7 +86,7 @@ export function UpdateCard(): JSX.Element | null {
     void window.nodeTerminal.updates.getPolicy().then((p) => {
       if (!p.mandatory) return
       setStatus((s) =>
-        s.kind === 'available' || s.kind === 'downloaded'
+        s.kind === 'available' || s.kind === 'manual' || s.kind === 'downloaded'
           ? s
           : { kind: 'required', minSupported: p.minSupported }
       )
@@ -125,7 +134,9 @@ export function UpdateCard(): JSX.Element | null {
       ? 'Checking for updates…'
       : status.kind === 'available'
         ? 'Downloading Update'
-        : status.kind === 'downloaded'
+        : status.kind === 'manual'
+          ? 'Update available'
+          : status.kind === 'downloaded'
           ? 'Update ready'
           : status.kind === 'upToDate'
             ? "You're up to date"
@@ -135,7 +146,10 @@ export function UpdateCard(): JSX.Element | null {
 
   const canMinimize = status.kind === 'available' || status.kind === 'downloaded'
   const canDismiss =
-    status.kind === 'downloaded' || status.kind === 'upToDate' || status.kind === 'error'
+    status.kind === 'manual' ||
+    status.kind === 'downloaded' ||
+    status.kind === 'upToDate' ||
+    status.kind === 'error'
 
   return (
     <div className="update-card">
@@ -167,6 +181,17 @@ export function UpdateCard(): JSX.Element | null {
             <div className="update-card__bar-fill" style={{ width: `${status.percent}%` }} />
           </div>
           <p className="update-card__pct">Downloading… {Math.round(status.percent)}%</p>
+        </>
+      )}
+
+      {status.kind === 'manual' && (
+        <>
+          <p className="update-card__body">
+            nodeterm v{status.version} is available. Download it to update.
+          </p>
+          <button className="update-card__btn" onClick={openReleases}>
+            Download
+          </button>
         </>
       )}
 

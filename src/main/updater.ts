@@ -9,6 +9,7 @@ import { app, ipcMain, Notification } from 'electron'
 // electron-vite v5's CJS interop.
 import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
+import { isManualUpdatePlatform, toUpdateAvailablePayload } from '../shared/update-platform'
 import { getMainWindow, sendToMain } from './main-window'
 import { retainUntilDismissed } from './notifications'
 
@@ -43,11 +44,16 @@ export function initUpdater(onBeforeRestart?: () => void): void {
     return
   }
 
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
+  // A Linux .deb/.rpm install (no APPIMAGE env) cannot self-install and would re-download the
+  // full AppImage every 6h only to throw on install. Degrade to a manual-download link: don't
+  // auto-download; surface update-available with `manual: true` so the card shows a Download link.
+  const manualUpdates = isManualUpdatePlatform(process.platform, !!process.env.APPIMAGE)
+
+  autoUpdater.autoDownload = !manualUpdates
+  autoUpdater.autoInstallOnAppQuit = !manualUpdates
 
   autoUpdater.on('update-available', (info) => {
-    send(IPC.appUpdateAvailable, { version: info.version, notes: info.releaseNotes ?? '' })
+    send(IPC.appUpdateAvailable, toUpdateAvailablePayload(info, manualUpdates))
   })
 
   autoUpdater.on('download-progress', (p) => {
