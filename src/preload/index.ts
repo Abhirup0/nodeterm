@@ -129,6 +129,27 @@ const api: NodeTerminalApi = {
     load: () => ipcRenderer.invoke(IPC.settingsLoad),
     save: (settings) => ipcRenderer.invoke(IPC.settingsSave, settings)
   },
+  speech: {
+    // IPC carries the raw Float32 samples as an ArrayBuffer (structured clone; decodePcmPayload's
+    // ArrayBuffer branch reads it directly, no re-encoding). A Float32Array view doesn't always
+    // span its whole underlying buffer (e.g. a slice of a pooled/recycled buffer upstream), so a
+    // non-spanning view is copied first — sending pcm.buffer as-is would leak neighboring bytes
+    // (or the wrong region) into the transcription.
+    transcribe: (pcm: Float32Array, language?: string) => {
+      const spansBuffer = pcm.byteOffset === 0 && pcm.byteLength === pcm.buffer.byteLength
+      const buffer = spansBuffer ? pcm.buffer : pcm.slice().buffer
+      return ipcRenderer.invoke(IPC.speechTranscribe, { pcm: buffer, language })
+    },
+    models: () => ipcRenderer.invoke(IPC.speechModels),
+    downloadModel: (id: string) => ipcRenderer.invoke(IPC.speechModelDownload, { id }),
+    deleteModel: (id: string) => ipcRenderer.invoke(IPC.speechModelDelete, { id }),
+    onProgress: (cb) => {
+      const handler = (_e: unknown, p: { id: string; pct: number }) => cb(p)
+      ipcRenderer.on(IPC.speechProgress, handler)
+      return () => ipcRenderer.removeListener(IPC.speechProgress, handler)
+    },
+    micConsent: () => ipcRenderer.invoke(IPC.speechMicConsent)
+  },
   ssh: {
     list: () => ipcRenderer.invoke(IPC.sshList),
     save: (server) => ipcRenderer.invoke(IPC.sshSave, server),

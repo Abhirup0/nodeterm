@@ -28,6 +28,8 @@ import {
   type PtyCreateOptions,
   type SettingsApi,
   type Settings,
+  type SpeechApi,
+  type SpeechModelInfo,
   type TmuxStatus,
   type Workspace,
   type WorkspaceApi
@@ -35,6 +37,7 @@ import {
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
+import { encodePcmForWire } from './speech-encode'
 import { type FrameTransport, WebSocketFrameTransport } from './frame-transport'
 
 type Listener = (...args: unknown[]) => void
@@ -437,6 +440,31 @@ export function buildPresenceApi(client: RpcClient): Pick<NodeTerminalApi, 'pres
 }
 
 /**
+ * Build the `speech` namespace over an RpcClient — a REAL implementation (the server registers
+ * `registerSpeechIpc` too; see `src/core/speech/register-ipc.ts`), not a stub. The one wire
+ * difference from Electron IPC: `decodePcmPayload` (src/core/speech/pcm.ts) accepts EITHER a raw
+ * Float32 ArrayBuffer (what the preload sends over structured-clone IPC) OR a base64 string of
+ * little-endian Int16 samples (half the bytes over JSON) — this is the string branch, encoded by
+ * the pure `encodePcmForWire` helper. `micConsent` resolves `true` locally: the browser's own
+ * `getUserMedia` prompt IS the consent gate, so there is nothing for the server to answer (the
+ * server-side handler for this channel is stubbed the same way — see src/server/index.ts).
+ */
+export function buildSpeechApi(client: RpcClient): Pick<NodeTerminalApi, 'speech'> {
+  const speech: SpeechApi = {
+    transcribe: (pcm, language) =>
+      client.request(IPC.speechTranscribe, { pcm: encodePcmForWire(pcm), language }) as Promise<{
+        text: string
+      }>,
+    models: () => client.request(IPC.speechModels) as Promise<SpeechModelInfo[]>,
+    downloadModel: (id) => client.request(IPC.speechModelDownload, { id }) as Promise<void>,
+    deleteModel: (id) => client.request(IPC.speechModelDelete, { id }) as Promise<void>,
+    onProgress: (cb) => client.subscribe(IPC.speechProgress, cb as Listener),
+    micConsent: () => Promise.resolve(true)
+  }
+  return { speech }
+}
+
+/**
  * Build the `claude` namespace over an RpcClient. `cliCaps` is a REAL handler on the server
  * (`registerClaudeCliIpc` runs in the server shell too), so the browser resolves the very same
  * `--permission-mode auto` version gate as desktop instead of silently no-opping into "auto
@@ -566,6 +594,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildAgentApi(client),
     ...buildCanvasApi(client),
     ...buildPresenceApi(client),
+    ...buildSpeechApi(client),
     // Only `cliCaps` is real here — the rest of the namespace stays stubbed (see buildClaudeApi).
     claude: buildClaudeApi(client, stubApi.claude),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over

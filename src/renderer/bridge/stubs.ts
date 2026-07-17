@@ -1,8 +1,9 @@
 // Graceful non-terminal stub surface for the browser (Server Edition) build.
 //
-// The real namespaces (`pty`, `workspace`, `settings`, the fs/git/files/context group from
-// `buildFilesApi`, and `dialog` from the in-app `dialog-picker`) are provided by the ws-bridge;
-// everything else here degrades benignly so the renderer boots without a full Electron preload.
+// The real namespaces (`pty`, `workspace`, `settings`, `speech`, the fs/git/files/context group
+// from `buildFilesApi`, and `dialog` from the in-app `dialog-picker`) are provided by the
+// ws-bridge; everything else here degrades benignly so the renderer boots without a full
+// Electron preload.
 // The exact per-member behavior is the boot-path contract encoded in the Task 7 brief (derived
 // from a full renderer-boot audit): every `on*` subscription MUST return a callable no-op
 // unsubscribe (the renderer uses the return value as a React effect cleanup — a missing member or
@@ -117,6 +118,7 @@ export function buildStubApi(): Omit<
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
   | 'presence'
+  | 'speech'
 > {
   const api = {
     ssh: {
@@ -327,6 +329,7 @@ export function buildStubApi(): Omit<
     | 'onSubagentActivity'
     | 'userDataDir'
     | 'presence'
+    | 'speech'
   >
 
   return api

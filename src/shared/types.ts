@@ -5,6 +5,7 @@ import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
+import type { WhisperModelInfo } from './speech'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -556,6 +557,30 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface SettingsApi {
   load(): Promise<Settings>
   save(settings: Settings): Promise<void>
+}
+
+/** A downloadable whisper model plus its on-disk status, as returned by `speech.models()`. */
+export interface SpeechModelInfo extends WhisperModelInfo {
+  downloaded: boolean
+  /** Actual on-disk size in MB, present only when `downloaded`. */
+  sizeMB?: number
+}
+
+export interface SpeechApi {
+  /** Transcribe a chunk of mono PCM audio (16kHz Float32 samples) to text.
+   *  `language` is a BCP-47-ish hint or 'auto'; defaults to the user's speech settings. */
+  transcribe(pcm: Float32Array, language?: string): Promise<{ text: string }>
+  /** List the known whisper models with their download/pro status. */
+  models(): Promise<SpeechModelInfo[]>
+  /** Download a whisper model to disk (progress via `onProgress`). */
+  downloadModel(id: string): Promise<void>
+  /** Delete a downloaded whisper model. */
+  deleteModel(id: string): Promise<void>
+  /** Subscribe to model-download progress (`pct` 0-100). Returns unsubscribe. */
+  onProgress(cb: (p: { id: string; pct: number }) => void): () => void
+  /** Ask for microphone permission. Electron: OS-level (macOS TCC prompt); browser: always
+   *  resolves true — the browser's own getUserMedia prompt is not ours to gate. */
+  micConsent(): Promise<boolean>
 }
 
 export interface SshApi {
@@ -1321,6 +1346,7 @@ export interface NodeTerminalApi {
   workspace: WorkspaceApi
   dialog: DialogApi
   settings: SettingsApi
+  speech: SpeechApi
   ssh: SshApi
   sshProject: SshProjectApi
   sshFs: SshFsApi
