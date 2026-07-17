@@ -7,6 +7,7 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useSshConn } from '../state/sshConn'
 import { useScmDraft } from '../state/scmDraft'
+import { useScmCache } from '../state/scmCache'
 import { useSession } from '../session/session'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
 import { buildCommitMenuItems } from './git-history/git-history-menu'
@@ -84,7 +85,16 @@ export function SourceControlPanel({
   // appears once `setConn` runs (after `setActiveRemote` arms remote routing). Observing it lets the
   // refresh re-run when the master connects. Local projects have no entry → undefined → no effect.
   const sshControlPath = useSshConn((s) => (project?.id ? s.byProject[project.id]?.controlPath : undefined))
-  const [status, setStatus] = useState<GitStatus | null>(null)
+  // Status + history live in a per-cwd cache (scmCache), not component state: the panel is
+  // unmounted on close, and reopening used to show an empty drawer until git answered. The
+  // cached snapshot paints immediately; the refresh-on-mount below replaces it silently.
+  const status = useScmCache((s) => (cwd ? (s.status[cwd] ?? null) : null))
+  const setStatus = useCallback(
+    (st: GitStatus | null) => {
+      if (cwd && st) useScmCache.getState().setStatus(cwd, st)
+    },
+    [cwd]
+  )
   // Commit message + AI-generate state live in a per-repo store (keyed by cwd), so closing the
   // panel mid-generation neither discards the message nor abandons the run — reopening shows it.
   const draftKey = cwd ?? ''
@@ -100,7 +110,13 @@ export function SourceControlPanel({
   const [branchMenu, setBranchMenu] = useState<{ top: number; left: number } | null>(null)
   const [newBranch, setNewBranch] = useState('')
   const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null)
-  const [history, setHistory] = useState<GitHistoryResult | null>(null)
+  const history = useScmCache((s) => (cwd ? (s.history[cwd] ?? null) : null))
+  const setHistory = useCallback(
+    (h: GitHistoryResult | null) => {
+      if (cwd && h) useScmCache.getState().setHistory(cwd, h)
+    },
+    [cwd]
+  )
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; item: GitHistoryItem } | null>(
@@ -128,11 +144,10 @@ export function SourceControlPanel({
   const autoFetchOn = useSettings((s) => s.settings.gitAutoFetch)
 
   const refreshHistory = useCallback(async () => {
-    if (!cwd) {
-      setHistory(null)
-      return
-    }
-    setHistoryLoading(true)
+    if (!cwd) return
+    // Spinner only when there is nothing to show yet — cached history stays visible while
+    // the silent re-fetch runs.
+    if (!useScmCache.getState().history[cwd]) setHistoryLoading(true)
     try {
       setHistory(await git.history(cwd))
       setHistoryError('')

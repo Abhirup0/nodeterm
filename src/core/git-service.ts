@@ -54,24 +54,44 @@ type ActiveClone = {
 }
 let activeClone: ActiveClone | null = null
 
-// `gh auth status` is a network-touching CLI call but auth state changes rarely, so cache
-// it briefly — otherwise every status refresh pays a process spawn (and possible round-trip).
-const GH_AUTH_TTL_MS = 60_000
+// `gh auth status` is a network-touching CLI call (it validates the token against the GitHub
+// API — measured ~700ms even on a fast link) but auth state changes rarely, so cache it.
+const GH_AUTH_TTL_MS = 10 * 60_000
 let ghAuthedCache: { value: boolean; at: number } | null = null
+let ghAuthedInFlight: Promise<boolean> | null = null
 
 async function ghAuthed(): Promise<boolean> {
   if (!GH_PATH) return false
   const now = Date.now()
   if (ghAuthedCache && now - ghAuthedCache.at < GH_AUTH_TTL_MS) return ghAuthedCache.value
-  let value = false
-  try {
-    await run(GH_PATH, ['auth', 'status'], { env: GIT_ENV, maxBuffer: 1024 * 1024 })
-    value = true
-  } catch {
-    value = false
-  }
-  ghAuthedCache = { value, at: now }
-  return value
+  if (ghAuthedInFlight) return ghAuthedInFlight
+  ghAuthedInFlight = (async () => {
+    let value = false
+    try {
+      await run(GH_PATH, ['auth', 'status'], { env: GIT_ENV, maxBuffer: 1024 * 1024 })
+      value = true
+    } catch {
+      value = false
+    }
+    ghAuthedCache = { value, at: Date.now() }
+    ghAuthedInFlight = null
+    return value
+  })()
+  return ghAuthedInFlight
+}
+
+/**
+ * Stale-while-revalidate view of `ghAuthed` for the status() hot path: `status()` must never
+ * block the file list on a GitHub API round-trip. Returns the cached answer immediately (even
+ * expired — auth state changes rarely, a stale answer beats a blank panel) and refreshes the
+ * cache in the background so the panel's next refresh sees the real value. Only the very first
+ * call ever (no cache at all) reports `false` while the probe runs; that flips one refresh later.
+ */
+function ghAuthedSwr(): boolean {
+  if (!GH_PATH) return false
+  const fresh = !!ghAuthedCache && Date.now() - ghAuthedCache.at < GH_AUTH_TTL_MS
+  if (!fresh) void ghAuthed().catch(() => {})
+  return ghAuthedCache?.value ?? false
 }
 
 interface Exec {
@@ -345,7 +365,9 @@ export class GitService {
     // These reads are independent of each other; run them concurrently instead of
     // serially spawning ~10 git processes one after the next. (`remote get-url origin`
     // simply fails to empty when there's no origin, so it needn't wait on `remote`.)
-    const [branchR, branchesR, remotesR, originR, countsR, upstreamR, cachedR, workR, porcelainR, gh] =
+    // gh auth is deliberately NOT awaited here (ghAuthedSwr): it hits the GitHub API and
+    // used to hold the whole status — i.e. the panel's first paint — hostage for ~700ms.
+    const [branchR, branchesR, remotesR, originR, countsR, upstreamR, cachedR, workR, porcelainR] =
       await Promise.all([
         git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']),
         git(cwd, ['branch', '--format=%(refname:short)']),
@@ -357,9 +379,9 @@ export class GitService {
         git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
         git(cwd, ['diff', '--cached', '--numstat']),
         git(cwd, ['diff', '--numstat']),
-        git(cwd, ['status', '--porcelain']),
-        ghAuthed()
+        git(cwd, ['status', '--porcelain'])
       ])
+    const gh = ghAuthedSwr()
 
     const branch = branchR.out.trim() || 'HEAD'
     const branches = branchesR.out.split('\n').map((b) => b.trim()).filter(Boolean)
