@@ -1,5 +1,36 @@
 import { describe, expect, it } from 'vitest'
-import { isAtRecordingCap, isProGateError } from './DictationOverlay'
+import { dictationMode, isAtRecordingCap, isProGateError, type DictationTarget } from './DictationOverlay'
+
+const terminalTarget: DictationTarget = { kind: 'terminal', nodeId: 'n1', title: 'shell' }
+const chatTarget: DictationTarget = { kind: 'chat', nodeId: 'n2', title: 'chat' }
+
+// Press-to-talk: the pill is the default surface for both target kinds while a take is in
+// flight; only a chat target's *transcribed* text ever reaches the editable card (a terminal
+// target inserts directly and never has a 'text' phase at all — see DictationOverlay.stopRecording).
+describe('dictationMode', () => {
+  it('is "warning" whenever there is no target, regardless of phase', () => {
+    expect(dictationMode(null, 'idle')).toBe('warning')
+    expect(dictationMode(null, 'recording')).toBe('warning')
+    expect(dictationMode(null, 'text')).toBe('warning')
+  })
+
+  it('is "pill" for a terminal target in every phase, including "text"', () => {
+    expect(dictationMode(terminalTarget, 'idle')).toBe('pill')
+    expect(dictationMode(terminalTarget, 'recording')).toBe('pill')
+    expect(dictationMode(terminalTarget, 'transcribing')).toBe('pill')
+    expect(dictationMode(terminalTarget, 'text')).toBe('pill')
+  })
+
+  it('is "pill" for a chat target until phase reaches "text"', () => {
+    expect(dictationMode(chatTarget, 'idle')).toBe('pill')
+    expect(dictationMode(chatTarget, 'recording')).toBe('pill')
+    expect(dictationMode(chatTarget, 'transcribing')).toBe('pill')
+  })
+
+  it('is "card" only for a chat target once transcribed ("text" phase)', () => {
+    expect(dictationMode(chatTarget, 'text')).toBe('card')
+  })
+})
 
 // Base64 int16 PCM runs ~2.6 MB/min; WS_MAX_PAYLOAD (src/server/ws.ts) is 8 MiB, so an unbounded
 // take would eventually blow the ws frame budget and drop the whole bridge. The 2:30 hard cap

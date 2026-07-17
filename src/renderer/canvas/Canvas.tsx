@@ -464,6 +464,10 @@ export function Canvas() {
   // overlay is up — the design explicitly freezes it so a stray click elsewhere mid-dictation
   // can't retarget an in-progress recording).
   const [dictationTarget, setDictationTarget] = useState<DictationTarget | null>(null)
+  // Bumped (never toggled) on a second shortcut/Dock-mic press while the overlay is already
+  // open — DictationOverlay watches this to decide STOP-vs-CANCEL from its own current phase
+  // instead of Canvas guessing; see the `stopSignal` prop doc on DictationOverlayProps.
+  const [dictationStopSignal, setDictationStopSignal] = useState(0)
   const [bugReportOpen, setBugReportOpen] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
@@ -982,12 +986,19 @@ export function Canvas() {
     }
   }, [sessionsPinned])
 
-  // ⌘⇧D / Dock mic button: opens the dictation overlay targeting the first selected
-  // terminal/chat node (agent nodes are `type: 'terminal'` with `data.agentId` set — no separate
-  // case needed). Closing and reopening re-resolves the target from the CURRENT selection.
+  // ⌘⇧D / Dock mic button: press-to-talk toggle. Closed → opens the dictation pill targeting the
+  // first selected terminal/chat node (agent nodes are `type: 'terminal'` with `data.agentId`
+  // set — no separate case needed) and starts recording immediately (or, with no such node
+  // selected, shows a brief warning pill — see DictationOverlay's mount effect). Already open →
+  // does NOT close the overlay itself; it bumps `dictationStopSignal` so DictationOverlay can
+  // decide what "press again" means from its own current phase (stop-and-transcribe while
+  // recording, dismiss otherwise) — see the `stopSignal` prop doc.
   const toggleDictation = useCallback(() => {
     setDictationOpen((open) => {
-      if (open) return false
+      if (open) {
+        setDictationStopSignal((n) => n + 1)
+        return true
+      }
       const sel = nodesRef.current.find(
         (n) => n.selected && (n.type === 'terminal' || n.type === 'chat')
       )
@@ -5923,6 +5934,7 @@ export function Canvas() {
       {dictationOpen && (
         <DictationOverlay
           target={dictationTarget}
+          stopSignal={dictationStopSignal}
           onClose={() => setDictationOpen(false)}
           onOpenLicense={() => {
             setDictationOpen(false)
