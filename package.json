@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:unit": "vitest run test/remote",
-    "rebuild": "electron-rebuild -f -w node-pty",
+    "rebuild": "electron-rebuild -f -w node-pty,smart-whisper",
     "server:build": "esbuild src/server/main.ts --bundle --platform=node --format=cjs --outfile=out/server/main.cjs --external:node-pty --external:ws --tsconfig=tsconfig.node.json",
     "server:start": "node out/server/main.cjs",
     "server:dev": "npm run build && npm run server:build && node out/server/main.cjs",
@@ -22,7 +22,7 @@
     "make-social": "node scripts/make-social.mjs",
     "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.notarize=false",
     "release": "npm run make-icon && electron-vite build && sh -c 'electron-builder --mac --arm64 --x64 --publish never; s=$?; npm run rebuild; exit $s'",
-    "postinstall": "electron-rebuild -f -w node-pty"
+    "postinstall": "electron-rebuild -f -w node-pty,smart-whisper"
   },
   "build": {
     "appId": "com.nodeterm.app",
@@ -36,7 +36,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/node-pty/**"
+      "**/node_modules/node-pty/**",
+      "**/node_modules/smart-whisper/**"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -77,6 +78,7 @@
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
     "qrcode": "^1.5.4",
+    "smart-whisper": "^0.8.1",
     "tweetnacl": "^1.0.3",
     "ws": "^8.21.0",
     "zustand": "^4.5.7"
