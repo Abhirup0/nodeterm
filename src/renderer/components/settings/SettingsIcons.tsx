@@ -29,6 +29,12 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M7 12h2" />
     </>
   ),
+  speech: (
+    <>
+      <rect x="6" y="2.2" width="4" height="7" rx="2" />
+      <path d="M4 8.2a4 4 0 0 0 8 0M8 12.2v1.6M6.2 13.8h3.6" />
+    </>
+  ),
   agents: (
     <path d="M8 2.3 9.4 5.9 13 7.3 9.4 8.7 8 12.3 6.6 8.7 3 7.3 6.6 5.9z" />
   ),
