@@ -5,6 +5,7 @@ import {
   masterArgs,
   childArgs,
   remoteTmuxHasSessionArgs,
+  probeSaysAbsent,
   remoteCapturePaneArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
@@ -183,5 +184,22 @@ describe('listDirArgs', () => {
       'deploy@h.example.com',
       `ls -1Ap ~/'my dir'`
     ])
+  })
+})
+
+describe('probeSaysAbsent (has-session probe discrimination)', () => {
+  it('only tmux\'s own exit 1 is evidence of absence', () => {
+    expect(probeSaysAbsent(Object.assign(new Error('exit 1'), { code: 1 }))).toBe(true)
+  })
+  it('transport/spawn failures are a failed READ, never absence', () => {
+    // ssh's own failure (dead or mid-reconnect ControlMaster).
+    expect(probeSaysAbsent(Object.assign(new Error('exit 255'), { code: 255 }))).toBe(false)
+    // tmux off the remote PATH.
+    expect(probeSaysAbsent(Object.assign(new Error('exit 127'), { code: 127 }))).toBe(false)
+    // spawn-level errors carry a string code, or none at all.
+    expect(probeSaysAbsent(Object.assign(new Error('spawn'), { code: 'EAGAIN' }))).toBe(false)
+    expect(probeSaysAbsent(new Error('plain'))).toBe(false)
+    expect(probeSaysAbsent(undefined)).toBe(false)
+    expect(probeSaysAbsent(null)).toBe(false)
   })
 })

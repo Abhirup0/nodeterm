@@ -18,6 +18,7 @@ import {
 import { findCommand, tmuxInstall } from './tmux-hint'
 import { hookServer } from './agents/hook-server'
 import {
+  probeSaysAbsent,
   remoteHookEnvArgs,
   remoteTmuxHasSessionArgs,
   remoteTmuxKillArgs,
@@ -883,18 +884,20 @@ export class PtyManager {
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
-   *  network round-trip never blocks the main event loop. */
+   *  network round-trip never blocks the main event loop. A probe that FAILED for transport
+   *  reasons answers "exists": only tmux's own exit 1 is evidence of absence (probeSaysAbsent) —
+   *  a dead/reconnecting master read as "cold" typed a resume command into a live agent session. */
   private async remoteSessionExists(
     sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
     sessionId: string
   ): Promise<boolean> {
     const ssh = findSsh()
-    if (!ssh) return false
+    if (!ssh) return true // can't probe → not evidence of absence; warm attach types nothing
     try {
       await runAsync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId))
       return true
-    } catch {
-      return false
+    } catch (e) {
+      return !probeSaysAbsent(e)
     }
   }
 
@@ -927,8 +930,11 @@ export class PtyManager {
     try {
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)])
       return true
-    } catch {
-      return false
+    } catch (e) {
+      // Same discrimination as the remote probe: tmux's exit 1 (no session / no server —
+      // the reboot case) is absence; a spawn failure (EAGAIN under a bulk project load) is
+      // not, and cold-restoring on it would type into a live session.
+      return !probeSaysAbsent(e)
     }
   }
 
