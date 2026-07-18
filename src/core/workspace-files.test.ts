@@ -251,7 +251,7 @@ describe('kanban board persistence', () => {
       { id: 'kcol-a', title: 'To Do', color: '#0a84ff' },
       { id: 'kcol-b', title: 'Done', color: '#32d74b' }
     ],
-    cards: [{ id: 'kcard-1', columnId: 'kcol-a', title: 'ship it', description: '**md**', createdAt: 1752800000000 }]
+    assignments: [{ nodeId: 'term-abc', columnId: 'kcol-a' }]
   }
   it('rides the project file round-trip', () => {
     const f = projectToFile(project({ kanban: board }), 1, '2026-07-18T00:00:00.000Z')
@@ -271,11 +271,13 @@ describe('kanban board persistence', () => {
     const { files } = splitWorkspace(ws, () => 1, '2026-01-01T00:00:00.000Z')
     expect(files.get('/a/b')?.kanban).toEqual(board)
   })
-  it('a malformed kanban shape from a hand-edited file is dropped, not carried', () => {
+  it('a malformed or v1-shaped kanban from a hand-edited file is dropped, not carried', () => {
     const f = projectToFile(project(), 1, '2026-07-18T00:00:00.000Z')
     const evil1 = { ...f, kanban: {} } as unknown as ProjectFileV1
-    const evil2 = { ...f, kanban: { columns: 42, cards: [] } } as unknown as ProjectFileV1
+    const evil2 = { ...f, kanban: { columns: 42, assignments: [] } } as unknown as ProjectFileV1
+    const v1shape = { ...f, kanban: { columns: [], cards: [] } } as unknown as ProjectFileV1
     expect('kanban' in fileToProject(evil1, {})).toBe(false)
     expect('kanban' in fileToProject(evil2, {})).toBe(false)
+    expect('kanban' in fileToProject(v1shape, {})).toBe(false)
   })
 })

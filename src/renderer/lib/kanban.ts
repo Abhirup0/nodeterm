@@ -1,9 +1,11 @@
-import type { KanbanCard, ProjectKanban } from '@shared/types'
+import type { KanbanAssignment, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
 // the next board here and hands it whole to setProjectKanban (no second live source).
 // Every function returns a new board; unknown ids are no-ops returning the input.
+// Cards are the project's SESSION NODES — the board stores only column assignments; a
+// session with no (or dangling) assignment sits in the virtual Ungrouped column.
 
 const kid = (prefix: string): string => `${prefix}-${Math.random().toString(36).slice(2, 10)}`
 
@@ -16,13 +18,8 @@ export function defaultKanban(): ProjectKanban {
       { id: kid('kcol'), title: 'In Progress', color: NODE_COLORS[2] },
       { id: kid('kcol'), title: 'Done', color: NODE_COLORS[1] }
     ],
-    cards: []
+    assignments: []
   }
-}
-
-/** A column's cards in board order (order = relative position in the cards array). */
-export function cardsInColumn(k: ProjectKanban, columnId: string): KanbanCard[] {
-  return k.cards.filter((c) => c.columnId === columnId)
 }
 
 /** Color for the next added column — cycles the node palette. */
@@ -53,61 +50,63 @@ export function moveColumn(k: ProjectKanban, columnId: string, beforeId: string 
   return { ...k, columns: [...without.slice(0, at), dragged, ...without.slice(at)] }
 }
 
-/** Deletes a column, migrating its cards to the first remaining column. Returns null
- *  when this is the last column — the board always keeps ≥ 1 column. */
-export function deleteColumn(k: ProjectKanban, columnId: string): ProjectKanban | null {
+/** Deletes a user column; its assigned sessions return to Ungrouped (assignments drop).
+ *  Non-destructive by design — sessions are untouched, so no confirm dialog and no
+ *  last-column rule (the virtual Ungrouped column always remains). */
+export function deleteColumn(k: ProjectKanban, columnId: string): ProjectKanban {
   if (!k.columns.some((c) => c.id === columnId)) return k
-  if (k.columns.length <= 1) return null
-  const columns = k.columns.filter((c) => c.id !== columnId)
-  const target = columns[0].id
   return {
-    columns,
-    cards: k.cards.map((c) => (c.columnId === columnId ? { ...c, columnId: target } : c))
+    columns: k.columns.filter((c) => c.id !== columnId),
+    assignments: k.assignments.filter((a) => a.columnId !== columnId)
   }
 }
 
-export function addCard(k: ProjectKanban, columnId: string, title: string, createdAt: number): ProjectKanban {
-  if (!k.columns.some((c) => c.id === columnId)) return k
-  return { ...k, cards: [...k.cards, { id: kid('kcard'), columnId, title, createdAt }] }
+/** Node ids assigned to `columnId`, in board order. */
+export function assignedTo(k: ProjectKanban, columnId: string): string[] {
+  return k.assignments.filter((a) => a.columnId === columnId).map((a) => a.nodeId)
 }
 
-export function updateCard(
+/** Ids from `sessionIds` with no live assignment — never assigned, or assigned to a column
+ *  that no longer exists (e.g. a git merge kept the assignment but lost the column). Order
+ *  follows `sessionIds` (= canvas order). */
+export function unassigned(k: ProjectKanban, sessionIds: string[]): string[] {
+  const cols = new Set(k.columns.map((c) => c.id))
+  const assigned = new Set(
+    k.assignments.filter((a) => cols.has(a.columnId)).map((a) => a.nodeId)
+  )
+  return sessionIds.filter((id) => !assigned.has(id))
+}
+
+/** Assigns/moves a session card. `columnId` null = back to Ungrouped (assignment removed;
+ *  Ungrouped order is canvas order, so `beforeNodeId` is ignored there). Inserts before
+ *  `beforeNodeId`'s assignment when that assignment is in the target column, else at the
+ *  end. Unknown target column is a no-op. */
+export function assignNode(
   k: ProjectKanban,
-  cardId: string,
-  patch: { title?: string; description?: string }
+  nodeId: string,
+  columnId: string | null,
+  beforeNodeId: string | null
 ): ProjectKanban {
-  return {
-    ...k,
-    cards: k.cards.map((c) => {
-      if (c.id !== cardId) return c
-      const next = { ...c, ...patch }
-      if (!next.description) delete next.description // emptied body: drop the key, keep the file clean
-      return next
-    })
+  if (nodeId === beforeNodeId) return k
+  if (columnId === null) {
+    if (!k.assignments.some((a) => a.nodeId === nodeId)) return k
+    return { ...k, assignments: k.assignments.filter((a) => a.nodeId !== nodeId) }
   }
-}
-
-export function deleteCard(k: ProjectKanban, cardId: string): ProjectKanban {
-  return { ...k, cards: k.cards.filter((c) => c.id !== cardId) }
-}
-
-/** Moves a card into `toColumnId`, before `beforeCardId` (null — or a card that is not
- *  in the target column — = end of that column). */
-export function moveCard(
-  k: ProjectKanban,
-  cardId: string,
-  toColumnId: string,
-  beforeCardId: string | null
-): ProjectKanban {
-  if (cardId === beforeCardId) return k
-  const card = k.cards.find((c) => c.id === cardId)
-  if (!card || !k.columns.some((c) => c.id === toColumnId)) return k
-  const moved = { ...card, columnId: toColumnId }
-  const without = k.cards.filter((c) => c.id !== cardId)
-  const before = beforeCardId
-    ? without.find((c) => c.id === beforeCardId && c.columnId === toColumnId)
+  if (!k.columns.some((c) => c.id === columnId)) return k
+  const moved: KanbanAssignment = { nodeId, columnId }
+  const without = k.assignments.filter((a) => a.nodeId !== nodeId)
+  const before = beforeNodeId
+    ? without.find((a) => a.nodeId === beforeNodeId && a.columnId === columnId)
     : undefined
   const idx = before ? without.indexOf(before) : -1
   const at = idx === -1 ? without.length : idx
-  return { ...k, cards: [...without.slice(0, at), moved, ...without.slice(at)] }
+  return { ...k, assignments: [...without.slice(0, at), moved, ...without.slice(at)] }
+}
+
+/** Drops assignments of nodes that no longer exist. Returns the SAME object when nothing
+ *  changed, so callers can cheaply skip a no-op persist. */
+export function pruneAssignments(k: ProjectKanban, liveIds: string[]): ProjectKanban {
+  const live = new Set(liveIds)
+  const assignments = k.assignments.filter((a) => live.has(a.nodeId))
+  return assignments.length === k.assignments.length ? k : { ...k, assignments }
 }
