@@ -5811,6 +5811,16 @@ export function Canvas() {
           <span className="cluster-search__icon">⌕</span>
           <span className="kbd">{hintLabel('⌘K')}</span>
         </button>
+        {/* Lives here, not in the tab bar: many open projects pushed a tab-strip toggle out of
+            sight, and this cluster is the stable home of view/panel controls. */}
+        {activeProjectId && (
+          <button
+            title={hintLabel(kanbanOpen ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)')}
+            onClick={() => useViewMode.getState().toggle(activeProjectId)}
+          >
+            {kanbanOpen ? <IconCanvasView /> : <IconKanban />}
+          </button>
+        )}
         <button title={hintLabel('Explorer (⌘⇧E)')} onClick={() => setExplorerOpen(true)}>
           <IconExplorer />
         </button>

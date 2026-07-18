@@ -2328,7 +2328,7 @@ body,
   position: absolute;
   top: 54px;
   right: 14px;
-  z-index: 11;
+  z-index: 26; /* above the kanban overlay (25) — the view toggle must stay reachable on the board */
   display: flex;
   align-items: center; /* center the presence facepile (26px) against the 34px toolbar buttons */
   gap: 6px;
@@ -2360,7 +2360,7 @@ body,
   top: 46px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 26; /* above the kanban overlay (25), below the tab bar (30) */
+  z-index: 27; /* above the kanban overlay (25) and the cluster (26), below the tab bar (30) */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -6451,21 +6451,30 @@ body,
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-.tab__view-toggle {
+
+/* ---- Kanban column pill: half-pill flush against a session node's top edge (rendered as a
+   sibling of the overflow:hidden node root, so it can poke above the border). ---- */
+.kanban-node-pill {
+  position: absolute;
+  top: -19px;
+  right: 10px;
+  height: 19px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  margin-left: 2px;
-  background: none;
-  border: none;
-  border-radius: 6px;
-  color: rgba(255, 255, 255, 0.55);
+  padding: 0 9px;
+  border: 1px solid;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0; /* the flat bottom is what makes it read as attached */
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
-  -webkit-app-region: no-drag; /* the tab bar is the window drag region */
+  backdrop-filter: blur(4px);
 }
-.tab__view-toggle:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.9);
+.kanban-node-pill:hover {
+  filter: brightness(1.3);
 }
