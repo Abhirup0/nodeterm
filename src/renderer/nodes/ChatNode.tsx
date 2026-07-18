@@ -19,6 +19,7 @@ import { useSession } from '../session/session'
 import { accountChipLabel, createDiffNode, type CanvasNode } from '../state/workspace'
 import { useSettings } from '../state/settings'
 import type { ChatImageAttachment, ChatToolSummary } from '@shared/types'
+import { ColumnPill } from '../components/kanban/ColumnPill'
 
 const MAX_IMAGES = 5
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024 // 2 MB per image
@@ -249,6 +250,9 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
   }
 
   return (
+    <>
+    {/* Sibling of the root: .chat-node is overflow:hidden and would clip the half-pill. */}
+    <ColumnPill nodeId={id} />
     <div className={`chat-node${selected ? ' selected' : ''}`} style={{ borderTopColor: data.color }}>
       <NodeResizer isVisible={selected} minWidth={360} minHeight={280} />
       <div className="chat-node__header">
@@ -387,5 +391,6 @@ export default function ChatNode({ id, data, selected }: NodeProps<CanvasNode>) 
       </div>
       )}
     </div>
+    </>
   )
 }

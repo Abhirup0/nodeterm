@@ -1,4 +1,4 @@
-import type { KanbanAssignment, ProjectKanban } from '@shared/types'
+import type { KanbanAssignment, KanbanColumn, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
@@ -109,4 +109,16 @@ export function pruneAssignments(k: ProjectKanban, liveIds: string[]): ProjectKa
   const live = new Set(liveIds)
   const assignments = k.assignments.filter((a) => live.has(a.nodeId))
   return assignments.length === k.assignments.length ? k : { ...k, assignments }
+}
+
+/** The column a node is assigned to, resolved against a project's board — undefined when
+ *  unassigned, dangling (column deleted elsewhere), or the project has no board yet. All
+ *  three mean Ungrouped, and the canvas shows no column pill for Ungrouped. */
+export function columnForNode(
+  k: ProjectKanban | undefined,
+  nodeId: string
+): KanbanColumn | undefined {
+  if (!k) return undefined
+  const a = k.assignments.find((x) => x.nodeId === nodeId)
+  return a ? k.columns.find((c) => c.id === a.columnId) : undefined
 }

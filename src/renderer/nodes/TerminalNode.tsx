@@ -72,6 +72,7 @@ import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRe
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
+import { ColumnPill } from '../components/kanban/ColumnPill'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -1504,6 +1505,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     status?.state !== 'blocked'
 
   return (
+    <>
+    {/* Sibling of the root: .term-node is overflow:hidden and would clip the half-pill. */}
+    <ColumnPill nodeId={id} />
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
         isUnread ? ' unread' : ''
@@ -1812,5 +1816,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           ))}
       </div>
     </div>
+    </>
   )
 }

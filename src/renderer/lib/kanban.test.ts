@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
 import {
   addColumn, assignNode, assignedTo, defaultKanban, deleteColumn, moveColumn,
-  nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
+  columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
 } from './kanban'
 
 const board = (): ProjectKanban => ({
@@ -86,5 +86,15 @@ describe('assignments', () => {
     expect(k.assignments.map((a) => a.nodeId)).toEqual(['n1', 'n3'])
     const same = board()
     expect(pruneAssignments(same, ['n1', 'n2', 'n3'])).toBe(same)
+  })
+})
+
+describe('columnForNode', () => {
+  it('resolves the assigned column; undefined for unassigned, dangling, or no board', () => {
+    expect(columnForNode(board(), 'n1')).toMatchObject({ id: 'a', title: 'To Do' })
+    expect(columnForNode(board(), 'n9')).toBeUndefined()
+    const dangling: ProjectKanban = { ...board(), assignments: [{ nodeId: 'n1', columnId: 'gone' }] }
+    expect(columnForNode(dangling, 'n1')).toBeUndefined()
+    expect(columnForNode(undefined, 'n1')).toBeUndefined()
   })
 })

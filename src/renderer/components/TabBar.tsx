@@ -9,8 +9,6 @@ import { sshAutoModeHint } from '../state/permissionMode'
 import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
-import { useViewMode } from '../state/viewMode'
-import { IconCanvasView, IconKanban } from './icons'
 import {
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
@@ -79,7 +77,6 @@ export function TabBar({
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
   const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
-  const kanbanActive = useViewMode((s) => !!activeId && !!s.viewByProject[activeId])
   // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
   const unreadIds = useAgentStatus((s) => {
@@ -332,15 +329,6 @@ export function TabBar({
           <button className="tab__add" title="New project" onClick={onOpenWelcome}>
             +
           </button>
-          {activeId && (
-            <button
-              className="tab__view-toggle"
-              title={kanbanActive ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)'}
-              onClick={() => useViewMode.getState().toggle(activeId)}
-            >
-              {kanbanActive ? <IconCanvasView /> : <IconKanban />}
-            </button>
-          )}
         </div>
       </div>
 
