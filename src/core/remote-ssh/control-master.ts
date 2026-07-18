@@ -3,7 +3,7 @@
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -74,6 +74,26 @@ export function exitMasterArgs(conn: SshConnection, controlPath: string): string
 }
 export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
   return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`)
+}
+/**
+ * Send literal text (and optionally Enter) into a node's REMOTE tmux session — the remote
+ * counterpart of `PtyManager.sendText`'s local `tmux send-keys` path (dictation insert, /rename,
+ * /branch, note pushes). Built as ONE remote command so text and Enter run strictly in order on
+ * the remote host without a second network round trip: `-l --` sends the text literally (`-l`)
+ * and stops option parsing first (`--`, so text starting with `-` is never read as another
+ * send-keys flag); `text` is single-quoted (`posixQuote`) so it survives the remote shell as one
+ * token verbatim, multiline included.
+ */
+export function remoteTmuxSendKeysArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  text: string,
+  enter: boolean
+): string[] {
+  let cmd = `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
+  if (enter) cmd += `; tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`
+  return childArgs(conn, controlPath, cmd)
 }
 /**
  * Did a FAILED `tmux has-session` probe actually say the session is absent? Only tmux's own

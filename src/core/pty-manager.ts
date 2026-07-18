@@ -23,6 +23,7 @@ import {
   remoteTmuxHasSessionArgs,
   remoteTmuxKillArgs,
   remoteTmuxPtyArgs,
+  remoteTmuxSendKeysArgs,
   remoteCapturePaneArgs
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
@@ -1734,11 +1735,30 @@ export class PtyManager {
    * note pushes) relies on the Enter being sent, so this stays bit-for-bit unless a caller opts
    * out. `enter: false` is for dictation's Insert action: it writes text into the terminal
    * WITHOUT submitting it, so the user can edit/append before running it themselves.
+   *
+   * An SSH-project node has no LOCAL tmux session to target (its pty program is `ssh -t '<remote
+   * attach>'`) — so if the node's LIVE session is registered with `sshRemote`, this runs the
+   * remote counterpart instead (`remoteTmuxSendKeysArgs`, over the project's ControlMaster),
+   * mirroring how `remoteSessionExists` reuses `findSsh()` + `runAsync`. A node with no live
+   * session at all (nothing mounted right now) still falls through to the local path and returns
+   * false there, same as before this change — reaching a currently-unmounted SSH node's remote
+   * session is not supported.
    */
   async sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean> {
-    if (!this.tmuxPath) return false
-    const target = sessionName(persistKey)
     const enter = opts?.enter ?? true
+    const target = sessionName(persistKey)
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return false
+      try {
+        await runAsync(ssh, remoteTmuxSendKeysArgs(sshRemote.conn, sshRemote.controlPath, target, text, enter))
+        return true
+      } catch {
+        return false
+      }
+    }
+    if (!this.tmuxPath) return false
     try {
       // The literal text and the Enter (when sent) must go in order, so await sequentially.
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text])

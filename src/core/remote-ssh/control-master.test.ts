@@ -5,6 +5,7 @@ import {
   masterArgs,
   childArgs,
   remoteTmuxHasSessionArgs,
+  remoteTmuxSendKeysArgs,
   probeSaysAbsent,
   remoteCapturePaneArgs,
   remoteTmuxPtyArgs,
@@ -79,6 +80,35 @@ describe('remoteTmuxHasSessionArgs', () => {
       'deploy@h.example.com',
       `tmux -L ${RMT_TMUX_SOCKET} has-session -t nt-x`
     ])
+  })
+})
+
+describe('remoteTmuxSendKeysArgs', () => {
+  it('sends literal text with -l -- (no Enter) when enter is false', () => {
+    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', false)
+    expect(args).toEqual([
+      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      'deploy@h.example.com',
+      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'`
+    ])
+  })
+  it('appends a second send-keys Enter, joined by ;, when enter is true', () => {
+    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', true)
+    expect(args[args.length - 1]).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'; tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x Enter`
+    )
+  })
+  it('single-quote-escapes a single quote in the text (the \'\\\'\' idiom)', () => {
+    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', `it's`, false)
+    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'it'\\''s'`)
+  })
+  it('keeps a multiline text as one literal token (single-quoted, newlines preserved)', () => {
+    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'line one\nline two', false)
+    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'line one\nline two'`)
+  })
+  it('guards leading-dash text from being read as a send-keys option (-l --)', () => {
+    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', '-not-an-option', false)
+    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- '-not-an-option'`)
   })
 })
 
