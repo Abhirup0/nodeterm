@@ -431,6 +431,26 @@ export class SshProjectManager {
     return this.conns.get(projectId)?.remoteHome
   }
 
+  /**
+   * Proactively re-validate every cached master (powerMonitor 'resume'). Sleep kills the TCP
+   * under the masters, but ServerAlive only notices ~60s AFTER wake — until then every terminal
+   * looks alive and is dead (keys echo nothing, scroll does nothing). `connect()` is idempotent:
+   * a live master returns immediately; a dead one is killed — which tears down its mux'd
+   * per-terminal ssh clients too, so their exit-255 drops fire the renderer's SshReconnector
+   * NOW instead of a minute later — and re-established, after which the reconnector's
+   * 'connected' flush respawns the dead nodes. Failures just leave the normal status-event
+   * error path in charge (connect reports it before throwing).
+   */
+  async revalidateAll(): Promise<void> {
+    for (const [projectId, e] of [...this.conns]) {
+      try {
+        await this.connect(projectId, e.conn, e.remoteCwd)
+      } catch {
+        // connect() already reported an error status for this project; keep checking the rest.
+      }
+    }
+  }
+
   /** The connection's cached remote `--permission-mode auto` capability (undefined = not
    *  probed / not connected). Feeds the agent-status settings block the phone reads. */
   remoteAutoPermFor(projectId: string): boolean | undefined {
