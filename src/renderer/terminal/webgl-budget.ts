@@ -30,8 +30,16 @@
  *    pan-back) but is the first reclaim candidate during that window.
  *  - `acquire()` returning false (WebGL2 unavailable / threw) does not count against the budget.
  *  - A context lost from outside (the addon's own `onContextLoss`) is reported via
- *    `handle.contextLost()`; the coordinator simply drops that grant from its accounting and does
- *    NOT auto-re-grant — the next visibility transition or reclaim decides.
+ *    `handle.contextLost()`: the grant is dropped from the accounting, and for a STILL-VISIBLE
+ *    client ONE budget-gated re-grant attempt is scheduled (`WEBGL_REACQUIRE_AFTER_LOSS_MS`).
+ *    Sleep/wake GPU resets lose EVERY context at once while nothing changes visibility — without
+ *    the re-grant, a woken machine's terminals sat on the DOM renderer indefinitely (the
+ *    "fallback feel": different cursor/scroll rendering) until the user happened to pan them out
+ *    and back. This is NOT the per-node self-re-acquire loop the old "never re-grant" rule
+ *    feared: the attempt goes through `tryGrant`, which never exceeds the budget and never
+ *    reclaims a visible holder, so re-granting clients cannot evict each other; and repeated
+ *    losses (`WEBGL_LOSS_STREAK_MAX`) stop the attempts until the next visibility transition —
+ *    a genuinely unstable GPU degrades to the DOM renderer exactly as before.
  */
 
 /** Ceiling on WebGL contexts we hold at once. Comfortably under Chromium's ~16-per-process cap. */
@@ -50,6 +58,15 @@ export const WEBGL_ACQUIRE_DEBOUNCE_MS = 150
  * reclaimed on demand when a newly visible client needs a slot, bypassing this delay.
  */
 export const WEBGL_RELEASE_DELAY_MS = 2000
+
+/** Delay before a visible client whose context was lost EXTERNALLY (sleep/wake GPU reset) retries
+ *  through the normal budget-gated grant path. Longer than the acquire debounce on purpose: right
+ *  after a wake the GPU is still settling, and an immediate retry tends to lose again. */
+export const WEBGL_REACQUIRE_AFTER_LOSS_MS = 1000
+
+/** External losses in a row (without a visibility transition) after which the coordinator stops
+ *  retrying and leaves the client on the DOM renderer — an unstable GPU must not be hammered. */
+export const WEBGL_LOSS_STREAK_MAX = 3
 
 export interface WebglClientCallbacks {
   /** Acquire the GPU context. Returns true on success, false if WebGL2 is unavailable / threw. */
@@ -81,6 +98,8 @@ interface Client {
    * SMALLEST value became hidden earliest (was visible least recently) → reclaimed first.
    */
   hiddenAt: number
+  /** Consecutive EXTERNAL context losses without a visibility transition (see contextLost). */
+  lossStreak: number
 }
 
 const clients = new Map<string, Client>()
@@ -165,6 +184,9 @@ function tryGrant(c: Client): void {
 function setVisible(c: Client, visible: boolean): void {
   if (c.visible === visible) return
   c.visible = visible
+  // A real visibility transition resets the loss streak: the give-up state after repeated
+  // external losses lasts only until the user pans away and back (the pre-existing recovery).
+  c.lossStreak = 0
   if (visible) {
     // Re-visible before the release fired: keep the warm context, cancel the pending release.
     cancelRelease(c)
@@ -227,7 +249,8 @@ export function registerWebglClient(id: string, callbacks: WebglClientCallbacks)
     granted: false,
     acquireTimer: null,
     releaseTimer: null,
-    hiddenAt: 0
+    hiddenAt: 0,
+    lossStreak: 0
   }
   clients.set(id, client)
 
@@ -239,10 +262,20 @@ export function registerWebglClient(id: string, callbacks: WebglClientCallbacks)
     contextLost() {
       const c = clients.get(id)
       if (c !== client) return
-      // The browser (or our own dispose) already tore the context down; just drop the accounting.
-      // Do NOT auto-re-grant — the next visibility transition or reclaim decides.
+      // The browser (or our own dispose) already tore the context down; drop the accounting.
       cancelRelease(c)
       c.granted = false
+      // Sleep/wake GPU resets lose every context at once with no visibility change, so a
+      // still-visible client schedules ONE delayed, budget-gated re-grant attempt (see the
+      // header). A streak of losses means the GPU is unstable → stop until the user pans the
+      // node out and back (setVisible resets the streak).
+      c.lossStreak += 1
+      if (c.visible && c.lossStreak <= WEBGL_LOSS_STREAK_MAX && !c.acquireTimer) {
+        c.acquireTimer = setTimeout(() => {
+          c.acquireTimer = null
+          tryGrant(c)
+        }, WEBGL_REACQUIRE_AFTER_LOSS_MS)
+      }
     },
     dispose() {
       const c = clients.get(id)

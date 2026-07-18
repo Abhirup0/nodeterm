@@ -600,9 +600,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       try {
         const addon = new WebglAddon()
         // The browser lost this context out from under us. Dispose + null the reference so the DOM
-        // renderer takes over, and tell the coordinator so its accounting drops this grant. Do NOT
-        // re-acquire from here — the next visibility transition / reclaim decides (re-acquiring in a
-        // loop is exactly the "Too many active WebGL contexts" storm this feature exists to stop).
+        // renderer takes over, and tell the coordinator so its accounting drops this grant. The
+        // NODE never re-acquires from here (a per-node loop is the "Too many active WebGL
+        // contexts" storm this feature exists to stop) — the COORDINATOR schedules one delayed,
+        // budget-gated re-grant for a still-visible client (sleep/wake loses every context at
+        // once with no visibility change; see webgl-budget.ts contextLost).
         addon.onContextLoss(() => {
           try {
             addon.dispose()

@@ -4,6 +4,8 @@ import {
   __resetWebglBudgetForTests,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
   WEBGL_BUDGET,
+  WEBGL_LOSS_STREAK_MAX,
+  WEBGL_REACQUIRE_AFTER_LOSS_MS,
   WEBGL_RELEASE_DELAY_MS,
   type WebglClientHandle
 } from './webgl-budget'
@@ -117,7 +119,7 @@ describe('webgl-budget coordinator', () => {
     expect(a.rec.held).toBe(true)
   })
 
-  it('frees a slot when a context is lost from outside (no auto-re-grant)', () => {
+  it('frees a slot when a context is lost from outside (waiting newcomers are not auto-served)', () => {
     const clients = Array.from({ length: WEBGL_BUDGET }, (_, i) => fakeClient(`c${i}`))
     clients.forEach(grant)
 
@@ -129,7 +131,8 @@ describe('webgl-budget coordinator', () => {
     // One holder's context is lost (browser eviction / our own dispose reported it).
     clients[0].handle.contextLost()
 
-    // The freed slot is NOT auto-handed to the waiting newcomer — a transition must drive it.
+    // The freed slot is NOT auto-handed to the waiting NEWCOMER — a transition must drive it.
+    // (The loser itself schedules a delayed retry; that is the next test's subject.)
     expect(nc.rec.acquires).toBe(0)
 
     // On the newcomer's next visibility transition it is now granted (a slot is free).
@@ -137,6 +140,56 @@ describe('webgl-budget coordinator', () => {
     nc.handle.setVisible(true)
     vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS)
     expect(nc.rec.held).toBe(true)
+
+    // The loser's own delayed retry then finds the budget full with every holder visible and
+    // declines — no second acquire, and nobody is evicted for it.
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS)
+    expect(clients[0].rec.acquires).toBe(1)
+    expect(nc.rec.held).toBe(true)
+  })
+
+  it('a visible client whose context is lost externally re-acquires after the loss delay', () => {
+    // The sleep/wake shape: contexts die with NO visibility change; the client must come back
+    // on its own instead of sitting on the DOM renderer until the user pans away and back.
+    const a = fakeClient('a')
+    grant(a)
+    expect(a.rec.acquires).toBe(1)
+
+    a.handle.contextLost()
+    expect(a.rec.acquires).toBe(1) // not immediate — the GPU may still be settling
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS)
+    expect(a.rec.acquires).toBe(2)
+    expect(a.rec.held).toBe(true)
+  })
+
+  it('a hidden client whose context is lost schedules no retry', () => {
+    const a = fakeClient('a')
+    grant(a)
+    a.handle.setVisible(false)
+    a.handle.contextLost()
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS * 2)
+    expect(a.rec.acquires).toBe(1)
+  })
+
+  it('stops retrying after WEBGL_LOSS_STREAK_MAX consecutive losses; a visibility transition resets', () => {
+    const a = fakeClient('a')
+    grant(a)
+    // Each loss within the streak retries once…
+    for (let i = 0; i < WEBGL_LOSS_STREAK_MAX; i++) {
+      a.handle.contextLost()
+      vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS)
+    }
+    expect(a.rec.acquires).toBe(1 + WEBGL_LOSS_STREAK_MAX)
+    // …but the loss beyond the cap gives up (unstable GPU → stay on the DOM renderer).
+    a.handle.contextLost()
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS * 2)
+    expect(a.rec.acquires).toBe(1 + WEBGL_LOSS_STREAK_MAX)
+
+    // Panning away and back (the pre-existing recovery) resets the streak and re-grants.
+    a.handle.setVisible(false)
+    a.handle.setVisible(true)
+    vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS)
+    expect(a.rec.held).toBe(true)
   })
 
   it('dispose releases a granted context and cancels timers', () => {
