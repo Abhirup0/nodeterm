@@ -174,6 +174,10 @@ describe('normalizeOpencode', () => {
   it('maps permission.asked to blocked and permission.replied back to working', () => {
     expect(normalizeFor('opencode', ocEnv({ event: 'permission.asked' }))).toMatchObject({ state: 'blocked' })
     expect(normalizeFor('opencode', ocEnv({ event: 'permission.replied' }))).toMatchObject({ state: 'working' })
+    // Question (elicitation) dialog, measured on 1.18.3 — blocks the turn without idling.
+    expect(normalizeFor('opencode', ocEnv({ event: 'question.asked' }))).toMatchObject({ state: 'blocked' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'question.replied' }))).toMatchObject({ state: 'working' })
+    expect(normalizeFor('opencode', ocEnv({ event: 'question.rejected' }))).toMatchObject({ state: 'working' })
   })
 
   it('maps session.idle and session.error to done', () => {

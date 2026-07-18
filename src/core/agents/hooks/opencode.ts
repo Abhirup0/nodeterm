@@ -117,6 +117,12 @@ export const NodetermStatus = async () => {
           return post('permission.asked', { sessionID: p.sessionID })
         case 'permission.replied':
           return post('permission.replied', { sessionID: p.sessionID })
+        // The question (elicitation) dialog blocks the turn WITHOUT idling the session —
+        // unforwarded, the badge sat on RUNNING while the TUI waited for an answer.
+        case 'question.asked':
+        case 'question.replied':
+        case 'question.rejected':
+          return post(ev.type, { sessionID: p.sessionID })
         case 'message.updated': {
           if ((info.role || p.role) !== 'user') return
           if (info.id) {

@@ -98,13 +98,27 @@ describe('generated plugin behavior (executed)', () => {
     await hooks.event({
       event: { type: 'permission.replied', properties: { sessionID: 'ses_1', permissionID: 'perm1', response: 'once' } }
     })
+    // The question (elicitation) flow, measured on 1.18.3: the TUI dialog blocks the turn
+    // but the session never goes idle, so without these the badge sat on RUNNING.
+    await hooks.event({
+      event: { type: 'question.asked', properties: { id: 'que_1', sessionID: 'ses_1', questions: [] } }
+    })
+    await hooks.event({
+      event: { type: 'question.replied', properties: { sessionID: 'ses_1', requestID: 'que_1', answers: [['Red']] } }
+    })
+    await hooks.event({
+      event: { type: 'question.rejected', properties: { sessionID: 'ses_1', requestID: 'que_1' } }
+    })
 
     expect(posts.map((p) => p.payload)).toEqual([
       { event: 'session.created', sessionID: 'ses_1' },
       { event: 'session.idle', sessionID: 'ses_1' },
       { event: 'session.error', sessionID: 'ses_1' },
       { event: 'permission.asked', sessionID: 'ses_1' },
-      { event: 'permission.replied', sessionID: 'ses_1' }
+      { event: 'permission.replied', sessionID: 'ses_1' },
+      { event: 'question.asked', sessionID: 'ses_1' },
+      { event: 'question.replied', sessionID: 'ses_1' },
+      { event: 'question.rejected', sessionID: 'ses_1' }
     ])
     expect(posts[0].url).toBe('http://127.0.0.1:43210/hook/opencode')
     expect(posts[0].nodeId).toBe('node-1')

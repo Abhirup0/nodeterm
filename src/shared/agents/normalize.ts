@@ -266,6 +266,11 @@ export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | 
   if (p.event === 'tool.execute.before') return { ...base, kind: 'state', state: 'working' }
   if (p.event === 'permission.asked') return { ...base, kind: 'state', state: 'blocked' }
   if (p.event === 'permission.replied') return { ...base, kind: 'state', state: 'working' }
+  // Question (elicitation) dialog: blocks the turn but the session never idles.
+  if (p.event === 'question.asked') return { ...base, kind: 'state', state: 'blocked' }
+  if (p.event === 'question.replied' || p.event === 'question.rejected') {
+    return { ...base, kind: 'state', state: 'working' }
+  }
   if (p.event === 'session.idle' || p.event === 'session.error') {
     return { ...base, kind: 'state', state: 'done' }
   }
