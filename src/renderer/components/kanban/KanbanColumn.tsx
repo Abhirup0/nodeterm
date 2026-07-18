@@ -1,49 +1,45 @@
 import { useState } from 'react'
-import type { KanbanCard as KanbanCardT, KanbanColumn as KanbanColumnT } from '@shared/types'
+import type { KanbanColumn as KanbanColumnT } from '@shared/types'
+import type { AgentNodeStatus } from '../../state/agentStatus'
 import { NODE_COLORS } from '../../state/workspace'
-import { KanbanCard } from './KanbanCard'
+import { SessionCard } from './SessionCard'
+import type { KanbanSession } from './KanbanView'
 
 interface KanbanColumnProps {
-  column: KanbanColumnT
-  cards: KanbanCardT[]
-  onRename: (title: string) => void
-  onRecolor: (color: string) => void
-  onRequestDelete: () => void
-  onAddCard: (title: string) => void
-  onEditCard: (cardId: string, patch: { title?: string; description?: string }) => void
-  onDeleteCard: (cardId: string) => void
+  /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
+  column: KanbanColumnT | null
+  cards: KanbanSession[]
+  statusById: Record<string, AgentNodeStatus>
+  onRename?: (title: string) => void
+  onRecolor?: (color: string) => void
+  onDelete?: () => void
+  onOpenNode: (nodeId: string) => void
   // Drag plumbing — the single drag source of truth lives in KanbanView.
-  onCardDragStart: (cardId: string) => void
-  onColumnDragStart: () => void
+  onCardDragStart: (nodeId: string) => void
+  onColumnDragStart?: () => void
   onDragEnd: () => void
   /** Drop on the column body: a card lands at the END of this column; a column lands BEFORE it. */
   onDropOnColumn: () => void
-  onDropBeforeCard: (cardId: string) => void
+  onDropBeforeCard: (nodeId: string) => void
 }
 
 export function KanbanColumn({
-  column, cards, onRename, onRecolor, onRequestDelete, onAddCard, onEditCard, onDeleteCard,
+  column, cards, statusById, onRename, onRecolor, onDelete, onOpenNode,
   onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn, onDropBeforeCard
 }: KanbanColumnProps) {
   const [editingTitle, setEditingTitle] = useState(false)
-  const [title, setTitle] = useState(column.title)
+  const [title, setTitle] = useState(column?.title ?? '')
   const [swatchesOpen, setSwatchesOpen] = useState(false)
-  const [composer, setComposer] = useState('')
 
   const commitTitle = () => {
     const t = title.trim()
-    if (t && t !== column.title) onRename(t)
+    if (column && t && t !== column.title) onRename?.(t)
     setEditingTitle(false)
-  }
-  const addCard = () => {
-    const t = composer.trim()
-    if (t) onAddCard(t)
-    setComposer('')
   }
 
   return (
     <div
-      className="kanban-col"
+      className={`kanban-col${column ? '' : ' kanban-col--ungrouped'}`}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault()
@@ -52,20 +48,25 @@ export function KanbanColumn({
     >
       <div
         className="kanban-col__header"
-        draggable
+        draggable={!!column}
         onDragStart={(e) => {
+          if (!column) return
           e.dataTransfer.effectAllowed = 'move'
-          onColumnDragStart()
+          onColumnDragStart?.()
         }}
         onDragEnd={onDragEnd}
       >
-        <button
-          className="kanban-col__dot"
-          style={{ background: column.color }}
-          title="Column color"
-          onClick={() => setSwatchesOpen((v) => !v)}
-        />
-        {editingTitle ? (
+        {column ? (
+          <button
+            className="kanban-col__dot"
+            style={{ background: column.color }}
+            title="Column color"
+            onClick={() => setSwatchesOpen((v) => !v)}
+          />
+        ) : (
+          <span className="kanban-col__dot kanban-col__dot--ungrouped" />
+        )}
+        {column && editingTitle ? (
           <input
             className="kanban-col__rename"
             autoFocus
@@ -81,19 +82,22 @@ export function KanbanColumn({
           <span
             className="kanban-col__title"
             onClick={() => {
+              if (!column) return
               setTitle(column.title)
               setEditingTitle(true)
             }}
           >
-            {column.title}
+            {column ? column.title : 'Ungrouped'}
           </span>
         )}
         <span className="kanban-col__count">{cards.length}</span>
-        <button className="kanban-col__close" title="Delete column" onClick={onRequestDelete}>
-          ✕
-        </button>
+        {column && (
+          <button className="kanban-col__close" title="Delete column (cards return to Ungrouped)" onClick={onDelete}>
+            ✕
+          </button>
+        )}
       </div>
-      {swatchesOpen && (
+      {column && swatchesOpen && (
         <div className="kanban-col__swatches">
           {NODE_COLORS.map((c) => (
             <button
@@ -101,7 +105,7 @@ export function KanbanColumn({
               className="kanban-col__swatch"
               style={{ background: c }}
               onClick={() => {
-                onRecolor(c)
+                onRecolor?.(c)
                 setSwatchesOpen(false)
               }}
             />
@@ -109,27 +113,17 @@ export function KanbanColumn({
         </div>
       )}
       <div className="kanban-col__cards">
-        {cards.map((card) => (
-          <KanbanCard
-            key={card.id}
-            card={card}
-            onEdit={(patch) => onEditCard(card.id, patch)}
-            onDelete={() => onDeleteCard(card.id)}
-            onDragStart={() => onCardDragStart(card.id)}
+        {cards.map((s) => (
+          <SessionCard
+            key={s.id}
+            session={s}
+            status={statusById[s.id]}
+            onOpen={() => onOpenNode(s.id)}
+            onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}
-            onDropBefore={() => onDropBeforeCard(card.id)}
+            onDropBefore={() => onDropBeforeCard(s.id)}
           />
         ))}
-      </div>
-      <div className="kanban-col__composer">
-        <input
-          placeholder="Add a card…"
-          value={composer}
-          onChange={(e) => setComposer(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') addCard()
-          }}
-        />
       </div>
     </div>
   )

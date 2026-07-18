@@ -6370,6 +6370,9 @@ body,
 }
 .kanban-card {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
@@ -6379,94 +6382,57 @@ body,
 .kanban-card:hover {
   border-color: rgba(255, 255, 255, 0.2);
 }
+.kanban-card__nodedot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
 .kanban-card__title {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.9);
-  word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.kanban-card__desc {
-  margin-top: 6px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
-  word-break: break-word;
-}
-.kanban-card__desc p {
-  margin: 0 0 4px;
-}
-.kanban-card__close {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: none;
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.35);
-  cursor: pointer;
-  font-size: 10px;
-  padding: 0;
-}
-.kanban-card:hover .kanban-card__close {
-  display: block;
-}
-.kanban-card__close:hover {
-  color: #ff453a;
-}
-.kanban-card--editing {
-  cursor: default;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.kanban-card--editing input,
-.kanban-card--editing textarea {
-  background: rgba(255, 255, 255, 0.06);
+.kanban-card__kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 5px;
-  color: #fff;
-  font-size: 12px;
-  padding: 4px 6px;
-  outline: none;
-  resize: vertical;
-  font-family: inherit;
+  border-radius: 4px;
+  padding: 1px 4px;
 }
-.kanban-card--editing input:focus,
-.kanban-card--editing textarea:focus {
-  border-color: var(--accent);
+.kanban-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 4px;
+  padding: 2px 5px;
+  flex: 0 0 auto;
 }
-.kanban-card__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
+.kanban-badge--running {
+  color: #32d74b;
+  background: rgba(50, 215, 75, 0.12);
+  /* reuse the terminal-header badge pulse (nt-pulse) rather than a bespoke keyframe */
+  animation: nt-pulse 1.1s ease-in-out infinite;
 }
-.kanban-card__actions button {
-  background: rgba(255, 255, 255, 0.08);
-  border: none;
-  border-radius: 5px;
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 11px;
-  padding: 3px 10px;
-  cursor: pointer;
+.kanban-badge--needs {
+  color: #ff9f0a;
+  background: rgba(255, 159, 10, 0.12);
 }
-.kanban-card__actions .kanban-card__save {
+.kanban-card__unread {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  flex: 0 0 auto;
 }
-.kanban-col__composer {
-  padding: 8px 10px 10px;
-}
-.kanban-col__composer input {
-  width: 100%;
-  box-sizing: border-box;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
-  color: #fff;
-  font-size: 12px;
-  padding: 6px 8px;
-  outline: none;
-}
-.kanban-col__composer input:focus {
-  border-color: var(--accent);
+.kanban-col__dot--ungrouped {
+  background: rgba(255, 255, 255, 0.25);
 }
 .kanban-add-col {
   flex: 0 0 auto;

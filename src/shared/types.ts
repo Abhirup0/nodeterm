@@ -193,23 +193,21 @@ export interface KanbanColumn {
   color: string
 }
 
-/** One kanban card. Lives in exactly one column; order within a column is the relative
- *  order of that column's cards in ProjectKanban.cards (no explicit order field). */
-export interface KanbanCard {
-  id: string
+/** Assignment of one session node to a board column. A session with no assignment sits
+ *  in the virtual Ungrouped column (never persisted). Order within a column = relative
+ *  order in ProjectKanban.assignments. */
+export interface KanbanAssignment {
+  nodeId: string
   columnId: string
-  title: string
-  /** Optional markdown body (rendered sanitized). */
-  description?: string
-  createdAt: number
 }
 
 /** Per-project kanban board (docs/superpowers/specs/2026-07-18-kanban-view-design.md).
  *  Absent = never edited: the renderer shows a default 3-column board and writes
- *  nothing until the first change. */
+ *  nothing until the first change. Cards are the project's session nodes — the board
+ *  stores only their column assignments. */
 export interface ProjectKanban {
   columns: KanbanColumn[]
-  cards: KanbanCard[]
+  assignments: KanbanAssignment[]
 }
 
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */

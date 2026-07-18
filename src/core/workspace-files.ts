@@ -117,6 +117,18 @@ export function projectToFile(p: Project, rev: number, savedAt: string): Project
   }
 }
 
+/** The kanban shape rule used on every load path (file refs, ssh cache, inline projects):
+ *  anything but {columns: [], assignments: []} arrays — including v1 {columns, cards}
+ *  boards — is dropped, so a legacy/hand-edited shape degrades to the fresh default
+ *  instead of crashing the board render. */
+export function validKanban(k: unknown): k is ProjectKanban {
+  return (
+    !!k &&
+    Array.isArray((k as ProjectKanban).columns) &&
+    Array.isArray((k as ProjectKanban).assignments)
+  )
+}
+
 export function fileToProject(
   f: ProjectFileV1,
   base: {
@@ -142,9 +154,7 @@ export function fileToProject(
     ...(f.defaultAccountId ? { defaultAccountId: f.defaultAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
-    ...(f.kanban && Array.isArray(f.kanban.columns) && Array.isArray(f.kanban.cards)
-      ? { kanban: f.kanban }
-      : {}),
+    ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {})

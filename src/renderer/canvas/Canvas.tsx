@@ -222,6 +222,7 @@ import {
   duplicateNode,
   flowToNodeStates,
   groupSelectedNodes,
+  NODE_COLORS,
   nodeStatesToFlow,
   reorderNodeBefore,
   reparentNode,
@@ -4046,6 +4047,30 @@ export function Canvas() {
   )
   focusNodeRef.current = focusNodeById
 
+  // Session board cards are derived LIVE from the canvas nodes; the board stores only assignments.
+  const kanbanSessions = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.type === 'terminal' || n.type === 'chat')
+        .map((n) => ({
+          id: n.id,
+          title: (n.data.title as string) ?? '',
+          color: (n.data.color as string) ?? NODE_COLORS[0],
+          kind: n.type as 'terminal' | 'chat',
+          agentId: n.data.agentId as string | undefined
+        })),
+    [nodes]
+  )
+
+  const openNodeFromKanban = useCallback(
+    (nodeId: string) => {
+      const id = useProjects.getState().activeProjectId
+      if (id) useViewMode.getState().toggle(id) // board → canvas
+      focusNodeById(nodeId)
+    },
+    [focusNodeById]
+  )
+
   const onPaletteQuery = useCallback((q: string) => {
     transcriptQueryRef.current = q
     // Reset any pending search so rapid keystrokes only fire one IPC call.
@@ -5751,7 +5776,14 @@ export function Canvas() {
             )
           })()}
       </div>
-      {kanbanOpen && <KanbanView board={projectKanban ?? seedBoard} onChange={onKanbanChange} />}
+      {kanbanOpen && (
+        <KanbanView
+          board={projectKanban ?? seedBoard}
+          sessions={kanbanSessions}
+          onChange={onKanbanChange}
+          onOpenNode={openNodeFromKanban}
+        />
+      )}
       <UpdateCard />
 
       <div
