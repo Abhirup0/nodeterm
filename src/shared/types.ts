@@ -186,6 +186,32 @@ export interface BridgeLink {
   target: string
 }
 
+/** One kanban board column. Column order = array order in ProjectKanban.columns. */
+export interface KanbanColumn {
+  id: string
+  title: string
+  color: string
+}
+
+/** One kanban card. Lives in exactly one column; order within a column is the relative
+ *  order of that column's cards in ProjectKanban.cards (no explicit order field). */
+export interface KanbanCard {
+  id: string
+  columnId: string
+  title: string
+  /** Optional markdown body (rendered sanitized). */
+  description?: string
+  createdAt: number
+}
+
+/** Per-project kanban board (docs/superpowers/specs/2026-07-18-kanban-view-design.md).
+ *  Absent = never edited: the renderer shows a default 3-column board and writes
+ *  nothing until the first change. */
+export interface ProjectKanban {
+  columns: KanbanColumn[]
+  cards: KanbanCard[]
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -204,6 +230,8 @@ export interface Project {
   defaultPermissionMode?: AgentPermissionMode
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
+  /** Kanban task board — shared via .nodeterm/project.json like nodes. */
+  kanban?: ProjectKanban
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**

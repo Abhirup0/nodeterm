@@ -4,6 +4,7 @@ import {
   toPortableNodes, resolveNodes, projectToFile, fileToProject,
   sameProjectContent, splitWorkspace, serializeProjectFile
 } from './workspace-files'
+import type { ProjectFileV1 } from './workspace-files'
 
 const node = (over: Partial<CanvasNodeState> = {}): CanvasNodeState => ({
   id: 'term-abc', kind: 'terminal', position: { x: 0, y: 0 },
@@ -241,5 +242,40 @@ describe('exec-enabling node fields never travel in the shared project file', ()
     const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [p] }
     const { index } = splitWorkspace(ws, () => 1, 'now')
     expect(index.entries[0].localExec).toBeUndefined()
+  })
+})
+
+describe('kanban board persistence', () => {
+  const board = {
+    columns: [
+      { id: 'kcol-a', title: 'To Do', color: '#0a84ff' },
+      { id: 'kcol-b', title: 'Done', color: '#32d74b' }
+    ],
+    cards: [{ id: 'kcard-1', columnId: 'kcol-a', title: 'ship it', description: '**md**', createdAt: 1752800000000 }]
+  }
+  it('rides the project file round-trip', () => {
+    const f = projectToFile(project({ kanban: board }), 1, '2026-07-18T00:00:00.000Z')
+    expect(f.kanban).toEqual(board)
+    expect(fileToProject(f, {}).kanban).toEqual(board)
+  })
+  it('absent stays absent — no key is written (lazy default rule)', () => {
+    const f = projectToFile(project(), 1, '2026-07-18T00:00:00.000Z')
+    expect('kanban' in f).toBe(false)
+    expect('kanban' in fileToProject(f, {})).toBe(false)
+  })
+  it('board edits break content equality (rev bumps) and survive splitWorkspace (both shells + ssh cache)', () => {
+    const a = projectToFile(project({ kanban: board }), 1, '2026-01-01T00:00:00.000Z')
+    const b = projectToFile(project(), 1, '2026-01-01T00:00:00.000Z')
+    expect(sameProjectContent(a, b)).toBe(false)
+    const ws: Workspace = { version: 2, activeProjectId: 'p1', projects: [project({ cwd: '/a/b', kanban: board })] }
+    const { files } = splitWorkspace(ws, () => 1, '2026-01-01T00:00:00.000Z')
+    expect(files.get('/a/b')?.kanban).toEqual(board)
+  })
+  it('a malformed kanban shape from a hand-edited file is dropped, not carried', () => {
+    const f = projectToFile(project(), 1, '2026-07-18T00:00:00.000Z')
+    const evil1 = { ...f, kanban: {} } as unknown as ProjectFileV1
+    const evil2 = { ...f, kanban: { columns: 42, cards: [] } } as unknown as ProjectFileV1
+    expect('kanban' in fileToProject(evil1, {})).toBe(false)
+    expect('kanban' in fileToProject(evil2, {})).toBe(false)
   })
 })

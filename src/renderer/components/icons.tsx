@@ -254,3 +254,19 @@ export const IconPhone = () => (
     <circle cx="12" cy="18" r="0.9" fill="currentColor" stroke="none" />
   </svg>
 )
+
+export const IconKanban = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+    <rect x="1.5" y="2.5" width="3.6" height="11" rx="1" />
+    <rect x="6.2" y="2.5" width="3.6" height="7.5" rx="1" />
+    <rect x="10.9" y="2.5" width="3.6" height="5" rx="1" />
+  </svg>
+)
+
+export const IconCanvasView = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+    <rect x="1.5" y="1.5" width="6" height="5" rx="1" />
+    <rect x="9" y="4" width="5.5" height="4.5" rx="1" />
+    <rect x="3.5" y="9.5" width="5.5" height="5" rx="1" />
+  </svg>
+)

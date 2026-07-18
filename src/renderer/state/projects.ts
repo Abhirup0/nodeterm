@@ -5,6 +5,7 @@ import type {
   CanvasMutation,
   CanvasNodeState,
   Project,
+  ProjectKanban,
   Viewport,
   Workspace
 } from '@shared/types'
@@ -49,6 +50,8 @@ interface ProjectsState {
   setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void
+  /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
+  setProjectKanban(id: string, kanban: ProjectKanban): void
   /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
   commitCanvas(
     id: string,
@@ -234,6 +237,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       projects: s.projects.map((p) =>
         p.id === id && score > (p.dinoHighScore ?? 0) ? { ...p, dinoHighScore: score } : p
       )
+    }))
+  },
+
+  setProjectKanban(id, kanban) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, kanban } : p))
     }))
   },
 

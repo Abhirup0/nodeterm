@@ -54,6 +54,8 @@ import {
   IconChat,
   IconDino,
   IconJump,
+  IconKanban,
+  IconCanvasView,
   IconLock,
   IconMarkdown,
   IconNote,
@@ -178,7 +180,10 @@ import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
-import type { CanvasNodeState, Project, SshProjectStatus, TranscriptHit } from '@shared/types'
+import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
+import { KanbanView } from '../components/kanban/KanbanView'
+import { defaultKanban } from '../lib/kanban'
+import { isKanbanOpen, useViewMode } from '../state/viewMode'
 import {
   createCanvasPublisher,
   isEphemeralNodeId,
@@ -1207,6 +1212,25 @@ export function Canvas() {
     if (!loadingRef.current) setDirty(true)
   }, [])
 
+  const kanbanOpen = useViewMode((s) => !!activeProjectId && !!s.viewByProject[activeProjectId])
+  const projectKanban = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban)
+  // Fresh default per project — ids must not be shared across projects; NOT persisted
+  // until the first edit writes it (spec lazy-default rule).
+  const seedBoard = useMemo(
+    () => defaultKanban(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeProjectId]
+  )
+  const onKanbanChange = useCallback(
+    (next: ProjectKanban) => {
+      const id = useProjects.getState().activeProjectId
+      if (!id) return
+      useProjects.getState().setProjectKanban(id, next)
+      markDirty() // rides the existing debounced persist (commitActiveToStore + workspace.save)
+    },
+    [markDirty]
+  )
+
   // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
   // (subagent / loop), which every client derives for itself from the agent:status stream.
   const publishableNow = useCallback((flow: CanvasNode[]): CanvasNodeState[] => {
@@ -1590,6 +1614,7 @@ export function Canvas() {
   // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y = redo (ignored while typing).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
       if (!(e.metaKey || e.ctrlKey)) return
       const k = e.key.toLowerCase()
       if (k !== 'z' && k !== 'y') return
@@ -2462,6 +2487,7 @@ export function Canvas() {
   // toggle dictation (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
       if (!(e.metaKey || e.ctrlKey)) return
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
@@ -2723,6 +2749,7 @@ export function Canvas() {
   // Delete / Backspace asks for confirmation, then deletes the selected nodes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
       if (e.key !== 'Delete' && e.key !== 'Backspace') return
       const tag = (document.activeElement?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
@@ -3547,6 +3574,10 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
         e.preventDefault()
         setScOpen((v) => !v)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault()
+        const id = useProjects.getState().activeProjectId
+        if (id) useViewMode.getState().toggle(id)
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault()
         toggleSessionsPin()
@@ -5493,6 +5524,18 @@ export function Canvas() {
           run: () => goToNode(n)
         })
       })
+    const kanbanId = useProjects.getState().activeProjectId
+    if (kanbanId) {
+      const kb = isKanbanOpen(kanbanId)
+      cmds.push({
+        id: 'toggle-kanban',
+        label: kb ? 'Canvas view' : 'Kanban view',
+        hint: '⌘⇧B',
+        section: 'View',
+        icon: kb ? <IconCanvasView /> : <IconKanban />,
+        run: () => useViewMode.getState().toggle(kanbanId)
+      })
+    }
     return cmds
   }, [
     addTerminal,
@@ -5668,6 +5711,7 @@ export function Canvas() {
             )
           })()}
       </div>
+      {kanbanOpen && <KanbanView board={projectKanban ?? seedBoard} onChange={onKanbanChange} />}
       <UpdateCard />
 
       <div
