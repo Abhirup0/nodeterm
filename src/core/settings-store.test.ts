@@ -40,7 +40,10 @@ describe('SettingsStore nested-default merge', () => {
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),
-      JSON.stringify({ speech: { engine: 'cloud', model: 'base', language: 'tr', shortcut: 'Cmd+Alt+D' } }),
+      // Deliberately a different combo than DEFAULT_SETTINGS.speech.shortcut, so this test can't
+      // pass by accident if the merge ever silently fell back to the default instead of preserving
+      // the file's explicit value.
+      JSON.stringify({ speech: { engine: 'cloud', model: 'base', language: 'tr', shortcut: 'Cmd+Shift+D' } }),
       'utf-8'
     )
     const store = new SettingsStore()
@@ -49,7 +52,7 @@ describe('SettingsStore nested-default merge', () => {
       engine: 'cloud',
       model: 'base',
       language: 'tr',
-      shortcut: 'Cmd+Alt+D'
+      shortcut: 'Cmd+Shift+D'
     })
   })
 

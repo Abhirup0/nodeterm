@@ -151,7 +151,7 @@ would otherwise be blocked) — rebuild the renderer or update the rewrite.
 
 ### Dictation
 
-Voice-to-text input works in the browser via the **same core speech service** the desktop app uses. Dictate with ⌘⇧D (or the dock mic button); transcribed text goes into the overlay's editable field and is sent only via explicit Send/Insert into the node that was selected when the overlay opened — nothing auto-submits. **Browser constraints:** `getUserMedia` requires a **secure context** — HTTPS or `localhost`; the microphone permission prompt is the browser's own. **Model storage:** Downloaded models (tiny free tier; larger Pro models) are stored on the **server's data dir** under `speech-models/`, persisted across sessions and server restarts.
+Voice-to-text input works in the browser via the **same core speech service** the desktop app uses. Dictate with ⌘⌥D (or the dock mic button); transcribed text goes into the overlay's editable field and is sent only via explicit Send/Insert into the node that was selected when the overlay opened — nothing auto-submits. **Browser constraints:** `getUserMedia` requires a **secure context** — HTTPS or `localhost`; the microphone permission prompt is the browser's own. **Model storage:** Downloaded models (tiny free tier; larger Pro models) are stored on the **server's data dir** under `speech-models/`, persisted across sessions and server restarts.
 
 ## Documented deviations from the spec
 

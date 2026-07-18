@@ -992,7 +992,7 @@ export function Canvas() {
     }
   }, [sessionsPinned])
 
-  // ⌘⇧D / Dock mic button: press-to-talk toggle. Closed → opens the dictation pill targeting the
+  // ⌘⌥D / Dock mic button: press-to-talk toggle. Closed → opens the dictation pill targeting the
   // first selected terminal/chat node (agent nodes are `type: 'terminal'` with `data.agentId`
   // set — no separate case needed) and starts recording immediately (or, with no such node
   // selected, shows a brief warning pill — see DictationOverlay's mount effect). Already open →
@@ -2508,7 +2508,7 @@ export function Canvas() {
     requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
   }, [])
 
-  // ⌘T = new terminal, ⌘⇧C = new default agent, configured dictation shortcut (default ⌘⇧D) =
+  // ⌘T = new terminal, ⌘⇧C = new default agent, configured dictation shortcut (default ⌘⌥D) =
   // toggle dictation (ignored while typing in a field/terminal).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

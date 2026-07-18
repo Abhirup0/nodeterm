@@ -477,7 +477,7 @@ export interface SpeechSettings {
   model: string
   /** BCP-47-ish hint or 'auto'. */
   language: string
-  /** Press-to-talk shortcut, canonical form e.g. "Cmd+Shift+D" (see `shared/shortcut.ts`).
+  /** Press-to-talk shortcut, canonical form e.g. "Cmd+Alt+D" (see `shared/shortcut.ts`).
    *  "Cmd" is platform-abstracted: metaKey on mac, ctrlKey elsewhere. Drives the Canvas
    *  listener, the Dock mic tooltip, and the ShortcutsPanel row. */
   shortcut: string
@@ -585,7 +585,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claudePermissionMode: 'auto',
   telemetryEnabled: false,
   phoneAccessEnabled: false,
-  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Shift+D' },
+  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt+D' },
 }
 
 export interface SettingsApi {
