@@ -1202,6 +1202,24 @@ body,
   color: #6cb0ff;
 }
 
+.term-node__mic {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.term-node__mic:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: #6cb0ff;
+}
+
 .term-node__chat {
   background: transparent;
   border: none;

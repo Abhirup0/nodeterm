@@ -2210,6 +2210,31 @@ export function Canvas() {
     }
   }, [openFile, revealProjectFile])
 
+  // Mic button on a terminal/chat node's header (TerminalNode dispatches this — same
+  // no-direct-line-to-canvas pattern as nodeterm:open-file above). Unlike toggleDictation's
+  // shortcut path, which infers the target from the current selection, this opens the overlay
+  // targeting THAT node explicitly. If the overlay is already open — e.g. a different node was
+  // targeted via the shortcut, or another mic button — a fresh mic click always means "dictate
+  // here", so this just retargets it (close-and-reopen with the new target); simplest correct
+  // behavior, since a mic click carries an explicit target and needs none of the shortcut's
+  // own-phase STOP-vs-CANCEL ambiguity.
+  useEffect(() => {
+    const onDictate = (e: Event): void => {
+      const d = (e as CustomEvent<{ nodeId: string }>).detail
+      if (!d?.nodeId) return
+      const n = nodesRef.current.find((x) => x.id === d.nodeId)
+      if (!n) return
+      setDictationTarget({
+        kind: n.type === 'chat' ? 'chat' : 'terminal',
+        nodeId: n.id,
+        title: (n.data.title as string) || 'Untitled'
+      })
+      setDictationOpen(true)
+    }
+    window.addEventListener('nodeterm:dictate', onDictate)
+    return () => window.removeEventListener('nodeterm:dictate', onDictate)
+  }, [])
+
   /** Open a git diff editor node for a changed file (from Source Control). */
   const openDiff = useCallback(
     (relPath: string, staged: boolean, scopeCwd?: string) => {

@@ -51,7 +51,7 @@ import {
 import { registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { deliverCommand } from '../terminal/command-delivery'
 import { FindBar } from '../components/FindBar'
-import { IconSearch, IconChat } from '../components/icons'
+import { IconSearch, IconChat, IconMic } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
@@ -1699,6 +1699,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             aria-pressed={searchOpen}
           >
             <IconSearch />
+          </button>
+        </Tooltip>
+        <Tooltip label="Dictate into this terminal">
+          <button
+            className="term-node__mic nodrag"
+            onClick={(e) => {
+              e.stopPropagation()
+              window.dispatchEvent(new CustomEvent('nodeterm:dictate', { detail: { nodeId: id } }))
+            }}
+          >
+            <IconMic />
           </button>
         </Tooltip>
         <Tooltip label="Name with AI (from terminal output)">

@@ -194,6 +194,13 @@ export const IconSearch = () => (
   </svg>
 )
 
+export const IconMic = () => (
+  <svg {...S}>
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" />
+  </svg>
+)
+
 export const IconSessions = () => (
   <svg {...S}>
     <rect x="3" y="4" width="18" height="5" rx="1.5" />
