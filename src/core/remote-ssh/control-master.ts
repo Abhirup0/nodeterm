@@ -82,7 +82,10 @@ export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: strin
  * the remote host without a second network round trip: `-l --` sends the text literally (`-l`)
  * and stops option parsing first (`--`, so text starting with `-` is never read as another
  * send-keys flag); `text` is single-quoted (`posixQuote`) so it survives the remote shell as one
- * token verbatim, multiline included.
+ * token verbatim, multiline included. Joined with `&&`, not `;` — this mirrors the local path's
+ * ordering guarantee (`PtyManager.sendText`): Enter only fires if the text send actually
+ * succeeded, so a failed text send can never leave a lone Enter to submit whatever was already
+ * composed in a live agent prompt.
  */
 export function remoteTmuxSendKeysArgs(
   conn: SshConnection,
@@ -92,7 +95,7 @@ export function remoteTmuxSendKeysArgs(
   enter: boolean
 ): string[] {
   let cmd = `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
-  if (enter) cmd += `; tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`
+  if (enter) cmd += ` && tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`
   return childArgs(conn, controlPath, cmd)
 }
 /**

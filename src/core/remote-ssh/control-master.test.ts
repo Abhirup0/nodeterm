@@ -92,10 +92,10 @@ describe('remoteTmuxSendKeysArgs', () => {
       `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'`
     ])
   })
-  it('appends a second send-keys Enter, joined by ;, when enter is true', () => {
+  it('appends a second send-keys Enter, joined by &&, when enter is true', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', true)
     expect(args[args.length - 1]).toBe(
-      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'; tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x Enter`
+      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello' && tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x Enter`
     )
   })
   it('single-quote-escapes a single quote in the text (the \'\\\'\' idiom)', () => {
