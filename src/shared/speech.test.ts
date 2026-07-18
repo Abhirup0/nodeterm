@@ -22,6 +22,11 @@ describe('whisper model catalog', () => {
   })
 
   it('speech settings default to free local dictation', () => {
-    expect(DEFAULT_SETTINGS.speech).toEqual({ engine: 'whisper', model: 'tiny', language: 'auto' })
+    expect(DEFAULT_SETTINGS.speech).toEqual({
+      engine: 'whisper',
+      model: 'tiny',
+      language: 'auto',
+      shortcut: 'Cmd+Shift+D'
+    })
   })
 })

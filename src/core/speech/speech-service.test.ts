@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SpeechService, type WhisperEngineHandle } from './speech-service'
+import { describeWhisperLoadError, SpeechService, type WhisperEngineHandle } from './speech-service'
 import { WhisperModelStore } from './whisper-models'
 
 describe('SpeechService', () => {
@@ -68,5 +68,38 @@ describe('SpeechService', () => {
     const svc = new SpeechService({ models, isPremium: () => true, engineFactory: factory('   ') })
     await expect(svc.transcribe(pcm, { model: 'tiny', language: 'auto' }))
       .rejects.toThrow('No speech detected.')
+  })
+})
+
+describe('describeWhisperLoadError', () => {
+  it('recognizes MODULE_NOT_FOUND code', () => {
+    const err = new Error('Cannot find module') as any
+    err.code = 'MODULE_NOT_FOUND'
+    expect(describeWhisperLoadError(err)).toBe('the smart-whisper module is not installed — run npm install')
+  })
+
+  it('recognizes ERR_MODULE_NOT_FOUND code', () => {
+    const err = new Error('Module not found') as any
+    err.code = 'ERR_MODULE_NOT_FOUND'
+    expect(describeWhisperLoadError(err)).toBe('the smart-whisper module is not installed — run npm install')
+  })
+
+  it('recognizes NODE_MODULE_VERSION mismatch in message', () => {
+    const err = new Error('The module was compiled against a different Node.js version')
+    expect(describeWhisperLoadError(err)).toBe(
+      'the native module was built for a different runtime — run npm run rebuild'
+    )
+  })
+
+  it('recognizes NODE_MODULE_VERSION 115 in message', () => {
+    const err = new Error('NODE_MODULE_VERSION 115')
+    expect(describeWhisperLoadError(err)).toBe(
+      'the native module was built for a different runtime — run npm run rebuild'
+    )
+  })
+
+  it('returns the error message itself as fallback', () => {
+    const err = new Error('boom')
+    expect(describeWhisperLoadError(err)).toBe('boom')
   })
 })

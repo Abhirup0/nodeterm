@@ -706,6 +706,75 @@ body,
   background: var(--accent-hover);
 }
 
+/* ---- Press-to-talk recording pill (warning / recording / transcribing / error) ----
+   Compact capsule variants of the `.dictation` shell above — used instead of the rectangular
+   card for every phase except the chat-only editable card (`.dictation--card` keeps the
+   rectangular sizing, i.e. the plain `.dictation` defaults above). */
+.dictation--pill,
+.dictation--warning {
+  width: auto;
+  min-width: 220px;
+  max-width: min(92vw, 420px);
+  flex-direction: row;
+  align-items: center;
+  border-radius: 999px;
+  padding: 10px 18px;
+}
+
+.dictation--pill {
+  min-width: 260px;
+}
+
+.dictation__warning-text {
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dictation__pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.dictation__stop {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 69, 58, 0.18);
+  border: 1px solid rgba(255, 69, 58, 0.5);
+  border-radius: 50%;
+  color: #ff453a;
+  cursor: pointer;
+  animation: dictation-pulse 1.4s ease-in-out infinite;
+}
+
+.dictation__stop:hover {
+  background: rgba(255, 69, 58, 0.28);
+}
+
+.dictation__bars {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  height: 22px;
+}
+
+.dictation__bar {
+  flex: 1 1 0;
+  max-width: 4px;
+  min-height: 2px;
+  border-radius: 2px;
+  background: #ff453a;
+  transition: height 90ms ease-out;
+}
+
 /* ---- Terminal node ---- */
 .term-node {
   width: 100%;

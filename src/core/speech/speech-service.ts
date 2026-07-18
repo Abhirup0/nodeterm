@@ -6,6 +6,17 @@ export interface WhisperEngineHandle {
   free(): Promise<void>
 }
 
+/** User-facing cause for a failed smart-whisper import. Pure — tested. */
+export function describeWhisperLoadError(err: unknown): string {
+  const code = (err as { code?: string })?.code
+  const msg = err instanceof Error ? err.message : String(err)
+  if (code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND')
+    return 'the smart-whisper module is not installed — run npm install'
+  if (/NODE_MODULE_VERSION|was compiled against a different Node\.js version/.test(msg))
+    return 'the native module was built for a different runtime — run npm run rebuild'
+  return msg
+}
+
 /** Local dictation via whisper.cpp (smart-whisper). One loaded model at a
  * time (they are hundreds of MB of RAM); same-model loads dedupe onto one
  * in-flight promise; transcriptions run FIFO on a promise chain. The Pro
@@ -67,9 +78,10 @@ async function defaultEngineFactory(modelPath: string): Promise<WhisperEngineHan
   try {
     // @ts-ignore -- optional native dep: absent until installed, and @ts-ignore stays valid either way (an expect-error would break the build the moment it resolves)
     mod = await import('smart-whisper')
-  } catch {
+  } catch (err) {
+    console.error('[speech] smart-whisper failed to load:', err)
     throw new Error(
-      'Local whisper is unavailable on this install (native module failed to load). Try the Cloud engine.',
+      `Local whisper is unavailable (${describeWhisperLoadError(err)}). Try the Cloud engine.`,
     )
   }
   const whisper = new mod.Whisper(modelPath, { gpu: true })
