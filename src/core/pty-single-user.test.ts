@@ -89,7 +89,9 @@ vi.mock('child_process', () => {
     if (args.includes('has-session')) {
       const target = args[args.indexOf('-t') + 1]
       if (liveTmuxSessions.has(target)) ok('')
-      else cb?.(new Error('no such session'))
+      // Real execFile carries tmux's exit status on err.code — 1 is what probeSaysAbsent
+      // reads as genuine absence (vs a spawn failure, which has a string/no code).
+      else cb?.(Object.assign(new Error('no such session'), { code: 1 }))
     } else if (args[0] === '-ilc') {
       // The login-shell PATH probe (`resolveShellPath`).
       ok('__NT_PATH_START__/usr/bin:/bin__NT_PATH_END__')
