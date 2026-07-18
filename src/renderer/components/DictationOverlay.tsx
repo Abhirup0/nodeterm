@@ -77,7 +77,11 @@ export function appendTake(existing: string, take: string): string {
   return `${a} ${b}`
 }
 
-const LEVEL_POLL_MS = 100 // ~10Hz
+// Faster than the visual 12-bar window needs on its own — the point is to feed more DISTINCT
+// samples into that scrolling window (see dictation-equalizer.ts) so the equalizer reads as live
+// motion instead of a slow crawl. PcmCapture.level() (RMS of the last chunk) is cheap enough that
+// polling twice as often here has no measurable cost.
+const LEVEL_POLL_MS = 50 // ~20Hz
 
 // Base64-encoded int16 PCM runs ~2.6 MB/min. The ws bridge caps a single frame at
 // WS_MAX_PAYLOAD (8 MiB, see src/server/ws.ts) — a take left running past ~3 minutes would

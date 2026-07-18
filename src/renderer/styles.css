@@ -769,10 +769,13 @@ body,
 .dictation__bar {
   flex: 1 1 0;
   max-width: 4px;
-  min-height: 2px;
-  border-radius: 2px;
-  background: #ff453a;
-  transition: height 90ms ease-out;
+  min-height: 3px;
+  /* Rounded tops, flat bottoms — reads as a bar rising off a baseline rather than a floating
+     pill, and the flat bottom keeps the idle-floor row looking like a deliberate baseline
+     (not a row of dots) when the take is quiet. */
+  border-radius: 3px 3px 1px 1px;
+  background: var(--accent);
+  transition: height 70ms ease-out;
 }
 
 /* ---- Terminal node ---- */
