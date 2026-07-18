@@ -90,6 +90,46 @@ describe('v2 → v3 migration', () => {
 // project.json while the index has no `localExec` for it. Without a migration the first load after
 // the upgrade drops it (the connection breaks), and the next save erases it from disk and
 // propagates the deletion to every teammate via `rev`. Silently.
+describe('inline (cwd-less) project kanban shape guard', () => {
+  const writeInlineIndex = async (kanban: unknown): Promise<void> => {
+    await fs.writeFile(
+      path.join(userData, 'workspace.json'),
+      JSON.stringify({
+        version: 3,
+        activeProjectId: 'p1',
+        entries: [
+          {
+            id: 'p1',
+            name: 'inline',
+            color: '#7aa2f7',
+            project: {
+              id: 'p1', name: 'inline', color: '#7aa2f7', viewport: { x: 0, y: 0, zoom: 1 },
+              nodes: [], kanban
+            }
+          }
+        ]
+      })
+    )
+  }
+
+  it('drops a v1-shaped kanban on an inline project (degrades to fresh default, no crash)', async () => {
+    await writeInlineIndex({ columns: [], cards: [] })
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].id).toBe('p1')
+    expect('kanban' in loaded.projects[0]).toBe(false)
+  })
+
+  it('keeps a well-formed inline kanban verbatim (does not over-strip)', async () => {
+    const board = {
+      columns: [{ id: 'kcol-a', title: 'To Do', color: '#0a84ff' }],
+      assignments: [{ nodeId: 'term-abc', columnId: 'kcol-a' }]
+    }
+    await writeInlineIndex(board)
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].kanban).toEqual(board)
+  })
+})
+
 describe('one-time exec migration (pre-existing project files)', () => {
   /** A v3 index + project file written the way the PRE-fix app wrote them. */
   const writeLegacy = async (extraArgs: string): Promise<void> => {
