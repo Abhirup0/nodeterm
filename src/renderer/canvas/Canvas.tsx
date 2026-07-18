@@ -474,6 +474,16 @@ export function Canvas() {
   // open — DictationOverlay watches this to decide STOP-vs-CANCEL from its own current phase
   // instead of Canvas guessing; see the `stopSignal` prop doc on DictationOverlayProps.
   const [dictationStopSignal, setDictationStopSignal] = useState(0)
+  // React key for <DictationOverlay>. Bumped whenever the overlay opens (or retargets) with a
+  // NEW nodeId — forces a fresh mount instead of reusing the live instance across a target
+  // change. Without this, a mic-retarget while the overlay is already up (nodeterm:dictate
+  // handler below) just mutated the `target` prop on the SAME instance, so an in-flight
+  // recording/take for the old node landed on the new one once stopped (stopRecording closes
+  // over whatever `target` the live render last saw). Remounting gives each target its own
+  // frozen closure — see DictationOverlayProps' `target` doc and the mount-only effect in
+  // DictationOverlay.tsx — and its unmount cleanup discards any in-progress capture for the
+  // node being retargeted away from.
+  const [dictationNonce, setDictationNonce] = useState(0)
   const [bugReportOpen, setBugReportOpen] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
@@ -1013,6 +1023,7 @@ export function Canvas() {
           ? { kind: sel.type === 'chat' ? 'chat' : 'terminal', nodeId: sel.id, title: (sel.data.title as string) || 'Untitled' }
           : null
       )
+      setDictationNonce((n) => n + 1)
       return true
     })
   }, [])
@@ -2215,9 +2226,12 @@ export function Canvas() {
   // shortcut path, which infers the target from the current selection, this opens the overlay
   // targeting THAT node explicitly. If the overlay is already open — e.g. a different node was
   // targeted via the shortcut, or another mic button — a fresh mic click always means "dictate
-  // here", so this just retargets it (close-and-reopen with the new target); simplest correct
-  // behavior, since a mic click carries an explicit target and needs none of the shortcut's
-  // own-phase STOP-vs-CANCEL ambiguity.
+  // here", so this retargets it by REMOUNTING <DictationOverlay> (bumping `dictationNonce`,
+  // its React key) rather than just swapping the `target` prop on the live instance: a bare
+  // prop swap would leave any in-flight recording/take for the old node to land there once
+  // stopped. The remount's unmount cleanup (DictationOverlay's belt-and-braces effect) cancels
+  // an in-progress capture outright, so a retarget mid-recording discards that take; the new
+  // instance mounts fresh and starts recording into the new target immediately.
   useEffect(() => {
     const onDictate = (e: Event): void => {
       const d = (e as CustomEvent<{ nodeId: string }>).detail
@@ -2230,6 +2244,7 @@ export function Canvas() {
         title: (n.data.title as string) || 'Untitled'
       })
       setDictationOpen(true)
+      setDictationNonce((prev) => prev + 1)
     }
     window.addEventListener('nodeterm:dictate', onDictate)
     return () => window.removeEventListener('nodeterm:dictate', onDictate)
@@ -6003,6 +6018,7 @@ export function Canvas() {
 
       {dictationOpen && (
         <DictationOverlay
+          key={dictationNonce}
           target={dictationTarget}
           stopSignal={dictationStopSignal}
           onClose={() => setDictationOpen(false)}
