@@ -1,6 +1,6 @@
 {
   "name": "node-terminal",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": {
     "name": "enes",
@@ -51,8 +51,18 @@
     ],
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Development",
       "icon": "build/icon.png",
