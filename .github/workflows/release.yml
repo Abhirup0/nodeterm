@@ -80,8 +80,11 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           # The linux job may already have created the release for this tag; tolerate the race.
+          # Created as PRERELEASE: a half-built release must never become "latest" (the site and
+          # the update feed follow /releases/latest). The `publish` job flips it once BOTH
+          # platform jobs have uploaded.
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag --notes "" || true
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag --prerelease --notes "" || true
           n=1
           until gh release upload "$tag" dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap --clobber --repo "$GITHUB_REPOSITORY"; do
             if [ "$n" -ge 5 ]; then
@@ -130,10 +133,27 @@ jobs:
       # Both jobs target the release for the same tag; softprops updates an existing
       # release rather than failing, so mac/linux artifact sets merge. (A same-instant
       # creation race is theoretically possible — rerunning the failed job resolves it.)
+      # prerelease: a half-built release must never become "latest" — the `publish` job
+      # flips it once both platform jobs are done.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: |
             dist/*.AppImage
             dist/*.deb
             dist/latest-linux.yml
+
+  # Flips the release to a published "latest" only when BOTH platform jobs uploaded their
+  # assets. Until then it stays a prerelease, so /releases/latest (the site + both update
+  # feeds) keeps serving the previous complete release — a mac-runner sleep or an upload
+  # failure can no longer put a partial release in front of users. If one platform job
+  # fails, fix/rerun it; this job then runs on the rerun and publishes.
+  publish:
+    runs-on: ubuntu-latest
+    needs: [release-mac, release-linux]
+    steps:
+      - name: Promote release to latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --prerelease=false --latest
