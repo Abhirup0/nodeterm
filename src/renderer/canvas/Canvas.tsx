@@ -32,7 +32,6 @@ import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { DinoNode } from '../nodes/DinoNode'
 import BrowserNode from '../nodes/BrowserNode'
-import ChatNode from '../nodes/ChatNode'
 import { normalizeAddress } from '../nodes/browserUrl'
 import VideoNode from '../nodes/VideoNode'
 import WebNode from '../nodes/WebNode'
@@ -51,7 +50,6 @@ import {
   IconGear,
   IconGrid,
   IconGroup,
-  IconChat,
   IconDino,
   IconJump,
   IconKanban,
@@ -112,7 +110,6 @@ import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useTeamAccessEvents } from '../state/teamAccess'
-import { useChatSessions } from '../state/chatSessions'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
@@ -209,7 +206,6 @@ import {
   systemAccountDisplay,
   createAgentNode,
   createBrowserNode,
-  createChatNode,
   createDinoNode,
   createDiffNode,
   createEditorNode,
@@ -469,7 +465,7 @@ export function Canvas() {
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [dictationOpen, setDictationOpen] = useState(false)
-  // Target = the first selected terminal/chat node AT OPEN TIME (not live-tracked while the
+  // Target = the first selected terminal node AT OPEN TIME (not live-tracked while the
   // overlay is up — the design explicitly freezes it so a stray click elsewhere mid-dictation
   // can't retarget an in-progress recording).
   const [dictationTarget, setDictationTarget] = useState<DictationTarget | null>(null)
@@ -771,8 +767,7 @@ export function Canvas() {
       dino: withNodeBoundary(DinoNode),
       video: withNodeBoundary(VideoNode),
       web: withNodeBoundary(WebNode),
-      browser: withNodeBoundary(BrowserNode),
-      chat: withNodeBoundary(ChatNode)
+      browser: withNodeBoundary(BrowserNode)
     }),
     []
   )
@@ -1010,7 +1005,7 @@ export function Canvas() {
   }, [sessionsPinned])
 
   // ⌘⌥D / Dock mic button: press-to-talk toggle. Closed → opens the dictation pill targeting the
-  // first selected terminal/chat node (agent nodes are `type: 'terminal'` with `data.agentId`
+  // first selected terminal node (agent nodes are `type: 'terminal'` with `data.agentId`
   // set — no separate case needed) and starts recording immediately (or, with no such node
   // selected, shows a brief warning pill — see DictationOverlay's mount effect). Already open →
   // does NOT close the overlay itself; it bumps `dictationStopSignal` so DictationOverlay can
@@ -1022,12 +1017,10 @@ export function Canvas() {
         setDictationStopSignal((n) => n + 1)
         return true
       }
-      const sel = nodesRef.current.find(
-        (n) => n.selected && (n.type === 'terminal' || n.type === 'chat')
-      )
+      const sel = nodesRef.current.find((n) => n.selected && n.type === 'terminal')
       setDictationTarget(
         sel
-          ? { kind: sel.type === 'chat' ? 'chat' : 'terminal', nodeId: sel.id, title: (sel.data.title as string) || 'Untitled' }
+          ? { kind: 'terminal', nodeId: sel.id, title: (sel.data.title as string) || 'Untitled' }
           : null
       )
       setDictationNonce((n) => n + 1)
@@ -2242,7 +2235,7 @@ export function Canvas() {
     }
   }, [openFile, revealProjectFile])
 
-  // Mic button on a terminal/chat node's header (TerminalNode dispatches this — same
+  // Mic button on a terminal node's header (TerminalNode dispatches this — same
   // no-direct-line-to-canvas pattern as nodeterm:open-file above). Unlike toggleDictation's
   // shortcut path, which infers the target from the current selection, this opens the overlay
   // targeting THAT node explicitly. If the overlay is already open — e.g. a different node was
@@ -2260,7 +2253,7 @@ export function Canvas() {
       const n = nodesRef.current.find((x) => x.id === d.nodeId)
       if (!n) return
       setDictationTarget({
-        kind: n.type === 'chat' ? 'chat' : 'terminal',
+        kind: 'terminal',
         nodeId: n.id,
         title: (n.data.title as string) || 'Untitled'
       })
@@ -2433,24 +2426,6 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter]
   )
 
-  const addChatNode = useCallback(
-    (center?: { x: number; y: number }, accountId?: string, groupId?: string) => {
-      const project = useProjects.getState().getProject(activeProjectId)
-      const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
-      const account = resolveNewNodeAccount(
-        accountId,
-        project,
-        useSettings.getState().settings.claudeAccounts
-      )
-      setNodes((ns) => {
-        const node = createChatNode(ns.length, cwd, center ?? viewCenter(), undefined, account)
-        return [...ns, groupId ? parentInto(node, groupId) : node]
-      })
-      markDirty()
-    },
-    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
-  )
-
   // Task 6: the Settings → Accounts "Add account" flow dispatches 'nodeterm:add-account-login'
   // to open a terminal node running `claude /login` under the new account's config dir.
   useEffect(() => {
@@ -2620,13 +2595,11 @@ export function Canvas() {
         if (!chordHeld(e, combo, isMac)) return
         armed = true
         heldSince = Date.now()
-        const sel = nodesRef.current.find(
-          (n) => n.selected && (n.type === 'terminal' || n.type === 'chat')
-        )
+        const sel = nodesRef.current.find((n) => n.selected && n.type === 'terminal')
         setDictationTarget(
           sel
             ? {
-                kind: sel.type === 'chat' ? 'chat' : 'terminal',
+                kind: 'terminal',
                 nodeId: sel.id,
                 title: (sel.data.title as string) || 'Untitled'
               }
@@ -2704,7 +2677,7 @@ export function Canvas() {
    * `data.fileMissing` instead of rewritten. The node stays on the canvas (never auto-closed: it
    * may hold unsaved Monaco edits the user hasn't copied out yet) and renders a persistent notice.
    *
-   * `respawn` separates the two callers (terminal/chat only — editor/diff has no session to touch):
+   * `respawn` separates the two callers (terminal only — editor/diff has no session to touch):
    *  - Remove (true): the directory is being deleted under live sessions, so their tmux sessions are
    *    destroyed and the terminals respawn straight into the fallback cwd.
    *  - Stale Unbind (false): unbind touches no process, by definition. The dead path is corrected on
@@ -2729,23 +2702,6 @@ export function Canvas() {
           // every co-viewer's) and respawns into the fallback cwd. `destroy` would cast "closed
           // by <name>" to co-viewers, permanently bricking their still-present node.
           if (n.type === 'terminal') transport.recycle(n.id)
-          // A chat node has no PTY, but it DOES have a live SDK driver — and that driver holds the
-          // deleted cwd. Fixing only the persisted `data.cwd` (below) left the running query rooted
-          // in a directory that no longer exists, where every tool call fails until the app is
-          // restarted: the node looked fine and was quietly broken, which is worse than looking
-          // broken. Recycling it is the exact same two steps the chat error bar's own "Reconnect"
-          // button takes — dispose the driver, then `ensure` a new one — except the cwd it comes
-          // back at is the fallback. `chatSessionId` is passed through, so the SDK RESUMES the same
-          // conversation (history intact, on both sides); the renderer's message store is
-          // deliberately NOT dropped, so the user sees no interruption at all.
-          if (n.type === 'chat') {
-            api.chat.dispose(n.id)
-            void api.chat.ensure(n.id, {
-              cwd: fallbackCwd,
-              sessionId: n.data.chatSessionId as string | undefined,
-              accountId: n.data.accountId as string | undefined
-            })
-          }
         }
       }
       setNodes((ns) =>
@@ -2779,7 +2735,7 @@ export function Canvas() {
    *
    * For a STALE binding (the worktree directory was deleted behind git's back) that means:
    *  a. displace the children (`resetDisplacedCwd`, no respawn — nothing here ends a process):
-   *     terminals/chats get `data.cwd` off the dead path (left behind, that dead path is persisted
+   *     terminals get `data.cwd` off the dead path (left behind, that dead path is persisted
    *     to project.json and tmux hides it until the next machine reboot cold-starts the terminal
    *     into a directory that is not there); editor/diff nodes get `data.fileMissing` instead,
    *     since there is nothing to re-point a dead `filePath` at; and
@@ -2822,13 +2778,6 @@ export function Canvas() {
         if (n.type === 'terminal')
           disposeTerminalOnUnmount(sessionForProject(useProjects.getState().activeProjectId ?? '').id, n.id)
         if (n.type === 'terminal') transport.destroy(n.id)
-        // Chat nodes: permanently kill the SDK driver + drop the live chat state. The driver
-        // lives across project switches (only permanent delete kills it), so this belongs here,
-        // not in node unmount.
-        if (n.type === 'chat') {
-          api.chat.dispose(n.id)
-          useChatSessions.getState().drop(n.id)
-        }
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
         // unread/loop). Node unmount no longer does this, so deletion must. The loop card's
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
@@ -3270,12 +3219,12 @@ export function Canvas() {
     //    missed), plus editor/diff nodes anywhere on the canvas whose file was inside it:
     //      a. terminals: end the tmux session, which is now sitting in a directory that no longer
     //         exists;
-    //      b. terminals AND chats: reset `data.cwd` off the deleted path. Leaving it there is the
+    //      b. terminals: reset `data.cwd` off the deleted path. Leaving it there is the
     //         exact trap this whole task exists to remove — on the next mount the node spawns into
     //         a path that is gone, pty-manager silently falls back to $HOME, and the dead cwd is
     //         persisted forever — only reached through the SANCTIONED Remove path.
     //      c. editor/diff: mark `data.fileMissing`. There is no fallback path to re-point a dead
-    //         `filePath` at — the file is genuinely gone — so unlike terminals/chats these are
+    //         `filePath` at — the file is genuinely gone — so unlike terminals these are
     //         flagged, not rewritten, and the node shows a persistent notice instead of silently
     //         opening blank or failing a `git show`.
     //    The respawn (nonce bump) puts the terminal straight back in the fallback cwd rather than
@@ -3874,7 +3823,7 @@ export function Canvas() {
     ]
   )
 
-  /** "New <agent>" / "New chat" creation entries shared by the pane and group context menus.
+  /** "New <agent>" creation entries shared by the pane and group context menus.
    *  `at` is the flow position to create at; with `groupId` the node is parented into that group. */
   const agentCreationItems = useCallback(
     (at?: { x: number; y: number }, groupId?: string): MenuItem[] => {
@@ -3951,8 +3900,6 @@ export function Canvas() {
               onClick: () => addAgentNode(c.id, at, groupId)
             })
           )
-        // "New chat" is deliberately NOT here: the context menus stay session-focused; chat
-        // nodes are created from the Dock + menu and the command palette.
       ]
     },
     [activeProjectId, addAgentNode]
@@ -4177,7 +4124,7 @@ export function Canvas() {
   const kanbanSessions = useMemo(
     () =>
       nodes
-        .filter((n) => n.type === 'terminal' || n.type === 'chat' || n.type === 'sticky')
+        .filter((n) => n.type === 'terminal' || n.type === 'sticky')
         .map((n) => {
           if (n.type === 'sticky') {
             const text = ((n.data.text as string) ?? '').trim()
@@ -4188,7 +4135,7 @@ export function Canvas() {
               color: (n.data.color as string) ?? NODE_COLORS[2],
               kind: 'sticky' as const,
               text,
-              // Sticky/chat cards never open a live terminal — the modal reads no spawn info.
+              // Sticky cards never open a live terminal — the modal reads no spawn info.
               spawn: {}
             }
           }
@@ -4196,10 +4143,10 @@ export function Canvas() {
             id: n.id,
             title: (n.data.title as string) ?? '',
             color: (n.data.color as string) ?? NODE_COLORS[0],
-            kind: n.type as 'terminal' | 'chat',
+            kind: 'terminal' as const,
             agentId: n.data.agentId as string | undefined,
             // What the card modal's co-attach terminal needs to join THIS node's session the same
-            // way the canvas TerminalNode does (used for kind 'terminal'; a chat card ignores it).
+            // way the canvas TerminalNode does.
             spawn: {
               shell: n.data.shell as string | undefined,
               cwd: n.data.cwd as string | undefined,
@@ -4996,10 +4943,6 @@ export function Canvas() {
           } else {
             disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
-            // Chat nodes in an inactive project keep their driver running across the switch;
-            // dispose is a no-op for non-chat ids, so call it unconditionally like destroy.
-            api.chat.dispose(id)
-            useChatSessions.getState().drop(id)
             useAgentStatus.getState().remove(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
@@ -5636,10 +5579,6 @@ export function Canvas() {
           disposeTerminalOnUnmount(sessionForProject(id).id, n.id) // may be parked from a recent switch away
           transport.destroy(n.id)
         }
-        if ((n.kind ?? 'terminal') === 'chat') {
-          api.chat.dispose(n.id)
-          useChatSessions.getState().drop(n.id)
-        }
         useAgentStatus.getState().remove(n.id)
       })
       // SSH project: the per-node `transport.destroy` above only ends the REMOTE session for
@@ -5719,7 +5658,6 @@ export function Canvas() {
             run: () => addAgentNode('claude', undefined, undefined, a.id)
           })
         ),
-      { id: 'new-chat', label: 'New chat', icon: <IconChat />, run: () => addChatNode() },
       { id: 'new-sticky', label: 'New sticky note', icon: <IconNote />, run: () => addSticky() },
       { id: 'new-dino', label: 'New dino game', icon: <IconDino />, run: () => addDino() },
       { id: 'open-file', label: 'Open file…', icon: <IconEditor />, run: () => void openFileDialog() },
@@ -5825,7 +5763,6 @@ export function Canvas() {
   }, [
     addTerminal,
     addAgentNode,
-    addChatNode,
     addSticky,
     addDino,
     addWebView,
@@ -6105,7 +6042,7 @@ export function Canvas() {
         )}
         {/* The active project's node subtree runs under ITS session (local for a local tab, the
             relay session for a remote tab). Keyed by session id so an api swap REMOUNTS the nodes
-            (obligation 3): TerminalNode/EditorNode/ChatNode capture `api` in []-effects, so a live
+            (obligation 3): TerminalNode/EditorNode capture `api` in []-effects, so a live
             api change must remount them or they keep talking to the old core. For an all-local user
             the key is always 'local', so this never remounts — zero behavior change. */}
         <SessionProvider session={sessionForProject(activeProjectId || '')} key={sessionForProject(activeProjectId || '').id}>
@@ -6520,7 +6457,6 @@ export function Canvas() {
         onAddSticky={addSticky}
         onAddDino={addDino}
         onAddAgent={(aid, accountId) => addAgentNode(aid, undefined, undefined, accountId)}
-        onAddChat={() => addChatNode()}
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}

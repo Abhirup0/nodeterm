@@ -18,12 +18,12 @@ export interface KanbanSession {
   id: string
   title: string
   color: string
-  kind: 'terminal' | 'chat' | 'sticky'
+  kind: 'terminal' | 'sticky'
   agentId?: string
   /** Sticky note body — shown in the expanded detail row. */
   text?: string
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
-   *  same session (kind 'terminal' only; sticky/chat pass `{}`). */
+   *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn
 }
 

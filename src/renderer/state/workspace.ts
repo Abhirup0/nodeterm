@@ -35,7 +35,6 @@ const DINO_SIZE = { width: 600, height: 200 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
-const CHAT_SIZE = { width: 420, height: 380 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -107,16 +106,6 @@ export interface NodeData {
    * SSH-project editor still routes to the remote fs after reopen.
    */
   sshFs?: boolean
-  /**
-   * chat-only: the SDK session id of this chat node's conversation. Persisted so a relaunch
-   * resumes the on-disk transcript (the SDK process dies with the app).
-   */
-  chatSessionId?: string
-  /**
-   * chat-only: source session id to fork from on first boot (Task 10). One-shot bootstrap —
-   * NOT persisted (like initialCommand); once the node's own chatSessionId arrives it's ignored.
-   */
-  forkFrom?: string
   [key: string]: unknown
 }
 
@@ -534,34 +523,6 @@ export function createBrowserNode(
   }
 }
 
-/** Creates an SDK-driven chat node (Claude conversation without a terminal). */
-export function createChatNode(
-  index: number,
-  cwd?: string,
-  center?: { x: number; y: number },
-  init?: { chatSessionId?: string; forkFrom?: string },
-  accountId?: string
-): CanvasNode {
-  return {
-    id: nextId('chat'),
-    type: 'chat',
-    position: placeAt(center, index, CHAT_SIZE.width, CHAT_SIZE.height),
-    width: CHAT_SIZE.width,
-    height: CHAT_SIZE.height,
-    style: { width: CHAT_SIZE.width, height: CHAT_SIZE.height },
-    data: {
-      title: 'Chat',
-      color: '#d97757', // clay, matches agent nodes
-      group: null,
-      // Chat nodes are always Claude — stamp the account when one was resolved/inherited.
-      ...(accountId ? { accountId } : {}),
-      ...(cwd ? { cwd } : {}),
-      ...(init?.chatSessionId ? { chatSessionId: init.chatSessionId } : {}),
-      ...(init?.forkFrom ? { forkFrom: init.forkFrom } : {})
-    }
-  }
-}
-
 /** Creates a diff editor node for a changed file (relative path + repo cwd). */
 export function createDiffNode(
   index: number,
@@ -918,7 +879,28 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
     if ((a.kind === 'group') === (b.kind === 'group')) return 0
     return a.kind === 'group' ? -1 : 1
   })
-  return ordered.map((n) => {
+  return ordered.map((raw) => {
+    // The SDK chat node was removed (2026-07). A persisted chat node degrades into a sticky that
+    // keeps its place and tells the user how to continue the conversation — chat sessions are
+    // ordinary Claude sessions, resumable in any terminal. (position/size are normalized
+    // defensively so a legacy chat node still lands even if its shape is minimal.)
+    let n = raw
+    if (n.kind === 'chat') {
+      const resume = n.chatSessionId
+        ? `\n\nContinue it in a terminal:\nclaude --resume ${n.chatSessionId}`
+        : ''
+      n = {
+        ...n,
+        kind: 'sticky',
+        position: n.position ?? { x: (n as { x?: number }).x ?? 0, y: (n as { y?: number }).y ?? 0 },
+        size: n.size ?? {
+          width: (n as { width?: number }).width ?? STICKY_SIZE.width,
+          height: (n as { height?: number }).height ?? STICKY_SIZE.height
+        },
+        text: `This was a chat node — the chat node type was removed.${resume}`,
+        chatSessionId: undefined
+      }
+    }
     const collapsed = !!n.collapsed
     const height = collapsed ? COLLAPSED_HEIGHT : n.size.height
     // Legacy migration: nodes saved before `agentId` existed marked Claude via the 'claude'
@@ -958,8 +940,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
-        worktree: n.worktree,
-        chatSessionId: n.chatSessionId
+        worktree: n.worktree
       }
     }
   })
@@ -984,9 +965,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                   ? WEB_SIZE
                   : kind === 'dino'
                     ? DINO_SIZE
-                    : kind === 'chat'
-                      ? CHAT_SIZE
-                      : TERMINAL_SIZE
+                    : TERMINAL_SIZE
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
@@ -1023,8 +1002,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
-        worktree: n.data.worktree,
-        chatSessionId: n.data.chatSessionId
+        worktree: n.data.worktree
       }
     })
 }
@@ -1038,7 +1016,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
  * every peer mutation — 20 times a second while a teammate drags:
  *   - SELECTION. `nodeStatesToFlow` never sets `selected`, so a teammate's drag wiped your
  *     box-select / shift-click / select-then-group the instant it landed.
- *   - LOCAL-ONLY DATA. `initialCommand`, `respawnNonce`, `forkFrom` never survive a serialize.
+ *   - LOCAL-ONLY DATA. `initialCommand`, `respawnNonce` never survive a serialize.
  *   - IDENTITY. Every node object was rebuilt → every node component re-rendered, per mutation.
  * Patching in place keeps all four: untouched nodes keep their object identity (React.memo holds),
  * and the touched one keeps `selected` and its local-only data.
@@ -1068,7 +1046,7 @@ export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): Can
   next[idx] = {
     ...incoming,
     selected: prev.selected,
-    // Local-only data (initialCommand / respawnNonce / remote / forkFrom) is not serialized, so it
+    // Local-only data (initialCommand / respawnNonce / remote) is not serialized, so it
     // is not in `incoming` — carry it. Every serialized key IS present on incoming.data (as a value
     // or an explicit undefined), so the spread still applies the peer's clears.
     //

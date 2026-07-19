@@ -1,13 +1,12 @@
 // Desktop press-to-talk: shortcut/Dock-mic press starts recording IMMEDIATELY into a compact
 // bottom-center pill (stop icon + live equalizer + elapsed mm:ss); pressing again (or the pill's
-// own stop icon) stops → transcribes → for a terminal target inserts the text directly
+// own stop icon) stops → transcribes → inserts the text directly into the target terminal
 // (`pty.sendText(id, text, { enter: false })`, no Enter — nothing here ever auto-submits) and the
-// pill closes; for a chat target (no external draft field to insert into) the transcript opens
-// in the v1 editable CARD instead, where the user still presses Send themselves.
+// pill closes.
 //
 // Two different ways to dismiss, not interchangeable:
 //  - STOP (shortcut second-press / the pill's stop icon) — ends the recording and PROCESSES it
-//    (transcribe → insert/card).
+//    (transcribe → insert).
 //  - CANCEL (Esc, or the ×/close affordances) — DISCARDS whatever was being recorded and closes
 //    the whole overlay. Esc mid-recording is cancel, not stop, even though both are triggered by
 //    a "press" — see handleClose vs the stopSignal branch below.
@@ -18,10 +17,9 @@ import { createPortal } from 'react-dom'
 import { scaleLevel } from '../lib/dictation-equalizer'
 import { PcmCapture } from '../lib/pcm-capture'
 import { useSession } from '../session/session'
-import { useChatSessions } from '../state/chatSessions'
 
 export interface DictationTarget {
-  kind: 'terminal' | 'chat'
+  kind: 'terminal'
   nodeId: string
   title: string
 }
@@ -45,19 +43,15 @@ export function isProGateError(message: string): boolean {
   return message.includes('requires nodeterm Pro')
 }
 
-type Phase = 'idle' | 'recording' | 'transcribing' | 'text'
+type Phase = 'idle' | 'recording' | 'transcribing'
 /** 'warning' = no target at press time (never records). 'pill' = the compact recording/
- *  transcribing/error capsule — used for BOTH targets while a take is in flight, and for a
- *  terminal target start to finish (it never reaches 'card'). 'card' = the v1 editable text
- *  card, reached only once a chat target's take has transcribed successfully (and again if the
- *  user re-records another take from there — the re-record trip goes back out through 'pill'). */
-export type DictationMode = 'warning' | 'pill' | 'card'
+ *  transcribing/error capsule — the whole surface for a terminal target, start to finish
+ *  (the transcript is inserted straight into the terminal, so there is no editable card). */
+export type DictationMode = 'warning' | 'pill'
 
 /** Pure — no side effects. Exported for its own unit coverage. */
-export function dictationMode(target: DictationTarget | null, phase: Phase): DictationMode {
-  if (!target) return 'warning'
-  if (target.kind === 'chat' && phase === 'text') return 'card'
-  return 'pill'
+export function dictationMode(target: DictationTarget | null): DictationMode {
+  return target ? 'pill' : 'warning'
 }
 
 /** mm:ss, floored to whole seconds. Pure — no side effects. */
@@ -66,15 +60,6 @@ export function formatElapsed(ms: number): string {
   const m = Math.floor(total / 60)
   const s = total % 60
   return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-/** Appends a new take's text after any existing text, space-separated; trims both sides. */
-export function appendTake(existing: string, take: string): string {
-  const a = existing.trim()
-  const b = take.trim()
-  if (!a) return b
-  if (!b) return a
-  return `${a} ${b}`
 }
 
 // Faster than the visual 12-bar window needs on its own — the point is to feed more DISTINCT
@@ -99,17 +84,11 @@ const NO_TARGET_DISMISS_MS = 2500
 
 export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }: DictationOverlayProps) {
   const { api } = useSession()
-  const addLocalUser = useChatSessions((s) => s.addLocalUser)
-  const chatWorking = useChatSessions((s) =>
-    target?.kind === 'chat' ? s.byId[target.nodeId]?.working : undefined
-  )
 
   const [phase, setPhase] = useState<Phase>('idle')
-  const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [levelHistory, setLevelHistory] = useState<number[]>([])
-  const [sending, setSending] = useState(false)
   const [capped, setCapped] = useState(false)
 
   const captureRef = useRef<PcmCapture | null>(null)
@@ -164,33 +143,22 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
       // An in-flight transcription can't be aborted — dropping the result honors the user's
       // dismissal (nothing may land after a cancel).
       if (discardedRef.current) return
-      if (target.kind === 'terminal') {
-        const ok = await api.pty.sendText(target.nodeId, transcribed, { enter: false })
-        if (!ok) {
-          setError('Could not insert — the terminal session is not available.')
-          setPhase('idle')
-          return
-        }
-        // A stale (remounted-over) instance still delivers its own transcript into the
-        // terminal — the target closure is per-instance and correct — but must not close the
-        // parent overlay state: a newer instance (a fresh hold-to-talk press that arrived while
-        // this one was still transcribing) may be live and recording in it right now.
-        if (mountedRef.current) onClose()
+      const ok = await api.pty.sendText(target.nodeId, transcribed, { enter: false })
+      if (!ok) {
+        setError('Could not insert — the terminal session is not available.')
+        setPhase('idle')
         return
       }
-      // Chat: no external draft field to insert into (see the file header) — open the editable
-      // card so the user can review/edit and press Send themselves. Appends onto any earlier take
-      // (re-record from the card).
-      setText((prev) => appendTake(prev, transcribed))
-      setPhase('text')
+      // A stale (remounted-over) instance still delivers its own transcript into the
+      // terminal — the target closure is per-instance and correct — but must not close the
+      // parent overlay state: a newer instance (a fresh hold-to-talk press that arrived while
+      // this one was still transcribing) may be live and recording in it right now.
+      if (mountedRef.current) onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Transcription failed.')
-      // A chat target with an earlier successful take falls back to the card (keeping that text,
-      // now alongside the error); everything else (terminal, or no prior text yet) falls back to
-      // the pill so the user can retry.
-      setPhase(text.trim() ? 'text' : 'idle')
+      setPhase('idle')
     }
-  }, [clearTimer, target, api, onClose, text])
+  }, [clearTimer, target, api, onClose])
 
   const startRecording = useCallback(async () => {
     if (!target) return
@@ -278,8 +246,8 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
 
   // A second shortcut/Dock-mic press while this overlay is already open (Canvas bumps
   // `stopSignal` rather than unmounting us — see DictationOverlayProps). While actively
-  // recording that means STOP (transcribe → insert/card); in every other phase (warning,
-  // transcribing, the editable card, an error pill) it means dismiss, same as Esc/×.
+  // recording that means STOP (transcribe → insert); in every other phase (warning,
+  // transcribing, an error pill) it means dismiss, same as Esc/×.
   const prevStopSignalRef = useRef(stopSignal)
   useEffect(() => {
     if (stopSignal === prevStopSignalRef.current) return
@@ -291,39 +259,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
     }
   }, [stopSignal, phase, stopRecording, handleClose])
 
-  const send = useCallback(async () => {
-    if (!target) return
-    const value = text.trim()
-    if (!value) return
-    setSending(true)
-    setError(null)
-    try {
-      if (target.kind === 'terminal') {
-        const ok = await api.pty.sendText(target.nodeId, value)
-        if (!ok) {
-          setError('Could not send — the terminal session is not available.')
-          return
-        }
-      } else {
-        api.chat.send(target.nodeId, value)
-        if (!chatWorking) addLocalUser(target.nodeId, value)
-      }
-      onClose()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send.')
-    } finally {
-      setSending(false)
-    }
-  }, [target, text, api, chatWorking, addLocalUser, onClose])
-
-  const copy = useCallback(() => {
-    const value = text.trim()
-    if (!value) return
-    window.nodeTerminal.clipboard.writeText(value)
-  }, [text])
-
-  const hasText = !!text.trim()
-  const mode = dictationMode(target, phase)
+  const mode = dictationMode(target)
 
   const errorBlock = error && (
     <div className="dictation__error">
@@ -342,7 +278,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   if (mode === 'warning') {
     return createPortal(
       <div className="dictation dictation--warning nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
-        <span className="dictation__warning-text">Select a terminal or chat node first.</span>
+        <span className="dictation__warning-text">Select a terminal node first.</span>
         <button type="button" className="dictation__close" title="Dismiss" onClick={handleClose}>
           ×
         </button>
@@ -351,8 +287,9 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
     )
   }
 
-  if (mode === 'pill') {
-    return createPortal(
+  // mode === 'pill' — the whole surface for a terminal target (a transcribed take is inserted
+  // straight into the terminal, so there is no editable card).
+  return createPortal(
       <div className="dictation dictation--pill nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
         {phase === 'recording' && (
           <div className="dictation__pill">
@@ -399,69 +336,6 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
       </div>,
       document.body
     )
-  }
-
-  // mode === 'card' — chat only, reached once a take has transcribed. v1 editable card, minus
-  // Insert (chat has no external draft field — see the file header; the quick pill flow above is
-  // how a terminal target ever gets text inserted, so Insert has no reachable case here at all).
-  return createPortal(
-    <div className="dictation dictation--card nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
-      <div className="dictation__head">
-        <span className="dictation__title">Dictate</span>
-        <span className="dictation__target">→ {target?.title}</span>
-        <button type="button" className="dictation__close" title="Close (Esc)" onClick={handleClose}>
-          ×
-        </button>
-      </div>
-
-      <div className="dictation__body">
-        <div className="dictation__text-row">
-          <textarea
-            className="dictation__textarea"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Transcribed text…"
-            autoFocus
-            spellCheck
-          />
-          <button
-            type="button"
-            className="dictation__mic dictation__mic--small"
-            onClick={() => void startRecording()}
-            title="Record another take (appends)"
-          >
-            <MicIcon />
-          </button>
-        </div>
-      </div>
-
-      {errorBlock}
-
-      <div className="dictation__actions">
-        <button type="button" className="dictation__btn" onClick={copy} disabled={!hasText}>
-          Copy
-        </button>
-        <button
-          type="button"
-          className="dictation__btn dictation__btn--primary"
-          onClick={() => void send()}
-          disabled={!target || !hasText || sending}
-        >
-          Send
-        </button>
-      </div>
-    </div>,
-    document.body
-  )
-}
-
-function MicIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <rect x="9" y="2" width="6" height="12" rx="3" />
-      <path d="M5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" />
-    </svg>
-  )
 }
 
 function PauseIcon() {
