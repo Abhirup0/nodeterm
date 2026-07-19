@@ -769,6 +769,8 @@ app.whenReady().then(async () => {
           }
         : null,
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
+    mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
+    mobilePushDone: () => settingsStore.get().mobilePushDone !== false,
     isPackaged: () => app.isPackaged
   })
   // And push each connected SSH project's slice of it onto its host

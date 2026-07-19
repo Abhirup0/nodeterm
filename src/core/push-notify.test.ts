@@ -50,6 +50,8 @@ function baseDeps(over: Partial<PushNotifyDeps> = {}): PushNotifyDeps {
     subscribe: () => () => {},
     getHostIdentity: () => IDENTITY,
     mobilePushEnabled: () => true,
+    mobilePushNeedsYou: () => true,
+    mobilePushDone: () => true,
     isPackaged: () => true,
     env: {},
     fetchImpl: fetchMock as unknown as typeof fetch,
@@ -266,6 +268,76 @@ describe('createPushNotify', () => {
     })
     it('unpackaged without a local API base', async () => {
       await expectNoPost({ isPackaged: () => false, env: {} })
+    })
+  })
+
+  describe('per-kind selection', () => {
+    it('defaults send all kinds (needsYou + done both on)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', kind: 'question', title: 'B' }))
+      em.emit(iev({ nodeId: 'c', kind: 'done', title: 'C' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events.map((e) => e.kind)).toEqual(['approval', 'question', 'done'])
+      h.stop()
+    })
+
+    it('needsYou off drops approval + question but done still sends', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, mobilePushNeedsYou: () => false })
+      )
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', kind: 'question', title: 'B' }))
+      em.emit(iev({ nodeId: 'c', kind: 'done', title: 'C' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events.map((e) => e.kind)).toEqual(['done'])
+      h.stop()
+    })
+
+    it('done off drops done but needs-you kinds still send', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, mobilePushDone: () => false }))
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', kind: 'question', title: 'B' }))
+      em.emit(iev({ nodeId: 'c', kind: 'done', title: 'C' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events.map((e) => e.kind)).toEqual(['approval', 'question'])
+      h.stop()
+    })
+
+    it('both sub-gates off sends nothing (master stays honest)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          mobilePushNeedsYou: () => false,
+          mobilePushDone: () => false
+        })
+      )
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', kind: 'question', title: 'B' }))
+      em.emit(iev({ nodeId: 'c', kind: 'done', title: 'C' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
+    })
+
+    it('a dropped kind does not consume the node throttle window', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, mobilePushNeedsYou: () => false })
+      )
+      // A dropped approval on node 'a' must not throttle a following done on 'a'.
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'dropped' }))
+      em.emit(iev({ nodeId: 'a', kind: 'done', title: 'kept' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events).toHaveLength(1)
+      expect(bodyOf().events[0].title).toBe('kept')
+      h.stop()
     })
   })
 

@@ -13,7 +13,7 @@ const ROWS = {
   },
   mobilePush: {
     title: 'Send push notifications to your paired phone',
-    keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval']
+    keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval', 'question', 'done', 'completed', 'needs you']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -21,6 +21,8 @@ const ENTRIES = Object.values(ROWS)
 export function NotificationsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const notifyOnClaudeDone = useSettings((s) => s.settings.notifyOnClaudeDone)
   const mobilePushEnabled = useSettings((s) => s.settings.mobilePushEnabled)
+  const mobilePushNeedsYou = useSettings((s) => s.settings.mobilePushNeedsYou)
+  const mobilePushDone = useSettings((s) => s.settings.mobilePushDone)
   const update = useSettings((s) => s.update)
   // The OS refused our test notification (macOS permission denied). macOS never re-prompts
   // once the app's record exists, so the only way back is the System Settings pane.
@@ -80,6 +82,35 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
             />
           }
         />
+        {/* Per-kind sub-gates. Inert (dimmed, non-interactive) while the master toggle is off. */}
+        <div
+          className={
+            'mt-3 space-y-3 border-l border-white/10 pl-4' +
+            (mobilePushEnabled ? '' : ' pointer-events-none opacity-40')
+          }
+          aria-disabled={!mobilePushEnabled}
+        >
+          <FieldRow
+            label="Needs you (approvals & questions)"
+            control={
+              <Switch
+                checked={mobilePushNeedsYou}
+                ariaLabel="Push when an agent needs you"
+                onChange={(on) => update({ mobilePushNeedsYou: on })}
+              />
+            }
+          />
+          <FieldRow
+            label="Task completed"
+            control={
+              <Switch
+                checked={mobilePushDone}
+                ariaLabel="Push when a task completes"
+                onChange={(on) => update({ mobilePushDone: on })}
+              />
+            }
+          />
+        </div>
       </SearchableRow>
     </SettingsSection>
   )
