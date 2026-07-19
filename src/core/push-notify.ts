@@ -23,6 +23,9 @@ const DEFAULT_THROTTLE_MS = 5000
 // Max events per POST (backend contract: events[≤10]).
 const MAX_EVENTS_PER_CALL = 10
 const FETCH_TIMEOUT_MS = 8000
+// Backend contract cap for the optional per-event `nodeTitle` (the node's canvas/sidebar name,
+// rendered into the alert title as "<Needs you|Completed> — <nodeTitle>").
+const NODE_TITLE_MAX = 80
 
 /** The standing relay host's identity, needed for the backend's (hostDeviceId, hostId-from-pubkey)
  *  auth. `hasPairedPhone` is what makes the service live at all — no paired phone ⇒ nowhere to fan
@@ -42,6 +45,10 @@ export interface PushNotifyEvent {
   detail?: string
   nodeId: string
   agentId?: string
+  /** The node's human display title (canvas header / sessions sidebar name), clipped to 80 chars.
+   *  Optional: the backend renders the alert title as "<Needs you|Completed> — <nodeTitle>" when
+   *  present, and falls back to a generic title when absent. */
+  nodeTitle?: string
   ts: number
 }
 
@@ -58,6 +65,10 @@ export interface PushNotifyDeps {
   mobilePushDone: () => boolean
   /** `app.isPackaged` — dev never hits the prod API unless a local base is targeted. */
   isPackaged: () => boolean
+  /** Resolve a node's human display title (canvas/sidebar name) for the push `nodeTitle`. In
+   *  production this is `workspaceStore.getNodeTitle`. Optional / may return undefined — the field
+   *  is then simply omitted from the payload. */
+  getNodeTitle?: (nodeId: string) => string | undefined
   /** Override base URL. Defaults to `env.NODETERM_API_BASE || 'https://api.nodeterm.dev'`. */
   apiBase?: string
   /** Injectable env (DNT guards + local-dev base). Defaults to `process.env`. */
@@ -141,12 +152,20 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     // throttle). Recorded at accept time — a declined event costs no throttle window.
     if (t - (lastPushAt.get(e.nodeId) ?? -Infinity) < throttleMs) return
     lastPushAt.set(e.nodeId, t)
+    // Resolve the node's display title (fail-open: a throwing/absent accessor omits the field).
+    let nodeTitle: string | undefined
+    try {
+      nodeTitle = deps.getNodeTitle?.(e.nodeId)?.slice(0, NODE_TITLE_MAX) || undefined
+    } catch {
+      nodeTitle = undefined
+    }
     buffer.push({
       kind: e.kind,
       title: e.title,
       ...(e.detail ? { detail: e.detail } : {}),
       nodeId: e.nodeId,
       ...(e.agentId ? { agentId: e.agentId } : {}),
+      ...(nodeTitle ? { nodeTitle } : {}),
       ts: e.ts
     })
     scheduleFlush()
