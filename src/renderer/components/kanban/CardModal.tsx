@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
+import { IconChat, IconMic, IconSearch } from '../icons'
+import { renderMarkdown } from '../../lib/markdown'
+import { useSession } from '../../session/session'
 import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
 import { ModalTerminal } from './ModalTerminal'
@@ -19,14 +22,36 @@ interface CardModalProps {
 }
 
 /** Trello-style card popup over the board. Scrim click / Esc close it; the board (and the
- *  canvas under it) stay mounted. Terminal pane arrives in Task 2 — until then terminal
- *  cards show the sticky/chat-style body with the open-on-canvas action. */
+ *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
+ *  search / dictate / AI-name / markdown view (the node itself is hidden under the board). */
 export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRename, onEditSticky }: CardModalProps) {
+  const { api } = useSession()
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
   const id = idRef.current
   const [editingTitle, setEditingTitle] = useState(false)
   const [title, setTitle] = useState(session.title)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [naming, setNaming] = useState(false)
+  // Markdown view of the captured output (the node's ⌘M, modal edition): null = terminal.
+  const [mdHtml, setMdHtml] = useState<string | null>(null)
+  const isTerminal = session.kind === 'terminal'
+
+  const nameWithAi = async () => {
+    setNaming(true)
+    const r = await api.pty.generateName(session.id, session.spawn.cwd ?? '')
+    setNaming(false)
+    if (r.ok) onRename(r.message)
+  }
+
+  const toggleMd = async () => {
+    if (mdHtml !== null) {
+      setMdHtml(null)
+      return
+    }
+    const captured = await api.pty.capture(session.id, true)
+    setMdHtml(renderMarkdown(captured || ''))
+  }
   // Ref mirror: the capture-phase listener below closes over stale state otherwise.
   const editingTitleRef = useRef(false)
   useEffect(() => {
@@ -92,6 +117,43 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
             </span>
           )}
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
+          {isTerminal && (
+            <>
+              <button
+                className="kanban-modal__action"
+                title="Search this terminal"
+                aria-pressed={searchOpen}
+                onClick={() => setSearchOpen((v) => !v)}
+              >
+                <IconSearch />
+              </button>
+              <button
+                className="kanban-modal__action"
+                title="Dictate into this terminal"
+                onClick={() =>
+                  window.dispatchEvent(new CustomEvent('nodeterm:dictate', { detail: { nodeId: session.id } }))
+                }
+              >
+                <IconMic />
+              </button>
+              <button
+                className="kanban-modal__action"
+                title="Name with AI (from terminal output)"
+                disabled={naming}
+                onClick={nameWithAi}
+              >
+                {naming ? '…' : '✦'}
+              </button>
+              <button
+                className="kanban-modal__action"
+                title="Markdown view of the output"
+                aria-pressed={mdHtml !== null}
+                onClick={toggleMd}
+              >
+                <IconChat />
+              </button>
+            </>
+          )}
           <button className="kanban-modal__action" title="Open on canvas" onClick={onOpenCanvas}>
             ↗
           </button>
@@ -113,8 +175,20 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
               <div className="kanban-modal__pane" data-kind={session.kind}>
                 {session.kind === 'terminal' ? (
                   // A live SECOND client on the node's session — keyed by node id so switching cards
-                  // remounts a fresh viewer. Chat has no PTY; it opens on the canvas.
-                  <ModalTerminal key={session.id} nodeId={session.id} spawn={session.spawn} />
+                  // remounts a fresh viewer. Chat has no PTY; it opens on the canvas. The markdown
+                  // view OVERLAYS the terminal (kept mounted — its viewer must not detach/re-seed).
+                  <>
+                    <ModalTerminal
+                      key={session.id}
+                      nodeId={session.id}
+                      spawn={session.spawn}
+                      searchOpen={searchOpen}
+                      onCloseSearch={() => setSearchOpen(false)}
+                    />
+                    {mdHtml !== null && (
+                      <div className="kanban-modal__md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
+                    )}
+                  </>
                 ) : (
                   <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
                 )}
