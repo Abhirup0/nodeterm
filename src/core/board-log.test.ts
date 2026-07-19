@@ -3,7 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { BoardLogEntry } from '@shared/types'
-import { buildLine, parseLines, validEntry, BoardLogStore, type RemoteLogExec } from './board-log'
+import { buildLine, parseLines, validEntry, BoardLogStore, BOARD_LOG_TEXT_MAX, type RemoteLogExec } from './board-log'
 
 const entry = (over: Partial<BoardLogEntry> = {}): BoardLogEntry => ({
   id: 'e1',
@@ -21,6 +21,19 @@ describe('buildLine / parseLines / validEntry', () => {
     expect(line.endsWith('\n')).toBe(true)
     expect(line.slice(0, -1).includes('\n')).toBe(false)
     expect(parseLines(line)).toEqual([e])
+  })
+
+  it('buildLine clamps over-long text to BOARD_LOG_TEXT_MAX chars + ellipsis, line stays valid JSON', () => {
+    const long = 'x'.repeat(BOARD_LOG_TEXT_MAX + 5000)
+    const line = buildLine(entry({ id: 'big', text: long }))
+    expect(line.endsWith('\n')).toBe(true)
+    const parsed = JSON.parse(line.slice(0, -1)) as BoardLogEntry // valid single-line JSON
+    expect(parsed.text).toHaveLength(BOARD_LOG_TEXT_MAX + 1) // cap chars + the '…'
+    expect(parsed.text!.endsWith('…')).toBe(true)
+    expect(parsed.text!.slice(0, -1)).toBe('x'.repeat(BOARD_LOG_TEXT_MAX))
+    // Text exactly at the cap is left untouched (no ellipsis).
+    const exact = 'y'.repeat(BOARD_LOG_TEXT_MAX)
+    expect((JSON.parse(buildLine(entry({ text: exact })).slice(0, -1)) as BoardLogEntry).text).toBe(exact)
   })
 
   it('parseLines is tolerant: skips a garbage line, keeps the valid one', () => {

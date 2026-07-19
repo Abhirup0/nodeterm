@@ -1,7 +1,10 @@
 import fs from 'fs'
 import path from 'path'
 import { watch, type FSWatcher } from 'fs'
-import type { BoardLogEntry } from '@shared/types'
+import { BOARD_LOG_TEXT_MAX, type BoardLogEntry } from '@shared/types'
+
+// Re-exported so callers of this module (and its tests) can reach the cap alongside buildLine.
+export { BOARD_LOG_TEXT_MAX }
 
 // Append-only board history. Each project's board log lives beside its nodes at
 // `<cwd>/.nodeterm/board-log.jsonl`, one JSON entry per line, oldest-first on disk. Local
@@ -12,6 +15,14 @@ import type { BoardLogEntry } from '@shared/types'
 const LOG_DIR = '.nodeterm'
 const LOG_FILE = 'board-log.jsonl'
 const DEFAULT_CAP = 500
+
+/** Clamp an entry's `text` to `BOARD_LOG_TEXT_MAX` chars (+ '…' when truncated). Returns the
+ *  same entry when nothing changes, else a shallow copy with the shortened text. */
+export function clampEntryText(entry: BoardLogEntry): BoardLogEntry {
+  const { text } = entry
+  if (typeof text !== 'string' || text.length <= BOARD_LOG_TEXT_MAX) return entry
+  return { ...entry, text: text.slice(0, BOARD_LOG_TEXT_MAX) + '…' }
+}
 // `all` still needs a finite tail count for the remote path; larger than any realistic log.
 const ALL_LINES = 1_000_000_000
 
@@ -45,7 +56,7 @@ export function validEntry(x: unknown): x is BoardLogEntry {
 /** One log line: single-line JSON + '\n'. Any newline in `text` is JSON-escaped, so the line
  *  never breaks the one-entry-per-line invariant. */
 export function buildLine(entry: BoardLogEntry): string {
-  return JSON.stringify(entry) + '\n'
+  return JSON.stringify(clampEntryText(entry)) + '\n'
 }
 
 /** Parse a raw log blob → entries, NEWEST-FIRST. Tolerant: lines that fail JSON.parse or the

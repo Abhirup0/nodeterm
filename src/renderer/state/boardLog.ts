@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { BoardLogEntry, NodeTerminalApi } from '@shared/types'
+import { BOARD_LOG_TEXT_MAX, type BoardLogEntry, type NodeTerminalApi } from '@shared/types'
 import { loadIdentity } from './presence'
 
 /**
@@ -69,13 +69,20 @@ export const useBoardLog = create<BoardLogState>((set, get) => ({
   append: (api, projectId, input) => {
     const id = loadIdentity()
     const author = id ? { name: id.name, color: id.color } : ANON_AUTHOR
+    // Clamp identically to buildLine (src/core/board-log.ts) so the optimistic entry the user sees
+    // matches what lands on disk — an over-long paste would otherwise silently truncate on reload
+    // (and, over SSH, fail the append entirely and vanish).
+    const text =
+      input.text !== undefined && input.text.length > BOARD_LOG_TEXT_MAX
+        ? input.text.slice(0, BOARD_LOG_TEXT_MAX) + '…'
+        : input.text
     const entry: BoardLogEntry = {
       id: crypto.randomUUID(),
       ts: Date.now(),
       author,
       kind: input.kind,
       ...(input.nodeId !== undefined ? { nodeId: input.nodeId } : {}),
-      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(text !== undefined ? { text } : {}),
       ...(input.event !== undefined ? { event: input.event } : {})
     }
     // Optimistic newest-first insert.

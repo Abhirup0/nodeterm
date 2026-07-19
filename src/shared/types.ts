@@ -246,6 +246,13 @@ export interface BoardLogEntry {
   event?: BoardLogEvent
 }
 
+/** Max chars kept for a comment's `text`. On an SSH project the whole JSON line becomes one
+ *  shell arg (`printf '%s\n' '<line>'` over the ControlMaster); an unbounded paste blows past
+ *  ARG_MAX → the append fails → the optimistic entry silently vanishes on reload. Locally it
+ *  just bloats the append-only file. Shared so core (disk) and the renderer (optimistic UI)
+ *  clamp identically. */
+export const BOARD_LOG_TEXT_MAX = 16_384
+
 /** Read options for the board log: cap the newest N entries (default 500 in the store) or `all`. */
 export interface BoardLogReadOpts {
   cap?: number
