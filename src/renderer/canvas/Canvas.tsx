@@ -192,7 +192,7 @@ import {
 } from '@shared/canvas-publish'
 import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
 import { createMutationGuard } from '@shared/canvas-mutations'
-import { matchesShortcut } from '@shared/shortcut'
+import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@shared/shortcut'
 
 import { canvasSyncTarget } from './collab-sync'
 import {
@@ -2524,8 +2524,11 @@ export function Canvas() {
     requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
   }, [])
 
-  // ⌘T = new terminal, ⌘⇧C = new default agent, configured dictation shortcut (default ⌘⌥D) =
-  // toggle dictation (ignored while typing in a field/terminal).
+  // ⌘T = new terminal, ⌘⇧C = new default agent, a KEYED dictation shortcut (e.g. "Cmd+Alt+D") =
+  // toggle dictation (ignored while typing in a field/terminal). A modifier-only shortcut (the
+  // new default, "Cmd+Alt") is hold-to-talk instead — matchesShortcut always returns false for
+  // that shape (its `key` is null), so this effect is naturally a no-op for it; see the
+  // dedicated hold-mode effect below, which is what fires in that case.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isKanbanOpen(useProjects.getState().activeProjectId)) return
@@ -2549,6 +2552,109 @@ export function Canvas() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [addTerminal, addAgentNode, toggleDictation])
+
+  // v3 hold-to-talk: active only while the configured dictation shortcut is a modifier-only
+  // chord (isHoldChord — the new default, "Cmd+Alt"). Walkie-talkie semantics: the chord held
+  // down starts recording immediately (armed on the keydown that completes the exact modifier
+  // match — see chordHeld); releasing either chord modifier stops (transcribe → insert) UNLESS
+  // the hold was under 400ms, which cancels quietly (an accidental tap, not an intentional
+  // hold). Unlike the toggle-mode effect above, this deliberately has NO typing guard — the
+  // chord types nothing, so it must fire even while a terminal/input has focus. State lives in
+  // plain closures (not React state) so a keystroke never triggers a re-render.
+  //
+  // Misfire guards: a third, non-modifier key pressed while armed cancels immediately (the user
+  // was invoking a real shortcut, e.g. the ⌘⌥D Dock-collision class) — and is never
+  // preventDefault()'d, so that shortcut still fires normally. An extra modifier joining the
+  // held chord (chordHeld flips false) cancels the same way. Auto-repeat keydowns for an
+  // already-armed chord are inert by construction: once armed, a repeat keydown of the same
+  // modifier still satisfies chordHeld, so the "misfire" branch's condition is false and it's a
+  // no-op. Window blur (app switch) cancels outright.
+  useEffect(() => {
+    if (!isHoldChord(settings.speech.shortcut)) return
+
+    let armed = false
+    let heldSince = 0
+
+    const cancel = (): void => {
+      if (!armed) return
+      armed = false
+      setDictationOpen(false)
+    }
+
+    const stop = (): void => {
+      if (!armed) return
+      armed = false
+      setDictationStopSignal((n) => n + 1)
+    }
+
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
+      const combo = useSettings.getState().settings.speech.shortcut
+      if (!isHoldChord(combo)) return
+
+      if (!armed) {
+        // Arm only on the keydown that completes the exact chord — not on every keydown while
+        // some-but-not-all of it is down (e.g. Cmd alone, before Alt joins).
+        if (e.repeat) return
+        if (!isModifierEventKey(e.key)) return
+        if (!chordHeld(e, combo, isMac)) return
+        armed = true
+        heldSince = Date.now()
+        const sel = nodesRef.current.find(
+          (n) => n.selected && (n.type === 'terminal' || n.type === 'chat')
+        )
+        setDictationTarget(
+          sel
+            ? {
+                kind: sel.type === 'chat' ? 'chat' : 'terminal',
+                nodeId: sel.id,
+                title: (sel.data.title as string) || 'Untitled'
+              }
+            : null
+        )
+        setDictationNonce((n) => n + 1)
+        setDictationOpen(true)
+        return
+      }
+
+      // Already armed: a non-modifier key, or an extra modifier joining the chord, is the
+      // misfire guard — cancel without preventDefault so the real shortcut still fires.
+      if (!isModifierEventKey(e.key) || !chordHeld(e, combo, isMac)) {
+        cancel()
+      }
+    }
+
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (!armed) return
+      const combo = useSettings.getState().settings.speech.shortcut
+      // Still fully down (an unrelated key was released) — keep recording.
+      if (chordHeld(e, combo, isMac)) return
+      const heldMs = Date.now() - heldSince
+      if (heldMs < 400) {
+        cancel()
+      } else {
+        stop()
+      }
+    }
+
+    const onBlur = (): void => {
+      cancel()
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+      // A settings change / project switch mid-hold must not leave a dangling recording.
+      if (armed) {
+        armed = false
+        setDictationOpen(false)
+      }
+    }
+  }, [settings.speech.shortcut])
 
   // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
   // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME

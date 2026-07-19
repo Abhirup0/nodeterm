@@ -26,7 +26,7 @@ describe('whisper model catalog', () => {
       engine: 'whisper',
       model: 'tiny',
       language: 'auto',
-      shortcut: 'Cmd+Alt+D'
+      shortcut: 'Cmd+Alt'
     })
   })
 })

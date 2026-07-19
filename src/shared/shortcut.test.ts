@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildModifierChord,
   captureToShortcut,
+  chordHeld,
   formatShortcut,
+  isHoldChord,
+  isModifierEventKey,
   matchesShortcut,
   parseShortcut,
   shortcutKeyParts
@@ -41,6 +45,19 @@ describe('parseShortcut', () => {
       key: 'D'
     })
   })
+
+  it('parses a modifier-only chord (no trailing key) — the v3 hold-to-talk shape', () => {
+    expect(parseShortcut('Cmd+Alt')).toEqual({ cmd: true, alt: true, shift: false, key: null })
+  })
+
+  it('parses a modifier-only chord with all three modifiers', () => {
+    expect(parseShortcut('Cmd+Alt+Shift')).toEqual({
+      cmd: true,
+      alt: true,
+      shift: true,
+      key: null
+    })
+  })
 })
 
 describe('formatShortcut', () => {
@@ -76,6 +93,26 @@ describe('formatShortcut', () => {
       // Formatting for either platform is a pure display transform of the same parsed shape —
       // reformatting a fresh capture (captureToShortcut) must reparse identically.
       expect(parseShortcut(combo)).toEqual(parsed)
+    }
+  })
+
+  it('formats a modifier-only chord (Cmd+Alt) on mac with no trailing key badge', () => {
+    expect(formatShortcut('Cmd+Alt', true)).toBe('⌘⌥')
+  })
+
+  it('formats a modifier-only chord (Cmd+Alt) off mac with no trailing key badge', () => {
+    expect(formatShortcut('Cmd+Alt', false)).toBe('Ctrl+Alt')
+  })
+
+  it('round-trips a modifier-only chord through parse -> format -> parse', () => {
+    for (const combo of ['Cmd+Alt', 'Cmd+Alt+Shift']) {
+      const parsed = parseShortcut(combo)
+      expect(parsed.key).toBeNull()
+      // formatShortcut is a display transform; there's no un-format, but shortcutKeyParts should
+      // never emit a stray trailing key badge for a modifier-only chord.
+      expect(shortcutKeyParts(combo, true).length).toBe(
+        (parsed.cmd ? 1 : 0) + (parsed.alt ? 1 : 0) + (parsed.shift ? 1 : 0)
+      )
     }
   })
 })
@@ -169,6 +206,100 @@ describe('matchesShortcut', () => {
     expect(
       matchesShortcut({ ...base, metaKey: true, key: 'F5' }, 'Cmd+F5', true)
     ).toBe(true)
+  })
+
+  it('never matches a modifier-only chord — that shape has no key to check', () => {
+    // Even a keydown of a real key while the exact modifiers are held must not match: a
+    // modifier-only shortcut is handled by chordHeld, not matchesShortcut.
+    expect(matchesShortcut({ ...base, metaKey: true, altKey: true, key: 'd' }, 'Cmd+Alt', true)).toBe(
+      false
+    )
+  })
+})
+
+describe('isHoldChord', () => {
+  it('is true for a modifier-only combo', () => {
+    expect(isHoldChord('Cmd+Alt')).toBe(true)
+    expect(isHoldChord('Cmd+Alt+Shift')).toBe(true)
+  })
+
+  it('is false for a keyed combo', () => {
+    expect(isHoldChord('Cmd+Alt+D')).toBe(false)
+    expect(isHoldChord('Cmd+D')).toBe(false)
+  })
+})
+
+describe('isModifierEventKey', () => {
+  it('recognizes modifier key names, case-insensitively', () => {
+    expect(isModifierEventKey('Meta')).toBe(true)
+    expect(isModifierEventKey('CONTROL')).toBe(true)
+    expect(isModifierEventKey('alt')).toBe(true)
+    expect(isModifierEventKey('Shift')).toBe(true)
+  })
+
+  it('rejects non-modifier keys', () => {
+    expect(isModifierEventKey('d')).toBe(false)
+    expect(isModifierEventKey('F5')).toBe(false)
+    expect(isModifierEventKey('Escape')).toBe(false)
+  })
+})
+
+describe('chordHeld', () => {
+  const base = { metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, key: 'Alt' }
+
+  it('is true when the event modifiers exactly match the chord (mac)', () => {
+    expect(chordHeld({ ...base, metaKey: true, altKey: true }, 'Cmd+Alt', true)).toBe(true)
+  })
+
+  it('is true when the event modifiers exactly match the chord (non-mac, ctrlKey primary)', () => {
+    expect(chordHeld({ ...base, ctrlKey: true, altKey: true }, 'Cmd+Alt', false)).toBe(true)
+  })
+
+  it('is false when the primary modifier is missing', () => {
+    expect(chordHeld({ ...base, altKey: true }, 'Cmd+Alt', true)).toBe(false)
+  })
+
+  it('is false when a required modifier (alt) is missing', () => {
+    expect(chordHeld({ ...base, metaKey: true }, 'Cmd+Alt', true)).toBe(false)
+  })
+
+  it('is false when an EXTRA modifier is held beyond what the chord requires', () => {
+    expect(chordHeld({ ...base, metaKey: true, altKey: true, shiftKey: true }, 'Cmd+Alt', true)).toBe(
+      false
+    )
+  })
+
+  it('is false on the wrong platform primary (ctrlKey standing in for metaKey on mac)', () => {
+    expect(chordHeld({ ...base, ctrlKey: true, altKey: true }, 'Cmd+Alt', true)).toBe(false)
+  })
+
+  it('ignores e.key entirely — same result regardless of which key the event names', () => {
+    expect(chordHeld({ ...base, metaKey: true, altKey: true, key: 'd' }, 'Cmd+Alt', true)).toBe(true)
+  })
+})
+
+describe('buildModifierChord', () => {
+  it('builds a Cmd+Alt combo', () => {
+    expect(buildModifierChord({ cmd: true, alt: true, shift: false })).toBe('Cmd+Alt')
+  })
+
+  it('builds a Cmd+Alt+Shift combo', () => {
+    expect(buildModifierChord({ cmd: true, alt: true, shift: true })).toBe('Cmd+Alt+Shift')
+  })
+
+  it('builds a bare Cmd combo', () => {
+    expect(buildModifierChord({ cmd: true, alt: false, shift: false })).toBe('Cmd')
+  })
+
+  it('returns null when the primary modifier is missing', () => {
+    expect(buildModifierChord({ cmd: false, alt: true, shift: true })).toBeNull()
+  })
+
+  it('round-trips through parseShortcut', () => {
+    const combo = buildModifierChord({ cmd: true, alt: true, shift: false })
+    expect(combo).not.toBeNull()
+    expect(parseShortcut(combo as string)).toEqual({ cmd: true, alt: true, shift: false, key: null })
+    expect(isHoldChord(combo as string)).toBe(true)
   })
 })
 
