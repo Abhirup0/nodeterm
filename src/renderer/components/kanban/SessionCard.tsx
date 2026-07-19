@@ -51,7 +51,6 @@ export function SessionCard({
       <div className="kanban-card__row">
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
         <span className="kanban-card__title">{session.title}</span>
-        {session.kind === 'chat' && <span className="kanban-card__kind">chat</span>}
         {sticky && <span className="kanban-card__kind">note</span>}
         {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
@@ -71,9 +70,7 @@ export function SessionCard({
                 </span>
               )}
               {!status?.sessionId && (
-                <span className="kanban-card__kindlabel">
-                  {session.kind === 'chat' ? 'chat' : 'terminal'}
-                </span>
+                <span className="kanban-card__kindlabel">terminal</span>
               )}
             </>
           )}

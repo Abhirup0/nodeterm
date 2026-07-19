@@ -18,7 +18,6 @@ interface DockProps {
   onAddSticky: () => void
   onAddDino: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
-  onAddChat: () => void
   onOpenFile: () => void
   onAddRemote: () => void
   onConnectRemote: () => void
@@ -45,7 +44,6 @@ export function Dock({
   onAddSticky,
   onAddDino,
   onAddAgent,
-  onAddChat,
   onOpenFile,
   onAddRemote,
   onConnectRemote,
@@ -137,10 +135,6 @@ export function Dock({
                   <span>{c.label}</span>
                 </button>
               ))}
-            <button onClick={pick(onAddChat)}>
-              <ChatIcon />
-              <span>Chat</span>
-            </button>
             <button onClick={pick(onAddSticky)}>
               <NoteIcon />
               <span>Sticky Note</span>
@@ -291,14 +285,6 @@ function DinoIcon() {
       <rect x="18" y="12" width="2" height="3" />
       <rect x="9" y="16" width="2" height="5" />
       <rect x="14" y="16" width="2" height="5" />
-    </svg>
-  )
-}
-function ChatIcon() {
-  return (
-    <svg {...S}>
-      <path d="M4 5h16v11H9l-4 3v-3H4z" />
-      <path d="M8 10h8M8 13h5" />
     </svg>
   )
 }

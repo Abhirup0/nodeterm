@@ -53,6 +53,7 @@ function baseDeps(over: Partial<PushNotifyDeps> = {}): PushNotifyDeps {
     mobilePushNeedsYou: () => true,
     mobilePushDone: () => true,
     isPackaged: () => true,
+    getNodeTitle: () => undefined,
     env: {},
     fetchImpl: fetchMock as unknown as typeof fetch,
     now: () => clock,
@@ -337,6 +338,64 @@ describe('createPushNotify', () => {
       await vi.advanceTimersByTimeAsync(2000)
       expect(bodyOf().events).toHaveLength(1)
       expect(bodyOf().events[0].title).toBe('kept')
+      h.stop()
+    })
+  })
+
+  describe('nodeTitle enrichment', () => {
+    it('includes nodeTitle when the accessor resolves one', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, getNodeTitle: (id) => (id === 'a' ? 'Backend server' : undefined) })
+      )
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0].nodeTitle).toBe('Backend server')
+      h.stop()
+    })
+
+    it('omits nodeTitle when the accessor returns undefined', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getNodeTitle: () => undefined }))
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0]).not.toHaveProperty('nodeTitle')
+      h.stop()
+    })
+
+    it('omits nodeTitle when no accessor is wired at all', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getNodeTitle: undefined }))
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0]).not.toHaveProperty('nodeTitle')
+      h.stop()
+    })
+
+    it('clips nodeTitle to 80 chars', async () => {
+      const em = makeEmitter()
+      const long = 'x'.repeat(200)
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getNodeTitle: () => long }))
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0].nodeTitle).toBe('x'.repeat(80))
+      h.stop()
+    })
+
+    it('omits nodeTitle when the accessor throws (fail-open)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          getNodeTitle: () => {
+            throw new Error('boom')
+          }
+        })
+      )
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events[0]).not.toHaveProperty('nodeTitle')
       h.stop()
     })
   })

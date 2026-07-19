@@ -60,7 +60,6 @@ import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff } from './handoff'
-import { ChatDriver } from '../core/chat-driver'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
@@ -195,9 +194,6 @@ const workspaceWatcher = new WorkspaceWatcher({
 })
 workspaceStore.onPersist = () => workspaceWatcher.sync()
 const gitService = new GitService()
-// One driver for all chat nodes. Resolves the live window at send time (getMainWindow) so
-// pushes survive a macOS close→dock-reopen; disposed on quit next to ptyManager.killAll().
-const chatDriver = new ChatDriver(getMainWindow, sendToMain)
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],
@@ -771,7 +767,10 @@ app.whenReady().then(async () => {
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
     mobilePushDone: () => settingsStore.get().mobilePushDone !== false,
-    isPackaged: () => app.isPackaged
+    isPackaged: () => app.isPackaged,
+    // The node's canvas/sidebar display title, so the phone can title the alert
+    // "<Needs you|Completed> — <nodeTitle>" (see workspace-store.getNodeTitle for the freshness note).
+    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
   })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS
@@ -981,17 +980,6 @@ app.whenReady().then(async () => {
       accountId: string | undefined
     ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId })
   )
-  // Chat nodes: one long-lived Claude Agent SDK query per node, bridged over chat:* IPC. On the
-  // platform: the driver runs on THIS host, and a remote tab's chat node drives the same one.
-  corePlatform.handle(IPC.chatEnsure, (nodeId: string, opts) => chatDriver.ensure(nodeId, opts))
-  corePlatform.on(IPC.chatSend, (nodeId: string, text: string, images) =>
-    chatDriver.send(nodeId, text, images))
-  corePlatform.on(IPC.chatInterrupt, (nodeId: string) => chatDriver.interrupt(nodeId))
-  corePlatform.on(IPC.chatPermissionReply, (nodeId: string, requestId: string, decision) =>
-    chatDriver.permissionReply(nodeId, requestId, decision))
-  corePlatform.on(IPC.chatRemoveQueued, (nodeId: string, queueId: string) =>
-    chatDriver.removeQueued(nodeId, queueId))
-  corePlatform.on(IPC.chatDispose, (nodeId: string) => chatDriver.dispose(nodeId))
 
   installManagedAgentHooks()
   // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
@@ -1421,7 +1409,6 @@ let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
   workspaceWatcher.dispose()
-  chatDriver.disposeAll() // tear down every chat node's SDK query (resume-based, so this is safe)
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
     sshProjectManager?.disconnectAll()

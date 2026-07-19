@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   createAccountLoginNode,
   createAgentNode,
-  createChatNode,
   createDinoNode,
   flowToNodeStates,
   groupSelectedNodes,
@@ -229,10 +228,6 @@ describe('accountId on Claude node factories', () => {
     const node = createAgentNode('claude', 0)
     expect(node.data.accountId).toBeUndefined()
   })
-  it('stamps accountId onto a chat node', () => {
-    const node = createChatNode(0, undefined, undefined, undefined, 'a1')
-    expect(node.data.accountId).toBe('a1')
-  })
 })
 
 describe('accountId serialization', () => {
@@ -294,6 +289,29 @@ describe('dino node serialization', () => {
     expect(node.type).toBe('dino')
     expect(node.data.highScore).toBe(0)
     expect(node.width).toBe(600)
+  })
+})
+
+describe('chat node tombstone', () => {
+  it('converts a persisted chat node into a sticky with the resume hint', () => {
+    const flow = nodeStatesToFlow([
+      {
+        id: 'chat-1', kind: 'chat', x: 10, y: 20, width: 420, height: 520,
+        title: 'API brainstorm', color: '#8b5cf6', chatSessionId: 'sess-abc123'
+      } as any
+    ])
+    expect(flow).toHaveLength(1)
+    const n = flow[0]
+    expect(n.type).toBe('sticky')
+    expect(n.position).toEqual({ x: 10, y: 20 })
+    expect(n.data.title).toBe('API brainstorm')
+    expect(String(n.data.text)).toContain('claude --resume sess-abc123')
+  })
+  it('converts a chat node without a session id into a plain explanatory sticky', () => {
+    const flow = nodeStatesToFlow([{ id: 'chat-2', kind: 'chat', x: 0, y: 0 } as any])
+    expect(flow[0].type).toBe('sticky')
+    expect(String(flow[0].data.text)).toContain('removed')
+    expect(String(flow[0].data.text)).not.toContain('--resume')
   })
 })
 

@@ -21,13 +21,6 @@ export const IPC = {
   ptyReadSessionName: 'pty:read-session-name',
   claudeReadTranscript: 'claude:read-transcript',
   chatReadTranscript: 'chat:read-transcript',
-  chatEnsure: 'chat:ensure',
-  chatSend: 'chat:send',
-  chatInterrupt: 'chat:interrupt',
-  chatPermissionReply: 'chat:permission-reply',
-  chatRemoveQueued: 'chat:remove-queued',
-  chatDispose: 'chat:dispose',
-  chatEvent: (nodeId: string) => `chat:event:${nodeId}`,
   claudeAccountsAdd: 'claude-accounts:add',
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
@@ -60,7 +53,7 @@ export const IPC = {
    *  the local fs.watch (or the desktop-ssh 5s poll); the last one stops it. */
   boardLogSubscribe: 'board-log:subscribe',
   boardLogUnsubscribe: 'board-log:unsubscribe',
-  /** Per-project push fired when a project's board log changes (mirrors ptyData/chatEvent naming). */
+  /** Per-project push fired when a project's board log changes (mirrors the ptyData naming). */
   boardLogChanged: (projectId: string) => `board-log:changed:${projectId}`,
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
