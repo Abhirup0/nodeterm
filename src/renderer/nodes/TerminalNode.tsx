@@ -73,6 +73,7 @@ import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
+import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -402,6 +403,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const contextLinkCapable = !!agentId && canContextLink(agentId) // context-link tip wording only; handles render on all terminals
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
+  // The header 💬 now opens the board-log comments flyout (right side); ⌘M keeps the markdown/chat view.
+  const [commentsOpen, setCommentsOpen] = useState(false)
   const canRenameNode = !!agentId && canRename(agentId) // title ⇄ session-name two-way sync
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
 
@@ -1723,17 +1726,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             {naming ? '…' : '✦'}
           </button>
         </Tooltip>
-        {showChat && (
-          <Tooltip label={hintLabel('Chat / markdown view (⌘M)')}>
-            <button
-              className="term-node__chat nodrag"
-              aria-pressed={!!data.mdMode}
-              onClick={() => updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))}
-            >
-              <IconChat />
-            </button>
-          </Tooltip>
-        )}
+        <Tooltip label="Comments & activity">
+          <button
+            className="term-node__chat nodrag"
+            aria-pressed={commentsOpen}
+            onClick={() => setCommentsOpen((v) => !v)}
+          >
+            <IconChat />
+          </button>
+        </Tooltip>
         <button
           className="term-node__close"
           title="Close (ends the session)"
@@ -1816,6 +1817,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           ))}
       </div>
     </div>
+    {/* Board-log comments flyout — a SIBLING of the root (overflow:hidden would clip it),
+        expanding to the node's right. Same feed/composer as the card modal's panel. */}
+    {commentsOpen && !collapsed && (
+      <div className="term-node__comments nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
+        <BoardLogPanel card={{ id }} />
+      </div>
+    )}
     </>
   )
 }

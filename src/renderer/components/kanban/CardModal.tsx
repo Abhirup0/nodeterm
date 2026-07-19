@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import { IconChat, IconMic, IconSearch } from '../icons'
-import { renderMarkdown } from '../../lib/markdown'
 import { useSession } from '../../session/session'
 import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
@@ -33,8 +32,8 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
   const [title, setTitle] = useState(session.title)
   const [searchOpen, setSearchOpen] = useState(false)
   const [naming, setNaming] = useState(false)
-  // Markdown view of the captured output (the node's ⌘M, modal edition): null = terminal.
-  const [mdHtml, setMdHtml] = useState<string | null>(null)
+  // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it.
+  const [panelOpen, setPanelOpen] = useState(true)
   const isTerminal = session.kind === 'terminal'
 
   const nameWithAi = async () => {
@@ -42,15 +41,6 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
     const r = await api.pty.generateName(session.id, session.spawn.cwd ?? '')
     setNaming(false)
     if (r.ok) onRename(r.message)
-  }
-
-  const toggleMd = async () => {
-    if (mdHtml !== null) {
-      setMdHtml(null)
-      return
-    }
-    const captured = await api.pty.capture(session.id, true)
-    setMdHtml(renderMarkdown(captured || ''))
   }
   // Ref mirror: the capture-phase listener below closes over stale state otherwise.
   const editingTitleRef = useRef(false)
@@ -144,16 +134,16 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
               >
                 {naming ? '…' : '✦'}
               </button>
-              <button
-                className="kanban-modal__action"
-                title="Markdown view of the output"
-                aria-pressed={mdHtml !== null}
-                onClick={toggleMd}
-              >
-                <IconChat />
-              </button>
             </>
           )}
+          <button
+            className="kanban-modal__action"
+            title={panelOpen ? 'Hide comments & activity' : 'Show comments & activity'}
+            aria-pressed={panelOpen}
+            onClick={() => setPanelOpen((v) => !v)}
+          >
+            <IconChat />
+          </button>
           <button className="kanban-modal__action" title="Open on canvas" onClick={onOpenCanvas}>
             ↗
           </button>
@@ -177,25 +167,20 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
                   // A live SECOND client on the node's session — keyed by node id so switching cards
                   // remounts a fresh viewer. Chat has no PTY; it opens on the canvas. The markdown
                   // view OVERLAYS the terminal (kept mounted — its viewer must not detach/re-seed).
-                  <>
-                    <ModalTerminal
-                      key={session.id}
-                      nodeId={session.id}
-                      spawn={session.spawn}
-                      searchOpen={searchOpen}
-                      onCloseSearch={() => setSearchOpen(false)}
-                    />
-                    {mdHtml !== null && (
-                      <div className="kanban-modal__md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
-                    )}
-                  </>
+                  <ModalTerminal
+                    key={session.id}
+                    nodeId={session.id}
+                    spawn={session.spawn}
+                    searchOpen={searchOpen}
+                    onCloseSearch={() => setSearchOpen(false)}
+                  />
                 ) : (
                   <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
                 )}
               </div>
             )}
           </div>
-          <BoardLogPanel card={session} />
+          {panelOpen && <BoardLogPanel card={session} />}
         </div>
       </div>
     </div>,
