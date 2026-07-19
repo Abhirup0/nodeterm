@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import type { KanbanSession } from './KanbanView'
+import { ModalTerminal } from './ModalTerminal'
 
 interface CardModalProps {
   session: KanbanSession
@@ -107,10 +108,13 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
             />
           ) : (
             <div className="kanban-modal__pane" data-kind={session.kind}>
-              {/* Task 2 replaces this with the live co-attach terminal for kind 'terminal'. */}
-              <div className="kanban-modal__placeholder">
-                {session.kind === 'chat' ? 'Chat sessions open on the canvas.' : 'Terminal'}
-              </div>
+              {session.kind === 'terminal' ? (
+                // A live SECOND client on the node's session — keyed by node id so switching cards
+                // remounts a fresh viewer. Chat has no PTY; it opens on the canvas.
+                <ModalTerminal key={session.id} nodeId={session.id} spawn={session.spawn} />
+              ) : (
+                <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
+              )}
             </div>
           )}
         </div>

@@ -10,6 +10,7 @@ import {
 } from '../../lib/kanban'
 import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
+import type { ModalSpawn } from './ModalTerminal'
 
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
  *  itself stores only column assignments. */
@@ -21,6 +22,9 @@ export interface KanbanSession {
   agentId?: string
   /** Sticky note body — shown in the expanded detail row. */
   text?: string
+  /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
+   *  same session (kind 'terminal' only; sticky/chat pass `{}`). */
+  spawn: ModalSpawn
 }
 
 /** What the per-column "+ New" menu can create. */
