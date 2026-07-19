@@ -55,7 +55,7 @@ describe('applyMutationToFlow', () => {
     expect(out[0].position).toEqual({ x: 50, y: 0 })
   })
 
-  // initialCommand / respawnNonce / forkFrom are deliberately not serialized. A peer's rename must
+  // initialCommand / respawnNonce are deliberately not serialized. A peer's rename must
   // not silently drop them from a node that has not consumed them yet.
   it('keeps local-only node data (initialCommand) while applying the peer\'s fields', () => {
     const nodes = [

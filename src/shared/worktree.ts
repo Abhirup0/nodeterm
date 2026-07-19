@@ -268,7 +268,7 @@ interface WorktreeNodeLike {
  * that merely shares the prefix, no cwd at all) are NOT displaced — they were never affected, and
  * rewriting them would be a change the user never asked for.
  *
- * Terminal/chat displacement is GROUP-scoped (`under.has`) because a cwd match alone is too broad —
+ * Terminal displacement is GROUP-scoped (`under.has`) because a cwd match alone is too broad —
  * plenty of terminals legitimately share a cwd with a worktree without living inside its frame.
  * Editor/diff nodes get no such scoping: `createEditorNode`/`createDiffNode` never set a
  * `parentId` (they float free on the canvas, `group: null`), so they are never a "descendant" of
@@ -286,7 +286,7 @@ export function displacedByWorktree(
   const under = descendantIds(nodes, groupId)
   const out = new Set<string>()
   for (const n of nodes) {
-    if (n.type === 'terminal' || n.type === 'chat') {
+    if (n.type === 'terminal') {
       if (!under.has(n.id)) continue
       const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
       if (isInsideDir(cwd, worktreePath)) out.add(n.id)
