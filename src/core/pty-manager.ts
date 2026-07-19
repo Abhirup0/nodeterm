@@ -1692,11 +1692,23 @@ export class PtyManager {
     }
     // The departing view (or sink) may have been one of the ones that paused us, and it will
     // never send the matching resume now — leaving that pause in place would freeze the terminal
-    // for everyone who stayed. EVERY owner it owed goes back (no `owner` argument): it stops
-    // receiving this session's output entirely, so neither its renderer nor its socket can ever
-    // resume us again. A pause owed by a view that is STILL here is untouched: the pty stays
-    // paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
-    this.releaseFlow(session, sub)
+    // for everyone who stayed. But WHICH tickets are unreturnable depends on whether the CLIENT is
+    // wholly gone or just this one VIEW:
+    //  - the relay sink (clientId null) departs entirely → return every owner it owed.
+    //  - the client still has ANOTHER view (e.g. the canvas node closed but the kanban modal is
+    //    still open on the SAME connection): only THIS view's RENDERER pause is unreturnable — its
+    //    own xterm is gone. The SOCKET pause is per-CONNECTION (it rides the PRIMARY view and is
+    //    shared by every view of this client), so it must survive; handing it back here would
+    //    permanently un-pause a still-jammed connection whose renderer flow control is edge-latched.
+    //  - this was the client's LAST view → the whole connection is gone. Sweep every ticket it owes
+    //    across all its views and owners (its socket ticket rides the PRIMARY view, so it is not
+    //    necessarily keyed on `sub`) — the same departure sweep `dropClient` uses.
+    // A pause owed by a DIFFERENT client that is still here is untouched either way (the pty stays
+    // paused until IT drains — its renderer cannot re-pause; see `Session.pausedBy`).
+    if (clientId === null) this.releaseFlow(session, sub)
+    else if ([...session.subscribers].some((s) => subClient(s) === clientId))
+      this.releaseFlow(session, sub, 'renderer')
+    else this.releaseFlowForClient(session, clientId)
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.
       this.applySize(sessionId, session)

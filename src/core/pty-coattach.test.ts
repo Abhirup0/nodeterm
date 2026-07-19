@@ -1299,4 +1299,52 @@ describe('viewer identity: multiple views per connection', () => {
     killV(ALICE, sessionId, 'modal') // the last view closes
     expect(spawned[0].killed).toBe(true) // …only now is the pty released
   })
+
+  // ── The Server Edition's per-CONNECTION socket pause outlives a single view's departure ──────
+  // A browser's WS send-buffer backpressure (`setFlow(uiId, …, 'socket')`) is owned by the whole
+  // CONNECTION, not by one xterm — it rides the PRIMARY view by convention (the socket forwards no
+  // viewerId). So when the canvas node (PRIMARY) unmounts while the kanban modal is still open on the
+  // SAME connection, that one shared socket may still be jammed: a `kill` that returned EVERY owner's
+  // ticket for the departing view — as a full departure does — would hand back the socket's pause too
+  // and permanently un-pause a drowning connection, because the renderer's flow control is
+  // edge-latched and will never re-pause (invariant (b) on `pausedBy`). The socket ticket must
+  // survive until the client's LAST view leaves; only THIS view's own renderer pause is unreturnable.
+  it("a PRIMARY-view kill keeps the client's per-connection SOCKET pause while a modal view stays", async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('x')
+    const { sessionId } = await createV(ALICE, undefined) // the canvas node (PRIMARY)
+    await createV(ALICE, 'modal') // the kanban card modal, SAME connection
+
+    m.setFlow(ALICE, sessionId, false, 'socket') // ALICE's WS socket is backed up (per-connection)
+    expect(spawned[0].paused).toBe(true)
+
+    killV(ALICE, sessionId) // the canvas node unmounts (PRIMARY) — the modal stays open
+    expect(spawned[0].paused).toBe(true) // the connection is still jammed; the pty must STAY paused
+    expect(spawned[0].killed).toBe(false) // …and the modal keeps it alive
+
+    m.setFlow(ALICE, sessionId, true, 'socket') // the socket finally drains into the browser
+    expect(spawned[0].paused).toBe(false) // only now does the pty resume
+
+    killV(ALICE, sessionId, 'modal') // the last view closes → the pty is released
+    expect(spawned[0].killed).toBe(true)
+  })
+
+  // Belt-and-braces: if the socket is STILL jammed when the client's last view leaves, the departure
+  // sweep must return the socket ticket (which rides the PRIMARY view, not the departing modal's
+  // key), or a released pty would be left holding an un-returnable pause on a session that is gone.
+  it("the client's last view leaving sweeps a still-held socket pause (no leaked ticket)", async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('x')
+    const { sessionId } = await createV(ALICE, undefined)
+    await createV(ALICE, 'modal')
+    await createV(BOB, undefined) // a second CONNECTION keeps the pty alive after ALICE fully leaves
+
+    m.setFlow(ALICE, sessionId, false, 'socket')
+    killV(ALICE, sessionId) // PRIMARY view goes; ALICE's socket pause stays (modal still open)
+    expect(spawned[0].paused).toBe(true)
+
+    killV(ALICE, sessionId, 'modal') // ALICE's LAST view leaves without ever resuming the socket
+    expect(spawned[0].paused).toBe(false) // the departure sweep returns the leftover socket ticket
+    expect(spawned[0].killed).toBe(false) // BOB still watches, so the pty is not released
+  })
 })
