@@ -7,8 +7,10 @@ import { useBoardLog } from '../../state/boardLog'
 import type { KanbanSession } from './KanbanView'
 
 interface BoardLogPanelProps {
-  /** The card whose activity this panel shows — feed + composer are scoped to `card.id`. */
-  card: KanbanSession
+  /** The card/node whose activity this panel shows — feed + composer are scoped to `card.id`.
+   *  Only the id is needed, so the canvas node flyout can use this panel without building a
+   *  full KanbanSession. */
+  card: Pick<KanbanSession, 'id'>
 }
 
 /** Human one-liner for an activity event. column-* events carry no nodeId and so never reach a
