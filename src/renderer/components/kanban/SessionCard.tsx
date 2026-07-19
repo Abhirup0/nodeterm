@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
 import type { KanbanSession } from './KanbanView'
@@ -5,62 +6,61 @@ import type { KanbanSession } from './KanbanView'
 interface SessionCardProps {
   session: KanbanSession
   status?: AgentNodeStatus
-  expanded: boolean
-  /** Single click toggles the detail row — opening the card moved to ↗ / double-click. */
-  onToggle: () => void
-  /** Open the card modal: both the ↗ button and double-click fire this. */
-  onOpenModal: () => void
+  /** Single click opens the card modal directly (the expand/collapse step was dropped). */
+  onOpen: () => void
   onDragStart: () => void
   onDragEnd: () => void
   /** A dragged card was dropped on this card — insert it before this one. */
   onDropBefore: () => void
 }
 
-export function SessionCard({
-  session, status, expanded, onToggle, onOpenModal, onDragStart, onDragEnd, onDropBefore
-}: SessionCardProps) {
-  const sticky = session.kind === 'sticky'
+export function SessionCard({ session, status, onOpen, onDragStart, onDragEnd, onDropBefore }: SessionCardProps) {
+  // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
+  const [dragging, setDragging] = useState(false)
   const badge =
-    !sticky && status?.state === 'working'
+    session.kind !== 'sticky' && status?.state === 'working'
       ? 'running'
-      : !sticky && (status?.state === 'waiting' || status?.state === 'blocked')
+      : session.kind !== 'sticky' && (status?.state === 'waiting' || status?.state === 'blocked')
         ? 'needs'
         : null
+  const stickyPreview = session.kind === 'sticky' ? (session.text ?? '').trim() : ''
+  const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
   return (
     <div
-      className={`kanban-card kanban-card--session${expanded ? ' kanban-card--expanded' : ''}`}
+      className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}`}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
+        setDragging(true)
         onDragStart()
       }}
-      onDragEnd={onDragEnd}
+      onDragEnd={() => {
+        setDragging(false)
+        onDragEnd()
+      }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault()
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card
         onDropBefore()
       }}
-      onClick={onToggle}
-      onDoubleClick={(e) => {
-        e.stopPropagation()
-        onOpenModal()
-      }}
-      title={expanded ? 'Collapse' : 'Expand'}
+      onClick={onOpen}
+      title="Open card"
     >
       <div className="kanban-card__row">
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
         <span className="kanban-card__title">{session.title}</span>
-        {sticky && <span className="kanban-card__kind">note</span>}
+        {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
-      {expanded && (
-        /* Clicks inside the detail row (meter popover, session chip) must not collapse the card. */
+      {/* Detail line is ALWAYS visible when the card has something to say (no expand step):
+          agents show the context meter + session chip; multi-line notes show a preview. */}
+      {hasDetail && (
         <div className="kanban-card__detail" onClick={(e) => e.stopPropagation()}>
-          {sticky ? (
-            <span className="kanban-card__stickytext">{session.text || 'Empty note'}</span>
+          {session.kind === 'sticky' ? (
+            <span className="kanban-card__stickytext">{stickyPreview}</span>
           ) : (
             <>
               <ContextMeter sessionId={status?.sessionId ?? null} />
@@ -69,14 +69,8 @@ export function SessionCard({
                   {status.session}
                 </span>
               )}
-              {!status?.sessionId && (
-                <span className="kanban-card__kindlabel">terminal</span>
-              )}
             </>
           )}
-          <button className="kanban-card__open" title="Open card" onClick={onOpenModal}>
-            ↗
-          </button>
         </div>
       )}
     </div>
