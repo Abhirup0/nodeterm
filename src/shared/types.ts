@@ -558,6 +558,10 @@ export interface Settings {
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
    *  (end-to-end encrypted). Pro-only; default off. Toggle in Settings → Phone. */
   phoneAccessEnabled: boolean
+  /** Send APNs push notifications to relay-paired phones when an agent needs approval, asks a
+   *  question, or finishes a turn (spec: apns-push). Default on — it only fires for users who
+   *  have paired a phone. Toggle in Settings → Notifications. */
+  mobilePushEnabled: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
 }
@@ -597,6 +601,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claudePermissionMode: 'auto',
   telemetryEnabled: false,
   phoneAccessEnabled: false,
+  mobilePushEnabled: true,
   speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt+D' },
 }
 

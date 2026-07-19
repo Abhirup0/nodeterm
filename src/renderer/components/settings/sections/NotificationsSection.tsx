@@ -10,12 +10,17 @@ const ROWS = {
   notify: {
     title: 'Notify when a turn finishes in the background',
     keywords: ['notify', 'notification', 'claude', 'background', 'turn', 'done']
+  },
+  mobilePush: {
+    title: 'Send push notifications to your paired phone',
+    keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval']
   }
 }
 const ENTRIES = Object.values(ROWS)
 
 export function NotificationsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const notifyOnClaudeDone = useSettings((s) => s.settings.notifyOnClaudeDone)
+  const mobilePushEnabled = useSettings((s) => s.settings.mobilePushEnabled)
   const update = useSettings((s) => s.update)
   // The OS refused our test notification (macOS permission denied). macOS never re-prompts
   // once the app's record exists, so the only way back is the System Settings pane.
@@ -62,6 +67,19 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
             </Button>
           </div>
         )}
+      </SearchableRow>
+      <SearchableRow {...ROWS.mobilePush}>
+        <FieldRow
+          label="Send push notifications to your paired phone"
+          description="Fires when an agent needs approval, asks a question, or finishes — only if you've paired a phone."
+          control={
+            <Switch
+              checked={mobilePushEnabled}
+              ariaLabel="Mobile push notifications"
+              onChange={(on) => update({ mobilePushEnabled: on })}
+            />
+          }
+        />
       </SearchableRow>
     </SettingsSection>
   )

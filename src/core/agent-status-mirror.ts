@@ -412,13 +412,37 @@ let usageProvider: (() => MirrorUsage | undefined) | null = null
 let inboxEvents: InboxEvent[] = []
 const inboxNodes = new Map<string, InboxNodeNow>()
 let inboxSeq = 0
+// Fires exactly when a NEW actionable inbox event is appended: approval/question POST-DEDUP (a
+// re-asserted identical prompt returns before pushInboxEvent, so it never fires twice) and `done`
+// on the turn edge. This is the seam the desktop push-notify service (src/core/push-notify.ts)
+// hooks — it is fed the same events the phone's Inbox feed shows. A listener must never throw into
+// production; wrapped below.
+const inboxActionableListeners = new Set<(e: InboxEvent) => void>()
+
+/**
+ * Subscribe to newly-appended actionable inbox events (approval/question post-dedup, done on edge).
+ * Returns an unsubscribe. Additive side-channel — does not change the feed or any disk write.
+ */
+export function onInboxActionable(cb: (e: InboxEvent) => void): () => void {
+  inboxActionableListeners.add(cb)
+  return () => inboxActionableListeners.delete(cb)
+}
 
 function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
   const id = `${e.ts}-${++inboxSeq}`
-  inboxEvents.push({ id, ...e })
+  const full: InboxEvent = { id, ...e }
+  inboxEvents.push(full)
   // Cap the feed from the front (oldest fall off).
   if (inboxEvents.length > INBOX_EVENTS_CAP) {
     inboxEvents = inboxEvents.slice(inboxEvents.length - INBOX_EVENTS_CAP)
+  }
+  // Notify actionable-event subscribers (only reached AFTER the dedup early-returns above it).
+  for (const cb of inboxActionableListeners) {
+    try {
+      cb(full)
+    } catch {
+      // A subscriber must never break inbox production (or its siblings).
+    }
   }
 }
 
@@ -672,6 +696,7 @@ export function _resetForTest(): void {
   inboxEvents = []
   inboxNodes.clear()
   inboxSeq = 0
+  inboxActionableListeners.clear()
 }
 
 /** Snapshot the in-memory map. Test-only. */
