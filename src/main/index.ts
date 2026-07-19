@@ -767,7 +767,10 @@ app.whenReady().then(async () => {
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
     mobilePushDone: () => settingsStore.get().mobilePushDone !== false,
-    isPackaged: () => app.isPackaged
+    isPackaged: () => app.isPackaged,
+    // The node's canvas/sidebar display title, so the phone can title the alert
+    // "<Needs you|Completed> — <nodeTitle>" (see workspace-store.getNodeTitle for the freshness note).
+    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
   })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS

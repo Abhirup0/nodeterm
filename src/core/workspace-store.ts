@@ -4,7 +4,7 @@ import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
   DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
-  type Project, type Workspace, type WorkspaceV1
+  type CanvasNodeState, type Project, type Workspace, type WorkspaceV1
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, sameProjectContent,
@@ -381,6 +381,48 @@ export class WorkspaceStore {
   sshProjectNodeIds(projectId: string): Set<string> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.ssh)
     return new Set((e?.cache?.nodes ?? []).map((n) => n.id))
+  }
+
+  /**
+   * Resolve a node's human display title (what the canvas header / sessions sidebar shows) from the
+   * last-persisted workspace, across all three entry kinds: inline canvases (`e.project.nodes`), ssh
+   * caches (`e.cache.nodes`), and local folder refs (the last content we wrote to their
+   * `project.json`, held in `lastWritten`). Sync + in-memory (no disk read). Returns undefined when
+   * the node isn't found or carries no non-empty title.
+   *
+   * Chosen as the mobile-push `nodeTitle` source (over the agent-status mirror) because:
+   *  - the mirror's `sessionTitle` field is declared but NEVER emitted by any normalizer — recording
+   *    it would record nothing;
+   *  - the OS-notification title is formatted in the RENDERER and reaches main already-composed
+   *    (`app:notify`), so main keeps no nodeId→title map of its own;
+   *  - the persisted node title here is the exact canvas/sidebar name and is refreshed on every
+   *    debounced save (which commits the ACTIVE project's live nodes first — see Canvas `persist()`),
+   *    so it lags a rename only by the save debounce. Freshness caveat: a brand-new node not yet
+   *    saved, or a rename inside that debounce window, resolves to undefined and the field is simply
+   *    omitted — acceptable for an optional alert-title enrichment.
+   */
+  getNodeTitle(nodeId: string): string | undefined {
+    for (const e of this.index?.entries ?? []) {
+      let nodes: CanvasNodeState[] | undefined
+      if (e.project) nodes = e.project.nodes
+      else if (e.cache) nodes = e.cache.nodes
+      else if (e.cwd) {
+        const raw = this.lastWritten.get(projectFilePath(e.cwd))
+        if (raw) {
+          try {
+            nodes = (JSON.parse(raw) as ProjectFileV1).nodes
+          } catch {
+            // Corrupt cached content: skip this entry, keep scanning the others.
+          }
+        }
+      }
+      const node = nodes?.find((n) => n.id === nodeId)
+      if (node) {
+        const title = node.title?.trim()
+        return title ? title : undefined
+      }
+    }
+    return undefined
   }
 
   /** A throttled trailing mirror write was acked but later dropped (connection died inside the
