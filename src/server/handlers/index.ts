@@ -43,14 +43,16 @@ export function registerCoreHandlers(
   void claudeCliCaps()
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
-  // the pill never rendered in the Server Edition. Poll only while a browser is attached: with
-  // no client there is nobody to show it to, and the usage endpoint's request budget is tight.
-  // Also feeds the agent-status mirror's per-account `usage` block for the phone (mobile-usage-inbox):
+  // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not
+  // browser-gated: the phone reads this host's agent-status mirror over plain SSH with no browser
+  // attached, so "no client connected" does NOT mean "nobody is looking" — a connected-clients
+  // gate starved the mirror's `usage` block empty forever on a headless host (the field bug that
+  // shipped v1). The 15-min cadence is 4 requests/hour — well inside the endpoint's budget.
+  // Feeds the agent-status mirror's per-account `usage` block for the phone (mobile-usage-inbox):
   // poll all local managed accounts, and re-flush the mirror on every cache update.
   const localClaudeAccountIds = (): string[] =>
     (deps.getSettings().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
   const usageService = startUsageService({
-    shouldPoll: () => platform.clientIds().length > 0,
     localAccounts: localClaudeAccountIds,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
