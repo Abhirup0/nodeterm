@@ -6349,6 +6349,9 @@ body,
   display: flex;
   flex-direction: column;
   flex: 0 0 288px;
+  width: 288px;
+  min-width: 0;
+  max-width: 288px;
   max-height: 100%;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -6446,8 +6449,12 @@ body,
 }
 .kanban-card__row {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* chips align to the first line of a wrapped title */
   gap: 8px;
+  min-width: 0;
+}
+.kanban-card__row > .kanban-card__nodedot {
+  margin-top: 5px; /* optically centers the dot on the first title line */
 }
 .kanban-card__detail {
   display: flex;
@@ -6504,10 +6511,15 @@ body,
   min-width: 0;
   font-size: 13.5px;
   font-weight: 500;
+  line-height: 1.35;
   color: rgba(255, 255, 255, 0.94);
-  white-space: nowrap;
+  /* Long session names WRAP (max 2 lines) instead of inflating the row/column width. */
+  white-space: normal;
+  word-break: break-word;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 .kanban-card__kind {
   font-size: 9px;
