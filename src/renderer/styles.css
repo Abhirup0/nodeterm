@@ -754,30 +754,23 @@ body,
   width: 100%;
 }
 
-/* Mobile-matched capsule: dots · "Dictating..." · elapsed · red round pause. */
-.dictation__dots {
+/* Mobile-matched capsule: equalizer · "Dictating..." · elapsed · red pause.
+   Bars are CENTERED (align-items: center) so they grow up and down from the
+   middle — livelier than baseline-anchored bars at small sizes. */
+.dictation__bars {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
+  height: 26px;
 }
 
-.dictation__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.dictation__bar {
+  width: 4px;
+  min-height: 4px;
+  border-radius: 2px;
   background: #ff453a;
-  opacity: 0.22;
-  transition: opacity 80ms ease-out;
-}
-
-.dictation__dot.lit {
-  opacity: 1;
-}
-
-/* Silence still shows life: the first dot breathes on its own. */
-.dictation__dot.base:not(.lit) {
-  animation: dictation-pulse 1.4s ease-in-out infinite;
+  transition: height 70ms ease-out;
 }
 
 .dictation__label {
@@ -4707,9 +4700,12 @@ body,
   align-items: center;
   gap: 4px;
 }
-/* While the popover is open, rise above the sessions sidebar (z-index 12) — a tall
-   sidebar reaches the bottom-left corner and would cover the panel. Closed pill keeps
-   its low layer so it never draws over the sidebar itself. */
+/* While the popover is open, rise above the sessions sidebar (z-index 12) — a tall sidebar
+   reaches the bottom-left corner and would cover the panel. Closed pill keeps its low layer so
+   it never draws over the sidebar itself.
+   This ONLY works because the indicator is mounted OUTSIDE <ReactFlow> (see Canvas.tsx): the
+   library's wrapper carries inline `z-index: 0`, a stacking context that would trap any inner
+   z-index below the sidebar no matter its value. */
 .usage-indicator:has(.usage-popover) {
   z-index: 13;
 }
