@@ -13,6 +13,7 @@ import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
+import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import { hookServer } from '../core/agents/hook-server'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import {
@@ -148,6 +149,16 @@ export async function startServer(
 
   // fs + git + commit handlers (shared with desktop core services).
   registerCoreHandlers(platform, { getSettings: () => settingsStore.get() })
+
+  // Board-log: same CorePlatform registrar as desktop, but the Server Edition has no SSH projects
+  // (terminals are local), so the router only ever resolves a local folder cwd or unsupported —
+  // an SSH-ref project answers `{ entries: [], unsupported: true }` (v1: no remote board log here).
+  registerBoardLogHandlers(platform, {
+    route: (projectId: string): BoardLogRoute => {
+      const cwd = workspaceStore.localCwdForProject(projectId)
+      return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
+    }
+  })
 
   // Agent status pipeline — mirrors the desktop boot order in src/main/index.ts:
   // mirror-init → wire the hook-server listeners onto the platform → install the managed hook
