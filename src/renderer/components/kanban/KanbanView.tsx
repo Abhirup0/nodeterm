@@ -5,9 +5,10 @@ import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
 import {
-  addColumn, assignNode, assignedTo, deleteColumn, moveColumn, nextColumnColor,
+  addColumn, assignNode, assignedTo, columnForNode, deleteColumn, moveColumn, nextColumnColor,
   pruneAssignments, recolorColumn, renameColumn, unassigned
 } from '../../lib/kanban'
+import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
 
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
@@ -43,6 +44,10 @@ interface KanbanViewProps {
   onOpenNode: (nodeId: string) => void
   /** Create a node from a column's "+ New" menu (columnId null = Ungrouped: no assignment). */
   onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => void
+  /** Rename a node (same funnel as the sessions sidebar). */
+  onRenameNode: (nodeId: string, title: string) => void
+  /** Write-through a sticky node's body text (only fired for kind 'sticky'). */
+  onEditSticky: (nodeId: string, text: string) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -50,8 +55,12 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
 /** Full-page session board OVER the canvas. The canvas stays mounted underneath (its
  *  agent-status listeners must keep running, and display:none would 0×0-resize every
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
-export function KanbanView({ board, sessions, onChange, onOpenNode, onCreateNode }: KanbanViewProps) {
+export function KanbanView({
+  board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky
+}: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
+  // One card modal at a time; a deleted node closes it via the byId.has render guard.
+  const [modalNodeId, setModalNodeId] = useState<string | null>(null)
   const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
@@ -130,7 +139,7 @@ export function KanbanView({ board, sessions, onChange, onOpenNode, onCreateNode
           statusById={statusById}
           expandedIds={expandedIds}
           onToggleCard={toggleExpanded}
-          onOpenNode={onOpenNode}
+          onOpenCard={setModalNodeId}
           createOptions={createOptions}
           onCreate={(choice) => onCreateNode(choice, null)}
           onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
@@ -149,7 +158,7 @@ export function KanbanView({ board, sessions, onChange, onOpenNode, onCreateNode
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}
-            onOpenNode={onOpenNode}
+            onOpenCard={setModalNodeId}
             createOptions={createOptions}
             onCreate={(choice) => onCreateNode(choice, col.id)}
             onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
@@ -166,6 +175,19 @@ export function KanbanView({ board, sessions, onChange, onOpenNode, onCreateNode
           + Add column
         </button>
       </div>
+      {modalNodeId && byId.has(modalNodeId) && (
+        <CardModal
+          session={byId.get(modalNodeId)!}
+          columnTitle={columnForNode(board, modalNodeId)?.title ?? null}
+          onClose={() => setModalNodeId(null)}
+          onOpenCanvas={() => {
+            setModalNodeId(null)
+            onOpenNode(modalNodeId)
+          }}
+          onRename={(t) => onRenameNode(modalNodeId, t)}
+          onEditSticky={(t) => onEditSticky(modalNodeId, t)}
+        />
+      )}
     </div>
   )
 }

@@ -4880,6 +4880,16 @@ export function Canvas() {
     [activeProjectId, setNodes, markDirty, writeDisk]
   )
 
+  // Write-through a sticky node's body text from the kanban card modal (the canvas sticky
+  // reads the same data.text path).
+  const editStickyText = useCallback(
+    (nodeId: string, text: string) => {
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, text } } : n)))
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
   // Sidebar "Name with AI": generate a title from the session's captured terminal output
   // (same BYO-agent path as the terminal node's ✦), then apply it via renameSession.
   const aiNameSession = useCallback(
@@ -5834,6 +5844,8 @@ export function Canvas() {
           onChange={onKanbanChange}
           onOpenNode={openNodeFromKanban}
           onCreateNode={createNodeInColumn}
+          onRenameNode={(nodeId, title) => renameSession(activeProjectId, nodeId, title)}
+          onEditSticky={editStickyText}
         />
       )}
       <UpdateCard />
