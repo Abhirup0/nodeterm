@@ -438,6 +438,75 @@ describe('SshProjectManager', () => {
   })
 })
 
+describe('master watchdog', () => {
+  // Real (tiny) intervals + vi.waitFor: connect() awaits real fs promises, which fake timers
+  // can't flush deterministically.
+  afterEach(() => vi.restoreAllMocks())
+
+  function makeWatchedMgr() {
+    // Keep the re-establish path off the real fs — controlPathFor hashes into the REAL
+    // ~/.nodeterm/ssh-cm, and an unmocked stat+rm could unlink a genuinely live socket there.
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
+    vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+    vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+    const statuses: string[] = []
+    // `-O check` fails while checkFails is true; spawning a fresh master heals it — models a
+    // master that died behind our back and comes back only when the watchdog respawns it.
+    let checkFails = false
+    const spawnMaster = vi.fn(() => {
+      checkFails = false
+      return { kill: vi.fn(), on: vi.fn() }
+    })
+    const run = vi.fn(async (args: string[]) =>
+      checkFails && args.includes('-O') ? { code: 1, stdout: '' } : { code: 0, stdout: '' }
+    )
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster,
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: (e) => statuses.push(e.status)
+    })
+    return { mgr, statuses, spawnMaster, setMasterDead: () => (checkFails = true) }
+  }
+
+  it('a healthy master is only checked — never respawned, no reconnecting status', async () => {
+    const { mgr, statuses, spawnMaster } = makeWatchedMgr()
+    await mgr.connect('p1', conn)
+    mgr.startWatchdog(5)
+    await new Promise((r) => setTimeout(r, 60))
+    mgr.stopWatchdog()
+    expect(spawnMaster).toHaveBeenCalledTimes(1)
+    expect(statuses).not.toContain('reconnecting')
+  })
+
+  it('an unnoticed master death is healed: reconnecting status + a fresh master', async () => {
+    const { mgr, statuses, spawnMaster, setMasterDead } = makeWatchedMgr()
+    await mgr.connect('p1', conn)
+    setMasterDead()
+    mgr.startWatchdog(5)
+    try {
+      await vi.waitFor(() => expect(spawnMaster).toHaveBeenCalledTimes(2))
+    } finally {
+      mgr.stopWatchdog()
+    }
+    expect(statuses).toContain('reconnecting')
+    expect(statuses.at(-1)).toBe('connected')
+  })
+
+  it('startWatchdog is idempotent and stopWatchdog ends the ticking', async () => {
+    const { mgr, spawnMaster, setMasterDead } = makeWatchedMgr()
+    await mgr.connect('p1', conn)
+    mgr.startWatchdog(5)
+    mgr.startWatchdog(5)
+    mgr.stopWatchdog()
+    setMasterDead()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(spawnMaster).toHaveBeenCalledTimes(1) // no tick fired after stop
+  })
+})
+
 describe('lastSshErrorLine', () => {
   it('picks the actionable last line, skipping debug noise', () => {
     const stderr = [

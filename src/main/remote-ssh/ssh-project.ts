@@ -55,6 +55,11 @@ const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 /** Cap on how much master stderr we retain (a misconfigured host can spew) — enough for the error. */
 const MASTER_STDERR_CAP = 8 * 1024
 
+/** Master watchdog cadence (see `startWatchdog`). Healthy cost per tick: ONE mux'd `-O check`
+ *  per connected project — no new TCP/auth — so this can afford to be brisk; 45s bounds how
+ *  long exec polls can churn direct-fallback connections after an unnoticed master death. */
+const MASTER_WATCHDOG_MS = 45_000
+
 /**
  * Pick the most informative line from an ssh master's stderr for the error banner. `-v` isn't
  * passed, so ordinary stderr has no `debug` noise, but we still skip `debug*`/`Warning:` lines and
@@ -163,8 +168,42 @@ export class SshProjectManager {
   /** Projects whose agent-status mirror was actually pushed — gates the disconnect cleanup so a
    *  transient folder-picker browse (never pushed) doesn't pay an extra rm round-trip. */
   private statusPushed = new Set<string>()
+  private watchdog?: ReturnType<typeof setInterval>
+  /** Re-entrancy guard: a tick mid-reconnect (slow host) must not stack a second revalidation. */
+  private revalidating = false
   constructor(private r: Runners) {
     this.remoteHooks = new RemoteHooks({ run: r.run })
+  }
+
+  /**
+   * Master watchdog. Nothing subscribes to the master process's death, and it can't: with
+   * `ControlPersist` the real master daemonizes away from the child we spawned, and a network
+   * change (no sleep event, so no powerMonitor 'resume' → `revalidateAll`) kills it with no
+   * signal to us. Every child ssh then silently falls back to a direct connection — sessions
+   * keep "working", so the dead master goes unnoticed while each 5s poll opens a fresh
+   * TCP+auth connection (the ~72k-logins/day field report). The mux'd pty clients' exit-255
+   * does fire the renderer's SshReconnector, but ptys respawned before the master is back up
+   * land on direct fallback connections and never migrate. So: periodically re-run the
+   * idempotent `connect()` per cached entry (via `revalidateAll`) — a live master costs one
+   * mux'd `-O check`; a dead one gets the full re-establish (stale socket unlinked, master
+   * respawned, 'reconnecting' status so the renderer flow engages). Interval is unref'd so it
+   * never holds the process open; an empty conns map makes a tick a no-op.
+   */
+  startWatchdog(intervalMs = MASTER_WATCHDOG_MS): void {
+    if (this.watchdog) return
+    this.watchdog = setInterval(() => {
+      if (this.revalidating || this.conns.size === 0) return
+      this.revalidating = true
+      void this.revalidateAll().finally(() => {
+        this.revalidating = false
+      })
+    }, intervalMs)
+    this.watchdog.unref?.()
+  }
+
+  stopWatchdog(): void {
+    if (this.watchdog) clearInterval(this.watchdog)
+    this.watchdog = undefined
   }
 
   async connect(
@@ -655,6 +694,7 @@ export class SshProjectManager {
    * reverse hook forward dies with the master, so cancelling it is unnecessary on quit.
    */
   disconnectAll(): void {
+    this.stopWatchdog()
     for (const projectId of [...this.conns.keys()]) {
       const c = this.conns.get(projectId)
       if (!c) continue
@@ -713,6 +753,7 @@ export function initSshProject(
       if (!win.isDestroyed()) win.webContents.send(IPC.sshProjectStatus, e)
     }
   })
+  mgr.startWatchdog()
   ipcMain.handle(IPC.sshConnectProject, async (_e, projectId: string, conn: SshConnection, remoteCwd?: string) => {
     const res = await mgr.connect(projectId, conn, remoteCwd)
     // Connection is up (master in the map) → reconcile the remote project file with our cache.

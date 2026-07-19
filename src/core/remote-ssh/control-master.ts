@@ -59,9 +59,41 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
   return args
 }
 
-/** Args for a child ssh that reuses the master socket; `remote` is an optional remote command. */
+/**
+ * Args for a child ssh that reuses the master socket; `remote` is an optional remote command.
+ *
+ * `ControlMaster=auto`, NOT `no` — this is the self-heal half of the churn fix. With a live
+ * master both behave identically (the child muxes over the socket, no new TCP/auth). But when
+ * the master is gone and its socket file is absent, `no` made every child SILENTLY fall back to
+ * a fresh direct connection — one full TCP+auth+close per poll (~2-3/s while the app is open;
+ * a field report counted ~72k root logins in 24h on one host), invisible because everything
+ * kept working. With `auto` + `ControlPersist`, the FIRST such child rebuilds a persistent
+ * background master and every later child muxes over it. A leftover DEAD socket file still
+ * blocks `auto` from binding (ssh refuses: "ControlSocket … already exists, disabling
+ * multiplexing" → direct fallback), which is what the manager's watchdog exists for
+ * (`ssh-project.ts` — periodic `-O check`, unlink stale socket, respawn master).
+ */
 export function childArgs(conn: SshConnection, controlPath: string, remote?: string): string[] {
-  const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
+  const args = [
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    `ControlPath=${controlPath}`,
+    '-o',
+    'ControlPersist=300',
+    // Meaningful only when this child ends up owning the transport (became the master, or fell
+    // back to a direct connection) — a mux client rides the master's keepalives. Same values as
+    // masterArgs, for the same reason: detect a dead link in ~60s instead of hanging half-dead.
+    '-o',
+    'ServerAliveInterval=15',
+    '-o',
+    'ServerAliveCountMax=4',
+    ...portArgs(conn)
+  ]
+  // The key matters exactly when mux is NOT available (fallback / becoming master) — the case
+  // the old childArgs ignored: with a non-default identityFile every fallback exec failed auth.
+  if (conn.identityFile) args.push('-i', conn.identityFile)
+  args.push(target(conn))
   if (remote !== undefined) args.push(remote)
   return args
 }
