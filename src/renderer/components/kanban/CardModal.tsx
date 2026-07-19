@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import type { KanbanSession } from './KanbanView'
+import { BoardLogPanel } from './BoardLogPanel'
 import { ModalTerminal } from './ModalTerminal'
 
 interface CardModalProps {
@@ -99,24 +100,28 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
           </button>
         </div>
         <div className="kanban-modal__body">
-          {session.kind === 'sticky' ? (
-            <textarea
-              className="kanban-modal__sticky"
-              value={session.text ?? ''}
-              placeholder="Write a note…"
-              onChange={(e) => onEditSticky(e.target.value)}
-            />
-          ) : (
-            <div className="kanban-modal__pane" data-kind={session.kind}>
-              {session.kind === 'terminal' ? (
-                // A live SECOND client on the node's session — keyed by node id so switching cards
-                // remounts a fresh viewer. Chat has no PTY; it opens on the canvas.
-                <ModalTerminal key={session.id} nodeId={session.id} spawn={session.spawn} />
-              ) : (
-                <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
-              )}
-            </div>
-          )}
+          {/* Body is a flex row: the card's own pane (2/3) + the board-log panel (1/3, all kinds). */}
+          <div className="kanban-modal__main">
+            {session.kind === 'sticky' ? (
+              <textarea
+                className="kanban-modal__sticky"
+                value={session.text ?? ''}
+                placeholder="Write a note…"
+                onChange={(e) => onEditSticky(e.target.value)}
+              />
+            ) : (
+              <div className="kanban-modal__pane" data-kind={session.kind}>
+                {session.kind === 'terminal' ? (
+                  // A live SECOND client on the node's session — keyed by node id so switching cards
+                  // remounts a fresh viewer. Chat has no PTY; it opens on the canvas.
+                  <ModalTerminal key={session.id} nodeId={session.id} spawn={session.spawn} />
+                ) : (
+                  <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
+                )}
+              </div>
+            )}
+          </div>
+          <BoardLogPanel card={session} />
         </div>
       </div>
     </div>,

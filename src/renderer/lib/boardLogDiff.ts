@@ -7,7 +7,12 @@ import type { BoardLogEvent, ProjectKanban } from '@shared/types'
 const UNGROUPED = 'Ungrouped'
 
 /** Board events implied by a prev→next board change. Column names resolved at event time;
- *  the virtual column is named 'Ungrouped'. Pure; returns [] when nothing loggable changed. */
+ *  the virtual column is named 'Ungrouped'. Pure; returns [] when nothing loggable changed.
+ *
+ *  BINDING INVARIANT — `cardTitle` MUST return '' for, and ONLY for, a nodeId whose node no
+ *  longer exists: a removed assignment with an empty title is read as a prune (not a move) and
+ *  suppressed. A LIVE node with an empty title must map to a non-empty placeholder ('Untitled'),
+ *  never '' — otherwise moving/removing an untitled card would be silently dropped. */
 export function boardLogEvents(
   prev: ProjectKanban,
   next: ProjectKanban,

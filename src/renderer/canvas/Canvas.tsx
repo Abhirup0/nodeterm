@@ -181,8 +181,10 @@ import { useEntitlement } from '../state/entitlement'
 import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
-import { KanbanView, type KanbanCreateChoice } from '../components/kanban/KanbanView'
+import { KanbanView, type KanbanCreateChoice, type KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, defaultKanban } from '../lib/kanban'
+import { boardLogEvents } from '../lib/boardLogDiff'
+import { useBoardLog } from '../state/boardLog'
 import { isKanbanOpen, useViewMode } from '../state/viewMode'
 import {
   createCanvasPublisher,
@@ -648,6 +650,10 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
+  // Live mirror of the derived board cards (defined far below), so the board-log emission funnel
+  // in onKanbanChange — declared above kanbanSessions — can resolve a node's card title without a
+  // dep cycle. Assigned right after that useMemo, same render-mirror idiom as nodesRef.
+  const kanbanSessionsRef = useRef<KanbanSession[]>([])
   // focusNodeById, for callbacks declared ABOVE its definition (openFile's dedupe focuses the
   // already-open node). Assigned right after the definition, same render-mirror idiom as nodesRef.
   const focusNodeRef = useRef<(nodeId: string) => void>(() => {})
@@ -1237,10 +1243,24 @@ export function Canvas() {
     (next: ProjectKanban) => {
       const id = useProjects.getState().activeProjectId
       if (!id) return
+      // The board BEFORE this change — read fresh at callback entry (a stale closed-over value
+      // would misattribute the diff). Same lazy-default as the KanbanView render.
+      const prev = useProjects.getState().getProject(id)?.kanban ?? seedBoard
       useProjects.getState().setProjectKanban(id, next)
       markDirty() // rides the existing debounced persist (commitActiveToStore + workspace.save)
+      // cardTitle must return '' for — and ONLY for — nodes that no longer exist (the diff reads
+      // '' as "pruned removal, not a move"). A LIVE node with an empty title maps to 'Untitled',
+      // never '' (see boardLogEvents' JSDoc).
+      const sessions = kanbanSessionsRef.current
+      const cardTitle = (nodeId: string): string => {
+        const s = sessions.find((x) => x.id === nodeId)
+        return s ? s.title || 'Untitled' : ''
+      }
+      for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
+        useBoardLog.getState().append(api, id, { kind: 'event', nodeId, event })
+      }
     },
-    [markDirty]
+    [markDirty, api, seedBoard]
   )
 
   // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
@@ -4086,6 +4106,7 @@ export function Canvas() {
         }),
     [nodes]
   )
+  kanbanSessionsRef.current = kanbanSessions
 
   // Create a node from the board's per-column "+ New" menu: it lands on the canvas (view
   // center) and, for a real column, is assigned there. The assignment is written directly —
@@ -4116,13 +4137,33 @@ export function Canvas() {
                 activePermissionMode()
               )
       setNodes((ns) => [...ns, node])
+      const board = project?.kanban ?? seedBoard
       if (columnId) {
-        const board = project?.kanban ?? seedBoard
         useProjects.getState().setProjectKanban(activeProjectId, assignNode(board, node.id, columnId, null))
       }
       markDirty()
+      // Log card-created directly here — the assignment above is written straight to the store
+      // (not via onKanbanChange), so its diff never runs and never double-logs a card-moved.
+      const toName = columnId
+        ? board.columns.find((c) => c.id === columnId)?.title ?? 'Ungrouped'
+        : 'Ungrouped'
+      const kindLabel =
+        choice.kind === 'terminal'
+          ? 'Terminal'
+          : choice.kind === 'sticky'
+            ? 'Sticky note'
+            : agentConfig(choice.agentId)?.label ??
+              useSettings.getState().settings.customAgents.find((a) => a.id === choice.agentId)
+                ?.label ??
+              choice.agentId
+      const title = (node.data.title as string) || kindLabel
+      useBoardLog.getState().append(api, activeProjectId, {
+        kind: 'event',
+        nodeId: node.id,
+        event: { type: 'card-created', to: toName, title }
+      })
     },
-    [activeProjectId, viewCenter, setNodes, markDirty, seedBoard]
+    [activeProjectId, viewCenter, setNodes, markDirty, seedBoard, api]
   )
 
   const openNodeFromKanban = useCallback(
