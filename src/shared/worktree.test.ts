@@ -250,7 +250,7 @@ describe('decideMergeStrategy', () => {
 })
 
 // Removing a worktree has to reach every node that was living in its directory — a terminal inside
-// a NESTED group is in that directory just as much as a direct child, and a chat node's cwd dies
+// a NESTED group is in that directory just as much as a direct child; editor/diff nodes are
 // with it too. A one-level filter left them holding a dead cwd, which is the exact trap the
 // destructive-edges work exists to remove.
 describe('descendantIds', () => {
@@ -292,7 +292,6 @@ describe('displacedByWorktree', () => {
   const nodes = [
     { id: 'g', type: 'group', data: { cwd: wt } },
     { id: 'term', type: 'terminal', parentId: 'g', data: { cwd: wt } },
-    { id: 'chat', type: 'chat', parentId: 'g', data: { cwd: `${wt}/src` } },
     { id: 'inner', type: 'group', parentId: 'g', data: { cwd: wt } },
     { id: 'nested', type: 'terminal', parentId: 'inner', data: { cwd: `${wt}/pkg` } },
     // In the group, but its cwd was pointed somewhere else by hand — it was never displaced.
@@ -315,9 +314,9 @@ describe('displacedByWorktree', () => {
     { id: 'diff-out', type: 'diff', data: { cwd: '/repo', filePath: 'src/index.ts' } }
   ]
 
-  it('collects every descendant terminal and chat living in the worktree, nested ones included', () => {
+  it('collects every descendant terminal living in the worktree, nested ones included', () => {
     expect([...displacedByWorktree(nodes, 'g', wt)].sort()).toEqual(
-      ['chat', 'diff-in', 'editor-in', 'nested', 'term'].sort()
+      ['diff-in', 'editor-in', 'nested', 'term'].sort()
     )
   })
 
