@@ -1,8 +1,13 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
+import { hasUsage } from '@shared/agents/config'
+import { FindBar } from '../FindBar'
+import { useAgentStatus } from '../../state/agentStatus'
 import { useSession } from '../../session/session'
 import { useSettings } from '../../state/settings'
+import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { parseOsc52 } from '../../terminal/osc52'
 import {
@@ -40,9 +45,57 @@ export interface ModalSpawn {
  * is short-lived and always on top. Closing kills ONLY this viewer (the last-view release stays with
  * the canvas node). The MIRROR-tagged blocks below are copied byte-for-byte from TerminalNode.
  */
-export function ModalTerminal({ nodeId, spawn }: { nodeId: string; spawn: ModalSpawn }) {
+interface ModalTerminalProps {
+  nodeId: string
+  spawn: ModalSpawn
+  /** The modal header's 🔍 toggle — the FindBar renders inside this pane. */
+  searchOpen: boolean
+  onCloseSearch: () => void
+}
+
+export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: ModalTerminalProps) {
   const { api } = useSession()
   const hostRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const searchAddonRef = useRef<SearchAddon | null>(null)
+  const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
+
+  // Same search machinery as the canvas node: capture-indexed matches + xterm highlight.
+  const readBuffer = useCallback((): string => {
+    const b = termRef.current?.buffer.active
+    if (!b) return ''
+    const lines: string[] = []
+    for (let i = 0; i < b.length; i++) lines[i] = b.getLine(i)?.translateToString() ?? ''
+    return lines.join('\n')
+  }, [])
+  const search = useTerminalSearch({
+    nodeId,
+    sessionId: agentSessionId,
+    cwd: spawn.cwd,
+    accountId: spawn.accountId,
+    searchTranscript: !!spawn.agentId && hasUsage(spawn.agentId),
+    open: searchOpen,
+    readBuffer
+  })
+  // MIRROR TerminalNode's findOpts — one source for the highlight colors.
+  const findOpts = {
+    decorations: {
+      matchBackground: '#ffd54f55',
+      activeMatchBackground: '#ffb300',
+      matchOverviewRuler: '#ffd54f',
+      activeMatchColorOverviewRuler: '#ffb300'
+    }
+  }
+  const handleNext = useCallback(() => {
+    search.next()
+    if (search.query.trim()) searchAddonRef.current?.findNext(search.query, findOpts)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
+  const handlePrev = useCallback(() => {
+    search.prev()
+    if (search.query.trim()) searchAddonRef.current?.findPrevious(search.query, findOpts)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
 
   useEffect(() => {
     // A unique viewerId per mount: the core namespaces it per connection, so uniqueness only has to
@@ -61,6 +114,10 @@ export function ModalTerminal({ nodeId, spawn }: { nodeId: string; spawn: ModalS
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    const searchAddon = new SearchAddon()
+    term.loadAddon(searchAddon)
+    termRef.current = term
+    searchAddonRef.current = searchAddon
     term.open(hostRef.current!)
     fit.fit()
 
@@ -189,5 +246,21 @@ export function ModalTerminal({ nodeId, spawn }: { nodeId: string; spawn: ModalS
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId])
 
-  return <div ref={hostRef} className="kanban-modal__term" />
+  return (
+    <div className="kanban-modal__termwrap">
+      {searchOpen && (
+        <FindBar
+          query={search.query}
+          onQueryChange={search.setQuery}
+          matchIndex={search.matchIndex}
+          matchCount={search.matchCount}
+          current={search.current}
+          onNext={handleNext}
+          onPrev={handlePrev}
+          onClose={onCloseSearch}
+        />
+      )}
+      <div ref={hostRef} className="kanban-modal__term" />
+    </div>
+  )
 }
