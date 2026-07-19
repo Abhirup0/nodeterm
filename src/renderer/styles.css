@@ -754,30 +754,23 @@ body,
   width: 100%;
 }
 
-/* Mobile-matched capsule: dots · "Dictating..." · elapsed · red round pause. */
-.dictation__dots {
+/* Mobile-matched capsule: equalizer · "Dictating..." · elapsed · red pause.
+   Bars are CENTERED (align-items: center) so they grow up and down from the
+   middle — livelier than baseline-anchored bars at small sizes. */
+.dictation__bars {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
+  height: 26px;
 }
 
-.dictation__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.dictation__bar {
+  width: 4px;
+  min-height: 4px;
+  border-radius: 2px;
   background: #ff453a;
-  opacity: 0.22;
-  transition: opacity 80ms ease-out;
-}
-
-.dictation__dot.lit {
-  opacity: 1;
-}
-
-/* Silence still shows life: the first dot breathes on its own. */
-.dictation__dot.base:not(.lit) {
-  animation: dictation-pulse 1.4s ease-in-out infinite;
+  transition: height 70ms ease-out;
 }
 
 .dictation__label {

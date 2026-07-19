@@ -15,7 +15,7 @@
 // No target selected at press time never records at all — see the warning-pill render branch.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { scaleLevel } from '../lib/dictation-equalizer'
+import { equalizerBars } from '../lib/dictation-equalizer'
 import { PcmCapture } from '../lib/pcm-capture'
 import { useSession } from '../session/session'
 import { useChatSessions } from '../state/chatSessions'
@@ -356,15 +356,12 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
       <div className="dictation dictation--pill nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
         {phase === 'recording' && (
           <div className="dictation__pill">
-            {/* Five dots as a live VU meter (mobile's capsule look, but driven
-                by the real mic level — dot i lights when the scaled level
-                crosses i/5; silence keeps one dim breathing dot). */}
-            <div className="dictation__dots" aria-hidden="true">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <span
-                  key={i}
-                  className={`dictation__dot${scaleLevel(levelHistory[levelHistory.length - 1] ?? 0) * 5 > i ? ' lit' : ''}${i === 0 ? ' base' : ''}`}
-                />
+            {/* Live equalizer bars, centered so they grow up AND down from
+                the middle — a scrolling window of real mic levels (newest at
+                the right); silence keeps a visible baseline row. */}
+            <div className="dictation__bars" aria-hidden="true">
+              {equalizerBars(levelHistory, 7).map((h, i) => (
+                <span key={i} className="dictation__bar" style={{ height: `${Math.round(h * 100)}%` }} />
               ))}
             </div>
             <span className="dictation__label">Dictating...</span>
