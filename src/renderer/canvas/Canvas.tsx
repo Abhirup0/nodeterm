@@ -178,7 +178,7 @@ import { useSshConn } from '../state/sshConn'
 import { useSystemAccount } from '../state/systemAccount'
 import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
-import type { SshServer } from '@shared/ssh'
+import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
 import { KanbanView, type KanbanCreateChoice } from '../components/kanban/KanbanView'
@@ -4061,7 +4061,9 @@ export function Canvas() {
               title: text.split('\n')[0].slice(0, 80) || 'Note',
               color: (n.data.color as string) ?? NODE_COLORS[2],
               kind: 'sticky' as const,
-              text
+              text,
+              // Sticky/chat cards never open a live terminal — the modal reads no spawn info.
+              spawn: {}
             }
           }
           return {
@@ -4069,7 +4071,17 @@ export function Canvas() {
             title: (n.data.title as string) ?? '',
             color: (n.data.color as string) ?? NODE_COLORS[0],
             kind: n.type as 'terminal' | 'chat',
-            agentId: n.data.agentId as string | undefined
+            agentId: n.data.agentId as string | undefined,
+            // What the card modal's co-attach terminal needs to join THIS node's session the same
+            // way the canvas TerminalNode does (used for kind 'terminal'; a chat card ignores it).
+            spawn: {
+              shell: n.data.shell as string | undefined,
+              cwd: n.data.cwd as string | undefined,
+              agentId: n.data.agentId as string | undefined,
+              accountId: n.data.accountId as string | undefined,
+              ssh: n.data.ssh as SshConnection | undefined,
+              sshRemoteTmux: !!n.data.sshRemoteTmux
+            }
           }
         }),
     [nodes]
@@ -4878,6 +4890,16 @@ export function Canvas() {
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]
+  )
+
+  // Write-through a sticky node's body text from the kanban card modal (the canvas sticky
+  // reads the same data.text path).
+  const editStickyText = useCallback(
+    (nodeId: string, text: string) => {
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, text } } : n)))
+      markDirty()
+    },
+    [setNodes, markDirty]
   )
 
   // Sidebar "Name with AI": generate a title from the session's captured terminal output
@@ -5834,6 +5856,8 @@ export function Canvas() {
           onChange={onKanbanChange}
           onOpenNode={openNodeFromKanban}
           onCreateNode={createNodeInColumn}
+          onRenameNode={(nodeId, title) => renameSession(activeProjectId, nodeId, title)}
+          onEditSticky={editStickyText}
         />
       )}
       <UpdateCard />

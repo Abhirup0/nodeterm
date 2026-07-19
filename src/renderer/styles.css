@@ -6632,3 +6632,109 @@ body,
   -webkit-box-orient: vertical;
   word-break: break-word;
 }
+
+/* ---- Kanban card modal (Trello-style popup over the board) ---- */
+.kanban-modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 55; /* above the board (25) + drawers (~40), below ConfirmDialog (70+) */
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.kanban-modal {
+  width: min(1040px, calc(100vw - 96px));
+  height: min(680px, calc(100vh - 120px));
+  display: flex;
+  flex-direction: column;
+  background: #161618;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.kanban-modal__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.kanban-modal__title {
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+  cursor: text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kanban-modal__rename {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: #fff;
+  font-size: 13px;
+  padding: 3px 8px;
+  outline: none;
+}
+.kanban-modal__column {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-right: auto;
+}
+.kanban-modal__action {
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.kanban-modal__action:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.kanban-modal__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.kanban-modal__sticky {
+  flex: 1;
+  background: none;
+  border: none;
+  resize: none;
+  outline: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 14px 16px;
+  font-family: inherit;
+}
+.kanban-modal__pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.kanban-modal__placeholder {
+  margin: auto;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 12px;
+}
+/* The live co-attach terminal fills the pane; the ResizeObserver in ModalTerminal drives fit(). */
+.kanban-modal__term {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+}

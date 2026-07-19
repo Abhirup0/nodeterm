@@ -16,7 +16,8 @@ interface KanbanColumnProps {
   onRename?: (title: string) => void
   onRecolor?: (color: string) => void
   onDelete?: () => void
-  onOpenNode: (nodeId: string) => void
+  /** Open a card's modal (↗ / double-click on the card). */
+  onOpenCard: (nodeId: string) => void
   /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked. */
   createOptions: KanbanCreateOption[]
   onCreate: (choice: KanbanCreateChoice) => void
@@ -30,7 +31,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, expandedIds, onToggleCard, onRename, onRecolor, onDelete, onOpenNode,
+  column, cards, statusById, expandedIds, onToggleCard, onRename, onRecolor, onDelete, onOpenCard,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropBeforeCard
 }: KanbanColumnProps) {
@@ -128,7 +129,7 @@ export function KanbanColumn({
             status={statusById[s.id]}
             expanded={expandedIds.has(s.id)}
             onToggle={() => onToggleCard(s.id)}
-            onOpen={() => onOpenNode(s.id)}
+            onOpenModal={() => onOpenCard(s.id)}
             onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}
             onDropBefore={() => onDropBeforeCard(s.id)}

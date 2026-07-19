@@ -197,9 +197,10 @@ export function buildRealApi(
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
     write: (sessionId, data) => client.cast(IPC.ptyWrite, sessionId, data),
-    resize: (sessionId, cols, rows) => client.cast(IPC.ptyResize, sessionId, cols, rows),
-    setFlow: (sessionId, resume) => client.cast(IPC.ptyFlow, sessionId, resume),
-    kill: (sessionId) => client.cast(IPC.ptyKill, sessionId),
+    resize: (sessionId, cols, rows, viewerId) =>
+      client.cast(IPC.ptyResize, sessionId, cols, rows, viewerId),
+    setFlow: (sessionId, resume, viewerId) => client.cast(IPC.ptyFlow, sessionId, resume, viewerId),
+    kill: (sessionId, viewerId) => client.cast(IPC.ptyKill, sessionId, viewerId),
     destroy: (persistKey) => client.cast(IPC.ptyDestroy, persistKey),
     recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
     // No server handler — degrade gracefully (never reject the boot path).

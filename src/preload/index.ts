@@ -54,9 +54,11 @@ const api: NodeTerminalApi = {
   pty: {
     create: (options: PtyCreateOptions) => ipcRenderer.invoke(IPC.ptyCreate, options),
     write: (sessionId, data) => ipcRenderer.send(IPC.ptyWrite, sessionId, data),
-    resize: (sessionId, cols, rows) => ipcRenderer.send(IPC.ptyResize, sessionId, cols, rows),
-    setFlow: (sessionId, resume) => ipcRenderer.send(IPC.ptyFlow, sessionId, resume),
-    kill: (sessionId) => ipcRenderer.send(IPC.ptyKill, sessionId),
+    resize: (sessionId, cols, rows, viewerId) =>
+      ipcRenderer.send(IPC.ptyResize, sessionId, cols, rows, viewerId),
+    setFlow: (sessionId, resume, viewerId) =>
+      ipcRenderer.send(IPC.ptyFlow, sessionId, resume, viewerId),
+    kill: (sessionId, viewerId) => ipcRenderer.send(IPC.ptyKill, sessionId, viewerId),
     destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
     recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),

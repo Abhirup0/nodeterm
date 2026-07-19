@@ -87,7 +87,7 @@ function escapeDroppedPath(p: string): string {
  * Returns undefined if no master appears within the window (connection failed); the caller then
  * degrades gracefully instead of spawning a local tmux in a non-existent remote directory.
  */
-async function resolveSshRemote(
+export async function resolveSshRemote(
   conn: SshConnection,
   cwd: string | undefined
 ): Promise<

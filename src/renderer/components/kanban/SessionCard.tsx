@@ -6,10 +6,10 @@ interface SessionCardProps {
   session: KanbanSession
   status?: AgentNodeStatus
   expanded: boolean
-  /** Single click toggles the detail row — opening the node moved to ↗ / double-click. */
+  /** Single click toggles the detail row — opening the card moved to ↗ / double-click. */
   onToggle: () => void
-  /** Open on canvas: switch back to canvas view and focus this node. */
-  onOpen: () => void
+  /** Open the card modal: both the ↗ button and double-click fire this. */
+  onOpenModal: () => void
   onDragStart: () => void
   onDragEnd: () => void
   /** A dragged card was dropped on this card — insert it before this one. */
@@ -17,7 +17,7 @@ interface SessionCardProps {
 }
 
 export function SessionCard({
-  session, status, expanded, onToggle, onOpen, onDragStart, onDragEnd, onDropBefore
+  session, status, expanded, onToggle, onOpenModal, onDragStart, onDragEnd, onDropBefore
 }: SessionCardProps) {
   const sticky = session.kind === 'sticky'
   const badge =
@@ -44,7 +44,7 @@ export function SessionCard({
       onClick={onToggle}
       onDoubleClick={(e) => {
         e.stopPropagation()
-        onOpen()
+        onOpenModal()
       }}
       title={expanded ? 'Collapse' : 'Expand'}
     >
@@ -77,7 +77,7 @@ export function SessionCard({
               )}
             </>
           )}
-          <button className="kanban-card__open" title="Open on canvas" onClick={onOpen}>
+          <button className="kanban-card__open" title="Open card" onClick={onOpenModal}>
             ↗
           </button>
         </div>
