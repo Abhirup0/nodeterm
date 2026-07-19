@@ -91,11 +91,25 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
   // True once we have detected a key swap and cut the session, so we don't do it twice.
   let keySwapped = false
 
+  // Board-log onChanged over the relay rides the core's per-project watch refcount
+  // (registerBoardLogHandlers): the guest casts board-log:subscribe / :unsubscribe, which start/stop
+  // the host watch. But a guest whose tab closes or whose socket drops sends no balancing unsubscribe,
+  // so we track THIS connection's net per-project subscribe count and replay the unsubscribes on
+  // teardown (see detach) — the host watch is released, and the shared local refcount is never touched
+  // below this connection's own contribution (an unbalanced guest unsubscribe is ignored).
+  const boardLogSubs = new Map<string, number>()
+
   /** The ONE teardown, mirroring src/server/ws.ts's close path exactly: `unregisterPeerSink` IS the
    *  three steps (presenceHub.leave → onPeerGone → PtyManager.dropClient → registry prune). Do NOT
    *  re-implement them here, and do NOT call `wirePeerRegistry` — it is wired once at boot. */
   const detach = (): void => {
     if (clientId === null) return
+    // Release any board-log watches this connection still holds — a dropped guest tab never sends the
+    // balancing unsubscribe, so replay one per outstanding count before the client id is gone.
+    for (const [projectId, count] of boardLogSubs) {
+      for (let i = 0; i < count; i++) opts.platform.cast(clientId, IPC.boardLogUnsubscribe, [projectId])
+    }
+    boardLogSubs.clear()
     unregisterPeerSink(clientId)
     clientId = null
   }
@@ -167,6 +181,21 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
     return { ...res, result: scopeWorkspaceToProject(res.result as Workspace, opts.sharedProjectId) }
   }
 
+  /** SCOPE jail for the board log (beyond the host registry's own projectId jail): a session bound to
+   *  one project must never let the guest reach ANOTHER project's board log. A board-log method naming
+   *  a different projectId is out of scope. Unscoped sessions pass through — the registry is the only
+   *  gate then, exactly as for the host's own renderer. The guest can never supply a filesystem path;
+   *  only a projectId the host resolves through its own router. */
+  const boardLogOutOfScope = (projectId: unknown): boolean =>
+    !!opts.sharedProjectId && projectId !== opts.sharedProjectId
+
+  /** The degraded response for an out-of-scope board-log request — the SAME shape the router gives an
+   *  unknown project, produced WITHOUT dispatching (never resolving a path). Never throws. */
+  const boardLogRefusal = (method: string, id: number): RpcOk =>
+    method === IPC.boardLogRead
+      ? { t: 'res', id, ok: true, result: { entries: [], unsupported: true } }
+      : { t: 'res', id, ok: true, result: false }
+
   const socket = connectRelay({
     url: opts.url,
     token: opts.token,
@@ -220,11 +249,34 @@ export function connectRelayHost(opts: ConnectRelayHostOptions): RelayHostSessio
         return
       }
       if (m.t === 'req') {
+        // Board-log read/append naming a project outside this session's scope: refuse WITHOUT
+        // dispatching (the host router never resolves it), degrading exactly as an unknown project.
+        if (
+          (m.method === IPC.boardLogAppend || m.method === IPC.boardLogRead) &&
+          boardLogOutOfScope(m.args[0])
+        ) {
+          socket.sendTunnelText(JSON.stringify(boardLogRefusal(m.method, m.id)))
+          return
+        }
         const id = clientId
         void opts.platform
           .dispatch(id, m)
           .then((res) => socket.sendTunnelText(JSON.stringify(scopeResponse(m.method, res))))
       } else if (m.t === 'cast') {
+        // Board-log subscribe/unsubscribe: scope-jail out-of-scope projects, and track this
+        // connection's net per-project count so a dropped guest's watch is released in detach().
+        if (m.method === IPC.boardLogSubscribe || m.method === IPC.boardLogUnsubscribe) {
+          const projectId = m.args[0]
+          if (typeof projectId !== 'string' || boardLogOutOfScope(projectId)) return
+          if (m.method === IPC.boardLogSubscribe) {
+            boardLogSubs.set(projectId, (boardLogSubs.get(projectId) ?? 0) + 1)
+          } else {
+            const cur = boardLogSubs.get(projectId) ?? 0
+            if (cur <= 0) return // this connection holds no such watch — never decrement the shared count
+            if (cur === 1) boardLogSubs.delete(projectId)
+            else boardLogSubs.set(projectId, cur - 1)
+          }
+        }
         opts.platform.cast(clientId, m.method, m.args)
       }
       // res/ev from a peer are ignored (mirrors src/server/ws.ts).

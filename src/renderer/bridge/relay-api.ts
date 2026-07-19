@@ -100,6 +100,19 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
       onData: (sessionId, listener) => local.pty.onData(sessionId, listener)
     },
 
+    // boardLog is CORE-BOUND: a relay guest reads and writes the HOST project's board comments/activity
+    // (with its OWN presence identity in each entry), routed to the host's registry-jailed board-log
+    // handlers (and scope-jailed to the shared project host-side in connectRelayHost). Version-skew
+    // degrade: an OLDER host with no board-log rpc answers E_NO_HANDLER, which we map to today's
+    // behavior — read → `{ entries: [], unsupported: true }`, append → `false` — instead of a rejection.
+    // `onChanged` casts subscribe/unsubscribe (fire-and-forget, no reject) and rides the host push.
+    boardLog: {
+      append: (projectId, entry) => files.boardLog.append(projectId, entry).catch(() => false),
+      read: (projectId, opts) =>
+        files.boardLog.read(projectId, opts).catch(() => ({ entries: [], unsupported: true })),
+      onChanged: (projectId, cb) => files.boardLog.onChanged(projectId, cb)
+    },
+
     // `settings` stays LOCAL (font/cursor/theme render in YOUR window). It came in via `...local`;
     // `real.settings` is deliberately left unused so a remote tab never adopts the host's prefs.
 
@@ -124,8 +137,9 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     //    silent no-op): ──
     // `chat` is now just readTranscript (the SDK chat node was removed). It has no relay builder:
     // reading a transcript over the relay would read THIS machine's transcript, not the host's, so
-    // refuse with E_UNSUPPORTED instead. contextLink / transcripts / handoff / boardLog stay LOCAL
-    // by way of `...local` (a v1 degrade: they read/write on this machine, not the host).
+    // refuse with E_UNSUPPORTED instead. contextLink / transcripts / handoff stay LOCAL by way of
+    // `...local` (a v1 degrade: they read/write on this machine, not the host). boardLog is now
+    // bridged to the host (see above) — it no longer rides `...local`.
     chat: stub.chat,
     // Agent canvas-control (`agent:control`) is not wired over the relay (matches the Server
     // Edition); inert no-ops rather than a local subscription that never carries the host's events.
