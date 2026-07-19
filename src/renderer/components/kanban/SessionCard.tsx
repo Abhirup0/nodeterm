@@ -19,10 +19,11 @@ interface SessionCardProps {
 export function SessionCard({
   session, status, expanded, onToggle, onOpen, onDragStart, onDragEnd, onDropBefore
 }: SessionCardProps) {
+  const sticky = session.kind === 'sticky'
   const badge =
-    status?.state === 'working'
+    !sticky && status?.state === 'working'
       ? 'running'
-      : status?.state === 'waiting' || status?.state === 'blocked'
+      : !sticky && (status?.state === 'waiting' || status?.state === 'blocked')
         ? 'needs'
         : null
   return (
@@ -51,6 +52,7 @@ export function SessionCard({
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
         <span className="kanban-card__title">{session.title}</span>
         {session.kind === 'chat' && <span className="kanban-card__kind">chat</span>}
+        {sticky && <span className="kanban-card__kind">note</span>}
         {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
@@ -58,14 +60,22 @@ export function SessionCard({
       {expanded && (
         /* Clicks inside the detail row (meter popover, session chip) must not collapse the card. */
         <div className="kanban-card__detail" onClick={(e) => e.stopPropagation()}>
-          <ContextMeter sessionId={status?.sessionId ?? null} />
-          {status?.session && (
-            <span className="kanban-card__session" title={status.session}>
-              {status.session}
-            </span>
-          )}
-          {!status?.sessionId && (
-            <span className="kanban-card__kindlabel">{session.kind === 'chat' ? 'chat' : 'terminal'}</span>
+          {sticky ? (
+            <span className="kanban-card__stickytext">{session.text || 'Empty note'}</span>
+          ) : (
+            <>
+              <ContextMeter sessionId={status?.sessionId ?? null} />
+              {status?.session && (
+                <span className="kanban-card__session" title={status.session}>
+                  {status.session}
+                </span>
+              )}
+              {!status?.sessionId && (
+                <span className="kanban-card__kindlabel">
+                  {session.kind === 'chat' ? 'chat' : 'terminal'}
+                </span>
+              )}
+            </>
           )}
           <button className="kanban-card__open" title="Open on canvas" onClick={onOpen}>
             ↗

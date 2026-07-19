@@ -1,7 +1,9 @@
 import { useRef, useState } from 'react'
 import type { ProjectKanban } from '@shared/types'
+import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
+import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, deleteColumn, moveColumn, nextColumnColor,
   pruneAssignments, recolorColumn, renameColumn, unassigned
@@ -14,8 +16,23 @@ export interface KanbanSession {
   id: string
   title: string
   color: string
-  kind: 'terminal' | 'chat'
+  kind: 'terminal' | 'chat' | 'sticky'
   agentId?: string
+  /** Sticky note body — shown in the expanded detail row. */
+  text?: string
+}
+
+/** What the per-column "+ New" menu can create. */
+export type KanbanCreateChoice =
+  | { kind: 'terminal' }
+  | { kind: 'sticky' }
+  | { kind: 'agent'; agentId: AgentId }
+
+/** One "+ New" menu entry (label + the choice it fires). */
+export interface KanbanCreateOption {
+  key: string
+  label: string
+  choice: KanbanCreateChoice
 }
 
 interface KanbanViewProps {
@@ -24,6 +41,8 @@ interface KanbanViewProps {
   onChange: (next: ProjectKanban) => void
   /** Open a session from its card: switch back to canvas view and focus the node. */
   onOpenNode: (nodeId: string) => void
+  /** Create a node from a column's "+ New" menu (columnId null = Ungrouped: no assignment). */
+  onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -31,7 +50,7 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
 /** Full-page session board OVER the canvas. The canvas stays mounted underneath (its
  *  agent-status listeners must keep running, and display:none would 0×0-resize every
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
-export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanViewProps) {
+export function KanbanView({ board, sessions, onChange, onOpenNode, onCreateNode }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
@@ -39,6 +58,23 @@ export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanView
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
   // Card detail rows open per session id; transient by design (resets when the board closes).
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
+  const customAgents = useSettings((s) => s.settings.customAgents)
+  // "+ New" menu entries: the builtin agents, the user's custom agents, then terminal + sticky
+  // (same universe as the dock's add menu, minus canvas-only kinds).
+  const createOptions: KanbanCreateOption[] = [
+    ...BUILTIN_AGENT_IDS.map((id) => ({
+      key: id,
+      label: AGENT_CONFIG[id].label,
+      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice
+    })),
+    ...customAgents.map((a) => ({
+      key: a.id,
+      label: a.label,
+      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice
+    })),
+    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' } },
+    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' } }
+  ]
   const byId = new Map(sessions.map((s) => [s.id, s]))
 
   const toggleExpanded = (id: string) =>
@@ -95,6 +131,8 @@ export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanView
           expandedIds={expandedIds}
           onToggleCard={toggleExpanded}
           onOpenNode={onOpenNode}
+          createOptions={createOptions}
+          onCreate={(choice) => onCreateNode(choice, null)}
           onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
           onDragEnd={() => (dragRef.current = null)}
           onDropOnColumn={() => dropOnColumn(null)}
@@ -112,6 +150,8 @@ export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanView
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}
             onOpenNode={onOpenNode}
+            createOptions={createOptions}
+            onCreate={(choice) => onCreateNode(choice, col.id)}
             onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
             onColumnDragStart={() => (dragRef.current = { kind: 'column', id: col.id })}
             onDragEnd={() => (dragRef.current = null)}
