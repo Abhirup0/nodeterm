@@ -363,6 +363,12 @@ export class WorkspaceStore {
     return (this.index?.entries ?? []).filter((e) => e.ssh).map((e) => e.id)
   }
 
+  /** The local folder cwd of a project by id (index lookup), or undefined for ssh/inline/unknown
+   *  projects. Sync (reads the in-memory index): the board-log router's local-vs-unsupported call. */
+  localCwdForProject(projectId: string): string | undefined {
+    return this.index?.entries.find((e) => e.id === projectId && e.cwd)?.cwd
+  }
+
   /** The local ref cwds of the current index — the workspace half of the phone bridge's fs/git
    *  jail. The phone browses EVERY project over `projects.list`, so jailing to only the active
    *  canvas's node cwds denied any project the desktop didn't happen to have focused. */

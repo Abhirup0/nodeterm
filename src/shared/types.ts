@@ -218,6 +218,67 @@ export interface ProjectKanban {
   assignments: KanbanAssignment[]
 }
 
+/** Who produced a board-log entry (a teammate on a shared board, or this user). */
+export interface BoardLogAuthor {
+  name: string
+  color: string
+}
+
+/** A structural board change worth recording. `type` is closed; the optional fields carry
+ *  the human-readable names resolved at event time (the virtual column is named 'Ungrouped'). */
+export interface BoardLogEvent {
+  type: 'card-created' | 'card-moved' | 'column-added' | 'column-renamed' | 'column-deleted'
+  from?: string
+  to?: string
+  /** Column title for column-added/deleted; card title for card-created. */
+  title?: string
+}
+
+/** One line of the append-only board history (`.nodeterm/board-log.jsonl`). A `comment`
+ *  carries `text`; an `event` carries `event`. Serialized one-per-line as JSON. */
+export interface BoardLogEntry {
+  id: string
+  ts: number
+  author: BoardLogAuthor
+  nodeId?: string
+  kind: 'comment' | 'event'
+  text?: string
+  event?: BoardLogEvent
+}
+
+/** Max chars kept for a comment's `text`. On an SSH project the whole JSON line becomes one
+ *  shell arg (`printf '%s\n' '<line>'` over the ControlMaster); an unbounded paste blows past
+ *  ARG_MAX → the append fails → the optimistic entry silently vanishes on reload. Locally it
+ *  just bloats the append-only file. Shared so core (disk) and the renderer (optimistic UI)
+ *  clamp identically. */
+export const BOARD_LOG_TEXT_MAX = 16_384
+
+/** Read options for the board log: cap the newest N entries (default 500 in the store) or `all`. */
+export interface BoardLogReadOpts {
+  cap?: number
+  all?: boolean
+}
+
+/** Result of a board-log read. `unsupported` is set (with `entries: []`) when the project has no
+ *  reachable log — an inline/no-cwd canvas, a disconnected SSH project, or an SSH project on the
+ *  Server Edition (v1 has no remote board log there). */
+export interface BoardLogReadResult {
+  entries: BoardLogEntry[]
+  unsupported?: boolean
+}
+
+/** The board-log surface on `window.nodeTerminal`. Project-routed: the main/server side resolves
+ *  the project to a local cwd, a desktop SSH connection, or unsupported. `append` is
+ *  fire-and-forget-safe (resolves `false` on any failure, never throws). */
+export interface BoardLogApi {
+  /** Append one entry. Resolves `false` on any failure (unsupported project, fs/exec error). */
+  append(projectId: string, entry: BoardLogEntry): Promise<boolean>
+  /** Read the log newest-first (see BoardLogReadResult). */
+  read(projectId: string, opts?: BoardLogReadOpts): Promise<BoardLogReadResult>
+  /** Subscribe to change pushes for one project; returns an unsubscribe. */
+  onChanged(projectId: string, cb: () => void): () => void
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -1487,6 +1548,7 @@ export interface NodeTerminalApi {
   license: LicenseApi
   relayQuota: RelayQuotaApi
   contextLink: ContextLinkApi
+  boardLog: BoardLogApi
   usage: UsageApi
   context: ContextApi
   canvas: CanvasApi

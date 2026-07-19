@@ -52,6 +52,16 @@ export const IPC = {
   canvasMut: 'canvas:mut',
   contextLinkSetLinks: 'context-link:set-links',
   contextLinkInfo: 'context-link:info',
+  /** Board-log (`.nodeterm/board-log.jsonl`): request/response append + read, routed per project
+   *  (local cwd / desktop-ssh / unsupported) in core/board-log-handlers.ts. */
+  boardLogAppend: 'board-log:append',
+  boardLogRead: 'board-log:read',
+  /** Fire-and-forget ref-counted subscribe/unsubscribe: the first subscriber for a project starts
+   *  the local fs.watch (or the desktop-ssh 5s poll); the last one stops it. */
+  boardLogSubscribe: 'board-log:subscribe',
+  boardLogUnsubscribe: 'board-log:unsubscribe',
+  /** Per-project push fired when a project's board log changes (mirrors ptyData/chatEvent naming). */
+  boardLogChanged: (projectId: string) => `board-log:changed:${projectId}`,
   appUpdateAvailable: 'app:update-available',
   appUpdateDownloaded: 'app:update-downloaded',
   appUpdateProgress: 'app:update-progress',
