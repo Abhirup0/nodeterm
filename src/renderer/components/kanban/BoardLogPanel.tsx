@@ -35,7 +35,7 @@ function eventLine(name: string, e: BoardLogEvent): string {
 export function BoardLogPanel({ card }: BoardLogPanelProps) {
   const { api } = useSession()
   const projectId = useProjects((s) => s.activeProjectId)
-  const entries = useBoardLog((s) => s.entriesByProject[projectId])
+  const entries = useBoardLog((s) => s.entriesFor(projectId))
   const unsupported = useBoardLog((s) => !!s.unsupportedByProject[projectId])
   const error = useBoardLog((s) => !!s.errorByProject[projectId])
   const [draft, setDraft] = useState('')
@@ -70,14 +70,17 @@ export function BoardLogPanel({ card }: BoardLogPanelProps) {
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends; Shift+Enter inserts a newline (default textarea behavior).
-            if (e.key === 'Enter' && !e.shiftKey) {
+            // Never submit mid-IME-composition (e.g. selecting a kanji candidate with Enter).
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               send()
             }
           }}
         />
       )}
-      {error && <div className="board-log__error">Couldn’t save your last comment.</div>}
+      {!unsupported && error && (
+        <div className="board-log__error">Some board history couldn’t be saved.</div>
+      )}
       <div className="board-log__feed">
         {feed.map((entry) => (
           <FeedRow key={entry.id} entry={entry} />
