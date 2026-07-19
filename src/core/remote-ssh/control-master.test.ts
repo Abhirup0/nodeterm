@@ -21,6 +21,19 @@ import {
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
+/** The option prefix every child ssh shares: self-healing mux (auto + persist, so the first
+ *  child after a cleanly-gone master rebuilds it), keepalives for when the child owns the
+ *  transport, and the identity key (auth matters exactly when mux is unavailable). */
+const childPrefix = [
+  '-o', 'ControlMaster=auto',
+  '-o', 'ControlPath=/s.sock',
+  '-o', 'ControlPersist=300',
+  '-o', 'ServerAliveInterval=15',
+  '-o', 'ServerAliveCountMax=4',
+  '-p', '2222',
+  '-i', '/k/id'
+]
+
 describe('mkDirArgs', () => {
   it('mkdir -p the quoted remote path, leaving a leading ~ unquoted', () => {
     expect(mkDirArgs(conn, '/s.sock', '~/new dir').join(' ')).toContain(`mkdir -p ~/'new dir'`)
@@ -62,21 +75,24 @@ describe('masterArgs', () => {
 })
 
 describe('childArgs', () => {
-  it('reuses the master socket (no new master) and appends a remote command', () => {
-    expect(childArgs(conn, '/s.sock', 'tmux ls')).toEqual([
-      '-o', 'ControlMaster=no',
-      '-o', 'ControlPath=/s.sock',
-      '-p', '2222',
-      'deploy@h.example.com',
-      'tmux ls'
-    ])
+  it('muxes over the master socket, self-healing (auto + persist), and appends a remote command', () => {
+    expect(childArgs(conn, '/s.sock', 'tmux ls')).toEqual([...childPrefix, 'deploy@h.example.com', 'tmux ls'])
+  })
+  it('omits -i when the connection has no identityFile', () => {
+    const bare = { host: 'h.example.com', user: 'deploy', port: 2222 }
+    const args = childArgs(bare, '/s.sock', 'tmux ls')
+    expect(args).not.toContain('-i')
+    expect(args.at(-2)).toBe('deploy@h.example.com')
+  })
+  it('regression: never ControlMaster=no — a dead master made every child a silent fresh direct connection', () => {
+    expect(childArgs(conn, '/s.sock')).not.toContain('ControlMaster=no')
   })
 })
 
 describe('remoteTmuxHasSessionArgs', () => {
   it('checks the remote socket for the node session', () => {
     expect(remoteTmuxHasSessionArgs(conn, '/s.sock', 'nt-x')).toEqual([
-      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      ...childPrefix,
       'deploy@h.example.com',
       `tmux -L ${RMT_TMUX_SOCKET} has-session -t nt-x`
     ])
@@ -87,7 +103,7 @@ describe('remoteTmuxSendKeysArgs', () => {
   it('sends literal text with -l -- (no Enter) when enter is false', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', false)
     expect(args).toEqual([
-      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      ...childPrefix,
       'deploy@h.example.com',
       `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'`
     ])
@@ -196,21 +212,21 @@ describe('scpArgs', () => {
 describe('listDirArgs', () => {
   it('lists directory entries of a quoted absolute path', () => {
     expect(listDirArgs(conn, '/s.sock', '/srv/app')).toEqual([
-      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      ...childPrefix,
       'deploy@h.example.com',
       `ls -1Ap '/srv/app'`
     ])
   })
   it('leaves a bare ~ unquoted so the remote shell expands it', () => {
     expect(listDirArgs(conn, '/s.sock', '~')).toEqual([
-      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      ...childPrefix,
       'deploy@h.example.com',
       `ls -1Ap ~`
     ])
   })
   it('tilde-expands a home-relative path, quoting the remainder', () => {
     expect(listDirArgs(conn, '/s.sock', '~/my dir')).toEqual([
-      '-o', 'ControlMaster=no', '-o', 'ControlPath=/s.sock', '-p', '2222',
+      ...childPrefix,
       'deploy@h.example.com',
       `ls -1Ap ~/'my dir'`
     ])
