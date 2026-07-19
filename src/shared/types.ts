@@ -246,6 +246,32 @@ export interface BoardLogEntry {
   event?: BoardLogEvent
 }
 
+/** Read options for the board log: cap the newest N entries (default 500 in the store) or `all`. */
+export interface BoardLogReadOpts {
+  cap?: number
+  all?: boolean
+}
+
+/** Result of a board-log read. `unsupported` is set (with `entries: []`) when the project has no
+ *  reachable log — an inline/no-cwd canvas, a disconnected SSH project, or an SSH project on the
+ *  Server Edition (v1 has no remote board log there). */
+export interface BoardLogReadResult {
+  entries: BoardLogEntry[]
+  unsupported?: boolean
+}
+
+/** The board-log surface on `window.nodeTerminal`. Project-routed: the main/server side resolves
+ *  the project to a local cwd, a desktop SSH connection, or unsupported. `append` is
+ *  fire-and-forget-safe (resolves `false` on any failure, never throws). */
+export interface BoardLogApi {
+  /** Append one entry. Resolves `false` on any failure (unsupported project, fs/exec error). */
+  append(projectId: string, entry: BoardLogEntry): Promise<boolean>
+  /** Read the log newest-first (see BoardLogReadResult). */
+  read(projectId: string, opts?: BoardLogReadOpts): Promise<BoardLogReadResult>
+  /** Subscribe to change pushes for one project; returns an unsubscribe. */
+  onChanged(projectId: string, cb: () => void): () => void
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -1505,6 +1531,7 @@ export interface NodeTerminalApi {
   license: LicenseApi
   relayQuota: RelayQuotaApi
   contextLink: ContextLinkApi
+  boardLog: BoardLogApi
   usage: UsageApi
   context: ContextApi
   canvas: CanvasApi

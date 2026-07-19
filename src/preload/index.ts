@@ -480,6 +480,20 @@ const api: NodeTerminalApi = {
     setLinks: (map) => ipcRenderer.invoke(IPC.contextLinkSetLinks, map),
     info: () => ipcRenderer.invoke(IPC.contextLinkInfo)
   },
+  boardLog: {
+    append: (projectId, entry) => ipcRenderer.invoke(IPC.boardLogAppend, projectId, entry),
+    read: (projectId, opts) => ipcRenderer.invoke(IPC.boardLogRead, projectId, opts),
+    onChanged: (projectId, cb) => {
+      const ch = IPC.boardLogChanged(projectId)
+      const handler = (): void => cb()
+      ipcRenderer.on(ch, handler)
+      ipcRenderer.send(IPC.boardLogSubscribe, projectId)
+      return () => {
+        ipcRenderer.removeListener(ch, handler)
+        ipcRenderer.send(IPC.boardLogUnsubscribe, projectId)
+      }
+    }
+  },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, sshMkdirArgs, sshExistsArgs, sshCheckIgnoreArgs, sshAppendArgs, sshTailArgs, parseLsEntries, SshFs } from './ssh-fs'
+import { sshListArgs, sshReadArgs, sshReadBinaryArgs, sshWriteArgs, sshMkdirArgs, sshExistsArgs, sshCheckIgnoreArgs, sshAppendArgs, sshTailArgs, sshSizeArgs, parseLsEntries, SshFs } from './ssh-fs'
 
 const conn = { host: 'h', user: 'u' }
 const ref = { conn, controlPath: '/s.sock' }
@@ -59,6 +59,13 @@ describe('ssh-fs arg builders', () => {
   })
   it('tail leaves a leading ~/ unquoted and coerces the line count to a safe integer', () => {
     expect(sshTailArgs(conn, '/s', '~/p/log', 12.9).join(' ')).toContain(`tail -n 12 ~/'p/log'`)
+  })
+  it('size runs `cat | wc -c` on the quoted path (quiet + 0 on a missing file)', () => {
+    const j = sshSizeArgs(conn, '/s.sock', '/a b/log.jsonl').join(' ')
+    expect(j).toContain(`cat '/a b/log.jsonl' 2>/dev/null | wc -c`)
+  })
+  it('size leaves a leading ~/ unquoted so the remote shell tilde-expands the path', () => {
+    expect(sshSizeArgs(conn, '/s', '~/p/log.jsonl').join(' ')).toContain(`cat ~/'p/log.jsonl' 2>/dev/null | wc -c`)
   })
   it('exists runs test -e on the quoted path', () => {
     expect(sshExistsArgs(conn, '/s.sock', '/a b/c').join(' ')).toContain(`test -e '/a b/c'`)

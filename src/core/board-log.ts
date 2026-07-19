@@ -72,6 +72,12 @@ function posixJoin(cwd: string, ...parts: string[]): string {
   return [cwd.replace(/\/+$/, ''), ...parts].join('/')
 }
 
+/** The remote (POSIX) path of a project's board log under `cwd`. Exported so the desktop SSH
+ *  change-poll can fingerprint the same file the store's RemoteLogExec reads/writes. */
+export function boardLogRemotePath(cwd: string): string {
+  return posixJoin(cwd, LOG_DIR, LOG_FILE)
+}
+
 export class BoardLogStore {
   private remote?: RemoteLogExec
   constructor(opts: { remote?: RemoteLogExec }) {
@@ -82,7 +88,7 @@ export class BoardLogStore {
     return path.join(cwd, LOG_DIR, LOG_FILE)
   }
   private remotePath(cwd: string): string {
-    return posixJoin(cwd, LOG_DIR, LOG_FILE)
+    return boardLogRemotePath(cwd)
   }
 
   /** Append one entry. Fire-and-forget-safe: never throws — returns false on any fs/exec error. */

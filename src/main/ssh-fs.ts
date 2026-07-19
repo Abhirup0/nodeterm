@@ -51,6 +51,12 @@ export function sshAppendArgs(conn: SshConnection, cp: string, path: string, lin
 export function sshTailArgs(conn: SshConnection, cp: string, path: string, lines: number): string[] {
   return childArgs(conn, cp, `tail -n ${Math.max(0, Math.trunc(lines))} ${quoteRemotePath(path)}`)
 }
+export function sshSizeArgs(conn: SshConnection, cp: string, path: string): string[] {
+  // A cheap change fingerprint for the board-log poll: the byte size of the file, or `0` when it
+  // does not exist yet. `cat | wc -c` (not `wc -c < file`) stays quiet + prints 0 on a missing file
+  // instead of erroring, so the poll never mistakes "not there yet" for a failure.
+  return childArgs(conn, cp, `cat ${quoteRemotePath(path)} 2>/dev/null | wc -c`)
+}
 export function sshExistsArgs(conn: SshConnection, cp: string, path: string): string[] {
   return childArgs(conn, cp, `test -e ${quoteRemotePath(path)}`)
 }

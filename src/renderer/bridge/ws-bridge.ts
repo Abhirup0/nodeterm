@@ -16,6 +16,8 @@ import {
 import { IPC } from '../../shared/ipc'
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  type BoardLogApi,
+  type BoardLogReadResult,
   type ClaudeApi,
   type ClaudeCliCaps,
   type ContextApi,
@@ -279,7 +281,7 @@ export function buildRealApi(
  */
 export function buildFilesApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context'> {
+): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog'> {
   const fs: FsApi = {
     list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
     read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
@@ -384,7 +386,25 @@ export function buildFilesApi(
       client.cast(IPC.contextEnsure, sessionId, cwd, accountId)
   }
 
-  return { fs, git, files, context }
+  // Board-log: REAL over the bridge for local projects (the server routes local; SSH projects on the
+  // server answer `unsupported`). `onChanged` is `.on` → subscribe, plus the ref-counted cast pair the
+  // preload sends so the server starts/stops watching this project's log.
+  const boardLog: BoardLogApi = {
+    append: (projectId, entry) =>
+      client.request(IPC.boardLogAppend, projectId, entry) as Promise<boolean>,
+    read: (projectId, opts) =>
+      client.request(IPC.boardLogRead, projectId, opts) as Promise<BoardLogReadResult>,
+    onChanged: (projectId, cb) => {
+      const unsub = client.subscribe(IPC.boardLogChanged(projectId), cb as Listener)
+      client.cast(IPC.boardLogSubscribe, projectId)
+      return () => {
+        unsub()
+        client.cast(IPC.boardLogUnsubscribe, projectId)
+      }
+    }
+  }
+
+  return { fs, git, files, context, boardLog }
 }
 
 /**

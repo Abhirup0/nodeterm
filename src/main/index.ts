@@ -5,6 +5,9 @@ import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, powerMonitor, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import type { RemoteLogExec } from '../core/board-log'
+import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
@@ -92,7 +95,7 @@ import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
-import { SshFs } from './ssh-fs'
+import { SshFs, sshAppendArgs, sshTailArgs, sshSizeArgs } from './ssh-fs'
 import { makeRemoteWorkspaceIO } from './remote-workspace-io'
 import {
   registerMediaScheme,
@@ -645,6 +648,40 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.sshFsExists, (_e, projectId: string, p: string) => {
     const ref = sshFsRefFor(projectId)
     return ref ? sshFs.exists(ref, p) : Promise.resolve(false)
+  })
+
+  // Board-log: same CorePlatform registrar as the Server Edition (core/board-log-handlers.ts), with
+  // a desktop router that adds SSH routing on top of the local-cwd/unsupported the server also does.
+  // A connected SSH project (refForProject → a ref with a remoteCwd) reads/writes/fingerprints over
+  // its ControlMaster; anything else falls to the local folder cwd, then unsupported.
+  registerBoardLogHandlers(corePlatform, {
+    route: (projectId: string): BoardLogRoute => {
+      const ref = sshProjectManager?.refForProject(projectId)
+      if (ref?.remoteCwd) {
+        const run = (args: string[], stdin?: string) =>
+          sshProjectManager!.sshRun(args, stdin)
+        const exec: RemoteLogExec = {
+          append: async (p, line) => {
+            const { code } = await run(sshAppendArgs(ref.conn, ref.controlPath, p, line))
+            if (code !== 0) throw new Error('board-log ssh append failed')
+          },
+          tail: async (p, lines) => {
+            const { code, stdout } = await run(sshTailArgs(ref.conn, ref.controlPath, p, lines))
+            return code === 0 ? stdout : ''
+          }
+        }
+        const remotePath = boardLogRemotePath(ref.remoteCwd)
+        const fingerprint = async (): Promise<string> => {
+          const { code, stdout } = await run(sshSizeArgs(ref.conn, ref.controlPath, remotePath))
+          if (code !== 0) throw new Error('board-log ssh fingerprint failed')
+          return stdout.trim()
+        }
+        return { kind: 'remote', remoteCwd: ref.remoteCwd, exec, fingerprint }
+      }
+      const cwd = workspaceStore.localCwdForProject(projectId)
+      if (cwd) return { kind: 'local', cwd }
+      return { kind: 'unsupported' }
+    }
   })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
