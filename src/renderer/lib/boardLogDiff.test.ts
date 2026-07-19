@@ -103,3 +103,34 @@ describe('boardLogEvents', () => {
     ])
   })
 })
+
+describe('card meta events', () => {
+  const enes = { name: 'enes', color: '#0a84ff' }
+  const mehmet = { name: 'mehmet', color: '#bf5af2' }
+  const titles = (id: string) => (id === 'dead' ? '' : 'card ' + id)
+  const base = () => board([col('c1', 'To Do')], [])
+  it('assigning and unassigning members emit per-person events', () => {
+    const next = { ...base(), meta: [{ nodeId: 'n1', assignees: [enes, mehmet] }] }
+    expect(boardLogEvents(base(), next, titles)).toEqual([
+      { nodeId: 'n1', event: { type: 'member-assigned', to: 'enes' } },
+      { nodeId: 'n1', event: { type: 'member-assigned', to: 'mehmet' } }
+    ])
+    const back = boardLogEvents(next, { ...base(), meta: [{ nodeId: 'n1', assignees: [enes] }] }, titles)
+    expect(back).toEqual([{ nodeId: 'n1', event: { type: 'member-unassigned', to: 'mehmet' } }])
+  })
+  it('due set / changed / cleared emit due events with ISO stamps', () => {
+    const at = Date.UTC(2026, 6, 21, 10, 0, 0)
+    const withDue = { ...base(), meta: [{ nodeId: 'n2', dueAt: at }] }
+    expect(boardLogEvents(base(), withDue, titles)).toEqual([
+      { nodeId: 'n2', event: { type: 'due-set', to: new Date(at).toISOString() } }
+    ])
+    expect(boardLogEvents(withDue, base(), titles)).toEqual([
+      { nodeId: 'n2', event: { type: 'due-cleared' } }
+    ])
+  })
+  it('meta of a dead node (prune) emits nothing; unchanged meta emits nothing', () => {
+    const withMeta = { ...base(), meta: [{ nodeId: 'dead', assignees: [enes], dueAt: 5 }] }
+    expect(boardLogEvents(withMeta, base(), titles)).toEqual([])
+    expect(boardLogEvents(withMeta, withMeta, titles)).toEqual([])
+  })
+})

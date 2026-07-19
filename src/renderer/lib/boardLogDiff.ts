@@ -1,4 +1,4 @@
-import type { BoardLogEvent, ProjectKanban } from '@shared/types'
+import type { BoardLogEvent, KanbanCardMeta, ProjectKanban } from '@shared/types'
 
 // Pure prev→next board diff → the events worth recording in the board log. No fs, no IPC:
 // the caller computes the next board (renderer/lib/kanban.ts) and asks here what changed.
@@ -61,5 +61,40 @@ export function boardLogEvents(
     }
     out.push({ nodeId, event: { type: 'card-moved', from: fromName, to: toName } })
   }
+  // Card metadata: assignee add/remove (per person, matched by name) and due set/change/clear.
+  // A dead node's meta disappearing is the prune path — suppressed via the same cardTitle guard.
+  const metaOf = (k: ProjectKanban): Map<string, KanbanCardMeta> => {
+    const m = new Map<string, KanbanCardMeta>()
+    if (Array.isArray(k.meta)) for (const e of k.meta) if (e?.nodeId) m.set(e.nodeId, e)
+    return m
+  }
+  const prevM = metaOf(prev)
+  const nextM = metaOf(next)
+  const metaIds: string[] = []
+  const seenM = new Set<string>()
+  for (const id of [...prevM.keys(), ...nextM.keys()]) {
+    if (!seenM.has(id)) {
+      seenM.add(id)
+      metaIds.push(id)
+    }
+  }
+  for (const nodeId of metaIds) {
+    const pm = prevM.get(nodeId)
+    const nm = nextM.get(nodeId)
+    if (!nm && !cardTitle(nodeId)) continue // node gone (prune) → nothing to narrate
+    const pa = pm?.assignees ?? []
+    const na = nm?.assignees ?? []
+    for (const a of na) if (!pa.some((x) => x.name === a.name))
+      out.push({ nodeId, event: { type: 'member-assigned', to: a.name } })
+    for (const a of pa) if (!na.some((x) => x.name === a.name))
+      out.push({ nodeId, event: { type: 'member-unassigned', to: a.name } })
+    const pd = pm?.dueAt
+    const nd = nm?.dueAt
+    if (pd !== nd) {
+      if (nd !== undefined) out.push({ nodeId, event: { type: 'due-set', to: new Date(nd).toISOString() } })
+      else out.push({ nodeId, event: { type: 'due-cleared' } })
+    }
+  }
+
   return out
 }

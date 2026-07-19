@@ -211,9 +211,21 @@ export interface KanbanAssignment {
  *  Absent = never edited: the renderer shows a default 3-column board and writes
  *  nothing until the first change. Cards are the project's session nodes — the board
  *  stores only their column assignments. */
+/** Trello-style per-card metadata. Lives beside the assignments (not on the node) so it rides
+ *  the same git/mirror machinery; absent entries mean "no metadata". Assignee identity is the
+ *  presence identity — the same {name, color} the board log attributes comments to. */
+export interface KanbanCardMeta {
+  nodeId: string
+  assignees?: BoardLogAuthor[]
+  /** Due timestamp (ms). Absent = no due date. */
+  dueAt?: number
+}
+
 export interface ProjectKanban {
   columns: KanbanColumn[]
   assignments: KanbanAssignment[]
+  /** Optional card metadata; tolerated as absent/malformed by every reader (lib normalizes). */
+  meta?: KanbanCardMeta[]
 }
 
 /** Who produced a board-log entry (a teammate on a shared board, or this user). */
@@ -225,7 +237,16 @@ export interface BoardLogAuthor {
 /** A structural board change worth recording. `type` is closed; the optional fields carry
  *  the human-readable names resolved at event time (the virtual column is named 'Ungrouped'). */
 export interface BoardLogEvent {
-  type: 'card-created' | 'card-moved' | 'column-added' | 'column-renamed' | 'column-deleted'
+  type:
+    | 'card-created'
+    | 'card-moved'
+    | 'column-added'
+    | 'column-renamed'
+    | 'column-deleted'
+    | 'member-assigned'
+    | 'member-unassigned'
+    | 'due-set'
+    | 'due-cleared'
   from?: string
   to?: string
   /** Column title for column-added/deleted; card title for card-created. */

@@ -3,6 +3,7 @@ import type { KanbanColumn as KanbanColumnT } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
+import type { KanbanCardMeta } from '@shared/types'
 import type { KanbanCreateChoice, KanbanCreateOption, KanbanSession } from './KanbanView'
 
 interface KanbanColumnProps {
@@ -15,6 +16,8 @@ interface KanbanColumnProps {
   onDelete?: () => void
   /** Open a card's modal (↗ / double-click on the card). */
   onOpenCard: (nodeId: string) => void
+  /** Card metadata lookup (assignees/due) for the chips on each card. */
+  metaOf: (nodeId: string) => KanbanCardMeta | undefined
   /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked. */
   createOptions: KanbanCreateOption[]
   onCreate: (choice: KanbanCreateChoice) => void
@@ -28,7 +31,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, onRename, onRecolor, onDelete, onOpenCard,
+  column, cards, statusById, metaOf, onRename, onRecolor, onDelete, onOpenCard,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropBeforeCard
 }: KanbanColumnProps) {
@@ -129,6 +132,7 @@ export function KanbanColumn({
             key={s.id}
             session={s}
             status={statusById[s.id]}
+            meta={metaOf(s.id)}
             onOpen={() => onOpenCard(s.id)}
             onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}

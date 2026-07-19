@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { KanbanCardMeta } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
 import type { KanbanSession } from './KanbanView'
@@ -6,6 +7,7 @@ import type { KanbanSession } from './KanbanView'
 interface SessionCardProps {
   session: KanbanSession
   status?: AgentNodeStatus
+  meta?: KanbanCardMeta
   /** Single click opens the card modal directly (the expand/collapse step was dropped). */
   onOpen: () => void
   onDragStart: () => void
@@ -14,7 +16,7 @@ interface SessionCardProps {
   onDropBefore: () => void
 }
 
-export function SessionCard({ session, status, onOpen, onDragStart, onDragEnd, onDropBefore }: SessionCardProps) {
+export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropBefore }: SessionCardProps) {
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   const badge =
@@ -24,6 +26,9 @@ export function SessionCard({ session, status, onOpen, onDragStart, onDragEnd, o
         ? 'needs'
         : null
   const stickyPreview = session.kind === 'sticky' ? (session.text ?? '').trim() : ''
+  const assignees = meta?.assignees ?? []
+  const due = meta?.dueAt
+  const overdue = due !== undefined && due < Date.now()
   const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
   return (
     <div
@@ -55,6 +60,23 @@ export function SessionCard({ session, status, onOpen, onDragStart, onDragEnd, o
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
+      {(assignees.length > 0 || due !== undefined) && (
+        <div className="kanban-card__metarow">
+          {due !== undefined && (
+            <span className={`kanban-due${overdue ? ' kanban-due--overdue' : ''}`}>
+              {new Date(due).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+            </span>
+          )}
+          <span className="kanban-card__avatars">
+            {assignees.slice(0, 3).map((a) => (
+              <span key={a.name} className="kanban-avatar kanban-avatar--sm" style={{ background: a.color }} title={a.name}>
+                {(a.name.trim()[0] ?? '?').toUpperCase()}
+              </span>
+            ))}
+            {assignees.length > 3 && <span className="kanban-avatar kanban-avatar--sm kanban-avatar--more">+{assignees.length - 3}</span>}
+          </span>
+        </div>
+      )}
       {/* Detail line is ALWAYS visible when the card has something to say (no expand step):
           agents show the context meter + session chip; multi-line notes show a preview. */}
       {hasDetail && (
