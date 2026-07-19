@@ -218,6 +218,34 @@ export interface ProjectKanban {
   assignments: KanbanAssignment[]
 }
 
+/** Who produced a board-log entry (a teammate on a shared board, or this user). */
+export interface BoardLogAuthor {
+  name: string
+  color: string
+}
+
+/** A structural board change worth recording. `type` is closed; the optional fields carry
+ *  the human-readable names resolved at event time (the virtual column is named 'Ungrouped'). */
+export interface BoardLogEvent {
+  type: 'card-created' | 'card-moved' | 'column-added' | 'column-renamed' | 'column-deleted'
+  from?: string
+  to?: string
+  /** Column title for column-added/deleted; card title for card-created. */
+  title?: string
+}
+
+/** One line of the append-only board history (`.nodeterm/board-log.jsonl`). A `comment`
+ *  carries `text`; an `event` carries `event`. Serialized one-per-line as JSON. */
+export interface BoardLogEntry {
+  id: string
+  ts: number
+  author: BoardLogAuthor
+  nodeId?: string
+  kind: 'comment' | 'event'
+  text?: string
+  event?: BoardLogEvent
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
