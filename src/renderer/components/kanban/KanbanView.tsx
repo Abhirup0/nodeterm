@@ -69,8 +69,6 @@ export function KanbanView({
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
-  // Card detail rows open per session id; transient by design (resets when the board closes).
-  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
   const customAgents = useSettings((s) => s.settings.customAgents)
   // "+ New" menu entries: the builtin agents, the user's custom agents, then terminal + sticky
   // (same universe as the dock's add menu, minus canvas-only kinds).
@@ -89,14 +87,6 @@ export function KanbanView({
     { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' } }
   ]
   const byId = new Map(sessions.map((s) => [s.id, s]))
-
-  const toggleExpanded = (id: string) =>
-    setExpandedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
 
   // Prune dead nodes' assignments on every persisted change, so they never accumulate
   // in the shared file.
@@ -141,8 +131,6 @@ export function KanbanView({
           column={null}
           cards={sessionsFor(unassigned(board, sessions.map((s) => s.id)))}
           statusById={statusById}
-          expandedIds={expandedIds}
-          onToggleCard={toggleExpanded}
           onOpenCard={setModalNodeId}
           createOptions={createOptions}
           onCreate={(choice) => onCreateNode(choice, null)}
@@ -157,8 +145,6 @@ export function KanbanView({
             column={col}
             cards={sessionsFor(assignedTo(board, col.id))}
             statusById={statusById}
-            expandedIds={expandedIds}
-            onToggleCard={toggleExpanded}
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}

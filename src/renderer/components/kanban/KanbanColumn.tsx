@@ -10,9 +10,6 @@ interface KanbanColumnProps {
   column: KanbanColumnT | null
   cards: KanbanSession[]
   statusById: Record<string, AgentNodeStatus>
-  /** Which cards show their detail row (card click toggles membership). */
-  expandedIds: ReadonlySet<string>
-  onToggleCard: (nodeId: string) => void
   onRename?: (title: string) => void
   onRecolor?: (color: string) => void
   onDelete?: () => void
@@ -31,7 +28,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, expandedIds, onToggleCard, onRename, onRecolor, onDelete, onOpenCard,
+  column, cards, statusById, onRename, onRecolor, onDelete, onOpenCard,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropBeforeCard
 }: KanbanColumnProps) {
@@ -39,6 +36,8 @@ export function KanbanColumn({
   const [title, setTitle] = useState(column?.title ?? '')
   const [swatchesOpen, setSwatchesOpen] = useState(false)
   const [newMenuOpen, setNewMenuOpen] = useState(false)
+  // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
+  const [dragOverCount, setDragOverCount] = useState(0)
 
   const commitTitle = () => {
     const t = title.trim()
@@ -48,10 +47,13 @@ export function KanbanColumn({
 
   return (
     <div
-      className={`kanban-col${column ? '' : ' kanban-col--ungrouped'}`}
+      className={`kanban-col${column ? '' : ' kanban-col--ungrouped'}${dragOverCount > 0 ? ' kanban-col--drop' : ''}`}
       onDragOver={(e) => e.preventDefault()}
+      onDragEnter={() => setDragOverCount((c) => c + 1)}
+      onDragLeave={() => setDragOverCount((c) => Math.max(0, c - 1))}
       onDrop={(e) => {
         e.preventDefault()
+        setDragOverCount(0)
         onDropOnColumn()
       }}
     >
@@ -127,9 +129,7 @@ export function KanbanColumn({
             key={s.id}
             session={s}
             status={statusById[s.id]}
-            expanded={expandedIds.has(s.id)}
-            onToggle={() => onToggleCard(s.id)}
-            onOpenModal={() => onOpenCard(s.id)}
+            onOpen={() => onOpenCard(s.id)}
             onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}
             onDropBefore={() => onDropBeforeCard(s.id)}
