@@ -550,9 +550,11 @@ export interface SpeechSettings {
   model: string
   /** BCP-47-ish hint or 'auto'. */
   language: string
-  /** Press-to-talk shortcut, canonical form e.g. "Cmd+Alt+D" (see `shared/shortcut.ts`).
-   *  "Cmd" is platform-abstracted: metaKey on mac, ctrlKey elsewhere. Drives the Canvas
-   *  listener, the Dock mic tooltip, and the ShortcutsPanel row. */
+  /** Press-to-talk / hold-to-talk shortcut, canonical form e.g. "Cmd+Alt+D" (keyed = toggle) or
+   *  "Cmd+Alt" (v3, modifier-only = hold-to-talk — the new DEFAULT); see `shared/shortcut.ts`
+   *  (`isHoldChord` derives the mode from the string, not a separate setting). "Cmd" is
+   *  platform-abstracted: metaKey on mac, ctrlKey elsewhere. Drives the Canvas listener, the
+   *  Dock mic tooltip, and the ShortcutsPanel row. */
   shortcut: string
 }
 
@@ -663,7 +665,7 @@ export const DEFAULT_SETTINGS: Settings = {
   telemetryEnabled: false,
   phoneAccessEnabled: false,
   mobilePushEnabled: true,
-  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt+D' },
+  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 
 export interface SettingsApi {

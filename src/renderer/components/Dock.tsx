@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
-import { formatShortcut } from '@shared/shortcut'
+import { formatShortcut, isHoldChord } from '@shared/shortcut'
 import { hintLabel } from '@shared/platform-utils'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
@@ -188,7 +188,11 @@ export function Dock({
         </button>
         <button
           className={`dock-btn${dictateActive ? ' active' : ''}`}
-          title={`Dictate (${formatShortcut(dictationShortcut, isMac)})`}
+          title={
+            isHoldChord(dictationShortcut)
+              ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
+              : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
+          }
           onClick={onDictate}
         >
           <MicIcon />

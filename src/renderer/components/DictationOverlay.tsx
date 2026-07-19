@@ -119,6 +119,13 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   const discardedRef = useRef(false)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  // Set false only in the unmount cleanup below. `dictationOpen`/`onClose` are shared with
+  // Canvas across the whole overlay, not scoped to this mounted instance (only the React key/
+  // nonce is) — so a stale instance (remounted-over by a fresh press while its own transcribe
+  // was still in flight) must still deliver its transcript, but must NOT call onClose(): a
+  // newer instance may be live and recording, and onClose() would unmount it out from under
+  // itself. See the async-continuation sites in stopRecording below.
+  const mountedRef = useRef(true)
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -131,6 +138,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   // through handleClose — e.g. a project switch), the mic must not stay live.
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       clearTimer()
       captureRef.current?.cancel()
       captureRef.current = null
@@ -148,7 +156,9 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
       const { text: transcribed } = await window.nodeTerminal.speech.transcribe(pcm)
       if (!target) {
         // Defensive only — recording never starts without a target (see the mount effect below).
-        onClose()
+        // Guarded like the terminal-insert path below: a superseded (remounted-over) instance
+        // must not close an overlay a newer instance may now own.
+        if (mountedRef.current) onClose()
         return
       }
       // An in-flight transcription can't be aborted — dropping the result honors the user's
@@ -161,7 +171,11 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
           setPhase('idle')
           return
         }
-        onClose()
+        // A stale (remounted-over) instance still delivers its own transcript into the
+        // terminal — the target closure is per-instance and correct — but must not close the
+        // parent overlay state: a newer instance (a fresh hold-to-talk press that arrived while
+        // this one was still transcribing) may be live and recording in it right now.
+        if (mountedRef.current) onClose()
         return
       }
       // Chat: no external draft field to insert into (see the file header) — open the editable

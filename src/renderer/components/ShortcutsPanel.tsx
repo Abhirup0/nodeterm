@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { shortcutKeyParts } from '@shared/shortcut'
+import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import { useSettings } from '../state/settings'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -15,9 +15,10 @@ interface Row {
   label: string
 }
 
-/** Everything but "Dictate" is fixed; that row's keys depend on `settings.speech.shortcut`, so
- *  the sections are built at render time instead of module scope. */
-function buildSections(dictationKeys: string[]): { title: string; rows: Row[] }[] {
+/** Everything but "Dictate" is fixed; that row's keys/label depend on `settings.speech.shortcut`
+ *  (a modifier-only chord is hold-to-talk — no trailing key badge, so the label spells that out),
+ *  so the sections are built at render time instead of module scope. */
+function buildSections(dictationKeys: string[], dictationLabel: string): { title: string; rows: Row[] }[] {
   return [
     {
       title: 'General',
@@ -25,7 +26,7 @@ function buildSections(dictationKeys: string[]): { title: string; rows: Row[] }[
         { keys: ['⌘', 'K'], label: 'Command palette' },
         { keys: ['⌘', ','], label: 'Settings' },
         { keys: ['⌘', '/'], label: 'This shortcuts panel' },
-        { keys: dictationKeys, label: 'Dictate' },
+        { keys: dictationKeys, label: dictationLabel },
         { keys: ['⌘', 'Z'], label: 'Undo' },
         { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }
       ]
@@ -66,7 +67,10 @@ function buildSections(dictationKeys: string[]): { title: string; rows: Row[] }[
 /** Keyboard shortcuts reference; shown on first launch and via ⌘/ or the ? button. */
 export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
   const speechShortcut = useSettings((s) => s.settings.speech.shortcut)
-  const SECTIONS = buildSections(shortcutKeyParts(speechShortcut, isMac))
+  const SECTIONS = buildSections(
+    shortcutKeyParts(speechShortcut, isMac),
+    isHoldChord(speechShortcut) ? 'Dictate (hold)' : 'Dictate'
+  )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
