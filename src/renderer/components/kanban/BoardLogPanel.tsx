@@ -35,6 +35,10 @@ function eventLine(name: string, e: BoardLogEvent): string {
       return `${name} set the due date → ${e.to ? formatStamp(Date.parse(e.to)) : ''}`.trimEnd()
     case 'due-cleared':
       return `${name} removed the due date`
+    case 'priority-set':
+      return `${name} set priority → ${e.to ?? ''}`.trimEnd()
+    case 'priority-cleared':
+      return `${name} removed the priority`
     default:
       // A newer peer may write event types this build doesn't know — show them neutrally.
       return `${name} updated this card`

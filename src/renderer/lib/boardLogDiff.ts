@@ -94,6 +94,12 @@ export function boardLogEvents(
       if (nd !== undefined) out.push({ nodeId, event: { type: 'due-set', to: new Date(nd).toISOString() } })
       else out.push({ nodeId, event: { type: 'due-cleared' } })
     }
+    const pp = pm?.priority
+    const np = nm?.priority
+    if (pp !== np) {
+      if (np !== undefined) out.push({ nodeId, event: { type: 'priority-set', to: np } })
+      else out.push({ nodeId, event: { type: 'priority-cleared' } })
+    }
   }
 
   return out

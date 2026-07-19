@@ -1,4 +1,4 @@
-import type { BoardLogAuthor, KanbanAssignment, KanbanCardMeta, KanbanColumn, ProjectKanban } from '@shared/types'
+import type { BoardLogAuthor, KanbanAssignment, KanbanCardMeta, KanbanColumn, KanbanPriority, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
@@ -148,7 +148,9 @@ function withCardMeta(
   next: Omit<KanbanCardMeta, 'nodeId'> | null
 ): ProjectKanban {
   const rest = metaList(k).filter((m) => m && m.nodeId !== nodeId)
-  const keep = next && ((next.assignees?.length ?? 0) > 0 || next.dueAt !== undefined)
+  const keep =
+    next &&
+    ((next.assignees?.length ?? 0) > 0 || next.dueAt !== undefined || next.priority !== undefined)
   const meta = keep ? [...rest, { nodeId, ...next }] : rest
   const { meta: _m, ...bare } = k
   return meta.length ? { ...bare, meta } : bare
@@ -166,7 +168,7 @@ export function toggleAssignee(
   const assignees = had
     ? (cur?.assignees ?? []).filter((a) => a.name !== person.name)
     : [...(cur?.assignees ?? []), person]
-  return withCardMeta(k, nodeId, { assignees, dueAt: cur?.dueAt })
+  return withCardMeta(k, nodeId, { assignees, dueAt: cur?.dueAt, priority: cur?.priority })
 }
 
 /** Sets (or clears, with null) the card's due timestamp. */
@@ -174,6 +176,21 @@ export function setCardDue(k: ProjectKanban, nodeId: string, dueAt: number | nul
   const cur = cardMeta(k, nodeId)
   return withCardMeta(k, nodeId, {
     assignees: cur?.assignees,
+    priority: cur?.priority,
     ...(dueAt === null ? {} : { dueAt })
+  })
+}
+
+/** Sets (or clears, with null) the card's priority. */
+export function setCardPriority(
+  k: ProjectKanban,
+  nodeId: string,
+  priority: KanbanPriority | null
+): ProjectKanban {
+  const cur = cardMeta(k, nodeId)
+  return withCardMeta(k, nodeId, {
+    assignees: cur?.assignees,
+    dueAt: cur?.dueAt,
+    ...(priority === null ? {} : { priority })
   })
 }
