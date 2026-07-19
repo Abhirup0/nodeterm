@@ -5,8 +5,8 @@ import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
 import {
-  addColumn, assignNode, assignedTo, columnForNode, deleteColumn, moveColumn, nextColumnColor,
-  pruneAssignments, recolorColumn, renameColumn, unassigned
+  addColumn, assignNode, assignedTo, cardMeta, columnForNode, deleteColumn, moveColumn,
+  nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
 } from '../../lib/kanban'
 import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
@@ -131,6 +131,7 @@ export function KanbanView({
           column={null}
           cards={sessionsFor(unassigned(board, sessions.map((s) => s.id)))}
           statusById={statusById}
+          metaOf={(id) => cardMeta(board, id)}
           onOpenCard={setModalNodeId}
           createOptions={createOptions}
           onCreate={(choice) => onCreateNode(choice, null)}
@@ -145,6 +146,7 @@ export function KanbanView({
             column={col}
             cards={sessionsFor(assignedTo(board, col.id))}
             statusById={statusById}
+            metaOf={(id) => cardMeta(board, id)}
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}
@@ -169,6 +171,8 @@ export function KanbanView({
         <CardModal
           session={byId.get(modalNodeId)!}
           columnTitle={columnForNode(board, modalNodeId)?.title ?? null}
+          board={board}
+          onChangeBoard={commit}
           onClose={() => setModalNodeId(null)}
           onOpenCanvas={() => {
             setModalNodeId(null)

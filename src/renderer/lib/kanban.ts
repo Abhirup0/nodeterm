@@ -1,4 +1,4 @@
-import type { KanbanAssignment, KanbanColumn, ProjectKanban } from '@shared/types'
+import type { BoardLogAuthor, KanbanAssignment, KanbanCardMeta, KanbanColumn, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
@@ -108,7 +108,16 @@ export function assignNode(
 export function pruneAssignments(k: ProjectKanban, liveIds: string[]): ProjectKanban {
   const live = new Set(liveIds)
   const assignments = k.assignments.filter((a) => live.has(a.nodeId))
-  return assignments.length === k.assignments.length ? k : { ...k, assignments }
+  const meta = metaList(k).filter((m) => m && live.has(m.nodeId))
+  const sameAssignments = assignments.length === k.assignments.length
+  const sameMeta = meta.length === metaList(k).length
+  if (sameAssignments && sameMeta) return k
+  const next: ProjectKanban = { ...k, assignments }
+  if (Array.isArray(k.meta)) {
+    if (meta.length) next.meta = meta
+    else delete next.meta
+  }
+  return next
 }
 
 /** The column a node is assigned to, resolved against a project's board — undefined when
@@ -121,4 +130,50 @@ export function columnForNode(
   if (!k) return undefined
   const a = k.assignments.find((x) => x.nodeId === nodeId)
   return a ? k.columns.find((c) => c.id === a.columnId) : undefined
+}
+
+/** Tolerant read of a card's metadata — `meta` may be absent or (hand-edited) malformed. */
+export function cardMeta(k: ProjectKanban, nodeId: string): KanbanCardMeta | undefined {
+  if (!Array.isArray(k.meta)) return undefined
+  return k.meta.find((m) => m && m.nodeId === nodeId)
+}
+
+const metaList = (k: ProjectKanban): KanbanCardMeta[] => (Array.isArray(k.meta) ? k.meta : [])
+
+/** Writes one card's meta back; an entry with no fields left is DROPPED (absent = clean file),
+ *  and an emptied meta array drops the key entirely. */
+function withCardMeta(
+  k: ProjectKanban,
+  nodeId: string,
+  next: Omit<KanbanCardMeta, 'nodeId'> | null
+): ProjectKanban {
+  const rest = metaList(k).filter((m) => m && m.nodeId !== nodeId)
+  const keep = next && ((next.assignees?.length ?? 0) > 0 || next.dueAt !== undefined)
+  const meta = keep ? [...rest, { nodeId, ...next }] : rest
+  const { meta: _m, ...bare } = k
+  return meta.length ? { ...bare, meta } : bare
+}
+
+/** Adds the person to the card (or removes them if already assigned — matched by NAME, the
+ *  presence identity's stable part; color is display-only and may drift per machine). */
+export function toggleAssignee(
+  k: ProjectKanban,
+  nodeId: string,
+  person: BoardLogAuthor
+): ProjectKanban {
+  const cur = cardMeta(k, nodeId)
+  const had = (cur?.assignees ?? []).some((a) => a.name === person.name)
+  const assignees = had
+    ? (cur?.assignees ?? []).filter((a) => a.name !== person.name)
+    : [...(cur?.assignees ?? []), person]
+  return withCardMeta(k, nodeId, { assignees, dueAt: cur?.dueAt })
+}
+
+/** Sets (or clears, with null) the card's due timestamp. */
+export function setCardDue(k: ProjectKanban, nodeId: string, dueAt: number | null): ProjectKanban {
+  const cur = cardMeta(k, nodeId)
+  return withCardMeta(k, nodeId, {
+    assignees: cur?.assignees,
+    ...(dueAt === null ? {} : { dueAt })
+  })
 }

@@ -6941,3 +6941,146 @@ body,
 .term-node__comments .board-log {
   border-left: none;
 }
+
+/* ---- Card metadata (Trello-style Members / Due date) ---- */
+.kanban-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 28px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.kanban-meta__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kanban-meta__label {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.55);
+}
+.kanban-meta__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kanban-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.kanban-avatar--add {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+}
+.kanban-avatar--add:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+.kanban-avatar--sm {
+  width: 18px;
+  height: 18px;
+  font-size: 9px;
+  cursor: default;
+}
+.kanban-avatar--more {
+  background: rgba(255, 255, 255, 0.18);
+}
+.kanban-meta__picker {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 6px;
+  min-width: 180px;
+  background: #1c1c1e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+}
+.kanban-meta__picker > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 12.5px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.kanban-meta__picker > button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.kanban-meta__pname {
+  flex: 1;
+  text-align: left;
+}
+.kanban-meta__check {
+  color: #32d74b;
+}
+.kanban-meta__due {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 12.5px;
+  padding: 4px 8px;
+  outline: none;
+  color-scheme: dark;
+}
+.kanban-meta__clear {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+.kanban-meta__clear:hover {
+  color: #ff453a;
+}
+.kanban-due {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.75);
+}
+.kanban-due--overdue {
+  background: rgba(255, 69, 58, 0.18);
+  color: #ff6961;
+}
+.kanban-card__metarow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+.kanban-card__avatars {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+}
+.board-log__event .board-log__time {
+  margin-left: 6px;
+}

@@ -5,14 +5,19 @@ import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useSession } from '../../session/session'
+import type { ProjectKanban } from '@shared/types'
 import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
+import { CardMetaBar } from './CardMetaBar'
 import { ModalTerminal } from './ModalTerminal'
 
 interface CardModalProps {
   session: KanbanSession
   /** Column title shown as a chip; null = Ungrouped. */
   columnTitle: string | null
+  /** The live board + its pruned commit — the Members/Due strip edits through them. */
+  board: ProjectKanban
+  onChangeBoard: (next: ProjectKanban) => void
   onClose: () => void
   /** Secondary action: close the modal, switch to canvas, focus the node. */
   onOpenCanvas: () => void
@@ -25,7 +30,7 @@ interface CardModalProps {
 /** Trello-style card popup over the board. Scrim click / Esc close it; the board (and the
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / markdown view (the node itself is hidden under the board). */
-export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRename, onEditSticky }: CardModalProps) {
+export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky }: CardModalProps) {
   const { api } = useSession()
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
@@ -156,6 +161,7 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
             ✕
           </button>
         </div>
+        <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />
         <div className="kanban-modal__body">
           {/* Body is a flex row: the card's own pane (2/3) + the board-log panel (1/3, all kinds). */}
           <div className="kanban-modal__main">

@@ -251,7 +251,8 @@ describe('kanban board persistence', () => {
       { id: 'kcol-a', title: 'To Do', color: '#0a84ff' },
       { id: 'kcol-b', title: 'Done', color: '#32d74b' }
     ],
-    assignments: [{ nodeId: 'term-abc', columnId: 'kcol-a' }]
+    assignments: [{ nodeId: 'term-abc', columnId: 'kcol-a' }],
+    meta: [{ nodeId: 'term-abc', assignees: [{ name: 'enes', color: '#0a84ff' }], dueAt: 1784500000000 }]
   }
   it('rides the project file round-trip', () => {
     const f = projectToFile(project({ kanban: board }), 1, '2026-07-18T00:00:00.000Z')

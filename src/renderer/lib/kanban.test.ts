@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
 import {
   addColumn, assignNode, assignedTo, defaultKanban, deleteColumn, moveColumn,
-  columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
+  cardMeta, columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn,
+  setCardDue, toggleAssignee, unassigned
 } from './kanban'
 
 const board = (): ProjectKanban => ({
@@ -96,5 +97,41 @@ describe('columnForNode', () => {
     const dangling: ProjectKanban = { ...board(), assignments: [{ nodeId: 'n1', columnId: 'gone' }] }
     expect(columnForNode(dangling, 'n1')).toBeUndefined()
     expect(columnForNode(undefined, 'n1')).toBeUndefined()
+  })
+})
+
+describe('card meta', () => {
+  const enes = { name: 'enes', color: '#0a84ff' }
+  const mehmet = { name: 'mehmet', color: '#bf5af2' }
+  it('cardMeta tolerates absent/malformed meta', () => {
+    expect(cardMeta(board(), 'n1')).toBeUndefined()
+    const bad = { ...board(), meta: 42 } as unknown as ProjectKanban
+    expect(cardMeta(bad, 'n1')).toBeUndefined()
+  })
+  it('toggleAssignee adds then removes by name; empty meta entries are dropped', () => {
+    const k1 = toggleAssignee(board(), 'n1', enes)
+    expect(cardMeta(k1, 'n1')?.assignees).toEqual([enes])
+    const k2 = toggleAssignee(k1, 'n1', mehmet)
+    expect(cardMeta(k2, 'n1')?.assignees).toEqual([enes, mehmet])
+    const k3 = toggleAssignee(k2, 'n1', { ...enes, color: '#fff' }) // match by NAME
+    expect(cardMeta(k3, 'n1')?.assignees).toEqual([mehmet])
+    const k4 = toggleAssignee(toggleAssignee(k3, 'n1', mehmet), 'n1', enes)
+    expect(cardMeta(k4, 'n1')?.assignees).toEqual([enes])
+    const k5 = toggleAssignee(k4, 'n1', enes)
+    expect(cardMeta(k5, 'n1')).toBeUndefined() // nothing left → entry dropped
+  })
+  it('setCardDue sets and clears; clearing the only field drops the entry', () => {
+    const k1 = setCardDue(board(), 'n2', 1784500000000)
+    expect(cardMeta(k1, 'n2')?.dueAt).toBe(1784500000000)
+    const k2 = setCardDue(k1, 'n2', null)
+    expect(cardMeta(k2, 'n2')).toBeUndefined()
+  })
+  it('pruneAssignments also drops dead nodes\' meta, and stays identity-stable on no-op', () => {
+    const k = setCardDue(toggleAssignee(board(), 'n1', enes), 'n9', 5)
+    const pruned = pruneAssignments(k, ['n1', 'n2', 'n3'])
+    expect(cardMeta(pruned, 'n1')?.assignees).toEqual([enes])
+    expect(cardMeta(pruned, 'n9')).toBeUndefined()
+    const same = setCardDue(board(), 'n1', 7)
+    expect(pruneAssignments(same, ['n1', 'n2', 'n3'])).toBe(same)
   })
 })

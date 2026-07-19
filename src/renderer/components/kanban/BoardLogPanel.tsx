@@ -27,7 +27,31 @@ function eventLine(name: string, e: BoardLogEvent): string {
       return `${name} renamed column ${e.from ?? ''} → ${e.to ?? ''}`
     case 'column-deleted':
       return `${name} deleted column ${e.title ?? ''}`.trimEnd()
+    case 'member-assigned':
+      return `${name} assigned ${e.to ?? 'someone'}`
+    case 'member-unassigned':
+      return `${name} removed ${e.to ?? 'someone'}`
+    case 'due-set':
+      return `${name} set the due date → ${e.to ? formatStamp(Date.parse(e.to)) : ''}`.trimEnd()
+    case 'due-cleared':
+      return `${name} removed the due date`
+    default:
+      // A newer peer may write event types this build doesn't know — show them neutrally.
+      return `${name} updated this card`
   }
+}
+
+/** Absolute, Trello-style stamp ("19 Jul 2026, 22:50") — the feed shows dates, not "2h ago"
+ *  (the relative form stays in the row's tooltip). */
+function formatStamp(ts: number): string {
+  if (!Number.isFinite(ts)) return ''
+  return new Date(ts).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
 }
 
 /** Right panel of the card modal (all card kinds): a composer on top and the card's own
@@ -93,16 +117,22 @@ export function BoardLogPanel({ card }: BoardLogPanelProps) {
 }
 
 function FeedRow({ entry }: { entry: BoardLogEntry }) {
-  const when = formatTimeAgo(entry.ts)
+  const when = formatStamp(entry.ts)
+  const whenAgo = formatTimeAgo(entry.ts)
   if (entry.kind === 'event' && entry.event) {
-    return <div className="board-log__event">{eventLine(entry.author.name, entry.event)}</div>
+    return (
+      <div className="board-log__event" title={whenAgo}>
+        {eventLine(entry.author.name, entry.event)}
+        <span className="board-log__time">{when}</span>
+      </div>
+    )
   }
   return (
     <div className="board-log__comment">
       <div className="board-log__meta">
         <span className="board-log__dot" style={{ background: entry.author.color }} />
         <span className="board-log__author">{entry.author.name}</span>
-        <span className="board-log__time">{when}</span>
+        <span className="board-log__time" title={whenAgo}>{when}</span>
       </div>
       <div className="board-log__text">{entry.text}</div>
     </div>
