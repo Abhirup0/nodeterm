@@ -261,6 +261,39 @@ export async function findInLoginPath(bin: string): Promise<string | null> {
 /** A UI client: an Electron webContents id or a ServerPlatform uiId. */
 type ClientId = number
 
+/** A viewer id: which VIEW within one client. `PRIMARY_VIEWER` is the default view — the canvas
+ *  node, and every legacy call that omits a viewerId. A second view in the SAME renderer (the
+ *  kanban card modal) passes its own id, so one connection can hold several independently-
+ *  detachable views of the same session. */
+type ViewerId = string
+const PRIMARY_VIEWER: ViewerId = ''
+
+/**
+ * The composite subscriber key: one (client, view) pair. The subscriber ledger keys on this, so a
+ * ClientId can hold many subscribers — the canvas node (PRIMARY) and the modal — each subscribing,
+ * sizing, pausing and detaching on its own. A `null` client (the relay host's detached sink) is
+ * NOT a composite subscriber; it keys the `sizes`/flow ledgers by literal `null`, exactly as before.
+ *
+ * Encoding: `<clientId> <viewerId>`. clientId is always a number (no space), so
+ * `subClient` recovers the client from the FIRST space regardless of what the viewerId
+ * (which arrives off the wire) contains. Absent viewerId ⇒ PRIMARY ⇒ `<clientId> `, i.e. one
+ * entry per client — bit-for-bit the pre-viewer ledger for every existing caller.
+ */
+type SubKey = string
+function subKey(clientId: ClientId, viewerId: ViewerId): SubKey {
+  return `${clientId} ${viewerId}`
+}
+/** The ClientId behind a composite subscriber key — the collapse to "which person", for the
+ *  per-ClientId data/exit/size channels and the closed-by/recycled fan-out (viewers are invisible
+ *  to peers). */
+function subClient(sub: SubKey): ClientId {
+  return Number(sub.slice(0, sub.indexOf(' ')))
+}
+/** The viewer id within a composite subscriber key (PRIMARY for a default view). */
+function subViewer(sub: SubKey): ViewerId {
+  return sub.slice(sub.indexOf(' ') + 1)
+}
+
 /**
  * WHO, within one client, owes us a resume (see `Session.pausedBy`).
  *
@@ -281,10 +314,13 @@ export type FlowOwner = 'renderer' | 'socket'
 /** All the owners one client can owe a pause under — the sweep on any leave path. */
 const FLOW_OWNERS: readonly FlowOwner[] = ['renderer', 'socket']
 
-/** The ledger key for one (client, owner) pause. `null` is the relay host's detached sink, which
- *  has no ClientId; it pauses on relay backpressure, i.e. as a `renderer`-side owner. */
-function flowTicket(clientId: ClientId | null, owner: FlowOwner): string {
-  return `${owner}#${clientId ?? 'relay'}`
+/** The ledger key for one (view, owner) pause. The `sub` is a composite subscriber key, so a
+ *  client's two views (canvas node + modal) pause the shared pty on their OWN tickets — each xterm
+ *  is edge-latched independently, so collapsing them by ClientId would let one hand back the pause
+ *  the other still owes (the same bug the `owner` dimension prevents for the socket). `null` is the
+ *  relay host's detached sink, which has no ClientId; it pauses as a `renderer`-side owner. */
+function flowTicket(sub: SubKey | null, owner: FlowOwner): string {
+  return `${owner}#${sub ?? 'relay'}`
 }
 
 /** One client's reported fit, run through the same floor/clamp the pty itself gets, so a size we
@@ -295,21 +331,24 @@ function normalizeSize(cols: number, rows: number): PtySize {
 
 interface Session {
   proc: pty.IPty
-  /** Every UI watching this session. Co-attach: ONE pty and ONE tmux client, N subscribers —
-   *  a second client on the same persistKey joins this set instead of spawning a second tmux
-   *  client (whose `-D` would then kick the first one off). Empty for a purely detached
-   *  (relay-served) session. */
-  subscribers: Set<ClientId>
+  /** Every VIEW watching this session, keyed by the composite `(ClientId, viewerId)` (`SubKey`).
+   *  Co-attach: ONE pty and ONE tmux client, N subscribers — a second client on the same persistKey
+   *  (or the SAME client's second view, e.g. the kanban card modal) joins this set instead of
+   *  spawning a second tmux client (whose `-D` would then kick the first one off). Empty for a
+   *  purely detached (relay-served) session. */
+  subscribers: Set<SubKey>
   /** Each VIEWING subscriber's last reported cols/rows — the pty runs at the min of these
    *  (`effectiveSize`). A subscriber that is subscribed but NOT looking is ABSENT from this map:
-   *  it still gets output, it just doesn't constrain the size (see `resize`). `null` keys the
-   *  relay host's detached sink, which has no ClientId but does report a size. */
-  sizes: Map<ClientId | null, PtySize>
+   *  it still gets output, it just doesn't constrain the size (see `resize`). Keyed by the composite
+   *  `SubKey` so two views in one client vote independently; `null` keys the relay host's detached
+   *  sink, which has no ClientId but does report a size. */
+  sizes: Map<SubKey | null, PtySize>
   /** The size each subscriber's xterm is believed to be rendering: the last authoritative size we
    *  sent it, or — if it has reported a fit since — its own fit (the renderer applies its own fit
-   *  locally, exactly as it always has). We only send `pty:size` to a subscriber whose view differs
-   *  from the effective size, which is what keeps a SOLO user's resize free of any extra IPC. */
-  shown: Map<ClientId, PtySize>
+   *  locally, exactly as it always has). Keyed by the composite `SubKey`. We only send `pty:size` to
+   *  a subscriber whose view differs from the effective size, which is what keeps a SOLO user's
+   *  resize free of any extra IPC. */
+  shown: Map<SubKey, PtySize>
   /** The size currently pushed into the pty (seeded from the spawn's cols/rows). Guards against
    *  re-resizing the tmux client to the size it already has — that is a full-pane redraw. */
   appliedSize?: PtySize
@@ -593,9 +632,17 @@ export class PtyManager {
     // channel, so leaving the old plain listener in place would run the resize twice.
     platform().onWithSender(
       IPC.ptyResize,
-      (senderId: number, sessionId: string, cols: number | null, rows: number | null) => {
+      (
+        senderId: number,
+        sessionId: string,
+        cols: number | null,
+        rows: number | null,
+        // Optional TRAILING viewerId: a client's second view (the kanban card modal) sizes on its
+        // own vote. Absent (every legacy caller) ⇒ the PRIMARY view.
+        viewerId?: string
+      ) => {
         if (!this.subscribes(senderId, sessionId)) return
-        this.resize(senderId, sessionId, cols, rows)
+        this.resize(senderId, sessionId, cols, rows, viewerId)
       }
     )
     // Sender-aware: a pause belongs to the client whose xterm backlog overflowed, and only that
@@ -604,17 +651,25 @@ export class PtyManager {
     // run the flow change twice (and, with an unattributed sessionId, wrongly).
     platform().onWithSender(
       IPC.ptyFlow,
-      (senderId: number, sessionId: string, resume: boolean) => {
+      // Optional TRAILING viewerId: a client's second view (the modal) is an independently
+      // edge-latched xterm, so its pause is owed on its own ticket. The `owner` is always
+      // 'renderer' off the wire (the Server Edition's 'socket' owner uses the direct setFlow call).
+      (senderId: number, sessionId: string, resume: boolean, viewerId?: string) => {
         if (!this.subscribes(senderId, sessionId)) return
-        this.setFlow(senderId, sessionId, resume)
+        this.setFlow(senderId, sessionId, resume, 'renderer', viewerId)
       }
     )
     // Sender-aware: with co-attach a kill detaches just THAT client, and the pty (and the tmux
     // session behind it) survives while any other subscriber is still watching.
-    platform().onWithSender(IPC.ptyKill, (senderId: number, sessionId: string) => {
-      if (!this.subscribes(senderId, sessionId)) return
-      this.kill(senderId, sessionId)
-    })
+    platform().onWithSender(
+      IPC.ptyKill,
+      // Optional TRAILING viewerId: closing the kanban card modal detaches ONLY that view; the
+      // canvas node's client (PRIMARY, or any other view) keeps the session alive. Absent ⇒ PRIMARY.
+      (senderId: number, sessionId: string, viewerId?: string) => {
+        if (!this.subscribes(senderId, sessionId)) return
+        this.kill(senderId, sessionId, viewerId)
+      }
+    )
     // Sender-aware: the × permanently ends a session OTHER people may be watching, so the close
     // event they get has to name WHO did it ("closed by <name>" — see `destroySession`).
     // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
@@ -673,7 +728,22 @@ export class PtyManager {
    * subscribers by design, and that path is not off the wire.
    */
   private subscribes(clientId: ClientId, sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.subscribers.has(clientId) ?? false
+    const subs = this.sessions.get(sessionId)?.subscribers
+    if (!subs) return false
+    // Client-scoped, not view-scoped: a client that opened this node in ANY view (canvas node or
+    // modal) may steer it. A kill/resize naming a viewer this client doesn't hold is then a
+    // harmless no-op delete, not a security hole — the gate's job is "is this the right person".
+    for (const sub of subs) if (subClient(sub) === clientId) return true
+    return false
+  }
+
+  /** The distinct ClientIds watching this session — the collapse of the composite ledger for the
+   *  per-ClientId data/exit channels: a client's two views share one `pty:data:<id>` channel, so a
+   *  chunk must be sent to each client ONCE (a second send would double every byte in both xterms). */
+  private clientsOf(session: Session): ClientId[] {
+    const clients = new Set<ClientId>()
+    for (const sub of session.subscribers) clients.add(subClient(sub))
+    return [...clients]
   }
 
   /**
@@ -822,13 +892,16 @@ export class PtyManager {
     const existingId = this.byPersistKey.get(persistKey)
     const existing = existingId ? this.sessions.get(existingId) : undefined
     if (!existingId || !existing) return undefined
-    existing.subscribers.add(clientId)
+    // The joining VIEW's composite key: a second client, OR the SAME client's second view (the
+    // kanban card modal). Either way it is a distinct subscriber of the one shared session/pty.
+    const sub = subKey(clientId, options.viewerId ?? PRIMARY_VIEWER)
+    existing.subscribers.add(sub)
     // The joiner's xterm has fitted itself to its own window; that is what it renders until we
     // tell it otherwise. applySize() then either shrinks the pty to it (it is the new smallest) or
     // sends it the authoritative size to render + letterbox.
     const size = normalizeSize(options.cols, options.rows)
-    existing.sizes.set(clientId, size)
-    existing.shown.set(clientId, size)
+    existing.sizes.set(sub, size)
+    existing.shown.set(sub, size)
     const before = existing.appliedSize
     this.applySize(existingId, existing)
     const resized =
@@ -839,8 +912,9 @@ export class PtyManager {
     // only THIS client's RENDERER pause: a pause owed by a DIFFERENT client that is still here and
     // still drowning stays in place, and so does this client's own SOCKET pause — a fresh page says
     // nothing about the state of the WS send buffer under it (invariant (b) on `pausedBy`), and the
-    // server returns that one itself when the socket drains.
-    this.releaseFlow(existing, clientId, 'renderer')
+    // server returns that one itself when the socket drains. Scoped to THIS view: the other view's
+    // (e.g. the still-open modal's) renderer pause is untouched.
+    this.releaseFlow(existing, sub, 'renderer')
     const base: PtyCreateResult = existing.accountFallback
       ? { sessionId: existingId, fresh: false, accountFallback: true }
       : { sessionId: existingId, fresh: false }
@@ -1223,17 +1297,20 @@ export class PtyManager {
     const tmuxBacked = !!(this.tmuxPath && settings.tmuxEnabled && options.persistKey)
     const persisted = !!options.persistKey && (remote ? true : tmuxBacked)
     const spawnSize = normalizeSize(options.cols, options.rows)
+    // The spawning view's composite key. Usually the canvas node (PRIMARY), but a modal that opens
+    // a node whose canvas terminal is closed spawns it too — under its own viewerId, correctly.
+    const spawnSub = clientId === null ? null : subKey(clientId, options.viewerId ?? PRIMARY_VIEWER)
     const session: Session = {
       proc,
-      subscribers: clientId === null ? new Set<ClientId>() : new Set<ClientId>([clientId]),
+      subscribers: spawnSub === null ? new Set<SubKey>() : new Set<SubKey>([spawnSub]),
       sizes:
-        clientId === null
-          ? new Map<ClientId | null, PtySize>()
-          : new Map<ClientId | null, PtySize>([[clientId, spawnSize]]),
+        spawnSub === null
+          ? new Map<SubKey | null, PtySize>()
+          : new Map<SubKey | null, PtySize>([[spawnSub, spawnSize]]),
       shown:
-        clientId === null
-          ? new Map<ClientId, PtySize>()
-          : new Map<ClientId, PtySize>([[clientId, spawnSize]]),
+        spawnSub === null
+          ? new Map<SubKey, PtySize>()
+          : new Map<SubKey, PtySize>([[spawnSub, spawnSize]]),
       // node-pty was just spawned with these cols/rows, so the pty ALREADY has this size — record
       // it so a co-attach (or a fit that reports the same numbers) doesn't ioctl it needlessly.
       // A detached (relay-served) pty is left unseeded: its first `resize` must reach the pty,
@@ -1275,7 +1352,8 @@ export class PtyManager {
     proc.onExit(({ exitCode }) => {
       this.flush(sessionId, session) // deliver any buffered output before the exit signal
       session.onExit?.(exitCode) // relay host sink (unchanged)
-      for (const sub of session.subscribers) this.send(sub, IPC.ptyExit(sessionId), exitCode)
+      for (const client of this.clientsOf(session))
+        this.send(client, IPC.ptyExit(sessionId), exitCode)
       this.forget(sessionId, session)
     })
 
@@ -1363,7 +1441,10 @@ export class PtyManager {
       const shown = session.shown.get(sub)
       if (shown && shown.cols === size.cols && shown.rows === size.rows) continue
       session.shown.set(sub, size)
-      this.send(sub, channel, size)
+      // Collapse to the ClientId: `pty:size:<id>` is a per-client channel. Two views in one client
+      // share it, so both xterms receive one send and each renders the authoritative size (and
+      // letterboxes) — exactly the co-attach contract. (A solo user, min(one), is never sent at all.)
+      this.send(subClient(sub), channel, size)
     }
   }
 
@@ -1391,7 +1472,8 @@ export class PtyManager {
     session.bufBytes = 0
     session.onData?.(data) // relay host sink (unchanged)
     const channel = IPC.ptyData(sessionId)
-    for (const sub of session.subscribers) this.send(sub, channel, data)
+    // One send per distinct client — a client's views share the per-client `pty:data:<id>` channel.
+    for (const client of this.clientsOf(session)) this.send(client, channel, data)
   }
 
   /**
@@ -1414,6 +1496,11 @@ export class PtyManager {
    * A socket drain then returns the SOCKET's ticket only, never the pause the browser's own xterm
    * still owes.
    *
+   * `viewerId` scopes the RENDERER pause to one VIEW: a client's canvas node and its kanban modal
+   * are two separate xterms, each edge-latched, so they pause on their own tickets — same reasoning
+   * as `owner`, one dimension over. Absent ⇒ PRIMARY. The `socket` owner is per-connection, so it
+   * rides the PRIMARY key by convention; the two owners never collide (different `owner`).
+   *
    * Single user: the set holds exactly his one renderer ticket while paused and is empty when he
    * resumes, so the actuator sees exactly the pause/resume pair it always saw.
    */
@@ -1421,16 +1508,18 @@ export class PtyManager {
     clientId: ClientId | null,
     sessionId: string,
     resume: boolean,
-    owner: FlowOwner = 'renderer'
+    owner: FlowOwner = 'renderer',
+    viewerId?: string
   ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    const sub = clientId === null ? null : subKey(clientId, viewerId ?? PRIMARY_VIEWER)
     if (resume) {
-      this.releaseFlow(session, clientId, owner)
+      this.releaseFlow(session, sub, owner)
       return
     }
     const wasPaused = session.pausedBy.size > 0
-    session.pausedBy.add(flowTicket(clientId, owner))
+    session.pausedBy.add(flowTicket(sub, owner))
     if (wasPaused) return // already paused by someone — pause() again would be a no-op
     try {
       session.proc.pause()
@@ -1440,24 +1529,24 @@ export class PtyManager {
   }
 
   /**
-   * Return a pause `clientId` owed us — because it resumed, or because it LEFT (kill /
+   * Return a pause a VIEW (`sub`) owed us — because it resumed, or because it LEFT (kill /
    * dropClient) or reloaded (join). The pty resumes only when the ledger empties: a pause still
-   * owed by a client that is here and behind must survive every other client's comings and goings,
-   * or that client's renderer queue grows without bound (its flow control is edge-latched and will
-   * never re-pause). No-op when this client owed nothing — the single-user resume path is then
+   * owed by a view that is here and behind must survive every other view's comings and goings,
+   * or that renderer's queue grows without bound (its flow control is edge-latched and will
+   * never re-pause). No-op when this view owed nothing — the single-user resume path is then
    * exactly the old `paused=false; proc.resume()`.
    *
-   * `owner` scopes WHICH of that client's tickets is returned:
+   * `owner` scopes WHICH of that view's tickets is returned:
    *  - a drain returns exactly the one that drained (invariant (b)): the socket emptying says
    *    nothing about the browser's xterm backlog, and vice versa;
-   *  - omitting it returns ALL of them, which is what a client's DEPARTURE means (invariant (a)):
+   *  - omitting it returns ALL of them, which is what a view's DEPARTURE means (invariant (a)):
    *    it receives nothing more on this session, so no owner of its can ever resume us again.
    */
-  private releaseFlow(session: Session, clientId: ClientId | null, owner?: FlowOwner): void {
+  private releaseFlow(session: Session, sub: SubKey | null, owner?: FlowOwner): void {
     const owners = owner ? [owner] : FLOW_OWNERS
     let released = false
     for (const o of owners) {
-      if (session.pausedBy.delete(flowTicket(clientId, o))) released = true
+      if (session.pausedBy.delete(flowTicket(sub, o))) released = true
     }
     if (!released) return
     if (session.pausedBy.size > 0) return
@@ -1468,9 +1557,30 @@ export class PtyManager {
     }
   }
 
-  /** Does this client owe a resume on this session under ANY owner? (dropClient's sweep gate.) */
-  private owesFlow(session: Session, clientId: ClientId | null): boolean {
-    return FLOW_OWNERS.some((o) => session.pausedBy.has(flowTicket(clientId, o)))
+  /**
+   * Return EVERY pause a whole CLIENT owed us, across all of its views and owners — the departure
+   * sweep for `dropClient`. A vanished webContents takes all its views (canvas node + modal) with
+   * it, so each of their tickets is unreturnable and must go, or the pty freezes for every co-viewer
+   * (invariant (a)). Scans `pausedBy` because a client's tickets are spread over an unknown set of
+   * viewer ids. Returns whether anything was released (the caller re-negotiates size iff so).
+   */
+  private releaseFlowForClient(session: Session, clientId: ClientId): boolean {
+    let released = false
+    for (const ticket of [...session.pausedBy]) {
+      // A ticket is `${owner}#${sub}`; the sub follows the first '#'. 'relay' (the null sink) never
+      // belongs to a client, so it is skipped.
+      const sub = ticket.slice(ticket.indexOf('#') + 1)
+      if (sub === 'relay') continue
+      if (subClient(sub) === clientId && session.pausedBy.delete(ticket)) released = true
+    }
+    if (released && session.pausedBy.size === 0) {
+      try {
+        session.proc.resume()
+      } catch {
+        // resume can throw if the proc already exited; ignore.
+      }
+    }
+    return released
   }
 
   /**
@@ -1530,24 +1640,28 @@ export class PtyManager {
     clientId: ClientId | null,
     sessionId: string,
     cols: number | null,
-    rows: number | null
+    rows: number | null,
+    viewerId?: string
   ): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    // The reporting VIEW's key (null = the relay sink, keyed by literal null as before). A client's
+    // canvas node and modal vote separately, so the pty runs at the min over both.
+    const sub = clientId === null ? null : subKey(clientId, viewerId ?? PRIMARY_VIEWER)
     // Loose `== null` on purpose (belt and braces): the sizes arrive over IPC on the desktop and
     // over a JSON wire in the Server Edition, and JSON has no `undefined`. If any encoding path
-    // ever loses the distinction again, "no size" must degrade to PARK — dropping the client from
+    // ever loses the distinction again, "no size" must degrade to PARK — dropping the view from
     // the ledger — and never to `normalizeSize(undefined, undefined)`, which clamps to a 1×1 grid
     // and would shrink the shared pty to one cell for every co-attached viewer.
     if (cols == null || rows == null) {
-      session.sizes.delete(clientId)
+      session.sizes.delete(sub)
     } else {
       const size = normalizeSize(cols, rows)
-      session.sizes.set(clientId, size)
-      // The client's own xterm fits itself locally (as it always has), so its fit — not the last
+      session.sizes.set(sub, size)
+      // The view's own xterm fits itself locally (as it always has), so its fit — not the last
       // authoritative size we sent it — is what it is rendering right now. If that fit isn't the
       // effective size, applySize() below corrects it straight back.
-      if (clientId !== null) session.shown.set(clientId, size)
+      if (sub !== null) session.shown.set(sub, size)
     }
     this.applySize(sessionId, session)
   }
@@ -1561,25 +1675,28 @@ export class PtyManager {
    * `clientId` is null for the relay host releasing its own detached (sink-served) pty: it drops
    * the sinks, which are that session's only "subscriber".
    */
-  kill(clientId: ClientId | null, sessionId: string): void {
+  kill(clientId: ClientId | null, sessionId: string, viewerId?: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    // The departing VIEW's key (null = the relay sink). Closing the kanban modal names its viewerId
+    // and detaches ONLY it; the canvas node's PRIMARY view stays subscribed and the pty lives on.
+    const sub = clientId === null ? null : subKey(clientId, viewerId ?? PRIMARY_VIEWER)
     if (clientId === null) {
       session.onData = undefined
       session.onExit = undefined
       session.sizes.delete(null)
     } else {
-      session.subscribers.delete(clientId)
-      session.sizes.delete(clientId)
-      session.shown.delete(clientId)
+      session.subscribers.delete(sub as SubKey)
+      session.sizes.delete(sub)
+      session.shown.delete(sub as SubKey)
     }
-    // The departing client (or sink) may have been one of the ones that paused us, and it will
+    // The departing view (or sink) may have been one of the ones that paused us, and it will
     // never send the matching resume now — leaving that pause in place would freeze the terminal
     // for everyone who stayed. EVERY owner it owed goes back (no `owner` argument): it stops
     // receiving this session's output entirely, so neither its renderer nor its socket can ever
-    // resume us again. A pause owed by a client that is STILL here is untouched: the pty stays
+    // resume us again. A pause owed by a view that is STILL here is untouched: the pty stays
     // paused until IT drains (its renderer cannot re-pause — see `Session.pausedBy`).
-    this.releaseFlow(session, clientId)
+    this.releaseFlow(session, sub)
     if (session.subscribers.size > 0 || session.onData) {
       // Somebody is still watching: the departing client's size no longer constrains the pty.
       this.applySize(sessionId, session)
@@ -1611,8 +1728,13 @@ export class PtyManager {
   dropClient(clientId: ClientId): void {
     // Snapshot the entries: kill() mutates `sessions` when a session falls to zero subscribers.
     for (const [sessionId, session] of [...this.sessions]) {
-      if (session.subscribers.has(clientId)) {
-        this.kill(clientId, sessionId)
+      // A vanished webContents takes ALL its views with it (canvas node + any modal), so kill each
+      // of this client's composite subscriptions. The last one released takes the pty down — exactly
+      // as the per-view `pty:kill`s would have, had the tab closed cleanly. (The outer snapshot holds
+      // the session ref even after the final kill `forget`s it.)
+      const views = [...session.subscribers].filter((s) => subClient(s) === clientId)
+      if (views.length > 0) {
+        for (const sub of views) this.kill(clientId, sessionId, subViewer(sub))
         continue
       }
       // NOT a subscriber — and yet it may still hold state here. Sweeping only the sessions a client
@@ -1621,14 +1743,16 @@ export class PtyManager {
       // for every real viewer, for the life of the core process. The wire casts are now gated on
       // membership (`subscribes`), so this should find nothing; sweep unconditionally anyway — the
       // invariant "nothing outlives its client" must not depend on every future caller remembering
-      // the gate.
-      const hadSize = session.sizes.delete(clientId)
-      const hadShown = session.shown.delete(clientId)
-      if (!hadSize && !hadShown && !this.owesFlow(session, clientId)) continue
+      // the gate. Sweep by CLIENT (every view/owner it might have planted), not by a single key.
+      let changed = false
+      for (const key of [...session.sizes.keys()])
+        if (key !== null && subClient(key) === clientId && session.sizes.delete(key)) changed = true
+      for (const key of [...session.shown.keys()])
+        if (subClient(key) === clientId) session.shown.delete(key)
       // Every owner's ticket, not just the renderer's: a vanished client's SOCKET pause is as
       // unreturnable as its renderer's (invariant (a) — the pty would freeze for every co-viewer).
-      this.releaseFlow(session, clientId)
-      this.applySize(sessionId, session)
+      if (this.releaseFlowForClient(session, clientId)) changed = true
+      if (changed) this.applySize(sessionId, session)
     }
   }
 
@@ -1877,10 +2001,16 @@ export class PtyManager {
     if (dyingId && dying) {
       this.byPersistKey.delete(persistKey)
       dying.indexKey = undefined
-      const others = [...dying.subscribers].filter((sub) => sub !== clientId)
+      // Collapse the composite subscribers to DISTINCT clients, minus the destroyer: closed/recycled
+      // are per-ClientId events (a client's two views share one channel and hear it once), and
+      // viewer granularity is invisible to peers. The destroyer is excluded whether it watched via
+      // the canvas node, the modal, or both.
+      const others = [...new Set([...dying.subscribers].map(subClient))].filter(
+        (c) => c !== clientId
+      )
       if (intent === 'delete') {
         const channel = IPC.ptyClosed(dyingId)
-        for (const sub of others) this.send(sub, channel, { by: clientId })
+        for (const client of others) this.send(client, channel, { by: clientId })
       } else if (others.length > 0) {
         this.armRecycle(persistKey, dyingId, others)
       }

@@ -27,6 +27,14 @@ export interface PtyCreateOptions {
   agentId?: AgentId
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
+  /**
+   * Which VIEW of the session this is, WITHIN one connection. A second view in the same renderer
+   * (the kanban card modal) passes its own id so it co-attaches as an independently-detachable
+   * subscriber rather than a no-op join; absent ⇒ the PRIMARY view (the canvas node) and bit-for-bit
+   * the pre-viewer behavior. Invisible to peers — viewers collapse to the ClientId everywhere a
+   * subscriber maps to a person.
+   */
+  viewerId?: string
   /** When set, this PTY runs on a remote host over the project's ssh ControlMaster, in remote tmux.
    * `remoteHome` is the connection's resolved `$HOME`, used to build an ABSOLUTE remote
    * `CLAUDE_CONFIG_DIR` for a managed remote account (tmux `-e` values are not shell-expanded). */
@@ -304,12 +312,18 @@ export interface PtyApi {
   /** Updates the PTY when the terminal is resized. The pty runs at the SMALLEST subscriber's grid,
    *  so this is a REPORT, not a command — the effective size comes back over `onSize`.
    *  `cols`/`rows` null means "subscribed, but not viewing" (a parked terminal): the client leaves
-   *  the size set entirely, so a parked small window can't shrink everyone else's terminal. */
-  resize(sessionId: string, cols: number | null, rows: number | null): void
-  /** Flow control: pause (false) or resume (true) reading the PTY when xterm is backed up. */
-  setFlow(sessionId: string, resume: boolean): void
-  /** Detaches/terminates the PTY client (the underlying tmux session survives). */
-  kill(sessionId: string): void
+   *  the size set entirely, so a parked small window can't shrink everyone else's terminal.
+   *  `viewerId` (optional, trailing) scopes the size vote to one VIEW within the connection (the
+   *  kanban card modal); absent ⇒ the PRIMARY view. */
+  resize(sessionId: string, cols: number | null, rows: number | null, viewerId?: string): void
+  /** Flow control: pause (false) or resume (true) reading the PTY when xterm is backed up.
+   *  `viewerId` (optional, trailing) scopes the pause to one VIEW (a client's second xterm is
+   *  edge-latched independently); absent ⇒ the PRIMARY view. */
+  setFlow(sessionId: string, resume: boolean, viewerId?: string): void
+  /** Detaches/terminates ONE view of the PTY (the underlying tmux session survives). `viewerId`
+   *  (optional, trailing) names the view to detach — closing the kanban modal leaves the canvas
+   *  node attached; absent ⇒ the PRIMARY view. */
+  kill(sessionId: string, viewerId?: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session) because the node
    *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
   destroy(persistKey: string): void

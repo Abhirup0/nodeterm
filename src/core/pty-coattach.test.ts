@@ -1178,3 +1178,125 @@ describe('tmuxAttachFlags', () => {
     expect(tmuxAttachFlags(true)).toEqual(['-A'])
   })
 })
+
+// ── Viewer identity: one connection holds MANY independently-detachable views ──────────────────
+// The kanban card modal opens a SECOND terminal view of a node's tmux session INSIDE the same
+// desktop renderer. Both views present the SAME ClientId (one webContents), so the subscriber
+// ledger keys on the composite (ClientId, viewerId ?? PRIMARY): the modal is a real second
+// subscriber, its size votes independently, and closing it detaches ONLY it — the canvas node's
+// client (and everyone else's) is untouched. An absent viewerId is the PRIMARY view (the canvas
+// node), and every legacy call omits it, so it maps bit-for-bit to today's single-subscriber path.
+describe('viewer identity: multiple views per connection', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    return m
+  }
+  // create carries an optional viewerId in its options; kill/resize carry it as a TRAILING arg.
+  const createV = (
+    clientId: number,
+    viewerId: string | undefined,
+    cols = 80,
+    rows = 24,
+    persistKey = 'node-1'
+  ) =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey, viewerId }) as Promise<{
+      sessionId: string
+      fresh: boolean
+      screen?: string
+    }>
+  const killV = (clientId: number, sessionId: string, viewerId?: string) =>
+    fake.senderListeners[IPC.ptyKill](clientId, sessionId, viewerId)
+  const resizeV = (
+    clientId: number,
+    sessionId: string,
+    cols: number | null,
+    rows: number | null,
+    viewerId?: string
+  ) => fake.senderListeners[IPC.ptyResize](clientId, sessionId, cols, rows, viewerId)
+  const write = (clientId: number, sessionId: string, data: string) =>
+    fake.senderListeners[IPC.ptyWrite](clientId, sessionId, data)
+
+  it('a second VIEW in the same client joins the session (same id, painted, both subscribed)', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    const a = await createV(ALICE, undefined) // the canvas node (PRIMARY)
+    const b = await createV(ALICE, 'modal') // the kanban card modal, SAME renderer
+
+    expect(spawned).toHaveLength(1) // ONE pty, ONE tmux client
+    expect(b.sessionId).toBe(a.sessionId) // the modal JOINED the live session
+    expect(b.fresh).toBe(false) // …so no cold-restore replay
+    expect(b.screen).toBe('current screen') // …and its empty xterm is painted from the screen
+
+    // Data fans out to the shared renderer ONCE — both views listen on the same per-client channel,
+    // so a second send would double every byte in both xterms.
+    spawned[0].onDataCb?.('hi')
+    vi.advanceTimersByTime(20)
+    const data = fake.sent.filter((s) => s.channel === IPC.ptyData(a.sessionId))
+    expect(data.map((s) => s.to)).toEqual([ALICE])
+
+    // Two independent subscribers now share the client: the pty is released only when BOTH leave.
+    killV(ALICE, a.sessionId, 'modal')
+    expect(spawned[0].killed).toBe(false)
+    killV(ALICE, a.sessionId) // the PRIMARY view (no viewerId)
+    expect(spawned[0].killed).toBe(true)
+  })
+
+  it('killing the modal view detaches ONLY it — the primary keeps the session and still steers it', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('x')
+    const { sessionId } = await createV(ALICE, undefined)
+    await createV(ALICE, 'modal')
+
+    killV(ALICE, sessionId, 'modal') // close the card modal
+    expect(spawned[0].killed).toBe(false) // pty untouched — the canvas node still watches
+
+    write(ALICE, sessionId, 'ls\n') // the client still has a view, so it may still write
+    expect(spawned[0].writes).toEqual(['ls\n'])
+  })
+
+  it('a modal view resizing smaller shrinks the shared pty; closing it restores the primary size', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('x')
+    const { sessionId } = await createV(ALICE, undefined, 120, 40) // primary 120x40
+    await createV(ALICE, 'modal', 120, 40) // modal joins at the same grid
+
+    resizeV(ALICE, sessionId, 80, 24, 'modal') // the card modal is a smaller pane
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 }) // min shrinks the pty
+
+    killV(ALICE, sessionId, 'modal') // close the modal → its size vote is withdrawn
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 120, rows: 40 }) // back to the primary's size
+    expect(spawned[0].killed).toBe(false) // …and the pty stays alive for the canvas node
+  })
+
+  it('killing the PRIMARY (no viewerId) leaves the modal view holding the session alive', async () => {
+    const m = await manager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('x')
+    const { sessionId } = await createV(ALICE, undefined)
+    await createV(ALICE, 'modal')
+
+    killV(ALICE, sessionId) // the canvas node unmounts (PRIMARY) — but the modal is still open
+    expect(spawned[0].killed).toBe(false) // the modal keeps the session alive: NO releasePty
+
+    write(ALICE, sessionId, 'x') // the client is still a subscriber (via the modal), so it may steer
+    expect(spawned[0].writes).toEqual(['x'])
+
+    killV(ALICE, sessionId, 'modal') // the last view closes
+    expect(spawned[0].killed).toBe(true) // …only now is the pty released
+  })
+})

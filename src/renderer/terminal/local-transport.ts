@@ -9,10 +9,22 @@ import type { TerminalTransport } from './transport'
  * identical to the pre-injection global reads.
  */
 export class LocalTransport implements TerminalTransport {
-  /** Lazy `window.nodeTerminal` fallback (not an eager default parameter): the module-scope
-   *  `transport` singleton below is constructed at import time, and under node (vitest, no
-   *  jsdom) `window` doesn't exist yet — it must only be touched on first use. */
-  constructor(private readonly injectedApi?: NodeTerminalApi) {}
+  /**
+   * `injectedApi` — lazy `window.nodeTerminal` fallback (not an eager default parameter): the
+   * module-scope `transport` singleton below is constructed at import time, and under node (vitest,
+   * no jsdom) `window` doesn't exist yet — it must only be touched on first use.
+   *
+   * `viewerId` — which VIEW of a session this transport instance drives. The canvas node's
+   * transport omits it (the PRIMARY view = today's exact behavior); the kanban card modal
+   * constructs its own `LocalTransport(api, 'modal-<nodeId>')`, so its create/resize/setFlow/kill
+   * co-attach and detach as an independent subscriber of the SAME session, without disturbing the
+   * canvas node's client. The `TerminalTransport` method signatures are unchanged — the viewer is
+   * baked into the instance, not threaded through every call site.
+   */
+  constructor(
+    private readonly injectedApi?: NodeTerminalApi,
+    private readonly viewerId?: string
+  ) {}
 
   private get api(): NodeTerminalApi {
     return this.injectedApi ?? window.nodeTerminal
@@ -23,7 +35,10 @@ export class LocalTransport implements TerminalTransport {
   }
 
   create(options: PtyCreateOptions): Promise<PtyCreateResult> {
-    return this.pty.create(options)
+    // Append the viewer only when this instance has one, so a PRIMARY transport's options object is
+    // untouched (an explicit `viewerId: undefined` would still be PRIMARY, but keeping it absent is
+    // bit-for-bit the pre-viewer create).
+    return this.pty.create(this.viewerId ? { ...options, viewerId: this.viewerId } : options)
   }
 
   write(sessionId: string, data: string): void {
@@ -31,15 +46,15 @@ export class LocalTransport implements TerminalTransport {
   }
 
   resize(sessionId: string, cols: number | null, rows: number | null): void {
-    this.pty.resize(sessionId, cols, rows)
+    this.pty.resize(sessionId, cols, rows, this.viewerId)
   }
 
   setFlow(sessionId: string, resume: boolean): void {
-    this.pty.setFlow(sessionId, resume)
+    this.pty.setFlow(sessionId, resume, this.viewerId)
   }
 
   kill(sessionId: string): void {
-    this.pty.kill(sessionId)
+    this.pty.kill(sessionId, this.viewerId)
   }
 
   destroy(persistKey: string): void {
