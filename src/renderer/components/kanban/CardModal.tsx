@@ -25,6 +25,11 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
   const id = idRef.current
   const [editingTitle, setEditingTitle] = useState(false)
   const [title, setTitle] = useState(session.title)
+  // Ref mirror: the capture-phase listener below closes over stale state otherwise.
+  const editingTitleRef = useRef(false)
+  useEffect(() => {
+    editingTitleRef.current = editingTitle
+  }, [editingTitle])
 
   useEffect(() => {
     pushDialog(id)
@@ -36,6 +41,11 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
       if (e.key !== 'Escape' || !isTopDialog(id)) return
       e.preventDefault()
       e.stopPropagation()
+      if (editingTitleRef.current) {
+        // Esc during a rename cancels the EDIT, not the modal.
+        setEditingTitle(false)
+        return
+      }
       onClose()
     }
     // Capture phase: beat the canvas/global keydown listeners to the Escape.
@@ -63,11 +73,8 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
               onChange={(e) => setTitle(e.target.value)}
               onBlur={commitTitle}
               onKeyDown={(e) => {
+                // Esc is owned by the capture-phase handler (cancels the edit).
                 if (e.key === 'Enter') commitTitle()
-                if (e.key === 'Escape') {
-                  e.stopPropagation()
-                  setEditingTitle(false)
-                }
               }}
             />
           ) : (
