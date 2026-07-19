@@ -5,6 +5,11 @@ import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { startUsageService } from '../../core/usage/usage-service'
+import {
+  setMirrorUsageProvider,
+  buildMirrorUsage,
+  flush as flushAgentStatusMirror
+} from '../../core/agent-status-mirror'
 import { IPC } from '../../shared/ipc'
 
 /** Register the Phase-3a handler surface (fs + git + commit) on the server platform.
@@ -40,7 +45,23 @@ export function registerCoreHandlers(
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. Poll only while a browser is attached: with
   // no client there is nobody to show it to, and the usage endpoint's request budget is tight.
-  startUsageService({ shouldPoll: () => platform.clientIds().length > 0 })
+  // Also feeds the agent-status mirror's per-account `usage` block for the phone (mobile-usage-inbox):
+  // poll all local managed accounts, and re-flush the mirror on every cache update.
+  const localClaudeAccountIds = (): string[] =>
+    (deps.getSettings().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  const usageService = startUsageService({
+    shouldPoll: () => platform.clientIds().length > 0,
+    localAccounts: localClaudeAccountIds,
+    onCacheUpdate: () => {
+      void flushAgentStatusMirror()
+    }
+  })
+  // The provider is consulted fresh at every flush, pairing the usage service's cache with the
+  // settings account labels. Dropped from SSH slices by filterMirrorForNodes (no SSH server-side
+  // anyway). Wired here (not index.ts) since the usage service is created here.
+  setMirrorUsageProvider(() =>
+    buildMirrorUsage(usageService.snapshot(), deps.getSettings().claudeAccounts ?? [], Date.now())
+  )
 
   return { gitService }
 }

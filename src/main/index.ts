@@ -22,7 +22,11 @@ import {
   onMirrorFlush,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
+  recordRawToolEvent,
+  recordContextUsage,
   setMirrorSettingsProvider,
+  setMirrorUsageProvider,
+  buildMirrorUsage,
   type MirrorSettings
 } from '../core/agent-status-mirror'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
@@ -754,6 +758,15 @@ app.whenReady().then(async () => {
   }
   const contextTail = createContextTail((payload) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
+    // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
+    // sessionId; map it back to the node via the raw-listener's nodeId↔sessionId association.
+    const cw = payload as { sessionId?: string; usedPercent?: number }
+    for (const [nid, sid] of nodeContextSession) {
+      if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
+        recordContextUsage(nid, cw.usedPercent)
+        break
+      }
+    }
   }, { onTaskNotification })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
@@ -950,6 +963,10 @@ app.whenReady().then(async () => {
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId !== 'claude') return
+    // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
+    // Runs BEFORE the local/remote split so it covers remote (SSH) nodes too — it needs only
+    // tool_name/tool_input, never the transcript path the split routes on.
+    recordRawToolEvent(nodeId, payload)
     const p = payload as {
       hook_event_name?: string
       session_id?: string
@@ -1118,7 +1135,21 @@ app.whenReady().then(async () => {
 
   initContextLink(ptyManager)
   initCanvasControl()
-  initClaudeUsage(win)
+  // Usage service + the mobile `usage` mirror block (mobile-usage-inbox): poll all local managed
+  // accounts alongside the system account, and re-flush the mirror on every cache update. The
+  // provider pairs the service's cache with the settings account labels at flush time; SSH slices
+  // drop it (filterMirrorForNodes) — a host answers only for its own local credentials.
+  const localClaudeAccountIds = (): string[] =>
+    (settingsStore.get().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  const usageService = initClaudeUsage(win, {
+    localAccounts: localClaudeAccountIds,
+    onCacheUpdate: () => {
+      void flushAgentStatusMirror()
+    }
+  })
+  setMirrorUsageProvider(() =>
+    buildMirrorUsage(usageService.snapshot(), settingsStore.get().claudeAccounts ?? [], Date.now())
+  )
   initTelemetry(() => settingsStore.get())
   // Declared before initLicense so its onChange hook can re-reconcile the standing host once the
   // async launch-time entitlement refresh settles (fixes the boot race where Pro isn't yet valid

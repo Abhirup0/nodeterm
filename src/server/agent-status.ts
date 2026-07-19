@@ -10,7 +10,7 @@
 import { resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
-import { recordAgentEvent } from '../core/agent-status-mirror'
+import { recordAgentEvent, recordRawToolEvent, recordContextUsage } from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { setNodeTranscript } from '../core/context-link'
@@ -79,6 +79,15 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
     createContextTail(
       (payload) => {
         platform.broadcast(IPC.contextUpdate, payload)
+        // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
+        // sessionId; map it back to the node via the same association the raw listener records.
+        const cw = payload as { sessionId?: string; usedPercent?: number }
+        for (const [nid, sid] of nodeContextSession) {
+          if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
+            recordContextUsage(nid, cw.usedPercent)
+            break
+          }
+        }
       },
       { onTaskNotification }
     )
@@ -103,6 +112,9 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hooks.setRawListener((agentId, nodeId, payload) => {
     if (agentId !== 'claude') return
+    // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
+    // Independent of the transcript-tailing below (no path needed), so it runs first.
+    recordRawToolEvent(nodeId, payload)
     const p = payload as {
       hook_event_name?: string
       session_id?: string

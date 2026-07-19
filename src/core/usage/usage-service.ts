@@ -183,6 +183,17 @@ export interface UsageServiceOptions {
    * informational, so a stale snapshot beats polling an idle app into 429s.
    */
   shouldPoll?: () => boolean
+  /**
+   * Local managed accounts to poll ALONGSIDE the system account on the background cadence (spec:
+   * mobile-usage-inbox). Returns their account ids (settings' non-`host`, non-`pending` claude
+   * accounts). The shell owns this because settings live in the shell. Absent ⇒ system only.
+   */
+  localAccounts?: () => string[]
+  /**
+   * Fired after any account's cache is (re)populated — the mirror wires this to a flush so the
+   * phone-facing `usage` block refreshes when a poll lands. Best-effort; must never throw.
+   */
+  onCacheUpdate?: () => void
 }
 
 export interface UsageService {
@@ -192,6 +203,8 @@ export interface UsageService {
   refresh(accountId?: string): Promise<ClaudeUsage>
   /** Refresh the system account if the debounce has elapsed — for shell focus/attach events. */
   refreshIfStale(): void
+  /** Every cached usage row (system account first). Feeds the agent-status mirror's `usage` block. */
+  snapshot(): { accountId: string | null; usage: ClaudeUsage }[]
   /** Stop the poll timer. */
   dispose(): void
 }
@@ -213,6 +226,12 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     lastFetchAt.set(key, u.updatedAt)
     // Only the system account feeds the push channel — the collapsed chip tracks it.
     if (key === '') platform().broadcast(IPC.usageUpdate, u)
+    // Notify the mirror (fail-open) so its phone-facing `usage` block re-assembles from the cache.
+    try {
+      opts.onCacheUpdate?.()
+    } catch {
+      // a mirror flush must never break the usage cache update
+    }
   }
 
   const run = async (accountId?: string): Promise<ClaudeUsage> => {
@@ -278,14 +297,28 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     return runProviders()
   })
 
+  // Poll the system account AND every local managed account (spec: mobile-usage-inbox), so the
+  // agent-status mirror can advertise per-account usage to the phone — not just the collapsed chip's
+  // system row. Each account is one request per cadence; the request-budget gate (`shouldPoll`)
+  // still fronts the whole sweep.
+  const pollAll = (): void => {
+    if (!shouldPoll()) return
+    void run()
+    let ids: string[] = []
+    try {
+      ids = opts.localAccounts?.() ?? []
+    } catch {
+      ids = [] // a throwing provider must never break the poll
+    }
+    for (const id of ids) if (id) void run(id)
+  }
+
   // The warm-up fetch goes through the same gate as the poll: it IS a poll, just the first one.
   // On desktop a focused window warms the cache before the pill mounts; on the server, boot
   // happens with no browser attached, so this correctly does nothing until someone connects
   // (and UsageIndicator fetches on mount regardless, so nothing is lost either way).
-  if (shouldPoll()) void run()
-  const interval = setInterval(() => {
-    if (shouldPoll()) void run()
-  }, POLL_MS)
+  pollAll()
+  const interval = setInterval(pollAll, POLL_MS)
   // Node keeps the process alive for pending timers; the server shell should exit on its own terms.
   interval.unref?.()
 
@@ -295,6 +328,11 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     refreshIfStale: () => {
       if (Date.now() - (lastFetchAt.get('') ?? 0) >= REFETCH_DEBOUNCE_MS) void run()
     },
+    snapshot: () =>
+      // System account (key '') first, then managed accounts in insertion order.
+      [...last.entries()]
+        .sort((a, b) => (a[0] === '' ? -1 : b[0] === '' ? 1 : 0))
+        .map(([key, usage]) => ({ accountId: key === '' ? null : key, usage })),
     dispose: () => clearInterval(interval)
   }
 }

@@ -65,6 +65,158 @@ export interface MirrorFile {
    *  on old files and whenever no settings provider is wired — the file shape is then byte-for-byte
    *  identical to before this block existed. */
   settings?: MirrorSettings
+  /** Local accounts' provider rate-limit usage (spec: mobile-usage-inbox). Additive/optional —
+   *  absent on old files, and dropped from SSH slices (a host answers only for its own creds). */
+  usage?: MirrorUsage
+  /** Agent inbox: an event feed + per-node "what it's doing right now" (spec: mobile-usage-inbox).
+   *  Additive/optional. Unlike `usage`, SSH slices KEEP a filtered inbox (their own nodes only). */
+  inbox?: MirrorInbox
+}
+
+// ---- Usage block (mobile-usage-inbox) ------------------------------------------------------
+
+/** Snapshot of the shared `UsageLimit`, tolerated LOOSE on purpose: a parallel branch is
+ *  generalizing that type (severity may be `string | null`, windowMinutes may appear). The mirror
+ *  passes entries through verbatim — every field but `kind`/`usedPercent` is optional here, and
+ *  the defensive mapper below (`?? null`) compiles against either shape of the source type. */
+export interface MirrorUsageLimit {
+  kind: string
+  group?: string | null
+  usedPercent: number
+  severity?: string | null
+  resetsAt?: number | null
+  windowMinutes?: number | null
+  scopeLabel?: string | null
+  isActive?: boolean
+}
+export interface MirrorUsageAccount {
+  /** null = the system `~/.claude` account. */
+  accountId: string | null
+  /** Account label from settings (managed accounts); null for the system account. */
+  label: string | null
+  email: string | null
+  agentId: string
+  /** 'ok' | 'unavailable' | 'error' | 'fetching' — passed through from the usage service. */
+  status: string
+  updatedAt: number
+  limits: MirrorUsageLimit[]
+}
+export interface MirrorUsage {
+  updatedAt: number
+  /** System account first, then managed local accounts. */
+  accounts: MirrorUsageAccount[]
+}
+
+/** One cached usage row from the usage service. Deliberately STRUCTURAL (not `import`ed from
+ *  `@shared/types`) so this file does not couple to a `ClaudeUsage` shape a parallel branch is
+ *  mid-flight editing — a real `ClaudeUsage` is assignable to this loose shape. */
+export interface UsageSnapshotEntry {
+  accountId: string | null
+  usage: {
+    email?: string | null
+    updatedAt?: number
+    status?: string
+    limits?: ReadonlyArray<{
+      kind: string
+      usedPercent: number
+      group?: string | null
+      severity?: string | null
+      resetsAt?: number | null
+      windowMinutes?: number | null
+      scopeLabel?: string | null
+      isActive?: boolean
+    }>
+  }
+}
+
+/**
+ * Assemble the `usage` block from the usage service's cached snapshots + the settings account
+ * list (for labels). Pure. Maps each `UsageLimit` through DEFENSIVELY (`?? null`) so it compiles
+ * whether the source's `severity` is `string` or `string | null`, and never re-derives severity
+ * or window from the percentage — those are the provider's call (see claude-usage-map.ts).
+ * Returns `undefined` when there is nothing to advertise, so the file keeps its old shape.
+ */
+export function buildMirrorUsage(
+  snapshot: ReadonlyArray<UsageSnapshotEntry>,
+  accounts: ReadonlyArray<{ id: string; label?: string | null; email?: string | null }>,
+  now: number
+): MirrorUsage | undefined {
+  if (snapshot.length === 0) return undefined
+  const byId = new Map(accounts.map((a) => [a.id, a]))
+  // System account (accountId null) first, then everything else in given order.
+  const ordered = [...snapshot].sort((a, b) => {
+    if (a.accountId === b.accountId) return 0
+    if (a.accountId === null) return -1
+    if (b.accountId === null) return 1
+    return 0
+  })
+  const mapped: MirrorUsageAccount[] = ordered.map((e) => {
+    const acct = e.accountId ? byId.get(e.accountId) : undefined
+    const u = e.usage
+    return {
+      accountId: e.accountId,
+      label: acct?.label ?? null,
+      email: u.email ?? acct?.email ?? null,
+      agentId: 'claude',
+      status: u.status ?? 'unavailable',
+      updatedAt: u.updatedAt ?? now,
+      limits: (u.limits ?? []).map((l) => ({
+        kind: l.kind,
+        group: l.group ?? null,
+        usedPercent: l.usedPercent,
+        // `?? null` here is the whole point: it type-checks against BOTH a `string` and a
+        // `string | null` severity (the parallel branch's in-flight generalization).
+        severity: l.severity ?? null,
+        resetsAt: l.resetsAt ?? null,
+        windowMinutes: l.windowMinutes ?? null,
+        scopeLabel: l.scopeLabel ?? null,
+        isActive: l.isActive ?? false
+      }))
+    }
+  })
+  const updatedAt = mapped.reduce((m, a) => Math.max(m, a.updatedAt), 0) || now
+  return { updatedAt, accounts: mapped }
+}
+
+// ---- Inbox block (mobile-usage-inbox) ------------------------------------------------------
+
+/** Feed cap — oldest events fall off the front once the array exceeds this. */
+export const INBOX_EVENTS_CAP = 50
+export const INBOX_TITLE_MAX = 120
+export const INBOX_DETAIL_MAX = 240
+export const INBOX_ACTIVITY_MAX = 80
+
+export interface InboxEvent {
+  /** Monotonic per writer: `${ts}-${seq}`. */
+  id: string
+  ts: number
+  nodeId: string
+  agentId?: string
+  sessionId?: string
+  kind: 'approval' | 'question' | 'done'
+  /** First line, ≤120 chars. */
+  title: string
+  /** ≤240 chars — lastMessage snippet. */
+  detail?: string
+  /** done: the user hit Esc/Ctrl-C. */
+  interrupted?: boolean
+  /** approval/question: the node has since left blocked/waiting (moves to the phone's archive). */
+  resolved?: boolean
+}
+export interface InboxNodeNow {
+  /** ≤80 chars — "Editing foo.ts", "Running npm test", "Reading bar.ts". */
+  activity?: string
+  /** Raw tool name the activity came from. */
+  tool?: string
+  /** Context-window fill 0–100 (from context-tail), when known. */
+  contextPercent?: number
+  updatedAt: number
+}
+export interface MirrorInbox {
+  /** Oldest→newest, capped at INBOX_EVENTS_CAP. */
+  events: InboxEvent[]
+  /** Per-node "what it's doing right now". */
+  nodes: Record<string, InboxNodeNow>
 }
 
 /**
@@ -112,11 +264,25 @@ export function reduceEntry(
  *
  * Deliberately drops the local `settings` block: a slice carries per-host settings that the SSH
  * push injects itself (Task 2 of mobile-agent-launch-parity), never this host's local block.
+ *
+ * `usage` is likewise DROPPED (spec: mobile-usage-inbox): a remote host's account credentials
+ * live on that host, so the desktop cannot answer for them — a host running nodeterm itself
+ * writes its own mirror with its own usage. `inbox` is KEPT but filtered to the slice's node ids
+ * (both the `events` feed and the per-node `nodes` map).
  */
 export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<string>): MirrorFile {
   const nodes: MirrorFile['nodes'] = {}
   for (const [id, e] of Object.entries(doc.nodes)) if (nodeIds.has(id)) nodes[id] = e
-  return { v: doc.v, updatedAt: doc.updatedAt, nodes }
+  const out: MirrorFile = { v: doc.v, updatedAt: doc.updatedAt, nodes }
+  if (doc.inbox) {
+    const inboxNodes: Record<string, InboxNodeNow> = {}
+    for (const [id, n] of Object.entries(doc.inbox.nodes)) if (nodeIds.has(id)) inboxNodes[id] = n
+    out.inbox = {
+      events: doc.inbox.events.filter((e) => nodeIds.has(e.nodeId)),
+      nodes: inboxNodes
+    }
+  }
+  return out
 }
 
 /** Prune expired entries and shape the on-disk file. Pure; `now` injected for testability.
@@ -126,7 +292,9 @@ export function buildFile(
   nodes: Record<string, MirrorEntry>,
   now: number,
   expireMs = EXPIRE_MS,
-  settings?: MirrorSettings
+  settings?: MirrorSettings,
+  usage?: MirrorUsage,
+  inbox?: MirrorInbox
 ): MirrorFile {
   const out: MirrorFile = { v: 1, updatedAt: now, nodes: {} }
   for (const [id, e] of Object.entries(nodes)) {
@@ -136,7 +304,91 @@ export function buildFile(
     out.nodes[id] = { state: e.state, agentId: e.agentId, sessionId: e.sessionId, updatedAt: e.updatedAt }
   }
   if (settings) out.settings = settings
+  if (usage) out.usage = usage
+  // Only attach a non-empty inbox — an empty one would gratuitously change the old-file shape.
+  if (inbox && (inbox.events.length > 0 || Object.keys(inbox.nodes).length > 0)) out.inbox = inbox
   return out
+}
+
+// ---- Inbox production (pure helpers) -------------------------------------------------------
+
+/** Clip a string to `max`, appending an ellipsis when it had to cut. */
+function clip(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s
+}
+
+/** First non-empty line of a message, trimmed and clipped. '' when absent/blank. */
+export function firstLine(msg: string | undefined, max: number): string {
+  if (!msg) return ''
+  const line = (msg.split('\n').find((l) => l.trim()) ?? '').trim()
+  return clip(line, max)
+}
+
+/** Basename of a slash- or backslash-separated path (no `path` import: works on remote paths too). */
+function basename(p: string): string {
+  const parts = p.split(/[\\/]/)
+  return parts[parts.length - 1] || p
+}
+
+/**
+ * Map a raw hook tool invocation to a human "what it's doing now" line (spec: mobile-usage-inbox).
+ * Pure; clipped to INBOX_ACTIVITY_MAX. Unknown tools fall back to "Using <tool>".
+ */
+export function toolActivity(toolName: string, toolInput: Record<string, unknown> | undefined): string {
+  const ti = toolInput ?? {}
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+  let out: string
+  switch (toolName) {
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+      out = `Editing ${basename(str(ti.file_path)) || 'file'}`
+      break
+    case 'NotebookEdit':
+      out = `Editing ${basename(str(ti.notebook_path) || str(ti.file_path)) || 'notebook'}`
+      break
+    case 'Read':
+      out = `Reading ${basename(str(ti.file_path) || str(ti.notebook_path)) || 'file'}`
+      break
+    case 'Bash': {
+      const cmd = str(ti.command).replace(/\s+/g, ' ').trim()
+      out = `Running ${cmd ? clip(cmd, 60) : 'command'}`
+      break
+    }
+    case 'Grep':
+    case 'Glob':
+      out = `Searching ${str(ti.pattern) || '…'}`
+      break
+    case 'Task':
+      out = `Delegating: ${str(ti.description) || str(ti.subagent_type) || '…'}`
+      break
+    case 'WebFetch': {
+      const url = str(ti.url)
+      let host = url
+      try {
+        host = new URL(url).host
+      } catch {
+        // not a parseable URL — show the raw string
+      }
+      out = `Fetching ${host || '…'}`
+      break
+    }
+    case 'WebSearch':
+      out = `Fetching ${str(ti.query) || '…'}`
+      break
+    default:
+      out = `Using ${toolName}`
+  }
+  return clip(out, INBOX_ACTIVITY_MAX)
+}
+
+/** Newest UNRESOLVED approval/question event for a node (dedup lookup), or undefined. */
+function newestUnresolved(events: ReadonlyArray<InboxEvent>, nodeId: string): InboxEvent | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]
+    if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) return e
+  }
+  return undefined
 }
 
 // ---- Stateful singleton (production side) --------------------------------------------------
@@ -149,6 +401,35 @@ const flushListeners = new Set<(doc: MirrorFile) => void>()
 // Supplies the host-level settings block, consulted fresh on every flush (so a mid-session
 // permission-mode / account change is picked up without re-wiring). Null = no block written.
 let settingsProvider: (() => MirrorSettings | undefined) | null = null
+// Supplies the local-accounts usage block, consulted fresh on every flush (so a poll landing
+// between flushes is picked up). Null = no `usage` block written (byte-identical old shape).
+let usageProvider: (() => MirrorUsage | undefined) | null = null
+
+// ---- Inbox state (feed + per-node activity) ------------------------------------------------
+// The event feed is oldest→newest and capped at INBOX_EVENTS_CAP; `inboxNodes` is the per-node
+// "what it's doing right now" (activity from raw tool events + context% from context-tail). Both
+// ride the same single write path as the main node map — there is one debounced flush.
+let inboxEvents: InboxEvent[] = []
+const inboxNodes = new Map<string, InboxNodeNow>()
+let inboxSeq = 0
+
+function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
+  const id = `${e.ts}-${++inboxSeq}`
+  inboxEvents.push({ id, ...e })
+  // Cap the feed from the front (oldest fall off).
+  if (inboxEvents.length > INBOX_EVENTS_CAP) {
+    inboxEvents = inboxEvents.slice(inboxEvents.length - INBOX_EVENTS_CAP)
+  }
+}
+
+/** Mark a node's unresolved approval/question events resolved (it left blocked/waiting). */
+function resolveUnresolvedFor(nodeId: string): void {
+  for (const e of inboxEvents) {
+    if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
+      e.resolved = true
+    }
+  }
+}
 
 /**
  * Wire (or clear with `null`) the provider for the additive host-level settings block. Called
@@ -165,6 +446,24 @@ function safeSettings(): MirrorSettings | undefined {
     return settingsProvider?.() ?? undefined
   } catch {
     return undefined // provider must never break the flush
+  }
+}
+
+/**
+ * Wire (or clear with `null`) the provider for the additive `usage` block. Called once per shell
+ * on launch; absent ⇒ the mirror writes no `usage` key. The provider is consulted fresh on every
+ * flush, so a usage poll that lands between flushes is picked up without re-wiring.
+ */
+export function setMirrorUsageProvider(p: (() => MirrorUsage | undefined) | null): void {
+  usageProvider = p
+}
+
+/** Read the usage provider, failing open (a throwing/absent provider yields no block). */
+function safeUsage(): MirrorUsage | undefined {
+  try {
+    return usageProvider?.() ?? undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -196,16 +495,130 @@ function resolveFile(): string | null {
   }
 }
 
-/** Fold a normalized agent event into the mirror and schedule a debounced write. */
+/** Fold a normalized agent event into the mirror (main state + inbox feed) and schedule a
+ *  debounced write. Called with EVERY normalized event by both shells. */
 export function recordAgentEvent(ev: NormalizedAgentEvent): void {
   if (!ev?.nodeId) return
-  state.set(ev.nodeId, reduceEntry(state.get(ev.nodeId), ev, Date.now()))
+  const nodeId = ev.nodeId
+  const now = Date.now()
+  const prev = state.get(nodeId)
+  const prevState = prev?.state
+  const next = reduceEntry(prev, ev, now)
+  state.set(nodeId, next)
+  produceInboxFromState(nodeId, ev, prevState, next.state, now)
   scheduleWrite()
 }
 
-/** Remove a node (call on permanent destroy). Schedules a write so the file drops it. */
+/**
+ * Inbox event production off a state transition (spec: mobile-usage-inbox). Reads the transition
+ * `prevState → nextState` that `reduceEntry` just computed (so the same done-holdoff / newTurn
+ * semantics gate the feed as gate the badge — no duplicate done inside a holdoff, no resurrection).
+ */
+function produceInboxFromState(
+  nodeId: string,
+  ev: NormalizedAgentEvent,
+  prevState: AgentState | undefined,
+  nextState: AgentState | undefined,
+  now: number
+): void {
+  // Leaving blocked/waiting (any newer, different state — incl. a session reset to idle) resolves
+  // that node's pending approval/question cards; they move to the phone's archive.
+  if ((prevState === 'blocked' || prevState === 'waiting') && nextState !== prevState) {
+    resolveUnresolvedFor(nodeId)
+  }
+  const baseEvent = { ts: now, nodeId, agentId: ev.agentId, sessionId: ev.sessionId }
+  // approval/question dedup is TITLE-based (not edge-based): a re-asserted blocked with the SAME
+  // ask is a no-op, but a genuinely different ask still lands — so the guard can't be a plain
+  // "same-state, skip". `done` alone is edge-guarded (one per turn).
+  if (nextState === 'blocked') {
+    const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Needs approval'
+    if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
+    pushInboxEvent({ ...baseEvent, kind: 'approval', title })
+  } else if (nextState === 'waiting') {
+    const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Waiting for input'
+    if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
+    pushInboxEvent({ ...baseEvent, kind: 'question', title })
+  } else if (nextState === 'done' && prevState !== 'done') {
+    // The turn ended: emit one `done` on the edge into done (reduceEntry's holdoff keeps a late
+    // working from re-entering, and the normalizer collapses an Esc-spam into one done).
+    const detail = firstLine(ev.lastMessage, INBOX_DETAIL_MAX) || undefined
+    pushInboxEvent({
+      ...baseEvent,
+      kind: 'done',
+      title: ev.interrupted ? 'Stopped' : 'Finished',
+      ...(detail ? { detail } : {}),
+      ...(ev.interrupted ? { interrupted: true } : {})
+    })
+    // A finished turn is no longer "doing" anything — clear its live activity line.
+    clearActivity(nodeId, now)
+  }
+}
+
+/** Clear a node's live activity (keep any contextPercent). Idempotent; no-op if nothing set. */
+function clearActivity(nodeId: string, now: number): void {
+  const n = inboxNodes.get(nodeId)
+  if (!n || n.activity === undefined) return
+  inboxNodes.set(nodeId, { contextPercent: n.contextPercent, updatedAt: now })
+}
+
+/**
+ * Fold a RAW hook tool event into the per-node "what it's doing now" line (spec:
+ * mobile-usage-inbox). Called from the shells' `setRawListener` for claude events. PreToolUse sets
+ * the activity; Stop / SessionEnd clear it. Other events are ignored. Schedules a write only when
+ * the line actually changes (raw POSTs are bursty).
+ */
+export function recordRawToolEvent(nodeId: string, payload: Record<string, unknown>): void {
+  if (!nodeId) return
+  const hook = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : ''
+  const now = Date.now()
+  if (hook === 'PreToolUse') {
+    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : ''
+    if (!toolName) return
+    const toolInput =
+      payload.tool_input && typeof payload.tool_input === 'object'
+        ? (payload.tool_input as Record<string, unknown>)
+        : undefined
+    const activity = toolActivity(toolName, toolInput)
+    const cur = inboxNodes.get(nodeId)
+    if (cur?.activity === activity && cur?.tool === toolName) return // no change
+    inboxNodes.set(nodeId, { activity, tool: toolName, contextPercent: cur?.contextPercent, updatedAt: now })
+    scheduleWrite()
+  } else if (hook === 'Stop' || hook === 'SessionEnd') {
+    const before = inboxNodes.get(nodeId)?.activity
+    clearActivity(nodeId, now)
+    if (before !== undefined) scheduleWrite()
+  }
+}
+
+/**
+ * Record a node's context-window fill (0–100) from the context-tail (spec: mobile-usage-inbox).
+ * Called where the shells broadcast IPC.contextUpdate. Schedules a write only on change.
+ */
+export function recordContextUsage(nodeId: string, percent: number): void {
+  if (!nodeId || typeof percent !== 'number' || !Number.isFinite(percent)) return
+  const clamped = Math.min(100, Math.max(0, percent))
+  const cur = inboxNodes.get(nodeId)
+  if (cur?.contextPercent === clamped) return
+  inboxNodes.set(nodeId, { activity: cur?.activity, tool: cur?.tool, contextPercent: clamped, updatedAt: Date.now() })
+  scheduleWrite()
+}
+
+/**
+ * Remove a node (call on permanent destroy). Its `nodes` entries (main + inbox activity) drop,
+ * but its inbox EVENTS stay as feed history — marked resolved so the phone archives them.
+ * Schedules a write so the file reflects the removal.
+ */
 export function clearNode(nodeId: string): void {
-  if (state.delete(nodeId)) scheduleWrite()
+  let changed = state.delete(nodeId)
+  if (inboxNodes.delete(nodeId)) changed = true
+  // History stays; unresolved cards for a gone node can never be answered → archive them.
+  for (const e of inboxEvents) {
+    if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
+      e.resolved = true
+      changed = true
+    }
+  }
+  if (changed) scheduleWrite()
 }
 
 function scheduleWrite(): void {
@@ -223,9 +636,12 @@ export async function flush(): Promise<void> {
   const file = resolveFile()
   if (!file) return
   const now = Date.now()
-  const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings())
+  const inbox: MirrorInbox = { events: inboxEvents, nodes: Object.fromEntries(inboxNodes) }
+  const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox)
   // Also drop expired entries from memory so the map itself can't grow without bound.
   for (const [id, e] of state) if (now - e.updatedAt > EXPIRE_MS) state.delete(id)
+  // Prune stale per-node activity the same way (events stay — they are capped feed history).
+  for (const [id, n] of inboxNodes) if (now - n.updatedAt > EXPIRE_MS) inboxNodes.delete(id)
   for (const cb of flushListeners) {
     try {
       cb(doc)
@@ -244,7 +660,7 @@ export async function flush(): Promise<void> {
 
 // ---- Test helpers --------------------------------------------------------------------------
 
-/** Reset all module state (in-memory map + config + listeners). Test-only. */
+/** Reset all module state (in-memory map + config + listeners + inbox). Test-only. */
 export function _resetForTest(): void {
   state.clear()
   targetFile = null
@@ -252,9 +668,18 @@ export function _resetForTest(): void {
   writeTimer = null
   flushListeners.clear()
   settingsProvider = null
+  usageProvider = null
+  inboxEvents = []
+  inboxNodes.clear()
+  inboxSeq = 0
 }
 
 /** Snapshot the in-memory map. Test-only. */
 export function _snapshot(): Record<string, MirrorEntry> {
   return Object.fromEntries(state)
+}
+
+/** Snapshot the in-memory inbox. Test-only. */
+export function _inboxSnapshot(): MirrorInbox {
+  return { events: inboxEvents.map((e) => ({ ...e })), nodes: Object.fromEntries(inboxNodes) }
 }

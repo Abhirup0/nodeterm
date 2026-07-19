@@ -9,16 +9,25 @@ import {
   filterMirrorForNodes,
   onMirrorFlush,
   recordAgentEvent,
+  recordRawToolEvent,
+  recordContextUsage,
   clearNode,
   flush,
   initAgentStatusMirror,
   setMirrorSettingsProvider,
+  setMirrorUsageProvider,
+  buildMirrorUsage,
+  toolActivity,
+  firstLine,
   _resetForTest,
   _snapshot,
+  _inboxSnapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
+  INBOX_EVENTS_CAP,
   type MirrorEntry,
-  type MirrorFile
+  type MirrorFile,
+  type MirrorUsage
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -279,5 +288,293 @@ describe('settings block', () => {
     setMirrorSettingsProvider(() => { throw new Error('boom') })
     await flush()
     expect('settings' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
+  })
+})
+
+// ---- mobile-usage-inbox ---------------------------------------------------------------------
+
+describe('inbox event production (via recordAgentEvent)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('emits an approval on blocked and dedups a same-title re-assertion', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write to /etc/hosts' }))
+    let ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0].kind).toBe('approval')
+    expect(ib.events[0].title).toBe('Approve write to /etc/hosts')
+    expect(ib.events[0].resolved).toBeUndefined()
+    // Same blocked ask again (still blocked) → deduped, no second event.
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write to /etc/hosts' }))
+    expect(_inboxSnapshot().events).toHaveLength(1)
+    // A genuinely different ask while still blocked DOES land.
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve rm -rf /tmp/x' }))
+    ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(2)
+    expect(ib.events[1].title).toBe('Approve rm -rf /tmp/x')
+  })
+
+  it('titles blocked/waiting from lastMessage first line, with fallbacks', () => {
+    recordAgentEvent(ev({ nodeId: 'a', state: 'blocked' }))
+    recordAgentEvent(ev({ nodeId: 'b', state: 'waiting' }))
+    recordAgentEvent(ev({ nodeId: 'c', state: 'waiting', lastMessage: 'Which file?\nsecond line' }))
+    const ev3 = _inboxSnapshot().events
+    expect(ev3.find((e) => e.nodeId === 'a')!.title).toBe('Needs approval')
+    expect(ev3.find((e) => e.nodeId === 'b')!.title).toBe('Waiting for input')
+    const q = ev3.find((e) => e.nodeId === 'c')!
+    expect(q.kind).toBe('question')
+    expect(q.title).toBe('Which file?')
+  })
+
+  it('resolves unresolved approval/question when the node leaves blocked/waiting', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve?' }))
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+    recordAgentEvent(ev({ state: 'working' })) // left blocked
+    expect(_inboxSnapshot().events[0].resolved).toBe(true)
+  })
+
+  it('session reset also resolves a pending question', () => {
+    recordAgentEvent(ev({ state: 'waiting', lastMessage: 'Pick one' }))
+    recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' }))
+    expect(_inboxSnapshot().events[0].resolved).toBe(true)
+  })
+
+  it('emits one done per turn with a detail snippet and passes interrupted through', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'done', lastMessage: 'All wired up.\nplus extra' }))
+    let ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0]).toMatchObject({ kind: 'done', title: 'Finished', detail: 'All wired up.' })
+    expect(ib.events[0].interrupted).toBeUndefined()
+    // A duplicate done (no new turn) does not append a second event.
+    recordAgentEvent(ev({ state: 'done' }))
+    expect(_inboxSnapshot().events).toHaveLength(1)
+    // A new turn that ends interrupted titles "Stopped".
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'done', interrupted: true }))
+    ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(2)
+    expect(ib.events[1]).toMatchObject({ kind: 'done', title: 'Stopped', interrupted: true })
+  })
+
+  it('caps the feed at INBOX_EVENTS_CAP, dropping oldest', () => {
+    const total = INBOX_EVENTS_CAP + 10
+    for (let i = 0; i < total; i++) {
+      recordAgentEvent(ev({ state: 'working', newTurn: true }))
+      recordAgentEvent(ev({ state: 'done', lastMessage: `turn ${i}` }))
+    }
+    const events = _inboxSnapshot().events
+    expect(events).toHaveLength(INBOX_EVENTS_CAP)
+    // The newest survives, the earliest fell off the front.
+    expect(events[events.length - 1].detail).toBe(`turn ${total - 1}`)
+    expect(events[0].detail).toBe(`turn ${total - INBOX_EVENTS_CAP}`)
+  })
+
+  it('clearNode drops the node activity but keeps its events, marked resolved', () => {
+    recordAgentEvent(ev({ nodeId: 'x', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'x', state: 'blocked', lastMessage: 'Q' }))
+    recordContextUsage('x', 40)
+    clearNode('x')
+    const ib = _inboxSnapshot()
+    expect(ib.nodes.x).toBeUndefined()
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0].resolved).toBe(true)
+  })
+})
+
+describe('activity mapping (toolActivity + recordRawToolEvent)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('maps each tool to its activity line', () => {
+    expect(toolActivity('Edit', { file_path: '/a/b/foo.ts' })).toBe('Editing foo.ts')
+    expect(toolActivity('Write', { file_path: 'x/bar.py' })).toBe('Editing bar.py')
+    expect(toolActivity('NotebookEdit', { notebook_path: '/n/nb.ipynb' })).toBe('Editing nb.ipynb')
+    expect(toolActivity('Read', { file_path: '/a/baz.md' })).toBe('Reading baz.md')
+    expect(toolActivity('Bash', { command: 'npm test' })).toBe('Running npm test')
+    expect(toolActivity('Grep', { pattern: 'foo.*bar' })).toBe('Searching foo.*bar')
+    expect(toolActivity('Glob', { pattern: '**/*.ts' })).toBe('Searching **/*.ts')
+    expect(toolActivity('Task', { description: 'refactor auth' })).toBe('Delegating: refactor auth')
+    expect(toolActivity('WebFetch', { url: 'https://example.com/x?q=1' })).toBe('Fetching example.com')
+    expect(toolActivity('WebSearch', { query: 'weather today' })).toBe('Fetching weather today')
+    expect(toolActivity('CustomThing', {})).toBe('Using CustomThing')
+  })
+
+  it('truncates a long Bash command', () => {
+    const long = 'echo ' + 'a'.repeat(200)
+    const out = toolActivity('Bash', { command: long })
+    expect(out.startsWith('Running ')).toBe(true)
+    expect(out.length).toBeLessThanOrEqual('Running '.length + 60)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  it('records activity on PreToolUse and clears it on Stop/SessionEnd', () => {
+    recordRawToolEvent('n1', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls -la' } })
+    expect(_inboxSnapshot().nodes.n1).toMatchObject({ activity: 'Running ls -la', tool: 'Bash' })
+    recordRawToolEvent('n1', { hook_event_name: 'Stop' })
+    expect(_inboxSnapshot().nodes.n1.activity).toBeUndefined()
+
+    recordRawToolEvent('n2', { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'a.ts' } })
+    recordRawToolEvent('n2', { hook_event_name: 'SessionEnd' })
+    expect(_inboxSnapshot().nodes.n2.activity).toBeUndefined()
+  })
+
+  it('a done event clears live activity but keeps context %', () => {
+    recordRawToolEvent('n3', { hook_event_name: 'PreToolUse', tool_name: 'Grep', tool_input: { pattern: 'x' } })
+    recordContextUsage('n3', 30)
+    expect(_inboxSnapshot().nodes.n3).toMatchObject({ activity: 'Searching x', contextPercent: 30 })
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'done' }))
+    const n3 = _inboxSnapshot().nodes.n3
+    expect(n3.activity).toBeUndefined()
+    expect(n3.contextPercent).toBe(30)
+  })
+
+  it('recordContextUsage clamps to 0–100 and coexists with activity', () => {
+    recordContextUsage('c', 42.5)
+    expect(_inboxSnapshot().nodes.c.contextPercent).toBe(42.5)
+    recordContextUsage('c', 150)
+    expect(_inboxSnapshot().nodes.c.contextPercent).toBe(100)
+    recordRawToolEvent('c', { hook_event_name: 'PreToolUse', tool_name: 'Glob', tool_input: { pattern: '*.md' } })
+    expect(_inboxSnapshot().nodes.c).toMatchObject({ activity: 'Searching *.md', contextPercent: 100 })
+  })
+
+  it('firstLine takes the first non-empty line and clips', () => {
+    expect(firstLine('  \n\n hello there \nmore', 100)).toBe('hello there')
+    expect(firstLine('abcdefghij', 5)).toBe('abcd…')
+    expect(firstLine(undefined, 10)).toBe('')
+  })
+})
+
+describe('buildMirrorUsage', () => {
+  it('maps snapshots to accounts, system first, with defensive limit fields + labels', () => {
+    const snap = [
+      {
+        accountId: null,
+        usage: {
+          email: 'sys@x',
+          updatedAt: 100,
+          status: 'ok',
+          limits: [{ kind: 'session', usedPercent: 20, severity: 'normal', resetsAt: 999 }]
+        }
+      },
+      {
+        accountId: 'a1',
+        usage: { email: null, updatedAt: 200, status: 'ok', limits: [{ kind: 'weekly_all', usedPercent: 80 }] }
+      }
+    ]
+    const mu = buildMirrorUsage(snap, [{ id: 'a1', label: 'Work', email: 'work@x' }], 500)!
+    expect(mu.accounts[0].accountId).toBeNull()
+    expect(mu.accounts[0].label).toBeNull()
+    expect(mu.accounts[0].email).toBe('sys@x')
+    expect(mu.accounts[0].agentId).toBe('claude')
+    expect(mu.accounts[0].limits[0]).toEqual({
+      kind: 'session',
+      group: null,
+      usedPercent: 20,
+      severity: 'normal',
+      resetsAt: 999,
+      windowMinutes: null,
+      scopeLabel: null,
+      isActive: false
+    })
+    // Managed account: label from settings, email backfilled from settings when usage has none,
+    // and its limit's absent severity passes through as null (not defaulted to a colour).
+    expect(mu.accounts[1]).toMatchObject({ accountId: 'a1', label: 'Work', email: 'work@x' })
+    expect(mu.accounts[1].limits[0].severity).toBeNull()
+    // updatedAt is the freshest account's stamp.
+    expect(mu.updatedAt).toBe(200)
+  })
+
+  it('orders the system account first regardless of snapshot order', () => {
+    const snap = [
+      { accountId: 'a1', usage: { status: 'ok', limits: [] } },
+      { accountId: null, usage: { status: 'ok', limits: [] } }
+    ]
+    const mu = buildMirrorUsage(snap, [], 9)!
+    expect(mu.accounts.map((a) => a.accountId)).toEqual([null, 'a1'])
+  })
+
+  it('returns undefined for an empty snapshot', () => {
+    expect(buildMirrorUsage([], [], 5)).toBeUndefined()
+  })
+})
+
+describe('usage block on flush', () => {
+  let tmpDir: string
+  let file: string
+
+  beforeEach(() => {
+    _resetForTest()
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-usage-'))
+    file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+  })
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('writes the usage block from the provider', async () => {
+    const usage: MirrorUsage = {
+      updatedAt: 5,
+      accounts: [
+        { accountId: null, label: null, email: 'e', agentId: 'claude', status: 'ok', updatedAt: 5, limits: [] }
+      ]
+    }
+    setMirrorUsageProvider(() => usage)
+    await flush()
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect(doc.usage.accounts[0].email).toBe('e')
+  })
+
+  it('omits usage when no provider is wired (old-file shape)', async () => {
+    await flush()
+    expect('usage' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
+  })
+
+  it('a throwing usage provider fails open (no usage, file still written)', async () => {
+    setMirrorUsageProvider(() => { throw new Error('boom') })
+    recordAgentEvent(ev({ state: 'working' }))
+    await flush()
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect('usage' in doc).toBe(false)
+    expect(doc.nodes.n1.state).toBe('working')
+  })
+})
+
+describe('filterMirrorForNodes (usage + inbox)', () => {
+  it('drops usage entirely and filters inbox events + nodes to the slice', () => {
+    const doc = buildFile(
+      { a: { state: 'working', updatedAt: 1 }, b: { state: 'done', updatedAt: 2 } },
+      10,
+      undefined,
+      undefined,
+      {
+        updatedAt: 5,
+        accounts: [
+          { accountId: null, label: null, email: null, agentId: 'claude', status: 'ok', updatedAt: 5, limits: [] }
+        ]
+      },
+      {
+        events: [
+          { id: '1', ts: 1, nodeId: 'a', kind: 'approval', title: 'A' },
+          { id: '2', ts: 2, nodeId: 'b', kind: 'done', title: 'Finished' }
+        ],
+        nodes: { a: { activity: 'x', updatedAt: 1 }, b: { activity: 'y', updatedAt: 2 } }
+      }
+    )
+    expect('usage' in doc).toBe(true)
+    const slice = filterMirrorForNodes(doc, new Set(['a']))
+    expect('usage' in slice).toBe(false)
+    expect(slice.inbox!.events.map((e) => e.nodeId)).toEqual(['a'])
+    expect(Object.keys(slice.inbox!.nodes)).toEqual(['a'])
+  })
+
+  it('buildFile omits an empty inbox (old-file shape preserved)', () => {
+    const d = buildFile({}, 1, undefined, undefined, undefined, { events: [], nodes: {} })
+    expect('inbox' in d).toBe(false)
   })
 })
