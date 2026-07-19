@@ -75,10 +75,11 @@ export const IPC = {
   usageUpdate: 'usage:update',
   /** Non-Claude providers (codex, …) as one list; Claude keeps its own account-aware channels. */
   usageProviders: 'usage:providers',
-  /** Store/clear the MiniMax browser cookie. Write-only: there is no channel that reads it back. */
-  usageSetMinimaxCookie: 'usage:set-minimax-cookie',
-  /** Whether a MiniMax cookie is stored — lets the UI show state without handling the value. */
-  usageHasMinimaxCookie: 'usage:has-minimax-cookie',
+  /** Store/clear a provider's browser cookie (minimax, opencode). Write-only: no channel reads
+   *  it back. */
+  usageSetProviderCookie: 'usage:set-provider-cookie',
+  /** Which cookie providers have one stored — lets the UI show state without handling secrets. */
+  usageCookieProviders: 'usage:cookie-providers',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the

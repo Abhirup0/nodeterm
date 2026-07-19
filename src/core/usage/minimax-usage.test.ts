@@ -10,7 +10,7 @@ import {
   minimaxRejected,
   fetchMinimaxUsage
 } from './minimax-usage'
-import { readMinimaxCookie, writeMinimaxCookie, hasMinimaxCookie } from './minimax-cookie'
+import { readProviderCookie, writeProviderCookie, hasProviderCookie } from './provider-cookie'
 import { initPlatform, resetPlatformForTests, type CorePlatform } from '../platform'
 import { primaryLimit, limitLabel } from '../../shared/usage-limits'
 
@@ -157,40 +157,40 @@ describe('minimax cookie storage', () => {
   })
 
   it('round-trips a cookie', async () => {
-    await writeMinimaxCookie('_token=abc')
-    await expect(readMinimaxCookie()).resolves.toBe('_token=abc')
-    await expect(hasMinimaxCookie()).resolves.toBe(true)
+    await writeProviderCookie('minimax', '_token=abc')
+    await expect(readProviderCookie('minimax')).resolves.toBe('_token=abc')
+    await expect(hasProviderCookie('minimax')).resolves.toBe(true)
   })
 
   it('stores it OUTSIDE settings.json, readable only by the owner', async () => {
     // The whole reason this is a separate file: settings.json is written with default
     // permissions, and this value is a live bearer credential, not config.
-    await writeMinimaxCookie('_token=abc')
+    await writeProviderCookie('minimax', '_token=abc')
     const mode = fs.statSync(path.join(dir, 'minimax-cookie.json')).mode & 0o777
     expect(mode).toBe(0o600)
     expect(fs.existsSync(path.join(dir, 'settings.json'))).toBe(false)
   })
 
   it('clears the stored cookie, leaving no file behind', async () => {
-    await writeMinimaxCookie('_token=abc')
-    await writeMinimaxCookie('')
-    await expect(readMinimaxCookie()).resolves.toBeNull()
-    await expect(hasMinimaxCookie()).resolves.toBe(false)
+    await writeProviderCookie('minimax', '_token=abc')
+    await writeProviderCookie('minimax', '')
+    await expect(readProviderCookie('minimax')).resolves.toBeNull()
+    await expect(hasProviderCookie('minimax')).resolves.toBe(false)
     expect(fs.existsSync(path.join(dir, 'minimax-cookie.json'))).toBe(false)
   })
 
   it('treats a whitespace-only paste as clearing, not as a cookie', async () => {
-    await writeMinimaxCookie('   ')
-    await expect(hasMinimaxCookie()).resolves.toBe(false)
+    await writeProviderCookie('minimax', '   ')
+    await expect(hasProviderCookie('minimax')).resolves.toBe(false)
   })
 
   it('reports no cookie rather than throwing on a corrupt file', async () => {
     fs.writeFileSync(path.join(dir, 'minimax-cookie.json'), '{{{')
-    await expect(readMinimaxCookie()).resolves.toBeNull()
+    await expect(readProviderCookie('minimax')).resolves.toBeNull()
   })
 
   it('leaves no temp file behind after a write', async () => {
-    await writeMinimaxCookie('_token=abc')
+    await writeProviderCookie('minimax', '_token=abc')
     expect(fs.readdirSync(dir)).toEqual(['minimax-cookie.json'])
   })
 })

@@ -486,9 +486,10 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
         client.request(IPC.usageRefresh, accountId) as Promise<ClaudeUsage>,
       providers: (force?: boolean) =>
         client.request(IPC.usageProviders, force) as Promise<ProviderUsage[]>,
-      setMinimaxCookie: (cookie: string) =>
-        client.request(IPC.usageSetMinimaxCookie, cookie) as Promise<boolean>,
-      hasMinimaxCookie: () => client.request(IPC.usageHasMinimaxCookie) as Promise<boolean>,
+      setProviderCookie: (provider: string, cookie: string) =>
+        client.request(IPC.usageSetProviderCookie, provider, cookie) as Promise<boolean>,
+      cookieProviders: () =>
+        client.request(IPC.usageCookieProviders) as Promise<Record<string, boolean>>,
       onUpdate: (listener) => client.subscribe(IPC.usageUpdate, listener as Listener)
     }
   }
