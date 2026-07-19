@@ -134,3 +134,21 @@ describe('card meta events', () => {
     expect(boardLogEvents(withMeta, withMeta, titles)).toEqual([])
   })
 })
+
+describe('priority events', () => {
+  const titles = (id: string) => 'card ' + id
+  const base = () => board([col('c1', 'To Do')], [])
+  it('set / changed / cleared', () => {
+    const hi = { ...base(), meta: [{ nodeId: 'n1', priority: 'high' as const }] }
+    expect(boardLogEvents(base(), hi, titles)).toEqual([
+      { nodeId: 'n1', event: { type: 'priority-set', to: 'high' } }
+    ])
+    const ur = { ...base(), meta: [{ nodeId: 'n1', priority: 'urgent' as const }] }
+    expect(boardLogEvents(hi, ur, titles)).toEqual([
+      { nodeId: 'n1', event: { type: 'priority-set', to: 'urgent' } }
+    ])
+    expect(boardLogEvents(ur, base(), titles)).toEqual([
+      { nodeId: 'n1', event: { type: 'priority-cleared' } }
+    ])
+  })
+})

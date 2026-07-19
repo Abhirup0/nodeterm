@@ -214,11 +214,15 @@ export interface KanbanAssignment {
 /** Trello-style per-card metadata. Lives beside the assignments (not on the node) so it rides
  *  the same git/mirror machinery; absent entries mean "no metadata". Assignee identity is the
  *  presence identity — the same {name, color} the board log attributes comments to. */
+export type KanbanPriority = 'low' | 'medium' | 'high' | 'urgent'
+
 export interface KanbanCardMeta {
   nodeId: string
   assignees?: BoardLogAuthor[]
   /** Due timestamp (ms). Absent = no due date. */
   dueAt?: number
+  /** Absent = no priority. */
+  priority?: KanbanPriority
 }
 
 export interface ProjectKanban {
@@ -247,6 +251,8 @@ export interface BoardLogEvent {
     | 'member-unassigned'
     | 'due-set'
     | 'due-cleared'
+    | 'priority-set'
+    | 'priority-cleared'
   from?: string
   to?: string
   /** Column title for column-added/deleted; card title for card-created. */

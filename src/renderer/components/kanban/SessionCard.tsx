@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { KanbanCardMeta } from '@shared/types'
+import type { KanbanCardMeta, KanbanPriority } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
 import type { KanbanSession } from './KanbanView'
@@ -29,6 +29,13 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
+  const priority = meta?.priority
+  const PRIO_COLOR: Record<KanbanPriority, string> = {
+    low: '#8e8e93',
+    medium: '#ffd60a',
+    high: '#ff9f0a',
+    urgent: '#ff453a'
+  }
   const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
   return (
     <div
@@ -60,8 +67,16 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
-      {(assignees.length > 0 || due !== undefined) && (
+      {(assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
+          {priority !== undefined && PRIO_COLOR[priority] && (
+            <span
+              className="kanban-due kanban-prio-chip"
+              style={{ background: `${PRIO_COLOR[priority]}26`, color: PRIO_COLOR[priority] }}
+            >
+              {priority.toUpperCase()}
+            </span>
+          )}
           {due !== undefined && (
             <span className={`kanban-due${overdue ? ' kanban-due--overdue' : ''}`}>
               {new Date(due).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}

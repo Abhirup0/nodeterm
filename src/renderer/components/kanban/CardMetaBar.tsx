@@ -1,11 +1,18 @@
 import { useMemo, useState } from 'react'
-import type { BoardLogAuthor, ProjectKanban } from '@shared/types'
-import { cardMeta, setCardDue, toggleAssignee } from '../../lib/kanban'
+import type { BoardLogAuthor, KanbanPriority, ProjectKanban } from '@shared/types'
+import { cardMeta, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
 import { loadIdentity, selectOthers, usePresence } from '../../state/presence'
 import { useBoardLog } from '../../state/boardLog'
 import { useProjects } from '../../state/projects'
 
 const initialOf = (name: string): string => (name.trim()[0] ?? '?').toUpperCase()
+
+export const PRIORITIES: Array<{ id: KanbanPriority; label: string; color: string }> = [
+  { id: 'low', label: 'Low', color: '#8e8e93' },
+  { id: 'medium', label: 'Medium', color: '#ffd60a' },
+  { id: 'high', label: 'High', color: '#ff9f0a' },
+  { id: 'urgent', label: 'Urgent', color: '#ff453a' }
+]
 
 /** Local-wallclock value for a datetime-local input (its value is timezone-less). */
 function toLocalInput(ts: number): string {
@@ -44,6 +51,7 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
+  const priority = meta?.priority
 
   return (
     <div className="kanban-meta">
@@ -109,6 +117,22 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
               ✕
             </button>
           )}
+        </div>
+      </div>
+      <div className="kanban-meta__group">
+        <span className="kanban-meta__label">Priority</span>
+        <div className="kanban-meta__row">
+          {PRIORITIES.map((pr) => (
+            <button
+              key={pr.id}
+              className={`kanban-prio${priority === pr.id ? ' kanban-prio--on' : ''}`}
+              style={priority === pr.id ? { background: `${pr.color}2e`, borderColor: pr.color, color: pr.color } : undefined}
+              title={priority === pr.id ? `${pr.label} — click to clear` : pr.label}
+              onClick={() => onChange(setCardPriority(board, nodeId, priority === pr.id ? null : pr.id))}
+            >
+              {pr.label}
+            </button>
+          ))}
         </div>
       </div>
     </div>

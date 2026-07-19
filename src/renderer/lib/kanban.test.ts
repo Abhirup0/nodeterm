@@ -3,7 +3,7 @@ import type { ProjectKanban } from '@shared/types'
 import {
   addColumn, assignNode, assignedTo, defaultKanban, deleteColumn, moveColumn,
   cardMeta, columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn,
-  setCardDue, toggleAssignee, unassigned
+  setCardDue, setCardPriority, toggleAssignee, unassigned
 } from './kanban'
 
 const board = (): ProjectKanban => ({
@@ -133,5 +133,23 @@ describe('card meta', () => {
     expect(cardMeta(pruned, 'n9')).toBeUndefined()
     const same = setCardDue(board(), 'n1', 7)
     expect(pruneAssignments(same, ['n1', 'n2', 'n3'])).toBe(same)
+  })
+})
+
+describe('card priority', () => {
+  const enes = { name: 'enes', color: '#0a84ff' }
+  it('setCardPriority sets, changes and clears; clearing the only field drops the entry', () => {
+    const k1 = setCardPriority(board(), 'n1', 'high')
+    expect(cardMeta(k1, 'n1')?.priority).toBe('high')
+    const k2 = setCardPriority(k1, 'n1', 'urgent')
+    expect(cardMeta(k2, 'n1')?.priority).toBe('urgent')
+    expect(cardMeta(setCardPriority(k2, 'n1', null), 'n1')).toBeUndefined()
+  })
+  it('priority survives assignee/due edits (and vice versa)', () => {
+    const k = setCardDue(toggleAssignee(setCardPriority(board(), 'n1', 'low'), 'n1', enes), 'n1', 9)
+    expect(cardMeta(k, 'n1')).toMatchObject({ priority: 'low', dueAt: 9, assignees: [enes] })
+    const cleared = setCardDue(k, 'n1', null)
+    expect(cardMeta(cleared, 'n1')).toMatchObject({ priority: 'low', assignees: [enes] })
+    expect(cardMeta(cleared, 'n1')?.dueAt).toBeUndefined()
   })
 })

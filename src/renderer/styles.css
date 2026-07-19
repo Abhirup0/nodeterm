@@ -7084,3 +7084,22 @@ body,
 .board-log__event .board-log__time {
   margin-left: 6px;
 }
+
+.kanban-prio {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.kanban-prio:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+.kanban-prio-chip {
+  letter-spacing: 0.04em;
+}
