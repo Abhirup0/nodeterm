@@ -194,6 +194,22 @@ body,
   outline: none;
 }
 
+.tab__board-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: currentColor;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 2px;
+  border-radius: 4px;
+  opacity: 0.55;
+}
+.tab__board-toggle:hover {
+  opacity: 1;
+}
+
 .tab__caret {
   background: transparent;
   border: none;
@@ -6274,10 +6290,40 @@ body,
   bottom: 0;
   z-index: 25; /* over the flow, under the tab bar (30) and the drawers/dialogs (40+) */
   background: #000;
-  overflow-x: auto;
-  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Title strip: the project the board belongs to. Its height also clears the floating
+   controls cluster (top-right), so column headers never sit under those icons. */
+.kanban-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 18px;
+  padding-right: 300px; /* keep a long project name from running under the cluster icons */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.kanban-header__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.kanban-header__name {
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .kanban-board {
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
   display: flex;
   align-items: flex-start;
   gap: 12px;
@@ -6370,14 +6416,58 @@ body,
 }
 .kanban-card {
   position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: block;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   padding: 8px 10px;
-  cursor: grab;
+  cursor: pointer; /* click = expand/collapse; drag still works via the draggable attr */
+}
+.kanban-card__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kanban-card__detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  min-height: 22px;
+  cursor: default;
+}
+.kanban-card__session {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kanban-card__kindlabel {
+  flex: 1;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.35);
+}
+.kanban-card__open {
+  margin-left: auto;
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.kanban-card__open:hover {
+  background: var(--accent);
+  color: #fff;
 }
 .kanban-card:hover {
   border-color: rgba(255, 255, 255, 0.2);
