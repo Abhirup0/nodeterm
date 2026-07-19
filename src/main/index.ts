@@ -1,6 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { readFile } from 'fs/promises'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, dialog, ipcMain, Notification, powerMonitor, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
@@ -27,8 +27,11 @@ import {
   setMirrorSettingsProvider,
   setMirrorUsageProvider,
   buildMirrorUsage,
+  onInboxActionable,
   type MirrorSettings
 } from '../core/agent-status-mirror'
+import { createPushNotify } from '../core/push-notify'
+import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
@@ -87,6 +90,7 @@ import { killRelayHostsByPeerKey } from './remote/relay-host'
 import { initRelayHost } from './remote/relay-host-service'
 import { createRevoker } from './remote/revocation'
 import { loadApprovedDevices, saveApprovedDevices } from './remote/approved-devices'
+import { publicKeyToB64 } from './remote/e2ee'
 import { connectRelayClient, type RelayClientSession } from './remote/relay-client'
 import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
@@ -692,6 +696,43 @@ app.whenReady().then(async () => {
         .filter((a) => !a.host && !a.pending)
         .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))
     }
+  })
+  // Desktop → paired-phone APNs push (spec: apns-push). Feeds off the SAME actionable-event seam
+  // the mobile Inbox uses (`onInboxActionable`), so it fires exactly on approval/question (post-
+  // dedup) + done (turn edge). It's inert unless a phone has been paired (an approved device is
+  // pinned) — that's the "standing relay host configured/paired" gate. The host public key
+  // (identity every paired phone pinned) + paired flag load async and refresh on a cheap interval,
+  // so a mid-run pairing / keyring-unlock is picked up without re-wiring; the getter is sync.
+  let pushHostKeyB64: string | null = null
+  let pushHasPairedPhone = false
+  const refreshPushIdentity = async (): Promise<void> => {
+    try {
+      pushHostKeyB64 = publicKeyToB64((await loadOrCreateKeyPair()).publicKey)
+    } catch {
+      // Keyring locked / transient read error: keep the last-known key (never clobber identity).
+    }
+    try {
+      pushHasPairedPhone = (await loadApprovedDevices()).pubkeys.length > 0
+    } catch {
+      pushHasPairedPhone = false
+    }
+  }
+  void refreshPushIdentity()
+  const pushIdentityTimer = setInterval(() => void refreshPushIdentity(), 60_000)
+  pushIdentityTimer.unref?.()
+  createPushNotify({
+    subscribe: onInboxActionable,
+    getHostIdentity: () =>
+      pushHostKeyB64
+        ? {
+            hostDeviceId: getDeviceId(),
+            hostPublicKeyB64: pushHostKeyB64,
+            hostLabel: hostname(),
+            hasPairedPhone: pushHasPairedPhone
+          }
+        : null,
+    mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
+    isPackaged: () => app.isPackaged
   })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS

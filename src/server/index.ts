@@ -177,6 +177,15 @@ export async function startServer(
     }
   })
   wireAgentStatus(platform)
+  // Desktop → paired-phone APNs push (spec: apns-push) is DELIBERATELY not wired here. The push
+  // service (`src/core/push-notify.ts`) fans actionable inbox events out to a host's relay-PAIRED
+  // phones, keyed by the standing relay host's identity (public key + hostDeviceId) and the
+  // pinned-device registry. The Server Edition has no standing relay host — no host keypair, no
+  // approved-devices store, no host-token mint (all live in src/main/remote/) — so there is no
+  // identity to sign the fan-out and no paired-phone list to reach. A phone talks to a server-
+  // edition host over SSH and keeps polling the mirror. So the service would be permanently inert
+  // here; we leave it unwired rather than construct a no-op. (Three-surfaces rule: documented
+  // desktop-only.)
   // `installHooks: false` (tests) skips the merge into the user's real ~/.claude et al —
   // the hook it would write points into `dataDir`, which a test then deletes.
   if (config.installHooks !== false) {
