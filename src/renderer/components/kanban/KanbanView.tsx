@@ -1,6 +1,7 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import type { ProjectKanban } from '@shared/types'
 import { useAgentStatus } from '../../state/agentStatus'
+import { useProjects } from '../../state/projects'
 import {
   addColumn, assignNode, assignedTo, deleteColumn, moveColumn, nextColumnColor,
   pruneAssignments, recolorColumn, renameColumn, unassigned
@@ -33,7 +34,20 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
 export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   const statusById = useAgentStatus((s) => s.byId)
+  // Primitive selectors (not one object) — an object selector would re-render on every store set.
+  const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
+  const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
+  // Card detail rows open per session id; transient by design (resets when the board closes).
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
   const byId = new Map(sessions.map((s) => [s.id, s]))
+
+  const toggleExpanded = (id: string) =>
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   // Prune dead nodes' assignments on every persisted change, so they never accumulate
   // in the shared file.
@@ -67,11 +81,19 @@ export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanView
 
   return (
     <div className="kanban-overlay">
+      {/* Title strip: names the board's project AND pushes the columns below the top-right
+          controls cluster, so column headers never sit under its icons. */}
+      <div className="kanban-header">
+        <span className="kanban-header__dot" style={{ background: projectColor }} />
+        <span className="kanban-header__name">{projectName}</span>
+      </div>
       <div className="kanban-board">
         <KanbanColumn
           column={null}
           cards={sessionsFor(unassigned(board, sessions.map((s) => s.id)))}
           statusById={statusById}
+          expandedIds={expandedIds}
+          onToggleCard={toggleExpanded}
           onOpenNode={onOpenNode}
           onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
           onDragEnd={() => (dragRef.current = null)}
@@ -84,6 +106,8 @@ export function KanbanView({ board, sessions, onChange, onOpenNode }: KanbanView
             column={col}
             cards={sessionsFor(assignedTo(board, col.id))}
             statusById={statusById}
+            expandedIds={expandedIds}
+            onToggleCard={toggleExpanded}
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}

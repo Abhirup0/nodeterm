@@ -10,6 +10,9 @@ interface KanbanColumnProps {
   column: KanbanColumnT | null
   cards: KanbanSession[]
   statusById: Record<string, AgentNodeStatus>
+  /** Which cards show their detail row (card click toggles membership). */
+  expandedIds: ReadonlySet<string>
+  onToggleCard: (nodeId: string) => void
   onRename?: (title: string) => void
   onRecolor?: (color: string) => void
   onDelete?: () => void
@@ -24,7 +27,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, onRename, onRecolor, onDelete, onOpenNode,
+  column, cards, statusById, expandedIds, onToggleCard, onRename, onRecolor, onDelete, onOpenNode,
   onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn, onDropBeforeCard
 }: KanbanColumnProps) {
   const [editingTitle, setEditingTitle] = useState(false)
@@ -118,6 +121,8 @@ export function KanbanColumn({
             key={s.id}
             session={s}
             status={statusById[s.id]}
+            expanded={expandedIds.has(s.id)}
+            onToggle={() => onToggleCard(s.id)}
             onOpen={() => onOpenNode(s.id)}
             onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}

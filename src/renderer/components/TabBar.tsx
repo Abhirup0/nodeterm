@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
+import { useViewMode } from '../state/viewMode'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
@@ -9,6 +10,7 @@ import { sshAutoModeHint } from '../state/permissionMode'
 import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
+import { IconCanvasView, IconKanban } from './icons'
 import {
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
@@ -77,6 +79,7 @@ export function TabBar({
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
   const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
+  const kanbanActive = useViewMode((s) => !!activeId && !!s.viewByProject[activeId])
   // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
   const unreadIds = useAgentStatus((s) => {
@@ -309,6 +312,18 @@ export function TabBar({
                   </span>
                 )}
 
+                {active && editingId !== p.id && (
+                  <button
+                    className="tab__board-toggle"
+                    title={kanbanActive ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)'}
+                    onClick={(e) => {
+                      e.stopPropagation() // a tab click switches projects — this only flips the view
+                      useViewMode.getState().toggle(p.id)
+                    }}
+                  >
+                    {kanbanActive ? <IconCanvasView /> : <IconKanban />}
+                  </button>
+                )}
                 {active && editingId !== p.id && (
                   <button
                     className="tab__caret"
