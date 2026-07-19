@@ -754,44 +754,57 @@ body,
   width: 100%;
 }
 
-.dictation__stop {
+/* Mobile-matched capsule: dots · "Dictating..." · elapsed · red round pause. */
+.dictation__dots {
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  background: rgba(255, 69, 58, 0.18);
-  border: 1px solid rgba(255, 69, 58, 0.5);
+  gap: 5px;
+}
+
+.dictation__dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  color: #ff453a;
-  cursor: pointer;
+  background: #ff453a;
+  opacity: 0.22;
+  transition: opacity 80ms ease-out;
+}
+
+.dictation__dot.lit {
+  opacity: 1;
+}
+
+/* Silence still shows life: the first dot breathes on its own. */
+.dictation__dot.base:not(.lit) {
   animation: dictation-pulse 1.4s ease-in-out infinite;
 }
 
-.dictation__stop:hover {
-  background: rgba(255, 69, 58, 0.28);
+.dictation__label {
+  color: var(--text);
+  font-size: 14px;
 }
 
-.dictation__bars {
+.dictation__spacer {
   flex: 1 1 auto;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 3px;
-  height: 22px;
 }
 
-.dictation__bar {
-  flex: 1 1 0;
-  max-width: 4px;
-  min-height: 3px;
-  /* Rounded tops, flat bottoms — reads as a bar rising off a baseline rather than a floating
-     pill, and the flat bottom keeps the idle-floor row looking like a deliberate baseline
-     (not a row of dots) when the take is quiet. */
-  border-radius: 3px 3px 1px 1px;
-  background: var(--accent);
-  transition: height 70ms ease-out;
+.dictation__pause {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ff453a;
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+}
+
+.dictation__pause:hover {
+  background: #ff5f55;
 }
 
 /* ---- Terminal node ---- */
