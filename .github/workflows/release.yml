@@ -37,8 +37,11 @@ jobs:
           # transient network blip while polling appstoreconnect (NSURLError -1009) fails the whole
           # build even though the submission gets Accepted. Retry the release up to 3 times so one
           # blip during a long poll doesn't sink the release.
+          # caffeinate: the runner is a MacBook Air, and idle sleep mid-notarization disconnects
+          # the runner — GitHub then marks the job "cancelled" (bit v0.2.16 and v0.2.18). Assert
+          # no-sleep for exactly as long as the release command runs.
           n=1
-          until npm run release; do
+          until caffeinate -dims npm run release; do
             if [ "$n" -ge 3 ]; then
               echo "::error::release failed after $n attempts"
               exit 1
@@ -66,14 +69,29 @@ jobs:
       # Canonical copy of every release on GitHub. The update feed itself lives on
       # nodeterm.dev (see the deploy step below), but keeping a GitHub Release means
       # there is always a downloadable, versioned backup.
+      #
+      # Shell + `gh release upload --clobber` instead of softprops: uploading ~800 MB from the
+      # self-hosted runner hit a mid-upload `write EPIPE` (v0.2.17) that softprops cannot retry,
+      # leaving latest-mac.yml pointing at binaries that were never uploaded. --clobber makes
+      # every retry idempotent, so a half-uploaded attempt heals on the next one.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.dmg
-            dist/*.zip
-            dist/*.yml
-            dist/*.blockmap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # The linux job may already have created the release for this tag; tolerate the race.
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag --notes "" || true
+          n=1
+          until gh release upload "$tag" dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap --clobber --repo "$GITHUB_REPOSITORY"; do
+            if [ "$n" -ge 5 ]; then
+              echo "::error::asset upload failed after $n attempts"
+              exit 1
+            fi
+            echo "::warning::asset upload attempt $n failed (transient network?); retrying in 30s…"
+            n=$((n + 1))
+            sleep 30
+          done
 
       # Publish the feed to nodeterm.dev/updates. Fill in for your host. Example for
       # SSH/rsync (store the private key as the DEPLOY_SSH_KEY secret):
