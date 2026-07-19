@@ -7,6 +7,9 @@
 // the same fake relay-host.test.ts drives) are faked. The token mint + keypair + Pro gate are
 // injected via `deps` so the test never touches the network or the OS keyring.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 const h: {
   handlers: Record<string, (...a: any[]) => unknown>
@@ -61,6 +64,7 @@ import { peerRegistry, unregisterPeerSink, wirePeerRegistry } from '../peer-regi
 import { presenceHub } from '../../core/presence/hub'
 import { initCanvasSync } from '../../core/canvas-sync'
 import { initPlatform, resetPlatformForTests } from '../../core/platform'
+import { registerBoardLogHandlers, type BoardLogRoute } from '../../core/board-log-handlers'
 import { IPC } from '../../shared/ipc'
 
 const decoder = new TextDecoder()
@@ -90,6 +94,10 @@ function wireHost(): {
   peerConfirms: () => void
   /** The relay drops the socket under the host. */
   dropSocket: () => void
+  /** The peer sends a raw tunnel frame (an RPC req/cast) to the host. */
+  peerSendsTunnelText: (json: string) => void
+  /** Non-trust tunnel frames the host pushed back to the peer (RPC res + ev). */
+  peerFrames: Array<Record<string, unknown>>
 } {
   const hostKeys = genKeyPair()
   const peerKeys = genKeyPair()
@@ -135,9 +143,11 @@ function wireHost(): {
 
   let peerGate: TrustGate | null = null
   let peerStore: ApprovedDevices = emptyApprovedDevices()
+  let peerSocket: ReturnType<typeof connectRelay> | null = null
+  const peerFrames: Array<Record<string, unknown>> = []
 
   const connectPeer = (): void => {
-    const peerSocket = connectRelay({
+    const sock = connectRelay({
       url: 'wss://relay.example',
       token: 'tok-123',
       role: 'client',
@@ -151,14 +161,20 @@ function wireHost(): {
       onTunnel: (kind, payload) => {
         if (kind !== 'text') return
         const json = decoder.decode(payload)
-        peerGate?.onTunnelText(json)
+        if (peerGate?.onTunnelText(json)) return // the host's own trust confirm
+        try {
+          peerFrames.push(JSON.parse(json))
+        } catch {
+          /* not JSON — ignore */
+        }
       }
     })
+    peerSocket = sock
     peerGate = createTrustGate({
-      peerKeyB64: peerSocket.peerPublicKeyB64()!,
+      peerKeyB64: sock.peerPublicKeyB64()!,
       sessionId: 'peer-side',
-      sas: () => peerSocket.sas(),
-      sendConfirm: (json) => peerSocket.sendTunnelText(json),
+      sas: () => sock.sas(),
+      sendConfirm: (json) => sock.sendTunnelText(json),
       onOpen: () => {},
       load: async () => peerStore,
       save: async (s) => {
@@ -173,13 +189,24 @@ function wireHost(): {
     peerKeyB64: publicKeyToB64(peerKeys.publicKey),
     connectPeer,
     peerConfirms: () => peerGate?.confirmHere(),
-    dropSocket: () => hostOnClose?.()
+    dropSocket: () => hostOnClose?.(),
+    peerSendsTunnelText: (json) => peerSocket?.sendTunnelText(json),
+    peerFrames
   }
 }
 
-/** Run `relay:host:start` and return its offer. */
-async function start(): Promise<{ offer: string }> {
-  return (await h.handlers[IPC.relayHostStart]({})) as { offer: string }
+/** Run `relay:host:start` (optionally scoped to a project) and return its offer. */
+async function start(projectId?: string): Promise<{ offer: string }> {
+  return (await h.handlers[IPC.relayHostStart]({}, projectId)) as { offer: string }
+}
+
+/** Drive a peer to a fully-open (mutually approved) platform client. */
+async function openPeer(host: ReturnType<typeof wireHost>): Promise<void> {
+  host.connectPeer()
+  const id = pendingSent()!.id
+  h.handlers[IPC.relayHostConfirm]({}, { id })
+  host.peerConfirms()
+  await vi.waitFor(() => expect(peerRegistry().ids().length).toBe(1))
 }
 
 function pendingSent(): { id: string; sas: string | null; peerKeyB64: string } | undefined {
@@ -642,5 +669,162 @@ describe('initRelayHost — Team Access start() aliases invite (additive)', () =
     // A second start does NOT supersede the first (which would close it); it is refused at cap 1.
     await expect(h.handlers[IPC.relayHostStart]({})).rejects.toThrow(E_SEATS_FULL)
     expect(captured[0].session.close).not.toHaveBeenCalled()
+  })
+})
+
+// ── Board-log bridged to the host over the relay tunnel ──────────────────────────────────────────
+// A relay guest reads and writes the HOST project's board-log through the SAME registry-jailed core
+// handlers the host's own renderer uses (registerBoardLogHandlers). The board-log-specific relay
+// guards (scope jail + leak-free onChanged refcount) live in connectRelayHost, exercised for REAL
+// here — only the electron shell + the relay wire are faked, as everywhere in this file.
+describe('initRelayHost — board-log bridged to the host', () => {
+  let tmp: string
+  let routed: string[]
+
+  const req = (
+    host: ReturnType<typeof wireHost>,
+    id: number,
+    method: string,
+    ...args: unknown[]
+  ): void => host.peerSendsTunnelText(JSON.stringify({ t: 'req', id, method, args }))
+  const cast = (host: ReturnType<typeof wireHost>, method: string, ...args: unknown[]): void =>
+    host.peerSendsTunnelText(JSON.stringify({ t: 'cast', method, args }))
+  const resFor = (host: ReturnType<typeof wireHost>, id: number): Record<string, unknown> | undefined =>
+    host.peerFrames.find((f) => f.t === 'res' && f.id === id)
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-boardlog-'))
+    // A real project's .nodeterm dir exists on disk (project.json lives there); the store watches it.
+    fs.mkdirSync(path.join(tmp, '.nodeterm'), { recursive: true })
+    routed = []
+    // The host's registry-jailed router: only 'shared' resolves to a real cwd, anything else is
+    // unsupported. Records every projectId it is asked to route, to prove an out-of-scope id NEVER
+    // reaches dispatch (the relay scope guard short-circuits before the router — and any path — runs).
+    registerBoardLogHandlers(platform, {
+      route: (projectId: string): BoardLogRoute => {
+        routed.push(projectId)
+        return projectId === 'shared' ? { kind: 'local', cwd: tmp } : { kind: 'unsupported' }
+      }
+    })
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  it('routes append to the shared project’s log, preserving the guest’s own author', async () => {
+    const host = wireHost()
+    await start('shared')
+    await openPeer(host)
+
+    const entry = {
+      id: 'e1',
+      ts: 1,
+      author: { name: 'Ayşe', color: '#ff00ff' }, // the GUEST's presence identity — the feature
+      kind: 'comment',
+      text: 'hi from the guest'
+    }
+    req(host, 1, IPC.boardLogAppend, 'shared', entry)
+    await vi.waitFor(() => expect(resFor(host, 1)).toMatchObject({ ok: true, result: true }))
+
+    const written = JSON.parse(
+      fs.readFileSync(path.join(tmp, '.nodeterm', 'board-log.jsonl'), 'utf-8').trim()
+    )
+    expect(written.author).toEqual({ name: 'Ayşe', color: '#ff00ff' })
+    expect(written.text).toBe('hi from the guest')
+  })
+
+  it('read returns the shared project’s entries newest-first', async () => {
+    const host = wireHost()
+    await start('shared')
+    await openPeer(host)
+
+    const mk = (id: string, ts: number): unknown => ({
+      id,
+      ts,
+      author: { name: 'guest', color: '#111111' },
+      kind: 'comment',
+      text: id
+    })
+    req(host, 1, IPC.boardLogAppend, 'shared', mk('a', 1))
+    await vi.waitFor(() => expect(resFor(host, 1)).toBeTruthy())
+    req(host, 2, IPC.boardLogAppend, 'shared', mk('b', 2))
+    await vi.waitFor(() => expect(resFor(host, 2)).toBeTruthy())
+
+    req(host, 3, IPC.boardLogRead, 'shared')
+    await vi.waitFor(() => expect(resFor(host, 3)).toBeTruthy())
+    const result = resFor(host, 3)!.result as { entries: Array<{ id: string }> }
+    expect(result.entries.map((e) => e.id)).toEqual(['b', 'a']) // newest-first (disk is oldest-first)
+  })
+
+  it('refuses an out-of-scope projectId (read unsupported, append false) without resolving a path', async () => {
+    const host = wireHost()
+    await start('shared')
+    await openPeer(host)
+    routed.length = 0 // ignore the open-time routing; focus on the out-of-scope calls below
+
+    req(host, 1, IPC.boardLogRead, 'other-project')
+    await vi.waitFor(() => expect(resFor(host, 1)).toBeTruthy())
+    expect(resFor(host, 1)!.result).toEqual({ entries: [], unsupported: true })
+
+    req(host, 2, IPC.boardLogAppend, 'other-project', {
+      id: 'x',
+      ts: 1,
+      author: { name: 'guest', color: '#111111' },
+      kind: 'comment',
+      text: 'nope'
+    })
+    await vi.waitFor(() => expect(resFor(host, 2)).toBeTruthy())
+    expect(resFor(host, 2)!.result).toBe(false)
+
+    // The scope guard short-circuits BEFORE dispatch, so the host router is never even asked about an
+    // out-of-scope project — no filesystem path is ever resolved from a client-supplied id.
+    expect(routed).not.toContain('other-project')
+  })
+
+  it('a host-side change pushes boardLogChanged to the subscribed peer, and a socket drop releases the watch', async () => {
+    // A spy alongside the real board-log handler on the unsubscribe channel: proves the balancing
+    // unsubscribe is replayed on drop (the shared per-project watch refcount is released — no leak).
+    const unsubSpy = vi.fn()
+    platform.on(IPC.boardLogUnsubscribe, unsubSpy)
+
+    const host = wireHost()
+    await start('shared')
+    await openPeer(host)
+
+    cast(host, IPC.boardLogSubscribe, 'shared')
+    await new Promise((r) => setTimeout(r, 50)) // let the subscribe cast arm the fs.watch
+
+    // A real append changes the file; the store's watch (debounced 250ms) broadcasts the change,
+    // which fans out to the peer sink over the tunnel as a boardLogChanged event.
+    fs.appendFileSync(
+      path.join(tmp, '.nodeterm', 'board-log.jsonl'),
+      JSON.stringify({ id: 'z', ts: 9, author: { name: 'guest', color: '#111111' }, kind: 'comment', text: 'ping' }) +
+        '\n'
+    )
+    await vi.waitFor(
+      () =>
+        expect(
+          host.peerFrames.some((f) => f.t === 'ev' && f.channel === IPC.boardLogChanged('shared'))
+        ).toBe(true),
+      { timeout: 3000 }
+    )
+
+    // The socket drops with no client-sent unsubscribe (a closed guest tab). The host must replay the
+    // balancing unsubscribe so the per-project watch is not leaked.
+    host.dropSocket()
+    expect(unsubSpy).toHaveBeenCalledWith('shared')
+  })
+
+  it('an out-of-scope subscribe never reaches the core watch', async () => {
+    const subSpy = vi.fn()
+    platform.on(IPC.boardLogSubscribe, subSpy)
+    const host = wireHost()
+    await start('shared')
+    await openPeer(host)
+
+    cast(host, IPC.boardLogSubscribe, 'other-project')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(subSpy).not.toHaveBeenCalled() // scope-jailed before it could arm a watch
   })
 })
