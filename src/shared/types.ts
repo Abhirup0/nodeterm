@@ -625,6 +625,12 @@ export interface Settings {
    *  question, or finishes a turn (spec: apns-push). Default on — it only fires for users who
    *  have paired a phone. Toggle in Settings → Notifications. */
   mobilePushEnabled: boolean
+  /** Push when an agent needs you: approval requests + questions. Default on. Sub-gate under
+   *  `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
+  mobilePushNeedsYou: boolean
+  /** Push when an agent finishes a turn (the `done` kind). Default on. Sub-gate under
+   *  `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
+  mobilePushDone: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
 }
@@ -665,6 +671,8 @@ export const DEFAULT_SETTINGS: Settings = {
   telemetryEnabled: false,
   phoneAccessEnabled: false,
   mobilePushEnabled: true,
+  mobilePushNeedsYou: true,
+  mobilePushDone: true,
   speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 

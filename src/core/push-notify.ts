@@ -50,8 +50,12 @@ export interface PushNotifyDeps {
   subscribe: (cb: (e: InboxEvent) => void) => () => void
   /** The standing relay host identity, or null when none is configured/available. */
   getHostIdentity: () => PushHostIdentity | null
-  /** The `settings.mobilePushEnabled` gate (default on). */
+  /** The `settings.mobilePushEnabled` gate (default on) — the master switch. */
   mobilePushEnabled: () => boolean
+  /** The `settings.mobilePushNeedsYou` sub-gate (default on): approval + question kinds. */
+  mobilePushNeedsYou: () => boolean
+  /** The `settings.mobilePushDone` sub-gate (default on): the done kind. */
+  mobilePushDone: () => boolean
   /** `app.isPackaged` — dev never hits the prod API unless a local base is targeted. */
   isPackaged: () => boolean
   /** Override base URL. Defaults to `env.NODETERM_API_BASE || 'https://api.nodeterm.dev'`. */
@@ -117,9 +121,21 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     batchTimer.unref?.()
   }
 
+  /** Per-kind sub-gate: "Needs you" covers approval + question, "Completed" covers done. Both
+   *  default on; the master `mobilePushEnabled` still wins (checked via liveIdentity). When both
+   *  sub-gates are off the service sends nothing — the master toggle stays honest. */
+  function kindAllowed(kind: InboxEvent['kind']): boolean {
+    if (kind === 'done') return deps.mobilePushDone()
+    // approval | question
+    return deps.mobilePushNeedsYou()
+  }
+
   function onEvent(e: InboxEvent): void {
     // Cheap gate first: if the service is inert, don't buffer anything.
     if (!liveIdentity()) return
+    // Per-kind selection: drop before the throttle window is consumed, so a declined kind
+    // never blocks a later accepted one on the same node.
+    if (!kindAllowed(e.kind)) return
     const t = now()
     // Per-node throttle: at most one push per node per `throttleMs` (mirrors the local notify
     // throttle). Recorded at accept time — a declined event costs no throttle window.
