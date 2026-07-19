@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import { IconChat, IconMic, IconSearch } from '../icons'
+import { ContextMeter } from '../ContextMeter'
+import { useAgentStatus } from '../../state/agentStatus'
 import { useSession } from '../../session/session'
 import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
@@ -31,6 +33,7 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
   const [editingTitle, setEditingTitle] = useState(false)
   const [title, setTitle] = useState(session.title)
   const [searchOpen, setSearchOpen] = useState(false)
+  const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it.
   const [panelOpen, setPanelOpen] = useState(true)
@@ -109,6 +112,8 @@ export function CardModal({ session, columnTitle, onClose, onOpenCanvas, onRenam
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
           {isTerminal && (
             <>
+              {/* Same context-window pill + popover as the node header (null until usage data). */}
+              <ContextMeter sessionId={agentSessionId ?? null} />
               <button
                 className="kanban-modal__action"
                 title="Search this terminal"
