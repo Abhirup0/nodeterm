@@ -91,7 +91,7 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'chat'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 export interface CanvasNodeState {
@@ -151,8 +151,6 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
-  /** chat-only: SDK session id of this chat node's conversation, persisted so a relaunch resumes it. */
-  chatSessionId?: string
 }
 
 /**
@@ -1188,34 +1186,6 @@ export interface ChatToolSummary {
   removed?: number
 }
 
-/** One queued (not-yet-sent) chat input. */
-export interface ChatQueueItem {
-  id: string
-  text: string
-}
-
-/** A base64-encoded image attachment sent with a chat message. */
-export interface ChatImageAttachment {
-  mediaType: string
-  data: string // base64
-}
-
-/** The renderer's reply to a chat permission request. */
-export type ChatPermissionDecision = { behavior: 'allow' | 'deny'; alwaysSession?: boolean }
-
-/** One streamed chat-driver event, pushed on chat:event:<nodeId>. */
-export type ChatEvent =
-  | { kind: 'session'; sessionId: string; slashCommands: string[] }
-  | { kind: 'delta'; block: 'text' | 'thinking'; text: string }
-  | { kind: 'message'; msg: ChatMessage }
-  | { kind: 'tool'; toolUseId: string; name: string; arg: string; summary?: ChatToolSummary }
-  | { kind: 'tool-result'; toolUseId: string; result: string }
-  | { kind: 'permission'; requestId: string; toolName: string; input: unknown }
-  | { kind: 'permission-done'; requestId: string }
-  | { kind: 'turn-done'; costUsd?: number; usage?: { inputTokens: number; outputTokens: number } }
-  | { kind: 'queue'; items: ChatQueueItem[] }
-  | { kind: 'error'; message: string; fatal?: boolean }
-
 export interface ChatApi {
   /**
    * Reads a Claude session transcript as structured chat messages ([] if unavailable).
@@ -1227,18 +1197,6 @@ export interface ChatApi {
     cwd: string | undefined,
     accountId?: string
   ): Promise<ChatMessage[]>
-  /** Start (or reattach) the driver for a node. fork=true resumes by forking (terminal takeover). */
-  ensure(
-    nodeId: string,
-    opts: { cwd?: string; sessionId?: string; fork?: boolean; accountId?: string }
-  ): Promise<{ ok: boolean; error?: string }>
-  send(nodeId: string, text: string, images?: ChatImageAttachment[]): void
-  interrupt(nodeId: string): void
-  permissionReply(nodeId: string, requestId: string, decision: ChatPermissionDecision): void
-  removeQueued(nodeId: string, queueId: string): void
-  /** Node closed for good: kill the driver process. */
-  dispose(nodeId: string): void
-  onEvent(nodeId: string, listener: (e: ChatEvent) => void): () => void
 }
 
 /** Optional SSH context for account ops. When `projectId` names a connected SSH project, the

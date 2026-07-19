@@ -885,9 +885,12 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
     // ordinary Claude sessions, resumable in any terminal. (position/size are normalized
     // defensively so a legacy chat node still lands even if its shape is minimal.)
     let n = raw
-    if (n.kind === 'chat') {
-      const resume = n.chatSessionId
-        ? `\n\nContinue it in a terminal:\nclaude --resume ${n.chatSessionId}`
+    // Legacy read: `chat` is no longer a NodeKind, so a persisted chat node arrives as an
+    // unknown-kind blob — detect it by its string kind and read its old `chatSessionId` field.
+    if ((n.kind as string) === 'chat') {
+      const chatSessionId = (n as { chatSessionId?: string }).chatSessionId
+      const resume = chatSessionId
+        ? `\n\nContinue it in a terminal:\nclaude --resume ${chatSessionId}`
         : ''
       n = {
         ...n,
@@ -897,8 +900,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
           width: (n as { width?: number }).width ?? STICKY_SIZE.width,
           height: (n as { height?: number }).height ?? STICKY_SIZE.height
         },
-        text: `This was a chat node — the chat node type was removed.${resume}`,
-        chatSessionId: undefined
+        text: `This was a chat node — the chat node type was removed.${resume}`
       }
     }
     const collapsed = !!n.collapsed

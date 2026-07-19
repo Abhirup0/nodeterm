@@ -239,14 +239,7 @@ export function buildStubApi(): Omit<
       readTranscript: U('claude.readTranscript')
     },
     chat: {
-      readTranscript: U('chat.readTranscript'),
-      ensure: U('chat.ensure'),
-      send: noop,
-      interrupt: noop,
-      permissionReply: noop,
-      removeQueued: noop,
-      dispose: noop,
-      onEvent: noopUnsub
+      readTranscript: U('chat.readTranscript')
     },
     claudeAccounts: {
       add: U('claudeAccounts.add'),

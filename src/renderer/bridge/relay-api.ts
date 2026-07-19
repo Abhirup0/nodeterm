@@ -122,10 +122,10 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
 
     // ── Deferred over the relay in v1 — documented degrades (a clean refusal, not a wrong-machine
     //    silent no-op): ──
-    // The SDK chat node has no relay chat builder yet (the Server Edition defers it too). Routing to
-    // the local chat driver would run it on the WRONG machine (a host cwd that does not exist
-    // locally), so refuse with E_UNSUPPORTED instead. contextLink / transcripts / handoff / boardLog
-    // stay LOCAL by way of `...local` (a v1 degrade: they read/write on this machine, not the host).
+    // `chat` is now just readTranscript (the SDK chat node was removed). It has no relay builder:
+    // reading a transcript over the relay would read THIS machine's transcript, not the host's, so
+    // refuse with E_UNSUPPORTED instead. contextLink / transcripts / handoff / boardLog stay LOCAL
+    // by way of `...local` (a v1 degrade: they read/write on this machine, not the host).
     chat: stub.chat,
     // Agent canvas-control (`agent:control`) is not wired over the relay (matches the Server
     // Edition); inert no-ops rather than a local subscription that never carries the host's events.
