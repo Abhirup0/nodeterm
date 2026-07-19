@@ -8,7 +8,9 @@ import { parseOsc52 } from '../../terminal/osc52'
 import {
   attachReplay,
   seedPaint,
+  stripTrailingNewline,
   terminalKeyAction,
+  toXtermText,
   xtermScrollback,
   SHIFT_ENTER_SEQ
 } from '../../terminal/terminal-config'
@@ -137,11 +139,20 @@ export function ModalTerminal({ nodeId, spawn }: { nodeId: string; spawn: ModalS
           transport.onSize(res.sessionId, (size) => term.resize(size.cols, size.rows))
         )
       term.onData((d) => sessionId && transport.write(sessionId, d))
+      // DELIBERATELY omitted vs. TerminalNode: no flow-control pause (transport.setFlow) and no
+      // onResync handler. The pty's pacing/backpressure comes from the canvas node's client — the
+      // modal is a transient, always-on-top second view and never drives the shared session's flow.
 
       // A fresh (cold-restart / first-open) session's tmux pane is gone, so replay the persisted
       // scrollback. A warm join is painted from the server-captured screen inside create(). Agent
-      // auto-resume is deliberately canvas-only — the modal never re-launches a CLI.
+      // auto-resume is deliberately canvas-only — the modal never re-launches a CLI. Both the
+      // snapshot and `res.screen` come from `capture-pane -p` (LF-separated, no CR bytes) and this
+      // xterm runs with convertEol:false, so they MUST go through toXtermText or they staircase.
       const snapshot = res.fresh ? await api.pty.readScrollback(nodeId) : null
+      // The read above is a suspension point: bail if the modal closed while it was in flight, so we
+      // never write into a disposed xterm or observe a null host ref (mirrors TerminalNode's
+      // post-await onDisposed check).
+      if (dead) return
       const paint = seedPaint({
         replay: attachReplay({ parked: false, fresh: res.fresh, hasInitialCommand: false }),
         superseded: false,
@@ -149,10 +160,11 @@ export function ModalTerminal({ nodeId, spawn }: { nodeId: string; spawn: ModalS
         screen: res.screen
       })
       if (paint === 'snapshot') {
-        if (snapshot) term.write(snapshot)
+        if (snapshot) term.write(toXtermText(snapshot))
         term.write('\r\n\x1b[90m— cold start · agent auto-resume happens on canvas —\x1b[0m\r\n')
       } else if (paint === 'create-screen' && res.screen) {
-        term.write(res.screen)
+        // Start from a known-clean SGR state, then convert the capture's LFs to CRLFs.
+        term.write('\x1b[0m' + toXtermText(stripTrailingNewline(res.screen)))
       }
 
       const ro = new ResizeObserver(() => {
