@@ -181,8 +181,8 @@ import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
-import { KanbanView } from '../components/kanban/KanbanView'
-import { defaultKanban } from '../lib/kanban'
+import { KanbanView, type KanbanCreateChoice } from '../components/kanban/KanbanView'
+import { assignNode, defaultKanban } from '../lib/kanban'
 import { isKanbanOpen, useViewMode } from '../state/viewMode'
 import {
   createCanvasPublisher,
@@ -4051,15 +4051,66 @@ export function Canvas() {
   const kanbanSessions = useMemo(
     () =>
       nodes
-        .filter((n) => n.type === 'terminal' || n.type === 'chat')
-        .map((n) => ({
-          id: n.id,
-          title: (n.data.title as string) ?? '',
-          color: (n.data.color as string) ?? NODE_COLORS[0],
-          kind: n.type as 'terminal' | 'chat',
-          agentId: n.data.agentId as string | undefined
-        })),
+        .filter((n) => n.type === 'terminal' || n.type === 'chat' || n.type === 'sticky')
+        .map((n) => {
+          if (n.type === 'sticky') {
+            const text = ((n.data.text as string) ?? '').trim()
+            return {
+              id: n.id,
+              // A note has no title of its own — its first line is the card label.
+              title: text.split('\n')[0].slice(0, 80) || 'Note',
+              color: (n.data.color as string) ?? NODE_COLORS[2],
+              kind: 'sticky' as const,
+              text
+            }
+          }
+          return {
+            id: n.id,
+            title: (n.data.title as string) ?? '',
+            color: (n.data.color as string) ?? NODE_COLORS[0],
+            kind: n.type as 'terminal' | 'chat',
+            agentId: n.data.agentId as string | undefined
+          }
+        }),
     [nodes]
+  )
+
+  // Create a node from the board's per-column "+ New" menu: it lands on the canvas (view
+  // center) and, for a real column, is assigned there. The assignment is written directly —
+  // NOT through the board's pruned commit path: the fresh node isn't in the derived session
+  // list until the next render, and a pruned commit would strip the assignment right back off.
+  const createNodeInColumn = useCallback(
+    (choice: KanbanCreateChoice, columnId: string | null) => {
+      const project = useProjects.getState().getProject(activeProjectId)
+      const index = nodesRef.current.length
+      const at = viewCenter()
+      const node =
+        choice.kind === 'terminal'
+          ? createTerminalNode(index, project?.cwd, at, undefined, project?.ssh)
+          : choice.kind === 'sticky'
+            ? createStickyNode(index, at)
+            : createAgentNode(
+                choice.agentId,
+                index,
+                project?.cwd,
+                at,
+                undefined,
+                project?.ssh,
+                resolveNewNodeAccount(
+                  undefined,
+                  project,
+                  useSettings.getState().settings.claudeAccounts
+                ),
+                activePermissionMode()
+              )
+      setNodes((ns) => [...ns, node])
+      if (columnId) {
+        const board = project?.kanban ?? seedBoard
+        useProjects.getState().setProjectKanban(activeProjectId, assignNode(board, node.id, columnId, null))
+      }
+      markDirty()
+    },
+    [activeProjectId, viewCenter, setNodes, markDirty, seedBoard]
   )
 
   const openNodeFromKanban = useCallback(
@@ -5782,6 +5833,7 @@ export function Canvas() {
           sessions={kanbanSessions}
           onChange={onKanbanChange}
           onOpenNode={openNodeFromKanban}
+          onCreateNode={createNodeInColumn}
         />
       )}
       <UpdateCard />

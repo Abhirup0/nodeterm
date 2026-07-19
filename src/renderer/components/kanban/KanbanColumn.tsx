@@ -3,7 +3,7 @@ import type { KanbanColumn as KanbanColumnT } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
-import type { KanbanSession } from './KanbanView'
+import type { KanbanCreateChoice, KanbanCreateOption, KanbanSession } from './KanbanView'
 
 interface KanbanColumnProps {
   /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
@@ -17,6 +17,9 @@ interface KanbanColumnProps {
   onRecolor?: (color: string) => void
   onDelete?: () => void
   onOpenNode: (nodeId: string) => void
+  /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked. */
+  createOptions: KanbanCreateOption[]
+  onCreate: (choice: KanbanCreateChoice) => void
   // Drag plumbing — the single drag source of truth lives in KanbanView.
   onCardDragStart: (nodeId: string) => void
   onColumnDragStart?: () => void
@@ -28,11 +31,13 @@ interface KanbanColumnProps {
 
 export function KanbanColumn({
   column, cards, statusById, expandedIds, onToggleCard, onRename, onRecolor, onDelete, onOpenNode,
-  onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn, onDropBeforeCard
+  createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
+  onDropBeforeCard
 }: KanbanColumnProps) {
   const [editingTitle, setEditingTitle] = useState(false)
   const [title, setTitle] = useState(column?.title ?? '')
   const [swatchesOpen, setSwatchesOpen] = useState(false)
+  const [newMenuOpen, setNewMenuOpen] = useState(false)
 
   const commitTitle = () => {
     const t = title.trim()
@@ -129,6 +134,26 @@ export function KanbanColumn({
             onDropBefore={() => onDropBeforeCard(s.id)}
           />
         ))}
+      </div>
+      <div className="kanban-col__footer">
+        {newMenuOpen && (
+          <div className="kanban-col__newmenu">
+            {createOptions.map((o) => (
+              <button
+                key={o.key}
+                onClick={() => {
+                  setNewMenuOpen(false)
+                  onCreate(o.choice)
+                }}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <button className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
+          + New session
+        </button>
       </div>
     </div>
   )

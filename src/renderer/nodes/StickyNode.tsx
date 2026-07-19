@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { ColumnPill } from '../components/kanban/ColumnPill'
 
 /**
  * A sticky note node: a colored, resizable card with free-text content.
@@ -29,6 +30,9 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
     )
 
   return (
+    <>
+    {/* Sibling of the root: .sticky-node is overflow:hidden and would clip the half-pill. */}
+    <ColumnPill nodeId={id} />
     <div
       className={`sticky-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}
       style={{ background: `${data.color}22`, borderColor: data.color }}
@@ -98,5 +102,6 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
         onChange={(e) => updateNodeData(id, { text: e.target.value })}
       />
     </div>
+    </>
   )
 }
