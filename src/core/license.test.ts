@@ -215,15 +215,25 @@ describe('license seats entitlement', () => {
     expect(licensedSeats()).toBe(5)
   })
 
-  it('a premium token with no seats field defaults to 1 seat (backward compat)', async () => {
+  it('a premium token with no seats field defaults to the 3 free Pro seats', async () => {
     storeToken(mint(7 * 24 * 60 * 60))
     const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await flush()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
     expect(status.active).toBe(true)
-    expect(status.seats).toBe(1)
-    expect(licensedSeats()).toBe(1)
+    expect(status.seats).toBe(3) // Pro includes 3 seats; existing tokens get them with no re-mint
+    expect(licensedSeats()).toBe(3)
+  })
+
+  it('a premium token below the free baseline is floored to the 3 free Pro seats', async () => {
+    storeToken(mint(7 * 24 * 60 * 60, 'test-device', 2))
+    const { initLicense, licensedSeats } = await import('./license')
+    initLicense()
+    await flush()
+    const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
+    expect(status.seats).toBe(3) // never fewer than the 3 included with Pro
+    expect(licensedSeats()).toBe(3)
   })
 
   it('an absent / non-premium token has 0 seats', async () => {

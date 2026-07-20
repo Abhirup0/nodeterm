@@ -5,8 +5,8 @@ interface EntitlementState {
   status: LicenseStatus
   /** True when an active Pro entitlement is present — features gate on this. */
   isPremium: boolean
-  /** Team Access seat cap (premium → N, premium-no-field → 1, free/inactive → 0). Mirrors
-   *  `status.seats` so the Team Access section can select it directly. */
+  /** Team seat cap (premium → max(3, N), premium-no-field → 3 = Pro's free seats, free/inactive
+   *  → 0). Mirrors `status.seats` so the Team seats section can select it directly. */
   seats: number
   hydrate(): Promise<void>
   /** Open Stripe checkout for this device; Pro arrives via onChange when the purchase lands. */

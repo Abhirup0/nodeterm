@@ -64,7 +64,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     sections: [
       { id: 'phone', title: 'Phone' },
       { id: 'remote', title: 'Remote access' },
-      { id: 'team-access', title: 'Team Access' },
+      { id: 'team-access', title: 'Team seats' },
       { id: 'ssh', title: 'Remote (SSH)' }
     ]
   },

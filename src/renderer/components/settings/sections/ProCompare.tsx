@@ -12,7 +12,7 @@ const PRO = [
   'Unlimited remote access from your phone',
   'Standing phone host (reachable anywhere)',
   'nodeterm mobile Pro included',
-  'Team Access seats'
+  '3 team seats included (extra seats $5/seat/mo)'
 ]
 
 /** Core vs Pro comparison + the live free-tier remote-access meter. */
