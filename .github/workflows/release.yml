@@ -158,7 +158,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --prerelease=false --latest
 
-      # Keep the Homebrew tap (eneskirca/homebrew-tap → `brew install --cask nodeterm`) in
+      # Keep the Homebrew tap (nodeterm/homebrew-tap → `brew install --cask nodeterm`) in
       # step with the release: regenerate Casks/nodeterm.rb with this version's dmg hashes
       # and push via a write deploy key on the tap repo (TAP_DEPLOY_KEY secret). Skips with
       # a warning when the secret is absent — a missing key must never block a release.
@@ -179,7 +179,7 @@ jobs:
           mkdir -p ~/.ssh && printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap_key && chmod 600 ~/.ssh/tap_key
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
-          git clone --depth 1 git@github.com:eneskirca/homebrew-tap.git tap
+          git clone --depth 1 git@github.com:nodeterm/homebrew-tap.git tap
           cat > tap/Casks/nodeterm.rb <<CASK
           cask "nodeterm" do
             version "${ver}"
