@@ -59,9 +59,15 @@ interface Payload {
   licenseId: string
   exp: number
   /** Seat cap for the relay host (Team Access). Rides the same signed token; an old token
-   * lacks it, in which case it resolves to 1 seat. See `seatsFrom`. */
+   * lacks it, in which case it resolves to the free baseline (PRO_FREE_SEATS). See `seatsFrom`. */
   seats?: number
 }
+
+/** Every Pro plan includes this many collaborator seats for free — the token carries a `seats`
+ * value only when a plan buys MORE than this (extra seats are $5/seat/month). The server omits
+ * `seats` at/below this baseline, so existing Pro tokens (no `seats` field) grant it automatically
+ * with no re-mint. Kept in sync with the server's PRO_FREE_SEATS (nodeterm-server entitlement). */
+export const PRO_FREE_SEATS = 3
 
 // Offline verification of our compact Ed25519 token: base64url(payload).base64url(sig).
 // Beyond the signature, the token must be minted for THIS machine (a copied license.json
@@ -88,10 +94,12 @@ function verify(token: string | undefined): Payload | null {
 }
 
 // Resolve the seat cap from a (possibly null) verified payload — the single source of truth so
-// statusFrom() and licensedSeats() can't drift: premium token → its seats ?? 1 (a premium token
-// with no seats field = today's single-peer behavior), inactive/free/invalid → 0.
+// statusFrom() and licensedSeats() can't drift. Every Pro plan grants at least the free baseline:
+// a premium token resolves to max(PRO_FREE_SEATS, its seats) — so a token with no seats field (or a
+// smaller/misconfigured value) still yields the 3 free seats, and a bought-up plan yields its higher
+// count. Inactive/free/invalid → 0.
 function seatsFrom(p: Payload | null): number {
-  return p ? p.seats ?? 1 : 0
+  return p ? Math.max(PRO_FREE_SEATS, p.seats ?? PRO_FREE_SEATS) : 0
 }
 
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
@@ -102,9 +110,9 @@ function statusFrom(token: string | undefined, error: string | null = null): Lic
 }
 
 /**
- * The seat cap the current stored entitlement grants: premium → its `seats` (absent → 1), else 0.
- * The relay host reads this to enforce how many devices may connect at once. Kept consistent with
- * `statusFrom` by sharing `seatsFrom`/`verify` — do not reimplement the resolution here.
+ * The seat cap the current stored entitlement grants: premium → max(PRO_FREE_SEATS, its `seats`),
+ * else 0. The relay host reads this to enforce how many devices may connect at once. Kept consistent
+ * with `statusFrom` by sharing `seatsFrom`/`verify` — do not reimplement the resolution here.
  */
 export function licensedSeats(): number {
   return seatsFrom(verify(load().token))

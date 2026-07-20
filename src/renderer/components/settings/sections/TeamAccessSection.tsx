@@ -80,8 +80,8 @@ export function TeamAccessSection({
   return (
     <SettingsSection
       id="team-access"
-      title="Team Access"
-      description="Share this Mac with your team — one seat per teammate, $5/seat/month."
+      title="Team seats"
+      description="Share this Mac with your team — Pro includes 3 seats, extra seats $5/seat/month."
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -93,6 +93,7 @@ export function TeamAccessSection({
               <div>
                 <h4 className="text-[13px] font-medium text-text">Seats</h4>
                 <p className="text-sm text-muted">{view.counterText}</p>
+                <p className="text-xs text-muted">3 included with Pro · extra seats $5/seat/month</p>
               </div>
               <Button onClick={() => void ent.upgrade()}>Add seats</Button>
             </div>
@@ -181,11 +182,12 @@ export function TeamAccessSection({
         ) : (
           <div className="space-y-3">
             <h4 className="text-[13px] font-medium text-text">
-              Share this Mac with your team
+              Upgrade to Pro — 3 collaborator seats included
             </h4>
             <p className="text-sm text-muted">
-              One seat per teammate, $5/seat/month. Each teammate connects from their own device
-              over the end-to-end encrypted relay.
+              Pro comes with 3 seats to share this Mac with your team. Need more? Extra seats are
+              $5/seat/month. Each teammate connects from their own device over the end-to-end
+              encrypted relay.
             </p>
             <p className="text-sm text-muted">
               A seat grants shell access: a teammate on a seat can run commands on this Mac — the
@@ -193,7 +195,7 @@ export function TeamAccessSection({
               pairing code you compare together.
             </p>
             <Button variant="primary" onClick={() => void ent.upgrade()}>
-              Get Team Access
+              Upgrade to Pro — get 3 free seats
             </Button>
           </div>
         )}
