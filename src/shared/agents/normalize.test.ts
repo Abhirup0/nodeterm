@@ -25,6 +25,26 @@ describe('normalizeClaude — turn-end signals', () => {
   })
 })
 
+describe('normalizeClaude — PermissionRequest (deterministic approvals)', () => {
+  it('PermissionRequest → blocked, threading the merged nodeterm_pending_id', () => {
+    const e = normalizeClaude(
+      env({
+        hook_event_name: 'PermissionRequest',
+        session_id: 's1',
+        last_assistant_message: 'Approve write',
+        nodeterm_pending_id: 'n1-1720-42'
+      })
+    )
+    expect(e).toMatchObject({ kind: 'state', state: 'blocked', pendingId: 'n1-1720-42' })
+  })
+
+  it('omits pendingId when the hook did not arm the wait branch (legacy prompt path)', () => {
+    const e = normalizeClaude(env({ hook_event_name: 'PermissionRequest', session_id: 's1' }))
+    expect(e).toMatchObject({ kind: 'state', state: 'blocked' })
+    expect(e && 'pendingId' in e).toBe(false)
+  })
+})
+
 describe('normalizeClaude — async subagents', () => {
   it('PostToolUse for a sync subagent → subagent-end with stats', () => {
     const e = normalizeClaude(

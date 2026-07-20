@@ -115,6 +115,7 @@ export function buildStubApi(): Omit<
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
+  | 'answerPermission'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
@@ -330,6 +331,7 @@ export function buildStubApi(): Omit<
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
+    | 'answerPermission'
     | 'userDataDir'
     | 'presence'
     | 'speech'

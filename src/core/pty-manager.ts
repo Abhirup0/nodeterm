@@ -16,7 +16,7 @@ import {
   type TmuxStatus
 } from '../shared/types'
 import { findCommand, tmuxInstall } from './tmux-hint'
-import { hookServer } from './agents/hook-server'
+import { hookServer, PERM_WAIT_SECS_DEFAULT } from './agents/hook-server'
 import {
   probeSaysAbsent,
   remoteHookEnvArgs,
@@ -1110,9 +1110,16 @@ export class PtyManager {
     // 127.0.0.1:<localPort>, which is useless (and misleading) on the remote host. The remote
     // session's hook env is injected via the remote tmux `-e` below (from the reverse-tunnel
     // endpoint file), so leave the local hook env out entirely here.
+    // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): arm the permission hook's
+    // wait-branch for claude sessions when the setting is on. `permWaitSecs > 0` injects
+    // NODETERM_PERM_WAIT_SECS; off / non-claude ⇒ 0 ⇒ absent ⇒ legacy behavior.
+    const permWaitSecs =
+      this.getSettings().hookReplyApprovals && (options.agentId ?? 'claude') === 'claude'
+        ? PERM_WAIT_SECS_DEFAULT
+        : 0
     const hookEnv =
       options.persistKey && !options.sshRemote
-        ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude')
+        ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude', permWaitSecs)
         : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
@@ -1173,11 +1180,17 @@ export class PtyManager {
       // selection off that raw id with no `nt-` stripping. Passing the session name here would
       // emit events under `nt-<id>` that match no node → no badge/notification/session/loop.
       const hookExtraEnv = options.sshRemote.hookEndpointPath
-        ? remoteHookEnvArgs(
-            options.sshRemote.hookEndpointPath,
-            options.persistKey,
-            hookServer.getVersion()
-          )
+        ? [
+            ...remoteHookEnvArgs(
+              options.sshRemote.hookEndpointPath,
+              options.persistKey,
+              hookServer.getVersion()
+            ),
+            // Arm the remote permission hook's wait-branch too (deterministic approvals over SSH):
+            // the request/answer files live on the REMOTE host; the desktop answers over the
+            // ControlMaster. Only when the hook endpoint is set (else no POST → nothing learns the id).
+            ...(permWaitSecs > 0 ? ['-e', `NODETERM_PERM_WAIT_SECS=${permWaitSecs}`] : [])
+          ]
         : []
       // Managed REMOTE Claude account (Task 12): inject CLAUDE_CONFIG_DIR into the remote tmux
       // session via `-e`, pointing at the account's config dir on the remote host. The path must be

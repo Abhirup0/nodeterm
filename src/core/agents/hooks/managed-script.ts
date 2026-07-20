@@ -2,6 +2,16 @@
 // It sources the endpoint file for the LIVE port/token (restart handoff), no-ops
 // outside nodeterm-spawned sessions (gating via NODETERM_NODE_ID), and posts the
 // raw hook payload to the loopback server. Fails open at every step.
+//
+// Deterministic hook-reply approvals (docs/hook-reply-approvals.md): when
+// NODETERM_PERM_WAIT_SECS is set (> 0) in the session env AND the incoming hook is a
+// PermissionRequest, the script generates a pendingId, drops the request JSON under
+// ~/.nodeterm/pending/, tags the POST body with nodeterm_pending_id (so the mirror/inbox
+// learns it), then polls for ~/.nodeterm/pending/<pendingId>.answer for up to that many
+// seconds. An answer ('allow' | 'deny') is echoed back as the hook's decision JSON; a
+// timeout prints nothing and Claude falls through to its normal interactive prompt. The
+// whole branch is a NO-OP when the env var is absent (a user's own terminals, older
+// nodeterm, non-claude agents), so behavior is bit-for-bit legacy there.
 export function buildManagedScript(agentId: string): string {
   return [
     '#!/bin/sh',
@@ -15,6 +25,24 @@ export function buildManagedScript(agentId: string): string {
     'if [ -z "$payload" ]; then',
     '  exit 0',
     'fi',
+    '# Deterministic-approval request: only for a PermissionRequest hook while the wait is armed.',
+    '# `nt_pending` stays empty otherwise, so the POST tag and the poll loop below are both inert.',
+    'nt_pending=""',
+    'nt_pending_file=""',
+    'if [ -n "$NODETERM_PERM_WAIT_SECS" ] && [ "$NODETERM_PERM_WAIT_SECS" -gt 0 ] 2>/dev/null; then',
+    '  case "$payload" in',
+    '    *\'"hook_event_name":"PermissionRequest"\'*|*\'"hook_event_name": "PermissionRequest"\'*)',
+    '      nt_node=$(printf %s "$NODETERM_NODE_ID" | tr -c \'A-Za-z0-9_-\' \'_\')',
+    '      nt_ms=$(date +%s%3N 2>/dev/null)',
+    '      case "$nt_ms" in \'\'|*[!0-9]*) nt_ms=$(date +%s) ;; esac',
+    '      nt_pending="${nt_node}-${nt_ms}-$$"',
+    '      nt_dir="$HOME/.nodeterm/pending"',
+    '      (umask 077; mkdir -p "$nt_dir") 2>/dev/null || :',
+    '      nt_pending_file="$nt_dir/$nt_pending.json"',
+    '      (umask 077; printf %s "$payload" > "$nt_pending_file") 2>/dev/null || :',
+    '      ;;',
+    '  esac',
+    'fi',
     'if [ -n "$NODETERM_HOOK_SOCK" ]; then',
     `  curl -sS -X POST --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/hook/${agentId}" \\`,
     '    --connect-timeout 0.5 --max-time 1.5 \\',
@@ -22,6 +50,7 @@ export function buildManagedScript(agentId: string): string {
     '    -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '    --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '    --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '    --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '    --data-urlencode "payload=${payload}" >/dev/null 2>&1 || true',
     'elif [ -n "$NODETERM_HOOK_PORT" ]; then',
     `  curl -sS -X POST "http://127.0.0.1:\${NODETERM_HOOK_PORT}/hook/${agentId}" \\`,
@@ -30,7 +59,30 @@ export function buildManagedScript(agentId: string): string {
     '    -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
     '    --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '    --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '    --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '    --data-urlencode "payload=${payload}" >/dev/null 2>&1 || true',
+    'fi',
+    '# Hold the hook open for a phone/canvas answer file, polling every 0.5s up to the armed seconds.',
+    'if [ -n "$nt_pending" ]; then',
+    '  nt_answer="$HOME/.nodeterm/pending/$nt_pending.answer"',
+    '  nt_max=$((NODETERM_PERM_WAIT_SECS * 2))',
+    '  nt_i=0',
+    '  while [ "$nt_i" -lt "$nt_max" ]; do',
+    '    if [ -f "$nt_answer" ]; then',
+    '      nt_decision=$(cat "$nt_answer" 2>/dev/null)',
+    '      rm -f "$nt_answer" "$nt_pending_file" 2>/dev/null || :',
+    '      if [ "$nt_decision" = "allow" ]; then',
+    '        printf \'%s\\n\' \'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\'',
+    '      elif [ "$nt_decision" = "deny" ]; then',
+    '        printf \'%s\\n\' \'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from nodeterm."}}}\'',
+    '      fi',
+    '      exit 0',
+    '    fi',
+    '    sleep 0.5 2>/dev/null || sleep 1',
+    '    nt_i=$((nt_i + 1))',
+    '  done',
+    '  # Timed out: clean up the request file and print nothing → Claude shows its normal prompt.',
+    '  rm -f "$nt_pending_file" 2>/dev/null || :',
     'fi',
     'exit 0',
     ''

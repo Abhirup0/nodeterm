@@ -60,6 +60,34 @@ describe('SshProjectManager', () => {
     expect(mgr.refForRemoteCwd('/nope')).toBeUndefined()
   })
 
+  it('writePendingAnswer writes the answer file over the master (atomic tmp+mv, decision on stdin)', async () => {
+    const { mgr, run } = makeMgr()
+    await mgr.connect('p1', conn)
+    const ok = await mgr.writePendingAnswer('p1', 'node-1-2', 'allow')
+    expect(ok).toBe(true)
+    const call = run.mock.calls.find((c) => (c[0] as string[]).join(' ').includes('.answer'))
+    expect(call).toBeTruthy()
+    const cmd = (call![0] as string[]).join(' ')
+    expect(cmd).toContain('umask 077')
+    expect(cmd).toContain('.nodeterm/pending')
+    // atomic tmp+mv: write to <id>.answer.tmp then rename onto <id>.answer.
+    expect(cmd).toMatch(/cat > [\s\S]*\.answer\.tmp/)
+    expect(cmd).toMatch(/mv -f [\s\S]*\.answer\.tmp[\s\S]*\.answer/)
+    expect(call![1]).toBe('allow') // decision written on stdin
+  })
+
+  it('writePendingAnswer refuses an invalid pendingId and a disconnected project (no run)', async () => {
+    const { mgr, run } = makeMgr()
+    // Not connected → false, no ssh command issued.
+    expect(await mgr.writePendingAnswer('p1', 'ok-id', 'allow')).toBe(false)
+    await mgr.connect('p1', conn)
+    const before = run.mock.calls.length
+    expect(await mgr.writePendingAnswer('p1', '../evil', 'allow')).toBe(false)
+    // @ts-expect-error — runtime guard against a bad decision value
+    expect(await mgr.writePendingAnswer('p1', 'ok-id', 'always')).toBe(false)
+    expect(run.mock.calls.length).toBe(before) // neither refusal touched ssh
+  })
+
   it('uploadFile uploads via scp under <remoteHome>/.nodeterm/uploads/<token> and returns the abs path', async () => {
     const scpCalls: string[][] = []
     const run = vi.fn(async (args: string[]) =>

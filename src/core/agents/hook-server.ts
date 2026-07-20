@@ -9,6 +9,12 @@ import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/nor
 export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
 const SLOWLORIS_MS = 2000
 
+// Default seconds the managed permission hook holds for a phone/canvas answer before falling
+// through to Claude's interactive prompt (must stay under Claude's own hook timeout). Injected
+// into a claude session's env as NODETERM_PERM_WAIT_SECS when hook-reply approvals are enabled.
+// See docs/hook-reply-approvals.md.
+export const PERM_WAIT_SECS_DEFAULT = 45
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
     // Collect Buffers and decode ONCE at the end: `data += chunk` coerced every chunk through
@@ -129,6 +135,11 @@ class HookServer {
           } catch {
             payload = {}
           }
+          // Deterministic-approval ticket: the managed permission hook adds `nodeterm_pending_id`
+          // as a separate form field (it can't edit the agent's JSON payload in POSIX sh). Merge it
+          // into the payload object so both the raw listener and the normalizers see it as if it
+          // rode inside the hook JSON. See docs/hook-reply-approvals.md.
+          if (form.nodeterm_pending_id) payload.nodeterm_pending_id = form.nodeterm_pending_id
           // Raw listener first: it drives the transcript-tailing features (which need
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
           this.rawListener?.(agentId, nodeId, payload)
@@ -186,7 +197,11 @@ class HookServer {
     }
   }
 
-  buildPtyEnv(nodeId: string, agentId: AgentId): Record<string, string> {
+  // `permWaitSecs > 0` opts this session into the deterministic hook-reply approval flow: the
+  // managed permission hook holds for that many seconds for a phone/canvas answer file before
+  // falling through to Claude's interactive prompt. 0/undefined ⇒ NODETERM_PERM_WAIT_SECS absent ⇒
+  // the hook's wait-branch is inert (exact legacy behavior). See docs/hook-reply-approvals.md.
+  buildPtyEnv(nodeId: string, agentId: AgentId, permWaitSecs = 0): Record<string, string> {
     if (this.port <= 0 || !this.token) return {}
     return {
       NODETERM_HOOK_PORT: String(this.port),
@@ -195,6 +210,7 @@ class HookServer {
       NODETERM_HOOK_ENDPOINT: this.endpointFilePath(),
       NODETERM_NODE_ID: nodeId,
       NODETERM_AGENT_ID: agentId,
+      ...(permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
       ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
     }
   }

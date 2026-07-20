@@ -14,7 +14,9 @@ import { WorkspaceStore } from '../core/workspace-store'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
+import { writePendingAnswerLocal, startPendingSweep, isValidPendingId } from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import {
   initAgentStatusMirror,
@@ -188,6 +190,24 @@ export async function startServer(
     }
   })
   wireAgentStatus(platform)
+  // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the browser canvas answers a
+  // held Claude permission hook here. The Server Edition runs ON the host, so a local project's
+  // answer file is written right there (under os.homedir(), which the hook uses as $HOME). SSH
+  // projects are v1-unsupported server-side (no ControlMaster manager here) → false, a documented
+  // three-surfaces degrade. pendingId is validated before it becomes a path.
+  platform.handle(
+    IPC.agentAnswerPermission,
+    async (payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }) => {
+      const { nodeId, pendingId, decision } = payload ?? ({} as typeof payload)
+      if (!isValidPendingId(pendingId)) return false
+      if (decision !== 'allow' && decision !== 'deny') return false
+      // An SSH-project node has no reachable ControlMaster here (v1): answer only local nodes.
+      if (workspaceStore.sshProjectIdForNode(nodeId)) return false
+      return writePendingAnswerLocal(pendingId, decision, os.homedir())
+    }
+  )
+  // Sweep stale ~/.nodeterm/pending files on boot + hourly (orphans from killed sessions).
+  startPendingSweep(os.homedir())
   // Desktop → paired-phone APNs push (spec: apns-push) is DELIBERATELY not wired here. The push
   // service (`src/core/push-notify.ts`) fans actionable inbox events out to a host's relay-PAIRED
   // phones, keyed by the standing relay host's identity (public key + hostDeviceId) and the
