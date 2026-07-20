@@ -158,67 +158,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --prerelease=false --latest
 
-      # Keep the Homebrew tap (nodeterm/homebrew-tap → `brew install --cask nodeterm`) in
-      # step with the release: regenerate Casks/nodeterm.rb with this version's dmg hashes
-      # and push via a write deploy key on the tap repo (TAP_DEPLOY_KEY secret). Skips with
-      # a warning when the secret is absent — a missing key must never block a release.
-      - name: Update Homebrew cask
-        env:
-          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$TAP_DEPLOY_KEY" ]; then
-            echo "::warning::TAP_DEPLOY_KEY secret not set; skipping Homebrew cask update"
-            exit 0
-          fi
-          tag="${GITHUB_REF_NAME}"; ver="${tag#v}"
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
-            --pattern "nodeterm-${ver}-arm64.dmg" --pattern "nodeterm-${ver}.dmg" -D dmgs
-          arm_sha=$(sha256sum "dmgs/nodeterm-${ver}-arm64.dmg" | cut -d' ' -f1)
-          intel_sha=$(sha256sum "dmgs/nodeterm-${ver}.dmg" | cut -d' ' -f1)
-          mkdir -p ~/.ssh && printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap_key && chmod 600 ~/.ssh/tap_key
-          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
-          git clone --depth 1 git@github.com:nodeterm/homebrew-tap.git tap
-          cat > tap/Casks/nodeterm.rb <<CASK
-          cask "nodeterm" do
-            version "${ver}"
-
-            on_arm do
-              sha256 "${arm_sha}"
-              url "https://github.com/eneskirca/nodeterm/releases/download/v#{version}/nodeterm-#{version}-arm64.dmg"
-            end
-            on_intel do
-              sha256 "${intel_sha}"
-              url "https://github.com/eneskirca/nodeterm/releases/download/v#{version}/nodeterm-#{version}.dmg"
-            end
-
-            name "nodeterm"
-            desc "Node-based terminal manager — terminals and coding agents on an infinite canvas"
-            homepage "https://nodeterm.dev/"
-
-            livecheck do
-              url :url
-              strategy :github_latest
-            end
-
-            # The app self-updates via electron-updater; brew should not force-reinstall over it.
-            auto_updates true
-
-            app "nodeterm.app"
-
-            zap trash: [
-              "~/Library/Application Support/node-terminal",
-              "~/Library/Preferences/com.nodeterm.app.plist",
-              "~/Library/Saved Application State/com.nodeterm.app.savedState",
-            ]
-          end
-          CASK
-          # The heredoc above is indented for YAML; strip the leading 10 spaces.
-          sed -i 's/^          //' tap/Casks/nodeterm.rb
-          cd tap
-          git config user.name "nodeterm-release"
-          git config user.email "release@nodeterm.dev"
-          git add Casks/nodeterm.rb
-          git diff --cached --quiet || git commit -m "cask: nodeterm ${tag}"
-          git push origin main
+      # Homebrew: the cask is NOT updated from here. The org disables deploy keys, so
+      # nodeterm/homebrew-tap carries its own `sync-cask` workflow (30-min schedule +
+      # manual dispatch) that tracks /releases/latest — which excludes prereleases, so it
+      # only ever casks a release this publish job has promoted.
