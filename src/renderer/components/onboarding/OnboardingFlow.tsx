@@ -6,6 +6,7 @@ import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import { keyLabel } from '@shared/platform-utils'
 import { useSettings } from '../../state/settings'
 import { useEntitlement } from '../../state/entitlement'
+import { AgentIcon } from '../../lib/agentIcons'
 import {
   OnbBrandMark,
   OnbCheck,
@@ -13,7 +14,8 @@ import {
   SceneAgents,
   SceneDictation,
   SceneKanban,
-  SceneNotify
+  SceneNotify,
+  ScenePhone
 } from './scenes'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -30,8 +32,9 @@ function formatSize(mb: number): string {
   return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`
 }
 
-/** Info step + the setting it configures, one per screen. Step 0 is the welcome cover. */
-const STEP_COUNT = 5
+/** Info step + the setting it configures, one per screen. Step 0 is the welcome cover;
+ *  the last step is the mobile-app announcement (info-only). */
+const STEP_COUNT = 6
 
 /**
  * First-run setup tour: welcome → agents → dictation → kanban → notifications. Each step
@@ -120,8 +123,8 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // ---- notifications (last step: both choices finish the tour) ----
-  const finishWithNotifications = (enable: boolean): void => {
+  // ---- notifications (either choice records the consent and moves on) ----
+  const chooseNotifications = (enable: boolean): void => {
     update({ notifyOnClaudeDone: enable, notifyConsentAsked: true })
     if (enable) {
       void window.nodeTerminal.notify({
@@ -131,7 +134,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
         force: true
       })
     }
-    onClose()
+    setStep((s) => Math.min(s + 1, STEP_COUNT - 1))
   }
 
   // `defaultAgent` is always a launchable builtin per its doc, but the type is open — guard.
@@ -190,10 +193,11 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
       ) : (
         <div className="onb-card">
           <div className="onb-scene">
-            {step === 1 && <SceneAgents label={agent.label} color={agent.color} />}
+            {step === 1 && <SceneAgents agentId={agentId} label={agent.label} color={agent.color} />}
             {step === 2 && <SceneDictation keys={dictKeys.map((k) => keyLabel(k, isMac))} hold={dictHold} />}
             {step === 3 && <SceneKanban pulseKey={kanbanPulse} />}
             {step === 4 && <SceneNotify />}
+            {step === 5 && <ScenePhone />}
           </div>
           <div className="onb-pane">
             <div className="onb-step-no">Step {step} of {STEP_COUNT - 1}</div>
@@ -215,7 +219,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                       className={`onb-agent ${settings.defaultAgent === id ? 'is-selected' : ''}`}
                       onClick={() => update({ defaultAgent: id })}
                     >
-                      <span className="onb-dot" style={{ background: AGENT_CONFIG[id].color }} />
+                      <AgentIcon agentId={id} />
                       {AGENT_CONFIG[id].label}
                     </button>
                   ))}
@@ -307,13 +311,28 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   Notifications.
                 </p>
                 <div className="onb-notify-actions">
-                  <button className="onb-btn onb-btn--primary" autoFocus onClick={() => finishWithNotifications(true)}>
-                    Enable notifications & finish
+                  <button className="onb-btn onb-btn--primary" autoFocus onClick={() => chooseNotifications(true)}>
+                    Enable notifications
                   </button>
-                  <button className="onb-btn" onClick={() => finishWithNotifications(false)}>
-                    Not now — just finish
+                  <button className="onb-btn" onClick={() => chooseNotifications(false)}>
+                    Not now
                   </button>
                 </div>
+              </>
+            )}
+
+            {step === 5 && (
+              <>
+                <h2>Your sessions, in your pocket</h2>
+                <p>
+                  <strong>nodeterm mobile</strong> attaches to these same live tmux sessions from
+                  your phone — watch an agent work, answer a "needs you", or type into any
+                  terminal from anywhere.
+                </p>
+                <p>
+                  The iOS app is in App Store review — <strong>coming soon</strong>. You'll find
+                  the pairing flow in Settings → Phone when it lands.
+                </p>
               </>
             )}
 
@@ -327,9 +346,14 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                 <button className="onb-btn" onClick={back}>
                   Back
                 </button>
-                {step < STEP_COUNT - 1 && (
-                  <button className="onb-btn onb-btn--primary" onClick={next}>
-                    Next
+                {/* Step 4's own choice buttons advance it (an explicit consent answer);
+                    the last step's primary is Finish. */}
+                {step !== 4 && (
+                  <button
+                    className="onb-btn onb-btn--primary"
+                    onClick={step === STEP_COUNT - 1 ? onClose : next}
+                  >
+                    {step === STEP_COUNT - 1 ? 'Finish' : 'Next'}
                   </button>
                 )}
               </div>

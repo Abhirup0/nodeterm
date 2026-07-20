@@ -7532,16 +7532,15 @@ body,
   20% { opacity: 0.9; transform: scale(0.5); }
   30%, 100% { opacity: 0; transform: scale(1.6); }
 }
-.onb-menu {
+/* The scene's context menu is the app's REAL .ctx-menu — this modifier only re-anchors it
+   into the scene (absolute, no fixed/z-index) and makes it a non-interactive replay. */
+.ctx-menu.onb-menu {
   position: absolute;
   left: 112px;
   top: 132px;
-  width: 148px;
-  background: #1d1d21;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  z-index: auto;
+  min-width: 150px;
+  pointer-events: none;
   opacity: 0;
   transform-origin: top left;
   animation: onb-menu 7s ease infinite;
@@ -7551,33 +7550,30 @@ body,
   23%, 52% { opacity: 1; transform: scale(1); }
   56%, 100% { opacity: 0; transform: scale(0.97); }
 }
-.onb-menu__row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  color: rgba(235, 235, 245, 0.75);
+.onb-menu .ctx-item {
+  font-size: 11.5px;
   padding: 5px 8px;
-  border-radius: 5px;
 }
-.onb-menu__row--hl {
-  color: #fff;
+.onb-menu__hl {
   animation: onb-menu-hl 7s ease infinite;
 }
 @keyframes onb-menu-hl {
   0%, 30% { background: transparent; }
-  36%, 54% { background: var(--accent); }
+  36%, 54% { background: var(--accent); color: #fff; }
   58%, 100% { background: transparent; }
 }
+/* The spawned node mirrors the real .term-node look: 3px color top border, panel header. */
 .onb-node {
   position: absolute;
   left: 128px;
   top: 96px;
-  width: 168px;
-  background: #131316;
-  border: 1px solid;
+  width: 180px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top-width: 3px;
   border-radius: 10px;
   overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
   opacity: 0;
   animation: onb-node-pop 7s cubic-bezier(0.34, 1.4, 0.5, 1) infinite;
 }
@@ -7591,29 +7587,23 @@ body,
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--panel-header);
   font-size: 10.5px;
   font-weight: 600;
+}
+.onb-node__color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.onb-node__head .term-node__status {
+  font-size: 8.5px;
 }
 .onb-node__title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.onb-badge {
-  margin-left: auto;
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  color: #34c759;
-  border: 1px solid rgba(52, 199, 89, 0.5);
-  border-radius: 4px;
-  padding: 1px 4px;
-  animation: onb-pulse 1.6s ease-in-out infinite;
-}
-@keyframes onb-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
 }
 .onb-node__body {
   padding: 9px 10px 12px;
@@ -7643,6 +7633,9 @@ body,
   align-items: center;
   gap: 6px;
 }
+/* One shared 8s timeline, in SEQUENCE (mirrors the real flow): keys go down (~5%),
+   the mic + waveform live only while held (8–52%), release (~55%), then the transcribed
+   text types out (58–90%) — nothing is written until you let go. */
 .onb-kbd {
   display: inline-flex;
   align-items: center;
@@ -7656,25 +7649,42 @@ body,
   border-radius: 8px;
   font-size: 15px;
   font-weight: 600;
-  animation: onb-keypress 5s ease infinite;
+  animation: onb-keypress 8s ease infinite;
 }
 .onb-kbd--hold {
   animation-name: onb-keyhold;
 }
 @keyframes onb-keypress {
-  0%, 6% { transform: translateY(0); border-bottom-width: 3px; }
-  10%, 14% { transform: translateY(2px); border-bottom-width: 1px; }
-  18%, 100% { transform: translateY(0); border-bottom-width: 3px; }
+  0%, 3% { transform: translateY(0); border-bottom-width: 3px; }
+  5%, 9% { transform: translateY(2px); border-bottom-width: 1px; }
+  12%, 100% { transform: translateY(0); border-bottom-width: 3px; }
 }
 @keyframes onb-keyhold {
-  0%, 6% { transform: translateY(0); border-bottom-width: 3px; }
-  12%, 72% { transform: translateY(2px); border-bottom-width: 1px; }
-  80%, 100% { transform: translateY(0); border-bottom-width: 3px; }
+  0%, 3% { transform: translateY(0); border-bottom-width: 3px; }
+  6%, 52% { transform: translateY(2px); border-bottom-width: 1px; }
+  57%, 100% { transform: translateY(0); border-bottom-width: 3px; }
 }
 .onb-kbd-hint {
   font-size: 10.5px;
   color: var(--muted);
   margin-left: 4px;
+  opacity: 0;
+  animation: onb-holdhint 8s ease infinite;
+}
+@keyframes onb-holdhint {
+  0%, 5% { opacity: 0; }
+  9%, 50% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+/* gates the whole mic block to the hold window; the loops inside keep their own rhythm */
+.onb-mic-wrap {
+  opacity: 0;
+  animation: onb-micgate 8s ease infinite;
+}
+@keyframes onb-micgate {
+  0%, 6% { opacity: 0; transform: scale(0.9); }
+  10%, 52% { opacity: 1; transform: scale(1); }
+  58%, 100% { opacity: 0; transform: scale(0.95); }
 }
 .onb-mic {
   position: relative;
@@ -7737,12 +7747,13 @@ body,
   overflow: hidden;
   white-space: nowrap;
   max-width: 0;
-  animation: onb-type 5s steps(32) infinite;
+  animation: onb-type 8s steps(32) infinite;
   color: rgba(235, 235, 245, 0.85);
 }
+/* types only AFTER the release (58%) — the transcription arrives when you let go */
 @keyframes onb-type {
-  0%, 14% { max-width: 0; }
-  70%, 100% { max-width: 100%; }
+  0%, 58% { max-width: 0; }
+  90%, 100% { max-width: 100%; }
 }
 .onb-caret {
   width: 6px;
@@ -7756,23 +7767,38 @@ body,
 
 /* -- kanban scene (positions transition; the JS interval flips .is-board) -- */
 .onb-scene--kanban {
-  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.onb-col {
+/* CENTERED stage the cards + columns live in (the action must not hug the top-left) */
+.onb-kstage {
+  position: relative;
+  width: 312px;
+  height: 210px;
+}
+/* column panels mirror the real board's .kanban-col (bg/border/radius), scaled down */
+.onb-kcol {
   position: absolute;
-  top: 12px;
-  width: 88px;
+  top: 0;
+  bottom: 0;
+  width: 96px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  opacity: 0;
+  transition: opacity 0.5s ease 0.25s;
+}
+.onb-kcol__h {
+  padding: 8px 9px 6px;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  padding-bottom: 4px;
-  opacity: 0;
-  transition: opacity 0.5s ease 0.25s;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
-.onb-scene--kanban.is-board .onb-col {
+.onb-kstage.is-board .onb-kcol {
   opacity: 1;
 }
 .onb-mini {
@@ -7871,6 +7897,89 @@ body,
   align-self: flex-start;
 }
 
+/* -- phone scene (mobile companion announcement) -- */
+.onb-scene--phone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.onb-phone {
+  position: relative;
+  width: 152px;
+  height: 296px;
+  background: #131316;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-radius: 24px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  padding: 28px 10px 12px;
+  animation: onb-float 7s ease-in-out infinite;
+}
+.onb-phone__notch {
+  position: absolute;
+  top: 9px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 54px;
+  height: 9px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.onb-phone__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.onb-phone__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 7px 8px;
+}
+/* the real status badges, scaled to phone-row size */
+.onb-phone__row .term-node__status {
+  margin-left: 0;
+  flex: none;
+  font-size: 7.5px;
+}
+.onb-phone__term {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  background: #0a0a0c;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-family: Menlo, Monaco, monospace;
+  font-size: 10px;
+}
+.onb-scene--phone {
+  position: relative;
+}
+.onb-soon {
+  /* pinned over the phone's top-right corner — must not cover the session rows */
+  position: absolute;
+  top: 13%;
+  right: 15%;
+  transform: rotate(8deg);
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 4px 11px;
+  border-radius: 999px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  animation: onb-soon 3.2s ease-in-out infinite;
+}
+@keyframes onb-soon {
+  0%, 100% { transform: rotate(8deg) scale(1); }
+  50% { transform: rotate(8deg) scale(1.07); }
+}
+
 /* ---- reduced motion: freeze every scene to a readable final frame ---- */
 @media (prefers-reduced-motion: reduce) {
   .onb-ghost,
@@ -7889,17 +7998,20 @@ body,
     animation: none;
     opacity: 1;
   }
-  .onb-menu__row--hl {
+  .onb-menu__hl {
     animation: none;
     background: var(--accent);
+    color: #fff;
   }
   .onb-node {
     animation: none;
     opacity: 1;
     transform: none;
   }
-  .onb-badge {
+  .onb-mic-wrap,
+  .onb-kbd-hint {
     animation: none;
+    opacity: 1;
   }
   .onb-term-typed {
     animation: none;
@@ -7907,5 +8019,9 @@ body,
   }
   .onb-mini {
     transition: none;
+  }
+  .onb-phone,
+  .onb-soon {
+    animation: none;
   }
 }
