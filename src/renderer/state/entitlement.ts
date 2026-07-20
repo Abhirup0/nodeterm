@@ -9,8 +9,9 @@ interface EntitlementState {
    *  → 0). Mirrors `status.seats` so the Team seats section can select it directly. */
   seats: number
   hydrate(): Promise<void>
-  /** Open Stripe checkout for this device; Pro arrives via onChange when the purchase lands. */
-  upgrade(): Promise<void>
+  /** Open Stripe checkout for this device; Pro arrives via onChange when the purchase lands.
+   * `target: 'seats'` opens the add-seats (quantity) link instead of base Pro. */
+  upgrade(target?: 'pro' | 'seats'): Promise<void>
   activate(key: string): Promise<void>
   deactivate(): Promise<void>
 }
@@ -29,8 +30,8 @@ export const useEntitlement = create<EntitlementState>((set) => {
     async hydrate() {
       apply(await window.nodeTerminal.license.getStatus())
     },
-    async upgrade() {
-      apply(await window.nodeTerminal.license.upgrade())
+    async upgrade(target) {
+      apply(await window.nodeTerminal.license.upgrade(target))
     },
     async activate(key) {
       apply(await window.nodeTerminal.license.activate(key))

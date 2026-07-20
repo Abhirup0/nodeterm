@@ -14,10 +14,15 @@ import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 
-// Stripe Payment Link (live) for the Pro subscription. The app appends ?client_reference_id=<deviceId>
-// so the webhook binds the purchase to this device → keyless ("device-bound") activation.
-// NODETERM_CHECKOUT_URL overrides it for testing (e.g. the test-mode link).
-const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/9B65kFeraflH9ora4A7EQ00'
+// Stripe Payment Link (live) for the base Pro subscription ($10/mo, includes the 3 free seats).
+// The app appends ?client_reference_id=<deviceId> so the webhook binds the purchase to this device
+// → keyless ("device-bound") activation. NODETERM_CHECKOUT_URL overrides it (e.g. the test link).
+const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/eVq00lbeY0qNbwz90w7EQ02'
+
+// Add-seats checkout: a quantity-based Payment Link for buying seats BEYOND the free 3 (the buyer
+// picks the total; extra seats are $5/seat/mo). Falls back to the base Pro link when unset, so a
+// single quantity-based link can serve both flows until a dedicated seats link exists.
+const SEATS_CHECKOUT_URL = process.env.NODETERM_SEATS_CHECKOUT_URL || CHECKOUT_URL
 
 // Tokens are short-lived (the server mints 7-day entitlements) and the app is designed to
 // stay open for days, so a launch-only refresh would let the token expire mid-session and
@@ -183,8 +188,11 @@ export function initLicense(onChange?: () => void): void {
   // Device-bound upgrade: open Stripe checkout (carrying our deviceId), then poll the status
   // endpoint until the webhook has bound + minted the entitlement. Status arrives via broadcast.
   let polling = false
-  platform().handle(IPC.licenseUpgrade, async () => {
-    const url = `${CHECKOUT_URL}${CHECKOUT_URL.includes('?') ? '&' : '?'}client_reference_id=${encodeURIComponent(deviceId)}`
+  platform().handle(IPC.licenseUpgrade, async (target?: 'pro' | 'seats') => {
+    // 'seats' opens the add-seats (quantity) link; anything else opens base Pro. Both carry the
+    // deviceId so the same device-bound webhook binds either purchase to this machine.
+    const base = target === 'seats' ? SEATS_CHECKOUT_URL : CHECKOUT_URL
+    const url = `${base}${base.includes('?') ? '&' : '?'}client_reference_id=${encodeURIComponent(deviceId)}`
     await platform().openExternal(url)
     if (!polling) {
       polling = true

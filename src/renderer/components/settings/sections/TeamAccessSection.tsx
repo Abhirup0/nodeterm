@@ -95,7 +95,7 @@ export function TeamAccessSection({
                 <p className="text-sm text-muted">{view.counterText}</p>
                 <p className="text-xs text-muted">3 included with Pro · extra seats $5/seat/month</p>
               </div>
-              <Button onClick={() => void ent.upgrade()}>Add seats</Button>
+              <Button onClick={() => void ent.upgrade('seats')}>Add seats</Button>
             </div>
 
             {/* Connected devices */}
