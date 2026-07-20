@@ -256,6 +256,13 @@ export interface LiveUpdateItem {
   activity?: string
   contextPercent?: number
   message?: string
+  /** needsYou only (spec: interactive-push-live-activities addendum): 'approval' | 'question'.
+   *  Omitted otherwise — the backend also forces null on non-needsYou content-state. */
+  kind?: 'approval' | 'question'
+  /** question needsYou only: the AskUserQuestion choices (≤4 × ≤60), for Live Activity buttons. */
+  options?: string[]
+  /** approval needsYou only: the deterministic hook-reply ticket, letting an intent answer. */
+  pendingId?: string
   ts: number
 }
 
@@ -343,6 +350,10 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
   function onStateChange(c: NodeStateChange): void {
     if (!liveIdentity()) return
     const title = nodeTitleOf(c.nodeId)
+    // kind/options/pendingId ride only a needsYou edge (spec: interactive-push-live-activities
+    // addendum) — belt-and-braces gate on state so a working/done edge never carries them (the
+    // backend also nulls them on non-needsYou content-state).
+    const needsYou = c.state === 'needsYou'
     buffer.push({
       nodeId: c.nodeId,
       ...(title ? { nodeTitle: title } : {}),
@@ -350,6 +361,9 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       event: c.event,
       state: c.state,
       ...(c.message ? { message: c.message.slice(0, LIVE_MESSAGE_MAX) } : {}),
+      ...(needsYou && c.kind ? { kind: c.kind } : {}),
+      ...(needsYou && c.options && c.options.length > 0 ? { options: c.options } : {}),
+      ...(needsYou && c.pendingId ? { pendingId: c.pendingId } : {}),
       ts: c.ts
     })
     scheduleFlush()

@@ -600,6 +600,61 @@ describe('onNodeStateChange seam', () => {
     recordAgentEvent(ev({ state: 'working' }))
     expect(seen.filter((c) => c.event === 'start')).toHaveLength(0)
   })
+
+  it('the needsYou edge into blocked carries kind:approval + the pendingId (from the approval event)', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-123-9' }))
+    const ny = seen.find((c) => c.state === 'needsYou')!
+    expect(ny.kind).toBe('approval')
+    expect(ny.pendingId).toBe('n1-123-9')
+    expect('options' in ny).toBe(false)
+  })
+
+  it('an approval edge whose hook did not arm a wait omits pendingId (still kind:approval)', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write' }))
+    const ny = seen.find((c) => c.state === 'needsYou')!
+    expect(ny.kind).toBe('approval')
+    expect('pendingId' in ny).toBe(false)
+  })
+
+  it('the needsYou edge into waiting carries kind:question + the stashed AskUserQuestion options', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordRawToolEvent('n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ options: [{ label: 'Dark' }, { label: 'Light' }, { label: 'System' }] }] }
+    })
+    recordAgentEvent(ev({ state: 'waiting', lastMessage: 'Pick a theme' }))
+    const ny = seen.find((c) => c.state === 'needsYou')!
+    expect(ny.kind).toBe('question')
+    expect(ny.options).toEqual(['Dark', 'Light', 'System'])
+    expect('pendingId' in ny).toBe(false)
+  })
+
+  it('a plain waiting edge (no AskUserQuestion stash) is kind:question with no options', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'waiting', lastMessage: 'Which one?' }))
+    const ny = seen.find((c) => c.state === 'needsYou')!
+    expect(ny.kind).toBe('question')
+    expect('options' in ny).toBe(false)
+  })
+
+  it('working and done edges carry no kind/options/pendingId', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'done', lastMessage: 'Wrapped up.' }))
+    for (const c of seen) {
+      expect('kind' in c).toBe(false)
+      expect('options' in c).toBe(false)
+      expect('pendingId' in c).toBe(false)
+    }
+  })
 })
 
 describe('onNodeNowChange seam', () => {

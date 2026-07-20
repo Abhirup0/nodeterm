@@ -462,6 +462,15 @@ export interface NodeStateChange {
   state: 'working' | 'needsYou' | 'done'
   /** needs-you / done headline, ≤120 chars. Absent for a plain 'start'. */
   message?: string
+  /** needsYou only (spec: interactive-push-live-activities addendum): 'approval' on the edge into
+   *  blocked, 'question' on the edge into waiting. Absent on working/done edges. */
+  kind?: 'approval' | 'question'
+  /** question needsYou only: the AskUserQuestion choices from the stash (≤4 × ≤60), so the phone
+   *  can render option buttons straight from the Live Activity. Absent otherwise. */
+  options?: string[]
+  /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
+   *  event, letting an intent answer the held hook. Absent otherwise. */
+  pendingId?: string
   ts: number
 }
 
@@ -681,8 +690,18 @@ function produceInboxFromState(
   if (nextState === 'blocked') {
     const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Needs approval'
     // needsYou live-update on the EDGE into blocked (a re-assert keeps the same activity live).
+    // Carries kind:'approval' + the deterministic-approval ticket (from the same `ev.pendingId`
+    // the approval InboxEvent below stashes) so an intent can answer the held hook straight from
+    // the Live Activity (spec: interactive-push-live-activities addendum).
     if (prevState !== 'blocked') {
-      fireNodeStateChange({ ...stateBase, event: 'update', state: 'needsYou', message: clip(title, LIVE_MESSAGE_MAX) })
+      fireNodeStateChange({
+        ...stateBase,
+        event: 'update',
+        state: 'needsYou',
+        kind: 'approval',
+        message: clip(title, LIVE_MESSAGE_MAX),
+        ...(ev.pendingId ? { pendingId: ev.pendingId } : {})
+      })
     }
     if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
     // Carry the deterministic-approval ticket (present only when the wait-branch of the managed
@@ -690,10 +709,19 @@ function produceInboxFromState(
     pushInboxEvent({ ...baseEvent, kind: 'approval', title, ...(ev.pendingId ? { pendingId: ev.pendingId } : {}) })
   } else if (nextState === 'waiting') {
     const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Waiting for input'
-    if (prevState !== 'waiting') {
-      fireNodeStateChange({ ...stateBase, event: 'update', state: 'needsYou', message: clip(title, LIVE_MESSAGE_MAX) })
-    }
     const options = pendingOptions.get(nodeId)
+    // needsYou live-update on the EDGE into waiting, carrying kind:'question' + the AskUserQuestion
+    // choices from the stash so the Live Activity can render numbered option buttons.
+    if (prevState !== 'waiting') {
+      fireNodeStateChange({
+        ...stateBase,
+        event: 'update',
+        state: 'needsYou',
+        kind: 'question',
+        message: clip(title, LIVE_MESSAGE_MAX),
+        ...(options ? { options } : {})
+      })
+    }
     if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
     pushInboxEvent({ ...baseEvent, kind: 'question', title, ...(options ? { options } : {}) })
   } else if (nextState === 'done' && prevState !== 'done') {
