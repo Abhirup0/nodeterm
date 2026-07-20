@@ -1,6 +1,7 @@
-// Anonymous, opt-in telemetry (default off; Settings → Privacy). Runs in the main process (like check.ts) so the
-// renderer CSP stays 'self'. Sends version/OS on launch and once a day; nothing personal,
-// and the client IP is never stored server-side.
+// Anonymous, opt-out telemetry (default on; turn off in Settings → Privacy). Runs in the main
+// process (like check.ts) so the renderer CSP stays 'self'. Sends version/OS on launch and once a
+// day; nothing personal, and the client IP is never stored server-side. Shares the same anonymous
+// device-id file as core/check.ts's install counter, so an install is never double-counted.
 import { promises as fs, readFileSync } from 'fs'
 import path from 'path'
 import { randomUUID } from 'crypto'

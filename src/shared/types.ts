@@ -646,8 +646,10 @@ export interface Settings {
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
    *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
-  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-in (default off)
-   *  so we never collect without explicit consent (GDPR). Toggle in Settings → Privacy. */
+  /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
+   *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
+   *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
+   *  install count also rides the /v1/check call and is NOT gated on this toggle — see core/check.ts. */
   telemetryEnabled: boolean
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
    *  (end-to-end encrypted). Pro-only; default off. Toggle in Settings → Phone. */
@@ -701,7 +703,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
-  telemetryEnabled: false,
+  // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
+  // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
+  telemetryEnabled: true,
   phoneAccessEnabled: false,
   mobilePushEnabled: true,
   mobilePushNeedsYou: true,

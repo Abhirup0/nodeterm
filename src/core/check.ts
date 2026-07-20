@@ -1,7 +1,12 @@
 // Polls the backend /v1/check feed from the main process (so the renderer CSP stays 'self').
 // Successor to the static announcements.json: returns targeted messages for the announcement
-// banner AND the mandatory-update policy for the Update Card. Persists nothing server-side.
+// banner AND the mandatory-update policy for the Update Card. It also carries the anonymous
+// install id (deviceId + os/arch/version), which the backend upserts into `devices` as a
+// passive active-install counter — so the version distribution reflects EVERY install, not only
+// the (few) that also opt into the telemetry ping. Nothing personal is sent and the client IP is
+// never stored server-side; a hard opt-out is still DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED.
 import { platform } from './platform'
+import { getDeviceId } from './device-id'
 import type { Announcement, UpdatePolicy } from '../shared/types'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
@@ -15,8 +20,10 @@ export interface CheckResult {
 const EMPTY: CheckResult = { messages: [], update: { minSupported: null, mandatory: false } }
 
 // Same build + DO_NOT_TRACK gate as telemetry: dev never hits the prod API unless a local
-// server is targeted explicitly. Not gated on the telemetry opt-out — this is content delivery
-// (the old announcements feed always ran) and /v1/check stores nothing.
+// server is targeted explicitly. Deliberately NOT gated on the in-app telemetry toggle: this
+// call always runs (content delivery + the anonymous install count), so an install still counts
+// even if the user never opts into the detailed telemetry ping. The env kill-switches above are
+// the hard off.
 function allowed(): boolean {
   if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
   if (!platform().isPackaged && !process.env.NODETERM_API_BASE) return false
@@ -53,8 +60,10 @@ export async function fetchCheck(): Promise<CheckResult> {
   if (cache && now - cache.at < CACHE_MS) return cache.data
   try {
     const q = new URLSearchParams({
+      deviceId: getDeviceId(),
       version: platform().appVersion,
       os: process.platform,
+      arch: process.arch,
       channel: 'stable'
     })
     const ctrl = new AbortController()
