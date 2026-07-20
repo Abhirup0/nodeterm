@@ -13,35 +13,36 @@ interface BoardLogPanelProps {
   card: Pick<KanbanSession, 'id'>
 }
 
-/** Human one-liner for an activity event. column-* events carry no nodeId and so never reach a
- *  card-scoped feed; they are handled defensively for completeness. */
-function eventLine(name: string, e: BoardLogEvent): string {
+/** The activity sentence WITHOUT the leading author name — the name is rendered separately in
+ *  the author's color, so the feed reads like Trello (colored actor + muted action). column-*
+ *  events carry no nodeId and so never reach a card-scoped feed; kept for completeness. */
+function eventBody(e: BoardLogEvent): string {
   switch (e.type) {
     case 'card-created':
-      return `${name} created this card in ${e.to ?? 'Ungrouped'}`
+      return `created this card in ${e.to ?? 'Ungrouped'}`
     case 'card-moved':
-      return `${name} moved this card ${e.from ?? 'Ungrouped'} → ${e.to ?? 'Ungrouped'}`
+      return `moved this card ${e.from ?? 'Ungrouped'} → ${e.to ?? 'Ungrouped'}`
     case 'column-added':
-      return `${name} added column ${e.title ?? ''}`.trimEnd()
+      return `added column ${e.title ?? ''}`.trimEnd()
     case 'column-renamed':
-      return `${name} renamed column ${e.from ?? ''} → ${e.to ?? ''}`
+      return `renamed column ${e.from ?? ''} → ${e.to ?? ''}`
     case 'column-deleted':
-      return `${name} deleted column ${e.title ?? ''}`.trimEnd()
+      return `deleted column ${e.title ?? ''}`.trimEnd()
     case 'member-assigned':
-      return `${name} assigned ${e.to ?? 'someone'}`
+      return `assigned ${e.to ?? 'someone'}`
     case 'member-unassigned':
-      return `${name} removed ${e.to ?? 'someone'}`
+      return `removed ${e.to ?? 'someone'}`
     case 'due-set':
-      return `${name} set the due date → ${e.to ? formatStamp(Date.parse(e.to)) : ''}`.trimEnd()
+      return `set the due date → ${e.to ? formatStamp(Date.parse(e.to)) : ''}`.trimEnd()
     case 'due-cleared':
-      return `${name} removed the due date`
+      return `removed the due date`
     case 'priority-set':
-      return `${name} set priority → ${e.to ?? ''}`.trimEnd()
+      return `set priority → ${e.to ?? ''}`.trimEnd()
     case 'priority-cleared':
-      return `${name} removed the priority`
+      return `removed the priority`
     default:
       // A newer peer may write event types this build doesn't know — show them neutrally.
-      return `${name} updated this card`
+      return `updated this card`
   }
 }
 
@@ -126,7 +127,11 @@ function FeedRow({ entry }: { entry: BoardLogEntry }) {
   if (entry.kind === 'event' && entry.event) {
     return (
       <div className="board-log__event" title={whenAgo}>
-        {eventLine(entry.author.name, entry.event)}
+        <span className="board-log__dot" style={{ background: entry.author.color }} />
+        <span className="board-log__author" style={{ color: entry.author.color }}>
+          {entry.author.name}
+        </span>{' '}
+        <span className="board-log__event-body">{eventBody(entry.event)}</span>
         <span className="board-log__time">{when}</span>
       </div>
     )
@@ -135,7 +140,9 @@ function FeedRow({ entry }: { entry: BoardLogEntry }) {
     <div className="board-log__comment">
       <div className="board-log__meta">
         <span className="board-log__dot" style={{ background: entry.author.color }} />
-        <span className="board-log__author">{entry.author.name}</span>
+        <span className="board-log__author" style={{ color: entry.author.color }}>
+          {entry.author.name}
+        </span>
         <span className="board-log__time" title={whenAgo}>{when}</span>
       </div>
       <div className="board-log__text">{entry.text}</div>
