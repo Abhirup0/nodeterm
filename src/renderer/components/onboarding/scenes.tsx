@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
+import type { AgentId } from '@shared/agents/config'
+import { AgentIcon } from '../../lib/agentIcons'
+import { IconTerminal, IconNote, IconEditor } from '../icons'
 
 /**
  * Animated scenes for the first-run setup tour (OnboardingFlow). All motion is CSS-only
  * (keyframes in styles.css, `.onb-*`) so there are no new dependencies; every scene loops
  * and respects `prefers-reduced-motion` (styles.css freezes them to their final frame).
+ * Where a scene depicts real UI (context menu, terminal node, kanban columns) it reuses
+ * the app's OWN classes (`ctx-menu`/`ctx-item`, `term-node__status`, kanban column look)
+ * so the tour never drifts from what the user actually gets.
  */
 
 /** Inline check icon — a literal "✓" is tofu on Linux's default font stack. */
@@ -58,29 +64,44 @@ export function OnbGhostCanvas() {
   )
 }
 
-/** Right-click → context menu → an agent node pops onto the canvas. The highlighted menu
- *  row and the spawned node follow the currently selected default agent. */
-export function SceneAgents({ label, color }: { label: string; color: string }) {
+/** Right-click → context menu → an agent node pops onto the canvas. The menu is the app's
+ *  real `.ctx-menu`/`.ctx-item` (with the real brand icons) and the node mirrors
+ *  `.term-node`'s look (3px color top border, panel header, real RUNNING badge classes) —
+ *  both follow the currently selected default agent. */
+export function SceneAgents({ agentId, label, color }: { agentId: AgentId; label: string; color: string }) {
   return (
     <div className="onb-scene-canvas" aria-hidden="true">
       {/* click ripple where the cursor right-clicks */}
       <div className="onb-ripple" />
-      {/* mock context menu */}
-      <div className="onb-menu">
-        <div className="onb-menu__row">New terminal</div>
-        <div className="onb-menu__row onb-menu__row--hl">
-          <span className="onb-dot" style={{ background: color }} />
+      {/* the real context menu, replayed (pointer-events off; positioned by the scene) */}
+      <div className="ctx-menu onb-menu">
+        <button className="ctx-item" tabIndex={-1}>
+          <span className="ctx-icon"><IconTerminal /></span>
+          New terminal
+        </button>
+        <button className="ctx-item onb-menu__hl" tabIndex={-1}>
+          <span className="ctx-icon"><AgentIcon agentId={agentId} /></span>
           New {label}
-        </div>
-        <div className="onb-menu__row">New sticky note</div>
-        <div className="onb-menu__row">Open file…</div>
+        </button>
+        <button className="ctx-item" tabIndex={-1}>
+          <span className="ctx-icon"><IconNote /></span>
+          New sticky note
+        </button>
+        <button className="ctx-item" tabIndex={-1}>
+          <span className="ctx-icon"><IconEditor /></span>
+          Open file…
+        </button>
       </div>
-      {/* the spawned agent node */}
-      <div className="onb-node" style={{ borderColor: color }}>
+      {/* the spawned agent node (term-node look: 3px color top border + panel header) */}
+      <div className="onb-node" style={{ borderTopColor: color }}>
         <div className="onb-node__head">
-          <span className="onb-dot" style={{ background: color }} />
+          <span className="onb-node__color" style={{ background: color }} />
+          <AgentIcon agentId={agentId} size={13} />
           <span className="onb-node__title">{label}</span>
-          <span className="onb-badge">RUNNING</span>
+          <span className="term-node__status term-node__status--busy" style={{ marginLeft: 'auto' }}>
+            <span className="term-node__status-dot" />
+            RUNNING
+          </span>
         </div>
         <div className="onb-node__body">
           <div className="onb-line onb-line--w70" />
@@ -101,30 +122,34 @@ export function SceneAgents({ label, color }: { label: string; color: string }) 
   )
 }
 
-/** Dictation: the shortcut keys depress, the mic pulses with a live waveform, and the
- *  transcribed text types into a mini terminal line. */
+/** Dictation, as a SEQUENCE (one shared 8s timeline): the shortcut is held → the mic +
+ *  waveform appear while holding → on release the transcribed text types into the
+ *  terminal line. Mirrors the real flow: nothing is written until you let go. */
 export function SceneDictation({ keys, hold }: { keys: string[]; hold: boolean }) {
   return (
     <div className="onb-scene-canvas onb-scene--dictation" aria-hidden="true">
       <div className="onb-kbd-row">
         {keys.map((k, i) => (
-          <kbd key={i} className={`onb-kbd ${hold ? 'onb-kbd--hold' : ''}`} style={{ animationDelay: `${i * 0.12}s` }}>
+          <kbd key={i} className={`onb-kbd ${hold ? 'onb-kbd--hold' : ''}`} style={{ animationDelay: `${i * 0.1}s` }}>
             {k}
           </kbd>
         ))}
-        {hold && <span className="onb-kbd-hint">hold</span>}
+        {hold && <span className="onb-kbd-hint">hold…</span>}
       </div>
-      <div className="onb-mic">
-        <div className="onb-mic__ring" />
-        <div className="onb-mic__ring onb-mic__ring--late" />
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="9" y="3" width="6" height="11" rx="3" />
-          <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-        </svg>
-        <div className="onb-wave">
-          {[0, 1, 2, 3, 4].map((i) => (
-            <span key={i} style={{ animationDelay: `${i * 0.15}s` }} />
-          ))}
+      {/* visible only during the hold window (wrapper opacity gates the loop inside) */}
+      <div className="onb-mic-wrap">
+        <div className="onb-mic">
+          <div className="onb-mic__ring" />
+          <div className="onb-mic__ring onb-mic__ring--late" />
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="3" width="6" height="11" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+          </svg>
+          <div className="onb-wave">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <span key={i} style={{ animationDelay: `${i * 0.15}s` }} />
+            ))}
+          </div>
         </div>
       </div>
       <div className="onb-term-line">
@@ -136,19 +161,22 @@ export function SceneDictation({ keys, hold }: { keys: string[]; hold: boolean }
   )
 }
 
+// Stage is 312×210 (3 real-looking columns of 96px + 12px gaps), centered by the scene.
+const KCOL_W = 96
+const KCOL_X = [0, 108, 216]
+const KCOL_LABELS = ['To Do', 'In Progress', 'Done']
 const KANBAN_CARDS = [
-  // [canvas x, canvas y, rotate] → column index + row index on the board
-  { id: 0, c: [12, 18, -3], col: 0, row: 0, w: 64 },
-  { id: 1, c: [150, 8, 2], col: 0, row: 1, w: 52 },
-  { id: 2, c: [236, 52, -2], col: 1, row: 0, w: 58 },
-  { id: 3, c: [58, 108, 3], col: 1, row: 1, w: 66 },
-  { id: 4, c: [188, 128, -1], col: 2, row: 0, w: 48 }
+  // canvas-scatter [x, y, rotate] → board [column, row]
+  { id: 0, c: [18, 22, -3], col: 0, row: 0 },
+  { id: 1, c: [180, 12, 2], col: 0, row: 1 },
+  { id: 2, c: [232, 74, -2], col: 1, row: 0 },
+  { id: 3, c: [64, 120, 3], col: 1, row: 1 },
+  { id: 4, c: [190, 158, -1], col: 2, row: 0 }
 ]
-const COL_X = [10, 112, 214]
-const COL_LABELS = ['To Do', 'In Progress', 'Done']
 
 /** Canvas ↔ kanban morph: scattered session cards fly into three labelled columns and back,
- *  on a timer (transition-driven, so a JS toggle is enough — no per-card keyframes). */
+ *  on a timer (transition-driven, so a JS toggle is enough — no per-card keyframes). The
+ *  stage is centered in the scene and the columns mirror the real board's column panels. */
 export function SceneKanban({ pulseKey }: { pulseKey?: number }) {
   const [board, setBoard] = useState(false)
   const reduced = useRef(
@@ -173,26 +201,28 @@ export function SceneKanban({ pulseKey }: { pulseKey?: number }) {
   }, [pulseKey])
 
   return (
-    <div className={`onb-scene-canvas onb-scene--kanban ${board ? 'is-board' : ''}`} aria-hidden="true">
-      {COL_LABELS.map((l, i) => (
-        <div key={l} className="onb-col" style={{ left: COL_X[i] }}>
-          {l}
-        </div>
-      ))}
-      {KANBAN_CARDS.map((k) => (
-        <div
-          key={k.id}
-          className="onb-mini"
-          style={
-            board
-              ? { left: COL_X[k.col], top: 34 + k.row * 34, transform: 'rotate(0deg)', width: 88 }
-              : { left: k.c[0], top: k.c[1], transform: `rotate(${k.c[2]}deg)`, width: k.w }
-          }
-        >
-          <span className="onb-mini__dot" />
-          <span className="onb-mini__bar" />
-        </div>
-      ))}
+    <div className="onb-scene-canvas onb-scene--kanban" aria-hidden="true">
+      <div className={`onb-kstage ${board ? 'is-board' : ''}`}>
+        {KCOL_LABELS.map((l, i) => (
+          <div key={l} className="onb-kcol" style={{ left: KCOL_X[i] }}>
+            <div className="onb-kcol__h">{l}</div>
+          </div>
+        ))}
+        {KANBAN_CARDS.map((k) => (
+          <div
+            key={k.id}
+            className="onb-mini"
+            style={
+              board
+                ? { left: KCOL_X[k.col] + 6, top: 36 + k.row * 34, transform: 'rotate(0deg)', width: KCOL_W - 12 }
+                : { left: k.c[0], top: k.c[1], transform: `rotate(${k.c[2]}deg)`, width: 64 }
+            }
+          >
+            <span className="onb-mini__dot" />
+            <span className="onb-mini__bar" />
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -215,6 +245,45 @@ export function SceneNotify() {
         </div>
         <div className="onb-notif__time">now</div>
       </div>
+    </div>
+  )
+}
+
+/** The mobile companion as a floating phone mockup: live session rows with real status
+ *  badges + a terminal line — announced as coming soon (iOS is in App Store review). */
+export function ScenePhone() {
+  return (
+    <div className="onb-scene-canvas onb-scene--phone" aria-hidden="true">
+      <div className="onb-phone">
+        <div className="onb-phone__notch" />
+        <div className="onb-phone__rows">
+          <div className="onb-phone__row">
+            <span className="onb-mini__dot" style={{ background: '#d97757' }} />
+            <span className="onb-mini__bar" />
+            <span className="term-node__status term-node__status--busy onb-phone__badge">
+              <span className="term-node__status-dot" />
+              RUNNING
+            </span>
+          </div>
+          <div className="onb-phone__row">
+            <span className="onb-mini__dot" style={{ background: '#10a37f' }} />
+            <span className="onb-mini__bar" />
+            <span className="term-node__status term-node__status--attention onb-phone__badge">
+              <span className="term-node__status-dot" />
+              NEEDS YOU
+            </span>
+          </div>
+          <div className="onb-phone__row">
+            <span className="onb-mini__dot" />
+            <span className="onb-mini__bar" />
+          </div>
+          <div className="onb-phone__term">
+            <span className="onb-term-prompt">❯</span>
+            <span className="onb-caret" />
+          </div>
+        </div>
+      </div>
+      <span className="onb-soon">COMING SOON</span>
     </div>
   )
 }
