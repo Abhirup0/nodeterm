@@ -19,10 +19,9 @@ const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
 // → keyless ("device-bound") activation. NODETERM_CHECKOUT_URL overrides it (e.g. the test link).
 const CHECKOUT_URL = process.env.NODETERM_CHECKOUT_URL || 'https://buy.stripe.com/eVq00lbeY0qNbwz90w7EQ02'
 
-// Add-seats checkout: a quantity-based Payment Link for buying seats BEYOND the free 3 (the buyer
-// picks the total; extra seats are $5/seat/mo). Falls back to the base Pro link when unset, so a
-// single quantity-based link can serve both flows until a dedicated seats link exists.
-const SEATS_CHECKOUT_URL = process.env.NODETERM_SEATS_CHECKOUT_URL || CHECKOUT_URL
+// Add-seats checkout: the live quantity-based Payment Link for buying seats BEYOND the free 3 (the
+// buyer picks the total; extra seats are $5/seat/mo). NODETERM_SEATS_CHECKOUT_URL overrides it.
+const SEATS_CHECKOUT_URL = process.env.NODETERM_SEATS_CHECKOUT_URL || 'https://buy.stripe.com/28E9AV6YI8Xj303a4A7EQ03'
 
 // Tokens are short-lived (the server mints 7-day entitlements) and the app is designed to
 // stay open for days, so a launch-only refresh would let the token expire mid-session and

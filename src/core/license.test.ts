@@ -278,7 +278,7 @@ describe('license seats entitlement', () => {
     }
   })
 
-  it('the add-seats link falls back to the base Pro link when unset', async () => {
+  it('the add-seats link uses its own built-in URL when the env override is unset', async () => {
     process.env.NODETERM_CHECKOUT_URL = 'https://pay.test/pro'
     delete process.env.NODETERM_SEATS_CHECKOUT_URL
     try {
@@ -286,7 +286,11 @@ describe('license seats entitlement', () => {
       initLicense()
       await flush() // let the launch refresh settle so its rejection isn't left unhandled
       await fake.handlers[IPC.licenseUpgrade]('seats')
-      expect(fake.opened).toEqual(['https://pay.test/pro?client_reference_id=test-device'])
+      // 'seats' opens the dedicated seats Payment Link — NOT the base Pro link — with the deviceId.
+      const opened = fake.opened[0]
+      expect(opened).not.toContain('pay.test/pro')
+      expect(opened).toContain('buy.stripe.com/')
+      expect(opened).toContain('client_reference_id=test-device')
     } finally {
       delete process.env.NODETERM_CHECKOUT_URL
     }
