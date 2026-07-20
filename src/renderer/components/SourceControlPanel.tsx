@@ -429,6 +429,7 @@ export function SourceControlPanel({
                 className="scm-branch"
                 onClick={(e) => {
                   const r = e.currentTarget.getBoundingClientRect()
+                  setNewBranch('') // a stale filter from the last open would hide branches
                   setBranchMenu({ top: r.bottom + 4, left: r.left })
                 }}
               >
@@ -593,51 +594,73 @@ export function SourceControlPanel({
 
         {branchMenu &&
           status &&
-          createPortal(
-            <>
-              <div
-                className="tab-backdrop"
-                style={{ zIndex: 78 }}
-                onClick={() => setBranchMenu(null)}
-              />
-              {/* --scroll: a repo easily holds 30+ branches, and this fixed-position menu
-                  otherwise runs past the viewport bottom with no way to reach the tail. */}
-              <div
-                className="tab-menu tab-menu--scroll"
-                style={{ top: branchMenu.top, left: branchMenu.left, zIndex: 80 }}
-              >
-                {status.branches.map((b) => (
-                  <button
-                    key={b}
-                    onClick={() => {
-                      setBranchMenu(null)
-                      if (b !== status.branch) void act(() => git.switchBranch(cwd!, b))
+          (() => {
+            // VS Code-style quick-pick: one input drives BOTH filtering and creation. The input
+            // is pinned ABOVE the scrolling list (it used to be the last row of an unbounded
+            // menu — with 30+ branches it sat below the viewport, so "create branch" looked
+            // simply broken). Enter switches to an exact match, else creates; the explicit
+            // "+ Create" row makes the no-match case a visible action instead of a guess.
+            const query = newBranch.trim()
+            const q = query.toLowerCase()
+            const shown = status.branches.filter((b) => !q || b.toLowerCase().includes(q))
+            const exact = status.branches.find((b) => b === query)
+            const close = (): void => {
+              setBranchMenu(null)
+              setNewBranch('')
+            }
+            const pick = (b: string): void => {
+              close()
+              if (b !== status.branch) void act(() => git.switchBranch(cwd!, b))
+            }
+            const createNew = (): void => {
+              close()
+              void act(() => git.createBranch(cwd!, query))
+            }
+            return createPortal(
+              <>
+                <div className="tab-backdrop" style={{ zIndex: 78 }} onClick={close} />
+                <div
+                  className="tab-menu"
+                  style={{ top: branchMenu.top, left: branchMenu.left, zIndex: 80 }}
+                >
+                  <input
+                    className="tab__edit tab-menu__filter"
+                    placeholder="Filter branches, or type a new name"
+                    value={newBranch}
+                    autoFocus
+                    spellCheck={false}
+                    onChange={(e) => setNewBranch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.stopPropagation()
+                        close()
+                        return
+                      }
+                      if (e.key !== 'Enter' || !query) return
+                      if (exact) pick(exact)
+                      else createNew()
                     }}
-                  >
-                    {b === status.branch ? '● ' : '   '}
-                    {b}
-                  </button>
-                ))}
-                <div className="ctx-sep" />
-                <input
-                  className="tab__edit"
-                  placeholder="new branch name"
-                  value={newBranch}
-                  spellCheck={false}
-                  onChange={(e) => setNewBranch(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && newBranch.trim()) {
-                      const name = newBranch.trim()
-                      setNewBranch('')
-                      setBranchMenu(null)
-                      void act(() => git.createBranch(cwd!, name))
-                    }
-                  }}
-                />
-              </div>
-            </>,
-            document.body
-          )}
+                  />
+                  {/* --scroll on the LIST only, so the filter input never scrolls away. */}
+                  <div className="tab-menu__list tab-menu--scroll">
+                    {shown.map((b) => (
+                      <button key={b} onClick={() => pick(b)}>
+                        {b === status.branch ? '● ' : '   '}
+                        {b}
+                      </button>
+                    ))}
+                    {query && !exact && (
+                      <>
+                        {shown.length > 0 && <div className="ctx-sep" />}
+                        <button onClick={createNew}>+ Create branch “{query}”</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </>,
+              document.body
+            )
+          })()}
       </aside>
 
       {fileMenu &&

@@ -315,6 +315,21 @@ body,
   flex-direction: column;
   gap: 2px;
 }
+/* Scrollable body of a quick-pick menu (branch picker): the filter input above it stays
+   pinned while only the list scrolls (pair with .tab-menu--scroll for the height cap). */
+.tab-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* The pinned filter input of a quick-pick menu: full menu width (overrides .tab__edit's
+   fixed 120px, which is sized for inline tab renames). */
+.tab-menu__filter {
+  width: auto;
+  align-self: stretch;
+  margin: 2px 2px 6px;
+  padding: 6px 8px;
+}
 .tab-menu__sub button {
   padding-left: 8px;
 }
