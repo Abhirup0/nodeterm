@@ -640,6 +640,71 @@ describe('createLiveUpdatePush', () => {
     })
   })
 
+  describe('needsYou kind/options/pendingId pass-through (interactive Dynamic Island)', () => {
+    it('passes kind + pendingId on an approval needsYou edge', async () => {
+      const { h, st } = wire()
+      st.emit({
+        nodeId: 'a',
+        event: 'update',
+        state: 'needsYou',
+        kind: 'approval',
+        message: 'Approve write',
+        pendingId: 'a-123-9',
+        ts: 1
+      })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.kind).toBe('approval')
+      expect(u.pendingId).toBe('a-123-9')
+      expect(u).not.toHaveProperty('options')
+      h.stop()
+    })
+
+    it('passes kind + options on a question needsYou edge', async () => {
+      const { h, st } = wire()
+      st.emit({
+        nodeId: 'a',
+        event: 'update',
+        state: 'needsYou',
+        kind: 'question',
+        message: 'Pick a theme',
+        options: ['Dark', 'Light', 'System'],
+        ts: 1
+      })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.kind).toBe('question')
+      expect(u.options).toEqual(['Dark', 'Light', 'System'])
+      expect(u).not.toHaveProperty('pendingId')
+      h.stop()
+    })
+
+    it('omits kind/options/pendingId on working and done edges', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      st.emit({ nodeId: 'b', event: 'end', state: 'done', message: 'Finished', ts: 2 })
+      await vi.advanceTimersByTimeAsync(1000)
+      for (const u of liveBodyOf().updates) {
+        expect(u).not.toHaveProperty('kind')
+        expect(u).not.toHaveProperty('options')
+        expect(u).not.toHaveProperty('pendingId')
+      }
+      h.stop()
+    })
+
+    it('now-update (activity/context) ticks never carry kind/options/pendingId', async () => {
+      const { h, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', contextPercent: 10, ts: 0 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u).not.toHaveProperty('kind')
+      expect(u).not.toHaveProperty('options')
+      expect(u).not.toHaveProperty('pendingId')
+      h.stop()
+    })
+  })
+
   it('stop() unsubscribes both seams so later events are ignored', async () => {
     const { h, st, nw } = wire()
     h.stop()
