@@ -7116,3 +7116,796 @@ body,
 .kanban-prio-chip {
   letter-spacing: 0.04em;
 }
+
+/* ============================== Setup tour (onboarding) ==============================
+   First-run flow: full-screen overlay, one animated scene + one decision per step.
+   All motion is CSS keyframes (no deps); prefers-reduced-motion freezes every scene. */
+
+.onb {
+  position: fixed;
+  inset: 0;
+  z-index: 40; /* above the welcome screen (5) + controls (26); below dialog-stack scrims (55) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  color: var(--text);
+}
+
+.onb-skip {
+  position: absolute;
+  top: 40px; /* clears the traffic lights / tab bar drag region */
+  right: 24px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+.onb-skip:hover {
+  color: var(--text);
+}
+
+/* ---- step 0: cover ---- */
+.onb-cover {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  max-width: 460px;
+}
+.onb-cover__brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.onb-cover__name {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+.onb-cover__tagline {
+  margin: 6px 0 22px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.onb-cover__props {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: left;
+  margin-bottom: 30px;
+}
+.onb-prop {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: rgba(235, 235, 245, 0.75);
+}
+.onb-prop svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--accent);
+}
+.onb-cover__cta {
+  font-size: 14px;
+  padding: 10px 22px;
+}
+
+/* ghost nodes floating behind the cover */
+.onb-ghosts {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.onb-ghost {
+  position: absolute;
+  width: 150px;
+  height: 92px;
+  border: 1px solid rgba(163, 141, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(163, 141, 255, 0.045);
+  animation: onb-float 9s ease-in-out infinite;
+}
+.onb-ghost--a { top: 14%; left: 12%; }
+.onb-ghost--b { top: 22%; right: 14%; width: 180px; animation-delay: -3s; }
+.onb-ghost--c { bottom: 18%; left: 20%; width: 120px; height: 74px; animation-delay: -5s; }
+.onb-ghost--d { bottom: 24%; right: 18%; animation-delay: -7s; }
+.onb-ghost-edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.onb-ghost-edges path {
+  fill: none;
+  stroke: rgba(163, 141, 255, 0.12);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 7;
+  animation: onb-dash 14s linear infinite;
+}
+@keyframes onb-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-14px); }
+}
+@keyframes onb-dash {
+  to { stroke-dashoffset: -260; }
+}
+
+/* ---- steps 1-4: two-pane card ---- */
+.onb-card {
+  display: flex;
+  width: min(820px, calc(100vw - 80px));
+  min-height: 400px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+.onb-scene {
+  flex: 0 0 46%;
+  position: relative;
+  background:
+    radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px) 0 0 / 22px 22px,
+    #0a0a0c;
+  border-right: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.onb-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 30px 32px 22px;
+  min-width: 0;
+}
+.onb-step-no {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.onb-pane h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+.onb-pane p {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: rgba(235, 235, 245, 0.72);
+}
+.onb-pane p .kbd {
+  margin: 0 1px;
+}
+.onb-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.onb-fineprint {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.onb-nav {
+  margin-top: auto;
+  padding-top: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.onb-dots {
+  display: flex;
+  gap: 6px;
+}
+.onb-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 0.15s;
+}
+.onb-dots span.is-active {
+  background: var(--accent);
+}
+.onb-nav__btns {
+  display: flex;
+  gap: 8px;
+}
+.onb-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.onb-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.onb-btn--primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+.onb-btn--primary:hover {
+  background: var(--accent);
+  filter: brightness(1.12);
+}
+
+/* ---- agent picker ---- */
+.onb-agent-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.onb-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.onb-agent:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.onb-agent.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.onb-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* ---- dictation model list ---- */
+.onb-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.onb-model {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+  overflow: hidden;
+}
+.onb-model:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.onb-model.is-selected {
+  border-color: var(--accent);
+}
+.onb-model.is-locked {
+  opacity: 0.6;
+}
+.onb-model__radio {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  flex: none;
+}
+.onb-model.is-selected .onb-model__radio {
+  border-color: var(--accent);
+  background: radial-gradient(circle at center, var(--accent) 0 4px, transparent 4.5px);
+}
+.onb-model__name {
+  font-weight: 600;
+}
+.onb-model__size {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.onb-pro {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: #e7c46a;
+  border: 1px solid rgba(231, 196, 106, 0.45);
+  border-radius: 5px;
+  padding: 1.5px 5px;
+}
+.onb-model__ok {
+  display: inline-flex;
+  align-items: center;
+  color: #34c759;
+  margin-left: auto; /* right-aligned when it's the only trailing chip… */
+}
+.onb-pro + .onb-model__ok {
+  margin-left: 6px; /* …but sits beside the PRO chip when both are shown */
+}
+.onb-model__bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.5px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.onb-model__bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+/* ---- kanban try-it ---- */
+.onb-tryit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: rgba(235, 235, 245, 0.8);
+}
+.onb-tryit.is-done {
+  border-style: solid;
+  border-color: rgba(52, 199, 89, 0.5);
+  color: #34c759;
+  font-weight: 600;
+}
+
+/* ---- notify actions ---- */
+.onb-notify-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  max-width: 280px;
+}
+
+/* ============ scenes ============ */
+.onb-scene-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+}
+
+/* -- agents scene: cursor → right-click → menu → node pop (one shared 7s loop) -- */
+.onb-cursor {
+  position: absolute;
+  left: 30px;
+  top: 200px;
+  animation: onb-cursor-path 7s ease-in-out infinite;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+@keyframes onb-cursor-path {
+  0% { transform: translate(0, 0); }
+  16%, 58% { transform: translate(58px, -78px); } /* arrive at the click point, dwell */
+  74%, 100% { transform: translate(150px, -40px); } /* drift toward the spawned node */
+}
+.onb-ripple {
+  position: absolute;
+  left: 96px;
+  top: 128px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(163, 141, 255, 0.8);
+  opacity: 0;
+  animation: onb-ripple 7s ease-out infinite;
+}
+@keyframes onb-ripple {
+  0%, 16% { opacity: 0; transform: scale(0.3); }
+  20% { opacity: 0.9; transform: scale(0.5); }
+  30%, 100% { opacity: 0; transform: scale(1.6); }
+}
+.onb-menu {
+  position: absolute;
+  left: 112px;
+  top: 132px;
+  width: 148px;
+  background: #1d1d21;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform-origin: top left;
+  animation: onb-menu 7s ease infinite;
+}
+@keyframes onb-menu {
+  0%, 19% { opacity: 0; transform: scale(0.92); }
+  23%, 52% { opacity: 1; transform: scale(1); }
+  56%, 100% { opacity: 0; transform: scale(0.97); }
+}
+.onb-menu__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: rgba(235, 235, 245, 0.75);
+  padding: 5px 8px;
+  border-radius: 5px;
+}
+.onb-menu__row--hl {
+  color: #fff;
+  animation: onb-menu-hl 7s ease infinite;
+}
+@keyframes onb-menu-hl {
+  0%, 30% { background: transparent; }
+  36%, 54% { background: var(--accent); }
+  58%, 100% { background: transparent; }
+}
+.onb-node {
+  position: absolute;
+  left: 128px;
+  top: 96px;
+  width: 168px;
+  background: #131316;
+  border: 1px solid;
+  border-radius: 10px;
+  overflow: hidden;
+  opacity: 0;
+  animation: onb-node-pop 7s cubic-bezier(0.34, 1.4, 0.5, 1) infinite;
+}
+@keyframes onb-node-pop {
+  0%, 56% { opacity: 0; transform: scale(0.7); }
+  63%, 94% { opacity: 1; transform: scale(1); }
+  98%, 100% { opacity: 0; transform: scale(0.96); }
+}
+.onb-node__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.onb-node__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.onb-badge {
+  margin-left: auto;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #34c759;
+  border: 1px solid rgba(52, 199, 89, 0.5);
+  border-radius: 4px;
+  padding: 1px 4px;
+  animation: onb-pulse 1.6s ease-in-out infinite;
+}
+@keyframes onb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.onb-node__body {
+  padding: 9px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.onb-line {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.onb-line--w70 { width: 70%; }
+.onb-line--w50 { width: 50%; }
+.onb-line--w60 { width: 60%; }
+
+/* -- dictation scene -- */
+.onb-scene--dictation {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+}
+.onb-kbd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.onb-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  background: #1d1d21;
+  border: 1px solid var(--border);
+  border-bottom-width: 3px;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  animation: onb-keypress 5s ease infinite;
+}
+.onb-kbd--hold {
+  animation-name: onb-keyhold;
+}
+@keyframes onb-keypress {
+  0%, 6% { transform: translateY(0); border-bottom-width: 3px; }
+  10%, 14% { transform: translateY(2px); border-bottom-width: 1px; }
+  18%, 100% { transform: translateY(0); border-bottom-width: 3px; }
+}
+@keyframes onb-keyhold {
+  0%, 6% { transform: translateY(0); border-bottom-width: 3px; }
+  12%, 72% { transform: translateY(2px); border-bottom-width: 1px; }
+  80%, 100% { transform: translateY(0); border-bottom-width: 3px; }
+}
+.onb-kbd-hint {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-left: 4px;
+}
+.onb-mic {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #ff375f;
+}
+.onb-mic__ring {
+  position: absolute;
+  top: -14px;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 55, 95, 0.5);
+  animation: onb-ring 2.4s ease-out infinite;
+}
+.onb-mic__ring--late {
+  animation-delay: 1.2s;
+}
+@keyframes onb-ring {
+  0% { opacity: 0.8; transform: scale(0.5); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+.onb-wave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+}
+.onb-wave span {
+  width: 4px;
+  height: 8px;
+  border-radius: 2px;
+  background: rgba(255, 55, 95, 0.85);
+  animation: onb-wave 1s ease-in-out infinite;
+}
+@keyframes onb-wave {
+  0%, 100% { height: 6px; }
+  50% { height: 20px; }
+}
+.onb-term-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 78%;
+  background: #131316;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-family: Menlo, Monaco, monospace;
+  font-size: 11px;
+}
+.onb-term-prompt {
+  color: var(--accent);
+  font-weight: 700;
+}
+.onb-term-typed {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 0;
+  animation: onb-type 5s steps(32) infinite;
+  color: rgba(235, 235, 245, 0.85);
+}
+@keyframes onb-type {
+  0%, 14% { max-width: 0; }
+  70%, 100% { max-width: 100%; }
+}
+.onb-caret {
+  width: 6px;
+  height: 13px;
+  background: rgba(235, 235, 245, 0.8);
+  animation: onb-caret 1s steps(1) infinite;
+}
+@keyframes onb-caret {
+  50% { opacity: 0; }
+}
+
+/* -- kanban scene (positions transition; the JS interval flips .is-board) -- */
+.onb-scene--kanban {
+  min-height: 240px;
+}
+.onb-col {
+  position: absolute;
+  top: 12px;
+  width: 88px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding-bottom: 4px;
+  opacity: 0;
+  transition: opacity 0.5s ease 0.25s;
+}
+.onb-scene--kanban.is-board .onb-col {
+  opacity: 1;
+}
+.onb-mini {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 7px;
+  background: #1c1c20;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transition: left 0.7s cubic-bezier(0.4, 0.9, 0.3, 1), top 0.7s cubic-bezier(0.4, 0.9, 0.3, 1),
+    transform 0.7s ease, width 0.7s ease;
+}
+.onb-mini__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.onb-mini:nth-child(odd) .onb-mini__dot {
+  background: #d97757;
+}
+.onb-mini__bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* -- notify scene -- */
+.onb-scene--notify {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.onb-bell {
+  position: absolute;
+  top: 46px;
+  color: rgba(235, 235, 245, 0.45);
+  transform-origin: top center;
+  animation: onb-bell 5s ease-in-out infinite;
+}
+@keyframes onb-bell {
+  0%, 8% { transform: rotate(0); }
+  12% { transform: rotate(13deg); }
+  16% { transform: rotate(-11deg); }
+  20% { transform: rotate(7deg); }
+  24%, 100% { transform: rotate(0); }
+}
+.onb-notif {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 82%;
+  background: rgba(40, 40, 46, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  animation: onb-notif 5s ease infinite;
+}
+@keyframes onb-notif {
+  0%, 6% { opacity: 0; transform: translateX(60px); }
+  14%, 86% { opacity: 1; transform: translateX(0); }
+  94%, 100% { opacity: 0; transform: translateX(60px); }
+}
+.onb-notif__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #131316;
+  flex: none;
+}
+.onb-notif__text {
+  min-width: 0;
+}
+.onb-notif__title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.onb-notif__body {
+  font-size: 11px;
+  color: rgba(235, 235, 245, 0.6);
+}
+.onb-notif__time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  align-self: flex-start;
+}
+
+/* ---- reduced motion: freeze every scene to a readable final frame ---- */
+@media (prefers-reduced-motion: reduce) {
+  .onb-ghost,
+  .onb-ghost-edges path,
+  .onb-cursor,
+  .onb-ripple,
+  .onb-kbd,
+  .onb-mic__ring,
+  .onb-wave span,
+  .onb-caret,
+  .onb-bell,
+  .onb-notif {
+    animation: none;
+  }
+  .onb-menu {
+    animation: none;
+    opacity: 1;
+  }
+  .onb-menu__row--hl {
+    animation: none;
+    background: var(--accent);
+  }
+  .onb-node {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .onb-badge {
+    animation: none;
+  }
+  .onb-term-typed {
+    animation: none;
+    max-width: 100%;
+  }
+  .onb-mini {
+    transition: none;
+  }
+}
