@@ -257,4 +257,38 @@ describe('license seats entitlement', () => {
     expect(status.seats).toBe(0)
     expect(licensedSeats()).toBe(0)
   })
+
+  it('upgrade opens the base Pro link by default and the add-seats link for target "seats"', async () => {
+    process.env.NODETERM_CHECKOUT_URL = 'https://pay.test/pro'
+    process.env.NODETERM_SEATS_CHECKOUT_URL = 'https://pay.test/seats'
+    try {
+      const { initLicense } = await import('./license')
+      initLicense()
+      await flush() // let the launch refresh settle so its rejection isn't left unhandled
+      await fake.handlers[IPC.licenseUpgrade]() // default → base Pro
+      await fake.handlers[IPC.licenseUpgrade]('seats') // add-seats link
+      // Each carries this device's id for the device-bound webhook binding.
+      expect(fake.opened).toEqual([
+        'https://pay.test/pro?client_reference_id=test-device',
+        'https://pay.test/seats?client_reference_id=test-device'
+      ])
+    } finally {
+      delete process.env.NODETERM_CHECKOUT_URL
+      delete process.env.NODETERM_SEATS_CHECKOUT_URL
+    }
+  })
+
+  it('the add-seats link falls back to the base Pro link when unset', async () => {
+    process.env.NODETERM_CHECKOUT_URL = 'https://pay.test/pro'
+    delete process.env.NODETERM_SEATS_CHECKOUT_URL
+    try {
+      const { initLicense } = await import('./license')
+      initLicense()
+      await flush() // let the launch refresh settle so its rejection isn't left unhandled
+      await fake.handlers[IPC.licenseUpgrade]('seats')
+      expect(fake.opened).toEqual(['https://pay.test/pro?client_reference_id=test-device'])
+    } finally {
+      delete process.env.NODETERM_CHECKOUT_URL
+    }
+  })
 })
