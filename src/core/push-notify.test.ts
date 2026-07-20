@@ -3,14 +3,36 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import { createPushNotify, type PushNotifyDeps, type PushHostIdentity } from './push-notify'
+import {
+  createPushNotify,
+  createLiveUpdatePush,
+  type PushNotifyDeps,
+  type PushHostIdentity,
+  type LiveUpdateDeps
+} from './push-notify'
 import {
   onInboxActionable,
   recordAgentEvent,
   initAgentStatusMirror,
   _resetForTest,
-  type InboxEvent
+  type InboxEvent,
+  type NodeStateChange,
+  type NodeNowChange
 } from './agent-status-mirror'
+
+/** A generic manual event source standing in for the mirror subscribe seams. */
+function emitter<T>(): { subscribe: (cb: (e: T) => void) => () => void; emit: (e: T) => void } {
+  const cbs = new Set<(e: T) => void>()
+  return {
+    subscribe: (cb) => {
+      cbs.add(cb)
+      return () => cbs.delete(cb)
+    },
+    emit: (e) => {
+      for (const cb of cbs) cb(e)
+    }
+  }
+}
 
 // ---- helpers -------------------------------------------------------------------------------
 
@@ -195,7 +217,10 @@ describe('createPushNotify', () => {
         title: 'Approve write to /etc/hosts',
         detail: 'Edit needs sudo',
         ts: 1789,
-        resolved: false
+        resolved: false,
+        // Deterministic-approval ticket rides the mirror to the phone but MUST NOT ride the push
+        // body (the phone re-reads the mirror before acting). See docs/hook-reply-approvals.md.
+        pendingId: 'node-9-1789-42'
       })
     )
     await vi.advanceTimersByTimeAsync(2000)
@@ -217,6 +242,7 @@ describe('createPushNotify', () => {
     // The internal InboxEvent fields do not leak into the payload.
     expect(body.events[0]).not.toHaveProperty('id')
     expect(body.events[0]).not.toHaveProperty('resolved')
+    expect(body.events[0]).not.toHaveProperty('pendingId')
     h.stop()
   })
 
@@ -400,11 +426,225 @@ describe('createPushNotify', () => {
     })
   })
 
+  describe('question options pass-through', () => {
+    it('passes question options into the notify payload', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'question', title: 'Pick a theme', options: ['Dark', 'Light', 'System'] }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0].options).toEqual(['Dark', 'Light', 'System'])
+      h.stop()
+    })
+
+    it('omits options when the event has none', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'Approve' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0]).not.toHaveProperty('options')
+      h.stop()
+    })
+  })
+
   it('stop() unsubscribes so later events are ignored', async () => {
     const em = makeEmitter()
     const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
     h.stop()
     em.emit(iev({ nodeId: 'a' }))
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// ---- live-update stream --------------------------------------------------------------------
+
+describe('createLiveUpdatePush', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    clock = 0
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function liveDeps(over: Partial<LiveUpdateDeps> = {}): LiveUpdateDeps {
+    return {
+      subscribeStateChange: () => () => {},
+      subscribeNowChange: () => () => {},
+      getHostIdentity: () => IDENTITY,
+      mobilePushEnabled: () => true,
+      mobileLiveActivities: () => true,
+      isPackaged: () => true,
+      getNodeTitle: () => undefined,
+      env: {},
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      now: () => clock,
+      batchWindowMs: 1000,
+      coalesceMs: 20000,
+      ...over
+    }
+  }
+
+  function liveBodyOf(callIndex = 0): {
+    hostDeviceId: string
+    hostPublicKeyB64: string
+    hostLabel: string
+    updates: Array<Record<string, unknown>>
+  } {
+    return JSON.parse(fetchMock.mock.calls[callIndex][1].body)
+  }
+
+  function wire(over: Partial<LiveUpdateDeps> = {}): {
+    h: ReturnType<typeof createLiveUpdatePush>
+    st: ReturnType<typeof emitter<NodeStateChange>>
+    nw: ReturnType<typeof emitter<NodeNowChange>>
+  } {
+    const st = emitter<NodeStateChange>()
+    const nw = emitter<NodeNowChange>()
+    const h = createLiveUpdatePush(
+      liveDeps({ subscribeStateChange: st.subscribe, subscribeNowChange: nw.subscribe, ...over })
+    )
+    return { h, st, nw }
+  }
+
+  it('posts a state edge within the batch window (immediate)', async () => {
+    const { h, st } = wire()
+    st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+    expect(fetchMock).not.toHaveBeenCalled() // still batching
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.nodeterm.dev/v1/push/live-update')
+    expect(init.method).toBe('POST')
+    expect(liveBodyOf().updates[0]).toMatchObject({ nodeId: 'a', event: 'start', state: 'working' })
+    h.stop()
+  })
+
+  it('emits the contract payload shape (host identity + trimmed update fields)', async () => {
+    const { h, st } = wire({ getNodeTitle: () => 'api-server' })
+    st.emit({ nodeId: 'node-1', agentId: 'claude', event: 'update', state: 'needsYou', message: 'Approve write', ts: 42 })
+    await vi.advanceTimersByTimeAsync(1000)
+    const body = liveBodyOf()
+    expect(body.hostDeviceId).toBe('host-device-1')
+    expect(body.hostPublicKeyB64).toBe('PUBKEYB64==')
+    expect(body.hostLabel).toBe('niova')
+    expect(body.updates[0]).toEqual({
+      nodeId: 'node-1',
+      nodeTitle: 'api-server',
+      agentId: 'claude',
+      event: 'update',
+      state: 'needsYou',
+      message: 'Approve write',
+      ts: 42
+    })
+    h.stop()
+  })
+
+  it('sends a now-update immediately on the leading edge, then COALESCES ticks to ≥20s/node', async () => {
+    const { h, nw } = wire()
+    // Leading edge (no prior send) → sent.
+    clock = 0
+    nw.emit({ nodeId: 'a', activity: 'Editing a.ts', contextPercent: 10, ts: 0 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(liveBodyOf(0).updates[0]).toMatchObject({
+      event: 'update',
+      state: 'working',
+      activity: 'Editing a.ts',
+      contextPercent: 10
+    })
+    // A second tick 5s later is inside the 20s window → coalesced (NOT sent yet).
+    clock = 5000
+    nw.emit({ nodeId: 'a', activity: 'Editing b.ts', ts: 5000 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // At the window edge the coalesced LATEST flushes.
+    clock = 20000
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(liveBodyOf(1).updates[0].activity).toBe('Editing b.ts')
+    h.stop()
+  })
+
+  it('a state edge is NOT subject to the now-coalesce window', async () => {
+    const { h, st, nw } = wire()
+    clock = 0
+    nw.emit({ nodeId: 'a', activity: 'x', ts: 0 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // A state edge on the same node 2s later still posts immediately (no 20s wait).
+    clock = 2000
+    st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Finished', ts: 2000 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(liveBodyOf(1).updates[0]).toMatchObject({ event: 'end', state: 'done' })
+    h.stop()
+  })
+
+  it('caps at 20 updates per POST and sends the remainder next', async () => {
+    const { h, st } = wire()
+    for (let i = 0; i < 25; i++) st.emit({ nodeId: `n${i}`, event: 'start', state: 'working', ts: i })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(liveBodyOf(0).updates).toHaveLength(20)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(liveBodyOf(1).updates).toHaveLength(5)
+    h.stop()
+  })
+
+  it('honors NODETERM_API_BASE override', async () => {
+    const { h, st } = wire({ env: { NODETERM_API_BASE: 'http://localhost:9999' } })
+    st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:9999/v1/push/live-update')
+    h.stop()
+  })
+
+  it('drops on network error without throwing', async () => {
+    fetchMock.mockRejectedValue(new Error('offline'))
+    const { h, st } = wire()
+    st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    h.stop()
+  })
+
+  describe('inert gates (no POST)', () => {
+    async function expectNoPost(over: Partial<LiveUpdateDeps>): Promise<void> {
+      const { h, st, nw } = wire(over)
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      nw.emit({ nodeId: 'a', activity: 'x', ts: 1 })
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
+    }
+
+    it('master switch off', async () => {
+      await expectNoPost({ mobilePushEnabled: () => false })
+    })
+    it('live-activities sub-gate off', async () => {
+      await expectNoPost({ mobileLiveActivities: () => false })
+    })
+    it('no relay host identity', async () => {
+      await expectNoPost({ getHostIdentity: () => null })
+    })
+    it('no paired phone', async () => {
+      await expectNoPost({ getHostIdentity: () => ({ ...IDENTITY, hasPairedPhone: false }) })
+    })
+    it('DO_NOT_TRACK', async () => {
+      await expectNoPost({ env: { DO_NOT_TRACK: '1' } })
+    })
+    it('unpackaged without a local API base', async () => {
+      await expectNoPost({ isPackaged: () => false, env: {} })
+    })
+  })
+
+  it('stop() unsubscribes both seams so later events are ignored', async () => {
+    const { h, st, nw } = wire()
+    h.stop()
+    st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+    nw.emit({ nodeId: 'a', activity: 'x', ts: 1 })
     await vi.advanceTimersByTimeAsync(2000)
     expect(fetchMock).not.toHaveBeenCalled()
   })

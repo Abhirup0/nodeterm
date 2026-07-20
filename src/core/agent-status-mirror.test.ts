@@ -19,6 +19,9 @@ import {
   buildMirrorUsage,
   toolActivity,
   firstLine,
+  extractQuestionOptions,
+  onNodeStateChange,
+  onNodeNowChange,
   _resetForTest,
   _snapshot,
   _inboxSnapshot,
@@ -27,7 +30,9 @@ import {
   INBOX_EVENTS_CAP,
   type MirrorEntry,
   type MirrorFile,
-  type MirrorUsage
+  type MirrorUsage,
+  type NodeStateChange,
+  type NodeNowChange
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -315,6 +320,20 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(ib.events[1].title).toBe('Approve rm -rf /tmp/x')
   })
 
+  it('carries the deterministic-approval pendingId onto the approval event (and omits it when absent)', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-123-9' }))
+    const withId = _inboxSnapshot().events[0]
+    expect(withId.kind).toBe('approval')
+    expect(withId.pendingId).toBe('n1-123-9')
+
+    // A different node whose hook did NOT arm the wait (no pendingId) → the field is omitted.
+    recordAgentEvent(ev({ nodeId: 'other', state: 'blocked', lastMessage: 'Approve?' }))
+    const noId = _inboxSnapshot().events.find((e) => e.nodeId === 'other')!
+    expect(noId.kind).toBe('approval')
+    expect('pendingId' in noId).toBe(false)
+  })
+
   it('titles blocked/waiting from lastMessage first line, with fallbacks', () => {
     recordAgentEvent(ev({ nodeId: 'a', state: 'blocked' }))
     recordAgentEvent(ev({ nodeId: 'b', state: 'waiting' }))
@@ -445,6 +464,165 @@ describe('activity mapping (toolActivity + recordRawToolEvent)', () => {
     expect(firstLine('  \n\n hello there \nmore', 100)).toBe('hello there')
     expect(firstLine('abcdefghij', 5)).toBe('abcd…')
     expect(firstLine(undefined, 10)).toBe('')
+  })
+})
+
+// ---- interactive-push-live-activities -------------------------------------------------------
+
+describe('question options (AskUserQuestion)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  const q1 = (opts: unknown[]) => ({ questions: [{ options: opts }] })
+
+  it('extracts ≤4 labels clipped to 60, first question only, fail-open on bad shape', () => {
+    expect(extractQuestionOptions(q1([{ label: 'Dark' }, { label: 'Light' }]))).toEqual(['Dark', 'Light'])
+    // clips each label to 60
+    const long = 'x'.repeat(100)
+    expect(extractQuestionOptions(q1([{ label: long }]))![0]).toBe('x'.repeat(59) + '…')
+    // caps at 4
+    expect(extractQuestionOptions(q1([1, 2, 3, 4, 5].map((n) => ({ label: `o${n}` })))))
+      .toEqual(['o1', 'o2', 'o3', 'o4'])
+    // only the FIRST question's options
+    expect(
+      extractQuestionOptions({ questions: [{ options: [{ label: 'A' }] }, { options: [{ label: 'B' }] }] })
+    ).toEqual(['A'])
+    // fail-open on every shape mismatch
+    expect(extractQuestionOptions(undefined)).toBeUndefined()
+    expect(extractQuestionOptions({})).toBeUndefined()
+    expect(extractQuestionOptions({ questions: [] })).toBeUndefined()
+    expect(extractQuestionOptions(q1([]))).toBeUndefined()
+    expect(extractQuestionOptions(q1([{ nope: 1 }]))).toBeUndefined()
+    expect(extractQuestionOptions({ questions: 'x' } as unknown as Record<string, unknown>)).toBeUndefined()
+  })
+
+  it('stashes options on the raw AskUserQuestion hook and attaches them to the next question', () => {
+    recordRawToolEvent('n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: q1([{ label: 'Dark' }, { label: 'Light' }, { label: 'System' }])
+    })
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'waiting', lastMessage: 'Pick a theme' }))
+    const q = _inboxSnapshot().events.find((e) => e.nodeId === 'n1' && e.kind === 'question')!
+    expect(q.options).toEqual(['Dark', 'Light', 'System'])
+  })
+
+  it('a plain question (no AskUserQuestion) carries no options', () => {
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'waiting', lastMessage: 'Which file?' }))
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'n2')!.options).toBeUndefined()
+  })
+
+  it('approvals never carry options even when a stash exists', () => {
+    recordRawToolEvent('n3', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: q1([{ label: 'A' }])
+    })
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve?' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3')!
+    expect(e.kind).toBe('approval')
+    expect(e.options).toBeUndefined()
+  })
+
+  it('clears the stash when the node leaves waiting (no reuse on a later question)', () => {
+    recordRawToolEvent('n4', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: q1([{ label: 'A' }])
+    })
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'waiting', lastMessage: 'Q1' }))
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'working' })) // leaves waiting → clears stash
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'waiting', lastMessage: 'Q2' }))
+    const qs = _inboxSnapshot().events.filter((e) => e.nodeId === 'n4' && e.kind === 'question')
+    expect(qs[qs.length - 1].options).toBeUndefined()
+  })
+
+  it('clears the stash on a new turn', () => {
+    recordRawToolEvent('n5', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: q1([{ label: 'A' }])
+    })
+    recordAgentEvent(ev({ nodeId: 'n5', state: 'working', newTurn: true })) // new turn clears
+    recordAgentEvent(ev({ nodeId: 'n5', state: 'waiting', lastMessage: 'Q' }))
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'n5' && e.kind === 'question')!.options).toBeUndefined()
+  })
+})
+
+describe('onNodeStateChange seam', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('fires start on working, needsYou on blocked/waiting, end on done — with the mapped messages', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write' }))
+    recordAgentEvent(ev({ state: 'working' })) // resume — an edge back into working
+    recordAgentEvent(ev({ state: 'done', lastMessage: 'Wrapped up.' }))
+    expect(seen.map((c) => [c.event, c.state])).toEqual([
+      ['start', 'working'],
+      ['update', 'needsYou'],
+      ['start', 'working'],
+      ['end', 'done']
+    ])
+    expect(seen[1].message).toBe('Approve write')
+    expect(seen[3].message).toBe('Finished')
+  })
+
+  it('maps waiting to needsYou and titles interrupted done "Stopped"', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ nodeId: 'q', state: 'waiting', lastMessage: 'Which one?' }))
+    recordAgentEvent(ev({ nodeId: 'q', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'q', state: 'done', interrupted: true }))
+    expect(seen.find((c) => c.state === 'needsYou')!.message).toBe('Which one?')
+    expect(seen.find((c) => c.state === 'done')!.message).toBe('Stopped')
+  })
+
+  it('does not refire start for a same-state working tick, nor needsYou for a re-asserted blocked', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'working' })) // tool tick
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'A' }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'A' })) // re-assert
+    expect(seen.filter((c) => c.event === 'start')).toHaveLength(1)
+    expect(seen.filter((c) => c.state === 'needsYou')).toHaveLength(1)
+  })
+
+  it('does not fire a start for a held-off late working (done-holdoff)', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'done' }))
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    // A late, non-newTurn working within DONE_HOLDOFF_MS is held off by reduceEntry → no start.
+    recordAgentEvent(ev({ state: 'working' }))
+    expect(seen.filter((c) => c.event === 'start')).toHaveLength(0)
+  })
+})
+
+describe('onNodeNowChange seam', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('fires on an activity change and on a context change', () => {
+    const seen: NodeNowChange[] = []
+    onNodeNowChange((c) => seen.push(c))
+    recordRawToolEvent('n1', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } })
+    recordContextUsage('n1', 55)
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toMatchObject({ nodeId: 'n1', activity: 'Running ls' })
+    expect(seen[1]).toMatchObject({ nodeId: 'n1', contextPercent: 55 })
+  })
+
+  it('fires with activity undefined when a Stop clears the line', () => {
+    const seen: NodeNowChange[] = []
+    recordRawToolEvent('n2', { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'a.ts' } })
+    onNodeNowChange((c) => seen.push(c))
+    recordRawToolEvent('n2', { hook_event_name: 'Stop' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0].activity).toBeUndefined()
   })
 })
 

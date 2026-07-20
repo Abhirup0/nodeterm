@@ -19,6 +19,7 @@ import { generateCommitMessage, generateGroupName, generateTerminalName } from '
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
+import { writePendingAnswerLocal, startPendingSweep, isValidPendingId } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import {
   initAgentStatusMirror,
@@ -31,9 +32,11 @@ import {
   setMirrorUsageProvider,
   buildMirrorUsage,
   onInboxActionable,
+  onNodeStateChange,
+  onNodeNowChange,
   type MirrorSettings
 } from '../core/agent-status-mirror'
-import { createPushNotify } from '../core/push-notify'
+import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -772,6 +775,28 @@ app.whenReady().then(async () => {
     // "<Needs you|Completed> — <nodeTitle>" (see workspace-store.getNodeTitle for the freshness note).
     getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
   })
+  // Desktop → paired-phone Live Activity updates (spec: interactive-push-live-activities). Feeds off
+  // the mirror's state-edge + activity/context seams, throttles activity ticks (≥20s/node), and
+  // POSTs to /v1/push/live-update. Same host identity + paired-phone gate as notify, plus its own
+  // `mobileLiveActivities` sub-gate under the `mobilePushEnabled` master. Inert without a paired
+  // phone — same documented three-surfaces degrade (Server Edition has no standing relay identity).
+  createLiveUpdatePush({
+    subscribeStateChange: onNodeStateChange,
+    subscribeNowChange: onNodeNowChange,
+    getHostIdentity: () =>
+      pushHostKeyB64
+        ? {
+            hostDeviceId: getDeviceId(),
+            hostPublicKeyB64: pushHostKeyB64,
+            hostLabel: hostname(),
+            hasPairedPhone: pushHasPairedPhone
+          }
+        : null,
+    mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
+    mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false,
+    isPackaged: () => app.isPackaged,
+    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
+  })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS
   // process, so that file is the only agent-status source a phone browsing the host directly
@@ -1003,6 +1028,28 @@ app.whenReady().then(async () => {
     sendToMain(IPC.agentStatus, e)
     recordAgentEvent(e)
   })
+  // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
+  // buttons (and any relay client) answer a held Claude permission hook here. Route by the node's
+  // project: an SSH project's hook runs on the REMOTE host (write over its ControlMaster), a local
+  // project's on THIS machine (write under os.homedir() — the hook uses $HOME, which may differ from
+  // the project cwd). pendingId is validated before it is interpolated into any path/command.
+  corePlatform.handle(
+    IPC.agentAnswerPermission,
+    async (payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }) => {
+      const { nodeId, pendingId, decision } = payload ?? ({} as typeof payload)
+      if (!isValidPendingId(pendingId)) return false
+      if (decision !== 'allow' && decision !== 'deny') return false
+      const sshProjectId = workspaceStore.sshProjectIdForNode(nodeId)
+      if (sshProjectId && sshProjectManager) {
+        return sshProjectManager.writePendingAnswer(sshProjectId, pendingId, decision)
+      }
+      return writePendingAnswerLocal(pendingId, decision, homedir())
+    }
+  )
+  // Sweep stale request/answer files (~/.nodeterm/pending) on boot + hourly — orphans from killed
+  // sessions that never got an answer. Local only; a remote host runs its own sweep if it hosts
+  // nodeterm, else the files age out harmlessly.
+  startPendingSweep(homedir())
   // Security: hook POSTs now arrive over the remote reverse tunnel too (SSH Phase 2a), so a
   // forged/remote POST could set transcript_path to an arbitrary LOCAL path (e.g. ~/.ssh/id_rsa)
   // and have the app read it. The tails read the LOCAL filesystem; legitimate LOCAL transcripts
