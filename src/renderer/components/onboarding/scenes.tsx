@@ -6,6 +6,15 @@ import { useEffect, useRef, useState } from 'react'
  * and respects `prefers-reduced-motion` (styles.css freezes them to their final frame).
  */
 
+/** Inline check icon — a literal "✓" is tofu on Linux's default font stack. */
+export function OnbCheck({ size = 13 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 12.5l5.5 5.5L20 6.5" />
+    </svg>
+  )
+}
+
 /** The nodeterm mark (same path as WelcomeScreen's, sized for the tour). */
 export function OnbBrandMark({ size = 56 }: { size?: number }) {
   return (
@@ -202,7 +211,7 @@ export function SceneNotify() {
         </div>
         <div className="onb-notif__text">
           <div className="onb-notif__title">Claude Code finished</div>
-          <div className="onb-notif__body">fix-auth · tests passing ✓</div>
+          <div className="onb-notif__body">fix-auth · tests passing</div>
         </div>
         <div className="onb-notif__time">now</div>
       </div>

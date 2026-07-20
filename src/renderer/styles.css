@@ -7445,8 +7445,9 @@ body,
   padding: 1.5px 5px;
 }
 .onb-model__ok {
+  display: inline-flex;
+  align-items: center;
   color: #34c759;
-  font-weight: 700;
   margin-left: auto; /* right-aligned when it's the only trailing chip… */
 }
 .onb-pro + .onb-model__ok {

@@ -8,6 +8,7 @@ import { useSettings } from '../../state/settings'
 import { useEntitlement } from '../../state/entitlement'
 import {
   OnbBrandMark,
+  OnbCheck,
   OnbGhostCanvas,
   SceneAgents,
   SceneDictation,
@@ -204,7 +205,9 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   Right-click the canvas to open a terminal — or an AI agent. Each one runs in
                   its own persistent tmux session.
                 </p>
-                <div className="onb-label">Default agent (what ⌘⇧C opens)</div>
+                <div className="onb-label">
+                  Default agent (what {isMac ? '⌘⇧C' : 'Ctrl+Shift+C'} opens)
+                </div>
                 <div className="onb-agent-grid">
                   {BUILTIN_AGENT_IDS.map((id) => (
                     <button
@@ -251,7 +254,11 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                         <span className="onb-model__name">{modelLabel(m.id)}</span>
                         <span className="onb-model__size">{formatSize(m.sizeMB ?? m.approxMB)}</span>
                         {m.pro && <span className="onb-pro">PRO</span>}
-                        {m.downloaded && <span className="onb-model__ok">✓</span>}
+                        {m.downloaded && (
+                          <span className="onb-model__ok">
+                            <OnbCheck />
+                          </span>
+                        )}
                         {pct !== undefined && (
                           <span className="onb-model__bar">
                             <span style={{ width: `${pct}%` }} />
@@ -274,7 +281,9 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                 </p>
                 <div className={`onb-tryit ${kanbanTried ? 'is-done' : ''}`}>
                   {kanbanTried ? (
-                    <>✓ That's the toggle — it works in any project.</>
+                    <>
+                      <OnbCheck /> That's the toggle — it works in any project.
+                    </>
                   ) : (
                     <>
                       Try it now — press{' '}
