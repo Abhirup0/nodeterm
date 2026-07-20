@@ -600,8 +600,10 @@ export function SourceControlPanel({
                 style={{ zIndex: 78 }}
                 onClick={() => setBranchMenu(null)}
               />
+              {/* --scroll: a repo easily holds 30+ branches, and this fixed-position menu
+                  otherwise runs past the viewport bottom with no way to reach the tail. */}
               <div
-                className="tab-menu"
+                className="tab-menu tab-menu--scroll"
                 style={{ top: branchMenu.top, left: branchMenu.left, zIndex: 80 }}
               >
                 {status.branches.map((b) => (
@@ -776,6 +778,7 @@ export function SourceControlPanel({
           x={branchPick.x}
           y={branchPick.y}
           zIndex={80}
+          scroll
           onClose={() => setBranchPick(null)}
           items={
             status.branches
