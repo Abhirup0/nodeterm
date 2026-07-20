@@ -517,10 +517,33 @@ function fireNodeNowChange(c: NodeNowChange): void {
   }
 }
 
-// Per-node stash of the pending AskUserQuestion option labels, set from the raw-hook seam and
-// attached to the next `question` InboxEvent for that node (cleared on state-leave / new turn /
-// session boundary).
-const pendingOptions = new Map<string, string[]>()
+// Per-node stash of the pending AskUserQuestion picker (option labels + the question text), set
+// from the raw-hook seam and attached to the next needs-you InboxEvent for that node. Cleared on
+// state-leave / new turn / session boundary, and additionally time-guarded (STASH_MAX_AGE_MS)
+// so a stash that was never consumed (e.g. a picker that auto-resolved) can't be picked up by a
+// genuinely unrelated later approval in the same turn.
+interface QuestionStash {
+  /** ≤4 labels, each ≤60 chars. */
+  options: string[]
+  /** The first question's prompt text, clipped to INBOX_TITLE_MAX. Absent if not present/parseable. */
+  question?: string
+  /** When the AskUserQuestion PreToolUse stashed this — freshness-guard anchor. */
+  at: number
+}
+const pendingQuestions = new Map<string, QuestionStash>()
+// A stash older than this is ignored (and swept) — see the comment above.
+export const STASH_MAX_AGE_MS = 5 * 60_000
+
+/** The node's stash IFF it exists and is fresh (< STASH_MAX_AGE_MS old); a stale one is dropped. */
+function freshStash(nodeId: string, now: number): QuestionStash | undefined {
+  const s = pendingQuestions.get(nodeId)
+  if (!s) return undefined
+  if (now - s.at > STASH_MAX_AGE_MS) {
+    pendingQuestions.delete(nodeId)
+    return undefined
+  }
+  return s
+}
 
 /**
  * Extract question option labels from an AskUserQuestion `tool_input` (first question only, v1):
@@ -543,6 +566,26 @@ export function extractQuestionOptions(
       if (labels.length >= INBOX_QUESTION_OPTIONS_MAX) break
     }
     return labels.length > 0 ? labels : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Extract the first question's prompt text from an AskUserQuestion `tool_input`
+ * (`questions[0].question`), clipped to INBOX_TITLE_MAX. Used as the question InboxEvent's title so
+ * the phone shows the actual question rather than the last assistant line. Pure; FAIL-OPEN — any
+ * shape mismatch (missing/non-string) yields `undefined`.
+ */
+export function extractQuestionText(
+  toolInput: Record<string, unknown> | undefined
+): string | undefined {
+  try {
+    const questions = (toolInput as { questions?: unknown })?.questions
+    if (!Array.isArray(questions) || questions.length === 0) return undefined
+    const q = (questions[0] as { question?: unknown })?.question
+    if (typeof q !== 'string' || !q) return undefined
+    return clip(q, INBOX_TITLE_MAX)
   } catch {
     return undefined
   }
@@ -668,13 +711,13 @@ function produceInboxFromState(
   // Clear any stashed question options on a new turn or session boundary — a stale option set must
   // never attach to a later, unrelated question. (State-leave clearing is handled below.)
   if (ev.kind === 'session' || (ev.kind === 'state' && ev.state === 'working' && ev.newTurn)) {
-    pendingOptions.delete(nodeId)
+    pendingQuestions.delete(nodeId)
   }
   // Leaving blocked/waiting (any newer, different state — incl. a session reset to idle) resolves
   // that node's pending approval/question cards; they move to the phone's archive.
   if ((prevState === 'blocked' || prevState === 'waiting') && nextState !== prevState) {
     resolveUnresolvedFor(nodeId)
-    pendingOptions.delete(nodeId)
+    pendingQuestions.delete(nodeId)
   }
   const baseEvent = { ts: now, nodeId, agentId: ev.agentId, sessionId: ev.sessionId }
   const stateBase = { nodeId, agentId: ev.agentId, sessionId: ev.sessionId, ts: now }
@@ -684,46 +727,55 @@ function produceInboxFromState(
   if (nextState === 'working' && prevState !== 'working') {
     fireNodeStateChange({ ...stateBase, event: 'start', state: 'working' })
   }
-  // approval/question dedup is TITLE-based (not edge-based): a re-asserted blocked with the SAME
+  // approval/question dedup is TITLE-based (not edge-based): a re-asserted needs-you with the SAME
   // ask is a no-op, but a genuinely different ask still lands — so the guard can't be a plain
   // "same-state, skip". `done` alone is edge-guarded (one per turn).
-  if (nextState === 'blocked') {
-    const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Needs approval'
-    // needsYou live-update on the EDGE into blocked (a re-assert keeps the same activity live).
-    // Carries kind:'approval' + the deterministic-approval ticket (from the same `ev.pendingId`
-    // the approval InboxEvent below stashes) so an intent can answer the held hook straight from
-    // the Live Activity (spec: interactive-push-live-activities addendum).
-    if (prevState !== 'blocked') {
+  if (nextState === 'blocked' || nextState === 'waiting') {
+    // STASH-PRIORITY CLASSIFICATION (fixes: AskUserQuestion always rendered as an approval on the
+    // phone). A pending AskUserQuestion picker reaches us as a permission-style signal — a
+    // PermissionRequest hook and/or a Notification `permission_prompt`, both of which normalize to
+    // `blocked` — even though it is a QUESTION with options, not an approve/deny. So when a fresh
+    // AskUserQuestion stash exists we produce a `question` (with its options) REGARDLESS of which
+    // needs-you state the CLI signaled; without a stash we keep today's mapping (blocked→approval,
+    // waiting→question).
+    const stash = freshStash(nodeId, now)
+    const kind: 'approval' | 'question' = stash || nextState === 'waiting' ? 'question' : 'approval'
+    const options = stash?.options
+    // Title: the AskUserQuestion's own question text wins (so the phone shows the real question),
+    // else the last assistant line, else a kind-appropriate generic.
+    const title =
+      stash?.question ||
+      firstLine(ev.lastMessage, INBOX_TITLE_MAX) ||
+      (kind === 'approval' ? 'Needs approval' : 'Waiting for input')
+    // pendingId (the deterministic hook-reply ticket) rides ONLY an approval. A stash-question
+    // suppresses it even when a PermissionRequest fired for the AskUserQuestion tool itself:
+    // approve/deny on a question is wrong UX — the phone answers with digit send-keys that drive
+    // the picker directly. That held PermissionRequest (if any) simply times out after 45s and the
+    // picker shows anyway (acceptable). See docs/hook-reply-approvals.md.
+    const pendingId = kind === 'approval' ? ev.pendingId : undefined
+    // needsYou live-update on the EDGE into the needs-you state (a re-assert of the SAME state
+    // keeps the activity live). Carries the classified kind + options (question) / pendingId
+    // (approval) so the Live Activity renders straight from this same code path
+    // (spec: interactive-push-live-activities addendum).
+    if (prevState !== nextState) {
       fireNodeStateChange({
         ...stateBase,
         event: 'update',
         state: 'needsYou',
-        kind: 'approval',
+        kind,
         message: clip(title, LIVE_MESSAGE_MAX),
-        ...(ev.pendingId ? { pendingId: ev.pendingId } : {})
+        ...(options ? { options } : {}),
+        ...(pendingId ? { pendingId } : {})
       })
     }
     if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
-    // Carry the deterministic-approval ticket (present only when the wait-branch of the managed
-    // hook ran) so the phone can answer the held hook. See docs/hook-reply-approvals.md.
-    pushInboxEvent({ ...baseEvent, kind: 'approval', title, ...(ev.pendingId ? { pendingId: ev.pendingId } : {}) })
-  } else if (nextState === 'waiting') {
-    const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Waiting for input'
-    const options = pendingOptions.get(nodeId)
-    // needsYou live-update on the EDGE into waiting, carrying kind:'question' + the AskUserQuestion
-    // choices from the stash so the Live Activity can render numbered option buttons.
-    if (prevState !== 'waiting') {
-      fireNodeStateChange({
-        ...stateBase,
-        event: 'update',
-        state: 'needsYou',
-        kind: 'question',
-        message: clip(title, LIVE_MESSAGE_MAX),
-        ...(options ? { options } : {})
-      })
-    }
-    if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
-    pushInboxEvent({ ...baseEvent, kind: 'question', title, ...(options ? { options } : {}) })
+    pushInboxEvent({
+      ...baseEvent,
+      kind,
+      title,
+      ...(options ? { options } : {}),
+      ...(pendingId ? { pendingId } : {})
+    })
   } else if (nextState === 'done' && prevState !== 'done') {
     // The turn ended: emit one `done` on the edge into done (reduceEntry's holdoff keeps a late
     // working from re-entering, and the normalizer collapses an Esc-spam into one done).
@@ -766,11 +818,13 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
       payload.tool_input && typeof payload.tool_input === 'object'
         ? (payload.tool_input as Record<string, unknown>)
         : undefined
-    // AskUserQuestion: stash the choice labels so the next `question` InboxEvent + push carry them
-    // (spec: interactive-push-live-activities). Fail-open — a shape mismatch leaves no stash.
+    // AskUserQuestion: stash the choice labels + the question text so the next needs-you event +
+    // push carry them and are classified as a `question` even when the CLI signals `blocked`
+    // (spec: interactive-push-live-activities; fixes AskUserQuestion-as-approval). Fail-open — a
+    // shape mismatch leaves no stash.
     if (toolName === 'AskUserQuestion') {
       const opts = extractQuestionOptions(toolInput)
-      if (opts) pendingOptions.set(nodeId, opts)
+      if (opts) pendingQuestions.set(nodeId, { options: opts, question: extractQuestionText(toolInput), at: now })
     }
     const activity = toolActivity(toolName, toolInput)
     const cur = inboxNodes.get(nodeId)
@@ -811,7 +865,7 @@ export function recordContextUsage(nodeId: string, percent: number): void {
 export function clearNode(nodeId: string): void {
   let changed = state.delete(nodeId)
   if (inboxNodes.delete(nodeId)) changed = true
-  pendingOptions.delete(nodeId)
+  pendingQuestions.delete(nodeId)
   // History stays; unresolved cards for a gone node can never be answered → archive them.
   for (const e of inboxEvents) {
     if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
@@ -876,7 +930,7 @@ export function _resetForTest(): void {
   inboxActionableListeners.clear()
   nodeStateChangeListeners.clear()
   nodeNowChangeListeners.clear()
-  pendingOptions.clear()
+  pendingQuestions.clear()
 }
 
 /** Snapshot the in-memory map. Test-only. */

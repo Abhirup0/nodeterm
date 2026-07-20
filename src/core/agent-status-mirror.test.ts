@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -20,6 +20,7 @@ import {
   toolActivity,
   firstLine,
   extractQuestionOptions,
+  extractQuestionText,
   onNodeStateChange,
   onNodeNowChange,
   _resetForTest,
@@ -27,6 +28,7 @@ import {
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
+  STASH_MAX_AGE_MS,
   INBOX_EVENTS_CAP,
   type MirrorEntry,
   type MirrorFile,
@@ -512,16 +514,76 @@ describe('question options (AskUserQuestion)', () => {
     expect(_inboxSnapshot().events.find((e) => e.nodeId === 'n2')!.options).toBeUndefined()
   })
 
-  it('approvals never carry options even when a stash exists', () => {
+  it('extracts the first question text, clipped to 120, fail-open on bad shape', () => {
+    expect(extractQuestionText({ questions: [{ question: 'Which theme?' }] })).toBe('Which theme?')
+    // only the first question
+    expect(extractQuestionText({ questions: [{ question: 'A?' }, { question: 'B?' }] })).toBe('A?')
+    // clips to 120
+    const long = 'x'.repeat(200)
+    const out = extractQuestionText({ questions: [{ question: long }] })!
+    expect(out.length).toBe(120)
+    expect(out.endsWith('…')).toBe(true)
+    // fail-open
+    expect(extractQuestionText(undefined)).toBeUndefined()
+    expect(extractQuestionText({})).toBeUndefined()
+    expect(extractQuestionText({ questions: [] })).toBeUndefined()
+    expect(extractQuestionText({ questions: [{ options: [] }] })).toBeUndefined()
+  })
+
+  // Stash-priority classification (fixes: AskUserQuestion always shown as an approval on the
+  // phone). A pending picker reaches us as a permission-style `blocked`; a fresh stash reclassifies
+  // it as a question with its options and the real question text, and suppresses the hook ticket.
+  it('a blocked edge WITH a stash becomes a question (options + question-text title + NO pendingId)', () => {
     recordRawToolEvent('n3', {
       hook_event_name: 'PreToolUse',
       tool_name: 'AskUserQuestion',
-      tool_input: q1([{ label: 'A' }])
+      tool_input: { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
     })
-    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve?' }))
+    // The CLI signals the picker as a permission-style blocked carrying a held-hook pendingId.
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve?', pendingId: 'n3-1-1' }))
     const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3')!
+    expect(e.kind).toBe('question')
+    expect(e.options).toEqual(['Dark', 'Light'])
+    expect(e.title).toBe('Which theme?') // question text, not the lastMessage / generic
+    expect('pendingId' in e).toBe(false) // suppressed — approve/deny on a question is wrong UX
+  })
+
+  it('a blocked edge WITHOUT a stash stays an approval with no options (unchanged)', () => {
+    recordAgentEvent(ev({ nodeId: 'n3b', state: 'blocked', lastMessage: 'Approve write' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3b')!
     expect(e.kind).toBe('approval')
     expect(e.options).toBeUndefined()
+  })
+
+  it('a stash-blocked question with no question text falls back to the lastMessage title', () => {
+    recordRawToolEvent('n3c', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: q1([{ label: 'A' }]) // options only, no `question`
+    })
+    recordAgentEvent(ev({ nodeId: 'n3c', state: 'blocked', lastMessage: 'Pick something' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3c')!
+    expect(e.kind).toBe('question')
+    expect(e.title).toBe('Pick something')
+    expect(e.options).toEqual(['A'])
+  })
+
+  it('ignores a stale stash (older than STASH_MAX_AGE_MS) — a later blocked stays an approval', () => {
+    const spy = vi.spyOn(Date, 'now')
+    spy.mockReturnValue(1_000_000)
+    recordRawToolEvent('n3d', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Q', options: [{ label: 'A' }] }] }
+    })
+    // Jump past the freshness window before an UNRELATED approval fires.
+    spy.mockReturnValue(1_000_000 + STASH_MAX_AGE_MS + 1)
+    recordAgentEvent(ev({ nodeId: 'n3d', state: 'blocked', lastMessage: 'Approve rm -rf', pendingId: 'p' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3d')!
+    expect(e.kind).toBe('approval')
+    expect(e.options).toBeUndefined()
+    expect(e.pendingId).toBe('p') // a real approval keeps its held-hook ticket
+    spy.mockRestore()
   })
 
   it('clears the stash when the node leaves waiting (no reuse on a later question)', () => {
@@ -633,6 +695,23 @@ describe('onNodeStateChange seam', () => {
     expect(ny.kind).toBe('question')
     expect(ny.options).toEqual(['Dark', 'Light', 'System'])
     expect('pendingId' in ny).toBe(false)
+  })
+
+  it('a stash-blocked edge emits kind:question + options + question-text message and drops pendingId', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordRawToolEvent('n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Pick a theme', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
+    })
+    // Picker signaled as a permission-style blocked with a held-hook pendingId.
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve?', pendingId: 'n1-1-1' }))
+    const ny = seen.find((c) => c.state === 'needsYou')!
+    expect(ny.kind).toBe('question')
+    expect(ny.options).toEqual(['Dark', 'Light'])
+    expect(ny.message).toBe('Pick a theme')
+    expect('pendingId' in ny).toBe(false) // approval ticket suppressed on a question edge
   })
 
   it('a plain waiting edge (no AskUserQuestion stash) is kind:question with no options', () => {
