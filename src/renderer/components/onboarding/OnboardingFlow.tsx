@@ -314,9 +314,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   <button className="onb-btn onb-btn--primary" autoFocus onClick={() => chooseNotifications(true)}>
                     Enable notifications
                   </button>
-                  <button className="onb-btn" onClick={() => chooseNotifications(false)}>
-                    Not now
-                  </button>
+                  <div className="onb-fineprint">…or just hit Next to leave them off.</div>
                 </div>
               </>
             )}
@@ -346,16 +344,15 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                 <button className="onb-btn" onClick={back}>
                   Back
                 </button>
-                {/* Step 4's own choice buttons advance it (an explicit consent answer);
-                    the last step's primary is Finish. */}
-                {step !== 4 && (
-                  <button
-                    className="onb-btn onb-btn--primary"
-                    onClick={step === STEP_COUNT - 1 ? onClose : next}
-                  >
-                    {step === STEP_COUNT - 1 ? 'Finish' : 'Next'}
-                  </button>
-                )}
+                {/* One consistent footer on every step (a lone Back read as the primary action).
+                    Next past the notifications step without choosing = leave them off — the
+                    close handler records the unanswered consent as asked+off. */}
+                <button
+                  className="onb-btn onb-btn--primary"
+                  onClick={step === STEP_COUNT - 1 ? onClose : next}
+                >
+                  {step === STEP_COUNT - 1 ? 'Finish' : 'Next'}
+                </button>
               </div>
             </div>
           </div>
