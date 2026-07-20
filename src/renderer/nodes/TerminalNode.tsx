@@ -372,6 +372,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
   const [dropping, setDropping] = useState(false)
+  // Overlay while dropped files upload to an SSH host (scp is seconds-long with zero feedback);
+  // doubles as a brief "Upload failed" flash when nothing made it.
+  const [uploadNote, setUploadNote] = useState<{ text: string; failed?: boolean } | null>(null)
+  const uploadNoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
+  }, [])
   const [naming, setNaming] = useState(false)
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
@@ -1359,14 +1366,31 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     if (data.sshRemoteTmux) {
       // Remote terminal: a local path is useless on the remote host. Upload each file over the
       // project's ControlMaster and paste the REMOTE absolute path instead. Fail-open: skip nulls.
+      // scp takes seconds and pastes nothing until it's done, so show an overlay while it runs —
+      // without it a drop looks like it silently did nothing.
       const projectId = useProjects.getState().activeProjectId
-      const uploaded = await Promise.all(
-        files.map((f) => {
-          const lp = window.nodeTerminal.getPathForFile(f)
-          return lp ? window.nodeTerminal.sshProject.uploadFile(projectId, lp, f.name) : Promise.resolve(null)
-        })
-      )
+      if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
+      setUploadNote({
+        text: `Uploading ${files.length === 1 ? files[0].name : `${files.length} files`}…`,
+      })
+      let uploaded: (string | null)[] = []
+      try {
+        uploaded = await Promise.all(
+          files.map((f) => {
+            const lp = window.nodeTerminal.getPathForFile(f)
+            return lp
+              ? window.nodeTerminal.sshProject.uploadFile(projectId, lp, f.name).catch(() => null)
+              : Promise.resolve(null)
+          })
+        )
+      } finally {
+        setUploadNote(null)
+      }
       paths = uploaded.filter((p): p is string => !!p).map(escapeDroppedPath)
+      if (!paths.length) {
+        setUploadNote({ text: 'Upload failed', failed: true })
+        uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
+      }
     } else {
       paths = files
         .map((f) => window.nodeTerminal.getPathForFile(f))
@@ -1777,6 +1801,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           className={`term-node__xterm nodrag nowheel${co.letterbox ? ' letterboxed' : ''}`}
           ref={bodyRef}
         />
+        {uploadNote && (
+          <div className={`term-node__upload${uploadNote.failed ? ' failed' : ''}`}>
+            {!uploadNote.failed && <span className="term-node__upload-spin" />}
+            {uploadNote.text}
+          </div>
+        )}
         {co.closed && (
           <div className="term-node__closed nodrag">
             Closed by {closedName} — this session was ended.

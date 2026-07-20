@@ -1378,6 +1378,36 @@ body,
   background: var(--bg);
 }
 
+/* Upload progress while dropped files scp to an SSH host (and a brief failure flash). */
+.term-node__upload {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.term-node__upload.failed {
+  color: #ff453a;
+}
+
+.term-node__upload-spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: dictation-spin 0.8s linear infinite;
+}
+
 /* Drop-target hint while dragging a file from Finder into the terminal. */
 .term-node__body.dropping::after {
   content: 'Drop to insert path';
