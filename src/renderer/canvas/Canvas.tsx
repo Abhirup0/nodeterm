@@ -75,6 +75,7 @@ import { SourceControlPanel } from '../components/SourceControlPanel'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { ShortcutsPanel } from '../components/ShortcutsPanel'
+import { OnboardingFlow } from '../components/onboarding/OnboardingFlow'
 import { DictationOverlay, type DictationTarget } from '../components/DictationOverlay'
 import { BugReportDialog } from '../components/BugReportDialog'
 import { describeOs, REPO_URL } from '../lib/bugReport'
@@ -464,6 +465,8 @@ export function Canvas() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  // First-run setup tour (agents / dictation / kanban / notifications) — see OnboardingFlow.
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [dictationOpen, setDictationOpen] = useState(false)
   // Target = the first selected terminal node AT OPEN TIME (not live-tracked while the
   // overlay is up — the design explicitly freezes it so a stray click elsewhere mid-dictation
@@ -1094,9 +1097,16 @@ export function Canvas() {
       .getState()
       .hydrate()
       .then(() => {
-        if (!useSettings.getState().settings.seenShortcuts) {
-          setShortcutsOpen(true)
-          useSettings.getState().update({ seenShortcuts: true })
+        const s = useSettings.getState().settings
+        if (s.seenOnboarding) return
+        if (s.seenShortcuts) {
+          // Existing install (pre-tour): the setup tour is for fresh installs — migrate
+          // silently so it never pops over an established workspace. Rerunnable via ⌘K.
+          useSettings.getState().update({ seenOnboarding: true })
+        } else {
+          // Fresh install: the tour replaces the auto-opened ShortcutsPanel (⌘/ still
+          // opens it manually) and owns the notification-consent question.
+          setOnboardingOpen(true)
         }
       })
     api.workspace.load().then((ws) => {
@@ -5275,13 +5285,16 @@ export function Canvas() {
   // First-launch consent: ask once whether to enable Claude completion notifications.
   // Gated on settings hydration — otherwise it runs before settings load from disk and
   // sees the default (notifyConsentAsked=false) on every launch, re-asking each time.
+  // While the setup tour is pending (seenOnboarding false), the tour owns this question —
+  // its last step asks it in context instead of a standalone dialog popping over the tour.
   const settingsHydrated = useSettings((s) => s.hydrated)
+  const seenOnboarding = useSettings((s) => s.settings.seenOnboarding)
   useEffect(() => {
-    if (!settingsHydrated) return
+    if (!settingsHydrated || !seenOnboarding) return
     if (useSettings.getState().settings.notifyConsentAsked) return
     useSettings.getState().update({ notifyConsentAsked: true, notifyOnClaudeDone: false })
     setConsentOpen(true)
-  }, [settingsHydrated])
+  }, [settingsHydrated, seenOnboarding])
 
   // Load saved SSH servers once so the RemotePicker / palette have them available.
   useEffect(() => {
@@ -5759,6 +5772,13 @@ export function Canvas() {
         run: () => useViewMode.getState().toggle(kanbanId)
       })
     }
+    cmds.push({
+      id: 'setup-tour',
+      label: 'Setup tour',
+      hint: 'welcome onboarding first-run',
+      section: 'View',
+      run: () => setOnboardingOpen(true)
+    })
     return cmds
   }, [
     addTerminal,
@@ -6215,6 +6235,21 @@ export function Canvas() {
       )}
 
       {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
+      {onboardingOpen && (
+        <OnboardingFlow
+          onClose={() => {
+            setOnboardingOpen(false)
+            const s = useSettings.getState().settings
+            useSettings.getState().update({
+              seenOnboarding: true,
+              seenShortcuts: true,
+              // Skipping the tour is also a consent answer — the standalone dialog must not
+              // pop right on top of a just-skipped setup. Re-decidable in Settings.
+              ...(s.notifyConsentAsked ? {} : { notifyConsentAsked: true, notifyOnClaudeDone: false })
+            })
+          }}
+        />
+      )}
 
       {dictationOpen && (
         <DictationOverlay

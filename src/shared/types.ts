@@ -617,6 +617,10 @@ export interface Settings {
   commitExtraPrompt: string
   /** Whether the shortcuts overlay has been shown on first launch. */
   seenShortcuts: boolean
+  /** Whether the first-run setup tour (onboarding) has been completed or skipped. Existing
+   *  installs (seenShortcuts already true) are migrated to true silently — the tour is for
+   *  fresh installs; rerunnable via the ⌘K "Setup tour" command. */
+  seenOnboarding: boolean
   /** Notify (OS notification) when a Claude Code turn finishes while the app is in the background. */
   notifyOnClaudeDone: boolean
   /** Periodically `git fetch` while the Source Control panel is open, so ahead/behind stays
@@ -686,6 +690,7 @@ export const DEFAULT_SETTINGS: Settings = {
   commitAgentCommand: '',
   commitExtraPrompt: '',
   seenShortcuts: false,
+  seenOnboarding: false,
   notifyOnClaudeDone: true,
   gitAutoFetch: true,
   notifyConsentAsked: false,
