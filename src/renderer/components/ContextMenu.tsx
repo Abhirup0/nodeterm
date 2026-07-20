@@ -32,13 +32,20 @@ interface ContextMenuProps {
    * Control panel) would render hidden behind it. Pass a value above the host overlay.
    */
   zIndex?: number
+  /**
+   * Cap the menu height and scroll overflow — for data-driven flat lists that can grow
+   * unbounded (e.g. the branch pickers: repos easily hold 30+ branches, and a fixed-position
+   * menu otherwise runs past the viewport with no way to reach the tail). Only for menus
+   * with NO submenu items: `overflow-y: auto` would clip a hover flyout.
+   */
+  scroll?: boolean
 }
 
 /**
  * A right-click menu rendered in a body portal at fixed coordinates, so it is never
  * clipped or hidden behind the canvas. Closes on backdrop click.
  */
-export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) {
+export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMenuProps) {
   // Keep the menu one above its backdrop (matches the default 46/45 CSS ordering).
   const backdropStyle = zIndex != null ? { zIndex } : undefined
   const menuStyle = zIndex != null ? { top: y, left: x, zIndex: zIndex + 1 } : { top: y, left: x }
@@ -52,7 +59,11 @@ export function ContextMenu({ x, y, items, onClose, zIndex }: ContextMenuProps) 
         onContextMenu={(e) => e.preventDefault()}
         onClick={onClose}
       />
-      <div className="ctx-menu" style={menuStyle} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`ctx-menu${scroll ? ' ctx-menu--scroll' : ''}`}
+        style={menuStyle}
+        onClick={(e) => e.stopPropagation()}
+      >
         {items.map((item, i) => {
           if (item.type === 'separator') return <div key={i} className="ctx-sep" />
           if (item.type === 'label') return <div key={i} className="ctx-label">{item.label}</div>
