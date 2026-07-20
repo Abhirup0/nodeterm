@@ -45,6 +45,13 @@ export interface AgentNodeStatus {
   session?: string
   /** Claude session id (from hooks) — used to resume/branch the conversation. */
   sessionId?: string
+  /**
+   * Deterministic hook-reply approval ticket (docs/hook-reply-approvals.md). Set while the node is
+   * `blocked` on a Claude permission request whose managed hook is holding open; the header's
+   * Approve/Deny buttons answer it. TRANSIENT — never persisted, and cleared the moment the node
+   * leaves `blocked` (so the buttons vanish once the decision lands). Absent = legacy prompt path.
+   */
+  pendingId?: string
   /** Set when running /loop, /schedule or /cron (heuristic); shown as a connected node. */
   loop?: {
     count: number
@@ -63,8 +70,16 @@ export interface AgentStatusStore {
   /** The terminal node the user is currently focused in (for unread decisions). */
   activeId: string | null
   setActive(id: string, active: boolean): void
-  /** `newTurn` marks a genuine UserPromptSubmit — the only working that may follow a fresh done. */
-  setState(id: string, state: AgentState | undefined, agentId?: AgentId, newTurn?: boolean): void
+  /** `newTurn` marks a genuine UserPromptSubmit — the only working that may follow a fresh done.
+   *  `pendingId` (deterministic approvals) is retained only while `state === 'blocked'`; any other
+   *  state clears it, so the header's Approve/Deny buttons disappear as soon as the node moves on. */
+  setState(
+    id: string,
+    state: AgentState | undefined,
+    agentId?: AgentId,
+    newTurn?: boolean,
+    pendingId?: string
+  ): void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
@@ -190,7 +205,7 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
         return s.activeId === id ? { activeId: null } : s
       }),
 
-    setState: (id, state, agentId, newTurn) =>
+    setState: (id, state, agentId, newTurn, pendingId) =>
       set((s) => {
         const prev = s.byId[id] ?? EMPTY
         const now = Date.now()
@@ -205,7 +220,16 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
         ) {
           return s
         }
-        if (prev.state === state && (agentId === undefined || prev.agentId === agentId)) {
+        // A re-asserted `blocked` carrying a NEW pendingId (Claude re-asks) must break the fast
+        // path so the header buttons retarget the new answer file — otherwise treat same-state as
+        // a freshness-only refresh.
+        const samePendingWhileBlocked =
+          state !== 'blocked' || (pendingId ?? prev.pendingId) === prev.pendingId
+        if (
+          prev.state === state &&
+          (agentId === undefined || prev.agentId === agentId) &&
+          samePendingWhileBlocked
+        ) {
           // Same-state event: refresh freshness in place — stateAt is never rendered, and a
           // new object here would re-render every node header on each tool event.
           if (s.byId[id]) s.byId[id].stateAt = now
@@ -213,6 +237,8 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
         }
         const next = { ...prev, state, stateAt: now }
         if (agentId !== undefined) next.agentId = agentId
+        // Retain the approval ticket only while blocked; any other state clears it (transient).
+        next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
         return { byId: { ...s.byId, [id]: next } }
       }),
 

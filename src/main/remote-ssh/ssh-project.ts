@@ -537,6 +537,41 @@ export class SshProjectManager {
   }
 
   /**
+   * Deterministic hook-reply approvals (docs/hook-reply-approvals.md): write the one-line answer
+   * file for a held REMOTE permission hook, on the project's host over its ControlMaster (atomic
+   * tmp+mv, 0600 via umask). The hook is polling `~/.nodeterm/pending/<pendingId>.answer` on that
+   * host. `pendingId` is validated by the caller (main) before it reaches here; this method also
+   * refuses anything but the safe charset as defense-in-depth, since it interpolates into a remote
+   * shell command. No-ops (false) when the project isn't connected or the write fails.
+   */
+  async writePendingAnswer(
+    projectId: string,
+    pendingId: string,
+    decision: 'allow' | 'deny'
+  ): Promise<boolean> {
+    const c = this.conns.get(projectId)
+    if (!c) return false
+    if (!/^[A-Za-z0-9_-]+$/.test(pendingId)) return false
+    if (decision !== 'allow' && decision !== 'deny') return false
+    const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm/pending` : '~/.nodeterm/pending'
+    const file = `${dir}/${pendingId}.answer`
+    const q = quoteRemotePath(file)
+    const qTmp = quoteRemotePath(`${file}.tmp`)
+    const qDir = quoteRemotePath(dir)
+    const { code } = await this.r
+      .run(
+        childArgs(
+          c.conn,
+          c.controlPath,
+          `umask 077; mkdir -p ${qDir} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+        ),
+        decision
+      )
+      .catch(() => ({ code: 1, stdout: '' }))
+    return code === 0
+  }
+
+  /**
    * The resolved remote `$HOME` for the project owning this `controlPath`, if known. The hook
    * raw-listener only has the node's `{ controlPath, conn }` (from `sshRemoteForNode`), so it
    * resolves the jail root by controlPath rather than projectId.

@@ -185,6 +185,12 @@ export const INBOX_EVENTS_CAP = 50
 export const INBOX_TITLE_MAX = 120
 export const INBOX_DETAIL_MAX = 240
 export const INBOX_ACTIVITY_MAX = 80
+// Question options (spec: interactive-push-live-activities): first question only, ≤4 choices,
+// each label clipped to 60 chars.
+export const INBOX_QUESTION_OPTIONS_MAX = 4
+export const INBOX_OPTION_LABEL_MAX = 60
+// Live-update `message` headline cap (needs-you / done event title).
+export const LIVE_MESSAGE_MAX = 120
 
 export interface InboxEvent {
   /** Monotonic per writer: `${ts}-${seq}`. */
@@ -202,6 +208,15 @@ export interface InboxEvent {
   interrupted?: boolean
   /** approval/question: the node has since left blocked/waiting (moves to the phone's archive). */
   resolved?: boolean
+  /** question only: the AskUserQuestion choices (first question, ≤4 labels, each ≤60 chars) so the
+   *  phone can render numbered chips / notification actions. Absent for approvals + plain questions
+   *  (spec: interactive-push-live-activities). */
+  options?: string[]
+  /** approval only: the deterministic hook-reply ticket (docs/hook-reply-approvals.md). Present when
+   *  the managed permission hook is holding open for an answer — the phone/canvas write
+   *  `~/.nodeterm/pending/<pendingId>.answer` to answer it. Rides the mirror to the phone; dropped
+   *  from the push-notify body (the phone re-reads the mirror before acting). Absent = legacy prompt. */
+  pendingId?: string
 }
 export interface InboxNodeNow {
   /** ≤80 chars — "Editing foo.ts", "Running npm test", "Reading bar.ts". */
@@ -428,6 +443,102 @@ export function onInboxActionable(cb: (e: InboxEvent) => void): () => void {
   return () => inboxActionableListeners.delete(cb)
 }
 
+// ---- Live-update seams (spec: interactive-push-live-activities) -----------------------------
+// Two narrow side-channels feed the desktop live-update push stream (src/core/push-notify.ts
+// `createLiveUpdatePush`). Neither changes the feed or any disk write.
+//  - `onNodeStateChange` fires on the MAIN-state EDGES a Live Activity cares about: working start,
+//    the edge INTO waiting/blocked (mapped to 'needsYou'), and the edge into done — post the same
+//    done-holdoff / newTurn gating as the badge, so a held-off working never fires a spurious start.
+//  - `onNodeNowChange` fires when a node's live activity line or context% changes (from
+//    recordRawToolEvent / recordContextUsage); the sender coalesces these ≥20s per node.
+
+/** A main-state edge worth a Live Activity update. `state` is the phone-facing bucket
+ *  (waiting/blocked collapse to 'needsYou'); `message` is the event headline for needs-you/done. */
+export interface NodeStateChange {
+  nodeId: string
+  agentId?: string
+  sessionId?: string
+  event: 'start' | 'update' | 'end'
+  state: 'working' | 'needsYou' | 'done'
+  /** needs-you / done headline, ≤120 chars. Absent for a plain 'start'. */
+  message?: string
+  ts: number
+}
+
+/** A per-node "what it's doing now" change (activity line and/or context%). */
+export interface NodeNowChange {
+  nodeId: string
+  activity?: string
+  contextPercent?: number
+  ts: number
+}
+
+const nodeStateChangeListeners = new Set<(c: NodeStateChange) => void>()
+const nodeNowChangeListeners = new Set<(c: NodeNowChange) => void>()
+
+/** Subscribe to main-state edges (working start / needsYou / done). Returns an unsubscribe. */
+export function onNodeStateChange(cb: (c: NodeStateChange) => void): () => void {
+  nodeStateChangeListeners.add(cb)
+  return () => nodeStateChangeListeners.delete(cb)
+}
+
+/** Subscribe to per-node activity/context% changes. Returns an unsubscribe. */
+export function onNodeNowChange(cb: (c: NodeNowChange) => void): () => void {
+  nodeNowChangeListeners.add(cb)
+  return () => nodeNowChangeListeners.delete(cb)
+}
+
+function fireNodeStateChange(c: NodeStateChange): void {
+  for (const cb of nodeStateChangeListeners) {
+    try {
+      cb(c)
+    } catch {
+      // A subscriber must never break production (or its siblings).
+    }
+  }
+}
+
+function fireNodeNowChange(c: NodeNowChange): void {
+  for (const cb of nodeNowChangeListeners) {
+    try {
+      cb(c)
+    } catch {
+      // A subscriber must never break production (or its siblings).
+    }
+  }
+}
+
+// Per-node stash of the pending AskUserQuestion option labels, set from the raw-hook seam and
+// attached to the next `question` InboxEvent for that node (cleared on state-leave / new turn /
+// session boundary).
+const pendingOptions = new Map<string, string[]>()
+
+/**
+ * Extract question option labels from an AskUserQuestion `tool_input` (first question only, v1):
+ * `questions[0].options[].label`, each clipped to 60 chars, ≤4 labels. Pure. FAIL-OPEN — any shape
+ * mismatch (missing/empty arrays, non-string labels) yields `undefined`.
+ */
+export function extractQuestionOptions(
+  toolInput: Record<string, unknown> | undefined
+): string[] | undefined {
+  try {
+    const questions = (toolInput as { questions?: unknown })?.questions
+    if (!Array.isArray(questions) || questions.length === 0) return undefined
+    const options = (questions[0] as { options?: unknown })?.options
+    if (!Array.isArray(options)) return undefined
+    const labels: string[] = []
+    for (const o of options) {
+      const label = (o as { label?: unknown })?.label
+      if (typeof label !== 'string' || !label) continue
+      labels.push(clip(label, INBOX_OPTION_LABEL_MAX))
+      if (labels.length >= INBOX_QUESTION_OPTIONS_MAX) break
+    }
+    return labels.length > 0 ? labels : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
   const id = `${e.ts}-${++inboxSeq}`
   const full: InboxEvent = { id, ...e }
@@ -545,31 +656,56 @@ function produceInboxFromState(
   nextState: AgentState | undefined,
   now: number
 ): void {
+  // Clear any stashed question options on a new turn or session boundary — a stale option set must
+  // never attach to a later, unrelated question. (State-leave clearing is handled below.)
+  if (ev.kind === 'session' || (ev.kind === 'state' && ev.state === 'working' && ev.newTurn)) {
+    pendingOptions.delete(nodeId)
+  }
   // Leaving blocked/waiting (any newer, different state — incl. a session reset to idle) resolves
   // that node's pending approval/question cards; they move to the phone's archive.
   if ((prevState === 'blocked' || prevState === 'waiting') && nextState !== prevState) {
     resolveUnresolvedFor(nodeId)
+    pendingOptions.delete(nodeId)
   }
   const baseEvent = { ts: now, nodeId, agentId: ev.agentId, sessionId: ev.sessionId }
+  const stateBase = { nodeId, agentId: ev.agentId, sessionId: ev.sessionId, ts: now }
+  // Working START edge (fresh turn / session open): a Live Activity begins here. reduceEntry's
+  // done-holdoff means a held-off late working keeps `nextState === 'done'`, so it never reaches
+  // here — no spurious 'start'.
+  if (nextState === 'working' && prevState !== 'working') {
+    fireNodeStateChange({ ...stateBase, event: 'start', state: 'working' })
+  }
   // approval/question dedup is TITLE-based (not edge-based): a re-asserted blocked with the SAME
   // ask is a no-op, but a genuinely different ask still lands — so the guard can't be a plain
   // "same-state, skip". `done` alone is edge-guarded (one per turn).
   if (nextState === 'blocked') {
     const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Needs approval'
+    // needsYou live-update on the EDGE into blocked (a re-assert keeps the same activity live).
+    if (prevState !== 'blocked') {
+      fireNodeStateChange({ ...stateBase, event: 'update', state: 'needsYou', message: clip(title, LIVE_MESSAGE_MAX) })
+    }
     if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
-    pushInboxEvent({ ...baseEvent, kind: 'approval', title })
+    // Carry the deterministic-approval ticket (present only when the wait-branch of the managed
+    // hook ran) so the phone can answer the held hook. See docs/hook-reply-approvals.md.
+    pushInboxEvent({ ...baseEvent, kind: 'approval', title, ...(ev.pendingId ? { pendingId: ev.pendingId } : {}) })
   } else if (nextState === 'waiting') {
     const title = firstLine(ev.lastMessage, INBOX_TITLE_MAX) || 'Waiting for input'
+    if (prevState !== 'waiting') {
+      fireNodeStateChange({ ...stateBase, event: 'update', state: 'needsYou', message: clip(title, LIVE_MESSAGE_MAX) })
+    }
+    const options = pendingOptions.get(nodeId)
     if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
-    pushInboxEvent({ ...baseEvent, kind: 'question', title })
+    pushInboxEvent({ ...baseEvent, kind: 'question', title, ...(options ? { options } : {}) })
   } else if (nextState === 'done' && prevState !== 'done') {
     // The turn ended: emit one `done` on the edge into done (reduceEntry's holdoff keeps a late
     // working from re-entering, and the normalizer collapses an Esc-spam into one done).
     const detail = firstLine(ev.lastMessage, INBOX_DETAIL_MAX) || undefined
+    const title = ev.interrupted ? 'Stopped' : 'Finished'
+    fireNodeStateChange({ ...stateBase, event: 'end', state: 'done', message: title })
     pushInboxEvent({
       ...baseEvent,
       kind: 'done',
-      title: ev.interrupted ? 'Stopped' : 'Finished',
+      title,
       ...(detail ? { detail } : {}),
       ...(ev.interrupted ? { interrupted: true } : {})
     })
@@ -602,15 +738,25 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
       payload.tool_input && typeof payload.tool_input === 'object'
         ? (payload.tool_input as Record<string, unknown>)
         : undefined
+    // AskUserQuestion: stash the choice labels so the next `question` InboxEvent + push carry them
+    // (spec: interactive-push-live-activities). Fail-open — a shape mismatch leaves no stash.
+    if (toolName === 'AskUserQuestion') {
+      const opts = extractQuestionOptions(toolInput)
+      if (opts) pendingOptions.set(nodeId, opts)
+    }
     const activity = toolActivity(toolName, toolInput)
     const cur = inboxNodes.get(nodeId)
     if (cur?.activity === activity && cur?.tool === toolName) return // no change
     inboxNodes.set(nodeId, { activity, tool: toolName, contextPercent: cur?.contextPercent, updatedAt: now })
+    fireNodeNowChange({ nodeId, activity, contextPercent: cur?.contextPercent, ts: now })
     scheduleWrite()
   } else if (hook === 'Stop' || hook === 'SessionEnd') {
     const before = inboxNodes.get(nodeId)?.activity
     clearActivity(nodeId, now)
-    if (before !== undefined) scheduleWrite()
+    if (before !== undefined) {
+      fireNodeNowChange({ nodeId, activity: undefined, contextPercent: inboxNodes.get(nodeId)?.contextPercent, ts: now })
+      scheduleWrite()
+    }
   }
 }
 
@@ -623,7 +769,9 @@ export function recordContextUsage(nodeId: string, percent: number): void {
   const clamped = Math.min(100, Math.max(0, percent))
   const cur = inboxNodes.get(nodeId)
   if (cur?.contextPercent === clamped) return
-  inboxNodes.set(nodeId, { activity: cur?.activity, tool: cur?.tool, contextPercent: clamped, updatedAt: Date.now() })
+  const now = Date.now()
+  inboxNodes.set(nodeId, { activity: cur?.activity, tool: cur?.tool, contextPercent: clamped, updatedAt: now })
+  fireNodeNowChange({ nodeId, activity: cur?.activity, contextPercent: clamped, ts: now })
   scheduleWrite()
 }
 
@@ -635,6 +783,7 @@ export function recordContextUsage(nodeId: string, percent: number): void {
 export function clearNode(nodeId: string): void {
   let changed = state.delete(nodeId)
   if (inboxNodes.delete(nodeId)) changed = true
+  pendingOptions.delete(nodeId)
   // History stays; unresolved cards for a gone node can never be answered → archive them.
   for (const e of inboxEvents) {
     if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
@@ -697,6 +846,9 @@ export function _resetForTest(): void {
   inboxNodes.clear()
   inboxSeq = 0
   inboxActionableListeners.clear()
+  nodeStateChangeListeners.clear()
+  nodeNowChangeListeners.clear()
+  pendingOptions.clear()
 }
 
 /** Snapshot the in-memory map. Test-only. */

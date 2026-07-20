@@ -1138,6 +1138,39 @@ body,
   color: var(--accent);
 }
 
+/* Deterministic hook-reply approvals: compact Approve/Deny buttons beside the NEEDS YOU badge. */
+.term-node__approve {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.term-node__approve-btn {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.term-node__approve-btn--allow {
+  color: #30d158;
+  border-color: rgba(48, 209, 88, 0.5);
+  background: rgba(48, 209, 88, 0.12);
+}
+.term-node__approve-btn--allow:hover {
+  background: rgba(48, 209, 88, 0.22);
+}
+.term-node__approve-btn--deny {
+  color: #ff453a;
+  border-color: rgba(255, 69, 58, 0.5);
+  background: rgba(255, 69, 58, 0.12);
+}
+.term-node__approve-btn--deny:hover {
+  background: rgba(255, 69, 58, 0.22);
+}
+
 @keyframes nt-pulse {
   0%,
   100% {

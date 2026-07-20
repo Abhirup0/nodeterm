@@ -5183,7 +5183,9 @@ export function Canvas() {
       const an = useAgentNodes.getState()
       switch (e.kind) {
         case 'state':
-          if (e.state) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn)
+          // `pendingId` (deterministic approvals) rides a `blocked` event; the store keeps it only
+          // while blocked so the header's Approve/Deny buttons appear + vanish with the state.
+          if (e.state) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId)
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language

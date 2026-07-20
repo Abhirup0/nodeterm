@@ -12,7 +12,7 @@
 // identity + paired-phone registry to feed it — the Server Edition has neither, so it never
 // constructs this (a documented, deliberate three-surfaces degrade; see src/server/index.ts).
 
-import type { InboxEvent } from './agent-status-mirror'
+import type { InboxEvent, NodeStateChange, NodeNowChange } from './agent-status-mirror'
 
 const DEFAULT_API_BASE = 'https://api.nodeterm.dev'
 // Batch actionable events landing close together into one POST (≤10 events/call per the contract).
@@ -49,6 +49,10 @@ export interface PushNotifyEvent {
    *  Optional: the backend renders the alert title as "<Needs you|Completed> — <nodeTitle>" when
    *  present, and falls back to a generic title when absent. */
   nodeTitle?: string
+  /** question only: the AskUserQuestion choices (≤4 labels, each ≤60 chars). The backend renders
+   *  them as numbered notification actions + appends them to the body (spec:
+   *  interactive-push-live-activities). Absent for approvals + plain questions. */
+  options?: string[]
   ts: number
 }
 
@@ -166,6 +170,7 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
       nodeId: e.nodeId,
       ...(e.agentId ? { agentId: e.agentId } : {}),
       ...(nodeTitle ? { nodeTitle } : {}),
+      ...(e.options && e.options.length > 0 ? { options: e.options } : {}),
       ts: e.ts
     })
     scheduleFlush()
@@ -215,6 +220,246 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
         batchTimer = null
       }
       buffer.length = 0
+    },
+    _flushNow: flush
+  }
+}
+
+// ---- Live-update stream (spec: interactive-push-live-activities) ----------------------------
+// A second, chattier stream to `POST {apiBase}/v1/push/live-update`, feeding iOS Live Activities.
+// Two sources from the mirror:
+//   - STATE EDGES (`onNodeStateChange`): working start → event 'start', edge into waiting/blocked →
+//     event 'update' state 'needsYou', edge into done → event 'end'. Sent IMMEDIATELY (short batch
+//     window only, to coalesce simultaneous edges into one POST + honor the ≤20 cap).
+//   - NOW CHANGES (`onNodeNowChange`): activity line / context% ticks, COALESCED to ≥20s per node
+//     (event 'update', state 'working' — activity only moves while a turn runs).
+// Same host-identity auth + DNT/packaged/paired-phone guards as notify, plus its own
+// `mobileLiveActivities` sub-gate (both under the `mobilePushEnabled` master).
+
+// Batch window for POSTing accumulated updates — short, so a state edge goes out "immediately".
+const DEFAULT_LIVE_BATCH_WINDOW_MS = 1000
+// Coalesce activity/context ticks to at most one live-update per node per this window.
+const DEFAULT_LIVE_COALESCE_MS = 20_000
+// Backend contract cap: updates[≤20] per call.
+const MAX_UPDATES_PER_CALL = 20
+// Live-activity field caps (Apple content-state stays small).
+const LIVE_ACTIVITY_MAX = 80
+const LIVE_MESSAGE_MAX = 120
+
+/** One entry of the `/v1/push/live-update` `updates[]` array (backend contract). */
+export interface LiveUpdateItem {
+  nodeId: string
+  nodeTitle?: string
+  agentId?: string
+  event: 'start' | 'update' | 'end'
+  state: 'working' | 'needsYou' | 'done'
+  activity?: string
+  contextPercent?: number
+  message?: string
+  ts: number
+}
+
+export interface LiveUpdateDeps {
+  /** Subscribe to main-state edges. In production this is `onNodeStateChange`. */
+  subscribeStateChange: (cb: (c: NodeStateChange) => void) => () => void
+  /** Subscribe to per-node activity/context changes. In production this is `onNodeNowChange`. */
+  subscribeNowChange: (cb: (c: NodeNowChange) => void) => () => void
+  /** The standing relay host identity, or null when none is configured/available. */
+  getHostIdentity: () => PushHostIdentity | null
+  /** The `settings.mobilePushEnabled` master switch. */
+  mobilePushEnabled: () => boolean
+  /** The `settings.mobileLiveActivities` sub-gate (default on). */
+  mobileLiveActivities: () => boolean
+  /** `app.isPackaged` — dev never hits the prod API unless a local base is targeted. */
+  isPackaged: () => boolean
+  /** Resolve a node's human display title. In production this is `workspaceStore.getNodeTitle`. */
+  getNodeTitle?: (nodeId: string) => string | undefined
+  apiBase?: string
+  env?: Record<string, string | undefined>
+  fetchImpl?: typeof fetch
+  now?: () => number
+  batchWindowMs?: number
+  coalesceMs?: number
+}
+
+export interface LiveUpdateHandle {
+  stop(): void
+  _flushNow(): Promise<void>
+}
+
+/**
+ * Wire the live-update push stream. State edges post immediately (within a short batch window);
+ * activity/context ticks coalesce to ≥20s per node. Gated by the master switch, the
+ * `mobileLiveActivities` sub-gate, and the same DNT/packaged/identity/paired-phone guards as
+ * notify. Everything is injected — pure + unit-testable. Drops on any network error (no retry).
+ */
+export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
+  const env = deps.env ?? process.env
+  const apiBase = deps.apiBase ?? env.NODETERM_API_BASE ?? DEFAULT_API_BASE
+  const fetchImpl = deps.fetchImpl ?? fetch
+  const now = deps.now ?? Date.now
+  const batchWindowMs = deps.batchWindowMs ?? DEFAULT_LIVE_BATCH_WINDOW_MS
+  const coalesceMs = deps.coalesceMs ?? DEFAULT_LIVE_COALESCE_MS
+
+  const buffer: LiveUpdateItem[] = []
+  // Per-node coalescing of activity/context ticks.
+  const lastNowSentAt = new Map<string, number>()
+  const pendingNow = new Map<string, NodeNowChange>()
+  let batchTimer: ReturnType<typeof setTimeout> | null = null
+  let coalesceTimer: ReturnType<typeof setTimeout> | null = null
+
+  function allowed(): boolean {
+    if (env.DO_NOT_TRACK || env.NODETERM_TELEMETRY_DISABLED) return false
+    if (!deps.isPackaged() && !env.NODETERM_API_BASE) return false
+    return true
+  }
+
+  function liveIdentity(): PushHostIdentity | null {
+    if (!allowed()) return null
+    if (!deps.mobilePushEnabled()) return null
+    if (!deps.mobileLiveActivities()) return null
+    const id = deps.getHostIdentity()
+    if (!id || !id.hasPairedPhone) return null
+    return id
+  }
+
+  function nodeTitleOf(nodeId: string): string | undefined {
+    try {
+      return deps.getNodeTitle?.(nodeId)?.slice(0, NODE_TITLE_MAX) || undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  function scheduleFlush(): void {
+    if (batchTimer) return
+    batchTimer = setTimeout(() => {
+      batchTimer = null
+      void flush()
+    }, batchWindowMs)
+    batchTimer.unref?.()
+  }
+
+  function onStateChange(c: NodeStateChange): void {
+    if (!liveIdentity()) return
+    const title = nodeTitleOf(c.nodeId)
+    buffer.push({
+      nodeId: c.nodeId,
+      ...(title ? { nodeTitle: title } : {}),
+      ...(c.agentId ? { agentId: c.agentId } : {}),
+      event: c.event,
+      state: c.state,
+      ...(c.message ? { message: c.message.slice(0, LIVE_MESSAGE_MAX) } : {}),
+      ts: c.ts
+    })
+    scheduleFlush()
+  }
+
+  /** Push a coalesced now-update for a node into the buffer. */
+  function emitNow(c: NodeNowChange): void {
+    const title = nodeTitleOf(c.nodeId)
+    buffer.push({
+      nodeId: c.nodeId,
+      ...(title ? { nodeTitle: title } : {}),
+      event: 'update',
+      state: 'working',
+      ...(c.activity ? { activity: c.activity.slice(0, LIVE_ACTIVITY_MAX) } : {}),
+      ...(typeof c.contextPercent === 'number' ? { contextPercent: c.contextPercent } : {}),
+      ts: c.ts
+    })
+    scheduleFlush()
+  }
+
+  function scheduleCoalesceTimer(): void {
+    if (coalesceTimer || pendingNow.size === 0) return
+    // Fire at the soonest node's window edge.
+    const t = now()
+    let soonest = Infinity
+    for (const nodeId of pendingNow.keys()) {
+      const due = (lastNowSentAt.get(nodeId) ?? 0) + coalesceMs
+      if (due < soonest) soonest = due
+    }
+    const delay = Math.max(0, soonest - t)
+    coalesceTimer = setTimeout(() => {
+      coalesceTimer = null
+      const cur = now()
+      for (const [nodeId, change] of [...pendingNow]) {
+        if (cur - (lastNowSentAt.get(nodeId) ?? -Infinity) >= coalesceMs) {
+          pendingNow.delete(nodeId)
+          lastNowSentAt.set(nodeId, cur)
+          emitNow(change)
+        }
+      }
+      scheduleCoalesceTimer()
+    }, delay)
+    coalesceTimer.unref?.()
+  }
+
+  function onNowChange(c: NodeNowChange): void {
+    if (!liveIdentity()) return
+    const t = now()
+    const last = lastNowSentAt.get(c.nodeId) ?? -Infinity
+    if (t - last >= coalesceMs) {
+      // Leading edge: send now.
+      lastNowSentAt.set(c.nodeId, t)
+      pendingNow.delete(c.nodeId)
+      emitNow(c)
+    } else {
+      // Within the window: keep only the latest, flush at the window edge.
+      pendingNow.set(c.nodeId, c)
+      scheduleCoalesceTimer()
+    }
+  }
+
+  async function flush(): Promise<void> {
+    if (buffer.length === 0) return
+    const id = liveIdentity()
+    if (!id) {
+      buffer.length = 0
+      return
+    }
+    const updates = buffer.splice(0, MAX_UPDATES_PER_CALL)
+    if (buffer.length > 0) scheduleFlush()
+
+    const body = {
+      hostDeviceId: id.hostDeviceId,
+      hostPublicKeyB64: id.hostPublicKeyB64,
+      hostLabel: id.hostLabel,
+      updates
+    }
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+    try {
+      await fetchImpl(`${apiBase}/v1/push/live-update`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      })
+    } catch {
+      // Drop on any network error — no retry queue (the phone still polls the mirror).
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  const unsubState = deps.subscribeStateChange(onStateChange)
+  const unsubNow = deps.subscribeNowChange(onNowChange)
+
+  return {
+    stop() {
+      unsubState()
+      unsubNow()
+      if (batchTimer) {
+        clearTimeout(batchTimer)
+        batchTimer = null
+      }
+      if (coalesceTimer) {
+        clearTimeout(coalesceTimer)
+        coalesceTimer = null
+      }
+      buffer.length = 0
+      pendingNow.clear()
     },
     _flushNow: flush
   }

@@ -415,11 +415,16 @@ export function buildFilesApi(
  */
 export function buildAgentApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity'> {
+): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity' | 'answerPermission'> {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
     onSubagentActivity: (listener) =>
-      client.subscribe(IPC.agentSubagentActivity, listener as Listener)
+      client.subscribe(IPC.agentSubagentActivity, listener as Listener),
+    // Deterministic hook-reply approvals: a real request over the bridge — the Server Edition runs
+    // ON the host, so a local project's answer file is written right there (SSH-from-server is v1
+    // unsupported and the handler returns false). See docs/hook-reply-approvals.md.
+    answerPermission: (payload) =>
+      client.request(IPC.agentAnswerPermission, payload) as Promise<boolean>
   }
 }
 

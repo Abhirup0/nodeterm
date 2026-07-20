@@ -35,6 +35,10 @@ export const IPC = {
   appFocusNode: 'app:focus-node',
   appSetBadge: 'app:set-badge',
   agentStatus: 'agent:status',
+  /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
+   *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
+   *  docs/hook-reply-approvals.md. */
+  agentAnswerPermission: 'agent:answer-permission',
   agentSubagentActivity: 'agent:subagent-activity',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',

@@ -17,6 +17,11 @@ export interface NormalizedAgentEvent {
   newTurn?: boolean
   sessionId?: string
   lastMessage?: string
+  // blocked (Claude PermissionRequest) only: the deterministic-approval ticket the managed hook
+  // generated and is polling for an answer file. Rides from the raw POST body's
+  // `nodeterm_pending_id` (merged into the payload by the hook server) so the phone/canvas can
+  // answer the held hook. Absent = no held hook (legacy prompt path). See docs/hook-reply-approvals.md.
+  pendingId?: string
   // session
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
@@ -51,6 +56,9 @@ const RECURRING_TOOLS = new Set(['Skill', 'CronCreate', 'ScheduleWakeup'])
 interface ClaudePayload {
   hook_event_name?: string
   session_id?: string
+  /** Deterministic-approval ticket the managed hook script added to its POST body and the hook
+   *  server merged into this payload (PermissionRequest only). */
+  nodeterm_pending_id?: string
   notification_type?: string
   is_interrupt?: boolean
   last_assistant_message?: string
@@ -167,7 +175,14 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
   }
   // The dedicated permission hook (more direct than Notification's permission_prompt).
   if (ev === 'PermissionRequest') {
-    return { ...base, kind: 'state', state: 'blocked', lastMessage: p.last_assistant_message }
+    return {
+      ...base,
+      kind: 'state',
+      state: 'blocked',
+      lastMessage: p.last_assistant_message,
+      // Deterministic-approval ticket (present only when the wait-branch of the managed hook ran).
+      ...(p.nodeterm_pending_id ? { pendingId: p.nodeterm_pending_id } : {})
+    }
   }
   if (ev === 'Notification') {
     // Only the types that genuinely need the user flip the state. Everything else —

@@ -668,6 +668,15 @@ export interface Settings {
   /** Push when an agent finishes a turn (the `done` kind). Default on. Sub-gate under
    *  `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
   mobilePushDone: boolean
+  /** Stream Live Activity updates (Lock Screen / Dynamic Island) to paired phones as a session's
+   *  state + activity + context% change (spec: interactive-push-live-activities). Default on.
+   *  Sub-gate under `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
+  mobileLiveActivities: boolean
+  /** Deterministic hook-reply approvals (spec: docs/hook-reply-approvals.md). When on (default),
+   *  Claude terminal sessions launch with `NODETERM_PERM_WAIT_SECS` set: the managed permission
+   *  hook holds briefly for a phone/canvas Approve/Deny before falling through to the normal
+   *  interactive prompt. Off ⇒ the env var is absent ⇒ exact legacy behavior. Claude-only. */
+  hookReplyApprovals: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
 }
@@ -715,6 +724,10 @@ export const DEFAULT_SETTINGS: Settings = {
   mobilePushEnabled: true,
   mobilePushNeedsYou: true,
   mobilePushDone: true,
+  mobileLiveActivities: true,
+  // Deterministic hook-reply approvals default ON (existing users pick it up on hydrate). Only
+  // affects Claude terminal sessions; off reproduces the pre-feature launch bit-for-bit.
+  hookReplyApprovals: true,
   speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 
@@ -1594,6 +1607,13 @@ export interface NodeTerminalApi {
   openNotificationSettings(): Promise<void>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
+  /** Answer a Claude permission request via the deterministic hook-reply channel (spec:
+   *  docs/hook-reply-approvals.md). Writes the one-line answer file the held hook is polling
+   *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a
+   *  local project, or the remote host over the project's ControlMaster for an SSH project. Resolves
+   *  `true` when the file was written, `false` on any failure (invalid pendingId, unknown node,
+   *  unsupported project, fs/exec error). */
+  answerPermission(payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }): Promise<boolean>
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */

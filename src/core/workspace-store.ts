@@ -383,6 +383,19 @@ export class WorkspaceStore {
     return new Set((e?.cache?.nodes ?? []).map((n) => n.id))
   }
 
+  /** The SSH project id a node belongs to, or undefined for a local/inline node (deterministic
+   *  approvals: a match routes the answer-file write to the REMOTE host over that project's
+   *  ControlMaster; undefined ⇒ write on the LOCAL fs). Scans the ssh entries' cached node lists;
+   *  a not-yet-cached remote node resolves undefined (fail-open to a local write that harmlessly
+   *  never matches a remote poll). */
+  sshProjectIdForNode(nodeId: string): string | undefined {
+    for (const e of this.index?.entries ?? []) {
+      if (!e.ssh) continue
+      if ((e.cache?.nodes ?? []).some((n) => n.id === nodeId)) return e.id
+    }
+    return undefined
+  }
+
   /**
    * Resolve a node's human display title (what the canvas header / sessions sidebar shows) from the
    * last-persisted workspace, across all three entry kinds: inline canvases (`e.project.nodes`), ssh

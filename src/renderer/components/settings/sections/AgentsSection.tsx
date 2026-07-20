@@ -21,6 +21,7 @@ import { hintLabel } from '@shared/platform-utils'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import { Select } from '@renderer/ui/Select'
+import { Switch } from '@renderer/ui/Switch'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -45,6 +46,10 @@ const ROWS = {
       'claude',
       'shift tab'
     ]
+  },
+  hookReplyApprovals: {
+    title: 'One-click approvals',
+    keywords: ['approve', 'deny', 'approval', 'permission', 'hook', 'phone', 'canvas', 'one click', 'claude']
   },
 }
 const ENTRIES = Object.values(ROWS)
@@ -139,6 +144,19 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
                 </option>
               ))}
             </Select>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.hookReplyApprovals}>
+        <FieldRow
+          label="One-click approvals"
+          description="Phone/canvas Approve & Deny answer Claude's permission hook directly; the interactive prompt appears after 45s if unanswered. Claude terminal sessions only."
+          control={
+            <Switch
+              checked={settings.hookReplyApprovals}
+              ariaLabel="One-click hook-reply approvals"
+              onChange={(on) => update({ hookReplyApprovals: on })}
+            />
           }
         />
       </SearchableRow>

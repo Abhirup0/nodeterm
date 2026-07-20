@@ -1705,6 +1705,40 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             NEEDS YOU
           </span>
         )}
+        {/* Deterministic hook-reply approvals (docs/hook-reply-approvals.md): when the node is
+            blocked on a Claude permission request whose managed hook is holding open (pendingId
+            known), answer it in one click — no keystrokes into the prompt. Vanishes the moment the
+            state leaves `blocked` (the store clears pendingId). */}
+        {status?.state === 'blocked' && status?.pendingId && (
+          <span className="term-node__approve nodrag">
+            <button
+              className="term-node__approve-btn term-node__approve-btn--allow"
+              title="Approve this permission request"
+              onClick={() =>
+                void window.nodeTerminal.answerPermission({
+                  nodeId: id,
+                  pendingId: status.pendingId!,
+                  decision: 'allow'
+                })
+              }
+            >
+              ✓ Approve
+            </button>
+            <button
+              className="term-node__approve-btn term-node__approve-btn--deny"
+              title="Deny this permission request"
+              onClick={() =>
+                void window.nodeTerminal.answerPermission({
+                  nodeId: id,
+                  pendingId: status.pendingId!,
+                  decision: 'deny'
+                })
+              }
+            >
+              ✕ Deny
+            </button>
+          </span>
+        )}
         {isUnread && (
             <span
               className="term-node__status term-node__status--unread"
