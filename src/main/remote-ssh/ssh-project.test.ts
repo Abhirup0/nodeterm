@@ -420,9 +420,16 @@ describe('SshProjectManager', () => {
       expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
-    it('adopts a LIVE orphan master instead of spawning a second one', async () => {
+    it('adopts a LIVE orphan master (whose hook tunnel verifies) instead of spawning a second one', async () => {
       const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
-      const run = vi.fn(async (_args: string[]) => ({ code: 0, stdout: '' })) // live master answers
+      // Live master answers `-O check`; its reverse hook tunnel VERIFIES (the curl returns 204), so
+      // `remoteHooks.setup` succeeds and the orphan is kept — no fresh master is built.
+      const run = vi.fn(async (args: string[]) => {
+        const j = args.join(' ')
+        if (j.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+        if (j.includes('%{http_code}')) return { code: 0, stdout: '204' }
+        return { code: 0, stdout: '' }
+      })
       vi.spyOn(fs, 'stat').mockResolvedValue({ isSocket: () => true } as never)
       const rmSpy = vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
       const statuses: string[] = []
@@ -437,6 +444,44 @@ describe('SshProjectManager', () => {
       await mgr.connect('p1', conn)
       expect(spawnMaster).not.toHaveBeenCalled() // reused, not respawned
       expect(rmSpy).not.toHaveBeenCalled() // a live socket is never unlinked
+      expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
+    })
+
+    it('rebuilds a FRESH master when the adopted orphan cannot re-establish the hook tunnel', async () => {
+      // Fresh-launch-straight-to-SSH field bug: the adopted live-orphan master still serves the
+      // PREVIOUS run's reverse-hook forward (dead port), so `setup()`'s tunnel never verifies over it.
+      // The reverse tunnel — and with it every remote agent's status hooks — must come back WITHOUT
+      // any local activity, so connect() drops the orphan and rebuilds a fresh master, over which the
+      // tunnel verifies. The `%{http_code}` curl answers 000 (dead) until a fresh master is spawned.
+      let respawned = false
+      const spawnMaster = vi.fn(() => {
+        respawned = true
+        return { kill: vi.fn(), on: vi.fn() }
+      })
+      const run = vi.fn(async (args: string[]) => {
+        const j = args.join(' ')
+        if (j.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+        if (j.includes('%{http_code}')) return { code: 0, stdout: respawned ? '204' : '000' }
+        return { code: 0, stdout: '' }
+      })
+      vi.spyOn(fs, 'stat').mockResolvedValue({ isSocket: () => true } as never)
+      const rmSpy = vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+      const statuses: string[] = []
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster,
+        run,
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 51234, token: 'tok', version: '1' }),
+        onStatus: (e) => statuses.push(e.status)
+      })
+      const info = await mgr.connect('p1', conn)
+      // The orphan was dropped (its `-O exit` ran + socket unlinked) and a fresh master spawned once.
+      expect(run.mock.calls.some(([a]) => a[0] === '-O' && a[1] === 'exit')).toBe(true)
+      expect(rmSpy).toHaveBeenCalledWith(controlPathFor('p1'), { force: true })
+      expect(spawnMaster).toHaveBeenCalledTimes(1)
+      // The retried setup over the fresh master verified → the remote endpoint file is advertised.
+      expect(info.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
       expect(statuses.slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
