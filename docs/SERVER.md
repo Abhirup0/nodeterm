@@ -89,7 +89,11 @@ curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/ins
 
 The installer (`scripts/install-server.sh`) is idempotent — re-run it any time to update. It:
 
-- checks Node.js ≥ 20 + git, and warns (with the apt/dnf one-liner) if the C toolchain
+- needs only `git`, `curl` and `tar` on the host — **Node.js is no longer a prerequisite**: if a
+  system Node ≥ 20 (with npm) is present it's used as-is, otherwise the installer downloads a
+  pinned Node LTS from nodejs.org into `~/.nodeterm-server-app/runtime/node` and uses it for the
+  build and the systemd service (nothing is installed system-wide; Alpine/musl hosts still need a
+  distro `nodejs`). It also warns (with the apt/dnf one-liner) if the C toolchain
   (`make`/`gcc`/`python3`) node-pty's native build needs is missing;
 - clones (or `git pull`s) the repo into `~/.nodeterm-server-app`;
 - installs deps (`npm ci --ignore-scripts`, then `npm rebuild node-pty` against Node's ABI —
