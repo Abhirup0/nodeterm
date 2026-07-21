@@ -28,8 +28,13 @@ import {
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   setMirrorSettingsProvider,
+  onInboxActionable,
+  onNodeStateChange,
+  onNodeNowChange,
   type MirrorSettings
 } from '../core/agent-status-mirror'
+import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
+import { createGrantsAccessor } from '../core/push-grants'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -225,15 +230,42 @@ export async function startServer(
   )
   // Sweep stale ~/.nodeterm/pending files on boot + hourly (orphans from killed sessions).
   startPendingSweep(os.homedir())
-  // Desktop → paired-phone APNs push (spec: apns-push) is DELIBERATELY not wired here. The push
-  // service (`src/core/push-notify.ts`) fans actionable inbox events out to a host's relay-PAIRED
-  // phones, keyed by the standing relay host's identity (public key + hostDeviceId) and the
-  // pinned-device registry. The Server Edition has no standing relay host — no host keypair, no
-  // approved-devices store, no host-token mint (all live in src/main/remote/) — so there is no
-  // identity to sign the fan-out and no paired-phone list to reach. A phone talks to a server-
-  // edition host over SSH and keeps polling the mirror. So the service would be permanently inert
-  // here; we leave it unwired rather than construct a no-op. (Three-surfaces rule: documented
-  // desktop-only.)
+  // Phone push via SSH-possession GRANTS (spec: nodeterm-server/docs/specs/2026-07-21-push-grants.md).
+  // The Server Edition has no standing relay host identity (no host keypair / approved-devices store /
+  // host-token mint — those live in src/main/remote/), so it cannot use the desktop's identity-signed
+  // fan-out. This contract SUPERSEDES the old "deliberately unwired — no relay identity" decision:
+  // a phone that reaches this host over SSH drops a signed, device-scoped grant at
+  // `~/.nodeterm/push-grants/<deviceId>.grant`, and we push to that phone under it (Authorization:
+  // Bearer <grant>, no host identity). Both senders run in GRANTED mode off one shared accessor (so a
+  // 401/403 dead-mark from either is seen by both). All the usual gates still apply
+  // (mobilePushEnabled / needsYou / done / mobileLiveActivities + DNT env guards). `isPackaged: true`
+  // — the server is a deployment artifact; dev safety comes for free since granted mode is inert until
+  // a phone actually drops a grant file. The DESKTOP keeps its relay-identity path and does NOT use
+  // grants in v1 (a host that is both paired AND granted would double-push the same phone) — see
+  // src/main/index.ts.
+  const pushGrants = createGrantsAccessor()
+  const grantedPushGates = {
+    getHostIdentity: () => null, // no relay identity here — granted mode only
+    getGrants: () => pushGrants.get(),
+    markGrantDead: (grant: string) => pushGrants.markDead(grant),
+    hostLabel: () => os.hostname(),
+    isPackaged: () => true,
+    getNodeTitle: (nodeId: string) => workspaceStore.getNodeTitle(nodeId)
+  }
+  createPushNotify({
+    subscribe: onInboxActionable,
+    ...grantedPushGates,
+    mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
+    mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
+    mobilePushDone: () => settingsStore.get().mobilePushDone !== false
+  })
+  createLiveUpdatePush({
+    subscribeStateChange: onNodeStateChange,
+    subscribeNowChange: onNodeNowChange,
+    ...grantedPushGates,
+    mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
+    mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false
+  })
   // `installHooks: false` (tests) skips the merge into the user's real ~/.claude et al —
   // the hook it would write points into `dataDir`, which a test then deletes.
   if (config.installHooks !== false) {

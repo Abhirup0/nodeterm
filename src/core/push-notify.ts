@@ -13,6 +13,7 @@
 // constructs this (a documented, deliberate three-surfaces degrade; see src/server/index.ts).
 
 import type { InboxEvent, NodeStateChange, NodeNowChange } from './agent-status-mirror'
+import type { PushGrant } from './push-grants'
 
 const DEFAULT_API_BASE = 'https://api.nodeterm.dev'
 // Batch actionable events landing close together into one POST (≤10 events/call per the contract).
@@ -59,11 +60,57 @@ export interface PushNotifyEvent {
   ts: number
 }
 
+/** Where a batch is sent: the relay host (legacy) or, in granted mode, a list of grants to
+ *  fan the same body out over (once each, Bearer-authorized). */
+type SendTarget =
+  | { mode: 'host'; id: PushHostIdentity }
+  | { mode: 'grants'; grants: PushGrant[] }
+
+/** POST a JSON body with the shared timeout, swallowing network errors (no retry queue — the phone
+ *  still polls the mirror). Returns the Response (so granted mode can read 401/403) or null on a
+ *  thrown/aborted fetch. When `grant` is set, sends `Authorization: Bearer <grant>` instead of a
+ *  host-identity body. */
+async function postJson(
+  fetchImpl: typeof fetch,
+  url: string,
+  body: unknown,
+  grant?: string
+): Promise<Response | null> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  try {
+    return await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(grant ? { authorization: `Bearer ${grant}` } : {})
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    })
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export interface PushNotifyDeps {
   /** Subscribe to actionable inbox events. In production this is `onInboxActionable`. */
   subscribe: (cb: (e: InboxEvent) => void) => () => void
   /** The standing relay host identity, or null when none is configured/available. */
   getHostIdentity: () => PushHostIdentity | null
+  /** Granted mode (SSH-possession push grants; spec: 2026-07-21-push-grants). When there is no
+   *  usable relay host identity but grants exist, the batch is POSTed once PER grant with
+   *  `Authorization: Bearer <grant>` (no host identity fields) — the Server Edition's path. Optional:
+   *  the desktop leaves it unwired (it uses its relay identity; a host that is both paired AND
+   *  granted would double-push the same phone). */
+  getGrants?: () => PushGrant[]
+  /** Mark a grant dead after a 401/403 (dropped until its file changes). Paired with `getGrants`. */
+  markGrantDead?: (grant: string) => void
+  /** `os.hostname()`, passed in to keep core pure — the granted-mode `hostLabel` (a granted send
+   *  carries no host identity, so this is the only host label the backend sees). */
+  hostLabel?: () => string
   /** The `settings.mobilePushEnabled` gate (default on) — the master switch. */
   mobilePushEnabled: () => boolean
   /** The `settings.mobilePushNeedsYou` sub-gate (default on): approval + question kinds. */
@@ -121,13 +168,18 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     return true
   }
 
-  /** Live identity IFF the service is enabled and there's a paired phone to reach; else null. */
-  function liveIdentity(): PushHostIdentity | null {
+  /** Resolve where a batch goes: the relay host (byte-identical legacy behavior) when a paired host
+   *  identity is available; else, in granted mode, the live grant list; else null (inert). The
+   *  master + DNT/packaged gates apply to both modes; the paired-phone gate is host-mode only (a
+   *  grant IS the phone's opt-in). */
+  function resolveTarget(): SendTarget | null {
     if (!allowed()) return null
     if (!deps.mobilePushEnabled()) return null
     const id = deps.getHostIdentity()
-    if (!id || !id.hasPairedPhone) return null
-    return id
+    if (id && id.hasPairedPhone) return { mode: 'host', id }
+    const grants = deps.getGrants?.() ?? []
+    if (grants.length > 0) return { mode: 'grants', grants }
+    return null
   }
 
   function scheduleFlush(): void {
@@ -150,7 +202,7 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
 
   function onEvent(e: InboxEvent): void {
     // Cheap gate first: if the service is inert, don't buffer anything.
-    if (!liveIdentity()) return
+    if (!resolveTarget()) return
     // Per-kind selection: drop before the throttle window is consumed, so a declined kind
     // never blocks a later accepted one on the same node.
     if (!kindAllowed(e.kind)) return
@@ -182,9 +234,9 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
 
   async function flush(): Promise<void> {
     if (buffer.length === 0) return
-    // Re-check the gate at flush: identity/setting can change during the batch window.
-    const id = liveIdentity()
-    if (!id) {
+    // Re-check the gate at flush: identity/grants/setting can change during the batch window.
+    const target = resolveTarget()
+    if (!target) {
       buffer.length = 0
       return
     }
@@ -192,25 +244,28 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     // More than one call's worth accumulated in the window — send the rest right after.
     if (buffer.length > 0) scheduleFlush()
 
-    const body = {
-      hostDeviceId: id.hostDeviceId,
-      hostPublicKeyB64: id.hostPublicKeyB64,
-      hostLabel: id.hostLabel,
-      events
-    }
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
-    try {
-      await fetchImpl(`${apiBase}/v1/push/notify`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: ctrl.signal
+    const url = `${apiBase}/v1/push/notify`
+    if (target.mode === 'host') {
+      // Legacy relay-identity body — byte-identical to the pre-grants shape.
+      await postJson(fetchImpl, url, {
+        hostDeviceId: target.id.hostDeviceId,
+        hostPublicKeyB64: target.id.hostPublicKeyB64,
+        hostLabel: target.id.hostLabel,
+        events
       })
-    } catch {
-      // Drop on any network error — v1 has no retry queue (the phone still polls the mirror).
-    } finally {
-      clearTimeout(timer)
+      return
+    }
+    // Granted mode: one POST per live grant, Bearer-authorized, NO host identity fields —
+    // just `hostLabel` (os.hostname(), injected). A 401/403 marks that grant dead.
+    const label = deps.hostLabel?.()
+    for (const g of target.grants) {
+      const res = await postJson(
+        fetchImpl,
+        url,
+        { ...(label ? { hostLabel: label } : {}), events },
+        g.grant
+      )
+      if (res && (res.status === 401 || res.status === 403)) deps.markGrantDead?.(g.grant)
     }
   }
 
@@ -284,6 +339,14 @@ export interface LiveUpdateDeps {
   subscribeNowChange: (cb: (c: NodeNowChange) => void) => () => void
   /** The standing relay host identity, or null when none is configured/available. */
   getHostIdentity: () => PushHostIdentity | null
+  /** Granted mode (SSH-possession push grants; spec: 2026-07-21-push-grants). See the identical
+   *  field on `PushNotifyDeps`: no usable host identity + grants present ⇒ one POST per grant,
+   *  Bearer-authorized, no host fields. Desktop leaves it unwired. */
+  getGrants?: () => PushGrant[]
+  /** Mark a grant dead after a 401/403 (dropped until its file changes). Paired with `getGrants`. */
+  markGrantDead?: (grant: string) => void
+  /** `os.hostname()`, passed in to keep core pure — the granted-mode `hostLabel`. */
+  hostLabel?: () => string
   /** The `settings.mobilePushEnabled` master switch. */
   mobilePushEnabled: () => boolean
   /** The `settings.mobileLiveActivities` sub-gate (default on). */
@@ -332,13 +395,15 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
     return true
   }
 
-  function liveIdentity(): PushHostIdentity | null {
+  function resolveTarget(): SendTarget | null {
     if (!allowed()) return null
     if (!deps.mobilePushEnabled()) return null
     if (!deps.mobileLiveActivities()) return null
     const id = deps.getHostIdentity()
-    if (!id || !id.hasPairedPhone) return null
-    return id
+    if (id && id.hasPairedPhone) return { mode: 'host', id }
+    const grants = deps.getGrants?.() ?? []
+    if (grants.length > 0) return { mode: 'grants', grants }
+    return null
   }
 
   function nodeTitleOf(nodeId: string): string | undefined {
@@ -359,7 +424,7 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
   }
 
   function onStateChange(c: NodeStateChange): void {
-    if (!liveIdentity()) return
+    if (!resolveTarget()) return
     const title = nodeTitleOf(c.nodeId)
     // kind/options/multiSelect/pendingId ride only a needsYou edge (spec:
     // interactive-push-live-activities addendum) — belt-and-braces gate on state so a working/done
@@ -426,7 +491,7 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
   }
 
   function onNowChange(c: NodeNowChange): void {
-    if (!liveIdentity()) return
+    if (!resolveTarget()) return
     const t = now()
     const last = lastNowSentAt.get(c.nodeId) ?? -Infinity
     if (t - last >= coalesceMs) {
@@ -443,33 +508,35 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
 
   async function flush(): Promise<void> {
     if (buffer.length === 0) return
-    const id = liveIdentity()
-    if (!id) {
+    const target = resolveTarget()
+    if (!target) {
       buffer.length = 0
       return
     }
     const updates = buffer.splice(0, MAX_UPDATES_PER_CALL)
     if (buffer.length > 0) scheduleFlush()
 
-    const body = {
-      hostDeviceId: id.hostDeviceId,
-      hostPublicKeyB64: id.hostPublicKeyB64,
-      hostLabel: id.hostLabel,
-      updates
-    }
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
-    try {
-      await fetchImpl(`${apiBase}/v1/push/live-update`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: ctrl.signal
+    const url = `${apiBase}/v1/push/live-update`
+    if (target.mode === 'host') {
+      // Legacy relay-identity body — byte-identical to the pre-grants shape.
+      await postJson(fetchImpl, url, {
+        hostDeviceId: target.id.hostDeviceId,
+        hostPublicKeyB64: target.id.hostPublicKeyB64,
+        hostLabel: target.id.hostLabel,
+        updates
       })
-    } catch {
-      // Drop on any network error — no retry queue (the phone still polls the mirror).
-    } finally {
-      clearTimeout(timer)
+      return
+    }
+    // Granted mode: one POST per live grant, Bearer-authorized, NO host identity fields.
+    const label = deps.hostLabel?.()
+    for (const g of target.grants) {
+      const res = await postJson(
+        fetchImpl,
+        url,
+        { ...(label ? { hostLabel: label } : {}), updates },
+        g.grant
+      )
+      if (res && (res.status === 401 || res.status === 403)) deps.markGrantDead?.(g.grant)
     }
   }
 
