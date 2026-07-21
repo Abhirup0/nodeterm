@@ -212,6 +212,10 @@ export interface InboxEvent {
    *  phone can render numbered chips / notification actions. Absent for approvals + plain questions
    *  (spec: interactive-push-live-activities). */
   options?: string[]
+  /** question only: the AskUserQuestion `questions[0].multiSelect` flag — the picker accepts more
+   *  than one choice. Rides the pipeline so the phone renders multi-select chips. Omitted when
+   *  absent/false (spec: interactive-push-live-activities). */
+  multiSelect?: boolean
   /** approval only: the deterministic hook-reply ticket (docs/hook-reply-approvals.md). Present when
    *  the managed permission hook is holding open for an answer — the phone/canvas write
    *  `~/.nodeterm/pending/<pendingId>.answer` to answer it. Rides the mirror to the phone; dropped
@@ -468,6 +472,9 @@ export interface NodeStateChange {
   /** question needsYou only: the AskUserQuestion choices from the stash (≤4 × ≤60), so the phone
    *  can render option buttons straight from the Live Activity. Absent otherwise. */
   options?: string[]
+  /** question needsYou only: the AskUserQuestion `multiSelect` flag from the stash. Omitted when
+   *  absent/false. */
+  multiSelect?: boolean
   /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
    *  event, letting an intent answer the held hook. Absent otherwise. */
   pendingId?: string
@@ -530,6 +537,8 @@ interface QuestionStash {
   options?: string[]
   /** The first question's prompt text, clipped to INBOX_TITLE_MAX. Absent if not present/parseable. */
   question?: string
+  /** AskUserQuestion `questions[0].multiSelect` (tolerant boolean). Absent when not present/false. */
+  multiSelect?: boolean
   /** PermissionRequest: the derived "what's being approved" summary (title + optional detail). */
   approval?: { title: string; detail?: string }
   /** When the AskUserQuestion PreToolUse / PermissionRequest stashed this — freshness-guard anchor. */
@@ -591,6 +600,25 @@ export function extractQuestionText(
     const q = (questions[0] as { question?: unknown })?.question
     if (typeof q !== 'string' || !q) return undefined
     return clip(q, INBOX_TITLE_MAX)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Extract the first question's `multiSelect` flag from an AskUserQuestion `tool_input`
+ * (`questions[0].multiSelect`). Pure; TOLERANT — a non-boolean or any shape mismatch yields
+ * `undefined` (treated the same as `false` downstream). Rides the stash so the next question event +
+ * push carry it (spec: interactive-push-live-activities).
+ */
+export function extractQuestionMultiSelect(
+  toolInput: Record<string, unknown> | undefined
+): boolean | undefined {
+  try {
+    const questions = (toolInput as { questions?: unknown })?.questions
+    if (!Array.isArray(questions) || questions.length === 0) return undefined
+    const ms = (questions[0] as { multiSelect?: unknown })?.multiSelect
+    return typeof ms === 'boolean' ? ms : undefined
   } catch {
     return undefined
   }
@@ -847,6 +875,8 @@ function produceInboxFromState(
     // Only a real AskUserQuestion picker (options present) forces the QUESTION classification — an
     // approval-only stash (a PermissionRequest summary) must stay an approval.
     const options = stash?.options
+    // multiSelect rides only a real question (options present) — an approval-only stash never sets it.
+    const multiSelect = options ? stash?.multiSelect : undefined
     const hasQuestion = !!options
     const kind: 'approval' | 'question' = hasQuestion || nextState === 'waiting' ? 'question' : 'approval'
     const approval = kind === 'approval' ? stash?.approval : undefined
@@ -886,6 +916,7 @@ function produceInboxFromState(
         kind,
         message: headline,
         ...(options ? { options } : {}),
+        ...(multiSelect ? { multiSelect: true } : {}),
         ...(pendingId ? { pendingId } : {})
       })
     }
@@ -896,6 +927,7 @@ function produceInboxFromState(
       title,
       ...(detail ? { detail } : {}),
       ...(options ? { options } : {}),
+      ...(multiSelect ? { multiSelect: true } : {}),
       ...(pendingId ? { pendingId } : {})
     })
   } else if (nextState === 'done' && prevState !== 'done') {
@@ -946,7 +978,13 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
     // shape mismatch leaves no stash.
     if (toolName === 'AskUserQuestion') {
       const opts = extractQuestionOptions(toolInput)
-      if (opts) pendingQuestions.set(nodeId, { options: opts, question: extractQuestionText(toolInput), at: now })
+      if (opts)
+        pendingQuestions.set(nodeId, {
+          options: opts,
+          question: extractQuestionText(toolInput),
+          multiSelect: extractQuestionMultiSelect(toolInput),
+          at: now
+        })
     }
     const activity = toolActivity(toolName, toolInput)
     const cur = inboxNodes.get(nodeId)

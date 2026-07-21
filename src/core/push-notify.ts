@@ -53,6 +53,9 @@ export interface PushNotifyEvent {
    *  them as numbered notification actions + appends them to the body (spec:
    *  interactive-push-live-activities). Absent for approvals + plain questions. */
   options?: string[]
+  /** question only: the AskUserQuestion `multiSelect` flag — the picker accepts multiple choices.
+   *  Rides the `nt` block so the phone renders multi-select. Omitted when absent/false. */
+  multiSelect?: boolean
   ts: number
 }
 
@@ -171,6 +174,7 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
       ...(e.agentId ? { agentId: e.agentId } : {}),
       ...(nodeTitle ? { nodeTitle } : {}),
       ...(e.options && e.options.length > 0 ? { options: e.options } : {}),
+      ...(e.multiSelect ? { multiSelect: true } : {}),
       ts: e.ts
     })
     scheduleFlush()
@@ -261,8 +265,15 @@ export interface LiveUpdateItem {
   kind?: 'approval' | 'question'
   /** question needsYou only: the AskUserQuestion choices (≤4 × ≤60), for Live Activity buttons. */
   options?: string[]
+  /** question needsYou only: the AskUserQuestion `multiSelect` flag. Omitted when absent/false. */
+  multiSelect?: boolean
   /** approval needsYou only: the deterministic hook-reply ticket, letting an intent answer. */
   pendingId?: string
+  /** true on a state EDGE (start / needsYou / end, and the working update that follows an answered
+   *  needs-you) — a user-visible state change. Absent on the ≥20s activity/context coalesced ticks.
+   *  The backend uses it for APNs priority: an edge is priority 10, a tick priority 5 (iOS delays
+   *  priority-5 liveactivity pushes, which was leaving the island up minutes after an answer). */
+  edge?: boolean
   ts: number
 }
 
@@ -350,9 +361,9 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
   function onStateChange(c: NodeStateChange): void {
     if (!liveIdentity()) return
     const title = nodeTitleOf(c.nodeId)
-    // kind/options/pendingId ride only a needsYou edge (spec: interactive-push-live-activities
-    // addendum) — belt-and-braces gate on state so a working/done edge never carries them (the
-    // backend also nulls them on non-needsYou content-state).
+    // kind/options/multiSelect/pendingId ride only a needsYou edge (spec:
+    // interactive-push-live-activities addendum) — belt-and-braces gate on state so a working/done
+    // edge never carries them (the backend also nulls them on non-needsYou content-state).
     const needsYou = c.state === 'needsYou'
     buffer.push({
       nodeId: c.nodeId,
@@ -360,9 +371,14 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       ...(c.agentId ? { agentId: c.agentId } : {}),
       event: c.event,
       state: c.state,
+      // Every onStateChange push IS a state edge (start / needsYou / end, and the working update
+      // that follows an answered needs-you) — mark it so the backend can prioritize it (10 vs the
+      // ticks' 5). The now-tick sender (emitNow) deliberately omits this.
+      edge: true,
       ...(c.message ? { message: c.message.slice(0, LIVE_MESSAGE_MAX) } : {}),
       ...(needsYou && c.kind ? { kind: c.kind } : {}),
       ...(needsYou && c.options && c.options.length > 0 ? { options: c.options } : {}),
+      ...(needsYou && c.multiSelect ? { multiSelect: true } : {}),
       ...(needsYou && c.pendingId ? { pendingId: c.pendingId } : {}),
       ts: c.ts
     })
