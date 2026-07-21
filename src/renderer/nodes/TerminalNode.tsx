@@ -74,6 +74,7 @@ import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
+import { AgentMascot } from './AgentMascot'
 
 /** Backslash-escape shell-special characters, like a native terminal does on file drop. */
 function escapeDroppedPath(p: string): string {
@@ -1682,7 +1683,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         <PresenceChips nodeId={id} />
         {status?.state === 'working' && (
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
-            <span className="term-node__status-dot" />
+            <AgentMascot agentId={agentId} />
             RUNNING
           </span>
         )}

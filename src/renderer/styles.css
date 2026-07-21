@@ -1136,6 +1136,58 @@ body,
   animation: nt-pulse 1.1s ease-in-out infinite;
 }
 
+/* Walking mascot (docs/mascot-sprites.md): sits where the pulsing dot would, INSIDE the RUNNING
+   badge, pure CSS spritesheet stepping — no per-node JS timers. Sizes come from lib/mascot.ts via
+   the inline CSS vars so the animation and the rendered sheet can never desync. Fixed heights ≤
+   the other header controls (≈18px), so the mascot never changes header height. */
+.term-node__mascot {
+  display: inline-block;
+  flex-shrink: 0;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  will-change: background-position, transform;
+}
+
+/* Claude: coral pixel critter, 2-frame walk (~2.5 steps/s ⇒ 0.8s/cycle) + an alternating bob.
+   steps(1) holds each keyframe's value across its segment, giving two discrete frame+bob states. */
+.term-node__mascot--claude {
+  width: var(--mascot-w);
+  height: var(--mascot-h);
+  background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
+  animation: mascot-walk-claude 0.8s steps(1) infinite;
+}
+
+@keyframes mascot-walk-claude {
+  0% {
+    background-position-x: 0;
+    transform: translateY(0);
+  }
+  50% {
+    background-position-x: calc(var(--mascot-w) * -1);
+    transform: translateY(-1.5px);
+  }
+  100% {
+    background-position-x: calc(var(--mascot-w) * -2);
+    transform: translateY(0);
+  }
+}
+
+/* Codex: pet-codex.webp first row, 8-frame walk at ~8fps ⇒ 0.96s/cycle. Only the first row is
+   shown (background-position-y stays 0); steps(8) walks left one frame at a time. */
+.term-node__mascot--codex {
+  width: var(--cmascot-w);
+  height: var(--cmascot-h);
+  background-position: 0 0;
+  background-size: var(--cmascot-sheet-w) var(--cmascot-sheet-h);
+  animation: mascot-walk-codex 0.96s steps(8) infinite;
+}
+
+@keyframes mascot-walk-codex {
+  to {
+    background-position-x: calc(var(--cmascot-w) * -8);
+  }
+}
+
 /* NEEDS YOU is red everywhere (same as the sidebar attention dot). */
 .term-node__status--attention {
   color: #ff453a;
