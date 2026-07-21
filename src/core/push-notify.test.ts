@@ -470,6 +470,99 @@ describe('createPushNotify', () => {
     })
   })
 
+  describe('granted mode (SSH-possession push grants)', () => {
+    const GRANTS = [
+      { deviceId: 'dev-A', grant: 'tok-A', connectionId: 'conn-A' },
+      { deviceId: 'dev-B', grant: 'tok-B' }
+    ]
+
+    function grantDeps(over: Partial<PushNotifyDeps> = {}): PushNotifyDeps {
+      return baseDeps({
+        getHostIdentity: () => null, // no relay identity → granted mode
+        getGrants: () => GRANTS,
+        hostLabel: () => 'niova',
+        ...over
+      })
+    }
+
+    it('fans one POST out per grant: Bearer auth + hostLabel, and NO host identity fields', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(grantDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'approval', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const calls = fetchMock.mock.calls
+      expect(calls.map((c) => c[1].headers.authorization)).toEqual(['Bearer tok-A', 'Bearer tok-B'])
+      for (const c of calls) {
+        expect(c[0]).toBe('https://api.nodeterm.dev/v1/push/notify')
+        const body = JSON.parse(c[1].body)
+        expect(body.hostLabel).toBe('niova')
+        expect(body).not.toHaveProperty('hostDeviceId')
+        expect(body).not.toHaveProperty('hostPublicKeyB64')
+        expect(body.events).toHaveLength(1)
+        expect(body.events[0].title).toBe('A')
+      }
+      h.stop()
+    })
+
+    it('marks a grant dead on a 401/403 (only the failing one)', async () => {
+      const dead: string[] = []
+      // tok-A → 403, tok-B → 200 (keyed on the Bearer header).
+      fetchMock.mockImplementation(async (_url: string, init: { headers: Record<string, string> }) => ({
+        status: init.headers.authorization === 'Bearer tok-A' ? 403 : 200
+      }))
+      const em = makeEmitter()
+      const h = createPushNotify(grantDeps({ subscribe: em.subscribe, markGrantDead: (g) => dead.push(g) }))
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(dead).toEqual(['tok-A'])
+      h.stop()
+    })
+
+    it('only POSTs the grants getGrants currently returns (a dead grant is dropped)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(grantDeps({ subscribe: em.subscribe, getGrants: () => [GRANTS[1]] }))
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock.mock.calls[0][1].headers.authorization).toBe('Bearer tok-B')
+      h.stop()
+    })
+
+    it('is inert when no host identity AND no grants', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(grantDeps({ subscribe: em.subscribe, getGrants: () => [] }))
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
+    })
+
+    it('honors the master + sub-gates in granted mode', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(grantDeps({ subscribe: em.subscribe, mobilePushEnabled: () => false }))
+      em.emit(iev({ nodeId: 'a' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
+    })
+
+    it('a paired host identity WINS: grants are never consulted (no double-push)', async () => {
+      const getGrants = vi.fn(() => GRANTS)
+      const em = makeEmitter()
+      // getHostIdentity defaults to the paired IDENTITY via baseDeps.
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getGrants, hostLabel: () => 'niova' }))
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const body = bodyOf()
+      expect(body.hostDeviceId).toBe('host-device-1')
+      expect(fetchMock.mock.calls[0][1].headers.authorization).toBeUndefined()
+      expect(getGrants).not.toHaveBeenCalled()
+      h.stop()
+    })
+  })
+
   it('stop() unsubscribes so later events are ignored', async () => {
     const em = makeEmitter()
     const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
@@ -832,6 +925,68 @@ describe('createLiveUpdatePush', () => {
         expect(tick).not.toHaveProperty('edge')
         h.stop()
       })
+    })
+  })
+
+  describe('granted mode (SSH-possession push grants)', () => {
+    const GRANTS = [
+      { deviceId: 'dev-A', grant: 'tok-A' },
+      { deviceId: 'dev-B', grant: 'tok-B' }
+    ]
+
+    it('fans a state edge out per grant: Bearer auth + hostLabel, no host identity fields', async () => {
+      const { h, st } = wire({ getHostIdentity: () => null, getGrants: () => GRANTS, hostLabel: () => 'niova' })
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const calls = fetchMock.mock.calls
+      expect(calls.map((c) => c[1].headers.authorization)).toEqual(['Bearer tok-A', 'Bearer tok-B'])
+      for (const c of calls) {
+        expect(c[0]).toBe('https://api.nodeterm.dev/v1/push/live-update')
+        const body = JSON.parse(c[1].body)
+        expect(body.hostLabel).toBe('niova')
+        expect(body).not.toHaveProperty('hostDeviceId')
+        expect(body).not.toHaveProperty('hostPublicKeyB64')
+        expect(body.updates[0]).toMatchObject({ nodeId: 'a', event: 'start', state: 'working', edge: true })
+      }
+      h.stop()
+    })
+
+    it('marks a grant dead on a 401/403', async () => {
+      const dead: string[] = []
+      fetchMock.mockImplementation(async (_url: string, init: { headers: Record<string, string> }) => ({
+        status: init.headers.authorization === 'Bearer tok-B' ? 401 : 200
+      }))
+      const { h, st } = wire({
+        getHostIdentity: () => null,
+        getGrants: () => GRANTS,
+        hostLabel: () => 'niova',
+        markGrantDead: (g) => dead.push(g)
+      })
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(dead).toEqual(['tok-B'])
+      h.stop()
+    })
+
+    it('a paired host identity WINS: grants are never consulted (no double-push)', async () => {
+      const getGrants = vi.fn(() => GRANTS)
+      const { h, st } = wire({ getGrants, hostLabel: () => 'niova' })
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(liveBodyOf().hostDeviceId).toBe('host-device-1')
+      expect(fetchMock.mock.calls[0][1].headers.authorization).toBeUndefined()
+      expect(getGrants).not.toHaveBeenCalled()
+      h.stop()
+    })
+
+    it('is inert when no host identity AND no grants', async () => {
+      const { h, st } = wire({ getHostIdentity: () => null, getGrants: () => [] })
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
     })
   })
 

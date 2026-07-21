@@ -744,6 +744,12 @@ app.whenReady().then(async () => {
   // pinned) — that's the "standing relay host configured/paired" gate. The host public key
   // (identity every paired phone pinned) + paired flag load async and refresh on a cheap interval,
   // so a mid-run pairing / keyring-unlock is picked up without re-wiring; the getter is sync.
+  //
+  // Desktop stays RELAY-ONLY: it does NOT wire the SSH-possession push grants
+  // (spec: nodeterm-server/docs/specs/2026-07-21-push-grants.md, which the Server Edition uses in
+  // src/server/index.ts). A desktop that a phone both relay-PAIRED and dropped a grant on would
+  // push the same event to the same phone twice — once identity-signed, once grant-authorized. The
+  // grant path is the fallback for hosts with no relay identity; the desktop always has one.
   let pushHostKeyB64: string | null = null
   let pushHasPairedPhone = false
   const refreshPushIdentity = async (): Promise<void> => {
