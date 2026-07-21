@@ -346,14 +346,17 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   // still fronts the whole sweep.
   const pollAll = (): void => {
     if (!shouldPoll()) return
-    void run()
+    // Fire-and-forget: a poll that lands after shutdown (or a test's platform reset) throws
+    // from platform()-dependent fetch paths — in an un-awaited chain that is an unhandled
+    // rejection, not a signal (same hardening as push()'s broadcast).
+    void run().catch(() => {})
     let ids: string[] = []
     try {
       ids = opts.localAccounts?.() ?? []
     } catch {
       ids = [] // a throwing provider must never break the poll
     }
-    for (const id of ids) if (id) void run(id)
+    for (const id of ids) if (id) void run(id).catch(() => {})
   }
 
   // The warm-up fetch goes through the same gate as the poll: it IS a poll, just the first one.
@@ -369,7 +372,7 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     fetch: (accountId?: string) => run(accountId),
     refresh: (accountId?: string) => run(accountId),
     refreshIfStale: () => {
-      if (Date.now() - (lastFetchAt.get('') ?? 0) >= REFETCH_DEBOUNCE_MS) void run()
+      if (Date.now() - (lastFetchAt.get('') ?? 0) >= REFETCH_DEBOUNCE_MS) void run().catch(() => {})
     },
     snapshot: () =>
       // System account (key '') first, then managed accounts in insertion order.

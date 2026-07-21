@@ -15,8 +15,14 @@ let tmp: string
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-oc-'))
   vi.spyOn(os, 'homedir').mockReturnValue(tmp)
+  // CI runners export XDG_CONFIG_HOME (GitHub Actions: /home/runner/.config), which wins
+  // over the mocked homedir in opencodeConfigDir() — the installer then writes outside the
+  // temp dir and every read here misses. Clear it so the homedir fallback is what's tested;
+  // the XDG describe block below stubs its own value on top.
+  vi.stubEnv('XDG_CONFIG_HOME', '')
 })
 afterEach(() => {
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
   fs.rmSync(tmp, { recursive: true, force: true })
 })
