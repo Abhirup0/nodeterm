@@ -367,10 +367,11 @@ export class GitService {
     // simply fails to empty when there's no origin, so it needn't wait on `remote`.)
     // gh auth is deliberately NOT awaited here (ghAuthedSwr): it hits the GitHub API and
     // used to hold the whole status — i.e. the panel's first paint — hostage for ~700ms.
-    const [branchR, branchesR, remotesR, originR, countsR, upstreamR, cachedR, workR, porcelainR] =
+    const [branchR, branchesR, remoteBranchesR, remotesR, originR, countsR, upstreamR, cachedR, workR, porcelainR] =
       await Promise.all([
         git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']),
         git(cwd, ['branch', '--format=%(refname:short)']),
+        git(cwd, ['branch', '-r', '--format=%(refname:short)']),
         git(cwd, ['remote']),
         git(cwd, ['remote', 'get-url', 'origin']),
         git(cwd, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']),
@@ -385,6 +386,11 @@ export class GitService {
 
     const branch = branchR.out.trim() || 'HEAD'
     const branches = branchesR.out.split('\n').map((b) => b.trim()).filter(Boolean)
+    // `<remote>/HEAD` is a symref to the remote's default branch, not a branch of its own.
+    const remoteBranches = remoteBranchesR.out
+      .split('\n')
+      .map((b) => b.trim())
+      .filter((b) => b && !/\/HEAD$/.test(b))
     const hasRemote = !!remotesR.out.trim()
     const hasUpstream = upstreamR.ok && !!upstreamR.out.trim()
     const originUrl = originR.out.trim()
@@ -433,6 +439,7 @@ export class GitService {
       repoName,
       branch,
       branches,
+      remoteBranches,
       ahead,
       behind,
       hasRemote,
