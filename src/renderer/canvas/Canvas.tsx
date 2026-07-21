@@ -6099,11 +6099,15 @@ export function Canvas() {
           maxZoom={2}
           proOptions={{ hideAttribution: true }}
           deleteKeyCode={null}
-          selectionOnDrag
+          // 'pan' drag mode (Miro-style, opt-in): left-drag on empty canvas pans (React Flow
+          // shows the grab cursor whenever panOnDrag includes button 0); box-select stays
+          // reachable via Shift+drag (selectionKeyCode's default). 'select' keeps the
+          // Figma-style default: left-drag rubber-band selects, pan is middle-drag/scroll.
+          selectionOnDrag={settings.canvasDragMode !== 'pan'}
           selectionMode={SelectionMode.Partial}
           // The lock freezes the CAMERA only (pan/zoom) — nodes stay draggable, resizable and
           // connectable: the point is "stop the map sliding under me", not "freeze my work".
-          panOnDrag={canvasLocked ? false : [1]}
+          panOnDrag={canvasLocked ? false : settings.canvasDragMode === 'pan' ? [0, 1] : [1]}
           panOnScroll={canvasLocked ? false : !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}

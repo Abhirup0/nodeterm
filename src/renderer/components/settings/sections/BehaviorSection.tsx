@@ -4,6 +4,7 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
+import { Select } from '@renderer/ui/Select'
 import { hintLabel } from '@shared/platform-utils'
 
 const ROWS = {
@@ -19,7 +20,11 @@ const ROWS = {
     title: 'Sidebar: focus active project',
     keywords: ['sidebar', 'sessions', 'collapse', 'expand', 'project', 'switch']
   },
-  wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] }
+  wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] },
+  dragMode: {
+    title: 'Canvas left-drag',
+    keywords: ['pan', 'drag', 'select', 'canvas', 'mouse', 'grab', 'figma', 'miro']
+  }
 }
 const ENTRIES = Object.values(ROWS)
 
@@ -127,6 +132,22 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               onChange={(v) => update({ wheelZoom: v })}
               ariaLabel="Scroll wheel zooms"
             />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.dragMode}>
+        <FieldRow
+          label="Canvas left-drag"
+          description="What dragging empty canvas does. Pan moves the map directly (box-select moves to Shift+drag); Select rubber-band selects, panning stays on middle-drag / two-finger scroll."
+          control={
+            <Select
+              aria-label="Canvas left-drag"
+              value={settings.canvasDragMode}
+              onChange={(e) => update({ canvasDragMode: e.target.value as 'select' | 'pan' })}
+            >
+              <option value="select">Select (default)</option>
+              <option value="pan">Pan the canvas</option>
+            </Select>
           }
         />
       </SearchableRow>
