@@ -45,6 +45,36 @@ describe('normalizeClaude — PermissionRequest (deterministic approvals)', () =
   })
 })
 
+describe('normalizeClaude — deterministic-approval "answered" signal', () => {
+  // The signal rides ALONGSIDE the original PermissionRequest payload, so it must be matched BEFORE
+  // hook_event_name (which would otherwise map to blocked) and yield a synthetic working transition.
+  it('nodeterm_answered=allow → working, threading pendingId, over the PermissionRequest payload', () => {
+    const e = normalizeClaude(
+      env({
+        hook_event_name: 'PermissionRequest',
+        session_id: 's1',
+        nodeterm_pending_id: 'n1-1720-42',
+        nodeterm_answered: 'allow'
+      })
+    )
+    expect(e).toMatchObject({ kind: 'state', state: 'working', pendingId: 'n1-1720-42', sessionId: 's1' })
+    // A working state carries no blocked/waiting signal — it never produces a new inbox ask.
+    expect(e?.state).not.toBe('blocked')
+  })
+
+  it('nodeterm_answered=deny also → working (the agent typically continues the turn)', () => {
+    const e = normalizeClaude(
+      env({ hook_event_name: 'PermissionRequest', nodeterm_pending_id: 'n1-9-9', nodeterm_answered: 'deny' })
+    )
+    expect(e).toMatchObject({ kind: 'state', state: 'working', pendingId: 'n1-9-9' })
+  })
+
+  it('an unrecognized nodeterm_answered value is ignored (falls through to the PermissionRequest map)', () => {
+    const e = normalizeClaude(env({ hook_event_name: 'PermissionRequest', nodeterm_answered: 'maybe' }))
+    expect(e).toMatchObject({ kind: 'state', state: 'blocked' })
+  })
+})
+
 describe('normalizeClaude — async subagents', () => {
   it('PostToolUse for a sync subagent → subagent-end with stats', () => {
     const e = normalizeClaude(

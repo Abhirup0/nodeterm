@@ -7,6 +7,7 @@ import {
   pendingDir,
   writePendingAnswerLocal,
   sweepPendingDir,
+  syntheticAnsweredEvent,
   PENDING_MAX_AGE_MS
 } from './pending-approvals'
 
@@ -62,6 +63,28 @@ describe('writePendingAnswerLocal', () => {
   it('refuses an out-of-contract decision', async () => {
     // @ts-expect-error — exercising the runtime guard against a bad value
     expect(await writePendingAnswerLocal('n', 'always', home)).toBe(false)
+  })
+})
+
+describe('syntheticAnsweredEvent (optimistic-flip builder)', () => {
+  it('builds a claude working-state event threading the pendingId (allow)', () => {
+    const e = syntheticAnsweredEvent('node-1', 'node-1-99-7', 'allow')
+    expect(e).toMatchObject({
+      nodeId: 'node-1',
+      agentId: 'claude',
+      kind: 'state',
+      state: 'working',
+      pendingId: 'node-1-99-7'
+    })
+  })
+
+  it('builds a working event for deny too (the agent continues the turn)', () => {
+    expect(syntheticAnsweredEvent('n', 'n-1-1', 'deny')).toMatchObject({ state: 'working', pendingId: 'n-1-1' })
+  })
+
+  it('returns null on an out-of-contract decision', () => {
+    // @ts-expect-error — exercising the runtime guard
+    expect(syntheticAnsweredEvent('n', 'n-1-1', 'always')).toBeNull()
   })
 })
 

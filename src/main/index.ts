@@ -19,7 +19,12 @@ import { generateCommitMessage, generateGroupName, generateTerminalName } from '
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
-import { writePendingAnswerLocal, startPendingSweep, isValidPendingId } from '../core/agents/pending-approvals'
+import {
+  writePendingAnswerLocal,
+  startPendingSweep,
+  isValidPendingId,
+  syntheticAnsweredEvent
+} from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import {
   initAgentStatusMirror,
@@ -1024,10 +1029,14 @@ app.whenReady().then(async () => {
       console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
     }
   }
-  hookServer.setListener((e) => {
+  // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
+  // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
+  // it for the optimistic flip.
+  const emitAgentStatus = (e: NormalizedAgentEvent): void => {
     sendToMain(IPC.agentStatus, e)
     recordAgentEvent(e)
-  })
+  }
+  hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
   // buttons (and any relay client) answer a held Claude permission hook here. Route by the node's
   // project: an SSH project's hook runs on the REMOTE host (write over its ControlMaster), a local
@@ -1040,10 +1049,19 @@ app.whenReady().then(async () => {
       if (!isValidPendingId(pendingId)) return false
       if (decision !== 'allow' && decision !== 'deny') return false
       const sshProjectId = workspaceStore.sshProjectIdForNode(nodeId)
-      if (sshProjectId && sshProjectManager) {
-        return sshProjectManager.writePendingAnswer(sshProjectId, pendingId, decision)
+      const ok =
+        sshProjectId && sshProjectManager
+          ? await sshProjectManager.writePendingAnswer(sshProjectId, pendingId, decision)
+          : await writePendingAnswerLocal(pendingId, decision, homedir())
+      // Optimistic flip: on a successful write, emit the same synthetic "answered" transition the
+      // held hook's second POST will produce, so the NEEDS YOU badge clears instantly instead of
+      // waiting for that POST to round-trip. The later hook POST is an idempotent duplicate (a
+      // same-state working re-assert is a no-op). See docs/hook-reply-approvals.md.
+      if (ok) {
+        const ev = syntheticAnsweredEvent(nodeId, pendingId, decision)
+        if (ev) emitAgentStatus(ev)
       }
-      return writePendingAnswerLocal(pendingId, decision, homedir())
+      return ok
     }
   )
   // Sweep stale request/answer files (~/.nodeterm/pending) on boot + hourly — orphans from killed

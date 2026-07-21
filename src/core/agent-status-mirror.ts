@@ -517,17 +517,22 @@ function fireNodeNowChange(c: NodeNowChange): void {
   }
 }
 
-// Per-node stash of the pending AskUserQuestion picker (option labels + the question text), set
-// from the raw-hook seam and attached to the next needs-you InboxEvent for that node. Cleared on
-// state-leave / new turn / session boundary, and additionally time-guarded (STASH_MAX_AGE_MS)
-// so a stash that was never consumed (e.g. a picker that auto-resolved) can't be picked up by a
-// genuinely unrelated later approval in the same turn.
+// Per-node stash of the pending needs-you detail, set from the raw-hook seam and attached to the
+// next needs-you InboxEvent for that node. Two producers feed it:
+//  - an AskUserQuestion PreToolUse stashes the option labels + question text (`options`/`question`);
+//  - a PermissionRequest stashes a derived "what's being approved" summary (`approval`).
+// `options` (a real picker) is the QUESTION classification signal; `approval` supplies an approval
+// card's title/detail. Cleared on state-leave / new turn / session boundary, and additionally
+// time-guarded (STASH_MAX_AGE_MS) so a stash that was never consumed (e.g. a picker that
+// auto-resolved) can't be picked up by a genuinely unrelated later needs-you in the same turn.
 interface QuestionStash {
-  /** ≤4 labels, each ≤60 chars. */
-  options: string[]
+  /** AskUserQuestion picker: ≤4 labels, each ≤60 chars. Its PRESENCE marks a real question. */
+  options?: string[]
   /** The first question's prompt text, clipped to INBOX_TITLE_MAX. Absent if not present/parseable. */
   question?: string
-  /** When the AskUserQuestion PreToolUse stashed this — freshness-guard anchor. */
+  /** PermissionRequest: the derived "what's being approved" summary (title + optional detail). */
+  approval?: { title: string; detail?: string }
+  /** When the AskUserQuestion PreToolUse / PermissionRequest stashed this — freshness-guard anchor. */
   at: number
 }
 const pendingQuestions = new Map<string, QuestionStash>()
@@ -586,6 +591,106 @@ export function extractQuestionText(
     const q = (questions[0] as { question?: unknown })?.question
     if (typeof q !== 'string' || !q) return undefined
     return clip(q, INBOX_TITLE_MAX)
+  } catch {
+    return undefined
+  }
+}
+
+/** mcp tool short name: `mcp__<server>__<tool>` → `<tool>`. Degrades gracefully on odd shapes. */
+function mcpShortName(name: string): string {
+  const parts = name.split('__').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : name
+}
+
+/** JSON.stringify a value, returning undefined for empty/unserializable objects. */
+function safeStringify(v: unknown): string | undefined {
+  try {
+    const s = JSON.stringify(v)
+    return s && s !== '{}' && s !== 'null' ? s : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Derive a human "what is being approved" summary from a PermissionRequest's tool_name/tool_input
+ * (field report: approval cards showed only "Needs approval"). Pure; FAIL-OPEN — an empty tool name,
+ * a shape mismatch, or any throw yields `undefined`, so the caller keeps today's lastMessage/generic
+ * title. `title` is clipped to INBOX_TITLE_MAX, `detail` to INBOX_DETAIL_MAX.
+ */
+export function buildApprovalSummary(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined
+): { title: string; detail?: string } | undefined {
+  if (!toolName) return undefined
+  try {
+    const ti = toolInput ?? {}
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+    // Rough line count: newlines + 1 when non-empty (the field-report spec says rough is fine).
+    const lineCount = (s: string): number => (s ? s.split('\n').length : 0)
+    let title: string
+    let detail: string | undefined
+    switch (toolName) {
+      case 'Edit':
+      case 'NotebookEdit': {
+        const p = str(ti.file_path) || str(ti.notebook_path)
+        const added = lineCount(str(ti.new_string) || str(ti.new_source))
+        const removed = lineCount(str(ti.old_string) || str(ti.old_source))
+        title = `Edit ${basename(p) || 'file'}`
+        detail = p ? `${p} +${added} −${removed}` : undefined
+        break
+      }
+      case 'Write': {
+        const p = str(ti.file_path)
+        const n = lineCount(str(ti.content))
+        title = `Write ${basename(p) || 'file'}`
+        detail = p ? `${p} (${n} lines)` : undefined
+        break
+      }
+      case 'Bash': {
+        const cmd = str(ti.command)
+        const first = cmd.split('\n')[0] ?? ''
+        title = 'Run command'
+        detail = cmd.includes('\n') ? `${first} …` : first || undefined
+        break
+      }
+      case 'Read': {
+        const p = str(ti.file_path) || str(ti.notebook_path)
+        title = `Read ${basename(p) || 'file'}`
+        detail = p || undefined
+        break
+      }
+      case 'WebFetch': {
+        const url = str(ti.url)
+        let host = url
+        try {
+          host = new URL(url).host
+        } catch {
+          // not a parseable URL — show the raw string
+        }
+        title = `Fetch ${host || '…'}`
+        detail = url || undefined
+        break
+      }
+      case 'WebSearch': {
+        title = 'Search'
+        detail = str(ti.query) || undefined
+        break
+      }
+      case 'Task': {
+        title = 'Launch subagent'
+        detail = str(ti.description) || str(ti.prompt) || undefined
+        break
+      }
+      default: {
+        title = toolName.startsWith('mcp__') ? `Use ${mcpShortName(toolName)}` : `Use ${toolName}`
+        detail = safeStringify(ti)
+      }
+    }
+    const t = clip(title, INBOX_TITLE_MAX)
+    if (!t) return undefined
+    const d = detail ? clip(detail, INBOX_DETAIL_MAX) : undefined
+    return d ? { title: t, detail: d } : { title: t }
   } catch {
     return undefined
   }
@@ -739,14 +844,27 @@ function produceInboxFromState(
     // needs-you state the CLI signaled; without a stash we keep today's mapping (blocked→approval,
     // waiting→question).
     const stash = freshStash(nodeId, now)
-    const kind: 'approval' | 'question' = stash || nextState === 'waiting' ? 'question' : 'approval'
+    // Only a real AskUserQuestion picker (options present) forces the QUESTION classification — an
+    // approval-only stash (a PermissionRequest summary) must stay an approval.
     const options = stash?.options
-    // Title: the AskUserQuestion's own question text wins (so the phone shows the real question),
-    // else the last assistant line, else a kind-appropriate generic.
+    const hasQuestion = !!options
+    const kind: 'approval' | 'question' = hasQuestion || nextState === 'waiting' ? 'question' : 'approval'
+    const approval = kind === 'approval' ? stash?.approval : undefined
+    // Title precedence: the stashed summary (AskUserQuestion's own question text for a question, or
+    // the PermissionRequest's "what's being approved" title for an approval) wins so the phone shows
+    // the real ask; else the last assistant line, else a kind-appropriate generic.
     const title =
-      stash?.question ||
+      (hasQuestion ? stash?.question : approval?.title) ||
       firstLine(ev.lastMessage, INBOX_TITLE_MAX) ||
       (kind === 'approval' ? 'Needs approval' : 'Waiting for input')
+    // Detail (approval only — a question renders options, not a detail line). Precedence: the stashed
+    // summary detail, else the lastMessage line (today's fallback). Dropped when it merely repeats the
+    // title (the common no-stash case where both derive from lastMessage).
+    const rawDetail =
+      kind === 'approval'
+        ? approval?.detail || firstLine(ev.lastMessage, INBOX_DETAIL_MAX) || undefined
+        : undefined
+    const detail = rawDetail && rawDetail !== title ? rawDetail : undefined
     // pendingId (the deterministic hook-reply ticket) rides ONLY an approval. A stash-question
     // suppresses it even when a PermissionRequest fired for the AskUserQuestion tool itself:
     // approve/deny on a question is wrong UX — the phone answers with digit send-keys that drive
@@ -757,13 +875,16 @@ function produceInboxFromState(
     // keeps the activity live). Carries the classified kind + options (question) / pendingId
     // (approval) so the Live Activity renders straight from this same code path
     // (spec: interactive-push-live-activities addendum).
+    // The live-update headline folds the approval detail in (so Live Activities / push alerts read
+    // "Edit App.tsx — src/components/App.tsx +2 −2"); a question / detail-less approval is just the title.
+    const headline = clip(detail ? `${title} — ${detail}` : title, LIVE_MESSAGE_MAX)
     if (prevState !== nextState) {
       fireNodeStateChange({
         ...stateBase,
         event: 'update',
         state: 'needsYou',
         kind,
-        message: clip(title, LIVE_MESSAGE_MAX),
+        message: headline,
         ...(options ? { options } : {}),
         ...(pendingId ? { pendingId } : {})
       })
@@ -773,6 +894,7 @@ function produceInboxFromState(
       ...baseEvent,
       kind,
       title,
+      ...(detail ? { detail } : {}),
       ...(options ? { options } : {}),
       ...(pendingId ? { pendingId } : {})
     })
@@ -832,6 +954,23 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
     inboxNodes.set(nodeId, { activity, tool: toolName, contextPercent: cur?.contextPercent, updatedAt: now })
     fireNodeNowChange({ nodeId, activity, contextPercent: cur?.contextPercent, ts: now })
     scheduleWrite()
+  } else if (hook === 'PermissionRequest') {
+    // Stash a "what's being approved" summary derived from the tool call so the next needs-you
+    // approval event/push carries a real title + detail instead of a bare "Needs approval" (field
+    // report). The raw seam fires BEFORE the normalized blocked event that produces the card, so the
+    // stash is ready when produceInboxFromState reads it. Fail-open — a shape mismatch leaves no
+    // stash (the card falls back to lastMessage/generic). Merges onto any fresh AskUserQuestion
+    // stash so its option labels (the question signal) survive; a stale one is dropped by freshStash.
+    const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : ''
+    if (!toolName) return
+    const toolInput =
+      payload.tool_input && typeof payload.tool_input === 'object'
+        ? (payload.tool_input as Record<string, unknown>)
+        : undefined
+    const summary = buildApprovalSummary(toolName, toolInput)
+    if (!summary) return
+    const cur = freshStash(nodeId, now)
+    pendingQuestions.set(nodeId, { ...(cur ?? {}), approval: summary, at: now })
   } else if (hook === 'Stop' || hook === 'SessionEnd') {
     const before = inboxNodes.get(nodeId)?.activity
     clearActivity(nodeId, now)
