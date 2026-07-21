@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 import { buildManagedScript } from './managed-script'
 
 describe('buildManagedScript', () => {
@@ -79,4 +83,78 @@ describe('buildManagedScript', () => {
       expect(codex).toContain('/hook/codex')
     })
   })
+
+  describe('endpoint failover (dead-primary retry against a live sibling endpoint)', () => {
+    it('lists the three known candidate endpoint files', () => {
+      expect(s).toContain('"$HOME/.nodeterm-server/hook-endpoint.env"')
+      expect(s).toContain('"$HOME/.config/node-terminal/hook-endpoint.env"')
+      expect(s).toContain('"$HOME/Library/Application Support/node-terminal/hook-endpoint.env"')
+    })
+    it('picks the FRESHEST existing candidate (ls -t | head -n 1)', () => {
+      expect(s).toContain('nt_fresh=$(ls -t "$@" 2>/dev/null | head -n 1)')
+    })
+    it('SKIPS the endpoint file already tried (compares each candidate to the tried path)', () => {
+      expect(s).toContain('nt_pick_fallback "$NODETERM_HOOK_ENDPOINT"')
+      expect(s).toContain('nt_tried="$1"')
+      expect(s).toContain('[ "$nt_c" = "$nt_tried" ] && continue')
+    })
+    it('only considers readable candidates and returns 1 when there are none', () => {
+      expect(s).toContain('[ -r "$nt_c" ] || continue')
+      expect(s).toContain('[ "$#" -gt 0 ] || return 1')
+    })
+    it('clears SOCK/PORT before sourcing the fallback so a transport switch takes effect', () => {
+      const clearSock = s.indexOf('NODETERM_HOOK_SOCK=""')
+      const clearPort = s.indexOf('NODETERM_HOOK_PORT=""')
+      const source = s.indexOf('. "$nt_fresh"')
+      expect(clearSock).toBeGreaterThan(-1)
+      expect(clearPort).toBeGreaterThan(-1)
+      expect(source).toBeGreaterThan(clearSock)
+      expect(source).toBeGreaterThan(clearPort)
+    })
+    it('re-POSTs against the fallback exactly ONCE on a failed primary POST', () => {
+      // nt_send_request: primary attempt short-circuits on success (`&& return 0`), else a single
+      // fallback source + one re-POST. No loop → at most one retry.
+      expect(s).toContain('nt_request_post && return 0')
+      expect(s).toContain('if nt_pick_fallback "$NODETERM_HOOK_ENDPOINT"; then')
+      // Count CALLS (followed by whitespace/EOL), not the `nt_request_post() {` definition (`(`).
+      const reposts = s.match(/\n *nt_request_post(?=\s|$)/g) ?? []
+      // Two textual calls: the primary attempt and the single fallback retry.
+      expect(reposts.length).toBe(2)
+    })
+    it('leaves the happy path untouched: a successful primary POST does no fallback work', () => {
+      // `&& return 0` guarantees nt_pick_fallback / the candidate scan never run when curl exits 0.
+      const send = s.slice(s.indexOf('nt_send_request() {'), s.indexOf('nt_send_request() {') + 200)
+      expect(send).toContain('nt_request_post && return 0')
+    })
+    it('returns curl exit status from nt_request_post (no `|| true` masking) and returns 1 with no transport', () => {
+      // The POST lines end at `>/dev/null 2>&1` (status preserved), NOT `>/dev/null 2>&1 || true`.
+      expect(s).not.toContain('--data-urlencode "payload=${payload}" >/dev/null 2>&1 || true')
+      expect(s).toContain('  else\n    return 1\n  fi')
+    })
+    it('perm-wait branch advertises the ask in the FOREGROUND (before the poll), non-perm backgrounds it', () => {
+      // Foreground in perm-wait (pendingId reaches primary-or-fallback before the answer poll begins),
+      // backgrounded otherwise so a live session's hot path never blocks.
+      expect(s).toContain('if [ -n "$nt_pending" ]; then\n  nt_send_request\nelse\n  nt_send_request &\nfi')
+      // The request POST carries nodeterm_pending_id, so the fallback learns the ask too.
+      expect(s).toContain('--data-urlencode "nodeterm_pending_id=${nt_pending}"')
+    })
+  })
+})
+
+describe('buildManagedScript generated shell is syntactically valid', () => {
+  const sh = spawnSync('sh', ['-c', 'exit 0'])
+  const shAvailable = sh.status === 0 && !sh.error
+  const dir = shAvailable ? mkdtempSync(join(tmpdir(), 'nt-managed-script-')) : ''
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+  for (const agentId of ['claude', 'codex', 'gemini']) {
+    it.skipIf(!shAvailable)(`passes \`sh -n\` for ${agentId}`, () => {
+      const file = join(dir, `hook-${agentId}.sh`)
+      writeFileSync(file, buildManagedScript(agentId), 'utf8')
+      const res = spawnSync('sh', ['-n', file], { encoding: 'utf8' })
+      expect(res.stderr || '').toBe('')
+      expect(res.status).toBe(0)
+    })
+  }
 })
