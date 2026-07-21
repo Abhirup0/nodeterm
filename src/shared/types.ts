@@ -855,6 +855,10 @@ export interface GitStatus {
   branch: string
   /** Local branch names (for the branch switcher). */
   branches: string[]
+  /** Remote-tracking branch names as `<remote>/<branch>` (HEAD pointers excluded), so the
+   *  switcher can offer branches that exist only on a remote — a plain `git switch <branch>`
+   *  then DWIMs a local tracking branch. Absent in stale caches: read with `?? []`. */
+  remoteBranches?: string[]
   ahead: number
   behind: number
   /** The repo has at least one remote — which may well not be named `origin` (a fork can have only

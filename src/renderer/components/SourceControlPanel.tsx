@@ -603,7 +603,18 @@ export function SourceControlPanel({
             const query = newBranch.trim()
             const q = query.toLowerCase()
             const shown = status.branches.filter((b) => !q || b.toLowerCase().includes(q))
+            // Branches that exist only on a remote (fetched, but never checked out here):
+            // `origin/feat/x` whose local name `feat/x` is not a local branch. Switching passes
+            // the LOCAL name — `git switch feat/x` DWIMs a tracking branch from the remote ref
+            // (ambiguity across several remotes is git's own error, surfaced in the banner).
+            const localName = (r: string): string => r.slice(r.indexOf('/') + 1)
+            const localSet = new Set(status.branches)
+            const remoteOnly = (status.remoteBranches ?? []).filter((r) => !localSet.has(localName(r)))
+            const remoteShown = remoteOnly.filter((r) => !q || r.toLowerCase().includes(q))
             const exact = status.branches.find((b) => b === query)
+            // Typing the exact local name of a remote-only branch must SWITCH (track), not
+            // create an unrelated branch at HEAD under the same name.
+            const remoteExact = !exact && remoteOnly.find((r) => localName(r) === query)
             const close = (): void => {
               setBranchMenu(null)
               setNewBranch('')
@@ -638,6 +649,7 @@ export function SourceControlPanel({
                       }
                       if (e.key !== 'Enter' || !query) return
                       if (exact) pick(exact)
+                      else if (remoteExact) pick(localName(remoteExact))
                       else createNew()
                     }}
                   />
@@ -649,9 +661,24 @@ export function SourceControlPanel({
                         {b}
                       </button>
                     ))}
-                    {query && !exact && (
+                    {remoteShown.length > 0 && (
                       <>
                         {shown.length > 0 && <div className="ctx-sep" />}
+                        {remoteShown.map((r) => (
+                          <button
+                            key={`r:${r}`}
+                            title={`Check out ${r} as a local tracking branch`}
+                            onClick={() => pick(localName(r))}
+                          >
+                            {'⇣ '}
+                            {r}
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    {query && !exact && !remoteExact && (
+                      <>
+                        {(shown.length > 0 || remoteShown.length > 0) && <div className="ctx-sep" />}
                         <button onClick={createNew}>+ Create branch “{query}”</button>
                       </>
                     )}
