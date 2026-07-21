@@ -3,6 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { syntheticAnsweredEvent } from './agents/pending-approvals'
 import {
   reduceEntry,
   buildFile,
@@ -18,6 +19,7 @@ import {
   setMirrorUsageProvider,
   buildMirrorUsage,
   toolActivity,
+  buildApprovalSummary,
   firstLine,
   extractQuestionOptions,
   extractQuestionText,
@@ -362,6 +364,49 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(_inboxSnapshot().events[0].resolved).toBe(true)
   })
 
+  it('synthetic "answered" working transition resolves the open approval and adds no new ask', () => {
+    // The deterministic-approval answered signal (built exactly as the hook POST / desktop optimistic
+    // flip does) is a working state → it goes through the same blocked→working path a normal resume
+    // would, resolving the approval without pushing a fresh approval/question.
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-1-1' }))
+    expect(_inboxSnapshot().events).toHaveLength(1)
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+    // Isolate the state-change edges produced by the answered signal alone.
+    changes.length = 0
+    const answered = syntheticAnsweredEvent('n1', 'n1-1-1', 'allow')!
+    recordAgentEvent(answered)
+    const ib = _inboxSnapshot()
+    // Approval resolved, and no second inbox event appended (working never produces an ask).
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0].resolved).toBe(true)
+    expect(_snapshot().n1.state).toBe('working')
+    // Consistent with a normal blocked→working resume: exactly one working 'start' edge (the same
+    // a plain `working` event fires on that edge), and no spurious extra state-change kinds.
+    expect(changes).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ event: 'start', state: 'working' })
+    unsub()
+  })
+
+  it('a duplicate answered signal is a no-op (same-state working re-assert)', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-2-2' }))
+    const answered = syntheticAnsweredEvent('n1', 'n1-2-2', 'allow')!
+    recordAgentEvent(answered) // optimistic flip (desktop write)
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    recordAgentEvent(answered) // the held hook's second POST — an idempotent duplicate
+    // No new inbox event, still one (resolved) approval, still working, and no new state edge fired.
+    const ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0].resolved).toBe(true)
+    expect(_snapshot().n1.state).toBe('working')
+    expect(changes).toHaveLength(0)
+    unsub()
+  })
+
   it('emits one done per turn with a detail snippet and passes interrupted through', () => {
     recordAgentEvent(ev({ state: 'working', newTurn: true }))
     recordAgentEvent(ev({ state: 'done', lastMessage: 'All wired up.\nplus extra' }))
@@ -611,6 +656,120 @@ describe('question options (AskUserQuestion)', () => {
   })
 })
 
+// ---- Approval summary (PermissionRequest → "what's being approved") -------------------------
+
+describe('buildApprovalSummary (builder table)', () => {
+  it('summarizes each tool family with a title + detail', () => {
+    // Edit: title from basename, detail = path with rough +added/−removed line counts.
+    expect(buildApprovalSummary('Edit', { file_path: 'src/components/App.tsx', old_string: 'a\nb', new_string: 'x\ny\nz' }))
+      .toEqual({ title: 'Edit App.tsx', detail: 'src/components/App.tsx +3 −2' })
+    // NotebookEdit shares the Edit shape (notebook_path / *_source fallbacks).
+    expect(buildApprovalSummary('NotebookEdit', { notebook_path: '/n/nb.ipynb', old_source: '', new_source: 'one' }))
+      .toEqual({ title: 'Edit nb.ipynb', detail: '/n/nb.ipynb +1 −0' })
+    // Write: line count of content.
+    expect(buildApprovalSummary('Write', { file_path: 'x/bar.py', content: 'l1\nl2\nl3' }))
+      .toEqual({ title: 'Write bar.py', detail: 'x/bar.py (3 lines)' })
+    // Read: detail is the path.
+    expect(buildApprovalSummary('Read', { file_path: '/a/baz.md' })).toEqual({ title: 'Read baz.md', detail: '/a/baz.md' })
+    // Bash: generic title, command as detail.
+    expect(buildApprovalSummary('Bash', { command: 'npm test' })).toEqual({ title: 'Run command', detail: 'npm test' })
+    // Bash multiline: first line + " …".
+    expect(buildApprovalSummary('Bash', { command: 'cd x\nnpm test' })).toEqual({ title: 'Run command', detail: 'cd x …' })
+    // WebFetch: host in title, url in detail.
+    expect(buildApprovalSummary('WebFetch', { url: 'https://example.com/x?q=1' }))
+      .toEqual({ title: 'Fetch example.com', detail: 'https://example.com/x?q=1' })
+    // WebSearch: fixed title, query in detail.
+    expect(buildApprovalSummary('WebSearch', { query: 'weather today' })).toEqual({ title: 'Search', detail: 'weather today' })
+    // Task: subagent launch.
+    expect(buildApprovalSummary('Task', { description: 'refactor auth' }))
+      .toEqual({ title: 'Launch subagent', detail: 'refactor auth' })
+    // mcp__ tool: short name in title, stringified input in detail.
+    expect(buildApprovalSummary('mcp__claude_ai_Gmail__get_message', { id: 'm1' }))
+      .toEqual({ title: 'Use get_message', detail: '{"id":"m1"}' })
+    // Unknown tool: "Use <tool>" + stringified input.
+    expect(buildApprovalSummary('SomethingNew', { a: 1 })).toEqual({ title: 'Use SomethingNew', detail: '{"a":1}' })
+  })
+
+  it('clips title ≤120 and detail ≤240', () => {
+    const longName = 'x'.repeat(300)
+    const s = buildApprovalSummary('Read', { file_path: longName })!
+    expect(s.title.length).toBe(120)
+    expect(s.title.endsWith('…')).toBe(true)
+    expect(s.detail!.length).toBe(240)
+    expect(s.detail!.endsWith('…')).toBe(true)
+  })
+
+  it('fails open (no stash) on an empty tool name or a degenerate detail', () => {
+    expect(buildApprovalSummary('', { file_path: 'x' })).toBeUndefined()
+    // Missing path → title kept, degenerate detail dropped (no path to show).
+    expect(buildApprovalSummary('Read', {})).toEqual({ title: 'Read file' })
+    expect(buildApprovalSummary('Edit', {})).toEqual({ title: 'Edit file' })
+    // Unknown tool with empty input → no useful detail.
+    expect(buildApprovalSummary('Weird', {})).toEqual({ title: 'Use Weird' })
+    // Garbage tool_input types don't throw.
+    expect(buildApprovalSummary('Bash', { command: 42 } as unknown as Record<string, unknown>))
+      .toEqual({ title: 'Run command' })
+  })
+})
+
+describe('approval summary stash (PermissionRequest → approval card)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  // A PermissionRequest raw hook stashes the summary; the following blocked event picks it up.
+  function permReq(nodeId: string, toolName: string, toolInput: Record<string, unknown>): void {
+    recordRawToolEvent(nodeId, { hook_event_name: 'PermissionRequest', tool_name: toolName, tool_input: toolInput })
+  }
+
+  it('titles + details a blocked approval from the stashed summary (title + detail precedence)', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    permReq('n1', 'Edit', { file_path: 'src/components/App.tsx', old_string: 'a\nb', new_string: 'x\ny' })
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Claude wants to edit a file', pendingId: 'n1-1-1' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n1')!
+    expect(e.kind).toBe('approval')
+    expect(e.title).toBe('Edit App.tsx') // stashed title beats the lastMessage
+    expect(e.detail).toBe('src/components/App.tsx +2 −2')
+    expect(e.pendingId).toBe('n1-1-1') // a real approval keeps its held-hook ticket
+  })
+
+  it('falls back to lastMessage then generic when there is no stash (detail dropped when == title)', () => {
+    recordAgentEvent(ev({ nodeId: 'a', state: 'blocked', lastMessage: 'Approve write to /etc/hosts' }))
+    recordAgentEvent(ev({ nodeId: 'b', state: 'blocked' }))
+    const evs = _inboxSnapshot().events
+    const a = evs.find((x) => x.nodeId === 'a')!
+    expect(a.title).toBe('Approve write to /etc/hosts')
+    expect(a.detail).toBeUndefined() // detail equal to the title (both from lastMessage) is dropped
+    expect(evs.find((x) => x.nodeId === 'b')!.title).toBe('Needs approval')
+  })
+
+  it('does not misclassify an approval stash as a question (options are the only question signal)', () => {
+    permReq('n2', 'Bash', { command: 'rm -rf /tmp/x' })
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'blocked', lastMessage: 'Approve?', pendingId: 'p' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n2')!
+    expect(e.kind).toBe('approval')
+    expect(e.options).toBeUndefined()
+    expect(e.title).toBe('Run command')
+    expect(e.detail).toBe('rm -rf /tmp/x')
+  })
+
+  it('leaves the question stash untouched — an AskUserQuestion still classifies as a question', () => {
+    recordRawToolEvent('n3', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
+    })
+    // Even if a PermissionRequest for the AskUserQuestion tool itself also fires, options win.
+    permReq('n3', 'AskUserQuestion', { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }] }] })
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve?', pendingId: 'n3-1-1' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3')!
+    expect(e.kind).toBe('question')
+    expect(e.options).toEqual(['Dark', 'Light'])
+    expect(e.title).toBe('Which theme?')
+    expect('pendingId' in e).toBe(false)
+    expect(e.detail).toBeUndefined()
+  })
+})
+
 describe('onNodeStateChange seam', () => {
   beforeEach(() => _resetForTest())
   afterEach(() => _resetForTest())
@@ -630,6 +789,26 @@ describe('onNodeStateChange seam', () => {
     ])
     expect(seen[1].message).toBe('Approve write')
     expect(seen[3].message).toBe('Finished')
+  })
+
+  it('folds the stashed approval summary into the needsYou message (title — detail)', () => {
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordRawToolEvent('n1', {
+      hook_event_name: 'PermissionRequest',
+      tool_name: 'Edit',
+      tool_input: { file_path: 'src/components/App.tsx', old_string: 'a\nb', new_string: 'x\ny' }
+    })
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Claude wants to edit a file', pendingId: 'n1-1-1' }))
+    const nu = seen.find((c) => c.state === 'needsYou')!
+    // Consistent with the inbox card (title + detail) so Live Activities / push alerts read the same.
+    expect(nu.message).toBe('Edit App.tsx — src/components/App.tsx +2 −2')
+    expect(nu.kind).toBe('approval')
+    expect(nu.pendingId).toBe('n1-1-1')
+    const card = _inboxSnapshot().events.find((x) => x.nodeId === 'n1')!
+    expect(card.title).toBe('Edit App.tsx')
+    expect(card.detail).toBe('src/components/App.tsx +2 −2')
   })
 
   it('maps waiting to needsYou and titles interrupted done "Stopped"', () => {

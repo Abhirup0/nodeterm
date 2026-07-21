@@ -140,6 +140,11 @@ class HookServer {
           // into the payload object so both the raw listener and the normalizers see it as if it
           // rode inside the hook JSON. See docs/hook-reply-approvals.md.
           if (form.nodeterm_pending_id) payload.nodeterm_pending_id = form.nodeterm_pending_id
+          // Same treatment for the "answered" signal the wait branch fires on a valid allow/deny
+          // answer (a separate form field it can't fold into the agent's JSON in POSIX sh). Merged
+          // so the normalizer sees it and maps it to a synthetic working transition. See
+          // docs/hook-reply-approvals.md.
+          if (form.nodeterm_answered) payload.nodeterm_answered = form.nodeterm_answered
           // Raw listener first: it drives the transcript-tailing features (which need
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
           this.rawListener?.(agentId, nodeId, payload)

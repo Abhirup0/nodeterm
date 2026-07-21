@@ -16,11 +16,17 @@ import { registerCoreHandlers } from './handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
-import { writePendingAnswerLocal, startPendingSweep, isValidPendingId } from '../core/agents/pending-approvals'
+import {
+  writePendingAnswerLocal,
+  startPendingSweep,
+  isValidPendingId,
+  syntheticAnsweredEvent
+} from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import {
   initAgentStatusMirror,
   flush as flushAgentStatusMirror,
+  recordAgentEvent,
   setMirrorSettingsProvider,
   type MirrorSettings
 } from '../core/agent-status-mirror'
@@ -203,7 +209,18 @@ export async function startServer(
       if (decision !== 'allow' && decision !== 'deny') return false
       // An SSH-project node has no reachable ControlMaster here (v1): answer only local nodes.
       if (workspaceStore.sshProjectIdForNode(nodeId)) return false
-      return writePendingAnswerLocal(pendingId, decision, os.homedir())
+      const ok = await writePendingAnswerLocal(pendingId, decision, os.homedir())
+      // Optimistic flip (parity with desktop): emit the synthetic "answered" transition so the
+      // browser canvas NEEDS YOU badge clears instantly, ahead of the held hook's second POST (an
+      // idempotent duplicate). See docs/hook-reply-approvals.md.
+      if (ok) {
+        const ev = syntheticAnsweredEvent(nodeId, pendingId, decision)
+        if (ev) {
+          platform.broadcast(IPC.agentStatus, ev)
+          recordAgentEvent(ev)
+        }
+      }
+      return ok
     }
   )
   // Sweep stale ~/.nodeterm/pending files on boot + hourly (orphans from killed sessions).

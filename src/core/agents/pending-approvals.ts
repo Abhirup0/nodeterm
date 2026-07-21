@@ -11,6 +11,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { normalizeClaude, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 
 /** pendingId shape the script generates (`<node>-<ms>-<pid>`) and the ONLY thing we interpolate
  *  into a filename. Validated everywhere a pendingId becomes a path so a forged value can't
@@ -56,6 +57,28 @@ export async function writePendingAnswerLocal(
     await fs.promises.rm(tmp, { force: true }).catch(() => {})
     return false
   }
+}
+
+/**
+ * Build the synthetic "answered" agent event the managed hook's second POST would produce, so a
+ * caller that just wrote the answer file (the desktop Approve/Deny handler) can OPTIMISTICALLY flip
+ * the badge to working before that POST round-trips. Goes through the same `normalizeClaude` path the
+ * hook server uses, so its shape is identical — the later hook POST is an idempotent duplicate
+ * (a same-state working re-assert is a no-op in the mirror + renderer store). Threads the pendingId
+ * so the open approval resolves. Claude-only (PermissionRequest is a Claude concept). Returns null on
+ * an invalid decision. See docs/hook-reply-approvals.md.
+ */
+export function syntheticAnsweredEvent(
+  nodeId: string,
+  pendingId: string,
+  decision: 'allow' | 'deny'
+): NormalizedAgentEvent | null {
+  if (decision !== 'allow' && decision !== 'deny') return null
+  return normalizeClaude({
+    nodeId,
+    agentId: 'claude',
+    payload: { nodeterm_answered: decision, nodeterm_pending_id: pendingId }
+  })
 }
 
 /**

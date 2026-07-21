@@ -9,7 +9,9 @@
 // ~/.nodeterm/pending/, tags the POST body with nodeterm_pending_id (so the mirror/inbox
 // learns it), then polls for ~/.nodeterm/pending/<pendingId>.answer for up to that many
 // seconds. An answer ('allow' | 'deny') is echoed back as the hook's decision JSON; a
-// timeout prints nothing and Claude falls through to its normal interactive prompt. The
+// timeout prints nothing and Claude falls through to its normal interactive prompt. On a valid
+// answer it ALSO fires a second, backgrounded "answered" POST (nodeterm_answered=<decision>) so the
+// NEEDS YOU badge flips to working immediately rather than lingering until the agent's next hook. The
 // whole branch is a NO-OP when the env var is absent (a user's own terminals, older
 // nodeterm, non-claude agents), so behavior is bit-for-bit legacy there.
 export function buildManagedScript(agentId: string): string {
@@ -71,6 +73,34 @@ export function buildManagedScript(agentId: string): string {
     '    if [ -f "$nt_answer" ]; then',
     '      nt_decision=$(cat "$nt_answer" 2>/dev/null)',
     '      rm -f "$nt_answer" "$nt_pending_file" 2>/dev/null || :',
+    '      # Fire-and-forget "answered" signal so the canvas/phone NEEDS YOU badge flips to working the',
+    '      # instant we read a valid answer, instead of sticking until the agent\'s next hook (which,',
+    '      # for a text-only reply, is not until the turn\'s Stop). Backgrounded (&) + short --max-time so',
+    '      # the decision JSON below is NEVER delayed. Same POST mechanism as above, tagged',
+    '      # nodeterm_answered=<decision>; only for a valid allow/deny (no POST on a bad/timed-out answer).',
+    '      if [ "$nt_decision" = "allow" ] || [ "$nt_decision" = "deny" ]; then',
+    '        if [ -n "$NODETERM_HOOK_SOCK" ]; then',
+    `          curl -sS -X POST --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/hook/${agentId}" \\`,
+    '            --connect-timeout 0.5 --max-time 1 \\',
+    '            -H "Content-Type: application/x-www-form-urlencoded" \\',
+    '            -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
+    '            --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
+    '            --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '            --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
+    '            --data-urlencode "nodeterm_answered=${nt_decision}" \\',
+    '            --data-urlencode "payload=${payload}" >/dev/null 2>&1 &',
+    '        elif [ -n "$NODETERM_HOOK_PORT" ]; then',
+    `          curl -sS -X POST "http://127.0.0.1:\${NODETERM_HOOK_PORT}/hook/${agentId}" \\`,
+    '            --connect-timeout 0.5 --max-time 1 \\',
+    '            -H "Content-Type: application/x-www-form-urlencoded" \\',
+    '            -H "X-Nodeterm-Hook-Token: ${NODETERM_HOOK_TOKEN}" \\',
+    '            --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
+    '            --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '            --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
+    '            --data-urlencode "nodeterm_answered=${nt_decision}" \\',
+    '            --data-urlencode "payload=${payload}" >/dev/null 2>&1 &',
+    '        fi',
+    '      fi',
     '      if [ "$nt_decision" = "allow" ]; then',
     '        printf \'%s\\n\' \'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\'',
     '      elif [ "$nt_decision" = "deny" ]; then',

@@ -59,6 +59,11 @@ interface ClaudePayload {
   /** Deterministic-approval ticket the managed hook script added to its POST body and the hook
    *  server merged into this payload (PermissionRequest only). */
   nodeterm_pending_id?: string
+  /** Deterministic-approval "answered" signal: the managed hook fired a second POST the instant it
+   *  read a valid allow/deny answer file, tagged nodeterm_answered=<decision>, merged into this
+   *  payload by the hook server. It rides alongside the original PermissionRequest payload, so it is
+   *  matched BEFORE hook_event_name and maps to a synthetic working transition (not a new ask). */
+  nodeterm_answered?: string
   notification_type?: string
   is_interrupt?: boolean
   last_assistant_message?: string
@@ -95,6 +100,21 @@ export function isAsyncSubagentLaunch(r: { status?: string; isAsync?: boolean } 
 export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | null {
   const p = env.payload as ClaudePayload
   const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+  // Deterministic hook-reply "answered" signal (docs/hook-reply-approvals.md): the managed hook
+  // fires this the instant it reads a valid allow/deny answer file — the agent is about to proceed
+  // (on 'deny' it typically continues the turn too), so map both to a synthetic 'working' transition
+  // that clears the NEEDS YOU badge without waiting for the agent's next real hook. Threads the
+  // pendingId so the mirror's state-leave resolves the open approval. It is NOT a new ask — a
+  // 'working' state never produces an inbox approval/question. Matched BEFORE hook_event_name because
+  // it rides alongside the original PermissionRequest payload.
+  if (p.nodeterm_answered === 'allow' || p.nodeterm_answered === 'deny') {
+    return {
+      ...base,
+      kind: 'state',
+      state: 'working',
+      ...(p.nodeterm_pending_id ? { pendingId: p.nodeterm_pending_id } : {})
+    }
+  }
   const ev = p.hook_event_name
   const tool = p.tool_name ?? ''
 

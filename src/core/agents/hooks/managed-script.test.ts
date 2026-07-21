@@ -32,9 +32,30 @@ describe('buildManagedScript', () => {
       expect(s).toContain("tr -c 'A-Za-z0-9_-' '_'")
     })
     it('tags the POST body with nodeterm_pending_id on both transports', () => {
-      // Two POST blocks (unix-socket + TCP) — both carry the tag.
+      // Four POST blocks now carry the tag: the initial request POST (unix-socket + TCP) AND the
+      // "answered" signal POST fired from the wait branch (unix-socket + TCP).
       const matches = s.match(/--data-urlencode "nodeterm_pending_id=\$\{nt_pending\}"/g) ?? []
-      expect(matches.length).toBe(2)
+      expect(matches.length).toBe(4)
+    })
+    it('fires a backgrounded "answered" POST in the wait branch after reading a valid answer', () => {
+      // Guarded on a valid allow/deny answer, tagged nodeterm_answered on both transports, and
+      // backgrounded (& + short --max-time) so the decision JSON is never delayed.
+      expect(s).toContain('if [ "$nt_decision" = "allow" ] || [ "$nt_decision" = "deny" ]; then')
+      const answered = s.match(/--data-urlencode "nodeterm_answered=\$\{nt_decision\}"/g) ?? []
+      expect(answered.length).toBe(2)
+      const backgrounded = s.match(/--data-urlencode "payload=\$\{payload\}" >\/dev\/null 2>&1 &/g) ?? []
+      expect(backgrounded.length).toBe(2)
+      expect(s).toContain('--max-time 1')
+    })
+    it('does NOT fire the answered POST on timeout (only inside the answer-found branch)', () => {
+      // The answered POST lives strictly between reading the answer file and the timeout cleanup:
+      // it appears before the "Timed out" comment, and the timeout tail has no answered field.
+      const answeredIdx = s.indexOf('nodeterm_answered')
+      const timeoutIdx = s.indexOf('# Timed out')
+      expect(answeredIdx).toBeGreaterThan(-1)
+      expect(timeoutIdx).toBeGreaterThan(answeredIdx)
+      const timeoutTail = s.slice(timeoutIdx)
+      expect(timeoutTail).not.toContain('nodeterm_answered')
     })
     it('polls the answer file every 0.5s up to the armed seconds', () => {
       expect(s).toContain('nt_answer="$HOME/.nodeterm/pending/$nt_pending.answer"')
