@@ -82,16 +82,26 @@ ensure_node() {
   if [ -x "$node_bin" ] && [ "$("$node_bin" -v 2>/dev/null)" = "$NODE_LTS_VERSION" ]; then
     ok "Node ${NODE_LTS_VERSION} already provisioned at $runtime_dir"
   else
-    local tarname url tmp
+    local tarname url tmp free_kb
     tarname="node-${NODE_LTS_VERSION}-${os}-${arch}"
     url="${NODE_DIST_BASE}/${NODE_LTS_VERSION}/${tarname}.tar.gz"
     rm -rf "$runtime_dir"                 # clear any partial / stale (wrong-version) extract
     mkdir -p "$runtime_dir"
-    tmp="$(mktemp -d)"
+    # Download NEXT TO the destination, not /tmp: small/full tmpfs /tmp (50 MB on some VPSes)
+    # made the ~30 MB tarball download die with "curl: (23) Failure writing output" — a field
+    # report. Same filesystem also makes the extract cheaper. Preflight ~600 MB free for
+    # tarball + extract + the app build that follows, with a readable failure.
+    tmp="$APP_DIR/runtime/.download"
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    free_kb=$(df -Pk "$APP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt 614400 ] 2>/dev/null; then
+      rm -rf "$tmp" "$runtime_dir"
+      fail "Not enough disk space in $APP_DIR ($(( free_kb / 1024 )) MB free, need ~600 MB). Free up space and re-run."
+    fi
     info "Downloading Node ${NODE_LTS_VERSION} (${os}-${arch}) from ${url}"
     if ! curl -fsSL "$url" -o "$tmp/node.tar.gz"; then
       rm -rf "$tmp" "$runtime_dir"
-      fail "Failed to download Node.js from ${url}. Check the host's network / DNS and re-run."
+      fail "Failed to download Node.js from ${url}. Check the host's network / DNS / disk space and re-run."
     fi
     if ! tar -xzf "$tmp/node.tar.gz" -C "$runtime_dir" --strip-components=1; then
       rm -rf "$tmp" "$runtime_dir"
