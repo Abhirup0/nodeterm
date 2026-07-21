@@ -93,8 +93,11 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
     )
 
   hooks.setListener((e) => {
-    platform.broadcast(IPC.agentStatus, e)
-    recordAgentEvent(e)
+    // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
+    // event ENRICHED for a needs-you edge (a question strips its pendingId), so the browser canvas
+    // keys off the same single source of truth as the mirror/phone. Then broadcast the enriched one.
+    const enriched = recordAgentEvent(e) ?? e
+    platform.broadcast(IPC.agentStatus, enriched)
   })
 
   // Security: hook POSTs can be forged, so a forged POST could set transcript_path to an

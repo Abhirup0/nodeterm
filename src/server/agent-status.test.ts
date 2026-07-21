@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { ServerPlatform } from './platform-server'
 import { wireAgentStatus } from './agent-status'
+import { _resetForTest } from '../core/agent-status-mirror'
 import { IPC } from '../shared/ipc'
 import { decodePtyData } from '../shared/rpc'
 
@@ -42,6 +43,7 @@ function recTail() {
 
 let dir: string, platform: ServerPlatform, sent: Array<{ channel: string; args: unknown[] }>
 beforeEach(() => {
+  _resetForTest() // isolate the mirror singleton (stash/state) between tests
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-agst-'))
   platform = new ServerPlatform({ userDataDir: dir, appVersion: '0' })
   sent = []
@@ -54,7 +56,19 @@ beforeEach(() => {
     }
   })
 })
-afterEach(() => fs.rmSync(dir, { recursive: true, force: true }))
+afterEach(() => {
+  fs.rmSync(dir, { recursive: true, force: true })
+  _resetForTest()
+})
+
+// Newest agent:status broadcast payload (the enriched event the shell records-then-broadcasts).
+function lastAgentStatus(): Record<string, unknown> | undefined {
+  for (let i = sent.length - 1; i >= 0; i--) {
+    const m = sent[i] as { channel?: string; args?: unknown[] }
+    if (m.channel === IPC.agentStatus) return m.args?.[0] as Record<string, unknown>
+  }
+  return undefined
+}
 
 describe('wireAgentStatus', () => {
   it('broadcasts a normalized agent event on agent:status', () => {
@@ -63,6 +77,35 @@ describe('wireAgentStatus', () => {
     const ev = { nodeId: 'n1', agentId: 'claude', kind: 'state', state: 'working' }
     fh.fireNormalized(ev)
     expect(sent).toContainEqual({ t: 'ev', channel: IPC.agentStatus, args: [ev] })
+  })
+
+  it('broadcasts the ENRICHED event: an AskUserQuestion blocked edge loses its pendingId (askKind question)', () => {
+    const fh = fakeHooks()
+    wireAgentStatus(platform, { hooks: fh.hooks as never })
+    // The raw AskUserQuestion PreToolUse stashes the picker options (recordRawToolEvent).
+    fh.fireRaw('claude', 'q1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
+    })
+    // The CLI then signals the picker as a permission-style blocked carrying a held-hook pendingId.
+    fh.fireNormalized({ nodeId: 'q1', agentId: 'claude', kind: 'state', state: 'blocked', pendingId: 'q1-1-1' })
+    const e = lastAgentStatus()!
+    expect(e.state).toBe('blocked')
+    expect(e.askKind).toBe('question')
+    // The pendingId is STRIPPED so the canvas approve/deny gate (blocked && pendingId) never fires.
+    expect('pendingId' in e).toBe(false)
+  })
+
+  it('broadcasts a genuine approval unchanged (keeps pendingId, askKind approval)', () => {
+    const fh = fakeHooks()
+    wireAgentStatus(platform, { hooks: fh.hooks as never })
+    // No AskUserQuestion stash → a blocked edge stays a real permission request.
+    fh.fireNormalized({ nodeId: 'a1', agentId: 'claude', kind: 'state', state: 'blocked', pendingId: 'a1-1-1' })
+    const e = lastAgentStatus()!
+    expect(e.state).toBe('blocked')
+    expect(e.askKind).toBe('approval')
+    expect(e.pendingId).toBe('a1-1-1')
   })
 
   it('tracks a subagent on PreToolUse(Task) and finishes it on PostToolUse', () => {

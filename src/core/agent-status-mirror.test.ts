@@ -657,6 +657,63 @@ describe('question options (AskUserQuestion)', () => {
   })
 })
 
+// The enrichment recordAgentEvent RETURNS is what the shells broadcast to the canvas — the single
+// source of truth for the approve/deny gate (field report: buttons showed during AskUserQuestion).
+describe('recordAgentEvent enrichment (returned broadcast event)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('a stash-classified question strips pendingId and gains askKind:question', () => {
+    recordRawToolEvent('e1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
+    })
+    // The CLI signals the picker as a permission-style blocked carrying a held-hook pendingId.
+    const out = recordAgentEvent(ev({ nodeId: 'e1', state: 'blocked', pendingId: 'e1-1-1' }))
+    expect(out.state).toBe('blocked')
+    expect(out.askKind).toBe('question')
+    expect(out.pendingId).toBeUndefined() // suppressed — approve/deny on a question is wrong UX
+  })
+
+  it('a genuine approval keeps its pendingId and gains askKind:approval', () => {
+    const out = recordAgentEvent(ev({ nodeId: 'e2', state: 'blocked', pendingId: 'e2-1-1' }))
+    expect(out.state).toBe('blocked')
+    expect(out.askKind).toBe('approval')
+    expect(out.pendingId).toBe('e2-1-1')
+  })
+
+  it('a plain waiting (no stash) is a question with no options and no pendingId', () => {
+    const out = recordAgentEvent(ev({ nodeId: 'e3', state: 'waiting', lastMessage: 'Pick one' }))
+    expect(out.askKind).toBe('question')
+    expect(out.pendingId).toBeUndefined()
+  })
+
+  it('non-needs-you events pass through untouched (no askKind added)', () => {
+    const working = ev({ nodeId: 'e4', state: 'working', newTurn: true })
+    const outW = recordAgentEvent(working)
+    expect(outW).toBe(working) // same reference — nothing to enrich
+    expect('askKind' in outW).toBe(false)
+    const outD = recordAgentEvent(ev({ nodeId: 'e4', state: 'done', lastMessage: 'done' }))
+    expect(outD.askKind).toBeUndefined()
+    const outS = recordAgentEvent(ev({ nodeId: 'e4', kind: 'session', sessionPhase: 'end' }))
+    expect(outS.askKind).toBeUndefined()
+  })
+
+  it('enrichment does not mutate the caller-supplied event', () => {
+    recordRawToolEvent('e5', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ options: [{ label: 'A' }] }] }
+    })
+    const original = ev({ nodeId: 'e5', state: 'blocked', pendingId: 'e5-1-1' })
+    const out = recordAgentEvent(original)
+    expect(original.pendingId).toBe('e5-1-1') // unchanged
+    expect(original.askKind).toBeUndefined() // unchanged
+    expect(out).not.toBe(original) // enriched is a copy
+  })
+})
+
 // ---- multiSelect (rides the AskUserQuestion pipeline) ---------------------------------------
 
 describe('question multiSelect (AskUserQuestion)', () => {

@@ -815,18 +815,46 @@ function resolveFile(): string | null {
   }
 }
 
-/** Fold a normalized agent event into the mirror (main state + inbox feed) and schedule a
- *  debounced write. Called with EVERY normalized event by both shells. */
-export function recordAgentEvent(ev: NormalizedAgentEvent): void {
-  if (!ev?.nodeId) return
+/**
+ * The stash-priority classification of a needs-you (blocked/waiting) event, computed once by
+ * `produceInboxFromState` and reused to ENRICH the event the shells broadcast. `kind` is what the
+ * inbox card was tagged; `pendingId` is the hook-reply ticket the card carries (present only for a
+ * genuine approval — a question strips it). Absent for non-needs-you events.
+ */
+interface NeedsYouClassification {
+  kind: 'question' | 'approval'
+  pendingId?: string
+}
+
+/**
+ * Fold a normalized agent event into the mirror (main state + inbox feed), schedule a debounced
+ * write, and RETURN the event the shells should broadcast — ENRICHED for a needs-you edge so the
+ * ONE stash-priority classification the mirror already computes is the single source of truth for
+ * the canvas too:
+ *  - a `question` (fresh AskUserQuestion stash) gains `askKind:'question'` and has its `pendingId`
+ *    STRIPPED — so TerminalNode's `blocked && pendingId` gate never renders approve/deny on a
+ *    question (field report: the buttons showed during an AskUserQuestion);
+ *  - a genuine `approval` gains `askKind:'approval'` and keeps its `pendingId` unchanged.
+ * Every other event (working / done / session / subagent / recurring) passes through untouched
+ * (same reference). Internal behavior — inbox production, live-update seams, disk writes — is
+ * unchanged; this only affects what the caller then broadcasts. Called with EVERY normalized event
+ * by both shells.
+ */
+export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent {
+  if (!ev?.nodeId) return ev
   const nodeId = ev.nodeId
   const now = Date.now()
   const prev = state.get(nodeId)
   const prevState = prev?.state
   const next = reduceEntry(prev, ev, now)
   state.set(nodeId, next)
-  produceInboxFromState(nodeId, ev, prevState, next.state, now)
+  const classification = produceInboxFromState(nodeId, ev, prevState, next.state, now)
   scheduleWrite()
+  if (!classification) return ev
+  // Enrich the broadcast event from the SAME classification the inbox used. A question drops
+  // pendingId (approve/deny is wrong UX for a picker); an approval keeps ev.pendingId as-is.
+  if (classification.kind === 'question') return { ...ev, askKind: 'question', pendingId: undefined }
+  return { ...ev, askKind: 'approval' }
 }
 
 /**
@@ -840,7 +868,7 @@ function produceInboxFromState(
   prevState: AgentState | undefined,
   nextState: AgentState | undefined,
   now: number
-): void {
+): NeedsYouClassification | undefined {
   // Clear any stashed question options on a new turn or session boundary — a stale option set must
   // never attach to a later, unrelated question. (State-leave clearing is handled below.)
   if (ev.kind === 'session' || (ev.kind === 'state' && ev.state === 'working' && ev.newTurn)) {
@@ -920,16 +948,20 @@ function produceInboxFromState(
         ...(pendingId ? { pendingId } : {})
       })
     }
-    if (newestUnresolved(inboxEvents, nodeId)?.title === title) return
-    pushInboxEvent({
-      ...baseEvent,
-      kind,
-      title,
-      ...(detail ? { detail } : {}),
-      ...(options ? { options } : {}),
-      ...(multiSelect ? { multiSelect: true } : {}),
-      ...(pendingId ? { pendingId } : {})
-    })
+    // Dedup a re-asserted SAME ask (title match) — but always return the classification below so
+    // the broadcast enrichment is consistent across the re-assert.
+    if (newestUnresolved(inboxEvents, nodeId)?.title !== title) {
+      pushInboxEvent({
+        ...baseEvent,
+        kind,
+        title,
+        ...(detail ? { detail } : {}),
+        ...(options ? { options } : {}),
+        ...(multiSelect ? { multiSelect: true } : {}),
+        ...(pendingId ? { pendingId } : {})
+      })
+    }
+    return { kind, pendingId }
   } else if (nextState === 'done' && prevState !== 'done') {
     // The turn ended: emit one `done` on the edge into done (reduceEntry's holdoff keeps a late
     // working from re-entering, and the normalizer collapses an Esc-spam into one done).
