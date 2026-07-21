@@ -5,6 +5,7 @@ import os from 'os'
 import path from 'path'
 import { Auth } from './auth'
 import { createHttpHandler, sessionTokenFromCookie, SESSION_COOKIE } from './http'
+import { parseTrustedNets } from './proxy-trust'
 
 let dir: string, rendererDir: string, server: http.Server, base: string, auth: Auth
 
@@ -121,5 +122,69 @@ describe('http layer', () => {
   it('sessionTokenFromCookie parses the session out of a multi-cookie header', () => {
     expect(sessionTokenFromCookie(`a=b; ${SESSION_COOKIE}=tok123; c=d`)).toBe('tok123')
     expect(sessionTokenFromCookie(undefined)).toBeUndefined()
+  })
+})
+
+describe('http layer with proxy header trust', () => {
+  const HDR = 'Cf-Access-Authenticated-User-Email'
+
+  function trustedServer(netsSpec: string): Promise<{ srv: http.Server; url: string }> {
+    const srv = http.createServer(
+      createHttpHandler({
+        auth,
+        rendererDir,
+        trustProxy: { header: HDR, nets: parseTrustedNets(netsSpec) }
+      })
+    )
+    return new Promise((r) =>
+      srv.listen(0, '127.0.0.1', () =>
+        r({ srv, url: `http://127.0.0.1:${(srv.address() as { port: number }).port}` })
+      )
+    )
+  }
+
+  it('trusted peer + header: serves the app with no cookie; /login and /setup redirect home', async () => {
+    const { srv, url } = await trustedServer('127.0.0.0/8')
+    try {
+      const home = await fetch(`${url}/`, { headers: { [HDR]: 'dev@corp.com' } })
+      expect(home.status).toBe(200)
+      const login = await fetch(`${url}/login`, {
+        headers: { [HDR]: 'dev@corp.com' },
+        redirect: 'manual'
+      })
+      expect(login.status).toBe(302)
+      expect(login.headers.get('location')).toBe('/')
+      const setup = await fetch(`${url}/setup`, {
+        headers: { [HDR]: 'dev@corp.com' },
+        redirect: 'manual'
+      })
+      expect(setup.status).toBe(302)
+      expect(setup.headers.get('location')).toBe('/')
+    } finally {
+      await new Promise((r) => srv.close(r))
+    }
+  })
+
+  it('missing/empty header, or a peer outside the nets, falls through to normal auth', async () => {
+    const { srv, url } = await trustedServer('127.0.0.0/8')
+    const { srv: srvFar, url: urlFar } = await trustedServer('10.0.0.0/8')
+    try {
+      expect((await fetch(`${url}/x.json`, { redirect: 'manual' })).status).toBe(401)
+      expect(
+        (await fetch(`${url}/x.json`, { headers: { [HDR]: '  ' }, redirect: 'manual' })).status
+      ).toBe(401)
+      // Loopback peer, but the trusted nets exclude loopback → the header means nothing.
+      expect(
+        (await fetch(`${urlFar}/x.json`, { headers: { [HDR]: 'dev@corp.com' }, redirect: 'manual' }))
+          .status
+      ).toBe(401)
+      // Password/cookie auth still works beside proxy trust.
+      const cookie = await setupAndLogin()
+      const viaCookie = await fetch(`${urlFar}/`, { headers: { cookie } })
+      expect(viaCookie.status).toBe(200)
+    } finally {
+      await new Promise((r) => srv.close(r))
+      await new Promise((r) => srvFar.close(r))
+    }
   })
 })

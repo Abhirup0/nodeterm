@@ -67,6 +67,8 @@ Precedence: **CLI flag > environment variable > default.**
 | `--renderer-dir <path>` | `NODETERM_RENDERER_DIR` | `out/renderer` (resolved from cwd) | Directory of the built renderer (`index.html` + hashed assets). |
 | `--insecure-http` | — | off | Acknowledge serving plain HTTP directly on a non-loopback interface (see below). |
 | — | `NODETERM_SERVER_PASSWORD` | — | Seed the password headlessly on first boot (see above). |
+| `--trust-proxy-header <name>` | `NODETERM_TRUST_PROXY_HEADER` | — (off) | Reverse-proxy SSO trust: identity header asserted by your proxy (see [Reverse-proxy SSO](#reverse-proxy-sso-header-trust)). |
+| `--trust-proxy-nets <list>` | `NODETERM_TRUST_PROXY_NETS` | `127.0.0.0/8, ::1/128` | Comma-separated IPs/CIDRs (IPv4+IPv6) whose requests may use the trust header. Only meaningful with the header set. |
 
 Binding a **non-loopback** host (anything other than `127.0.0.1` / `localhost` /
 `::1`) **without** `--insecure-http` is refused at startup — plain HTTP on a public
@@ -94,6 +96,44 @@ Single-user auth. There is one password; sessions are per-browser.
   (further attempts get `429 too_many_attempts`); a success resets the counter.
 - **Auth gate:** every route except the login/setup pages and their POST handlers
   requires a valid session — HTML navigations redirect to `/login`, API/WS get `401`.
+
+### Reverse-proxy SSO (header trust)
+
+Deployments that front the server with an SSO reverse proxy (Cloudflare Access,
+Tailscale, oauth2-proxy, Authelia…) already authenticate every request before it
+reaches nodeterm, and the proxy asserts the identity in a request header. Setting
+`NODETERM_TRUST_PROXY_HEADER` makes such requests count as authenticated — no
+password, setup token, or session cookie needed:
+
+```bash
+# Cloudflare Access
+NODETERM_TRUST_PROXY_HEADER=Cf-Access-Authenticated-User-Email node out/server/main.cjs
+# Tailscale (tailscale serve / funnel with identity headers)
+NODETERM_TRUST_PROXY_HEADER=Tailscale-User-Login node out/server/main.cjs
+# oauth2-proxy / Authelia / most others
+NODETERM_TRUST_PROXY_HEADER=X-Forwarded-User node out/server/main.cjs
+```
+
+A request is trusted only when **both** hold:
+
+1. its **TCP peer address** is inside `NODETERM_TRUST_PROXY_NETS` (default:
+   loopback only — the same-host proxy deployment). If your proxy reaches the
+   container over a private network, list it explicitly, e.g.
+   `NODETERM_TRUST_PROXY_NETS=127.0.0.1,10.0.0.0/8`;
+2. it carries the configured header with a **non-empty value**.
+
+The header **content is not validated** (no JWT verification) — the trusted-network
+boundary is the trust statement. That makes two things non-negotiable: only the
+proxy may be reachable from the trusted networks, and the proxy must
+**strip/overwrite** the header on incoming client requests (Cloudflare Access,
+Tailscale and oauth2-proxy all do). A typo'd nets entry fails the boot rather than
+silently changing who is trusted; setting nets without a header is likewise refused.
+
+Everything else stays intact: password/cookie auth keeps working beside it (e.g.
+for loopback ops access), the WS upgrade still enforces the same-host Origin check,
+and a proxy-authed visit to `/login` or `/setup` just redirects home. The boot log
+prints a `⚠️ Proxy header trust ENABLED` line naming the header and networks —
+verify it matches what you meant to trust.
 
 ### TLS (reverse proxy)
 

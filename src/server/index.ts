@@ -6,6 +6,7 @@ import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
 import { createHttpHandler } from './http'
 import { attachWsServer } from './ws'
+import { describeTrustedNets } from './proxy-trust'
 import type { ServerConfig } from './config'
 
 import { initPlatform } from '../core/platform'
@@ -89,6 +90,16 @@ export async function startServer(
 
   const auth = new Auth(config.dataDir)
   if (config.passwordSeed && !auth.isConfigured()) auth.setPassword(config.passwordSeed)
+  if (config.trustProxy) {
+    // Loud on purpose: this line is the operator's one chance to notice a trust
+    // misconfiguration (wrong header name, or nets wider than the proxy's own subnet).
+    console.log(
+      `⚠️  Proxy header trust ENABLED: requests from [${describeTrustedNets(config.trustProxy.nets)}] ` +
+        `carrying a non-empty "${config.trustProxy.header}" header are authenticated WITHOUT a ` +
+        `password. Ensure ONLY your SSO reverse proxy can reach this server from those networks, ` +
+        `and that it strips/overwrites this header on client requests.`
+    )
+  }
   if (!auth.isConfigured()) {
     // No password set yet: print the one-time setup URL so the operator can bootstrap.
     console.log(`Setup: http://${config.host}:${config.port}/setup?token=${auth.setupToken()}`)
@@ -278,10 +289,17 @@ export async function startServer(
   }
   await hookServer.start()
 
-  const server = http.createServer(createHttpHandler({ auth, rendererDir: config.rendererDir }))
+  const server = http.createServer(
+    createHttpHandler({ auth, rendererDir: config.rendererDir, trustProxy: config.trustProxy })
+  )
   // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
   // so the WS close hook is what unsubscribes that client from the sessions it was watching.
-  attachWsServer(server, { platform, auth, onClientGone: (uiId) => ptyManager.dropClient(uiId) })
+  attachWsServer(server, {
+    platform,
+    auth,
+    onClientGone: (uiId) => ptyManager.dropClient(uiId),
+    trustProxy: config.trustProxy
+  })
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

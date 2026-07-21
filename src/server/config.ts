@@ -1,5 +1,6 @@
 import os from 'os'
 import path from 'path'
+import { parseTrustedNets, DEFAULT_TRUSTED_NETS_SPEC, type TrustProxyConfig } from './proxy-trust'
 
 /**
  * Fully-resolved server configuration. Produced by {@link resolveConfig} from the
@@ -21,6 +22,12 @@ export type ServerConfig = {
    * every subsequent agent session on the machine.
    */
   installHooks?: boolean
+  /**
+   * Reverse-proxy SSO trust (issue #29): requests whose TCP peer is inside `nets` and
+   * which carry `header` (non-empty) are authenticated without a session cookie.
+   * Absent = feature off (default). See src/server/proxy-trust.ts and docs/SERVER.md.
+   */
+  trustProxy?: TrustProxyConfig
 }
 
 /**
@@ -85,5 +92,24 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     )
   }
 
-  return { port, host, dataDir, rendererDir, insecureHttp, passwordSeed }
+  // Reverse-proxy SSO trust. `pick` with an empty default so "unset" and "" coincide.
+  const trustHeader = pick('trust-proxy-header', 'NODETERM_TRUST_PROXY_HEADER', '')
+  const trustNetsSpec = pick('trust-proxy-nets', 'NODETERM_TRUST_PROXY_NETS', '')
+  let trustProxy: TrustProxyConfig | undefined
+  if (trustHeader !== '') {
+    // parseTrustedNets throws on a typo — a bad trust config must fail the boot, not
+    // silently change who is trusted.
+    trustProxy = {
+      header: trustHeader,
+      nets: parseTrustedNets(trustNetsSpec || DEFAULT_TRUSTED_NETS_SPEC)
+    }
+  } else if (trustNetsSpec !== '') {
+    throw new Error(
+      `--trust-proxy-nets / NODETERM_TRUST_PROXY_NETS is set but no trust header is configured. ` +
+        `Set NODETERM_TRUST_PROXY_HEADER (or --trust-proxy-header) to the identity header your ` +
+        `reverse proxy asserts (e.g. Cf-Access-Authenticated-User-Email), or unset the nets.`
+    )
+  }
+
+  return { port, host, dataDir, rendererDir, insecureHttp, passwordSeed, trustProxy }
 }

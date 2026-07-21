@@ -7,6 +7,7 @@ import http from 'http'
 import fs from 'fs'
 import path from 'path'
 import type { Auth } from './auth'
+import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
 
 export const SESSION_COOKIE = 'nt_session'
 
@@ -30,6 +31,13 @@ const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'se
 export interface HttpHandlerOpts {
   auth: Auth
   rendererDir: string
+  /**
+   * Reverse-proxy SSO trust (issue #29): when set, a request whose TCP peer is inside the
+   * trusted nets and which carries the header (non-empty) is authenticated without a
+   * session cookie. Never *blocks* anything — a request that doesn't qualify simply falls
+   * through to the normal cookie/login path.
+   */
+  trustProxy?: TrustProxyConfig
 }
 
 /** Parse the `nt_session=` value out of a Cookie header. Exported for the WS upgrade (Task 5). */
@@ -215,7 +223,7 @@ function serveStatic(
 export function createHttpHandler(
   opts: HttpHandlerOpts
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
-  const { auth, rendererDir } = opts
+  const { auth, rendererDir, trustProxy } = opts
 
   return function handler(req: http.IncomingMessage, res: http.ServerResponse): void {
     void handle(req, res).catch(() => {
@@ -228,6 +236,15 @@ export function createHttpHandler(
     const url = new URL(req.url || '/', 'http://x')
     const pathname = url.pathname
     const method = req.method || 'GET'
+
+    const proxyAuthed =
+      trustProxy !== undefined && proxyAuthAllowed(trustProxy, req.headers, req.socket.remoteAddress)
+
+    // A proxy-authed caller has no use for the password pages — send them home.
+    if (proxyAuthed && method === 'GET' && (pathname === '/login' || pathname === '/setup')) {
+      redirect(res, 302, '/')
+      return
+    }
 
     // ---- Public auth routes (no session required) --------------------------
 
@@ -318,7 +335,7 @@ export function createHttpHandler(
     // ---- Everything else requires a valid session --------------------------
 
     const token = sessionTokenFromCookie(req.headers['cookie'])
-    if (!auth.validateSession(token)) {
+    if (!proxyAuthed && !auth.validateSession(token)) {
       if (isHtmlNavigation(req)) redirect(res, 302, '/login')
       else sendJson(res, 401, { error: 'unauthorized' })
       return

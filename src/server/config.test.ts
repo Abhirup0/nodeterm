@@ -25,4 +25,34 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0' }, [])).toThrow(/insecure-http|reverse proxy/i)
     expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0' }, ['--insecure-http'])).not.toThrow()
   })
+
+  it('proxy trust: off by default', () => {
+    expect(resolveConfig({}, []).trustProxy).toBeUndefined()
+  })
+
+  it('proxy trust: header via env, nets default to loopback', () => {
+    const c = resolveConfig({ NODETERM_TRUST_PROXY_HEADER: 'Cf-Access-Authenticated-User-Email' }, [])
+    expect(c.trustProxy?.header).toBe('Cf-Access-Authenticated-User-Email')
+    expect(c.trustProxy?.nets.length).toBeGreaterThan(0)
+  })
+
+  it('proxy trust: argv overrides env; custom nets parsed', () => {
+    const c = resolveConfig({ NODETERM_TRUST_PROXY_HEADER: 'X-Env' }, [
+      '--trust-proxy-header',
+      'Tailscale-User-Login',
+      '--trust-proxy-nets',
+      '10.0.0.0/8'
+    ])
+    expect(c.trustProxy?.header).toBe('Tailscale-User-Login')
+    expect(c.trustProxy?.nets).toHaveLength(1)
+  })
+
+  it('proxy trust: invalid nets or nets-without-header fail the boot', () => {
+    expect(() =>
+      resolveConfig({ NODETERM_TRUST_PROXY_HEADER: 'X-U', NODETERM_TRUST_PROXY_NETS: 'nope' }, [])
+    ).toThrow(/nope/)
+    expect(() => resolveConfig({ NODETERM_TRUST_PROXY_NETS: '10.0.0.0/8' }, [])).toThrow(
+      /TRUST_PROXY_HEADER/i
+    )
+  })
 })
