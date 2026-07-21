@@ -261,6 +261,11 @@ export class SshProjectManager {
     // case (no leftover) skips straight to spawn with no extra round-trip.
     let master: Conn['master']
     let leftover = false
+    // A reused live-orphan master (adopted just below) still holds the PREVIOUS app run's reverse
+    // hook forward, bound to that run's now-dead hook port (`hookServer` picks a fresh ephemeral
+    // port every launch). If the tunnel then fails to verify, we rebuild a fresh master (below):
+    // this flag says the current master was inherited, so that rebuild only fires on the orphan path.
+    let reusedOrphan = false
     try {
       leftover = (await fs.stat(controlPath)).isSocket()
     } catch {
@@ -269,6 +274,7 @@ export class SshProjectManager {
     if (leftover && (await this.r.run(checkMasterArgs(conn, controlPath))).code === 0) {
       // Live orphan: reuse it. `kill()` sends `-O exit` (what `disconnect` does anyway); the loop
       // below succeeds on its first `-O check` and runs the normal post-connect setup.
+      reusedOrphan = true
       master = {
         kill: () => {
           void this.r.run(exitMasterArgs(conn, controlPath)).catch(() => {})
@@ -286,7 +292,30 @@ export class SshProjectManager {
       if (code === 0) {
         // Master is up. Best-effort remote hook setup (reverse tunnel + endpoint + install);
         // fail-open — a null result just means the remote agents run without hooks.
-        const res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
+        let res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
+        // Fresh-launch-straight-to-SSH failure mode (field report: no RUNNING badges from remote
+        // sessions until a reconnect): an ADOPTED live-orphan master carries the previous app run's
+        // `-R <sock>:127.0.0.1:<oldPort>` reverse-hook forward. Its target port died with that run,
+        // and sshd can keep serving the stale listener across our rm+rebind (the "two fds on one
+        // sshd" `remote-hooks` notes), so `setup()`'s tunnel never verifies → it returns null → the
+        // remote endpoint file is never written → every remote hook POST vanishes → dead status for
+        // the whole session. A client-side forward-cancel can't reliably displace the leaked listener;
+        // the certain cure is a FRESH master, whose predecessor's forwards sshd tears down on `-O exit`.
+        // Rebuild once and retry — ONLY on the orphan+failure path, so a clean connect is untouched.
+        if (!res && reusedOrphan) {
+          await this.r.run(exitMasterArgs(conn, controlPath)).catch(() => {}) // drop the orphan + its forwards
+          await fs.rm(controlPath, { force: true }).catch(() => {})
+          reusedOrphan = false
+          master = this.r.spawnMaster(masterArgs(conn, controlPath))
+          this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
+          for (let j = 0; j < 50 && !res; j++) {
+            if ((await this.r.run(checkMasterArgs(conn, controlPath))).code === 0) {
+              res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
+              break
+            }
+            await new Promise((r) => setTimeout(r, 100))
+          }
+        }
         const hookEndpointPath = res?.endpointPath
         // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
         // doesn't surface it). Phase 2b uses it to jail remote transcript reads. Fail-open: an
