@@ -23,6 +23,7 @@ import {
   firstLine,
   extractQuestionOptions,
   extractQuestionText,
+  extractQuestionMultiSelect,
   onNodeStateChange,
   onNodeNowChange,
   _resetForTest,
@@ -653,6 +654,124 @@ describe('question options (AskUserQuestion)', () => {
     recordAgentEvent(ev({ nodeId: 'n5', state: 'working', newTurn: true })) // new turn clears
     recordAgentEvent(ev({ nodeId: 'n5', state: 'waiting', lastMessage: 'Q' }))
     expect(_inboxSnapshot().events.find((e) => e.nodeId === 'n5' && e.kind === 'question')!.options).toBeUndefined()
+  })
+})
+
+// ---- multiSelect (rides the AskUserQuestion pipeline) ---------------------------------------
+
+describe('question multiSelect (AskUserQuestion)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  const qms = (multiSelect: unknown) => ({
+    questions: [{ question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect }]
+  })
+
+  it('extracts the tolerant boolean, undefined on absence/non-boolean/bad shape', () => {
+    expect(extractQuestionMultiSelect(qms(true))).toBe(true)
+    expect(extractQuestionMultiSelect(qms(false))).toBe(false)
+    // absent multiSelect key → undefined
+    expect(extractQuestionMultiSelect({ questions: [{ options: [{ label: 'A' }] }] })).toBeUndefined()
+    // non-boolean is tolerated as undefined (never coerced)
+    expect(extractQuestionMultiSelect(qms('yes'))).toBeUndefined()
+    expect(extractQuestionMultiSelect(qms(1))).toBeUndefined()
+    // only the FIRST question's flag
+    expect(
+      extractQuestionMultiSelect({ questions: [{ multiSelect: true }, { multiSelect: false }] })
+    ).toBe(true)
+    // fail-open on every shape mismatch
+    expect(extractQuestionMultiSelect(undefined)).toBeUndefined()
+    expect(extractQuestionMultiSelect({})).toBeUndefined()
+    expect(extractQuestionMultiSelect({ questions: [] })).toBeUndefined()
+    expect(extractQuestionMultiSelect({ questions: 'x' } as unknown as Record<string, unknown>)).toBeUndefined()
+  })
+
+  it('stashes multiSelect and attaches it to the next question event', () => {
+    recordRawToolEvent('n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(true)
+    })
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'waiting', lastMessage: 'Pick some' }))
+    const q = _inboxSnapshot().events.find((e) => e.nodeId === 'n1' && e.kind === 'question')!
+    expect(q.options).toEqual(['A', 'B'])
+    expect(q.multiSelect).toBe(true)
+  })
+
+  it('omits multiSelect from the event when the flag is false', () => {
+    recordRawToolEvent('n2', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(false)
+    })
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'waiting', lastMessage: 'Pick one' }))
+    const q = _inboxSnapshot().events.find((e) => e.nodeId === 'n2')!
+    expect(q.options).toEqual(['A', 'B'])
+    expect('multiSelect' in q).toBe(false)
+  })
+
+  it('omits multiSelect for a plain question and for an approval (no stash)', () => {
+    recordAgentEvent(ev({ nodeId: 'q', state: 'waiting', lastMessage: 'Which file?' }))
+    recordAgentEvent(ev({ nodeId: 'a', state: 'blocked', lastMessage: 'Approve write' }))
+    expect('multiSelect' in _inboxSnapshot().events.find((e) => e.nodeId === 'q')!).toBe(false)
+    expect('multiSelect' in _inboxSnapshot().events.find((e) => e.nodeId === 'a')!).toBe(false)
+  })
+
+  it('rides a stash-reclassified blocked edge (options force question) and survives a PermissionRequest merge', () => {
+    recordRawToolEvent('n3', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(true)
+    })
+    // A PermissionRequest for the same picker merges onto the stash — multiSelect must survive.
+    recordRawToolEvent('n3', {
+      hook_event_name: 'PermissionRequest',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(true)
+    })
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve?', pendingId: 'n3-1-1' }))
+    const e = _inboxSnapshot().events.find((x) => x.nodeId === 'n3')!
+    expect(e.kind).toBe('question')
+    expect(e.multiSelect).toBe(true)
+  })
+
+  it('clears multiSelect with the stash when the node leaves waiting', () => {
+    recordRawToolEvent('n4', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(true)
+    })
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'waiting', lastMessage: 'Q1' }))
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'working' })) // leaves waiting → clears stash
+    recordAgentEvent(ev({ nodeId: 'n4', state: 'waiting', lastMessage: 'Q2' }))
+    const qs = _inboxSnapshot().events.filter((e) => e.nodeId === 'n4' && e.kind === 'question')
+    expect('multiSelect' in qs[qs.length - 1]).toBe(false)
+  })
+
+  it('the onNodeStateChange needsYou edge carries multiSelect (present true / omitted false)', () => {
+    const seen: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => seen.push(c))
+    recordRawToolEvent('n5', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(true)
+    })
+    recordAgentEvent(ev({ nodeId: 'n5', state: 'waiting', lastMessage: 'Pick some' }))
+    const ny = seen.find((c) => c.nodeId === 'n5' && c.state === 'needsYou')!
+    expect(ny.kind).toBe('question')
+    expect(ny.multiSelect).toBe(true)
+
+    // A false flag is omitted from the edge.
+    recordRawToolEvent('n6', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: qms(false)
+    })
+    recordAgentEvent(ev({ nodeId: 'n6', state: 'waiting', lastMessage: 'Pick one' }))
+    const ny2 = seen.find((c) => c.nodeId === 'n6' && c.state === 'needsYou')!
+    expect(ny2.kind).toBe('question')
+    expect('multiSelect' in ny2).toBe(false)
+    unsub()
   })
 })
 

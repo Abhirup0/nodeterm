@@ -12,13 +12,17 @@ import {
 } from './push-notify'
 import {
   onInboxActionable,
+  onNodeStateChange,
+  onNodeNowChange,
   recordAgentEvent,
+  recordRawToolEvent,
   initAgentStatusMirror,
   _resetForTest,
   type InboxEvent,
   type NodeStateChange,
   type NodeNowChange
 } from './agent-status-mirror'
+import { syntheticAnsweredEvent } from './agents/pending-approvals'
 
 /** A generic manual event source standing in for the mirror subscribe seams. */
 function emitter<T>(): { subscribe: (cb: (e: T) => void) => () => void; emit: (e: T) => void } {
@@ -444,6 +448,26 @@ describe('createPushNotify', () => {
       expect(bodyOf().events[0]).not.toHaveProperty('options')
       h.stop()
     })
+
+    it('passes multiSelect through when the question is multi-select', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'question', title: 'Pick', options: ['A', 'B'], multiSelect: true }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(bodyOf().events[0].multiSelect).toBe(true)
+      expect(bodyOf().events[0].options).toEqual(['A', 'B'])
+      h.stop()
+    })
+
+    it('omits multiSelect when absent or false', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', kind: 'question', title: 'Pick', options: ['A'], multiSelect: false }))
+      em.emit(iev({ nodeId: 'b', kind: 'question', title: 'Pick', options: ['A'] }))
+      await vi.advanceTimersByTimeAsync(2000)
+      for (const e of bodyOf().events) expect(e).not.toHaveProperty('multiSelect')
+      h.stop()
+    })
   })
 
   it('stop() unsubscribes so later events are ignored', async () => {
@@ -535,6 +559,8 @@ describe('createLiveUpdatePush', () => {
       agentId: 'claude',
       event: 'update',
       state: 'needsYou',
+      // A state edge (here the needsYou edge) is marked so the backend can prioritize it (10 vs 5).
+      edge: true,
       message: 'Approve write',
       ts: 42
     })
@@ -702,6 +728,110 @@ describe('createLiveUpdatePush', () => {
       expect(u).not.toHaveProperty('options')
       expect(u).not.toHaveProperty('pendingId')
       h.stop()
+    })
+
+    it('passes multiSelect on a question needsYou edge; omits it when absent', async () => {
+      const { h, st } = wire()
+      st.emit({
+        nodeId: 'a',
+        event: 'update',
+        state: 'needsYou',
+        kind: 'question',
+        options: ['A', 'B'],
+        multiSelect: true,
+        ts: 1
+      })
+      st.emit({ nodeId: 'b', event: 'update', state: 'needsYou', kind: 'question', options: ['A'], ts: 2 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(liveBodyOf().updates[0].multiSelect).toBe(true)
+      expect(liveBodyOf().updates[1]).not.toHaveProperty('multiSelect')
+      h.stop()
+    })
+
+    it('never carries multiSelect on a working/done edge even if the change object has it', async () => {
+      const { h, st } = wire()
+      // Belt-and-braces: a non-needsYou change with a stray multiSelect must not leak it.
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', multiSelect: true, ts: 1 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(liveBodyOf().updates[0]).not.toHaveProperty('multiSelect')
+      h.stop()
+    })
+  })
+
+  describe('state-edge marking (edge flag)', () => {
+    it('marks every state edge (start/needsYou/end) with edge:true', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      st.emit({ nodeId: 'b', event: 'update', state: 'needsYou', message: 'Approve', ts: 2 })
+      st.emit({ nodeId: 'c', event: 'end', state: 'done', message: 'Finished', ts: 3 })
+      await vi.advanceTimersByTimeAsync(1000)
+      for (const u of liveBodyOf().updates) expect(u.edge).toBe(true)
+      h.stop()
+    })
+
+    it('never marks a now-tick (activity/context) with edge', async () => {
+      const { h, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', contextPercent: 10, ts: 0 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(liveBodyOf().updates[0]).not.toHaveProperty('edge')
+      h.stop()
+    })
+
+    // Wire the live-update push to the REAL mirror seams so the synthetic answered blocked→working
+    // transition (built exactly as the held hook's second POST) is exercised end-to-end.
+    describe('via the real mirror', () => {
+      let dir: string
+      beforeEach(() => {
+        _resetForTest()
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'push-edge-'))
+        initAgentStatusMirror(path.join(dir, 'agent-status.json'))
+      })
+      afterEach(() => {
+        _resetForTest()
+        fs.rmSync(dir, { recursive: true, force: true })
+      })
+
+      function ev(p: Partial<NormalizedAgentEvent>): NormalizedAgentEvent {
+        return { nodeId: 'n1', agentId: 'claude', kind: 'state', ...p } as NormalizedAgentEvent
+      }
+
+      it('the answered blocked→working synthetic transition flows through onNodeStateChange as an edge', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true })) // start edge
+        recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-1-1' })) // needsYou edge
+        // The answered signal (allow) → synthetic working, i.e. a blocked→working state edge.
+        recordAgentEvent(syntheticAnsweredEvent('n1', 'n1-1-1', 'allow')!)
+        recordAgentEvent(ev({ state: 'done', lastMessage: 'Done' })) // end edge
+        await vi.advanceTimersByTimeAsync(1000)
+        const updates = liveBodyOf().updates
+        // Four state edges, and every one is marked.
+        expect(updates.map((u: Record<string, unknown>) => [u.event, u.state])).toEqual([
+          ['start', 'working'],
+          ['update', 'needsYou'],
+          ['start', 'working'],
+          ['end', 'done']
+        ])
+        for (const u of updates) expect(u.edge).toBe(true)
+        h.stop()
+      })
+
+      it('activity ticks interleaved with edges stay unmarked while edges are marked', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true })) // start edge
+        recordRawToolEvent('n1', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }) // now-tick
+        await vi.advanceTimersByTimeAsync(1000)
+        const updates = liveBodyOf().updates
+        const start = updates.find((u: Record<string, unknown>) => u.event === 'start')!
+        const tick = updates.find((u: Record<string, unknown>) => u.activity === 'Running ls')!
+        expect(start.edge).toBe(true)
+        expect(tick).not.toHaveProperty('edge')
+        h.stop()
+      })
     })
   })
 
