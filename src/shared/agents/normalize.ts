@@ -22,6 +22,14 @@ export interface NormalizedAgentEvent {
   // `nodeterm_pending_id` (merged into the payload by the hook server) so the phone/canvas can
   // answer the held hook. Absent = no held hook (legacy prompt path). See docs/hook-reply-approvals.md.
   pendingId?: string
+  // needs-you (blocked/waiting) only: how the shell classified this ask AFTER the mirror's
+  // stash-priority reclassification (see agent-status-mirror.recordAgentEvent). 'question' = an
+  // AskUserQuestion picker (its `pendingId` is stripped — approve/deny on a question is wrong UX);
+  // 'approval' = a genuine permission request (its `pendingId`, if any, is kept). Absent on every
+  // non-needs-you event. This is the ENRICHED field the shells broadcast — it is not produced by
+  // the normalizers themselves. Present for future UI; the canvas already keys the approve/deny
+  // buttons off `pendingId`, which is now absent on a question. */
+  askKind?: 'question' | 'approval'
   // session
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out

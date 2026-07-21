@@ -1039,8 +1039,11 @@ app.whenReady().then(async () => {
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
   const emitAgentStatus = (e: NormalizedAgentEvent): void => {
-    sendToMain(IPC.agentStatus, e)
-    recordAgentEvent(e)
+    // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
+    // event ENRICHED for a needs-you edge (a question strips its pendingId), so the canvas keys off
+    // the same single source of truth as the mirror/phone. Then broadcast the enriched event.
+    const enriched = recordAgentEvent(e) ?? e
+    sendToMain(IPC.agentStatus, enriched)
   }
   hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
