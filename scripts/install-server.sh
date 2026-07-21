@@ -17,6 +17,10 @@ REPO_URL="${NODETERM_REPO_URL:-https://github.com/eneskirca/nodeterm}"
 APP_DIR="${NODETERM_APP_DIR:-$HOME/.nodeterm-server-app}"
 SERVICE_NAME="nodeterm-server"
 MIN_NODE_MAJOR=20
+# When the system Node is missing or too old we provision this pinned LTS privately (see ensure_node).
+# v22.14.0 is a Node 22 "Jod" LTS release. Override with NODETERM_NODE_VERSION for a different pin.
+NODE_LTS_VERSION="${NODETERM_NODE_VERSION:-v22.14.0}"
+NODE_DIST_BASE="${NODETERM_NODE_DIST_BASE:-https://nodejs.org/dist}"
 
 # ---- pretty output ---------------------------------------------------------------------------
 info() { printf '\033[36m→\033[0m %s\n' "$1"; }
@@ -29,16 +33,82 @@ fail() { printf '\033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || fail "git is not installed. Install it first (e.g. 'sudo apt install git' or 'sudo dnf install git')."
 
-if ! command -v node >/dev/null 2>&1; then
-  fail "Node.js is not installed. Install Node.js >= ${MIN_NODE_MAJOR} (https://nodejs.org or your distro / nvm) and re-run."
-fi
-NODE_BIN="$(command -v node)"
-NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
-  fail "Node.js >= ${MIN_NODE_MAJOR} is required, found $("$NODE_BIN" -v). Upgrade Node and re-run."
-fi
+# ---- Node.js: use a good-enough system install, else provision a private one --------------------
+# Sets NODE_BIN (absolute — used by npm ci, the node-pty rebuild, and the systemd ExecStart) and,
+# when it provisions, prepends its bin to PATH so `node`/`npm`/`npx`/build scripts all use it. This
+# is what makes the one-tap iOS install flow work on a host whose system Node is missing or < 20.
+ensure_node() {
+  # 1. A good-enough system Node (>= MIN_NODE_MAJOR, with npm)? Use it unchanged — today's behavior.
+  if command -v node >/dev/null 2>&1; then
+    local sys_node sys_major
+    sys_node="$(command -v node)"
+    sys_major="$("$sys_node" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    if [ "$sys_major" -ge "$MIN_NODE_MAJOR" ] && command -v npm >/dev/null 2>&1; then
+      NODE_BIN="$sys_node"
+      ok "Using system Node.js $("$NODE_BIN" -v)"
+      return
+    fi
+    if [ "$sys_major" -ge "$MIN_NODE_MAJOR" ]; then
+      warn "System Node.js $("$sys_node" -v) found but npm is missing — provisioning a private Node runtime instead."
+    else
+      info "System Node.js $("$sys_node" -v) is older than v${MIN_NODE_MAJOR} — provisioning Node ${NODE_LTS_VERSION} privately (no system changes)."
+    fi
+  else
+    info "Node.js not found — provisioning Node ${NODE_LTS_VERSION} privately (no system changes)."
+  fi
 
-command -v npm >/dev/null 2>&1 || fail "npm is not installed (it normally ships with Node.js). Install npm and re-run."
+  # 2. Provision the pinned Node LTS under the app dir. Map uname → nodejs.org dist naming.
+  local os arch runtime_dir node_bin
+  case "$(uname -s)" in
+    Linux)  os="linux" ;;
+    Darwin) os="darwin" ;;
+    *) fail "Automatic Node provisioning supports Linux and macOS only (found $(uname -s)). Install Node.js >= ${MIN_NODE_MAJOR} manually and re-run." ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  arch="x64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) fail "Automatic Node provisioning supports x64 and arm64 only (found $(uname -m)). Install Node.js >= ${MIN_NODE_MAJOR} manually and re-run." ;;
+  esac
+
+  # The official tarballs are glibc-linked; musl (Alpine) can't run them.
+  if [ "$os" = "linux" ] && { [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; }; then
+    fail "This host uses musl libc (e.g. Alpine); the official Node.js binaries need glibc. Install Node.js >= ${MIN_NODE_MAJOR} via your package manager (e.g. 'apk add nodejs npm') and re-run."
+  fi
+
+  runtime_dir="$APP_DIR/runtime/node"
+  node_bin="$runtime_dir/bin/node"
+
+  # Idempotent: reuse an existing extract only when it is exactly the pinned version.
+  if [ -x "$node_bin" ] && [ "$("$node_bin" -v 2>/dev/null)" = "$NODE_LTS_VERSION" ]; then
+    ok "Node ${NODE_LTS_VERSION} already provisioned at $runtime_dir"
+  else
+    local tarname url tmp
+    tarname="node-${NODE_LTS_VERSION}-${os}-${arch}"
+    url="${NODE_DIST_BASE}/${NODE_LTS_VERSION}/${tarname}.tar.gz"
+    rm -rf "$runtime_dir"                 # clear any partial / stale (wrong-version) extract
+    mkdir -p "$runtime_dir"
+    tmp="$(mktemp -d)"
+    info "Downloading Node ${NODE_LTS_VERSION} (${os}-${arch}) from ${url}"
+    if ! curl -fsSL "$url" -o "$tmp/node.tar.gz"; then
+      rm -rf "$tmp" "$runtime_dir"
+      fail "Failed to download Node.js from ${url}. Check the host's network / DNS and re-run."
+    fi
+    if ! tar -xzf "$tmp/node.tar.gz" -C "$runtime_dir" --strip-components=1; then
+      rm -rf "$tmp" "$runtime_dir"
+      fail "Failed to extract the Node.js tarball. Ensure 'tar' (with gzip) is installed and re-run."
+    fi
+    rm -rf "$tmp"
+  fi
+
+  # 3. Verify the binary runs before we depend on it, then put it first on PATH so npm/npx/build use it.
+  if ! "$node_bin" --version >/dev/null 2>&1; then
+    rm -rf "$runtime_dir"
+    fail "The provisioned Node.js binary at $node_bin does not run on this host. Install Node.js >= ${MIN_NODE_MAJOR} manually and re-run."
+  fi
+  NODE_BIN="$node_bin"
+  export PATH="$runtime_dir/bin:$PATH"
+  ok "Provisioned Node $("$NODE_BIN" -v) at $runtime_dir"
+}
 
 # node-pty is a native module and is (re)built from source against Node's ABI, which needs a C/C++
 # toolchain + python3. Missing tools → warn with the install one-liner, but don't hard-fail: if a
@@ -70,6 +140,11 @@ else
 fi
 
 cd "$APP_DIR"
+
+# ---- Node.js runtime (system if good enough, else provision under $APP_DIR/runtime/node) ------
+# Runs AFTER the clone so the runtime lives inside the checkout without tripping the clone's
+# "dir already exists" guard; the untracked runtime/ survives `git reset --hard` on later updates.
+ensure_node
 
 # ---- install deps + build --------------------------------------------------------------------
 # The repo's postinstall runs electron-rebuild (targets ELECTRON's ABI). The server runs under
