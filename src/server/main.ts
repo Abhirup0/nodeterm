@@ -13,8 +13,12 @@ process.on('unhandledRejection', (e) => console.error('[nodeterm-server] unhandl
 async function main(): Promise<void> {
   const config = resolveConfig(process.env, process.argv.slice(2))
   const { port, close } = await startServer(config)
-  const scheme = config.insecureHttp ? 'http (insecure)' : 'http'
-  console.log(`nodeterm-server listening on ${scheme} ${config.host}:${port}`)
+  // Headless binds no listener, so there is nothing to announce as "listening" (startServer already
+  // logged the headless line). Only print the address in normal serving mode.
+  if (!config.headless) {
+    const scheme = config.insecureHttp ? 'http (insecure)' : 'http'
+    console.log(`nodeterm-server listening on ${scheme} ${config.host}:${port}`)
+  }
 
   const shutdown = (signal: string): void => {
     console.log(`\nReceived ${signal}, shutting down…`)

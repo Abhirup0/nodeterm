@@ -14,6 +14,15 @@ export type ServerConfig = {
   insecureHttp: boolean
   passwordSeed?: string
   /**
+   * Headless notification-host mode (`NODETERM_HEADLESS=1`). When set, the server does NOT
+   * bind the HTTP/WS listener at all — no renderer serving, no auth surface, no open port —
+   * but boots every other core service exactly as usual (the loopback hook server, agent-status
+   * mirror, usage poll, granted push senders, pending-approvals sweep). A phone that SSHes into
+   * the host still gets full push / Live-Activity coverage as long as this process runs. See the
+   * "Headless notification host" section of docs/SERVER.md.
+   */
+  headless: boolean
+  /**
    * Merge the managed agent hooks into the user's real agent config dirs (~/.claude,
    * ~/.codex, ~/.gemini) at boot. Defaults to true — the server needs them to receive
    * agent status. Tests MUST pass false: the installed hook points at
@@ -82,8 +91,14 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   const rendererDir = pick('renderer-dir', 'NODETERM_RENDERER_DIR', path.resolve('out/renderer'))
   const insecureHttp = args['insecure-http'] === true
   const passwordSeed = env.NODETERM_SERVER_PASSWORD || undefined
+  // Headless mode is env-only (a deployment/systemd knob, not an interactive flag). Accept the two
+  // truthy spellings the install script + systemd unit emit.
+  const headlessEnv = (env.NODETERM_HEADLESS || '').trim().toLowerCase()
+  const headless = headlessEnv === '1' || headlessEnv === 'true'
 
-  if (!isLoopback(host) && !insecureHttp) {
+  // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
+  // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
+  if (!isLoopback(host) && !insecureHttp && !headless) {
     throw new Error(
       `Refusing to bind non-loopback host "${host}" over plain HTTP. Run nodeterm-server ` +
         `behind a TLS-terminating reverse proxy and keep it bound to a loopback address ` +
@@ -111,5 +126,5 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     )
   }
 
-  return { port, host, dataDir, rendererDir, insecureHttp, passwordSeed, trustProxy }
+  return { port, host, dataDir, rendererDir, insecureHttp, passwordSeed, trustProxy, headless }
 }

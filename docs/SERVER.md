@@ -75,6 +75,57 @@ Binding a **non-loopback** host (anything other than `127.0.0.1` / `localhost` /
 interface would leak the session cookie. The intended deployment is loopback-bound
 behind a TLS-terminating reverse proxy (see [TLS](#tls-reverse-proxy)).
 
+## Headless notification host
+
+The Server Edition doubles as a **headless notification host**: a background process on any
+Linux box that gives a phone SSHing into it full push / Live-Activity coverage — **without
+serving the browser UI and without opening a single port**.
+
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/install-server.sh | bash
+```
+
+The installer (`scripts/install-server.sh`) is idempotent — re-run it any time to update. It:
+
+- checks Node.js ≥ 20 + git, and warns (with the apt/dnf one-liner) if the C toolchain
+  (`make`/`gcc`/`python3`) node-pty's native build needs is missing;
+- clones (or `git pull`s) the repo into `~/.nodeterm-server-app`;
+- installs deps (`npm ci --ignore-scripts`, then `npm rebuild node-pty` against Node's ABI —
+  the same trap the [Docker](#docker--dokploy) build documents) and builds the renderer +
+  server bundle;
+- installs a **systemd** service (`NODETERM_HEADLESS=1`, `Restart=on-failure`, journald logs):
+  a system unit at `/etc/systemd/system/nodeterm-server.service` when run as root, or a
+  per-user unit + `loginctl enable-linger` otherwise — then enables and (re)starts it.
+
+Follow the logs with `journalctl -u nodeterm-server -f` (add `--user` for a non-root install).
+
+### `NODETERM_HEADLESS`
+
+Set `NODETERM_HEADLESS=1` (also accepts `true`, case-insensitive) to boot in headless mode.
+Everything boots **exactly as usual** — the loopback hook server, the agent-status mirror, the
+usage poll, the granted push senders (push-notify + Live-Activity), and the pending-approvals
+sweep — **except** the public HTTP/WS listener, which is **never bound**. There is no renderer
+serving and no auth surface. `NODETERM_HOST` / `NODETERM_PORT` are ignored (nothing binds), and
+`platform.broadcast` is a no-op while no browser UI is attached.
+
+### Security rationale: zero open ports
+
+The whole point of this mode is that it adds **no network attack surface**:
+
+- **No public listener at all.** The HTTP/WS server is never created, so there is no port to
+  expose, no login page to brute-force, and no session cookie in flight.
+- **The hook server stays loopback-only.** Agent CLIs POST their lifecycle hooks to
+  `127.0.0.1` (a per-session bearer token, fail-open) — it never leaves the host.
+- **Push is outbound-only.** Notifications reach the phone over **outbound HTTPS**, authorized
+  by a signed, device-scoped **grant** the phone itself drops at
+  `~/.nodeterm/push-grants/<deviceId>.grant` when it reaches the host over SSH. No inbound
+  connection, no standing relay identity — a grant a phone never dropped simply means no push.
+
+The phone's own SSH session into the host is the trust boundary; nodeterm adds nothing listening
+beside it.
+
 ## Security model
 
 Single-user auth. There is one password; sessions are per-browser.
