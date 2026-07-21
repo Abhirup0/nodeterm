@@ -22,7 +22,7 @@ export const NODE_COLORS = [
   '#ff9f0a' // systemOrange
 ]
 
-const TERMINAL_SIZE = { width: 600, height: 400 }
+const TERMINAL_SIZE = { width: 640, height: 440 }
 const STICKY_SIZE = { width: 240, height: 200 }
 const GROUP_SIZE = { width: 520, height: 360 }
 /** A fresh worktree group starts empty but exists to HOLD terminals/agents, and the default

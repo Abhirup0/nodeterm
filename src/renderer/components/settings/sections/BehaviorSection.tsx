@@ -52,7 +52,7 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
                 min={280}
                 max={2400}
                 step={20}
-                onChange={(v) => update({ defaultNodeWidth: v || 600 })}
+                onChange={(v) => update({ defaultNodeWidth: v || 640 })}
               />
               <span style={{ opacity: 0.6 }}>×</span>
               <NumberField
@@ -60,7 +60,7 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
                 min={160}
                 max={1600}
                 step={20}
-                onChange={(v) => update({ defaultNodeHeight: v || 400 })}
+                onChange={(v) => update({ defaultNodeHeight: v || 440 })}
               />
             </div>
           }
