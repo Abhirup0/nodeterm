@@ -10,13 +10,13 @@ Multiple real terminals live as draggable nodes on a single pan/zoom canvas.
 Built for people with ADHD and scattered workflows: a spatial layout instead of
 a stack of hidden tabs.
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)-black)](https://nodeterm.dev)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)%20·%20Linux%20(x64)-black)](https://nodeterm.dev)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
 
-[Download](#-download) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
+[Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
 
 </div>
 
@@ -34,8 +34,11 @@ Stacked terminal tabs hide context — you lose track of what's running where. n
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
 into. Sessions are spatial and persistent, so your mental model stays intact across
 restarts. And because the app is built around a clean service seam, the same canvas now
-runs three ways — as the **macOS desktop app**, as a **self-hosted browser app** you
-reach from anywhere (Server Edition), and (in progress) a **mobile companion**.
+runs three ways — as the **desktop app for macOS and Linux**, as a **self-hosted browser
+app** you reach from anywhere (Server Edition), and (in progress) an **iOS companion**.
+
+📚 **Full documentation lives at [nodeterm.dev/docs](https://nodeterm.dev/docs)** — get
+started, concepts, agents, remote access, troubleshooting.
 
 ## ✨ Features
 
@@ -48,7 +51,7 @@ reach from anywhere (Server Edition), and (in progress) a **mobile companion**.
 - **Many node kinds**, all on the same canvas:
   - 🖥 **Terminal** — xterm + tmux, click-to-rename, color, tags, AI naming.
   - 🤖 **Agent** — a terminal preset that launches an agent CLI: **Claude Code**, **Codex**,
-    **Gemini**, or your own custom command.
+    **Gemini**, **opencode**, or your own custom command.
   - 💬 **Chat** — an SDK-driven Claude chat node (streaming, in-chat permission prompts,
     image paste, cost meter) — not a PTY.
   - 📝 **Sticky note** — free-text colored notes; link one to an agent to feed it context.
@@ -58,10 +61,11 @@ reach from anywhere (Server Edition), and (in progress) a **mobile companion**.
   - 🌐 **Web / Video** — render a page or a video right on the canvas.
 - **Live agent status** — hook-driven **RUNNING / NEEDS YOU** badges, **subagent** cards
   with a live transcript, a **context-window meter**, and unread dots + completion
-  notifications — for Claude, Codex, and Gemini, no output-scraping.
-- **Agent superpowers** — **context links** so two agent nodes (Claude / Codex / Gemini) can
-  read each other's transcript on demand, plus Claude-only **branch a conversation** into a
-  new node and **managed accounts** to run several logged-in Claude identities side by side.
+  notifications — for all four built-in agents, no output-scraping.
+- **Agent superpowers** — **context links** so two agent nodes (any mix of the four
+  built-ins) can read each other's transcript on demand, plus Claude-only **branch a
+  conversation** into a new node and **managed accounts** to run several logged-in Claude
+  identities side by side.
 - **Remote / SSH projects** — open a project on a remote host over SSH; terminals, files,
   and git run there while the canvas stays local.
 - **Source control** — VS Code-style file-level stage/unstage, discard, branch
@@ -92,15 +96,21 @@ limitations.
 
 ## 📦 Download
 
-Grab the latest `.dmg` from **[nodeterm.dev](https://nodeterm.dev)** (Apple Silicon and
-Intel builds). The app auto-updates itself from there.
+Grab the latest build from **[nodeterm.dev](https://nodeterm.dev)** — the download button
+detects your platform. Everything is also listed at
+[nodeterm.dev/releases](https://nodeterm.dev/releases):
 
-> Until the build is signed & notarized, macOS Gatekeeper may warn on first launch —
+- **macOS** — `.dmg` for Apple Silicon and Intel (auto-updates).
+- **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
+  (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
+
+> Until the macOS build is signed & notarized, Gatekeeper may warn on first launch —
 > right-click the app → **Open** to bypass it once.
 
 ## 🛠 Build from source
 
-Requires Node.js 20+ and macOS.
+Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
+survive restarts).
 
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall)
@@ -110,6 +120,7 @@ npm start          # preview the production build
 npm run typecheck  # fastest correctness gate
 npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
+npm run dist:linux # AppImage + .deb into dist/ (on a Linux host)
 npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```
 
@@ -147,12 +158,13 @@ headless browser edition.
 - **Three surfaces** — the desktop app, the browser **Server Edition**, and an in-progress
   **mobile companion** (a separate SwiftUI repo) all ride the same core + transport seams.
 
-See [`CLAUDE.md`](./CLAUDE.md) for the full design notes and gotchas, and
-[`docs/SERVER.md`](./docs/SERVER.md) for the Server Edition.
+See [`docs/SERVER.md`](./docs/SERVER.md) for the Server Edition, and the design docs
+under [`docs/`](./docs) for deeper notes.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. nodeterm is licensed under the
+Issues and pull requests are welcome. Questions or bug reports are also happy at
+[nodeterm.dev/support](https://nodeterm.dev/support) / support@nodeterm.dev. nodeterm is licensed under the
 [Business Source License 1.1](https://mariadb.com/bsl11/) — you can use, modify,
 and redistribute it freely, including in production, except offering it as a
 competing product or service (see [License](#-license)).
