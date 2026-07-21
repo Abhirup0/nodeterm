@@ -94,6 +94,21 @@ browser today; the SDK chat node is the one piece still desktop-only. See
 [`docs/SERVER.md`](./docs/SERVER.md) for the quickstart, security model, and current
 limitations.
 
+#### 🔔 Get push notifications from any SSH host
+
+The same server also runs **headless** as a background notification host: install it on any
+Linux box you SSH into, and your phone gets **RUNNING / NEEDS YOU** push + Live-Activity
+coverage for the agents running there — with **zero open ports** (the hook server stays
+loopback-only and push goes out over HTTPS under a grant your phone drops over SSH).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/install-server.sh | bash
+```
+
+One line installs, builds, and runs it as a systemd service (`NODETERM_HEADLESS=1`); re-run it
+to update. See the [headless notification host](./docs/SERVER.md#headless-notification-host)
+section for details.
+
 ## 📦 Download
 
 Grab the latest build from **[nodeterm.dev](https://nodeterm.dev)** — the download button

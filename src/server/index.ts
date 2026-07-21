@@ -100,8 +100,9 @@ export async function startServer(
         `and that it strips/overwrites this header on client requests.`
     )
   }
-  if (!auth.isConfigured()) {
+  if (!config.headless && !auth.isConfigured()) {
     // No password set yet: print the one-time setup URL so the operator can bootstrap.
+    // (Headless binds no listener, so there is no setup page to point at.)
     console.log(`Setup: http://${config.host}:${config.port}/setup?token=${auth.setupToken()}`)
   }
 
@@ -288,6 +289,22 @@ export async function startServer(
     }
   }
   await hookServer.start()
+
+  // Headless notification host: every core service above (incl. the loopback hook server, which
+  // is its own listener and MUST run) is booted, but we bind NO public HTTP/WS listener — no
+  // renderer serving, no auth surface, no open port. The granted push senders reach the phone over
+  // outbound HTTPS, and platform.broadcast is a no-op with zero attached UIs. See docs/SERVER.md.
+  if (config.headless) {
+    console.log('nodeterm-server headless mode — UI disabled (no HTTP/WS listener bound)')
+    return {
+      port: 0, // nothing bound
+      async close() {
+        // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
+        await ptyManager.killAll()
+        hookServer.stop()
+      }
+    }
+  }
 
   const server = http.createServer(
     createHttpHandler({ auth, rendererDir: config.rendererDir, trustProxy: config.trustProxy })

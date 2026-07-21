@@ -26,6 +26,21 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0' }, ['--insecure-http'])).not.toThrow()
   })
 
+  it('headless: off by default, on for "1"/"true" (case-insensitive), off for anything else', () => {
+    expect(resolveConfig({}, []).headless).toBe(false)
+    expect(resolveConfig({ NODETERM_HEADLESS: '1' }, []).headless).toBe(true)
+    expect(resolveConfig({ NODETERM_HEADLESS: 'true' }, []).headless).toBe(true)
+    expect(resolveConfig({ NODETERM_HEADLESS: 'TRUE' }, []).headless).toBe(true)
+    expect(resolveConfig({ NODETERM_HEADLESS: ' true ' }, []).headless).toBe(true)
+    expect(resolveConfig({ NODETERM_HEADLESS: '0' }, []).headless).toBe(false)
+    expect(resolveConfig({ NODETERM_HEADLESS: 'yes' }, []).headless).toBe(false)
+  })
+
+  it('headless: a non-loopback host no longer fails the boot (nothing binds)', () => {
+    // In normal mode this throws; headless binds no listener, so the hazard does not apply.
+    expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0', NODETERM_HEADLESS: '1' }, [])).not.toThrow()
+  })
+
   it('proxy trust: off by default', () => {
     expect(resolveConfig({}, []).trustProxy).toBeUndefined()
   })
