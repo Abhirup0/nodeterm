@@ -17,6 +17,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import type { Auth } from './auth'
 import type { ServerPlatform } from './platform-server'
 import { sessionTokenFromCookie } from './http'
+import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
 import { parseRpcMessage } from '../shared/rpc'
 import { presenceHub } from '../core/presence/hub'
 
@@ -65,16 +66,26 @@ export interface WsServerOpts {
   onClientGone?: (uiId: number) => void
   /** TEST ONLY: shorten the heartbeat period. Production always uses WS_HEARTBEAT_MS. */
   heartbeatMs?: number
+  /** Reverse-proxy SSO trust (issue #29) — same object the HTTP handler gets. */
+  trustProxy?: TrustProxyConfig
 }
 
 /**
- * Decide whether an upgrade request is allowed. Returns true only when the
- * session cookie validates AND, if an Origin header is present, its host matches
- * the Host header. A malformed Origin URL is treated as a rejection (never throws).
+ * Decide whether an upgrade request is allowed. Returns true only when the request is
+ * authenticated — a valid session cookie OR reverse-proxy header trust (issue #29) —
+ * AND, if an Origin header is present, its host matches the Host header (the cross-site
+ * WS hijacking check applies to both auth paths). A malformed Origin URL is treated as a
+ * rejection (never throws).
  */
-function upgradeAllowed(req: http.IncomingMessage, auth: Auth): boolean {
+function upgradeAllowed(
+  req: http.IncomingMessage,
+  auth: Auth,
+  trustProxy?: TrustProxyConfig
+): boolean {
   const token = sessionTokenFromCookie(req.headers['cookie'])
-  if (!auth.validateSession(token)) return false
+  const proxyAuthed =
+    trustProxy !== undefined && proxyAuthAllowed(trustProxy, req.headers, req.socket.remoteAddress)
+  if (!proxyAuthed && !auth.validateSession(token)) return false
 
   const origin = req.headers['origin']
   if (typeof origin === 'string' && origin.length > 0) {
@@ -91,7 +102,7 @@ function upgradeAllowed(req: http.IncomingMessage, auth: Auth): boolean {
 }
 
 export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
-  const { platform, auth, onClientGone, heartbeatMs = WS_HEARTBEAT_MS } = opts
+  const { platform, auth, onClientGone, heartbeatMs = WS_HEARTBEAT_MS, trustProxy } = opts
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
 
   // The one teardown for a connection that is GONE — whether by a clean 'close', or because its sink
@@ -140,7 +151,7 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): void {
     const pathname = new URL(req.url || '/', 'http://x').pathname
     if (pathname !== '/ws') return
 
-    if (!upgradeAllowed(req, auth)) {
+    if (!upgradeAllowed(req, auth, trustProxy)) {
       // Guard the raw socket: writing to an already-dead peer emits 'error', and an
       // unhandled 'error' on a socket (EventEmitter) throws → crashes the process.
       socket.on('error', () => {})

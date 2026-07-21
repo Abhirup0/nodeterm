@@ -8,6 +8,7 @@ import { Auth } from './auth'
 import { ServerPlatform } from './platform-server'
 import { attachWsServer, WS_MAX_PAYLOAD } from './ws'
 import { SESSION_COOKIE } from './http'
+import { parseTrustedNets } from './proxy-trust'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { presenceHub } from '../core/presence/hub'
 import { IPC } from '../shared/ipc'
@@ -189,6 +190,50 @@ describe('ws endpoint', () => {
     ws.close()
     await until(() => gone.length === 1, 'the close hook fires')
     expect(gone).toEqual([1]) // the uiId this socket attached as
+  })
+
+  it('proxy header trust: upgrade allowed via trusted header, still origin-checked', async () => {
+    const HDR = 'Tailscale-User-Login'
+    const mk = async (netsSpec: string): Promise<{ srv: http.Server; p: number }> => {
+      const srv = http.createServer((_q, s2) => { s2.statusCode = 404; s2.end() })
+      attachWsServer(srv, {
+        platform,
+        auth,
+        trustProxy: { header: HDR, nets: parseTrustedNets(netsSpec) }
+      })
+      await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r))
+      return { srv, p: (srv.address() as { port: number }).port }
+    }
+    const dial = (p2: number, headers: Record<string, string>): Promise<WebSocket> =>
+      new Promise((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${p2}/ws`, { headers })
+        sockets.push(ws)
+        ws.on('open', () => resolve(ws))
+        ws.on('error', reject)
+      })
+
+    const { srv, p: pTrusted } = await mk('127.0.0.0/8')
+    const { srv: srvFar, p: pFar } = await mk('10.0.0.0/8')
+    try {
+      // No cookie, trusted peer + header → accepted (same-host Origin passes the origin check).
+      const ok = await dial(pTrusted, { [HDR]: 'dev@corp', origin: `http://127.0.0.1:${pTrusted}` })
+      expect(ok.readyState).toBe(WebSocket.OPEN)
+      // Cross-site Origin is still rejected even when proxy-authed.
+      await expect(
+        dial(pTrusted, { [HDR]: 'dev@corp', origin: 'https://evil.example.com' })
+      ).rejects.toThrow()
+      // Header without cookie from a peer outside the trusted nets → rejected.
+      await expect(dial(pFar, { [HDR]: 'dev@corp' })).rejects.toThrow()
+      // Cookie still works on a trust-enabled server.
+      const viaCookie = await dial(pFar, { cookie })
+      expect(viaCookie.readyState).toBe(WebSocket.OPEN)
+      for (const ws of sockets) ws.terminate()
+      sockets = []
+      await until(() => presenceHub.peers().length === 0, 'trust-test peers drain')
+    } finally {
+      await new Promise((r) => srv.close(r))
+      await new Promise((r) => srvFar.close(r))
+    }
   })
 
   it('heartbeat: terminates a socket that never answers a ping, dropping its presence peer', async () => {
