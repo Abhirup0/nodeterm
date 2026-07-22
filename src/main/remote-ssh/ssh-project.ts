@@ -360,6 +360,7 @@ export class SshProjectManager {
         // best-effort setup, and holding the connect on them would delay every terminal.
         if (remoteHome && hookEndpointPath) {
           void this.remoteHooks.installCanvasControl(conn, controlPath, remoteHome)
+          void this.remoteHooks.installContextLink(conn, controlPath, remoteHome)
         }
         const entry = this.conns.get(projectId)
         if (entry) {
@@ -644,6 +645,7 @@ export class SshProjectManager {
     // CLAUDE_CONFIG_DIR, so an account session never sees the one in `~/.claude/skills`.
     if (c.remoteHome && c.hookEndpointPath) {
       await this.remoteHooks.installCanvasSkillIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
+      await this.remoteHooks.installContextLinkSkillIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
     }
     // One remote `claude --version` gates both the keychain-scoping answer (>= 2.1, fail-open true)
     // AND the fullscreen-tui write (>= 2.1.89, write-if-absent) into the account dir.

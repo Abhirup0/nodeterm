@@ -252,3 +252,59 @@ describe('RemoteHooks.installCanvasControl', () => {
     await expect(new RemoteHooks({ run }).installCanvasControl(conn, '/s.sock', '/home/u')).resolves.toBeUndefined()
   })
 })
+
+describe('RemoteHooks.installContextLink', () => {
+  const isWriteTo = (args: string[], p: string) => args.join(' ').includes('cat > ') && args.join(' ').includes(p)
+
+  it('writes an executable shim + the skill, and merges the instruction blocks', async () => {
+    const { rh, calls } = mk()
+    await rh.installContextLink(conn, '/s.sock', '/home/u')
+    const joined = calls.map((c) => c.args.join(' '))
+    expect(joined.some((j) => j.includes("cat > '/home/u/.nodeterm/context.sh'") && j.includes('chmod 755'))).toBe(true)
+    // The shim is the thin client: it POSTs and prints. All transcript parsing stays on the
+    // desktop, which is what makes the host's missing `node` irrelevant.
+    const shim = calls.find((c) => isWriteTo(c.args, '/home/u/.nodeterm/context.sh'))?.stdin ?? ''
+    expect(shim).toContain('#!/bin/sh')
+    expect(shim).toContain('/context-link/')
+    expect(shim).toContain('--unix-socket')
+    expect(shim).not.toContain('ELECTRON_RUN_AS_NODE')
+    const skill = calls.find((c) => isWriteTo(c.args, '/home/u/.claude/skills/get-linked-context/SKILL.md'))?.stdin ?? ''
+    expect(skill).toContain('name: get-linked-context')
+    expect(skill).toContain('sh "/home/u/.nodeterm/context.sh"')
+    expect(calls.some((c) => (c.stdin ?? '').includes('nodeterm:get-linked-context:start'))).toBe(true)
+    expect(joined.some((j) => j.includes('~/'))).toBe(false)
+  })
+
+  it('leaves the canvas-control block in the same file alone', async () => {
+    // Both features merge into ~/.codex/AGENTS.md under DIFFERENT markers. Installing one must
+    // not evict the other, or every connect would leave the host with exactly one of the two.
+    const existing =
+      '<!-- nodeterm:manage-canvas:start -->\nCANVAS BLOCK\n<!-- nodeterm:manage-canvas:end -->\n'
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      const joined = args.join(' ')
+      if (joined.includes('.codex/AGENTS.md') && !joined.includes('cat >')) return { code: 0, stdout: existing }
+      return { code: 0, stdout: '' }
+    })
+    await new RemoteHooks({ run }).installContextLink(conn, '/s.sock', '/home/u')
+    const write = calls.find((c) => isWriteTo(c.args, '/home/u/.codex/AGENTS.md'))
+    expect(write?.stdin).toContain('CANVAS BLOCK')
+    expect(write?.stdin).toContain('nodeterm:get-linked-context:start')
+  })
+
+  it('installs the skill into a remote managed-account config dir', async () => {
+    const { rh, calls } = mk()
+    await rh.installContextLinkSkillIntoAccountDir(conn, '/s.sock', '/home/u', 'acc-1')
+    const target = '/home/u/.nodeterm/claude-accounts/acc-1/skills/get-linked-context/SKILL.md'
+    expect(calls.some((c) => isWriteTo(c.args, target))).toBe(true)
+    expect(calls.some((c) => isWriteTo(c.args, '/home/u/.nodeterm/context.sh'))).toBe(true)
+  })
+
+  it('fails open when the remote runner throws', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('ssh died')
+    })
+    await expect(new RemoteHooks({ run }).installContextLink(conn, '/s.sock', '/home/u')).resolves.toBeUndefined()
+  })
+})

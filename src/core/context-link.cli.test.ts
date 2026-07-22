@@ -1,36 +1,41 @@
+// The context-link read path, end to end: the REAL POSIX-sh shim, run by the real /bin/sh,
+// against the real hook server and the real renderer. This replaces an identical suite that
+// exercised the retired Node CLI — same fixtures and same expectations, so the rewrite answers
+// for the behavior it inherited, plus the remote (SSH) case the old shape could not express.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CLI_SCRIPT } from './context-link-core'
+import { promisify } from 'node:util'
+import { CONTEXT_SHIM_SCRIPT, type LinkDoc } from './context-link-core'
+import { renderContextLink, type ContextLinkFetch, type ContextLinkVerb } from './context-link-render'
+import { hookServer } from './agents/hook-server'
+import { initPlatform, resetPlatformForTests } from './platform'
+import { fakePlatform } from './platform-fake'
 
-let dir: string
-let binDir: string
+const run = promisify(execFile)
 
-beforeAll(() => {
+let dir = ''
+let shim = ''
+let doc: LinkDoc
+
+/** What the fetchers were asked for — how the remote-routing assertions see the difference. */
+const asked: { transcripts: string[]; terminals: string[]; exports: string[] } = {
+  transcripts: [],
+  terminals: [],
+  exports: []
+}
+
+beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'ctxlink-'))
-  writeFileSync(join(dir, 'context-cli.mjs'), CLI_SCRIPT)
-  // A fake `opencode` on PATH: `opencode export <id>` prints a session-export JSON blob.
-  // opencode stores sessions in SQLite, so the CLI shells out to `opencode export` instead
-  // of reading a file — we stub that binary to return a fixture payload.
-  binDir = mkdtempSync(join(tmpdir(), 'ctxlink-bin-'))
-  const opencodeExport = JSON.stringify({
-    messages: [
-      { role: 'user', parts: [{ type: 'text', text: 'add rerank' }] },
-      {
-        role: 'assistant',
-        parts: [
-          { type: 'text', text: 'done, added rerank.ts' },
-          { type: 'tool', tool: 'bash', state: { input: { command: 'npm test' } } }
-        ]
-      }
-    ]
-  })
-  writeFileSync(join(binDir, 'export.json'), opencodeExport)
-  writeFileSync(join(binDir, 'opencode'), `#!/bin/sh\ncat "${join(binDir, 'export.json')}"\n`)
-  chmodSync(join(binDir, 'opencode'), 0o755)
-  const transcript = [
+  resetPlatformForTests()
+  initPlatform(fakePlatform({ userDataDir: dir }))
+  shim = join(dir, 'context.sh')
+  writeFileSync(shim, CONTEXT_SHIM_SCRIPT, { mode: 0o755 })
+  chmodSync(shim, 0o755)
+
+  const claudeTranscript = [
     JSON.stringify({ type: 'user', message: { content: 'deploy the app' } }),
     JSON.stringify({
       type: 'assistant',
@@ -42,7 +47,6 @@ beforeAll(() => {
       }
     })
   ].join('\n')
-  writeFileSync(join(dir, 'b.jsonl'), transcript)
   const codexTranscript = [
     JSON.stringify({ type: 'session_meta', payload: { id: 'sess-x' } }),
     JSON.stringify({
@@ -59,111 +63,192 @@ beforeAll(() => {
     }),
     JSON.stringify({ type: 'response_item', payload: { type: 'function_call_output', output: '2 passed' } })
   ].join('\n')
-  writeFileSync(join(dir, 'codex.jsonl'), codexTranscript)
   const geminiTranscript = [
     JSON.stringify({ sessionId: 'g-sess', projectHash: 'abc' }),
     JSON.stringify({ $set: { messages: [{ type: 'user', content: 'hello gemini' }] } }),
     JSON.stringify({ $push: { messages: { type: 'gemini', content: 'hello back' } } })
   ].join('\n')
-  writeFileSync(join(dir, 'gemini.jsonl'), geminiTranscript)
-  writeFileSync(
-    join(dir, 'node-A.json'),
-    JSON.stringify({
-      self: { id: 'node-A' },
-      links: [
-        { id: 'node-B', title: 'Builder', cwd: '', transcriptPath: join(dir, 'b.jsonl'), tmux: 'nt-node-B' },
-        { id: 'node-X', title: 'Coder', cwd: '', transcriptPath: join(dir, 'codex.jsonl'), tmux: 'nt-node-X', agent: 'codex' },
-        { id: 'node-G', title: 'Gem', cwd: '', transcriptPath: join(dir, 'gemini.jsonl'), tmux: 'nt-node-G', agent: 'gemini' },
-        { id: 'node-Y', title: 'ColdCoder', cwd: '/nowhere', transcriptPath: '', tmux: 'nt-node-Y', agent: 'codex' },
-        { id: 'node-O', title: 'OpenCoder', cwd: '', transcriptPath: '', tmux: 'nt-node-O', agent: 'opencode', sessionId: 'ses_abc' },
-        { id: 'node-O2', title: 'NoSession', cwd: '', transcriptPath: '', tmux: 'nt-node-O2', agent: 'opencode' },
-        { id: 'note-1', title: 'Deploy notes', cwd: '', transcriptPath: '', tmux: '', note: 'use the staging key' }
-      ],
-      tmuxBin: null,
-      tmuxSocket: 'node-terminal'
-    })
-  )
+  const opencodeExport = JSON.stringify({
+    messages: [
+      { role: 'user', parts: [{ type: 'text', text: 'add rerank' }] },
+      {
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'done, added rerank.ts' },
+          { type: 'tool', tool: 'bash', state: { input: { command: 'npm test' } } }
+        ]
+      }
+    ]
+  })
+
+  const bodies: Record<string, string> = {
+    'node-B': claudeTranscript,
+    'node-X': codexTranscript,
+    'node-G': geminiTranscript,
+    // A REMOTE node: this fixture stands in for bytes fetched over the ControlMaster.
+    'node-R': claudeTranscript
+  }
+
+  doc = {
+    self: { id: 'node-A' },
+    links: [
+      { id: 'node-B', title: 'Builder', cwd: '', transcriptPath: join(dir, 'b.jsonl'), tmux: 'nt-node-B' },
+      { id: 'node-X', title: 'Coder', cwd: '', transcriptPath: join(dir, 'codex.jsonl'), tmux: 'nt-node-X', agent: 'codex' },
+      { id: 'node-G', title: 'Gem', cwd: '', transcriptPath: join(dir, 'gemini.jsonl'), tmux: 'nt-node-G', agent: 'gemini' },
+      { id: 'node-Y', title: 'ColdCoder', cwd: '/nowhere', transcriptPath: '', tmux: 'nt-node-Y', agent: 'codex' },
+      { id: 'node-O', title: 'OpenCoder', cwd: '', transcriptPath: '', tmux: 'nt-node-O', agent: 'opencode', sessionId: 'ses_abc' },
+      { id: 'node-O2', title: 'NoSession', cwd: '', transcriptPath: '', tmux: 'nt-node-O2', agent: 'opencode' },
+      { id: 'node-R', title: 'RemoteBuilder', cwd: '', transcriptPath: '/home/u/.claude/projects/x/r.jsonl', tmux: 'nt-node-R' },
+      { id: 'note-1', title: 'Deploy notes', cwd: '', transcriptPath: '', tmux: '', note: 'use the staging key' }
+    ],
+    tmuxBin: null,
+    tmuxSocket: 'node-terminal'
+  }
+
+  // Fetchers standing in for the real ones (local fs / ssh / tmux): what is under test here is
+  // the shim ⇄ route ⇄ renderer path, not the filesystem.
+  const fetchers: ContextLinkFetch = {
+    transcript: async (node) => {
+      asked.transcripts.push(node.id)
+      return bodies[node.id] ?? null
+    },
+    terminal: async (node) => {
+      asked.terminals.push(node.id)
+      return node.id === 'node-B' ? 'last build ok\n' : ''
+    },
+    opencodeExport: async (node) => {
+      asked.exports.push(node.id)
+      return node.id === 'node-O' ? opencodeExport : null
+    }
+  }
+
+  await hookServer.start()
+  hookServer.setContextLinkHandler(async (req) => {
+    // Mirrors handleContextLinkRequest's authorization: the document is chosen by the REQUESTER's
+    // id, never by anything in the request body.
+    if (req.nodeId !== 'node-A') {
+      return 'No linked nodes. Draw a context-link edge from this node to another on the canvas.'
+    }
+    return renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers)
+  })
 })
 
 afterAll(() => {
+  hookServer.stop()
   rmSync(dir, { recursive: true, force: true })
-  rmSync(binDir, { recursive: true, force: true })
 })
 
-function run(nodeId: string, args: string[]): string {
-  return execFileSync(process.execPath, [join(dir, 'context-cli.mjs'), ...args], {
-    encoding: 'utf-8',
-    env: { ...process.env, NODETERM_NODE_ID: nodeId, PATH: `${binDir}:${process.env.PATH ?? ''}` }
+async function shimRun(nodeId: string, args: string[]): Promise<string> {
+  const { stdout } = await run('/bin/sh', [shim, ...args], {
+    env: {
+      PATH: process.env.PATH ?? '',
+      NODETERM_NODE_ID: nodeId,
+      NODETERM_HOOK_PORT: String(hookServer.getPort()),
+      NODETERM_HOOK_TOKEN: hookServer.getToken()
+    },
+    maxBuffer: 10 * 1024 * 1024
   })
+  return stdout
 }
 
-describe('context-cli', () => {
-  it('list shows the linked node', () => {
-    const out = run('node-A', ['list'])
+describe('context-link CLI', () => {
+  it('list shows the linked node', async () => {
+    const out = await shimRun('node-A', ['list'])
     expect(out).toContain('Builder')
     expect(out).toContain('node-B')
   })
-  it('summary prints recent conversation lines', () => {
-    const out = run('node-A', ['summary', '-n', '10', '--node', 'node-B'])
+  it('summary prints recent conversation lines', async () => {
+    const out = await shimRun('node-A', ['summary', '-n', '10', '--node', 'node-B'])
     expect(out).toContain('deploy the app')
     expect(out).toContain('On it.')
     expect(out).toContain('npm run build')
   })
-  it('transcript prints the full conversation', () => {
-    const out = run('node-A', ['transcript', '--node', 'node-B'])
+  it('transcript prints the full conversation', async () => {
+    const out = await shimRun('node-A', ['transcript', '--node', 'node-B'])
     expect(out).toContain('full transcript')
     expect(out).toContain('deploy the app')
   })
-  it('terminal mode reports when tmux is unavailable', () => {
-    const out = run('node-A', ['terminal', '--node', 'node-B'])
-    expect(out).toContain('Terminal capture unavailable')
+  it('terminal prints the captured pane', async () => {
+    const out = await shimRun('node-A', ['terminal', '--node', 'node-B'])
+    expect(out).toContain('Builder — terminal')
+    expect(out).toContain('last build ok')
   })
-  it('is a no-op without NODETERM_NODE_ID', () => {
-    const out = run('', ['list'])
+  it('terminal reports a session that is not running', async () => {
+    const out = await shimRun('node-A', ['terminal', '--node', 'node-X'])
+    expect(out).toContain('not running')
+  })
+  it('is a no-op without NODETERM_NODE_ID', async () => {
+    const out = await shimRun('', ['list'])
     expect(out).toContain('Not a nodeterm session')
   })
-  it('list marks sticky notes', () => {
-    const out = run('node-A', ['list'])
+  it('list marks sticky notes', async () => {
+    const out = await shimRun('node-A', ['list'])
     expect(out).toContain('Deploy notes (note)')
   })
-  it('summary of a note prints its text', () => {
-    const out = run('node-A', ['summary', '--node', 'note-1'])
+  it('summary of a note prints its text', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'note-1'])
     expect(out).toContain('Deploy notes — note')
     expect(out).toContain('use the staging key')
   })
-  it('transcript of a note prints its text too', () => {
-    const out = run('node-A', ['transcript', '--node', 'Deploy notes'])
+  it('transcript of a note prints its text too', async () => {
+    const out = await shimRun('node-A', ['transcript', '--node', 'Deploy notes'])
     expect(out).toContain('use the staging key')
   })
-  it('terminal of a note explains there is no terminal', () => {
-    const out = run('node-A', ['terminal', '--node', 'note-1'])
+  it('terminal of a note explains there is no terminal', async () => {
+    const out = await shimRun('node-A', ['terminal', '--node', 'note-1'])
     expect(out).toContain('sticky note')
     expect(out).toContain('no terminal')
   })
-  it('renders a codex rollout transcript', () => {
-    const out = run('node-A', ['summary', '-n', '20', '--node', 'node-X'])
+  it('renders a codex rollout transcript', async () => {
+    const out = await shimRun('node-A', ['summary', '-n', '20', '--node', 'node-X'])
     expect(out).toContain('user: fix the tests')
     expect(out).toContain('assistant: Sure, running them.')
     expect(out).toContain('$ shell')
     expect(out).toContain('= 2 passed')
   })
-  it('renders a gemini chat transcript (event-sourced replay)', () => {
-    const out = run('node-A', ['transcript', '--node', 'node-G'])
+  it('renders a gemini chat transcript (event-sourced replay)', async () => {
+    const out = await shimRun('node-A', ['transcript', '--node', 'node-G'])
     expect(out).toContain('user: hello gemini')
     expect(out).toContain('assistant: hello back')
   })
-  it('non-claude agent without a resolved path gets no cwd fallback', () => {
-    const out = run('node-A', ['summary', '--node', 'node-Y'])
+  it('non-claude agent without a resolved path gets no cwd fallback', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'node-Y'])
     expect(out).toContain('no conversation transcript yet')
   })
-  it('renders an opencode transcript via `opencode export`', () => {
-    const out = run('node-A', ['transcript', '--node', 'node-O'])
+  it('renders an opencode transcript via the export', async () => {
+    const out = await shimRun('node-A', ['transcript', '--node', 'node-O'])
     expect(out).toContain('user: add rerank')
     expect(out).toContain('assistant: done, added rerank.ts')
     expect(out).toContain('$ bash npm test')
   })
-  it('opencode without a session id reports friendly, does not throw', () => {
-    const out = run('node-A', ['summary', '--node', 'node-O2'])
+  it('opencode without a session id reports friendly, does not throw', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'node-O2'])
     expect(out).toContain('has no session id yet')
+  })
+
+  // The whole point of Phase 2: the transcript is on another machine, and the desktop serves the
+  // read over the project's ControlMaster. The command an agent types is unchanged.
+  it('reads a REMOTE node through the same command', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'node-R'])
+    expect(out).toContain('deploy the app')
+    expect(asked.transcripts).toContain('node-R')
+  })
+
+  it('matches a node by title, case-insensitively', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'builder'])
+    expect(out).toContain('deploy the app')
+  })
+
+  it('lists what IS linked when the target is unknown', async () => {
+    const out = await shimRun('node-A', ['summary', '--node', 'nope'])
+    expect(out).toContain('No linked node matches')
+    expect(out).toContain('Builder')
+  })
+
+  // Authorization: a caller holding the hook token still only ever gets ITS OWN document.
+  it('gives an unlinked node nothing, whatever it asks for', async () => {
+    const out = await shimRun('node-Z', ['transcript', '--node', 'node-B'])
+    expect(out).toContain('No linked nodes')
+    expect(out).not.toContain('deploy the app')
   })
 })

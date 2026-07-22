@@ -79,6 +79,49 @@ dropped connection — the session runs, just without canvas control. Outside a 
 session the shim exits immediately on its env gate, so it stays inert in the user's own
 terminals (same discipline as the managed hook script).
 
+## What shipped: context link over SSH
+
+`get-linked-context` could not use the canvas-control trick as-is: its CLI was a ~230-line parser
+for three transcript formats (claude JSONL, codex rollout, gemini event-sourced, plus an opencode
+export), too much to express in sh — and the host may have no `node` at all.
+
+So the same rule was applied one level deeper: **the desktop does the reading and the parsing.**
+
+1. **The parsing moved out of the CLI** into `core/context-link-render.ts` — ordinary, tested TS
+   instead of JavaScript embedded in a template literal. `renderContextLink` takes a link document
+   and three injected fetchers and returns the text to print; it knows nothing about ssh, fs, or
+   tmux.
+2. **A `/context-link/<verb>` route** on the hook server answers with `text/plain`, and
+   `context.sh` — the sh+curl twin of `nodeterm.sh` — is the only client. The local path uses the
+   same route, so there is one implementation, not a local one and a remote one that drift.
+3. **Remote reads were already reachable** from the desktop: a remote node's hook-fed
+   `transcriptPath` *is* a remote path, read over the ControlMaster with `RemoteFile.readTail`
+   (bounded — a long session's transcript is tens of MB and a `summary` shows 15 lines), and
+   `PtyManager.captureSession` was already remote-aware, so `terminal` needed no new code. The
+   three deps are injected by `src/main` (`initContextLink(ptyManager, deps)`); the Server Edition
+   passes none and keeps its local-only behavior.
+4. **A missing link in the hook path**: the remote branch of the raw hook listener never called
+   `setNodeTranscript`, so a remote node had no known transcript at all. It does now — with the
+   path already jailed by `isSafeRemoteTranscriptPath`, so a forged POST cannot aim a link read at
+   an arbitrary remote file.
+5. **`resolveLinkTranscript` refuses the local locators for a remote node.** They search *this*
+   machine's disk and would have returned some unrelated local session's file — the linked agent
+   would have read a stranger's conversation with nothing to indicate it. For a remote node the
+   hook-fed path is the only trustworthy source; without it there is simply nothing to read yet.
+
+### Authorization
+
+The link document is chosen by the **requester's own node id**, and `pickLinkNode` will only
+return a node listed in it. So a caller holding the hook token still cannot read a node it was
+never linked to, and cannot read *through* an edge it does not itself hold (the link map is
+directional). The token remains the outer boundary, exactly as for status hooks. The one value
+that reaches a remote command line — an opencode session id — is shell-quoted at that site.
+
+`docs/`-worthy consequence: `src/server` never calls `initContextLink`, so context link is absent
+on the Server Edition (it was before this change too). The route and the renderer are both in
+`src/core`, so wiring it there is now just a call plus a decision about what "remote" means when
+the server *is* the host.
+
 ## Testing
 
 `canvas-control-shim.test.ts` runs the **real shim** under `/bin/sh` against a **real** hook
@@ -87,27 +130,10 @@ checks, and it is now the only canvas-control client. It covers the nasty-value 
 (quotes / newlines / `$` / backticks / backslashes), the positional forms, error propagation,
 the env gate, a bad token, a dead socket, and reading coordinates from the endpoint file.
 
-## Still owed: context link over SSH (Phase 2)
-
-`get-linked-context` is **not** yet available on SSH nodes. It cannot use the same trick as-is,
-because its CLI is a ~230-line parser for three transcript formats (claude JSONL, codex rollout,
-gemini event-sourced) — too much to ship as sh, and the host may have no `node`.
-
-The plan is the same shape, one level deeper: put the parsing **on the desktop**.
-
-1. A `/context-link/<verb>` route on the hook server, with the parsing lifted out of
-   `CLI_SCRIPT` into ordinary (testable) TS — the string-embedded JS CLI retires with it, and
-   the local path collapses onto the same route.
-2. Remote reads are already reachable from the desktop: the hook-fed `transcriptPath` for a
-   remote node **is a remote path**, readable over the ControlMaster with `SshFs.readText`, and
-   `PtyManager.captureSession` is already remote-aware.
-3. `resolveLinkTranscript` needs a fix first: for an SSH node it must not fall back to the
-   **local** `locateCodex`/`locateGemini`, which would happily resolve some unrelated transcript
-   on the wrong machine.
-4. **Authorization moves to the route.** Today a node may only read the links in its own link
-   file, which the per-node file layout enforces implicitly. Once `nodeId` arrives in a request
-   body, the route must check it explicitly — the same class of guard as the board-log relay's
-   `sharedProjectId` scope check.
+`context-link.cli.test.ts` does the same for the context-link shim, carrying over the fixtures and
+expectations of the suite that tested the retired Node CLI, so the rewrite answers for the
+behavior it inherited. `context-link.handler.test.ts` drives the real handler: authorization,
+the local/remote read split, and the locator guard.
 
 ## Out of scope
 
