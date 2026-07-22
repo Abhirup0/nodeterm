@@ -1,0 +1,55 @@
+name: Security
+
+# Two independent security gates on every PR into main (and a weekly baseline scan):
+#   - CodeQL static analysis of the JS/TS sources (main + preload + renderer + server).
+#   - Dependency review: blocks a PR that adds a vulnerable or disallowed-license dep.
+# Both are free on public repos and add no secrets to the PR runner.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly re-scan so a newly-disclosed CVE in an unchanged dependency still surfaces.
+    - cron: '17 4 * * 1'
+
+# Least privilege: only CodeQL needs security-events:write to upload results.
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # 'security-extended' adds higher-recall security queries beyond the default set.
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
+
+  dependency-review:
+    name: Dependency review
+    # Only meaningful on a PR (it diffs the PR's manifest against the base).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # post the summary comment on the PR
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          # Fail the PR on a moderate-or-worse advisory in an added/changed dependency.
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+          # BUSL-1.1 is the project's own license; deny the classic copyleft licenses
+          # that would be incompatible with redistributing the app.
+          deny-licenses: AGPL-3.0, GPL-2.0, GPL-3.0
