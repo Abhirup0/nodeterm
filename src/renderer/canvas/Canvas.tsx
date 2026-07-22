@@ -25,6 +25,7 @@ import {
   disposeTerminalOnUnmount,
   disposeParkedTerminal
 } from '../nodes/TerminalNode'
+import { solveFitPadding } from './fit-view'
 import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
 import { StickyNode } from '../nodes/StickyNode'
@@ -329,6 +330,7 @@ const ropeEdge = (id: string, source: string, target: string, color: string): Ed
   style: { stroke: color, strokeWidth: 1.5 },
   markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 }
 })
+
 
 const minimapNodeColor = (n: Node): string =>
   (n.data as { color?: string })?.color ?? '#0a84ff'
@@ -679,8 +681,31 @@ export function Canvas() {
    */
   const hasPeersRef = useRef(false)
   const [, bumpHist] = useState(0)
-  const { setViewport, getViewport, fitView, zoomIn, zoomOut, screenToFlowPosition, setCenter, getZoom } =
-    useReactFlow()
+  const {
+    setViewport,
+    getViewport,
+    fitView,
+    zoomIn,
+    zoomOut,
+    screenToFlowPosition,
+    setCenter,
+    getZoom,
+    getNodes,
+    getNodesBounds
+  } = useReactFlow()
+
+  // Single "fit everything" path for every fit-view entry point (dock button, the built-in
+  // Controls button, the ⌘K palette and the context menu) so they behave identically and there's
+  // one place to tune. Solved per click against the CURRENT chrome layout and the CURRENT content
+  // shape, so hiding the minimap or fitting a narrow column reclaims that space instead of paying
+  // a fixed toll for panels the content never reaches.
+  const fitAll = useCallback(() => {
+    const wrap = flowWrapRef.current
+    const bounds = getNodesBounds(getNodes())
+    const padding = wrap ? solveFitPadding(wrap, bounds.width, bounds.height) : null
+    // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
+    void fitView({ duration: 300, padding: padding ?? 0.1 })
+  }, [fitView, getNodes, getNodesBounds])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // The ACTIVE session + its presence — what the canvas-sync publisher and onMutation subscriber
@@ -3997,7 +4022,7 @@ export function Canvas() {
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
-          { label: 'Fit view', icon: <IconFit />, onClick: () => fitView({ padding: 0.2, duration: 300 }) }
+          { label: 'Fit view', icon: <IconFit />, onClick: fitAll }
         ]
       })
     },
@@ -5712,7 +5737,7 @@ export function Canvas() {
         icon: <IconRemote />,
         run: () => void connectRemote()
       },
-      { id: 'fit', label: 'Fit view', icon: <IconFit />, run: () => fitView({ padding: 0.2, duration: 300 }) },
+      { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() }
     ]
     const store = useProjects.getState()
@@ -6122,7 +6147,7 @@ export function Canvas() {
             size={2.5}
             color="#4a4a4a"
           />
-          <Controls showInteractive={false} position="bottom-left">
+          <Controls showInteractive={false} position="bottom-left" onFitView={fitAll}>
             <ControlButton
               className={`canvas-lock-btn${canvasLocked ? ' locked' : ''}`}
               title={canvasLocked ? 'Unlock view (pan/zoom)' : 'Lock view (pan/zoom) — nodes stay movable'}
@@ -6510,7 +6535,7 @@ export function Canvas() {
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
         onSave={persist}
-        onFitView={() => fitView({ padding: 0.2, duration: 300 })}
+        onFitView={fitAll}
         onZoomIn={() => zoomIn({ duration: 150 })}
         onZoomOut={() => zoomOut({ duration: 150 })}
         onDictate={toggleDictation}
