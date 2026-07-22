@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # npm dependencies: weekly, grouped so one PR carries the routine bumps instead
+  # of a dozen. Security updates still come through as their own PRs immediately.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+    # node-pty / electron are ABI-sensitive (postinstall rebuilds node-pty against
+    # Electron's ABI) — take those majors by hand, not on an auto-PR.
+    ignore:
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+      - dependency-name: node-pty
+        update-types: [version-update:semver-major]
+
+  # Keep the GitHub Actions pinned in the workflows current (security patches to
+  # checkout / setup-node / codeql-action land here).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
