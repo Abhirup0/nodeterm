@@ -1132,6 +1132,12 @@ app.whenReady().then(async () => {
         remoteTranscriptBySession.set(p.session_id, ref)
       }
       if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
+      // Context Link: remember the node's transcript path for remote nodes too. This branch used
+      // to `return` without it, which is why a remote node was never readable through a link —
+      // the local locators are no substitute (they search the wrong machine's disk, so
+      // resolveLinkTranscript deliberately refuses them for remote nodes). The path stored is the
+      // JAILED one, so a forged POST cannot aim a link read at an arbitrary remote file.
+      if (nodeId && p.session_id && transcriptPath) setNodeTranscript(nodeId, p.session_id, transcriptPath)
       if (p.hook_event_name === 'SessionEnd' && p.session_id) {
         remoteContextTail.untrack(p.session_id)
         remoteTranscriptBySession.delete(p.session_id)
@@ -1275,7 +1281,32 @@ app.whenReady().then(async () => {
   })
   initMediaProtocol()
 
-  initContextLink(ptyManager)
+  // Context Link reads happen HERE, on the desktop, which is what lets a remote (SSH-project)
+  // node's transcript be read at all: it lives on the host, behind the project's ControlMaster.
+  // These three deps are the whole of what `src/core` cannot answer for itself. Fail-open
+  // throughout — a failed remote read renders as "no transcript yet", never as an error.
+  initContextLink(ptyManager, {
+    isRemoteNode: (nodeId) => !!ptyManager.sshRemoteForNode(nodeId),
+    readRemoteFile: async (nodeId, filePath, maxBytes) => {
+      const rt = ptyManager.sshRemoteForNode(nodeId)
+      if (!rt) return null
+      const text = await remoteFile.readTail(
+        { conn: rt.conn, controlPath: rt.controlPath, path: filePath },
+        maxBytes
+      )
+      return text || null
+    },
+    runRemoteCommand: async (nodeId, command) => {
+      const rt = ptyManager.sshRemoteForNode(nodeId)
+      if (!rt || !sshProjectManager) return null
+      try {
+        const { code, stdout } = await sshProjectManager.sshRun(childArgs(rt.conn, rt.controlPath, command))
+        return code === 0 ? stdout : null
+      } catch {
+        return null
+      }
+    }
+  })
   initCanvasControl()
   // Usage service + the mobile `usage` mirror block (mobile-usage-inbox): poll all local managed
   // accounts alongside the system account, and re-flush the mirror on every cache update. The

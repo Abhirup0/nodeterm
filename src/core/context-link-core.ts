@@ -19,11 +19,16 @@ export type TranscriptLocator = (sessionId: string, accountId?: string) => Promi
  * Resolve one link entry's transcript path. Claude (and legacy entries without an
  * agentId) prefer the hook-fed path; every agent falls back to its locator by
  * sessionId. Notes, unknown agents, and locator errors resolve to '' (fail open —
- * the CLI prints a clear "no transcript yet" message).
+ * the reader then prints a clear "no transcript yet" message).
  */
 export async function resolveLinkTranscript(
   link: { id: string; title?: string; agentId?: string; sessionId?: string; accountId?: string; note?: string },
-  deps: { hooked: (id: string) => string; locators: Record<string, TranscriptLocator> }
+  deps: {
+    hooked: (id: string) => string
+    locators: Record<string, TranscriptLocator>
+    /** True for a node whose session runs on an SSH project's remote host. */
+    isRemote?: (id: string) => boolean
+  }
 ): Promise<string> {
   if (link.note != null) return ''
   const agent = link.agentId ?? 'claude'
@@ -31,6 +36,12 @@ export async function resolveLinkTranscript(
     const hooked = deps.hooked(link.id)
     if (hooked) return hooked
   }
+  // A REMOTE node's transcript lives on the host. The locators search THIS machine's disk and
+  // would happily return some unrelated local session's file — the linked agent would then read
+  // a stranger's conversation with no sign anything was wrong. The hook-fed path (jailed where
+  // the payload arrives) is the only trustworthy source for a remote node; without it there is
+  // simply nothing to read yet.
+  if (deps.isRemote?.(link.id)) return ''
   const locate = deps.locators[agent]
   if (!locate || !link.sessionId) return ''
   try {
@@ -124,240 +135,111 @@ export function buildLinkDoc(
   }
 }
 
-// The standalone CLI, written to disk by context-link.ts and run via Electron-as-Node.
-// Self-contained (no deps) and uses no backticks / ${} so it can live in this template literal.
-export const CLI_SCRIPT = `// nodeterm context-link CLI (auto-generated — do not edit).
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
+// The context-link CLI, as a POSIX sh script. It replaced a ~230-line Node CLI that was written
+// to disk and run via Electron-as-Node: that CLI did its own transcript parsing, which meant it
+// had to run where the transcripts are — impossible for an SSH project, where the transcripts are
+// on the host and the interpreter it needed is on the desktop. The parsing now lives on the
+// desktop (context-link-render.ts) behind the hook server's /context-link/ route, and this shim is
+// the thin client that reaches it — over the reverse tunnel's unix socket for a remote node, over
+// loopback for a local one. Same script either way; sh + curl only.
+export const CONTEXT_SHIM_SCRIPT = `#!/bin/sh
+# nodeterm context-link CLI (auto-generated — do not edit).
 
-var DIR = path.dirname(fileURLToPath(import.meta.url))
-var NODE_ID = process.env.NODETERM_NODE_ID || ''
+if [ -z "$NODETERM_NODE_ID" ]; then
+  echo "Not a nodeterm session (NODETERM_NODE_ID unset) — nothing to read."
+  exit 0
+fi
 
-function out(s) { process.stdout.write(s + '\\n') }
+# Live endpoint (sock/port/token); for an SSH project this names that project's reverse-tunnel
+# socket, so the read is served by the desktop that owns the canvas.
+if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then
+  . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :
+fi
 
-function loadLinks() {
-  if (!NODE_ID) { out('Not a nodeterm session (NODETERM_NODE_ID unset) — nothing to read.'); process.exit(0) }
-  try {
-    var data = JSON.parse(fs.readFileSync(path.join(DIR, NODE_ID + '.json'), 'utf-8'))
-    return data && Array.isArray(data.links) ? data : { links: [] }
-  } catch (e) { return { links: [] } }
-}
+nt_verb="list"
+if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
 
-function pickNode(doc, want) {
-  var links = doc.links
-  if (!links.length) { out('No linked nodes. Draw a context-link edge from this node to another on the canvas.'); process.exit(0) }
-  if (want) {
-    var q = String(want).toLowerCase()
-    var m = links.find(function (n) { return String(n.id).toLowerCase() === q || String(n.title || '').toLowerCase() === q })
-    if (!m) { out('No linked node matches "' + want + '". Linked: ' + links.map(function (n) { return n.title }).join(', ')); process.exit(0) }
-    return m
-  }
-  if (links.length === 1) return links[0]
-  out('Several linked nodes — re-run with --node <id|title>:')
-  links.forEach(function (n) { out('- ' + n.title + (n.note != null ? ' (note)' : '') + ' (id: ' + n.id + ')') })
-  process.exit(0)
-}
+# Translate the flags into curl --data-urlencode pairs (curl does the escaping). The positional
+# list is the accumulator: originals consumed from the front, translated pairs appended at the back.
+nt_count=$#
+nt_i=0
+while [ "$nt_i" -lt "$nt_count" ]; do
+  nt_a="$1"; shift; nt_i=$((nt_i + 1))
+  case "$nt_a" in
+    --node|-n)
+      nt_k="node"
+      [ "$nt_a" = "-n" ] && nt_k="n"
+      nt_v=""
+      if [ "$nt_i" -lt "$nt_count" ]; then nt_v="$1"; shift; nt_i=$((nt_i + 1)); fi
+      set -- "$@" --data-urlencode "arg.$nt_k=$nt_v"
+      ;;
+    *) ;;
+  esac
+done
 
-// ~/.claude/projects/<cwd with / and . -> ->/ newest .jsonl  (fallback when path unknown).
-function transcriptForCwd(cwd) {
-  if (!cwd) return ''
-  var d = path.join(os.homedir(), '.claude', 'projects', String(cwd).replace(/[/.]/g, '-'))
-  var newest = '', best = 0
-  try {
-    fs.readdirSync(d).forEach(function (e) {
-      if (!e.endsWith('.jsonl')) return
-      var p = path.join(d, e)
-      try { var st = fs.statSync(p); if (st.mtimeMs > best) { best = st.mtimeMs; newest = p } } catch (e2) {}
-    })
-  } catch (e) {}
-  return newest
-}
+nt_out=$(mktemp 2>/dev/null || echo "/tmp/nodeterm-context.$$")
+if [ -n "$NODETERM_HOOK_SOCK" ]; then
+  nt_code=$(curl -sS -o "$nt_out" -w '%{http_code}' -X POST \\
+    --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/context-link/$nt_verb" \\
+    -H "Accept: text/plain" \\
+    -H "X-Nodeterm-Hook-Token: \${NODETERM_HOOK_TOKEN}" \\
+    --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
+elif [ -n "$NODETERM_HOOK_PORT" ]; then
+  nt_code=$(curl -sS -o "$nt_out" -w '%{http_code}' -X POST \\
+    "http://127.0.0.1:\${NODETERM_HOOK_PORT}/context-link/$nt_verb" \\
+    -H "Accept: text/plain" \\
+    -H "X-Nodeterm-Hook-Token: \${NODETERM_HOOK_TOKEN}" \\
+    --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
+else
+  rm -f "$nt_out"
+  echo "nodeterm is not reachable from this session — nothing to read." >&2
+  exit 1
+fi
 
-function resolveTranscript(node) {
-  if (node.transcriptPath && fs.existsSync(node.transcriptPath)) return node.transcriptPath
-  if (node.agent && node.agent !== 'claude') return ''
-  return transcriptForCwd(node.cwd)
-}
-
-function textOf(content) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) return content.map(function (c) { return c && c.type === 'text' ? (c.text || '') : '' }).filter(Boolean).join('\\n')
-  return ''
-}
-
-// Flatten codex/gemini content: string, or array of parts carrying a .text field.
-function flatText(c) {
-  if (typeof c === 'string') return c
-  if (Array.isArray(c)) return c.map(function (x) { return x && typeof x.text === 'string' ? x.text : '' }).filter(Boolean).join('\\n')
-  return ''
-}
-
-// codex rollout line ({type:'response_item', payload}) -> 0..n display strings.
-function linesFromCodex(raw) {
-  var o
-  try { o = JSON.parse(raw) } catch (e) { return [] }
-  if (o.type !== 'response_item' || !o.payload) return []
-  var p = o.payload
-  var res = []
-  if (p.type === 'message') {
-    var role = p.role === 'user' ? 'user' : 'assistant'
-    var t = flatText(p.content)
-    if (t) res.push(role + ': ' + t)
-  } else if (p.type === 'function_call') {
-    var a = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || '')
-    res.push('  $ ' + (p.name || 'tool') + ' ' + String(a).slice(0, 200))
-  } else if (p.type === 'function_call_output') {
-    var s = flatText(p.output).split('\\n').slice(0, 3).join(' ').slice(0, 500)
-    if (s) res.push('  = ' + s)
-  }
-  return res
-}
-
-// gemini chat file is event-sourced: replay $set/$push/bare-message lines, then flatten.
-function linesFromGeminiFile(buf) {
-  var messages = []
-  buf.split('\\n').forEach(function (raw) {
-    var t = raw.trim()
-    if (!t) return
-    var o
-    try { o = JSON.parse(t) } catch (e) { return }
-    if (o.$set && typeof o.$set === 'object' && Array.isArray(o.$set.messages)) { messages = o.$set.messages; return }
-    if (o.$push && typeof o.$push === 'object') {
-      var m = o.$push.messages
-      if (Array.isArray(m)) messages = messages.concat(m)
-      else if (m && typeof m === 'object') messages.push(m)
-      return
-    }
-    if (o.content !== undefined && o.sessionId === undefined) messages.push(o)
-  })
-  var res = []
-  messages.forEach(function (m) {
-    var role = m.type === 'user' ? 'user' : (m.type === 'gemini' || m.type === 'model') ? 'assistant' : String(m.type || 'message')
-    var t = flatText(m.content)
-    if (t) res.push(role + ': ' + t)
-  })
-  return res
-}
-
-// opencode >=1.18 stores sessions in SQLite — never parse its disk. The CLI exports a
-// session as JSON: 'opencode export <sessionID>'. Shape read defensively: a messages array
-// whose items carry role + parts[] (text / tool) or a plain content string.
-function linesFromOpencodeExport(node) {
-  if (!node.sessionId) { out('"' + node.title + '" has no session id yet.'); return [] }
-  var raw
-  try {
-    raw = execFileSync('opencode', ['export', String(node.sessionId)], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
-  } catch (e) { out('Could not export "' + node.title + '" session (is opencode installed?).'); return [] }
-  var o
-  try { o = JSON.parse(raw) } catch (e) { out('Unreadable opencode export for "' + node.title + '".'); return [] }
-  var msgs = Array.isArray(o) ? o : (o && (o.messages || (o.data && o.data.messages))) || []
-  var res = []
-  msgs.forEach(function (m) {
-    if (!m) return
-    var role = (m.role || (m.info && m.info.role)) === 'user' ? 'user' : 'assistant'
-    var parts = m.parts || (Array.isArray(m.content) ? m.content : null)
-    if (typeof m.content === 'string' && m.content) { res.push(role + ': ' + m.content); return }
-    if (!Array.isArray(parts)) return
-    parts.forEach(function (c) {
-      if (!c) return
-      if (typeof c.text === 'string' && c.text && (c.type === 'text' || !c.type)) res.push(role + ': ' + c.text)
-      else if (c.type === 'tool' || c.type === 'tool_use' || c.tool) {
-        var name = c.tool || c.name || 'tool'
-        var input = c.state && c.state.input ? c.state.input : c.input
-        var a = input && (input.command || input.filePath || input.file_path || input.pattern || input.description)
-        res.push('  $ ' + name + (typeof a === 'string' ? ' ' + a.slice(0, 200) : ''))
-      }
-    })
-  })
-  if (!res.length) out('"' + node.title + '" export contained no readable messages.')
-  return res
-}
-
-// Parse one transcript JSONL line into 0..n display strings.
-function linesFrom(raw) {
-  var o
-  try { o = JSON.parse(raw) } catch (e) { return [] }
-  var content = o.message && o.message.content
-  var res = []
-  if (o.type === 'assistant' && Array.isArray(content)) {
-    content.forEach(function (c) {
-      if (c.type === 'text' && c.text) res.push('assistant: ' + c.text)
-      else if (c.type === 'tool_use') {
-        var a = c.input && (c.input.command || c.input.file_path || c.input.path || c.input.pattern || c.input.description || c.input.prompt)
-        res.push('  $ ' + (c.name || 'tool') + (typeof a === 'string' ? ' ' + a.slice(0, 200) : ''))
-      }
-    })
-  } else if (o.type === 'user' && Array.isArray(content)) {
-    content.forEach(function (c) {
-      if (c.type === 'text' && c.text) res.push('user: ' + c.text)
-      else if (c.type === 'tool_result') { var s = textOf(c.content).split('\\n').slice(0, 3).join(' ').slice(0, 500); if (s) res.push('  = ' + s) }
-    })
-  } else if (o.type === 'user' && typeof content === 'string') {
-    res.push('user: ' + content)
-  }
-  return res
-}
-
-function readTranscript(node) {
-  // opencode has no transcript file (SQLite) — export by session id before any path resolution.
-  if (node.agent === 'opencode') return linesFromOpencodeExport(node)
-  var p = resolveTranscript(node)
-  if (!p) { out('"' + node.title + '" has no conversation transcript yet.'); return [] }
-  var buf
-  try { buf = fs.readFileSync(p, 'utf-8') } catch (e) { out('Could not read "' + node.title + '" transcript.'); return [] }
-  if (node.agent === 'gemini') return linesFromGeminiFile(buf)
-  var parse = node.agent === 'codex' ? linesFromCodex : linesFrom
-  var lines = []
-  buf.split('\\n').forEach(function (raw) { if (raw.trim()) lines.push.apply(lines, parse(raw)) })
-  return lines
-}
-
-function readTerminal(doc, node) {
-  if (!doc.tmuxBin) { out('Terminal capture unavailable (tmux not found).'); return }
-  try {
-    var o = execFileSync(doc.tmuxBin, ['-L', doc.tmuxSocket, 'capture-pane', '-p', '-t', node.tmux, '-S', '-200'], { encoding: 'utf-8' })
-    out(o.replace(/\\s+$/, ''))
-  } catch (e) { out('"' + node.title + '" terminal session is not running.') }
-}
-
-var argv = process.argv.slice(2)
-var cmd = argv[0] || 'list'
-function flag(name) { var i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined }
-
-var doc = loadLinks()
-if (cmd === 'list') {
-  if (!doc.links.length) { out('No linked nodes.'); process.exit(0) }
-  out('Linked nodes:')
-  doc.links.forEach(function (n) { out('- ' + n.title + (n.note != null ? ' (note)' : '') + ' (id: ' + n.id + ')') })
-  process.exit(0)
-}
-var node = pickNode(doc, flag('--node'))
-// Sticky notes carry their text in the link file — every command just prints it.
-if (node.note != null) {
-  if (cmd === 'terminal') {
-    out('"' + node.title + '" is a sticky note — it has no terminal.')
-  } else {
-    out('=== ' + node.title + ' — note ===')
-    out(node.note || '(empty note)')
-  }
-  process.exit(0)
-}
-if (cmd === 'summary') {
-  var n = parseInt(flag('-n') || '15', 10) || 15
-  var ls = readTranscript(node)
-  out('=== ' + node.title + ' — last ' + n + ' lines ===')
-  ls.slice(-n).forEach(out)
-} else if (cmd === 'transcript') {
-  var all = readTranscript(node)
-  out('=== ' + node.title + ' — full transcript (' + all.length + ' lines) ===')
-  all.forEach(out)
-} else if (cmd === 'terminal') {
-  out('=== ' + node.title + ' — terminal ===')
-  readTerminal(doc, node)
-} else {
-  out('Unknown command. Use: list | summary [--node X] [-n N] | transcript [--node X] | terminal [--node X]')
-}
+if [ "$nt_code" = "200" ]; then
+  cat "$nt_out" 2>/dev/null
+  rm -f "$nt_out"
+  exit 0
+fi
+cat "$nt_out" >&2 2>/dev/null
+rm -f "$nt_out"
+echo "Could not read linked context (nodeterm unreachable)." >&2
+exit 1
 `
+
+/** The get-linked-context SKILL.md body, pointing at the shim at `shimPath`. Parameterized
+ *  because the same skill is installed twice with different paths: into the desktop's config
+ *  dirs, and onto an SSH host for remote agent nodes. */
+export function buildContextLinkSkillBody(shimPath: string): string {
+  return `---
+name: get-linked-context
+description: Read the conversation/transcript, a recent summary, or the terminal output of another agent node (Claude, Codex or Gemini) you are linked to on the nodeterm canvas. Use when you need to know what a connected node has been doing, hand off, or continue its work. Only meaningful inside a nodeterm session with a context-link edge. Also reads sticky notes linked to this node as context.
+---
+
+# Get linked context
+
+On the nodeterm canvas, this Claude session may be connected to other agent nodes (Claude, Codex or Gemini) by a
+context-link edge. When you are linked, you can READ the other node's context on demand by
+running the local CLI shim below. Nothing is pushed to you automatically — pull what you need.
+
+Run the shim (absolute path):
+
+\`\`\`sh
+sh "${shimPath}" <command> [--node <id|title>] [-n <N>]
+\`\`\`
+
+Commands:
+- \`list\` — list the nodes you are linked to (start here).
+- \`summary [--node X] [-n 15]\` — the last N lines of a linked node's conversation.
+- \`transcript [--node X]\` — the linked node's full conversation transcript.
+- \`terminal [--node X]\` — the linked node's recent terminal output (visible buffer).
+
+Linked sticky notes appear in \`list\` marked \`(note)\`; \`summary\` or \`transcript\` on a note
+prints its **current** text (the note is read live from the canvas, so it may have changed
+since it was first linked).
+
+\`--node\` is optional when you are linked to exactly one node; otherwise pass the id or title
+from \`list\`. If the CLI says "Not a nodeterm session" or "No linked nodes", there is nothing
+to read — do not retry.
+`
+}

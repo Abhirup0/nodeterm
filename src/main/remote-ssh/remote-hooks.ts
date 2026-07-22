@@ -14,6 +14,12 @@ import {
   buildCanvasSkillBody,
   mergeCanvasControlBlock
 } from '../canvas-control-core'
+import {
+  CONTEXT_SHIM_SCRIPT,
+  buildContextLinkSkillBody,
+  buildLinkedContextInstructions,
+  mergeInstructionsBlock
+} from '../../core/context-link-core'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
 
 /** POSIX dirname of an absolute remote path. `path.dirname` would apply the LOCAL separator
@@ -202,8 +208,14 @@ export class RemoteHooks {
   async installCanvasControl(conn: SshConnection, controlPath: string, remoteHome: string): Promise<void> {
     try {
       const shim = `${remoteHome}/.nodeterm/nodeterm.sh`
-      await this.writeCanvasShim(conn, controlPath, shim)
-      await this.installCanvasSkillAt(conn, controlPath, `${remoteHome}/.claude`, shim)
+      await this.writeRemoteShim(conn, controlPath, shim, CONTROL_SHIM_SCRIPT)
+      await this.writeRemoteSkill(
+        conn,
+        controlPath,
+        `${remoteHome}/.claude`,
+        'manage-nodeterm-canvas',
+        buildCanvasSkillBody(shim)
+      )
       // codex / gemini / opencode have no skill system — same marker-delimited instruction block
       // the desktop merges into their global instruction files. The opencode path is expanded by
       // the REMOTE shell (it is XDG-respecting and the local value says nothing about the host).
@@ -214,7 +226,7 @@ export class RemoteHooks {
         `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
       ]
       for (const target of targets) {
-        await this.mergeRemoteInstructions(conn, controlPath, target, block)
+        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeCanvasControlBlock)
       }
     } catch {
       /* fail-open: the remote agent simply runs without canvas control */
@@ -235,48 +247,119 @@ export class RemoteHooks {
     try {
       const shim = `${remoteHome}/.nodeterm/nodeterm.sh`
       // Idempotently (re)write the shim: installCanvasControl may not have run (fail-open) yet.
-      await this.writeCanvasShim(conn, controlPath, shim)
+      await this.writeRemoteShim(conn, controlPath, shim, CONTROL_SHIM_SCRIPT)
       const accountDir = `${remoteHome}/.nodeterm/claude-accounts/${accountId}`
-      await this.installCanvasSkillAt(conn, controlPath, accountDir, shim)
+      await this.writeRemoteSkill(
+        conn,
+        controlPath,
+        accountDir,
+        'manage-nodeterm-canvas',
+        buildCanvasSkillBody(shim)
+      )
     } catch {
       /* fail-open */
     }
   }
 
-  private async writeCanvasShim(conn: SshConnection, controlPath: string, shim: string): Promise<void> {
+  /**
+   * Install the context-link CLI + its discovery docs on the REMOTE host, so a linked agent node
+   * in an SSH project can read what its neighbours are doing.
+   *
+   * Same thin-client shape as canvas control, for a sharper reason: reading and parsing the
+   * transcripts happens on the desktop (three formats, and the host may have no node at all), so
+   * all the host needs is sh + curl aimed at the reverse tunnel. Gated by the caller on a
+   * verified tunnel; fail-open per step.
+   */
+  async installContextLink(conn: SshConnection, controlPath: string, remoteHome: string): Promise<void> {
+    try {
+      const shim = `${remoteHome}/.nodeterm/context.sh`
+      await this.writeRemoteShim(conn, controlPath, shim, CONTEXT_SHIM_SCRIPT)
+      await this.writeRemoteSkill(
+        conn,
+        controlPath,
+        `${remoteHome}/.claude`,
+        'get-linked-context',
+        buildContextLinkSkillBody(shim)
+      )
+      const block = buildLinkedContextInstructions(shim)
+      const targets = [
+        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
+        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
+        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      ]
+      for (const target of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeInstructionsBlock)
+      }
+    } catch {
+      /* fail-open: the remote agent simply runs without context link */
+    }
+  }
+
+  /** The context-link skill for a REMOTE managed-account config dir (see the canvas twin). */
+  async installContextLinkSkillIntoAccountDir(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string,
+    accountId: string
+  ): Promise<void> {
+    try {
+      const shim = `${remoteHome}/.nodeterm/context.sh`
+      await this.writeRemoteShim(conn, controlPath, shim, CONTEXT_SHIM_SCRIPT)
+      await this.writeRemoteSkill(
+        conn,
+        controlPath,
+        `${remoteHome}/.nodeterm/claude-accounts/${accountId}`,
+        'get-linked-context',
+        buildContextLinkSkillBody(shim)
+      )
+    } catch {
+      /* fail-open */
+    }
+  }
+
+  private async writeRemoteShim(
+    conn: SshConnection,
+    controlPath: string,
+    shim: string,
+    body: string
+  ): Promise<void> {
     const q = posixQuote(shim)
     await this.r.run(
       childArgs(conn, controlPath, `mkdir -p ${posixQuote(dirnameOf(shim))} && cat > ${q} && chmod 755 ${q}`),
-      CONTROL_SHIM_SCRIPT
+      body
     )
   }
 
-  private async installCanvasSkillAt(
+  private async writeRemoteSkill(
     conn: SshConnection,
     controlPath: string,
     configDir: string,
-    shim: string
+    name: string,
+    body: string
   ): Promise<void> {
-    const skill = `${configDir}/skills/manage-nodeterm-canvas/SKILL.md`
+    const skill = `${configDir}/skills/${name}/SKILL.md`
     await this.r.run(
       childArgs(conn, controlPath, `mkdir -p ${posixQuote(dirnameOf(skill))} && cat > ${posixQuote(skill)}`),
-      buildCanvasSkillBody(shim)
+      body
     )
   }
 
   /** Read-merge-write one marker-delimited instructions block at a remote path EXPRESSION
-   *  (already quoted / shell-expandable). Everything outside the markers is preserved. */
+   *  (already quoted / shell-expandable). Everything outside the markers is preserved — including
+   *  the OTHER feature's block, which is why the merge function is a parameter: canvas control and
+   *  context link own different markers in the same files. */
   private async mergeRemoteInstructions(
     conn: SshConnection,
     controlPath: string,
     pathExpr: string,
-    block: string
+    block: string,
+    merge: (existing: string, block: string) => string
   ): Promise<void> {
     try {
       const { stdout: existing } = await this.r.run(
         childArgs(conn, controlPath, `cat ${pathExpr} 2>/dev/null || true`)
       )
-      const merged = mergeCanvasControlBlock(existing, block)
+      const merged = merge(existing, block)
       if (merged === existing) return
       await this.r.run(
         childArgs(conn, controlPath, `mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),

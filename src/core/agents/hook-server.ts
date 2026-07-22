@@ -85,6 +85,11 @@ class HookServer {
         error?: string
       }>)
     | null = null
+  // Context-link reads. Same shape as the control handler, but it answers with TEXT (a rendered
+  // transcript / summary / terminal capture) rather than acting on the canvas.
+  private contextLinkHandler:
+    | ((req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<string>)
+    | null = null
   private endpointPath = ''
 
   endpointFilePath(): string {
@@ -114,6 +119,10 @@ class HookServer {
 
   setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
     this.controlHandler = cb
+  }
+
+  setContextLinkHandler(cb: NonNullable<HookServer['contextLinkHandler']>): void {
+    this.contextLinkHandler = cb
   }
 
   async start(): Promise<void> {
@@ -155,6 +164,21 @@ class HookServer {
           }
           res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
+          return
+        }
+        if (reqUrl.pathname.startsWith('/context-link/')) {
+          const verb = decodeURIComponent(reqUrl.pathname.replace(/^\/context-link\//, ''))
+          const { nodeId, args } = parseControlBody(
+            await readBody(req),
+            String(req.headers['content-type'] ?? '')
+          )
+          // Always text: the caller is the sh shim, and the payload IS prose (a rendered
+          // transcript). The handler owns the authorization — see context-link.ts.
+          const text = this.contextLinkHandler
+            ? await this.contextLinkHandler({ verb, nodeId, args })
+            : 'Context link is unavailable in this session.'
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end(`${text}\n`)
           return
         }
         const agentId = decodeURIComponent(reqUrl.pathname.replace(/^\/hook\//, ''))

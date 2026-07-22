@@ -1,12 +1,17 @@
-// Context Link — lets two Claude nodes on the canvas read each other's context on demand.
+// Context Link — lets two agent nodes on the canvas read each other's context on demand.
 //
-// Connecting two Claude nodes means "these two may READ each other." No messages flow. The
-// renderer pushes the current link map to main (context-link:set-links); main writes one
-// enriched file per node to <userData>/context-links/<nodeId>.json (linked nodes' titles,
-// transcript paths learned from hooks, cwds, tmux session names). A self-contained CLI
-// (context-cli.mjs, run via Electron-as-Node through context.sh) reads that file and prints
-// the linked node's transcript / summary / terminal output. A globally-installed Claude
-// skill tells the agent how + when to call it.
+// Connecting two agent nodes means "these two may READ each other." No messages flow. The
+// renderer pushes the current link map to main (context-link:set-links); main builds one link
+// document per node (linked nodes' titles, transcript paths learned from hooks, cwds, tmux
+// session names) and answers reads over the hook server's /context-link/ route. A POSIX-sh shim
+// (context.sh) is the client; a globally-installed Claude skill (plus instruction blocks for the
+// agents that have no skill system) tells the agent how + when to call it.
+//
+// The reading and parsing happen HERE, on the desktop, not in the CLI. That is what lets an SSH
+// project's remote agent use the feature at all: its transcripts live on the host, reachable over
+// the project's ControlMaster (injected as `deps`), and its terminal is captured by a PtyManager
+// that already knows the difference. The link documents are also still written to
+// <userData>/context-links/ as a debugging aid.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -16,13 +21,23 @@ import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
-  CLI_SCRIPT,
+  CONTEXT_SHIM_SCRIPT,
+  buildContextLinkSkillBody,
   buildLinkDoc,
   buildLinkedContextInstructions,
   mergeInstructionsBlock,
   resolveLinkTranscript,
-  transcriptPathOf
+  transcriptPathOf,
+  type LinkDoc,
+  type LinkDocEntry
 } from './context-link-core'
+import {
+  CONTEXT_LINK_VERBS,
+  renderContextLink,
+  type ContextLinkFetch,
+  type ContextLinkVerb
+} from './context-link-render'
+import { hookServer } from './agents/hook-server'
 import { locateClaude, locateCodex, locateGemini } from './handoff/locate'
 import { opencodeConfigDir } from './agents/hooks/opencode'
 
@@ -32,9 +47,6 @@ let dir = ''
 export function contextLinkDir(): string {
   if (!dir) dir = path.join(platform().userDataDir, 'context-links')
   return dir
-}
-function cliScriptPath(): string {
-  return path.join(contextLinkDir(), 'context-cli.mjs')
 }
 function cliShimPath(): string {
   return path.join(contextLinkDir(), 'context.sh')
@@ -46,54 +58,25 @@ function skillPath(): string {
 function writeCliFiles(): void {
   const d = contextLinkDir()
   fs.mkdirSync(d, { recursive: true })
-  fs.writeFileSync(cliScriptPath(), CLI_SCRIPT)
-  const shim = `#!/bin/sh
-# nodeterm context-link CLI shim (auto-generated — do not edit).
-ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliScriptPath()}" "$@"
-`
-  fs.writeFileSync(cliShimPath(), shim)
+  fs.writeFileSync(cliShimPath(), CONTEXT_SHIM_SCRIPT)
   try {
     fs.chmodSync(cliShimPath(), 0o755)
+  } catch {
+    /* fail open */
+  }
+  // Sweep the retired Electron-as-Node CLI off upgraders' disks: the shim no longer execs it,
+  // and it would sit there pointing at a binary path that moves with every app update.
+  try {
+    fs.rmSync(path.join(d, 'context-cli.mjs'), { force: true })
   } catch {
     /* fail open */
   }
 }
 
 function installSkill(): void {
-  const body = `---
-name: get-linked-context
-description: Read the conversation/transcript, a recent summary, or the terminal output of another agent node (Claude, Codex or Gemini) you are linked to on the nodeterm canvas. Use when you need to know what a connected node has been doing, hand off, or continue its work. Only meaningful inside a nodeterm session with a context-link edge. Also reads sticky notes linked to this node as context.
----
-
-# Get linked context
-
-On the nodeterm canvas, this Claude session may be connected to other agent nodes (Claude, Codex or Gemini) by a
-context-link edge. When you are linked, you can READ the other node's context on demand by
-running the local CLI shim below. Nothing is pushed to you automatically — pull what you need.
-
-Run the shim (absolute path):
-
-\`\`\`sh
-sh "${cliShimPath()}" <command> [--node <id|title>] [-n <N>]
-\`\`\`
-
-Commands:
-- \`list\` — list the nodes you are linked to (start here).
-- \`summary [--node X] [-n 15]\` — the last N lines of a linked node's conversation.
-- \`transcript [--node X]\` — the linked node's full conversation transcript.
-- \`terminal [--node X]\` — the linked node's recent terminal output (visible buffer).
-
-Linked sticky notes appear in \`list\` marked \`(note)\`; \`summary\` or \`transcript\` on a note
-prints its **current** text (the note is read live from the canvas, so it may have changed
-since it was first linked).
-
-\`--node\` is optional when you are linked to exactly one node; otherwise pass the id or title
-from \`list\`. If the CLI says "Not a nodeterm session" or "No linked nodes", there is nothing
-to read — do not retry.
-`
   try {
     fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    fs.writeFileSync(skillPath(), body, 'utf8')
+    fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
   }
@@ -125,8 +108,33 @@ function installAgentInstructions(): void {
 }
 
 let pty: PtyManager | undefined
+let deps: ContextLinkDeps = {}
+
+/**
+ * The shell-specific reach the reads need. Everything here is about ONE question — is this node
+ * on a remote host, and if so how do I reach it — which `src/core` must not answer for itself
+ * (SshProjectManager and the ControlMaster wiring are desktop-only). The Server Edition passes
+ * nothing and gets the local-only behavior it had before.
+ */
+export interface ContextLinkDeps {
+  /** True when the node is a live session on an SSH project's remote host. */
+  isRemoteNode?: (nodeId: string) => boolean
+  /** Read (at most `maxBytes` of) a file on a remote node's host. null = unreadable. */
+  readRemoteFile?: (nodeId: string, filePath: string, maxBytes: number) => Promise<string | null>
+  /** Run one command on a remote node's host and return stdout. null = it failed. */
+  runRemoteCommand?: (nodeId: string, command: string) => Promise<string | null>
+}
+
+// Remote transcripts are read from the END: a long-running session's file reaches tens of MB,
+// and the whole thing would cross an ssh channel for a `summary` that shows 15 lines. A tail can
+// start mid-line, which only costs that one line (it fails to parse and is dropped).
+const REMOTE_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
 const LINK_LOCATORS = { claude: locateClaude, codex: locateCodex, gemini: locateGemini }
+
+// The link documents, by node id — the same objects written to disk, kept in memory because they
+// are what authorizes a read (a node may only ever name a link inside ITS OWN document).
+const linkDocs = new Map<string, LinkDoc>()
 
 // Write one enriched link file per node id present in the map. Removed links should not
 // linger, so we clear stale per-node files first. Async fs throughout — this runs on edge
@@ -147,15 +155,24 @@ async function writeLinkFiles(map: ContextLinkMap): Promise<void> {
   for (const links of Object.values(map)) {
     for (const n of links) {
       if (n.note != null || resolved.has(n.id)) continue
-      resolved.set(n.id, await resolveLinkTranscript(n, { hooked: transcriptPathOf, locators: LINK_LOCATORS }))
+      resolved.set(
+        n.id,
+        await resolveLinkTranscript(n, {
+          hooked: transcriptPathOf,
+          locators: LINK_LOCATORS,
+          isRemote: deps.isRemoteNode
+        })
+      )
     }
   }
+  linkDocs.clear()
   for (const [nodeId, links] of Object.entries(map)) {
     const doc = buildLinkDoc(nodeId, links, {
       transcriptOf: (id) => resolved.get(id) ?? '',
       tmuxBin: bin,
       tmuxSocket: TMUX_SOCKET
     })
+    linkDocs.set(nodeId, doc)
     try {
       await fs.promises.writeFile(path.join(d, `${nodeId}.json`), JSON.stringify(doc, null, 2))
     } catch (e) {
@@ -164,8 +181,89 @@ async function writeLinkFiles(map: ContextLinkMap): Promise<void> {
   }
 }
 
-export function initContextLink(ptyManager: PtyManager): void {
+/** Read a linked node's transcript bytes — from the remote host when it lives there, else from
+ *  this machine's disk. null when there is no path yet or it could not be read. */
+async function fetchTranscript(node: LinkDocEntry): Promise<string | null> {
+  if (!node.transcriptPath) return null
+  if (deps.isRemoteNode?.(node.id)) {
+    // The path was jailed at ingest (isSafeRemoteTranscriptPath, where the hook payload arrives),
+    // so what reaches here is already confined to the host's transcript roots.
+    return deps.readRemoteFile
+      ? await deps.readRemoteFile(node.id, node.transcriptPath, REMOTE_TRANSCRIPT_MAX_BYTES)
+      : null
+  }
+  try {
+    return await fs.promises.readFile(node.transcriptPath, 'utf-8')
+  } catch {
+    return null
+  }
+}
+
+async function fetchOpencodeExport(node: LinkDocEntry): Promise<string | null> {
+  if (!node.sessionId) return null
+  if (deps.isRemoteNode?.(node.id)) {
+    return deps.runRemoteCommand
+      ? await deps.runRemoteCommand(node.id, `opencode export ${shellQuote(node.sessionId)}`)
+      : null
+  }
+  try {
+    const { execFile } = await import('node:child_process')
+    return await new Promise<string | null>((resolve) => {
+      execFile('opencode', ['export', node.sessionId ?? ''], { encoding: 'utf-8' }, (err, stdout) =>
+        resolve(err ? null : stdout)
+      )
+    })
+  } catch {
+    return null
+  }
+}
+
+/** Single-quote for a POSIX shell. The session id reaches a remote command line, and it is
+ *  ultimately provider-supplied data — never interpolate it raw. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+const fetchers: ContextLinkFetch = {
+  transcript: fetchTranscript,
+  // captureSession already knows a remote node's tmux lives on the host, so this one call
+  // covers both surfaces.
+  terminal: async (node) => (pty ? await pty.captureSession(node.id) : ''),
+  opencodeExport: fetchOpencodeExport
+}
+
+/**
+ * Answer one /context-link/ request. AUTHORIZATION: the document is chosen by the REQUESTER's
+ * node id and `pickLinkNode` (inside renderContextLink) will only ever return a node listed in
+ * it — so a caller that holds the hook token still cannot read a node it was never linked to.
+ * The token remains the outer boundary, exactly as it is for status hooks.
+ */
+export async function handleContextLinkRequest(req: {
+  verb: string
+  nodeId: string
+  args: Record<string, string>
+}): Promise<string> {
+  if (!req.nodeId) return 'Not a nodeterm session — nothing to read.'
+  if (!CONTEXT_LINK_VERBS.includes(req.verb as ContextLinkVerb)) {
+    return 'Unknown command. Use: list | summary [--node X] [-n N] | transcript [--node X] | terminal [--node X]'
+  }
+  const doc = linkDocs.get(req.nodeId)
+  if (!doc) {
+    return 'No linked nodes. Draw a context-link edge from this node to another on the canvas.'
+  }
+  try {
+    return await renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers)
+  } catch (e) {
+    console.warn('[context-link] read failed', e)
+    return 'Could not read linked context.'
+  }
+}
+
+export function initContextLink(ptyManager: PtyManager, platformDeps: ContextLinkDeps = {}): void {
   pty = ptyManager
+  deps = platformDeps
+  linkDocs.clear()
+  hookServer.setContextLinkHandler(handleContextLinkRequest)
   try {
     const d = contextLinkDir()
     fs.mkdirSync(d, { recursive: true })

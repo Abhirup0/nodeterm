@@ -90,6 +90,29 @@ describe('resolveLinkTranscript', () => {
     codex: async (sid: string) => `/x/${sid}.jsonl`,
     gemini: async (sid: string) => `/g/${sid}.jsonl`
   }
+  // A REMOTE node's transcript is on the host; these locators search THIS machine's disk. Without
+  // the guard they resolve happily and the agent reads an unrelated local session's conversation
+  // with no sign anything is wrong — so the guard must win even where a locator WOULD have answered.
+  it('never consults the local locators for a remote node', async () => {
+    const link = { id: 'n1', title: 'T', agentId: 'codex', sessionId: 's1' }
+    const local = await resolveLinkTranscript(link, { hooked: () => '', locators })
+    expect(local).toBe('/x/s1.jsonl') // proves the locator WOULD have answered
+    const remote = await resolveLinkTranscript(link, {
+      hooked: () => '',
+      locators,
+      isRemote: () => true
+    })
+    expect(remote).toBe('')
+  })
+
+  it("still prefers a remote node's hook-fed path (the only trustworthy source there)", async () => {
+    const p = await resolveLinkTranscript(
+      { id: 'n1', title: 'T', agentId: 'claude', sessionId: 's1' },
+      { hooked: () => '/remote/jailed.jsonl', locators, isRemote: () => true }
+    )
+    expect(p).toBe('/remote/jailed.jsonl')
+  })
+
   it('claude prefers the hook-fed path', async () => {
     const p = await resolveLinkTranscript(
       { id: 'n1', title: 'T', agentId: 'claude', sessionId: 's1' },
