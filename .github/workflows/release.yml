@@ -136,7 +136,7 @@ jobs:
       # prerelease: a half-built release must never become "latest" — the `publish` job
       # flips it once both platform jobs are done.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           prerelease: true
           files: |
