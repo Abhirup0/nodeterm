@@ -44,10 +44,12 @@ function parseForm(body: string): Record<string, string> {
 }
 
 /**
- * Read a /control/ request body in either dialect. The desktop's own callers send JSON; the
- * POSIX-sh shim sends form-urlencoded with `nodeId` plus one `arg.<name>` field per flag,
- * because `curl --data-urlencode` is the only escaping sh can be trusted with (hand-built JSON
- * would break on the first quote in a `--prompt` or `--html` value). Exported for tests.
+ * Read a /control/ request body in either dialect. The POSIX-sh shim — since it retired the Node
+ * CLI, the only client there is — sends form-urlencoded: `nodeId` plus one `arg.<name>` field per
+ * flag, because `curl --data-urlencode` is the only escaping sh can be trusted with (hand-built
+ * JSON would break on the first quote in a `--prompt` or `--html` value). The JSON dialect is
+ * kept because the route is a stable local API that a session predating an app upgrade may still
+ * be holding a copy of. Exported for tests.
  */
 export function parseControlBody(
   raw: string,
