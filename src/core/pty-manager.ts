@@ -1184,7 +1184,10 @@ export class PtyManager {
             ...remoteHookEnvArgs(
               options.sshRemote.hookEndpointPath,
               options.persistKey,
-              hookServer.getVersion()
+              hookServer.getVersion(),
+              // Same default the local path applies (`hookServer.buildPtyEnv(persistKey, agentId ??
+              // 'claude', …)`) so a remote node's agent env matches its local twin exactly.
+              options.agentId ?? 'claude'
             ),
             // Arm the remote permission hook's wait-branch too (deterministic approvals over SSH):
             // the request/answer files live on the REMOTE host; the desktop answers over the

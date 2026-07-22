@@ -352,6 +352,15 @@ export class SshProjectManager {
             /* fail-open: no conf → remote tmux uses host defaults */
           }
         }
+        // Canvas control for remote agent nodes. Gated on BOTH the resolved home (every remote
+        // path must be absolute) and a verified tunnel (`hookEndpointPath` is only set once
+        // setup() proved the reverse forward reaches this app run) — installing a skill whose
+        // endpoint answers nothing would have the agent retry a dead socket instead of reporting
+        // canvas control as unavailable. Not awaited: it is several remote round-trips of pure
+        // best-effort setup, and holding the connect on them would delay every terminal.
+        if (remoteHome && hookEndpointPath) {
+          void this.remoteHooks.installCanvasControl(conn, controlPath, remoteHome)
+        }
         const entry = this.conns.get(projectId)
         if (entry) {
           entry.hookEndpointPath = hookEndpointPath
@@ -631,6 +640,11 @@ export class SshProjectManager {
     // Install the managed hook into the account dir's settings.json (needs the absolute $HOME so the
     // merged `sh "…"` command has no unexpanded ~). Fail-open when the home never resolved.
     if (c.remoteHome) await this.remoteHooks.installIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
+    // Same gap for the canvas-control SKILL: claude resolves user skills relative to
+    // CLAUDE_CONFIG_DIR, so an account session never sees the one in `~/.claude/skills`.
+    if (c.remoteHome && c.hookEndpointPath) {
+      await this.remoteHooks.installCanvasSkillIntoAccountDir(c.conn, c.controlPath, c.remoteHome, accountId)
+    }
     // One remote `claude --version` gates both the keychain-scoping answer (>= 2.1, fail-open true)
     // AND the fullscreen-tui write (>= 2.1.89, write-if-absent) into the account dir.
     const version = await this.remoteClaudeVersion(c.conn, c.controlPath)

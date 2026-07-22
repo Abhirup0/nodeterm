@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
 import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import { canControlCanvas } from '../../shared/agents/config'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -192,9 +193,33 @@ export function hookForwardArgs(conn: SshConnection, controlPath: string, remote
 export function hookForwardCancelArgs(conn: SshConnection, controlPath: string, remoteSock: string, hookPort: number): string[] {
   return ['-O', 'cancel', '-R', fwdSpec(remoteSock, hookPort), '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }
-/** tmux `-e KEY=VALUE` pairs injecting the remote hook endpoint file + node id + protocol version. */
-export function remoteHookEnvArgs(endpointPath: string, nodeId: string, version: string): string[] {
-  return ['-e', `NODETERM_HOOK_ENDPOINT=${endpointPath}`, '-e', `NODETERM_NODE_ID=${nodeId}`, '-e', `NODETERM_HOOK_VERSION=${version}`]
+/**
+ * tmux `-e KEY=VALUE` pairs injecting the remote hook endpoint file + node id + protocol version,
+ * plus the agent identity. The identity pair matters: the local path's `hookServer.buildPtyEnv`
+ * sets NODETERM_AGENT_ID and gates NODETERM_CANVAS_CONTROL on `canControlCanvas`, and a remote
+ * session that inherited neither had the canvas-control CLI disable itself on its own env gate —
+ * so the skill was inert on every SSH node even once it was installed there.
+ * `agentId` is omitted for plain (non-agent) terminals, which get neither pair.
+ */
+export function remoteHookEnvArgs(
+  endpointPath: string,
+  nodeId: string,
+  version: string,
+  agentId?: string
+): string[] {
+  const env = [
+    '-e',
+    `NODETERM_HOOK_ENDPOINT=${endpointPath}`,
+    '-e',
+    `NODETERM_NODE_ID=${nodeId}`,
+    '-e',
+    `NODETERM_HOOK_VERSION=${version}`
+  ]
+  if (agentId) {
+    env.push('-e', `NODETERM_AGENT_ID=${agentId}`)
+    if (canControlCanvas(agentId)) env.push('-e', 'NODETERM_CANVAS_CONTROL=1')
+  }
+  return env
 }
 /** Contents of the remote endpoint env file the managed hook script sources (unix-socket transport). */
 export function remoteEndpointFileContents(sock: string, token: string, version: string): string {

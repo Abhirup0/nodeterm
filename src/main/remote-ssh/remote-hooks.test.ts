@@ -168,3 +168,87 @@ describe('RemoteHooks.teardown', () => {
     ).toBe(true)
   })
 })
+
+describe('RemoteHooks.installCanvasControl', () => {
+  const isWriteTo = (args: string[], p: string) => args.join(' ').includes('cat > ') && args.join(' ').includes(p)
+
+  it('writes an executable shim + the skill, and merges the codex/gemini/opencode blocks', async () => {
+    const { rh, calls } = mk()
+    await rh.installCanvasControl(conn, '/s.sock', '/home/u')
+    const joined = calls.map((c) => c.args.join(' '))
+    // The shim must land executable: the skill tells the agent to run it via `sh <path>`, but the
+    // instruction blocks and a user's own habits may exec it directly.
+    expect(joined.some((j) => j.includes('cat > \'/home/u/.nodeterm/nodeterm.sh\'') && j.includes('chmod 755'))).toBe(true)
+    // It is the POSIX shim, NOT the retired Electron-as-Node one — nothing may reference a local
+    // interpreter path, which is exactly what made the old CLI unusable off the desktop.
+    const shim = calls.find((c) => isWriteTo(c.args, '/home/u/.nodeterm/nodeterm.sh'))?.stdin ?? ''
+    expect(shim).toContain('#!/bin/sh')
+    expect(shim).toContain('--unix-socket')
+    expect(shim).not.toContain('ELECTRON_RUN_AS_NODE')
+    // The skill points at the REMOTE shim path (a desktop path would resolve to nothing here).
+    const skill = calls.find((c) => isWriteTo(c.args, '/home/u/.claude/skills/manage-nodeterm-canvas/SKILL.md'))?.stdin ?? ''
+    expect(skill).toContain('name: manage-nodeterm-canvas')
+    expect(skill).toContain('sh "/home/u/.nodeterm/nodeterm.sh"')
+    // codex/gemini get the marker block; opencode's path is expanded by the REMOTE shell, since
+    // the desktop's XDG_CONFIG_HOME says nothing about the host's.
+    expect(joined.some((j) => j.includes('/home/u/.codex/AGENTS.md'))).toBe(true)
+    expect(joined.some((j) => j.includes('/home/u/.gemini/GEMINI.md'))).toBe(true)
+    expect(joined.some((j) => j.includes('${XDG_CONFIG_HOME:-/home/u/.config}/opencode/AGENTS.md'))).toBe(true)
+    expect(calls.some((c) => (c.stdin ?? '').includes('nodeterm:manage-canvas:start'))).toBe(true)
+    // no unexpanded tilde survives in any remote path.
+    expect(joined.some((j) => j.includes('~/'))).toBe(false)
+  })
+
+  it('preserves existing instruction-file content and rewrites its own block only', async () => {
+    const existing = '# my notes\n\n<!-- nodeterm:manage-canvas:start -->\nSTALE\n<!-- nodeterm:manage-canvas:end -->\n'
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      const joined = args.join(' ')
+      if (joined.includes('.codex/AGENTS.md') && !joined.includes('cat >')) return { code: 0, stdout: existing }
+      return { code: 0, stdout: '' }
+    })
+    await new RemoteHooks({ run }).installCanvasControl(conn, '/s.sock', '/home/u')
+    const write = calls.find((c) => isWriteTo(c.args, '/home/u/.codex/AGENTS.md'))
+    expect(write?.stdin).toContain('# my notes')
+    expect(write?.stdin).not.toContain('STALE')
+    expect(write?.stdin).toContain('nodeterm canvas')
+  })
+
+  it('skips the write when the block is already current (idempotent reconnects)', async () => {
+    // A connect happens on every app start and every reconnect; rewriting an unchanged file each
+    // time would churn the user's instruction files (and their mtimes) for nothing.
+    const first = mk()
+    await first.rh.installCanvasControl(conn, '/s.sock', '/home/u')
+    const merged = first.calls.find((c) => c.args.join(' ').includes('cat > \'/home/u/.gemini/GEMINI.md\''))?.stdin ?? ''
+    expect(merged).toBeTruthy()
+
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      const joined = args.join(' ')
+      if (joined.includes('.gemini/GEMINI.md') && !joined.includes('cat >')) return { code: 0, stdout: merged }
+      return { code: 0, stdout: '' }
+    })
+    await new RemoteHooks({ run }).installCanvasControl(conn, '/s.sock', '/home/u')
+    expect(calls.some((c) => isWriteTo(c.args, '/home/u/.gemini/GEMINI.md'))).toBe(false)
+  })
+
+  it('installs the skill into a remote managed-account config dir', async () => {
+    // claude resolves user skills relative to CLAUDE_CONFIG_DIR, so an account session never sees
+    // ~/.claude/skills — the same gap installIntoAccountDir exists for on the hook side.
+    const { rh, calls } = mk()
+    await rh.installCanvasSkillIntoAccountDir(conn, '/s.sock', '/home/u', 'acc-1')
+    const target = '/home/u/.nodeterm/claude-accounts/acc-1/skills/manage-nodeterm-canvas/SKILL.md'
+    expect(calls.some((c) => isWriteTo(c.args, target))).toBe(true)
+    // the shim is (re)written too — installCanvasControl may have failed open earlier.
+    expect(calls.some((c) => isWriteTo(c.args, '/home/u/.nodeterm/nodeterm.sh'))).toBe(true)
+  })
+
+  it('fails open when the remote runner throws', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('ssh died')
+    })
+    await expect(new RemoteHooks({ run }).installCanvasControl(conn, '/s.sock', '/home/u')).resolves.toBeUndefined()
+  })
+})

@@ -43,6 +43,34 @@ function parseForm(body: string): Record<string, string> {
   return out
 }
 
+/**
+ * Read a /control/ request body in either dialect. The POSIX-sh shim — since it retired the Node
+ * CLI, the only client there is — sends form-urlencoded: `nodeId` plus one `arg.<name>` field per
+ * flag, because `curl --data-urlencode` is the only escaping sh can be trusted with (hand-built
+ * JSON would break on the first quote in a `--prompt` or `--html` value). The JSON dialect is
+ * kept because the route is a stable local API that a session predating an app upgrade may still
+ * be holding a copy of. Exported for tests.
+ */
+export function parseControlBody(
+  raw: string,
+  contentType: string
+): { nodeId: string; args: Record<string, string> } {
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const form = parseForm(raw)
+    const args: Record<string, string> = {}
+    for (const [k, v] of Object.entries(form)) {
+      if (k.startsWith('arg.') && k.length > 4) args[k.slice(4)] = v
+    }
+    return { nodeId: form.nodeId ?? '', args }
+  }
+  try {
+    const parsed = JSON.parse(raw) as { nodeId?: string; args?: Record<string, string> }
+    return { nodeId: parsed.nodeId ?? '', args: parsed.args ?? {} }
+  } catch {
+    return { nodeId: '', args: {} }
+  }
+}
+
 class HookServer {
   private server: Server | null = null
   private port = 0
@@ -108,19 +136,23 @@ class HookServer {
         const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
         if (reqUrl.pathname.startsWith('/control/')) {
           const verb = decodeURIComponent(reqUrl.pathname.replace(/^\/control\//, ''))
-          let parsed: { nodeId?: string; args?: Record<string, string> } = {}
-          try {
-            parsed = JSON.parse(await readBody(req))
-          } catch {
-            parsed = {}
-          }
+          const { nodeId, args } = parseControlBody(
+            await readBody(req),
+            String(req.headers['content-type'] ?? '')
+          )
           const result = this.controlHandler
-            ? await this.controlHandler({
-                verb,
-                nodeId: parsed.nodeId ?? '',
-                args: parsed.args ?? {}
-              })
+            ? await this.controlHandler({ verb, nodeId, args })
             : { ok: false, error: 'control unavailable' }
+          // The POSIX-sh shim asks for text/plain: it has no JSON parser, so the server does the
+          // rendering the Node CLI used to do client-side. Everything else keeps the JSON shape.
+          if (String(req.headers.accept ?? '').includes('text/plain')) {
+            const text = result.ok
+              ? result.message ?? JSON.stringify(result.result ?? {})
+              : result.error ?? 'control request failed'
+            res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end(`${text}\n`)
+            return
+          }
           res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
           return

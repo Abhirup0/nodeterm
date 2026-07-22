@@ -8,7 +8,20 @@ import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileCo
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import { mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import { ensureFullscreenTui, type TuiSettings } from '../../core/agents/hooks/claude-tui'
+import {
+  CONTROL_SHIM_SCRIPT,
+  buildCanvasControlInstructions,
+  buildCanvasSkillBody,
+  mergeCanvasControlBlock
+} from '../canvas-control-core'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
+
+/** POSIX dirname of an absolute remote path. `path.dirname` would apply the LOCAL separator
+ *  rules, which is wrong the moment the desktop is Windows and the host is Linux. */
+function dirnameOf(p: string): string {
+  const i = p.lastIndexOf('/')
+  return i > 0 ? p.slice(0, i) : '/'
+}
 
 export interface RemoteRunner {
   /** Run one ssh child command (over the master); optional stdin written to the child. */
@@ -168,6 +181,109 @@ export class RemoteHooks {
       )
     } catch {
       /* fail-open: the account session simply runs without status hooks */
+    }
+  }
+
+  /**
+   * Install the canvas-control CLI + its discovery docs on the REMOTE host, so an agent running
+   * in an SSH project can create and organize canvas nodes exactly like a local one.
+   *
+   * The desktop installs the same two artifacts into its own home (`canvas-control.ts`); this is
+   * the SSH counterpart. Nothing machine-specific crosses over: the shim is pure sh + curl and
+   * reads its endpoint from `$NODETERM_HOOK_ENDPOINT` (the per-project file `setup()` wrote), so
+   * the *remote* copy reaches this desktop through the same reverse tunnel the status hooks use.
+   * The old Electron-as-Node shim could not be installed here at any price — it hardcoded the
+   * desktop's `process.execPath`.
+   *
+   * The CALLER gates this on `setup()` having verified the tunnel: a skill pointing at a socket
+   * that answers nothing is worse than no skill, because the agent retries a dead endpoint
+   * instead of telling the user canvas control is unavailable. Fail-open per step otherwise.
+   */
+  async installCanvasControl(conn: SshConnection, controlPath: string, remoteHome: string): Promise<void> {
+    try {
+      const shim = `${remoteHome}/.nodeterm/nodeterm.sh`
+      await this.writeCanvasShim(conn, controlPath, shim)
+      await this.installCanvasSkillAt(conn, controlPath, `${remoteHome}/.claude`, shim)
+      // codex / gemini / opencode have no skill system — same marker-delimited instruction block
+      // the desktop merges into their global instruction files. The opencode path is expanded by
+      // the REMOTE shell (it is XDG-respecting and the local value says nothing about the host).
+      const block = buildCanvasControlInstructions(shim)
+      const targets = [
+        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
+        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
+        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      ]
+      for (const target of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, target, block)
+      }
+    } catch {
+      /* fail-open: the remote agent simply runs without canvas control */
+    }
+  }
+
+  /**
+   * Same skill, installed into a REMOTE managed-account config dir. Claude Code resolves user
+   * skills relative to CLAUDE_CONFIG_DIR, so an account session sees `~/.claude/skills` not at
+   * all — the exact reason `installIntoAccountDir` exists for the status hook.
+   */
+  async installCanvasSkillIntoAccountDir(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string,
+    accountId: string
+  ): Promise<void> {
+    try {
+      const shim = `${remoteHome}/.nodeterm/nodeterm.sh`
+      // Idempotently (re)write the shim: installCanvasControl may not have run (fail-open) yet.
+      await this.writeCanvasShim(conn, controlPath, shim)
+      const accountDir = `${remoteHome}/.nodeterm/claude-accounts/${accountId}`
+      await this.installCanvasSkillAt(conn, controlPath, accountDir, shim)
+    } catch {
+      /* fail-open */
+    }
+  }
+
+  private async writeCanvasShim(conn: SshConnection, controlPath: string, shim: string): Promise<void> {
+    const q = posixQuote(shim)
+    await this.r.run(
+      childArgs(conn, controlPath, `mkdir -p ${posixQuote(dirnameOf(shim))} && cat > ${q} && chmod 755 ${q}`),
+      CONTROL_SHIM_SCRIPT
+    )
+  }
+
+  private async installCanvasSkillAt(
+    conn: SshConnection,
+    controlPath: string,
+    configDir: string,
+    shim: string
+  ): Promise<void> {
+    const skill = `${configDir}/skills/manage-nodeterm-canvas/SKILL.md`
+    await this.r.run(
+      childArgs(conn, controlPath, `mkdir -p ${posixQuote(dirnameOf(skill))} && cat > ${posixQuote(skill)}`),
+      buildCanvasSkillBody(shim)
+    )
+  }
+
+  /** Read-merge-write one marker-delimited instructions block at a remote path EXPRESSION
+   *  (already quoted / shell-expandable). Everything outside the markers is preserved. */
+  private async mergeRemoteInstructions(
+    conn: SshConnection,
+    controlPath: string,
+    pathExpr: string,
+    block: string
+  ): Promise<void> {
+    try {
+      const { stdout: existing } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${pathExpr} 2>/dev/null || true`)
+      )
+      const merged = mergeCanvasControlBlock(existing, block)
+      if (merged === existing) return
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),
+        merged
+      )
+    } catch {
+      /* fail-open: one unwritable instruction file must never break the connect */
     }
   }
 
