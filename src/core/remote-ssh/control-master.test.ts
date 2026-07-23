@@ -100,31 +100,46 @@ describe('remoteTmuxHasSessionArgs', () => {
 })
 
 describe('remoteTmuxSendKeysArgs', () => {
+  const TMUX = `tmux -L ${RMT_TMUX_SOCKET}`
+  /** The remote command is a paste-aware conditional: framed atomic send when the pane's app
+   *  requested bracketed paste, the legacy two-step send otherwise (issue #47). */
+  const conditional = (session: string, framed: string, legacy: string): string =>
+    `if [ "$(${TMUX} display-message -p -t ${session} '#{bracket_paste_flag}' 2>/dev/null)" = 1 ]; then ${framed}; else ${legacy}; fi`
+
   it('sends literal text with -l -- (no Enter) when enter is false', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', false)
     expect(args).toEqual([
       ...childPrefix,
       'deploy@h.example.com',
-      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello'`
+      conditional(
+        'nt-x',
+        `${TMUX} send-keys -t nt-x -l -- '\x1b[200~hello\x1b[201~'`,
+        `${TMUX} send-keys -t nt-x -l -- 'hello'`
+      )
     ])
   })
-  it('appends a second send-keys Enter, joined by &&, when enter is true', () => {
+  it('appends Enter inside the framed write; legacy branch keeps the && two-step', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', true)
     expect(args[args.length - 1]).toBe(
-      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'hello' && tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x Enter`
+      conditional(
+        'nt-x',
+        `${TMUX} send-keys -t nt-x -l -- '\x1b[200~hello\x1b[201~\r'`,
+        `${TMUX} send-keys -t nt-x -l -- 'hello' && ${TMUX} send-keys -t nt-x Enter`
+      )
     )
   })
   it('single-quote-escapes a single quote in the text (the \'\\\'\' idiom)', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', `it's`, false)
-    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'it'\\''s'`)
+    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- 'it'\\''s'`)
+    expect(args[args.length - 1]).toContain(`'\x1b[200~it'\\''s\x1b[201~'`)
   })
   it('keeps a multiline text as one literal token (single-quoted, newlines preserved)', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'line one\nline two', false)
-    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- 'line one\nline two'`)
+    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- 'line one\nline two'`)
   })
   it('guards leading-dash text from being read as a send-keys option (-l --)', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', '-not-an-option', false)
-    expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x -l -- '-not-an-option'`)
+    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- '-not-an-option'`)
   })
 })
 

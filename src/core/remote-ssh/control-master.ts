@@ -5,6 +5,7 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 import { canControlCanvas } from '../../shared/agents/config'
+import { bracketedInjection } from '../paste-injection'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -111,14 +112,20 @@ export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: strin
 /**
  * Send literal text (and optionally Enter) into a node's REMOTE tmux session — the remote
  * counterpart of `PtyManager.sendText`'s local `tmux send-keys` path (dictation insert, /rename,
- * /branch, note pushes). Built as ONE remote command so text and Enter run strictly in order on
+ * /branch, note pushes). Built as ONE remote command so everything runs strictly in order on
  * the remote host without a second network round trip: `-l --` sends the text literally (`-l`)
  * and stops option parsing first (`--`, so text starting with `-` is never read as another
  * send-keys flag); `text` is single-quoted (`posixQuote`) so it survives the remote shell as one
- * token verbatim, multiline included. Joined with `&&`, not `;` — this mirrors the local path's
- * ordering guarantee (`PtyManager.sendText`): Enter only fires if the text send actually
- * succeeded, so a failed text send can never leave a lone Enter to submit whatever was already
- * composed in a live agent prompt.
+ * token verbatim, multiline included.
+ *
+ * Mirrors the local path's paste-aware delivery (`PtyManager.sendText`, issue #47): when the
+ * remote pane's application requested bracketed-paste mode (`bracket_paste_flag`), the text is
+ * framed in paste markers with the Enter appended in the SAME send-keys, so a re-chunking
+ * middle layer (e.g. the herdr multiplexer) can never absorb the Enter into the paste. The
+ * quoted body carries raw ESC/CR bytes — inside single quotes they reach tmux verbatim.
+ * Otherwise the legacy two-step send runs, joined with `&&`, not `;`: Enter only fires if the
+ * text send actually succeeded, so a failed text send can never leave a lone Enter to submit
+ * whatever was already composed in a live agent prompt.
  */
 export function remoteTmuxSendKeysArgs(
   conn: SshConnection,
@@ -127,8 +134,11 @@ export function remoteTmuxSendKeysArgs(
   text: string,
   enter: boolean
 ): string[] {
-  let cmd = `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
-  if (enter) cmd += ` && tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`
+  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
+  const framed = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(bracketedInjection(text, enter))}`
+  let legacy = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
+  if (enter) legacy += ` && ${tmux} send-keys -t ${sessionId} Enter`
+  const cmd = `if [ "$(${tmux} display-message -p -t ${sessionId} '#{bracket_paste_flag}' 2>/dev/null)" = 1 ]; then ${framed}; else ${legacy}; fi`
   return childArgs(conn, controlPath, cmd)
 }
 /**

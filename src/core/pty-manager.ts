@@ -27,6 +27,7 @@ import {
   remoteCapturePaneArgs
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
+import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
@@ -1912,12 +1913,51 @@ export class PtyManager {
     }
     if (!this.tmuxPath) return false
     try {
+      if (await this.bracketPasteRequested(target)) {
+        // Paste-aware target (agent TUIs, multiplexers like herdr): one atomic write — the
+        // text framed in paste markers plus the Enter — so the composer sees a definitive
+        // paste boundary and the Enter can never be re-chunked into the paste (issue #47).
+        await runAsync(this.tmuxPath, [
+          '-L',
+          TMUX_SOCKET,
+          'send-keys',
+          '-t',
+          target,
+          '-l',
+          bracketedInjection(text, enter)
+        ])
+        return true
+      }
       // The literal text and the Enter (when sent) must go in order, so await sequentially.
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text])
       if (enter) {
         await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
       }
       return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Did the application in this pane request bracketed-paste mode? tmux tracks the DECSET
+   * 2004 state per pane and exposes it as `bracket_paste_flag`. Unknown — query fails, old
+   * tmux without the format — reads as false, so delivery degrades to the legacy two-step
+   * path rather than sending paste markers an unaware app would render as garbage input.
+   */
+  private async bracketPasteRequested(target: string): Promise<boolean> {
+    if (!this.tmuxPath) return false
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'display-message',
+        '-p',
+        '-t',
+        target,
+        '#{bracket_paste_flag}'
+      ])
+      return stdout.trim() === '1'
     } catch {
       return false
     }
