@@ -218,6 +218,12 @@ Environment=NODETERM_HEADLESS=1
 ExecStart=$NODE_BIN $APP_DIR/out/server/main.cjs
 Restart=on-failure
 RestartSec=5
+# KillMode=process is LOAD-BEARING: the default control-group kill would SIGTERM every
+# process the service ever spawned — including the tmux server holding the user's live
+# agent sessions — so each restart (installer re-run, the nightly auto-update timer)
+# silently killed every session and their resumed turns re-emitted duplicate done
+# notifications. Only the node process dies on restart; tmux and its sessions survive.
+KillMode=process
 # Logs go to journald (journalctl); StandardOutput/Error default to journal.
 
 [Install]
