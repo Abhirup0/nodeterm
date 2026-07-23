@@ -175,7 +175,6 @@ import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
 import { useSystemAccount } from '../state/systemAccount'
-import { requireProOr } from '../state/upgradeGate'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
@@ -1167,19 +1166,18 @@ export function Canvas() {
     // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
     if (project.ssh) {
       const ssh = project.ssh
-      requireProOr('SSH Remote Projects', () => {
-        window.nodeTerminal.sshProject
-          .connect(project.id, ssh.server, ssh.remoteCwd)
-          .then(async (info) => {
-            // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
-            // Source Control panel's re-fetch (which keys off that entry) already hits the master.
-            await api.git.setActiveRemote(project.id)
-            useSshConn.getState().setConn(project.id, info)
-          })
-          .catch(() => {
-            /* status surfaced via onStatus → the connection banner */
-          })
-      })
+      // SSH remote projects are free (Core). Only phone/relay remote access is Pro-gated.
+      window.nodeTerminal.sshProject
+        .connect(project.id, ssh.server, ssh.remoteCwd)
+        .then(async (info) => {
+          // Arm remote git routing for the active project BEFORE the sshConn entry appears, so the
+          // Source Control panel's re-fetch (which keys off that entry) already hits the master.
+          await api.git.setActiveRemote(project.id)
+          useSshConn.getState().setConn(project.id, info)
+        })
+        .catch(() => {
+          /* status surfaced via onStatus → the connection banner */
+        })
     } else {
       // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
       void api.git.setActiveRemote(null)
@@ -2564,9 +2562,9 @@ export function Canvas() {
     [setNodes, markDirty, screenToFlowPosition, viewCenter]
   )
 
-  // Pro-gated entry to the SSH server picker: free users get the upgrade dialog instead.
+  // Open the SSH server picker. Remote SSH terminals are free (Core).
   const openRemotePicker = useCallback((screenPos: { x: number; y: number }) => {
-    requireProOr('Remote SSH terminals', () => setRemotePicker(screenPos))
+    setRemotePicker(screenPos)
   }, [])
 
   // ⌘T = new terminal, ⌘⇧C = new default agent, a KEYED dictation shortcut (e.g. "Cmd+Alt+D") =
@@ -5736,9 +5734,7 @@ export function Canvas() {
           label: `New remote: ${srv.label}`,
           icon: <IconTerminal />,
           run: () =>
-            requireProOr('Remote SSH terminals', () =>
-              addSshTerminal(srv, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
-            )
+            addSshTerminal(srv, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
         })
       ),
       {
