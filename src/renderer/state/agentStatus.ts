@@ -153,7 +153,10 @@ export interface AgentStatusSession {
  * save is a no-op — the instance never touches localStorage). See the module docblock for
  * why only the default instance has a key today.
  */
-export function createAgentStatusSession(persistKey?: string): AgentStatusSession {
+export function createAgentStatusSession(
+  persistKey?: string,
+  ackDone?: (nodeId: string) => void
+): AgentStatusSession {
   if (persistKey === KEY) migrateLegacyKey()
 
   function load(): Record<string, AgentNodeStatus> {
@@ -297,6 +300,12 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
       set((s) => {
         const prev = s.byId[id]
         if (!prev?.unread) return s
+        // Cross-surface ACK: reading a FINISHED session here dismisses the paired phone's lingering
+        // DONE Live Activity and marks its Inbox card seen (via the core mirror's `ackDone`). Gated
+        // on the node's LATEST state being `done` — a working-state focus (unread from an earlier
+        // turn while a new turn is now live) must not ack. Fire-and-forget; the mirror no-ops when
+        // there is no unresolved done event, so a stray call is harmless + idempotent.
+        if (prev.state === 'done') ackDone?.(id)
         const byId = { ...s.byId, [id]: { ...prev, unread: false } }
         save(byId)
         return { byId }
@@ -383,7 +392,10 @@ const instanceByApi = new WeakMap<NodeTerminalApi, AgentStatusSession>()
 export function agentStatusForApi(api: NodeTerminalApi): AgentStatusSession {
   const existing = api ? instanceByApi.get(api) : undefined
   if (existing) return existing
-  const session = createAgentStatusSession() // keyless — remote status is never persisted (4a)
+  // Keyless — remote status is never persisted (4a) — but the done-read ack routes to THAT core's
+  // api (a remote/relay core acks on its own host), so reading a finished remote session dismisses
+  // its phone activity too. A nullish api (node-env tests) gets no ack.
+  const session = createAgentStatusSession(undefined, api ? (id) => api.ackDone(id) : undefined)
   if (api) instanceByApi.set(api, session)
   return session
 }
@@ -397,7 +409,11 @@ export function agentStatusForApi(api: NodeTerminalApi): AgentStatusSession {
  * `agentStatusForApi(window.nodeTerminal)` — the session registry's local session — resolve
  * here, never to a parallel twin.
  */
-const defaultAgentStatus = createAgentStatusSession(KEY)
+// The default (local core) acks the finished-session read to `window.nodeTerminal.ackDone` — guarded
+// for node-environment tests where no preload exists (the callback is invoked later, at clear time).
+const defaultAgentStatus = createAgentStatusSession(KEY, (id) => {
+  if (typeof window !== 'undefined') window.nodeTerminal?.ackDone?.(id)
+})
 export { defaultAgentStatus }
 if (typeof window !== 'undefined' && window.nodeTerminal) {
   instanceByApi.set(window.nodeTerminal as NodeTerminalApi, defaultAgentStatus)

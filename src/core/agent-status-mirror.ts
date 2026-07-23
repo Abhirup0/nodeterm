@@ -206,7 +206,9 @@ export interface InboxEvent {
   detail?: string
   /** done: the user hit Esc/Ctrl-C. */
   interrupted?: boolean
-  /** approval/question: the node has since left blocked/waiting (moves to the phone's archive). */
+  /** approval/question: the node has since left blocked/waiting (moves to the phone's archive).
+   *  done: the desktop/browser user READ the finished session (`ackDone`), so the phone marks the
+   *  Inbox card seen and its lingering DONE Live Activity is dismissed. Set on next mirror flush. */
   resolved?: boolean
   /** question only: the AskUserQuestion choices (first question, ≤4 labels, each ≤60 chars) so the
    *  phone can render numbered chips / notification actions. Absent for approvals + plain questions
@@ -478,6 +480,11 @@ export interface NodeStateChange {
   /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
    *  event, letting an intent answer the held hook. Absent otherwise. */
   pendingId?: string
+  /** done only: this 'end' was produced by an explicit desktop/browser READ of the finished
+   *  session (`ackDone`), NOT the natural turn-end edge. Both send event:'end', which is what the
+   *  phone uses to dismiss the Live Activity — `ack` only distinguishes them for internal
+   *  bookkeeping/tests; the push sender does not need to forward it (end = dismiss). */
+  ack?: boolean
   ts: number
 }
 
@@ -1083,6 +1090,43 @@ export function clearNode(nodeId: string): void {
     }
   }
   if (changed) scheduleWrite()
+}
+
+/**
+ * ACK a node's finished turn: the desktop/browser user READ the finished session (spec: the
+ * unread-clear funnel in the renderer, gated on the node's latest state being `done`). Two effects,
+ * both cross-surface:
+ *  - marks the node's UNRESOLVED `done` inbox event(s) `resolved:true` so the phone's Inbox archives
+ *    the card on its next mirror poll (schedules a flush);
+ *  - fires ONE onNodeStateChange 'end' edge (state 'done', `ack:true`) so the live-update push
+ *    (createLiveUpdatePush) POSTs an 'end' the backend fans out to the phone, dismissing the
+ *    lingering DONE Live Activity. The natural turn-end already sent an 'end' at done-time; this
+ *    re-sends it on the READ, which is what actually clears an activity ActivityKit's dismissal
+ *    policy kept on the lock screen.
+ * NO-OP when the node has no unresolved done event (a stray/duplicate ack — e.g. a second read, or a
+ * working-state focus that slipped the renderer gate — fires no seam and schedules no write). Pure
+ * apart from the seam + write; `now` is Date.now for parity with the rest of the module.
+ */
+export function ackDone(nodeId: string): void {
+  if (!nodeId) return
+  let latest: InboxEvent | undefined
+  for (const e of inboxEvents) {
+    if (e.nodeId === nodeId && e.kind === 'done' && !e.resolved) {
+      e.resolved = true
+      latest = e // feed is oldest→newest, so the last match is the newest done
+    }
+  }
+  if (!latest) return
+  fireNodeStateChange({
+    nodeId,
+    agentId: latest.agentId,
+    sessionId: latest.sessionId,
+    event: 'end',
+    state: 'done',
+    ack: true,
+    ts: Date.now()
+  })
+  scheduleWrite()
 }
 
 function scheduleWrite(): void {

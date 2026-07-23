@@ -415,7 +415,7 @@ export function buildFilesApi(
  */
 export function buildAgentApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity' | 'answerPermission'> {
+): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity' | 'answerPermission' | 'ackDone'> {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
     onSubagentActivity: (listener) =>
@@ -424,7 +424,13 @@ export function buildAgentApi(
     // ON the host, so a local project's answer file is written right there (SSH-from-server is v1
     // unsupported and the handler returns false). See docs/hook-reply-approvals.md.
     answerPermission: (payload) =>
-      client.request(IPC.agentAnswerPermission, payload) as Promise<boolean>
+      client.request(IPC.agentAnswerPermission, payload) as Promise<boolean>,
+    // Read-a-finished-session ack: a real fire-and-forget request over the bridge — the browser
+    // canvas runs ON the host, so the server's mirror acks the done event + re-sends the 'end'
+    // live-update to the paired phone, same as desktop. See agent-status-mirror `ackDone`.
+    ackDone: (nodeId) => {
+      void client.request(IPC.agentAckDone, nodeId)
+    }
   }
 }
 

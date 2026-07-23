@@ -13,6 +13,7 @@ import {
   recordRawToolEvent,
   recordContextUsage,
   clearNode,
+  ackDone,
   flush,
   initAgentStatusMirror,
   setMirrorSettingsProvider,
@@ -448,6 +449,98 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(ib.nodes.x).toBeUndefined()
     expect(ib.events).toHaveLength(1)
     expect(ib.events[0].resolved).toBe(true)
+  })
+})
+
+describe('ackDone (read-a-finished-session)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  /** Drive a node to a done inbox event. */
+  function toDone(nodeId: string): void {
+    recordAgentEvent(ev({ nodeId, state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId, state: 'done', lastMessage: 'All done.' }))
+  }
+
+  it('resolves the done event and fires one end/ack seam', () => {
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    toDone('n1')
+    // Seams so far: working 'start' + done 'end' (the natural turn-end). Snapshot the count.
+    const before = changes.length
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+
+    ackDone('n1')
+
+    const ib = _inboxSnapshot()
+    expect(ib.events).toHaveLength(1)
+    expect(ib.events[0].kind).toBe('done')
+    expect(ib.events[0].resolved).toBe(true)
+    // Exactly one new seam, an ack 'end' carrying identity from the done event.
+    expect(changes.length).toBe(before + 1)
+    expect(changes[changes.length - 1]).toMatchObject({
+      nodeId: 'n1',
+      event: 'end',
+      state: 'done',
+      ack: true,
+      agentId: 'claude'
+    })
+    unsub()
+  })
+
+  it('is idempotent — a second ack resolves nothing new and fires no seam', () => {
+    toDone('n1')
+    ackDone('n1')
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    ackDone('n1') // already resolved
+    expect(changes).toHaveLength(0)
+    expect(_inboxSnapshot().events[0].resolved).toBe(true)
+    unsub()
+  })
+
+  it('no-ops for a node with no unresolved done event (working focus / unknown node)', () => {
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    // A node that is only working (no done yet) — the renderer gate should prevent this, but the
+    // mirror must be defensive: no seam, nothing to resolve.
+    recordAgentEvent(ev({ nodeId: 'w', state: 'working', newTurn: true }))
+    changes.length = 0
+    ackDone('w')
+    ackDone('nope') // unknown node
+    expect(changes).toHaveLength(0)
+    unsub()
+  })
+
+  it('resolves done ONLY — leaves an unrelated node and approval/question events untouched', () => {
+    toDone('n1')
+    // A separate node sitting on an approval card.
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'blocked', lastMessage: 'Approve?' }))
+    ackDone('n1')
+    const events = _inboxSnapshot().events
+    const done = events.find((e) => e.nodeId === 'n1')
+    const approval = events.find((e) => e.nodeId === 'n2')
+    expect(done?.resolved).toBe(true)
+    expect(approval?.kind).toBe('approval')
+    expect(approval?.resolved).toBeUndefined() // approval NOT touched by a done-ack
+  })
+
+  it('resolves the newest done and carries its identity', () => {
+    // Two finished turns on one node → two done events; ack resolves both, seam uses the newest.
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done', sessionId: 's1' }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done', sessionId: 's2' }))
+    const changes: NodeStateChange[] = []
+    const unsub = onNodeStateChange((c) => changes.push(c))
+    ackDone('n1')
+    const dones = _inboxSnapshot().events.filter((e) => e.kind === 'done')
+    expect(dones).toHaveLength(2)
+    expect(dones.every((e) => e.resolved)).toBe(true)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].sessionId).toBe('s2') // newest done's identity
+    unsub()
   })
 })
 
