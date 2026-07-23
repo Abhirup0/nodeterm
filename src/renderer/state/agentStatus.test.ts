@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   useAgentStatus,
+  createAgentStatusSession,
   inferInterruptAfterSettle,
   DONE_HOLDOFF_MS,
   STALE_WORKING_MS
@@ -104,5 +105,40 @@ describe('interrupt inference (Esc/Ctrl-C with no final hook)', () => {
     inferInterruptAfterSettle(id, 1500)
     vi.advanceTimersByTime(1500)
     expect(useAgentStatus.getState().byId[id].state).toBe('done')
+  })
+})
+
+describe('clearUnread — cross-surface ack vs. external (host-driven) clear', () => {
+  it('a normal clear of a done+unread node ACKs the read (dismisses the phone activity)', () => {
+    const acked: string[] = []
+    const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
+    const id = 'nt-1'
+    store.getState().setState(id, 'done', 'claude')
+    store.getState().markUnread(id)
+    store.getState().clearUnread(id)
+    expect(store.getState().byId[id].unread).toBe(false)
+    expect(acked).toEqual(['nt-1'])
+  })
+
+  it('an EXTERNAL clear (driven by a swept phone read-ack) does NOT re-ack — no loop', () => {
+    const acked: string[] = []
+    const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
+    const id = 'nt-2'
+    store.getState().setState(id, 'done', 'claude')
+    store.getState().markUnread(id)
+    store.getState().clearUnread(id, { external: true })
+    expect(store.getState().byId[id].unread).toBe(false)
+    // The ack already happened phone-side; re-acking here would loop host→renderer→ackDone.
+    expect(acked).toEqual([])
+  })
+
+  it('a non-done unread clear never acks (regardless of the external flag)', () => {
+    const acked: string[] = []
+    const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
+    const id = 'nt-3'
+    store.getState().setState(id, 'working', 'claude')
+    store.getState().markUnread(id)
+    store.getState().clearUnread(id)
+    expect(acked).toEqual([])
   })
 })

@@ -28,12 +28,14 @@ import {
   extractQuestionMultiSelect,
   onNodeStateChange,
   onNodeNowChange,
+  onInboxActionable,
   _resetForTest,
   _snapshot,
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
   STASH_MAX_AGE_MS,
+  QUESTION_DEDUP_WINDOW_MS,
   INBOX_EVENTS_CAP,
   type MirrorEntry,
   type MirrorFile,
@@ -426,6 +428,59 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
     recordAgentEvent(ev({ state: 'working' })) // left blocked
     expect(_inboxSnapshot().events[0].resolved).toBe(true)
+  })
+
+  // Task 3: the title-dedup must be BOUNDED so a lingering unresolved same-title ask (e.g. a generic
+  // "Waiting for input" restored across a restart) can't muzzle a genuinely NEW same-title ask forever.
+  describe('bounded title-dedup window (QUESTION_DEDUP_WINDOW_MS)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+      _resetForTest()
+    })
+    afterEach(() => {
+      _resetForTest()
+      vi.useRealTimers()
+    })
+
+    it('dedups a same-generic-title re-assert INSIDE the window (no duplicate)', () => {
+      vi.setSystemTime(0)
+      recordAgentEvent(ev({ state: 'waiting' })) // generic title "Waiting for input"
+      expect(_inboxSnapshot().events).toHaveLength(1)
+      // Re-assert well within the window (node still waiting) → deduped.
+      vi.setSystemTime(QUESTION_DEDUP_WINDOW_MS - 1000)
+      recordAgentEvent(ev({ state: 'waiting' }))
+      const ib = _inboxSnapshot()
+      expect(ib.events).toHaveLength(1)
+      expect(ib.events[0].resolved).toBeUndefined()
+    })
+
+    it('supersedes a STALE unresolved same-title ask and fires the new one (the restart false-suppression fix)', () => {
+      vi.setSystemTime(0)
+      recordAgentEvent(ev({ state: 'waiting' })) // event 0, title "Waiting for input", unresolved
+      // Node stays waiting; the ask lingers unanswered past the dedup window (models an unresolved
+      // event surviving a restart, its node never re-passing the state-leave resolve).
+      vi.setSystemTime(QUESTION_DEDUP_WINDOW_MS + 1)
+      recordAgentEvent(ev({ state: 'waiting' })) // same generic title, but the old dup is now stale
+      const ib = _inboxSnapshot()
+      expect(ib.events).toHaveLength(2)
+      // The stale one is superseded (resolved) so it stops muzzling; the new ask is live.
+      expect(ib.events[0].resolved).toBe(true)
+      expect(ib.events[1].title).toBe('Waiting for input')
+      expect(ib.events[1].resolved).toBeUndefined()
+    })
+
+    it('the superseding new ask fires the actionable seam (a genuinely new question is not lost)', () => {
+      const fired: string[] = []
+      const off = onInboxActionable((e) => fired.push(e.id))
+      vi.setSystemTime(0)
+      recordAgentEvent(ev({ state: 'waiting' }))
+      vi.setSystemTime(QUESTION_DEDUP_WINDOW_MS + 1)
+      recordAgentEvent(ev({ state: 'waiting' }))
+      off()
+      // Two distinct actionable events — the stale one did NOT swallow the new ask.
+      expect(fired).toHaveLength(2)
+      expect(new Set(fired).size).toBe(2)
+    })
   })
 
   it('session reset also resolves a pending question', () => {

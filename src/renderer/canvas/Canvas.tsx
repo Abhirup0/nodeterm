@@ -5208,6 +5208,15 @@ export function Canvas() {
     []
   )
 
+  // Phone→host read-ack: the host swept a `~/.nodeterm/acks/<nodeId>.seen` (the phone READ this
+  // node's finished session), so drop the node's unread flag here too. `external: true` so this
+  // clear does NOT re-ack — the ack already happened on the phone side; a re-ack would loop
+  // host→renderer→ackDone. See core/ack-sweep.ts.
+  useEffect(
+    () => api.onUnreadClear((nodeId) => useAgentStatus.getState().clearUnread(nodeId, { external: true })),
+    []
+  )
+
   // Agent lifecycle, reported by each agent's own hooks via the main-process hook server
   // (`main/agents/hook-server.ts`) and mapped to the shared 4-state model by the per-agent
   // normalizers (`shared/agents/normalize.ts`): working / waiting / blocked / done. On a turn

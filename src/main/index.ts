@@ -43,6 +43,7 @@ import {
   type MirrorSettings
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
+import { createAckSweeper } from '../core/ack-sweep'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1088,6 +1089,37 @@ app.whenReady().then(async () => {
   corePlatform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
+  // Phone→host read-acks (this feature, the other direction): the phone drops
+  // `~/.nodeterm/acks/<nodeId>.seen` on the SESSION host when it READS a finished session. For each
+  // ack: `ackDone` (mirror resolves the done event → phone Inbox archives it + the paired phone's
+  // DONE Live Activity dismisses) AND `agent:unread-clear` so the desktop renderer drops the node's
+  // unread flag WITHOUT re-acking (external clear — the ack already happened phone-side; a re-ack
+  // would loop). ONE 15s cadence drives BOTH: the LOCAL fs sweep (cheap dir-mtime gate) for
+  // local-project nodes, and a REMOTE sweep of each connected SSH project's host over its
+  // ControlMaster (a Mac→SSH node's acks land on the REMOTE fs, invisible to the local sweep).
+  // sshProjectManager is created below; the tick resolves it lazily.
+  const ackSweeper = createAckSweeper({
+    handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
+  })
+  let remoteAckSweepBusy = false
+  const ackSweepTimer = setInterval(() => {
+    ackSweeper.sweep()
+    if (remoteAckSweepBusy || !sshProjectManager) return
+    remoteAckSweepBusy = true
+    void sshProjectManager
+      .sweepRemoteAcks()
+      .then((ids) => {
+        for (const id of ids) {
+          ackDone(id)
+          sendToMain(IPC.agentUnreadClear, id)
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        remoteAckSweepBusy = false
+      })
+  }, 15_000)
+  ackSweepTimer.unref?.()
   // Sweep stale request/answer files (~/.nodeterm/pending) on boot + hourly — orphans from killed
   // sessions that never got an answer. Local only; a remote host runs its own sweep if it hosts
   // nodeterm, else the files age out harmlessly.

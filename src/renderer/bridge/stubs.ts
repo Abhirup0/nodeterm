@@ -115,6 +115,7 @@ export function buildStubApi(): Omit<
   | 'dialog'
   | 'onAgentStatus'
   | 'onSubagentActivity'
+  | 'onUnreadClear'
   | 'answerPermission'
   | 'ackDone'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
@@ -332,6 +333,7 @@ export function buildStubApi(): Omit<
     | 'dialog'
     | 'onAgentStatus'
     | 'onSubagentActivity'
+    | 'onUnreadClear'
     | 'answerPermission'
   | 'ackDone'
     | 'userDataDir'

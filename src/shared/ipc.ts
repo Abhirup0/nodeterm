@@ -43,6 +43,11 @@ export const IPC = {
    *  node's done inbox event(s) + dismisses the paired phone's lingering DONE Live Activity. Arg:
    *  `nodeId: string`. Fire-and-forget. See agent-status-mirror `ackDone`. */
   agentAckDone: 'agent:ack-done',
+  /** main/server → renderer: drop the unread flag for a node because the phone READ its finished
+   *  session (a `~/.nodeterm/acks/<nodeId>.seen` the host swept). Arg: `nodeId: string`. The
+   *  renderer clears unread WITHOUT re-acking (external clear — see agentStatus.clearUnread's
+   *  `external` opt). See core/ack-sweep.ts. */
+  agentUnreadClear: 'agent:unread-clear',
   agentSubagentActivity: 'agent:subagent-activity',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
