@@ -47,6 +47,20 @@ export interface MirrorEntry {
   updatedAt: number
 }
 
+/** This host's Server-Edition install metadata (spec: server-update). Written by the installer
+ *  (`scripts/install-server.sh` → `<dataDir>/install-meta.json`) and surfaced to the phone so it
+ *  can show the installed version / commit and answer "how does this install learn about updates?".
+ *  Set ONLY by the SERVER shell (the desktop app is not an "installed server"); every field is
+ *  optional and the whole block is dropped from SSH slices (it is host-local info). */
+export interface MirrorServer {
+  /** package.json version of the installed checkout, e.g. "0.2.17". */
+  version?: string
+  /** Short git commit of the installed checkout, e.g. "1e56f83". */
+  commit?: string
+  /** ISO-8601 timestamp of the last successful install/update. */
+  installedAt?: string
+}
+
 /** Host-level launch settings the phone consumes (spec: mobile-agent-launch-parity).
  *  Additive to MirrorFile v1 — absent on old files, ignored by old readers. */
 export interface MirrorSettings {
@@ -71,6 +85,10 @@ export interface MirrorFile {
   /** Agent inbox: an event feed + per-node "what it's doing right now" (spec: mobile-usage-inbox).
    *  Additive/optional. Unlike `usage`, SSH slices KEEP a filtered inbox (their own nodes only). */
   inbox?: MirrorInbox
+  /** This host's Server-Edition install metadata (spec: server-update). Additive/optional — absent
+   *  on old files and whenever no server provider is wired (e.g. the desktop app). Dropped from SSH
+   *  slices (host-local info, like `usage`). */
+  server?: MirrorServer
 }
 
 // ---- Usage block (mobile-usage-inbox) ------------------------------------------------------
@@ -288,8 +306,10 @@ export function reduceEntry(
  *
  * `usage` is likewise DROPPED (spec: mobile-usage-inbox): a remote host's account credentials
  * live on that host, so the desktop cannot answer for them — a host running nodeterm itself
- * writes its own mirror with its own usage. `inbox` is KEPT but filtered to the slice's node ids
- * (both the `events` feed and the per-node `nodes` map).
+ * writes its own mirror with its own usage. `server` (install metadata) is DROPPED for the same
+ * reason (it describes THIS host's install, not the remote's — a remote nodeterm writes its own).
+ * `inbox` is KEPT but filtered to the slice's node ids (both the `events` feed and the per-node
+ * `nodes` map).
  */
 export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<string>): MirrorFile {
   const nodes: MirrorFile['nodes'] = {}
@@ -315,7 +335,8 @@ export function buildFile(
   expireMs = EXPIRE_MS,
   settings?: MirrorSettings,
   usage?: MirrorUsage,
-  inbox?: MirrorInbox
+  inbox?: MirrorInbox,
+  server?: MirrorServer
 ): MirrorFile {
   const out: MirrorFile = { v: 1, updatedAt: now, nodes: {} }
   for (const [id, e] of Object.entries(nodes)) {
@@ -328,6 +349,8 @@ export function buildFile(
   if (usage) out.usage = usage
   // Only attach a non-empty inbox — an empty one would gratuitously change the old-file shape.
   if (inbox && (inbox.events.length > 0 || Object.keys(inbox.nodes).length > 0)) out.inbox = inbox
+  // Only attach a non-empty server block (all fields absent ⇒ omit, keeping the old-file shape).
+  if (server && (server.version || server.commit || server.installedAt)) out.server = server
   return out
 }
 
@@ -425,6 +448,9 @@ let settingsProvider: (() => MirrorSettings | undefined) | null = null
 // Supplies the local-accounts usage block, consulted fresh on every flush (so a poll landing
 // between flushes is picked up). Null = no `usage` block written (byte-identical old shape).
 let usageProvider: (() => MirrorUsage | undefined) | null = null
+// Supplies this host's install metadata block (spec: server-update). Set only by the SERVER shell
+// (the desktop app leaves it null). Consulted fresh on every flush. Null = no `server` block.
+let serverProvider: (() => MirrorServer | undefined) | null = null
 
 // ---- Inbox state (feed + per-node activity) ------------------------------------------------
 // The event feed is oldest→newest and capped at INBOX_EVENTS_CAP; `inboxNodes` is the per-node
@@ -795,6 +821,24 @@ function safeUsage(): MirrorUsage | undefined {
 }
 
 /**
+ * Wire (or clear with `null`) the provider for the additive `server` install-metadata block
+ * (spec: server-update). Called once by the SERVER shell on launch; absent ⇒ the mirror writes no
+ * `server` key (the desktop app's shape is byte-identical to before this block existed).
+ */
+export function setMirrorServerProvider(p: (() => MirrorServer | undefined) | null): void {
+  serverProvider = p
+}
+
+/** Read the server provider, failing open (a throwing/absent provider yields no block). */
+function safeServer(): MirrorServer | undefined {
+  try {
+    return serverProvider?.() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Subscribe to every flush's built doc (fires even when the local disk write fails — the doc is
  * the product, the file is one consumer of it). Returns an unsubscribe. Feeds the SSH-host
  * status push, which mirrors each connected project's slice of this doc onto its host.
@@ -1145,7 +1189,7 @@ export async function flush(): Promise<void> {
   if (!file) return
   const now = Date.now()
   const inbox: MirrorInbox = { events: inboxEvents, nodes: Object.fromEntries(inboxNodes) }
-  const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox)
+  const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox, safeServer())
   // Also drop expired entries from memory so the map itself can't grow without bound.
   for (const [id, e] of state) if (now - e.updatedAt > EXPIRE_MS) state.delete(id)
   // Prune stale per-node activity the same way (events stay — they are capped feed history).
@@ -1177,6 +1221,7 @@ export function _resetForTest(): void {
   flushListeners.clear()
   settingsProvider = null
   usageProvider = null
+  serverProvider = null
   inboxEvents = []
   inboxNodes.clear()
   inboxSeq = 0

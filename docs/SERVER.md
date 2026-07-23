@@ -101,9 +101,48 @@ The installer (`scripts/install-server.sh`) is idempotent — re-run it any time
   server bundle;
 - installs a **systemd** service (`NODETERM_HEADLESS=1`, `Restart=on-failure`, journald logs):
   a system unit at `/etc/systemd/system/nodeterm-server.service` when run as root, or a
-  per-user unit + `loginctl enable-linger` otherwise — then enables and (re)starts it.
+  per-user unit + `loginctl enable-linger` otherwise — then enables and (re)starts it;
+- writes **`<data-dir>/install-meta.json`** (`{version, commit, installedAt}`, where `<data-dir>`
+  defaults to `~/.nodeterm-server`). The server reads it at boot and surfaces it to a paired phone
+  through the agent-status mirror's top-level `server` block, so a connection can show which version
+  this install is on — the answer to "how does an installed Server Edition learn about updates?";
+- installs a **daily auto-update timer** (unless you opt out — see below).
 
 Follow the logs with `journalctl -u nodeterm-server -f` (add `--user` for a non-root install).
+
+### Auto-update
+
+The installer also installs a `nodeterm-server-update.service` (a `oneshot`) plus a
+`nodeterm-server-update.timer` (`OnCalendar=daily`, `RandomizedDelaySec=3600`, `Persistent=true`),
+with the **same root/user split** as the main service (a system unit under
+`/etc/systemd/system/`, or a per-user unit under `~/.config/systemd/user/`). When it fires, the
+service:
+
+1. `git pull --ff-only` in `~/.nodeterm-server-app` — updating the checkout **including this
+   updater script**, so the updater logic keeps itself current;
+2. re-execs the freshly-pulled `scripts/install-server.sh`, which rebuilds and restarts the
+   service. The installer is idempotent, so an already-current pull just no-ops through a harmless
+   rebuild.
+
+**Opt out:** run the installer with `NODETERM_NO_AUTOUPDATE=1` — it skips the timer, and (so a
+re-run can turn auto-update off) **removes an existing** timer/service. The installer prints the
+timer status (`systemctl list-timers`) in its summary so you can confirm the next run.
+
+Check or trigger it manually:
+
+```bash
+systemctl list-timers nodeterm-server-update.timer      # add --user for a non-root install
+systemctl start nodeterm-server-update.service          # run an update now
+```
+
+### Per-user installs (one per Unix user)
+
+An install covers **only the Unix user it runs as** — its systemd unit, `~/.nodeterm-server-app`
+checkout, and `~/.nodeterm-server` data dir are that user's. A box with several server users
+(`root`, `customerservice`, …) needs **one install per user**; the phone offers this per
+connection (it installs under whichever user its SSH session logs in as). Non-root installs rely on
+`loginctl enable-linger <user>` (the installer runs it) so the user's systemd manager — and thus
+both the service and the auto-update timer — keep running without an active login session.
 
 ### `NODETERM_HEADLESS`
 

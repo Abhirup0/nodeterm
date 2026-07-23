@@ -15,7 +15,13 @@ set -euo pipefail
 
 REPO_URL="${NODETERM_REPO_URL:-https://github.com/eneskirca/nodeterm}"
 APP_DIR="${NODETERM_APP_DIR:-$HOME/.nodeterm-server-app}"
+# Where the running server keeps its state (auth, sessions, workspace, scrollback). Matches the
+# server's own default (src/server/config.ts) so the install-meta.json we write below lands where
+# the server reads it. Override with NODETERM_DATA_DIR (mirror the same override into the service if
+# you use one).
+DATA_DIR="${NODETERM_DATA_DIR:-$HOME/.nodeterm-server}"
 SERVICE_NAME="nodeterm-server"
+UPDATE_SERVICE_NAME="nodeterm-server-update"
 MIN_NODE_MAJOR=20
 # When the system Node is missing or too old we provision this pinned LTS privately (see ensure_node).
 # v22.14.0 is a Node 22 "Jod" LTS release. Override with NODETERM_NODE_VERSION for a different pin.
@@ -172,6 +178,28 @@ npm rebuild node-pty
 
 [ -f "$APP_DIR/out/server/main.cjs" ] || fail "Build did not produce out/server/main.cjs — check the output above."
 
+# ---- install metadata (surfaced to the phone via the agent-status mirror's `server` block) -----
+# The server reads <DATA_DIR>/install-meta.json at boot (src/server/index.ts readInstallMeta) and
+# advertises {version, commit, installedAt} to a paired phone, so a connection can show which
+# version this install is on. Written only after a successful build above.
+write_install_meta() {
+  local meta_file commit version now
+  meta_file="$DATA_DIR/install-meta.json"
+  commit="$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  version="$("$NODE_BIN" -p "require('$APP_DIR/package.json').version" 2>/dev/null || echo 0.0.0)"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$DATA_DIR"
+  cat > "$meta_file" <<META
+{
+  "commit": "$commit",
+  "installedAt": "$now",
+  "version": "$version"
+}
+META
+  ok "Wrote install metadata to $meta_file (commit $commit, v$version)"
+}
+write_install_meta
+
 # ---- install + (re)start the systemd service -------------------------------------------------
 UNIT_DESC="nodeterm headless notification host"
 
@@ -197,6 +225,42 @@ WantedBy=$2
 UNIT
 }
 
+# ---- auto-update: a oneshot service + daily timer --------------------------------------------
+# The timer fires the oneshot service ~daily (randomized). The service pulls the latest code and
+# then RE-EXECS the freshly-pulled install-server.sh — so the updater logic updates itself. The
+# installer is idempotent, so a no-op pull (already current) is harmless. Opt out with
+# NODETERM_NO_AUTOUPDATE=1 (see the branches below), which also removes an existing timer.
+write_update_units() {
+  # $1 = target unit directory (system-wide or per-user)
+  cat > "$1/${UPDATE_SERVICE_NAME}.service" <<UNIT
+[Unit]
+Description=$UNIT_DESC — auto-update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$APP_DIR
+# git pull to update the checkout (incl. THIS updater script), then re-exec the pulled installer,
+# which rebuilds and restarts the service. Absolute paths are baked in at write time.
+ExecStart=/bin/sh -c 'cd "$APP_DIR" && git pull --ff-only && exec bash "$APP_DIR/scripts/install-server.sh"'
+UNIT
+  cat > "$1/${UPDATE_SERVICE_NAME}.timer" <<UNIT
+[Unit]
+Description=$UNIT_DESC — daily auto-update check
+
+[Timer]
+OnCalendar=daily
+# Spread the load off exactly-midnight and de-sync fleets.
+RandomizedDelaySec=3600
+# Catch up a run missed while the host was off.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
 if [ "$(id -u)" = "0" ]; then
   # Root install: system-wide unit.
   UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -206,11 +270,27 @@ if [ "$(id -u)" = "0" ]; then
   systemctl enable "$SERVICE_NAME"
   systemctl restart "$SERVICE_NAME"
   ok "Service installed and (re)started."
+
+  # Auto-update timer (system-wide). Opt out with NODETERM_NO_AUTOUPDATE=1, which also removes an
+  # existing timer so a re-run can turn auto-update off.
+  UPDATE_UNIT_DIR="/etc/systemd/system"
+  if [ -n "${NODETERM_NO_AUTOUPDATE:-}" ]; then
+    systemctl disable --now "${UPDATE_SERVICE_NAME}.timer" >/dev/null 2>&1 || true
+    rm -f "$UPDATE_UNIT_DIR/${UPDATE_SERVICE_NAME}.service" "$UPDATE_UNIT_DIR/${UPDATE_SERVICE_NAME}.timer"
+    systemctl daemon-reload
+    info "Auto-update disabled (NODETERM_NO_AUTOUPDATE set)."
+  else
+    write_update_units "$UPDATE_UNIT_DIR"
+    systemctl daemon-reload
+    systemctl enable --now "${UPDATE_SERVICE_NAME}.timer"
+    ok "Auto-update timer installed (daily; opt out with NODETERM_NO_AUTOUPDATE=1)."
+  fi
   echo
   systemctl --no-pager status "$SERVICE_NAME" || true
   echo
+  [ -z "${NODETERM_NO_AUTOUPDATE:-}" ] && { systemctl --no-pager list-timers "${UPDATE_SERVICE_NAME}.timer" || true; echo; }
   info "Logs:   journalctl -u $SERVICE_NAME -f"
-  info "Update: re-run this script."
+  info "Update: automatic (daily timer) or re-run this script."
 else
   # Non-root install: per-user unit + linger so it runs without an active login session.
   command -v systemctl >/dev/null 2>&1 || fail "systemctl not found — a systemd host is required for the service. (You can still run it manually: NODETERM_HEADLESS=1 node $APP_DIR/out/server/main.cjs)"
@@ -225,11 +305,26 @@ else
   systemctl --user enable "$SERVICE_NAME"
   systemctl --user restart "$SERVICE_NAME"
   ok "Service installed and (re)started."
+
+  # Auto-update timer (per-user). Linger (enabled above) keeps the user manager running so the
+  # timer fires without an active login. Opt out with NODETERM_NO_AUTOUPDATE=1.
+  if [ -n "${NODETERM_NO_AUTOUPDATE:-}" ]; then
+    systemctl --user disable --now "${UPDATE_SERVICE_NAME}.timer" >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/${UPDATE_SERVICE_NAME}.service" "$UNIT_DIR/${UPDATE_SERVICE_NAME}.timer"
+    systemctl --user daemon-reload
+    info "Auto-update disabled (NODETERM_NO_AUTOUPDATE set)."
+  else
+    write_update_units "$UNIT_DIR"
+    systemctl --user daemon-reload
+    systemctl --user enable --now "${UPDATE_SERVICE_NAME}.timer"
+    ok "Auto-update timer installed (daily; opt out with NODETERM_NO_AUTOUPDATE=1)."
+  fi
   echo
   systemctl --user --no-pager status "$SERVICE_NAME" || true
   echo
+  [ -z "${NODETERM_NO_AUTOUPDATE:-}" ] && { systemctl --user --no-pager list-timers "${UPDATE_SERVICE_NAME}.timer" || true; echo; }
   info "Logs:   journalctl --user -u $SERVICE_NAME -f"
-  info "Update: re-run this script."
+  info "Update: automatic (daily timer) or re-run this script."
 fi
 
 echo
