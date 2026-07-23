@@ -1624,6 +1624,12 @@ export interface NodeTerminalApi {
    *  `true` when the file was written, `false` on any failure (invalid pendingId, unknown node,
    *  unsupported project, fs/exec error). */
   answerPermission(payload: { nodeId: string; pendingId: string; decision: 'allow' | 'deny' }): Promise<boolean>
+  /** Notify the core that the user READ a finished (done) session on this surface (the unread-clear
+   *  funnel calls it when the node's latest state is `done`). The core marks the node's done inbox
+   *  event(s) resolved (phone Inbox archives the card) and re-sends an 'end' live-update so the
+   *  paired phone dismisses its lingering DONE Live Activity. Fire-and-forget; no-op if the node has
+   *  no unresolved done event. */
+  ackDone(nodeId: string): void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */

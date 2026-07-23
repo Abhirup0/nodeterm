@@ -28,6 +28,7 @@ import {
   initAgentStatusMirror,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
+  ackDone,
   setMirrorSettingsProvider,
   onInboxActionable,
   onNodeStateChange,
@@ -240,6 +241,13 @@ export async function startServer(
       return ok
     }
   )
+  // Read-a-finished-session ack (parity with desktop): the browser canvas's unread-clear funnel
+  // calls it when the just-read node's latest state is `done`. The mirror resolves the node's done
+  // inbox event(s) + re-sends an 'end' live-update so the paired phone dismisses its lingering DONE
+  // Live Activity. Fire-and-forget; no-op with no unresolved done.
+  platform.handle(IPC.agentAckDone, (nodeId: string) => {
+    ackDone(nodeId)
+  })
   // Sweep stale ~/.nodeterm/pending files on boot + hourly (orphans from killed sessions).
   startPendingSweep(os.homedir())
   // Phone push via SSH-possession GRANTS (spec: nodeterm-server/docs/specs/2026-07-21-push-grants.md).

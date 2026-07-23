@@ -31,6 +31,7 @@ import {
   onMirrorFlush,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
+  ackDone,
   recordRawToolEvent,
   recordContextUsage,
   setMirrorSettingsProvider,
@@ -1073,6 +1074,13 @@ app.whenReady().then(async () => {
       return ok
     }
   )
+  // Read-a-finished-session ack (this feature): the renderer's unread-clear funnel calls it when the
+  // just-read node's latest state is `done`. The mirror resolves the node's done inbox event(s)
+  // (phone Inbox archives the card) and re-sends an 'end' live-update so the paired phone dismisses
+  // its lingering DONE Live Activity. Fire-and-forget; the mirror no-ops with no unresolved done.
+  corePlatform.handle(IPC.agentAckDone, (nodeId: string) => {
+    ackDone(nodeId)
+  })
   // Sweep stale request/answer files (~/.nodeterm/pending) on boot + hourly — orphans from killed
   // sessions that never got an answer. Local only; a remote host runs its own sweep if it hosts
   // nodeterm, else the files age out harmlessly.

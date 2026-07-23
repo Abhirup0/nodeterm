@@ -501,6 +501,9 @@ const api: NodeTerminalApi = {
     return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
   },
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
+  ackDone: (nodeId) => {
+    void ipcRenderer.invoke(IPC.agentAckDone, nodeId)
+  },
   onAgentStatus: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)

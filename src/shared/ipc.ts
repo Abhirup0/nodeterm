@@ -39,6 +39,10 @@ export const IPC = {
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */
   agentAnswerPermission: 'agent:answer-permission',
+  /** Renderer → main/server: the user READ a finished (done) session on this surface. Acks the
+   *  node's done inbox event(s) + dismisses the paired phone's lingering DONE Live Activity. Arg:
+   *  `nodeId: string`. Fire-and-forget. See agent-status-mirror `ackDone`. */
+  agentAckDone: 'agent:ack-done',
   agentSubagentActivity: 'agent:subagent-activity',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
