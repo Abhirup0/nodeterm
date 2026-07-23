@@ -89,7 +89,13 @@ export interface AgentStatusStore {
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   markUnread(id: string): void
-  clearUnread(id: string): void
+  /**
+   * Drop a node's unread flag. By default a clear of a FINISHED (done) node also ACKs the read
+   * cross-surface (dismisses the paired phone's DONE Live Activity via the mirror's `ackDone`).
+   * Pass `{ external: true }` for a clear that was ITSELF driven by a phone read-ack the host swept
+   * (`agent:unread-clear`): it must NOT re-ack, or host→renderer→ackDone would loop.
+   */
+  clearUnread(id: string, opts?: { external?: boolean }): void
   /** Start (active=true, resets) or stop a /loop, /schedule or /cron indicator. */
   setLoop(
     id: string,
@@ -296,7 +302,7 @@ export function createAgentStatusSession(
         return { byId }
       }),
 
-    clearUnread: (id) =>
+    clearUnread: (id, opts) =>
       set((s) => {
         const prev = s.byId[id]
         if (!prev?.unread) return s
@@ -305,7 +311,9 @@ export function createAgentStatusSession(
         // on the node's LATEST state being `done` — a working-state focus (unread from an earlier
         // turn while a new turn is now live) must not ack. Fire-and-forget; the mirror no-ops when
         // there is no unresolved done event, so a stray call is harmless + idempotent.
-        if (prev.state === 'done') ackDone?.(id)
+        // SUPPRESSED for an `external` clear — one the host drove FROM a phone read-ack it swept
+        // (`agent:unread-clear`): re-acking here would loop host→renderer→ackDone straight back.
+        if (prev.state === 'done' && !opts?.external) ackDone?.(id)
         const byId = { ...s.byId, [id]: { ...prev, unread: false } }
         save(byId)
         return { byId }

@@ -415,9 +415,14 @@ export function buildFilesApi(
  */
 export function buildAgentApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'onAgentStatus' | 'onSubagentActivity' | 'answerPermission' | 'ackDone'> {
+): Pick<
+  NodeTerminalApi,
+  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+> {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
+    onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>
       client.subscribe(IPC.agentSubagentActivity, listener as Listener),
     // Deterministic hook-reply approvals: a real request over the bridge — the Server Edition runs

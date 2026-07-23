@@ -576,6 +576,46 @@ export class SshProjectManager {
   }
 
   /**
+   * Sweep phone read-acks on the connected hosts (spec: cross-surface read sync). The phone drops
+   * `~/.nodeterm/acks/<nodeId>.seen` on the host it can reach; for a Mac→SSH node that host is the
+   * REMOTE one, so the desktop must consume them over the ControlMaster — the local-fs sweep never
+   * sees them. One command per connected HOST (deduped by host key, since projects sharing a host
+   * share `$HOME/.nodeterm/acks`) atomically lists + deletes each `.seen` and prints its nodeId; the
+   * returned ids are fed the SAME `ackDone` + unread-clear path a local ack takes. Best-effort — a
+   * disconnected/failed project simply contributes nothing. The command is fully literal (no
+   * interpolation), and the returned nodeIds are used only as in-memory map keys (never a path), so
+   * a compromised host can at worst clear an unread badge / resolve a done card it can guess.
+   */
+  async sweepRemoteAcks(): Promise<string[]> {
+    // List then delete each `~/.nodeterm/acks/*.seen`, printing the basename (nodeId). The `break` on
+    // a non-existent first match handles the no-glob case (the pattern stays literal when nothing
+    // matches). Absent dir ⇒ exit 0 (nothing swept).
+    const cmd =
+      'd="$HOME/.nodeterm/acks"; [ -d "$d" ] || exit 0; ' +
+      'for f in "$d"/*.seen; do [ -e "$f" ] || break; ' +
+      'printf "%s\\n" "$(basename "$f" .seen)"; rm -f "$f"; done'
+    const seenHosts = new Set<string>()
+    const out: string[] = []
+    for (const c of this.conns.values()) {
+      const hk = sshHostKey(c.conn)
+      if (seenHosts.has(hk)) continue
+      seenHosts.add(hk)
+      try {
+        const { code, stdout } = await this.r.run(childArgs(c.conn, c.controlPath, cmd))
+        if (code === 0 && stdout) {
+          for (const line of stdout.split('\n')) {
+            const id = line.trim()
+            if (id) out.push(id)
+          }
+        }
+      } catch {
+        // best-effort per host — a failed sweep just leaves the acks for the next tick
+      }
+    }
+    return out
+  }
+
+  /**
    * Deterministic hook-reply approvals (docs/hook-reply-approvals.md): write the one-line answer
    * file for a held REMOTE permission hook, on the project's host over its ControlMaster (atomic
    * tmp+mv, 0600 via umask). The hook is polling `~/.nodeterm/pending/<pendingId>.answer` on that

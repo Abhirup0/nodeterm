@@ -1630,6 +1630,11 @@ export interface NodeTerminalApi {
    *  paired phone dismisses its lingering DONE Live Activity. Fire-and-forget; no-op if the node has
    *  no unresolved done event. */
   ackDone(nodeId: string): void
+  /** Fires when the host swept a phone read-ack (`~/.nodeterm/acks/<nodeId>.seen`) for a finished
+   *  session: the renderer should drop the node's unread flag WITHOUT re-acking (call
+   *  `clearUnread(id, { external: true })`, so it does not loop back into `ackDone`). Arg is the
+   *  node id. Returns unsubscribe. See core/ack-sweep.ts. */
+  onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */

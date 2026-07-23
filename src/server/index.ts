@@ -39,6 +39,7 @@ import {
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
+import { createAckSweeper } from '../core/ack-sweep'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -282,6 +283,17 @@ export async function startServer(
   platform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
+  // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
+  // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
+  // (mirror resolve + phone Live-Activity dismiss) + broadcast `agent:unread-clear` so the browser
+  // canvas drops the node's unread flag WITHOUT re-acking. Local fs only — the Server Edition has no
+  // SSH projects (v1); a host it hosts writes its own acks here. See core/ack-sweep.ts.
+  createAckSweeper({
+    handlers: {
+      ackDone,
+      onUnreadClear: (nodeId) => platform.broadcast(IPC.agentUnreadClear, nodeId)
+    }
+  }).start()
   // Sweep stale ~/.nodeterm/pending files on boot + hourly (orphans from killed sessions).
   startPendingSweep(os.homedir())
   // Phone push via SSH-possession GRANTS (spec: nodeterm-server/docs/specs/2026-07-21-push-grants.md).

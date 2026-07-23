@@ -209,6 +209,13 @@ export const INBOX_QUESTION_OPTIONS_MAX = 4
 export const INBOX_OPTION_LABEL_MAX = 60
 // Live-update `message` headline cap (needs-you / done event title).
 export const LIVE_MESSAGE_MAX = 120
+// Bound on the approval/question TITLE-dedup (see produceInboxFromState). A live ask re-asserts
+// within seconds, so only an unresolved same-title event YOUNGER than this suppresses a re-assert.
+// An OLDER lingering same-title event — e.g. an unresolved generic-title "Waiting for input"
+// restored across a restart (loadPersisted keeps unresolved events verbatim), whose node never
+// re-passed the state-leave `resolveUnresolvedFor` — must NOT muzzle a genuinely NEW ask forever:
+// it is SUPERSEDED (resolved) and the new ask fires.
+export const QUESTION_DEDUP_WINDOW_MS = 10 * 60_000
 
 export interface InboxEvent {
   /** Monotonic per writer: `${ts}-${seq}`. */
@@ -1080,9 +1087,17 @@ function produceInboxFromState(
         ...(pendingId ? { pendingId } : {})
       })
     }
-    // Dedup a re-asserted SAME ask (title match) — but always return the classification below so
-    // the broadcast enrichment is consistent across the re-assert.
-    if (newestUnresolved(inboxEvents, nodeId)?.title !== title) {
+    // Dedup a re-asserted SAME ask (title match) — BOUNDED (QUESTION_DEDUP_WINDOW_MS): only an
+    // unresolved same-title event still inside the window suppresses. A stale lingering same-title one
+    // (restored across a restart, or a long-abandoned turn) is SUPERSEDED — marked resolved so it
+    // stops muzzling — and the new ask fires. A different-title unresolved event never suppresses (a
+    // genuinely new ask) and is left untouched (it may still be pending). Always return the
+    // classification below so the broadcast enrichment stays consistent across the re-assert.
+    const dup = newestUnresolved(inboxEvents, nodeId)
+    const sameTitle = !!dup && dup.title === title
+    const freshDup = sameTitle && dup ? now - dup.ts < QUESTION_DEDUP_WINDOW_MS : false
+    if (!freshDup) {
+      if (sameTitle && dup) dup.resolved = true // supersede the stale same-title card
       pushInboxEvent({
         ...baseEvent,
         kind,
