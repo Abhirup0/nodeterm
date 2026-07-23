@@ -6,6 +6,15 @@ async function bootstrap(): Promise<void> {
     const { installWsBridge } = await import('./bridge/ws-bridge')
     const connected = await installWsBridge()
     if (!connected) return // overlay is up; startReconnect reloads on the first reopen
+  } else {
+    // Electron desktop: main raised Chromium's WebGL context cap (--max-active-webgl-contexts),
+    // so the terminal GPU-renderer budget can rise to match. A browser tab (Server Edition)
+    // cannot raise its cap and stays on the default budget. See src/shared/webgl.ts.
+    const [{ setWebglBudget }, { WEBGL_BUDGET_DESKTOP }] = await Promise.all([
+      import('./terminal/webgl-budget'),
+      import('../shared/webgl')
+    ])
+    setWebglBudget(WEBGL_BUDGET_DESKTOP)
   }
   await import('./boot')
 }

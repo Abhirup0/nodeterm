@@ -48,7 +48,7 @@ import {
   xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
-import { registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { deliverCommand } from '../terminal/command-delivery'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic } from '../components/icons'
@@ -584,8 +584,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         cursorBlink: s.cursorBlink,
         theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
         allowProposedApi: true,
-        // Scrolling is xterm's job now (tmux's mouse is off), so it needs a real scrollback —
-        // the default is 1000 lines. Capped: the cost is per node and a canvas holds many.
+        // NOT what the user scrolls in a tmux session — tmux's mouse is ON and the wheel scrolls
+        // tmux's own history (see pty-manager's tmuxConf). This buffer backs the plain-shell
+        // fallback (tmux unavailable) and the cold-snapshot replay. Capped: per node, many nodes.
         scrollback: xtermScrollback(s.tmuxScrollback),
         // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
         // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
@@ -637,12 +638,20 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
     const releaseWebgl = () => {
       if (!webgl) return
+      // Capture the element BEFORE dispose (dispose detaches the addon's canvases). After the
+      // addon is gone, explicitly lose its context: addon dispose() alone leaves the context
+      // alive until GC, and Chromium counts un-GC'd contexts against its per-page cap — enough
+      // churn (fast pans cycling grants) and the zombies push the page past the cap, which is
+      // the "Too many active WebGL contexts" warning + force-evictions the budget exists to
+      // prevent. Not needed on the onContextLoss path: that context is already lost.
+      const canvases = term.element ? Array.from(term.element.querySelectorAll('canvas')) : null
       try {
         webgl.dispose()
       } catch {
         // already disposed via context loss
       }
       webgl = null
+      loseWebglContexts(canvases)
     }
 
     let sessionId: string | null = parked ? parked.sessionId : null

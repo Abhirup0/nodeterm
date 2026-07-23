@@ -42,8 +42,65 @@
  *    a genuinely unstable GPU degrades to the DOM renderer exactly as before.
  */
 
-/** Ceiling on WebGL contexts we hold at once. Comfortably under Chromium's ~16-per-process cap. */
+/**
+ * DEFAULT ceiling on WebGL contexts we hold at once. Comfortably under Chromium's default
+ * ~16-per-page cap — which is what a BROWSER tab (Server Edition) gets. The desktop shell raises
+ * the browser cap itself (`--max-active-webgl-contexts` in src/main/index.ts), and the renderer
+ * raises the matching budget via `setWebglBudget` at boot (main.tsx). The invariant is the same
+ * everywhere: our budget stays comfortably under whatever the platform cap actually is.
+ */
 export const WEBGL_BUDGET = 12
+
+/** Live ceiling — `WEBGL_BUDGET` unless the shell raised it (see `setWebglBudget`). */
+let budget = WEBGL_BUDGET
+
+/**
+ * Raise (or lower) the live budget. Called once at boot by the shell that knows its platform cap
+ * (desktop raises the Chromium cap to `WEBGL_CONTEXT_CAP_DESKTOP`, so it can afford a higher
+ * budget). Non-finite or < 1 values are ignored — a bad caller must not zero the ceiling.
+ */
+export function setWebglBudget(n: number): void {
+  if (!Number.isFinite(n) || n < 1) return
+  budget = Math.floor(n)
+}
+
+/** The live budget (test/introspection seam). */
+export function getWebglBudget(): number {
+  return budget
+}
+
+/**
+ * Explicitly lose the WebGL context of every canvas under `root` (a terminal's element), via
+ * `WEBGL_lose_context`. Chromium counts a context against its per-page cap until it is GC'd OR
+ * explicitly lost — and `@xterm/addon-webgl`'s dispose() does neither (verified on 0.18.0: zero
+ * `loseContext` calls). Without this, every release leaves a zombie context that still occupies
+ * a cap slot until some later GC, so real context count = granted + zombies could exceed the cap
+ * under churn (fast pan) even though the coordinator never exceeded its budget — surfacing as
+ * Chromium's "Too many active WebGL contexts" warning and force-evictions.
+ *
+ * Takes the CANVAS ELEMENTS, captured before the addon is disposed — dispose detaches them from
+ * the DOM, so a root query afterwards would find nothing, while held element references (and
+ * their contexts) stay valid. Safe on non-WebGL canvases: `getContext('webgl2')` on a canvas
+ * that already holds a 2d context returns null without creating anything. Returns how many
+ * contexts were lost.
+ */
+export function loseWebglContexts(canvases: ArrayLike<HTMLCanvasElement> | null): number {
+  if (!canvases) return 0
+  let lost = 0
+  for (const canvas of Array.from(canvases)) {
+    try {
+      const gl = canvas.getContext('webgl2') as WebGL2RenderingContext | null
+      const ext = gl?.getExtension('WEBGL_lose_context')
+      if (ext) {
+        ext.loseContext()
+        lost++
+      }
+    } catch {
+      // fail open — losing a context is an optimization, never worth breaking release for.
+    }
+  }
+  return lost
+}
 
 /**
  * How long a client must stay continuously visible before it is granted a context. Absorbs fast
@@ -166,7 +223,7 @@ function tryGrant(c: Client): void {
   cancelAcquire(c)
   // Guard: the client may have gone hidden or been disposed between debounce start and fire.
   if (!clients.has(c.id) || !c.visible || c.granted) return
-  if (grantCount() < WEBGL_BUDGET) {
+  if (grantCount() < budget) {
     doGrant(c)
     return
   }
@@ -303,4 +360,5 @@ export function __resetWebglBudgetForTests(): void {
   }
   clients.clear()
   visibilityClock = 0
+  budget = WEBGL_BUDGET
 }

@@ -118,12 +118,19 @@ import {
 import { initPlatform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
 import { wirePeerRegistry } from './peer-registry'
+import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
 
 // Dev-only: NT_MULTI lets a SECOND instance run (host + client testing on one machine) with an
 // isolated userData via NT_USER_DATA — its own device-id/session/license/workspace. Never active
 // in packaged builds. Must run before the stores below resolve userData paths.
 const NT_MULTI = !app.isPackaged && !!process.env.NT_MULTI
 if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT_USER_DATA)
+
+// Raise Chromium's per-page WebGL context cap (default ~16) — a busy canvas wants more
+// GPU-rendered terminals than that. The renderer raises its own budget to match at boot
+// (main.tsx → setWebglBudget); see src/shared/webgl.ts for the invariant. Must be appended
+// before app 'ready' or the switch is silently ignored.
+app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXT_CAP_DESKTOP))
 
 // First thing in bootstrap: install the Electron CorePlatform so anything in src/core
 // (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI

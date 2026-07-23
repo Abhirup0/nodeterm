@@ -275,24 +275,24 @@ const PRIMARY_VIEWER: ViewerId = ''
  * sizing, pausing and detaching on its own. A `null` client (the relay host's detached sink) is
  * NOT a composite subscriber; it keys the `sizes`/flow ledgers by literal `null`, exactly as before.
  *
- * Encoding: `<clientId> <viewerId>`. clientId is always a number (no space), so
+ * Encoding: `<clientId>\x00<viewerId>` (a literal NUL byte). clientId is always a number (no space), so
  * `subClient` recovers the client from the FIRST space regardless of what the viewerId
- * (which arrives off the wire) contains. Absent viewerId ⇒ PRIMARY ⇒ `<clientId> `, i.e. one
+ * (which arrives off the wire) contains. Absent viewerId ⇒ PRIMARY ⇒ `<clientId>\x00`, i.e. one
  * entry per client — bit-for-bit the pre-viewer ledger for every existing caller.
  */
 type SubKey = string
 function subKey(clientId: ClientId, viewerId: ViewerId): SubKey {
-  return `${clientId} ${viewerId}`
+  return `${clientId}\x00${viewerId}`
 }
 /** The ClientId behind a composite subscriber key — the collapse to "which person", for the
  *  per-ClientId data/exit/size channels and the closed-by/recycled fan-out (viewers are invisible
  *  to peers). */
 function subClient(sub: SubKey): ClientId {
-  return Number(sub.slice(0, sub.indexOf(' ')))
+  return Number(sub.slice(0, sub.indexOf('\x00')))
 }
 /** The viewer id within a composite subscriber key (PRIMARY for a default view). */
 function subViewer(sub: SubKey): ViewerId {
-  return sub.slice(sub.indexOf(' ') + 1)
+  return sub.slice(sub.indexOf('\x00') + 1)
 }
 
 /**

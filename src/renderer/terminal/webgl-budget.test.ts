@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   registerWebglClient,
   __resetWebglBudgetForTests,
+  getWebglBudget,
+  loseWebglContexts,
+  setWebglBudget,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
   WEBGL_BUDGET,
   WEBGL_LOSS_STREAK_MAX,
@@ -240,5 +243,58 @@ describe('webgl-budget coordinator', () => {
     grant(b)
     expect(b.rec.acquires).toBe(1)
     b.handle.dispose()
+  })
+
+  it('setWebglBudget raises the grant ceiling (desktop, where the browser cap is raised too)', () => {
+    setWebglBudget(WEBGL_BUDGET + 4)
+    expect(getWebglBudget()).toBe(WEBGL_BUDGET + 4)
+    const clients = Array.from({ length: WEBGL_BUDGET + 4 }, (_, i) => fakeClient(`c${i}`))
+    clients.forEach(grant)
+    expect(clients.every((c) => c.rec.held)).toBe(true)
+    // The raised ceiling is still a ceiling: one more all-visible client is not granted.
+    const extra = fakeClient('extra')
+    grant(extra)
+    expect(extra.rec.held).toBe(false)
+  })
+
+  it('setWebglBudget ignores nonsense values and reset restores the default', () => {
+    setWebglBudget(0)
+    expect(getWebglBudget()).toBe(WEBGL_BUDGET)
+    setWebglBudget(NaN)
+    expect(getWebglBudget()).toBe(WEBGL_BUDGET)
+    setWebglBudget(20)
+    expect(getWebglBudget()).toBe(20)
+    __resetWebglBudgetForTests()
+    expect(getWebglBudget()).toBe(WEBGL_BUDGET)
+  })
+})
+
+describe('loseWebglContexts', () => {
+  /** Canvas-like fake: getContext('webgl2') returns `gl` (or throws), anything else null. */
+  function fakeCanvas(gl: unknown, opts: { throws?: boolean } = {}) {
+    return {
+      getContext(type: string) {
+        if (opts.throws) throw new Error('boom')
+        return type === 'webgl2' ? gl : null
+      }
+    }
+  }
+
+  it('explicitly loses the webgl2 context of every captured canvas', () => {
+    const lose = vi.fn()
+    const webglCanvas = fakeCanvas({ getExtension: (n: string) => (n === 'WEBGL_lose_context' ? { loseContext: lose } : null) })
+    const linkCanvas = fakeCanvas(null) // 2d-only layer: getContext('webgl2') → null
+    expect(loseWebglContexts([webglCanvas, linkCanvas] as never)).toBe(1)
+    expect(lose).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails open on a throwing canvas and a missing extension', () => {
+    const bad = fakeCanvas(null, { throws: true })
+    const noExt = fakeCanvas({ getExtension: () => null })
+    expect(loseWebglContexts([bad, noExt] as never)).toBe(0)
+  })
+
+  it('returns 0 for a null canvas list', () => {
+    expect(loseWebglContexts(null)).toBe(0)
   })
 })

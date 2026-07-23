@@ -57,6 +57,7 @@ import {
   IconCanvasView,
   IconLock,
   IconMarkdown,
+  IconReload,
   IconNote,
   IconPhone,
   IconProject,
@@ -3539,6 +3540,28 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  // Reload a terminal in place: bump `respawnNonce`, which re-runs TerminalNode's lifecycle
+  // effect — the old PTY client + xterm are torn down and a fresh attach is made to the SAME
+  // tmux session (persistKey = node id), so the session and anything running in it survive.
+  // Manual recovery for a terminal that never painted or lost its renderer (dead ssh attach,
+  // GPU context loss, stale screen after a long sleep). The transient nonce is never persisted.
+  const reloadTerminals = useCallback(
+    (ids: string[]) => {
+      const set = new Set(ids)
+      setNodes((ns) =>
+        ns.map((n) =>
+          set.has(n.id) && n.type === 'terminal'
+            ? {
+                ...n,
+                data: { ...n.data, respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1 }
+              }
+            : n
+        )
+      )
+    },
+    [setNodes]
+  )
+
   // Run Claude's /branch in this node, then open a new node that resumes the original
   // conversation (claude -r <ORIGINAL_ID>). The source node stays on the new branch.
   // We already know the current session id from the hooks; only fall back to parsing the
@@ -3858,7 +3881,8 @@ export function Canvas() {
       { label: 'Collapse / Expand', icon: <IconCollapse />, onClick: () => toggleCollapseNodes(ids) },
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
         ? ([
-            { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) }
+            { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) },
+            { label: 'Reload terminal', icon: <IconReload />, onClick: () => reloadTerminals(ids) }
           ] as MenuItem[])
         : []),
       { type: 'separator' },
@@ -3875,6 +3899,7 @@ export function Canvas() {
       alignToGrid,
       toggleCollapseNodes,
       toggleMarkdown,
+      reloadTerminals,
       deleteNodes
     ]
   )

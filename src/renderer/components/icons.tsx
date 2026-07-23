@@ -151,6 +151,13 @@ export const IconSettings = () => (
   </svg>
 )
 
+export const IconReload = () => (
+  <svg {...S}>
+    <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+    <path d="M20 4v4h-4" />
+  </svg>
+)
+
 export const IconBranch = () => (
   <svg {...S}>
     <circle cx="6" cy="6" r="2.5" />
