@@ -3617,14 +3617,16 @@ export function Canvas() {
       }
       // The file is context-budgeted by buildHandoff (long sessions: digest + verbatim tail,
       // full copy beside it), so "read it" is always affordable. The wording pins the agent to
-      // resuming: an earlier phrasing let the reader finish the file, end its turn, and greet
-      // with "what would you like to work on?" — the task must be treated as already assigned.
+      // CONTINUING rather than restarting — but conditionally: a handoff of a session with an
+      // in-progress task must be resumed without a greeting round-trip, while a handoff of a
+      // conversation that never got to a task (someone transfers right after "hey") has
+      // nothing to resume, and forbidding questions there would push the agent to invent work.
       const prompt =
         `The file ${res.filePath} is a handoff of the prior conversation from a ` +
-        `${sourceAgentId} session; the live task state is at the END of the file. ` +
-        `Read the file, then resume that task immediately from where it left off. ` +
-        `Do not greet, do not summarize the file back, and do not ask what to work on — ` +
-        `the task in the file is already assigned to you.`
+        `${sourceAgentId} session; the most recent exchange is at the END of the file. ` +
+        `Read the file, then continue seamlessly from exactly where the conversation left ` +
+        `off — as if you had been the assistant all along. If a task is in progress, resume ` +
+        `it immediately; do not greet, re-introduce yourself, or summarize the file back.`
       const node = createAgentNode(
         targetAgentId,
         nodesRef.current.length,
