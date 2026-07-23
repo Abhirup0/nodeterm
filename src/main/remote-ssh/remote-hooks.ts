@@ -1,12 +1,18 @@
 // Connection-time remote hook setup for SSH projects: opens the reverse unix-socket tunnel
 // (local loopback hook server → remote socket), writes the owner-only remote endpoint file,
-// and installs the managed hook into the remote agent configs (claude + gemini in Phase 2a;
-// codex deferred). Every step fails open: any remote failure → setup returns null and the
-// agent simply runs without hooks. Takes an INJECTED runner so the flow is unit-testable
-// without real ssh/electron.
+// and installs the managed hook into the remote agent configs (claude + gemini JSON settings,
+// plus codex's hooks.json + config.toml trust). Every step fails open: any remote failure →
+// setup returns null (or, for codex, the agent simply runs without status). Takes an INJECTED
+// runner so the flow is unit-testable without real ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import { mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
+import {
+  buildCodexHooksAndTrust,
+  buildManagedCommand as buildCodexManagedCommand,
+  type HooksConfig as CodexHooksConfig
+} from '../../core/agents/hooks/codex'
+import { upsertHookTrustEntriesInContent } from '../../core/agents/hooks/codex-trust'
 import { ensureFullscreenTui, type TuiSettings } from '../../core/agents/hooks/claude-tui'
 import {
   CONTROL_SHIM_SCRIPT,
@@ -34,7 +40,9 @@ export interface RemoteRunner {
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
 }
 
-// Per-agent remote install targets (JSON-config agents only in Phase 2a; codex deferred).
+// Per-agent remote install targets (JSON-settings agents merged via mergeManagedHook). Codex
+// is installed separately (installCodexRemote) because it needs a hooks.json merge PLUS a
+// config.toml trust write — see that method.
 // Paths are relative to the remote $HOME and are made absolute once it is resolved at setup
 // (a literal `~` is NOT expanded inside double quotes or when passed as data, so the merged
 // hook command / endpoint file / `-R` bind path would otherwise carry an unexpanded tilde).
@@ -138,9 +146,100 @@ export class RemoteHooks {
           JSON.stringify(merged, null, 2)
         )
       }
+      // 4. codex: hooks.json merge + config.toml trust (its own shape — not a JSON-settings agent).
+      await this.installCodexRemote(conn, controlPath, home, remoteDir)
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
+    }
+  }
+
+  /**
+   * Install the managed codex status hook on the REMOTE host: write `codex.sh`, merge our handler
+   * into `~/.codex/hooks.json`, and — the part that makes codex different from claude/gemini — write
+   * the matching TRUST entries into `~/.codex/config.toml`. Codex will NOT run a hook whose
+   * `[hooks.state."<key>"].trusted_hash` doesn't equal its own hash of the hook definition, so the
+   * hooks.json merge alone (the desktop's local `codex.ts` learned this) leaves a remote codex
+   * session dark. This mirrors that local flow over the ControlMaster.
+   *
+   * The trust hash is computed over the EXACT `command` string (which embeds the remote script
+   * path), so the command written into hooks.json and the command hashed into config.toml MUST be
+   * the same bytes — both come from `buildCodexManagedCommand(script)`. The trust KEY is keyed by
+   * the hooks.json path as codex canonicalizes it (`key_source` → realpath), so we resolve the
+   * remote path with `readlink -f` ON THE HOST rather than realpath'ing it against the desktop fs
+   * (which would resolve the wrong machine's symlinks, or fall back to a path codex never uses).
+   *
+   * Fail-open at every step; an unparseable remote hooks.json is left untouched (never clobbered).
+   */
+  private async installCodexRemote(
+    conn: SshConnection,
+    controlPath: string,
+    home: string,
+    remoteDir: string
+  ): Promise<void> {
+    try {
+      const script = `${remoteDir}/agent-hooks/codex.sh`
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
+        ),
+        buildManagedScript('codex')
+      )
+      const command = buildCodexManagedCommand(script)
+      const codexHome = `${home}/.codex`
+      const hooksFile = `${codexHome}/hooks.json`
+      const configToml = `${codexHome}/config.toml`
+
+      // Resolve the canonical remote hooks.json path (codex realpath's key_source before keying the
+      // trust entry). Falls back to the plain path when readlink can't resolve it yet.
+      const { stdout: canonRaw } = await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p ${posixQuote(codexHome)}; readlink -f ${posixQuote(hooksFile)} 2>/dev/null || printf %s ${posixQuote(hooksFile)}`
+        )
+      )
+      const sourcePath = canonRaw.trim() || hooksFile
+
+      // Read the current hooks.json. `|| echo '{}'` only fires when the file is MISSING, so a
+      // present-but-malformed file reaches JSON.parse and throws → we skip (never clobber it).
+      const { stdout: hooksRaw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(hooksFile)} 2>/dev/null || echo '{}'`)
+      )
+      let existing: CodexHooksConfig | null
+      try {
+        const parsed = JSON.parse(hooksRaw || '{}') as unknown
+        existing =
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? (parsed as CodexHooksConfig)
+            : null
+      } catch {
+        existing = null
+      }
+      const built = buildCodexHooksAndTrust(existing, command, sourcePath)
+      if (!built) return // missing is fine ({}); unparseable/odd shape → leave the host's file alone
+
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p ${posixQuote(codexHome)} && cat > ${posixQuote(hooksFile)}`),
+        `${JSON.stringify(built.config, null, 2)}\n`
+      )
+
+      // Trust LAST: read config.toml, line-merge our trust blocks (preserving all other content),
+      // write back only if it changed. `|| true` so a missing config.toml reads as empty.
+      const { stdout: tomlRaw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(configToml)} 2>/dev/null || true`)
+      )
+      const nextToml = upsertHookTrustEntriesInContent(tomlRaw, built.trustEntries)
+      if (nextToml !== tomlRaw) {
+        await this.r.run(
+          childArgs(conn, controlPath, `mkdir -p ${posixQuote(codexHome)} && cat > ${posixQuote(configToml)}`),
+          nextToml
+        )
+      }
+    } catch {
+      /* fail-open: the remote codex session simply runs without status hooks */
     }
   }
 

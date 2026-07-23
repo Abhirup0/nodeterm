@@ -40,7 +40,7 @@ import {
 } from './codex-trust'
 
 // Confirmed codex event set.
-const CODEX_EVENTS = [
+export const CODEX_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'PreToolUse',
@@ -53,7 +53,7 @@ const CODEX_EVENTS = [
 // codex-rs/hooks/src/lib.rs::hook_event_key_label), while hooks.json uses the
 // PascalCase serde-rename. Map between them in one place so the trust-write
 // path can't drift from the hooks.json install path.
-const CODEX_EVENT_LABEL: Record<(typeof CODEX_EVENTS)[number], CodexEventLabel> = {
+export const CODEX_EVENT_LABEL: Record<(typeof CODEX_EVENTS)[number], CodexEventLabel> = {
   SessionStart: 'session_start',
   UserPromptSubmit: 'user_prompt_submit',
   PreToolUse: 'pre_tool_use',
@@ -68,7 +68,7 @@ const SCRIPT_FILE_NAME = 'codex.sh'
 // where each HookDefinition has a `hooks` array of command handlers.
 type HookCommandConfig = { type: 'command'; command: string; [k: string]: unknown }
 type HookDefinition = { hooks?: HookCommandConfig[]; [k: string]: unknown }
-type HooksConfig = { hooks?: Record<string, HookDefinition[]>; [k: string]: unknown }
+export type HooksConfig = { hooks?: Record<string, HookDefinition[]>; [k: string]: unknown }
 
 function codexHome(): string {
   // Default CODEX_HOME. We intentionally write into the user's REAL ~/.codex.
@@ -121,10 +121,65 @@ function removeManagedFromDefinitions(defs: HookDefinition[]): HookDefinition[] 
 // makes Codex reject the hook. The POSIX wrapper's
 // `[ -x ... ]` guard makes a missing/non-executable script a silent no-op so a
 // broken install never poisons the session with exit-127 noise.
-function buildManagedCommand(script: string): string {
+export function buildManagedCommand(script: string): string {
   // POSIX single-quote escape so $, `, ", \ in the path are taken literally.
   const quoted = `'${script.replaceAll("'", "'\\''")}'`
   return `if [ -x ${quoted} ]; then /bin/sh ${quoted}; fi`
+}
+
+// Pure core of the codex install: given the CURRENT parsed hooks.json (or {} for
+// a missing file), the managed hook `command`, and the `sourcePath` used to key
+// the trust entries (the hooks.json path — canonical/realpath'd form on the host
+// that will RUN codex), return the merged hooks.json config plus the trust
+// entries whose `trusted_hash` must land in config.toml. Shared by the LOCAL
+// installer (fs writes) and the SSH RemoteHooks installer (writes over the
+// ControlMaster) so the hooks.json shape and the trust hash can never drift
+// between the two paths. Returns null when `existing` is null (unparseable
+// hooks.json) — the caller must then leave the file untouched.
+export function buildCodexHooksAndTrust(
+  existing: HooksConfig | null,
+  command: string,
+  sourcePath: string
+): { config: HooksConfig; trustEntries: CodexTrustEntry[] } | null {
+  if (!existing) return null
+  const config: HooksConfig = { ...existing }
+  const nextHooks: Record<string, HookDefinition[]> = { ...(config.hooks ?? {}) }
+  const managedEvents = new Set<string>(CODEX_EVENTS)
+
+  // Sweep managed entries out of events we no longer subscribe to (e.g. left
+  // over from an older install) so we don't keep firing stale hooks.
+  for (const [eventName, defs] of Object.entries(nextHooks)) {
+    if (managedEvents.has(eventName) || !Array.isArray(defs)) {
+      continue
+    }
+    const cleaned = removeManagedFromDefinitions(defs)
+    if (cleaned.length === 0) {
+      delete nextHooks[eventName]
+    } else {
+      nextHooks[eventName] = cleaned
+    }
+  }
+
+  // Prepend our managed handler to each subscribed event (idempotent — strip any
+  // prior managed copy first) and record the matching trust entry at
+  // groupIndex 0 / handlerIndex 0.
+  const trustEntries: CodexTrustEntry[] = []
+  for (const eventName of CODEX_EVENTS) {
+    const current = Array.isArray(nextHooks[eventName]) ? nextHooks[eventName] : []
+    const cleaned = removeManagedFromDefinitions(current)
+    const definition: HookDefinition = { hooks: [{ type: 'command', command }] }
+    nextHooks[eventName] = [definition, ...cleaned]
+    trustEntries.push({
+      sourcePath,
+      eventLabel: CODEX_EVENT_LABEL[eventName],
+      groupIndex: 0,
+      handlerIndex: 0,
+      command
+    })
+  }
+
+  config.hooks = nextHooks
+  return { config, trustEntries }
 }
 
 function readHooksJson(file: string): HooksConfig | null {
@@ -208,49 +263,17 @@ export function installCodexHooks(): void {
   }
 
   try {
-    const nextHooks: Record<string, HookDefinition[]> = { ...(config.hooks ?? {}) }
-    const managedEvents = new Set<string>(CODEX_EVENTS)
-
-    // Why: sweep managed entries out of events we no longer subscribe to (e.g.
-    // left over from an older install) so we don't keep firing stale hooks.
-    for (const [eventName, defs] of Object.entries(nextHooks)) {
-      if (managedEvents.has(eventName) || !Array.isArray(defs)) {
-        continue
-      }
-      const cleaned = removeManagedFromDefinitions(defs)
-      if (cleaned.length === 0) {
-        delete nextHooks[eventName]
-      } else {
-        nextHooks[eventName] = cleaned
-      }
-    }
-
-    // Why: prepend our managed handler to each subscribed event (idempotent —
-    // strip any prior managed copy first) and record the matching trust entry
-    // at groupIndex 0 / handlerIndex 0. Prepending keeps the status hook ahead
-    // of any user hooks so a slow user hook can't leave the badge stale.
-    const trustEntries: CodexTrustEntry[] = []
-    for (const eventName of CODEX_EVENTS) {
-      const current = Array.isArray(nextHooks[eventName]) ? nextHooks[eventName] : []
-      const cleaned = removeManagedFromDefinitions(current)
-      const definition: HookDefinition = { hooks: [{ type: 'command', command }] }
-      nextHooks[eventName] = [definition, ...cleaned]
-      trustEntries.push({
-        sourcePath: hooksFile,
-        eventLabel: CODEX_EVENT_LABEL[eventName],
-        groupIndex: 0,
-        handlerIndex: 0,
-        command
-      })
-    }
-
-    config.hooks = nextHooks
-    writeHooksJson(hooksFile, config)
+    // Prepending keeps the status hook ahead of any user hooks so a slow user
+    // hook can't leave the badge stale. The trust entry is keyed by the local
+    // hooks.json path (computeTrustKey realpath's it to match how codex keys it).
+    const built = buildCodexHooksAndTrust(config, command, hooksFile)
+    if (!built) return
+    writeHooksJson(hooksFile, built.config)
 
     // Why: write trust LAST so a half-write can't leave a hash pointing at a
     // hook that doesn't exist. upsert does a line-level merge that preserves
     // all other config.toml content.
-    upsertHookTrustEntries(configTomlPath(), trustEntries)
+    upsertHookTrustEntries(configTomlPath(), built.trustEntries)
   } catch (e) {
     console.warn('[agent-hooks] codex install failed', e)
   }

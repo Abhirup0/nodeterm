@@ -52,6 +52,53 @@ describe('RemoteHooks.setup', () => {
     expect(joined.some((j) => j.includes('~/'))).toBe(false)
   })
 
+  it('installs codex too — hooks.json merge PLUS the config.toml trust write', async () => {
+    const { rh, calls } = mk()
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res).not.toBeNull()
+    const joined = calls.map((c) => c.args.join(' '))
+    // codex managed script written to the absolute agent-hooks path (paths are posix-quoted).
+    expect(joined.some((j) => j.includes("cat > '/home/u/.nodeterm/agent-hooks/codex.sh'"))).toBe(true)
+    // hooks.json merged with the [ -x ] guarded command (embedded as JSON in stdin).
+    expect(
+      calls.some(
+        (c) =>
+          c.args.join(' ').includes("cat > '/home/u/.codex/hooks.json'") &&
+          (c.stdin ?? '').includes("if [ -x '/home/u/.nodeterm/agent-hooks/codex.sh' ]")
+      )
+    ).toBe(true)
+    // the part claude/gemini don't need: a config.toml trust block with a trusted_hash.
+    expect(
+      calls.some(
+        (c) =>
+          c.args.join(' ').includes("cat > '/home/u/.codex/config.toml'") &&
+          (c.stdin ?? '').includes('[hooks.state.') &&
+          (c.stdin ?? '').includes('trusted_hash = "sha256:')
+      )
+    ).toBe(true)
+    // no unexpanded tilde anywhere in the codex path work either.
+    expect(joined.some((j) => j.includes('~/'))).toBe(false)
+  })
+
+  it('leaves a malformed remote codex hooks.json untouched (never clobbers it)', async () => {
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      const joined = args.join(' ')
+      if (joined.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+      if (joined.includes('%{http_code}')) return { code: 0, stdout: '204' }
+      // present-but-broken hooks.json (the `|| echo '{}'` only fires when the file is MISSING).
+      if (joined.includes("cat '/home/u/.codex/hooks.json'")) return { code: 0, stdout: '{ not json' }
+      return { code: 0, stdout: '' }
+    })
+    await new RemoteHooks({ run }).setup('p1', conn, '/s.sock', { port: 1, token: 't', version: '1' })
+    const joined = calls.map((c) => c.args.join(' '))
+    // the script is still (idempotently) written, but neither hooks.json nor config.toml is rewritten.
+    expect(joined.some((j) => j.includes("cat > '/home/u/.nodeterm/agent-hooks/codex.sh'"))).toBe(true)
+    expect(joined.some((j) => j.includes("cat > '/home/u/.codex/hooks.json'"))).toBe(false)
+    expect(joined.some((j) => j.includes("cat > '/home/u/.codex/config.toml'"))).toBe(false)
+  })
+
   it('verifies the tunnel end-to-end and heals a stale forward with one rebind', async () => {
     // First verify sees a dead target (a reused live-orphan master serving a previous run's
     // forward — the field case that killed remote statuses for hours); the rebind fixes it.
