@@ -275,6 +275,16 @@ export class WorkspaceStore {
       // Mirror on change, and re-mirror while a previous write is still owed (the first save
       // often races the ControlMaster coming up — its write is dropped fail-open, and without
       // the retry nothing rewrites until the next real content change).
+      //
+      // KNOWN GAP (concurrent write, follow-up): this is a BLIND mirror write — it does not re-read
+      // the server first. While the desktop is connected, the connected-project poll
+      // (refreshSshProject, ~15s) reconciles + rescues a phone-appended node (reconcileSsh above), but
+      // a local edit whose 5s-throttled mirror write fires INSIDE that poll window overwrites the
+      // server before the poll adopts the append — the phone's session is lost until it is re-created.
+      // Closing it means routing this write through reconcileSsh (read → union → write) so it can
+      // never clobber a remote-only node; deferred here because that adds an SSH round-trip to every
+      // changed save (the poll was the deliberate cheaper alternative). The connect-LATER path — the
+      // reported field bug — is fully fixed by the union in reconcileSsh.
       if (changedSinceLoad || this.unmirrored.has(e.id)) {
         const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
         if (ok) this.unmirrored.delete(e.id)
@@ -510,14 +520,44 @@ export class WorkspaceStore {
         ? remote.rev > cacheRev
         : (cacheNodes === 0 && remote.nodes.length > 0) ||
           (remote.nodes.length > 0 && remote.rev > cacheRev))
+    // Whichever side wins, rescue the OTHER side's session nodes it doesn't have. The two writers of a
+    // same-lineage file (this desktop's throttled mirror + the mobile companion's direct append) are
+    // ordered only by a single `rev` counter, and that counter DRIFTS: a dropped/forgotten final mirror
+    // write or an offline edit leaves the server behind our cache, so the phone's append (rev = the
+    // server file + 1) lands BELOW our cache rev and a rev-only decision silently discards it — the
+    // field bug where a phone-created SSH session never reached the desktop canvas. Guarded to
+    // same-lineage AND both sides populated, so a deliberate clear on either side (an empty side with a
+    // higher rev = "the user cleared their canvas elsewhere") still wins by rev, unchanged.
+    const mergeable = sameLineage && !!e.cache && cacheNodes > 0 && !!remote && remote.nodes.length > 0
     if (remote && remoteWins) {
-      const adopted = remote.id === e.id ? remote : { ...remote, id: e.id }
+      let adopted = remote.id === e.id ? remote : { ...remote, id: e.id }
+      let owed = false
+      if (mergeable) {
+        const rescued = nodesMissingFrom(adopted.nodes, e.cache!.nodes) // our local-only additions
+        if (rescued.length) {
+          adopted = { ...adopted, nodes: [...adopted.nodes, ...rescued], rev: Math.max(adopted.rev, cacheRev) + 1 }
+          owed = true // the server file lacks the merged-in nodes → owe a mirror write
+        }
+      }
       e.cache = adopted
       e.name = adopted.name
       e.color = adopted.color
       this.revs.set(e.id, adopted.rev)
-      this.unmirrored.delete(e.id) // the server copy IS the truth now — nothing owed
+      if (owed) this.unmirrored.add(e.id)
+      else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
+    }
+    // Our cache stood. Before it clobbers the server, merge in any remote-only session nodes (the
+    // phone's drifted append) so the push carries them instead of erasing them.
+    let merged: Project | null = null
+    if (mergeable && e.cache && remote) {
+      const rescued = nodesMissingFrom(e.cache.nodes, remote.nodes)
+      if (rescued.length) {
+        e.cache = { ...e.cache, nodes: [...e.cache.nodes, ...rescued], rev: Math.max(cacheRev, remote.rev) + 1 }
+        this.revs.set(e.id, e.cache.rev)
+        this.unmirrored.add(e.id) // the merged set must land on the server
+        merged = fileToProject(e.cache, { ssh: e.ssh, closed: e.closed, localExec: e.localExec })
+      }
     }
     if (e.cache && (pushIfStanding || this.unmirrored.has(e.id))) {
       // Our cache stood. If it just beat a FOREIGN lineage on the merits (not on rev), outbid that
@@ -532,8 +572,18 @@ export class WorkspaceStore {
       if (ok) this.unmirrored.delete(e.id)
       else this.unmirrored.add(e.id)
     }
-    return null
+    // Surface a rescued merge to the renderer even on a read-only poll (pushIfStanding:false) — the
+    // whole point is the phone's session reaching the live desktop canvas without a reconnect.
+    return merged
   }
+}
+
+/** The nodes of `from` whose id is NOT present in `base` — the additions one writer has that the
+ *  other lacks. Used to UNION a same-lineage divergence so neither writer's session nodes are lost
+ *  when the shared `rev` counter can't order the two writes (see reconcileSsh). */
+function nodesMissingFrom(base: CanvasNodeState[], from: CanvasNodeState[]): CanvasNodeState[] {
+  const have = new Set(base.map((n) => n.id))
+  return from.filter((n) => !have.has(n.id))
 }
 
 /** A labeled grey placeholder for a ref whose file can't be read right now. */

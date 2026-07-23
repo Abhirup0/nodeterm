@@ -759,4 +759,49 @@ describe('ssh lineage safety', () => {
     expect(adopted).toMatchObject({ id: 'ps' })
     expect(adopted!.nodes).toHaveLength(0)
   })
+
+  // The FIELD BUG: a phone-created session (in an SSH project's folder on a server) never reached
+  // the desktop canvas. The phone appends its node to the server's project.json and bumps rev vs the
+  // file it read — but the desktop's CACHE rev can drift AHEAD of the server (a dropped/forgotten
+  // final mirror write, or an offline edit), so a rev-only decision discards the phone's node and the
+  // standing cache clobbers the server. Same-lineage must UNION remote-only session nodes, not lose
+  // them. Guarded to both-sides-populated so the "user cleared their canvas" case above still wins.
+  const node = (id: string, title: string) => ({
+    id, kind: 'terminal' as const, position: { x: 0, y: 0 }, size: { width: 1, height: 1 },
+    title, color: '#fff', group: null
+  })
+  it('rescues a mobile-appended node when our cache rev has drifted ahead of the server', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 't')] })])) // rev 1
+    // Two local edits drift our cache to rev 3 (the last mirror write is imagined dropped below).
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 'edit1')] })])) // rev 2
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 'edit2')] })])) // rev 3
+    // The server is BEHIND our cache (rev 2, dropped final mirror) and the phone appended a session to it.
+    files['~/app'] = JSON.stringify({
+      version: 1, rev: 2, savedAt: 'then', id: 'ps', name: 'foo', color: '#7aa2f7',
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [node('term-1', 'edit2'), node('term-mobile-1', 'Mobile')]
+    })
+    const adopted = await store.refreshSshProject('ps')
+    // The phone's session reaches the live canvas...
+    expect(adopted?.nodes.map((n) => n.id)).toContain('term-mobile-1')
+    expect(adopted?.nodes.map((n) => n.id)).toContain('term-1') // and our own node survives too
+    // ...and the merged set is pushed back so the server keeps it.
+    expect(JSON.parse(files['~/app']).nodes.map((n: any) => n.id)).toContain('term-mobile-1')
+  })
+
+  it('poll (read-only stand) still rescues + surfaces a drifted mobile append', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 't')] })])) // rev 1
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 'edit')] })])) // rev 2
+    files['~/app'] = JSON.stringify({
+      version: 1, rev: 1, savedAt: 'then', id: 'ps', name: 'foo', color: '#7aa2f7',
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [node('term-1', 'edit'), node('term-mobile-1', 'Mobile')]
+    })
+    const adopted = await store.refreshSshProject('ps', { pushIfStanding: false })
+    expect(adopted?.nodes.map((n) => n.id)).toContain('term-mobile-1')
+  })
 })
