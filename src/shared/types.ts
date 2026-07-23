@@ -677,6 +677,12 @@ export interface Settings {
    *  state + activity + context% change (spec: interactive-push-live-activities). Default on.
    *  Sub-gate under `mobilePushEnabled` (the master switch). Toggle in Settings → Notifications. */
   mobileLiveActivities: boolean
+  /** Hold phone ALERTS while you're actively at this computer, releasing them when you go idle or
+   *  lock the screen (spec: presence-aware-push). Default on. Desktop-only (the Server Edition is
+   *  headless, so it always sends); the live-update stream is never held. Sub-gate under
+   *  `mobilePushEnabled`. Off ⇒ alerts always send immediately (legacy). Toggle in Settings →
+   *  Notifications. */
+  mobilePushPresenceAware: boolean
   /** Deterministic hook-reply approvals (spec: docs/hook-reply-approvals.md). When on (default),
    *  Claude terminal sessions launch with `NODETERM_PERM_WAIT_SECS` set: the managed permission
    *  hook holds briefly for a phone/canvas Approve/Deny before falling through to the normal
@@ -731,6 +737,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mobilePushNeedsYou: true,
   mobilePushDone: true,
   mobileLiveActivities: true,
+  mobilePushPresenceAware: true,
   // Deterministic hook-reply approvals default ON (existing users pick it up on hydrate). Only
   // affects Claude terminal sessions; off reproduces the pre-feature launch bit-for-bit.
   hookReplyApprovals: true,

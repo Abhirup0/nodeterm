@@ -40,9 +40,11 @@ import {
   onInboxActionable,
   onNodeStateChange,
   onNodeNowChange,
+  isEventUnresolved,
   type MirrorSettings
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
+import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
@@ -749,16 +751,19 @@ app.whenReady().then(async () => {
   })
   // Desktop → paired-phone APNs push (spec: apns-push). Feeds off the SAME actionable-event seam
   // the mobile Inbox uses (`onInboxActionable`), so it fires exactly on approval/question (post-
-  // dedup) + done (turn edge). It's inert unless a phone has been paired (an approved device is
-  // pinned) — that's the "standing relay host configured/paired" gate. The host public key
-  // (identity every paired phone pinned) + paired flag load async and refresh on a cheap interval,
-  // so a mid-run pairing / keyring-unlock is picked up without re-wiring; the getter is sync.
+  // dedup) + done (turn edge). The host public key (identity every paired phone pinned) + paired
+  // flag load async and refresh on a cheap interval, so a mid-run pairing / keyring-unlock is
+  // picked up without re-wiring; the getter is sync.
   //
-  // Desktop stays RELAY-ONLY: it does NOT wire the SSH-possession push grants
-  // (spec: nodeterm-server/docs/specs/2026-07-21-push-grants.md, which the Server Edition uses in
-  // src/server/index.ts). A desktop that a phone both relay-PAIRED and dropped a grant on would
-  // push the same event to the same phone twice — once identity-signed, once grant-authorized. The
-  // grant path is the fallback for hosts with no relay identity; the desktop always has one.
+  // GRANTED-MODE FALLBACK (spec: 2026-07-21-push-grants; owner-approved "B"). The desktop ALSO
+  // wires the SSH-possession push grants the Server Edition uses (src/server/index.ts) — a phone
+  // that reached this Mac by plain SSH drops a signed, device-scoped grant at
+  // `~/.nodeterm/push-grants/<deviceId>.grant` on the Mac's own fs. `resolveTarget` keeps a SINGLE
+  // sender: host-mode only when a relay identity is present AND a phone is paired; else (unpaired,
+  // or no identity) it falls through to the grants. So a plain-SSH phone gets pushes for
+  // Mac-tracked sessions with NO QR pairing, and QR-pairing later flips `hasPairedPhone` true →
+  // host-mode automatically (grants suppressed — no double-push to the same phone).
+  const pushGrants = createGrantsAccessor()
   let pushHostKeyB64: string | null = null
   let pushHasPairedPhone = false
   const refreshPushIdentity = async (): Promise<void> => {
@@ -776,6 +781,49 @@ app.whenReady().then(async () => {
   void refreshPushIdentity()
   const pushIdentityTimer = setInterval(() => void refreshPushIdentity(), 60_000)
   pushIdentityTimer.unref?.()
+  // Presence-aware alert deferral (spec: presence-aware-push; owner UX call). Hold phone ALERTS
+  // while the user is actively at THIS Mac (noise); release them the moment they go idle or lock
+  // the screen (exactly the right time). Presence = powerMonitor: idle < 180s AND not screen-locked.
+  // A 15s poll detects the present→away idle edge; the lock event fires the flush immediately. Only
+  // createPushNotify (alerts) is deferred — the live-update stream stays ambient. When the setting
+  // is off, isUserPresent() is always false ⇒ nothing is ever held ⇒ exact legacy behavior.
+  const PRESENCE_IDLE_AWAY_SECS = 180
+  let screenLocked = false
+  const presenceAwayListeners = new Set<() => void>()
+  const isUserPresent = (): boolean => {
+    if (settingsStore.get().mobilePushPresenceAware === false) return false
+    if (screenLocked) return false
+    try {
+      return powerMonitor.getSystemIdleTime() < PRESENCE_IDLE_AWAY_SECS
+    } catch {
+      return false // powerMonitor unavailable (e.g. no session) ⇒ treat as away, send immediately
+    }
+  }
+  const firePresenceAway = (): void => {
+    for (const cb of presenceAwayListeners) {
+      try {
+        cb()
+      } catch {
+        // A held-flush subscriber must never break its siblings.
+      }
+    }
+  }
+  let wasPresent = isUserPresent()
+  powerMonitor.on('lock-screen', () => {
+    screenLocked = true
+    wasPresent = false
+    firePresenceAway()
+  })
+  powerMonitor.on('unlock-screen', () => {
+    screenLocked = false
+    wasPresent = isUserPresent()
+  })
+  const presenceTimer = setInterval(() => {
+    const present = isUserPresent()
+    if (wasPresent && !present) firePresenceAway() // present → away: flush held alerts
+    wasPresent = present
+  }, 15_000)
+  presenceTimer.unref?.()
   createPushNotify({
     subscribe: onInboxActionable,
     getHostIdentity: () =>
@@ -787,19 +835,32 @@ app.whenReady().then(async () => {
             hasPairedPhone: pushHasPairedPhone
           }
         : null,
+    // Granted-mode fallback (unpaired / no relay identity → push to SSH-dropped grants; see the
+    // block comment above). resolveTarget keeps a single sender: host wins when paired.
+    getGrants: () => pushGrants.get(),
+    markGrantDead: (grant) => pushGrants.markDead(grant),
+    hostLabel: () => hostname(),
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
     mobilePushDone: () => settingsStore.get().mobilePushDone !== false,
     isPackaged: () => app.isPackaged,
     // The node's canvas/sidebar display title, so the phone can title the alert
     // "<Needs you|Completed> — <nodeTitle>" (see workspace-store.getNodeTitle for the freshness note).
-    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
+    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId),
+    // Presence-aware deferral wiring (alerts only).
+    isUserPresent,
+    subscribePresence: (cb) => {
+      presenceAwayListeners.add(cb)
+      return () => presenceAwayListeners.delete(cb)
+    },
+    isEventUnresolved: (nodeId, eventId) => isEventUnresolved(nodeId, eventId)
   })
   // Desktop → paired-phone Live Activity updates (spec: interactive-push-live-activities). Feeds off
   // the mirror's state-edge + activity/context seams, throttles activity ticks (≥20s/node), and
-  // POSTs to /v1/push/live-update. Same host identity + paired-phone gate as notify, plus its own
-  // `mobileLiveActivities` sub-gate under the `mobilePushEnabled` master. Inert without a paired
-  // phone — same documented three-surfaces degrade (Server Edition has no standing relay identity).
+  // POSTs to /v1/push/live-update. Same host identity + granted-mode fallback as notify (a
+  // plain-SSH phone's grants also drive Live Activities), plus its own `mobileLiveActivities`
+  // sub-gate under the `mobilePushEnabled` master. Presence deferral does NOT apply here — the
+  // live-update stream is ambient (activity/context ticks), so it is never held.
   createLiveUpdatePush({
     subscribeStateChange: onNodeStateChange,
     subscribeNowChange: onNodeNowChange,
@@ -812,6 +873,9 @@ app.whenReady().then(async () => {
             hasPairedPhone: pushHasPairedPhone
           }
         : null,
+    getGrants: () => pushGrants.get(),
+    markGrantDead: (grant) => pushGrants.markDead(grant),
+    hostLabel: () => hostname(),
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false,
     isPackaged: () => app.isPackaged,

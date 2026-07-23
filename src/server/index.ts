@@ -323,7 +323,12 @@ export async function startServer(
     ...grantedPushGates,
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
-    mobilePushDone: () => settingsStore.get().mobilePushDone !== false
+    mobilePushDone: () => settingsStore.get().mobilePushDone !== false,
+    // Presence-aware deferral (spec: presence-aware-push) is desktop-only: the Server Edition is
+    // HEADLESS — nobody is sitting at it — so nothing is ever "present". Every alert sends
+    // immediately, unchanged from before this feature. (No subscribePresence/isEventUnresolved
+    // needed: with isUserPresent always false, the hold queue is never touched.)
+    isUserPresent: () => false
   })
   createLiveUpdatePush({
     subscribeStateChange: onNodeStateChange,

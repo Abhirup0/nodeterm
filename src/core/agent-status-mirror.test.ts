@@ -29,6 +29,7 @@ import {
   onNodeStateChange,
   onNodeNowChange,
   onInboxActionable,
+  isEventUnresolved,
   _resetForTest,
   _snapshot,
   _inboxSnapshot,
@@ -1459,5 +1460,37 @@ describe('filterMirrorForNodes (usage + inbox)', () => {
   it('buildFile omits an empty inbox (old-file shape preserved)', () => {
     const d = buildFile({}, 1, undefined, undefined, undefined, { events: [], nodes: {} })
     expect('inbox' in d).toBe(false)
+  })
+})
+
+describe('isEventUnresolved (presence-hold flush lookup)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('true for a live unresolved approval, false once the node leaves blocked', () => {
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Approve write' }))
+    const id = _inboxSnapshot().events.find((e) => e.kind === 'approval')!.id
+    expect(isEventUnresolved('n1', id)).toBe(true)
+    // Leaving blocked resolves the card (resolveUnresolvedFor).
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working' }))
+    expect(isEventUnresolved('n1', id)).toBe(false)
+  })
+
+  it('true for an unread done, false after ackDone', () => {
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'done', lastMessage: 'All set.' }))
+    const id = _inboxSnapshot().events.find((e) => e.kind === 'done')!.id
+    expect(isEventUnresolved('n2', id)).toBe(true)
+    ackDone('n2')
+    expect(isEventUnresolved('n2', id)).toBe(false)
+  })
+
+  it('false for an unknown event id or the wrong node', () => {
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n3', state: 'blocked', lastMessage: 'Approve' }))
+    const id = _inboxSnapshot().events.find((e) => e.kind === 'approval')!.id
+    expect(isEventUnresolved('n3', 'no-such-id')).toBe(false)
+    expect(isEventUnresolved('other-node', id)).toBe(false)
   })
 })
