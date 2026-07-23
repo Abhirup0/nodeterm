@@ -17,6 +17,7 @@ import {
   flush,
   initAgentStatusMirror,
   setMirrorSettingsProvider,
+  setMirrorServerProvider,
   setMirrorUsageProvider,
   buildMirrorUsage,
   toolActivity,
@@ -299,6 +300,73 @@ describe('settings block', () => {
     setMirrorSettingsProvider(() => { throw new Error('boom') })
     await flush()
     expect('settings' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
+  })
+})
+
+// ---- server-update (install metadata block) -------------------------------------------------
+
+describe('server block', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    _resetForTest()
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-'))
+  })
+
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('buildFile includes the server block when given one', () => {
+    const doc = buildFile({}, 1000, undefined, undefined, undefined, undefined, {
+      version: '0.2.17',
+      commit: '1e56f83',
+      installedAt: '2026-07-23T00:00:00Z'
+    })
+    expect(doc.server).toEqual({
+      version: '0.2.17',
+      commit: '1e56f83',
+      installedAt: '2026-07-23T00:00:00Z'
+    })
+  })
+
+  it('buildFile omits the server key entirely when none given (old-file shape)', () => {
+    expect('server' in buildFile({}, 1000)).toBe(false)
+    // An all-empty block is also omitted (nothing worth advertising).
+    expect('server' in buildFile({}, 1000, undefined, undefined, undefined, undefined, {})).toBe(false)
+  })
+
+  it('filterMirrorForNodes drops the server block from slices (host-local info)', () => {
+    const doc = buildFile({}, 1000, undefined, undefined, undefined, undefined, { version: '0.2.17' })
+    expect('server' in doc).toBe(true)
+    expect('server' in filterMirrorForNodes(doc, new Set())).toBe(false)
+  })
+
+  it('flush consults the server provider at flush time', async () => {
+    const file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+    setMirrorServerProvider(() => ({ version: '0.2.17', commit: 'abc1234' }))
+    await flush()
+    const written = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect(written.server).toEqual({ version: '0.2.17', commit: 'abc1234' })
+  })
+
+  it('a throwing provider fails open (no server block, file still written)', async () => {
+    const file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+    setMirrorServerProvider(() => {
+      throw new Error('boom')
+    })
+    await flush()
+    expect('server' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
+  })
+
+  it('writes no server block when no provider is wired (desktop parity)', async () => {
+    const file = path.join(tmpDir, 'status.json')
+    initAgentStatusMirror(file)
+    await flush()
+    expect('server' in JSON.parse(fs.readFileSync(file, 'utf-8'))).toBe(false)
   })
 })
 

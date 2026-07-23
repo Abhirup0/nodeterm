@@ -30,10 +30,12 @@ import {
   recordAgentEvent,
   ackDone,
   setMirrorSettingsProvider,
+  setMirrorServerProvider,
   onInboxActionable,
   onNodeStateChange,
   onNodeNowChange,
-  type MirrorSettings
+  type MirrorSettings,
+  type MirrorServer
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -65,6 +67,31 @@ function readAppVersion(): string {
     return parsed.version ?? '0.0.0'
   } catch {
     return '0.0.0'
+  }
+}
+
+/**
+ * This host's Server-Edition install metadata (spec: server-update), surfaced to the phone via the
+ * agent-status mirror's top-level `server` block. `scripts/install-server.sh` writes
+ * `<dataDir>/install-meta.json` (`{version, commit, installedAt}`) after every successful install
+ * or auto-update; the auto-update path restarts the service, so a boot-time read is always current.
+ * Tolerant: a missing/corrupt file or a block with no usable fields yields `undefined` (no block).
+ */
+function readInstallMeta(dataDir: string): MirrorServer | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(dataDir, 'install-meta.json'), 'utf8')
+    const p = JSON.parse(raw) as { version?: unknown; commit?: unknown; installedAt?: unknown }
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+    const out: MirrorServer = {}
+    const version = str(p.version)
+    const commit = str(p.commit)
+    const installedAt = str(p.installedAt)
+    if (version) out.version = version
+    if (commit) out.commit = commit
+    if (installedAt) out.installedAt = installedAt
+    return out.version || out.commit || out.installedAt ? out : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -213,6 +240,13 @@ export async function startServer(
         .map((a) => ({ id: a.id, dir: claudeConfigDirFor(a.id) }))
     }
   })
+  // Advertise this install's version/commit/installedAt to the phone (spec: server-update). The
+  // installer writes <dataDir>/install-meta.json after a successful install/update; read it once at
+  // boot (the auto-update path restarts this service, so a boot-time read is always current) and
+  // expose it as the mirror's `server` block. Desktop never sets this provider. Tolerant — a
+  // missing/corrupt file simply yields no block.
+  const installMeta = readInstallMeta(config.dataDir)
+  setMirrorServerProvider(() => installMeta)
   wireAgentStatus(platform)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the browser canvas answers a
   // held Claude permission hook here. The Server Edition runs ON the host, so a local project's
