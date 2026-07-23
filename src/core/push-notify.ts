@@ -27,6 +27,10 @@ const FETCH_TIMEOUT_MS = 8000
 // Backend contract cap for the optional per-event `nodeTitle` (the node's canvas/sidebar name,
 // rendered into the alert title as "<Needs you|Completed> — <nodeTitle>").
 const NODE_TITLE_MAX = 80
+// Bound on the presence-aware hold queue: while the user is present at the desktop, alerts pile up
+// here until they go idle/lock. Oldest-dropped past this cap; the queue is in-memory, so a restart
+// loses it (the mirror still carries the events — acceptable, documented).
+const HELD_QUEUE_MAX = 50
 
 /** The standing relay host's identity, needed for the backend's (hostDeviceId, hostId-from-pubkey)
  *  auth. `hasPairedPhone` is what makes the service live at all — no paired phone ⇒ nowhere to fan
@@ -123,6 +127,22 @@ export interface PushNotifyDeps {
    *  production this is `workspaceStore.getNodeTitle`. Optional / may return undefined — the field
    *  is then simply omitted from the payload. */
   getNodeTitle?: (nodeId: string) => string | undefined
+  /** Presence-aware alert deferral (owner UX call): pushing an ALERT to the phone while the user is
+   *  actively at the desktop is noise; when they go idle/lock it's exactly right. When this returns
+   *  true at send time, the batched event goes to an in-memory HOLD queue instead of POSTing. Absent
+   *  (or always-false, the Server Edition's headless case) ⇒ every event sends immediately, i.e.
+   *  exact legacy behavior. Alerts only — the live-update stream (createLiveUpdatePush) is ambient
+   *  and never deferred. */
+  isUserPresent?: () => boolean
+  /** Poke on the present→away transition to flush the hold queue. In production the desktop shell
+   *  detects the edge (powerMonitor idle poll + lock-screen) and fires `cb`. Returns an unsubscribe.
+   *  Paired with `isUserPresent`; absent ⇒ nothing is ever held so nothing needs flushing. */
+  subscribePresence?: (cb: () => void) => () => void
+  /** On the away-flush, drop a held event that got resolved in the mirror while it waited (an
+   *  approval/question the node has since left, or a `done` the desktop user already read). In
+   *  production this is `agent-status-mirror.isEventUnresolved`. Absent ⇒ all held events flush
+   *  unfiltered. */
+  isEventUnresolved?: (nodeId: string, eventId: string) => boolean
   /** Override base URL. Defaults to `env.NODETERM_API_BASE || 'https://api.nodeterm.dev'`. */
   apiBase?: string
   /** Injectable env (DNT guards + local-dev base). Defaults to `process.env`. */
@@ -157,6 +177,9 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
   const throttleMs = deps.throttleMs ?? DEFAULT_THROTTLE_MS
 
   const buffer: PushNotifyEvent[] = []
+  // Presence-aware hold queue: while the user is present, accepted alerts wait here (with the mirror
+  // event id, so the away-flush can drop any that got resolved meanwhile). Bounded, oldest-dropped.
+  const held: { event: PushNotifyEvent; nodeId: string; eventId: string }[] = []
   const lastPushAt = new Map<string, number>()
   let batchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -218,7 +241,7 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     } catch {
       nodeTitle = undefined
     }
-    buffer.push({
+    const payload: PushNotifyEvent = {
       kind: e.kind,
       title: e.title,
       ...(e.detail ? { detail: e.detail } : {}),
@@ -228,8 +251,30 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
       ...(e.options && e.options.length > 0 ? { options: e.options } : {}),
       ...(e.multiSelect ? { multiSelect: true } : {}),
       ts: e.ts
-    })
+    }
+    // Presence-aware deferral: if the user is at the desktop right now, hold the alert instead of
+    // POSTing it — the present→away flush (subscribePresence) sends the survivors later. Carry the
+    // mirror event id so that flush can drop any that got resolved while held. Bounded/oldest-dropped.
+    if (deps.isUserPresent?.()) {
+      held.push({ event: payload, nodeId: e.nodeId, eventId: e.id })
+      if (held.length > HELD_QUEUE_MAX) held.splice(0, held.length - HELD_QUEUE_MAX)
+      return
+    }
+    buffer.push(payload)
     scheduleFlush()
+  }
+
+  /** Present→away edge: move held alerts still RELEVANT (unresolved in the mirror) into the send
+   *  buffer and flush; drop the rest (answered approval/question, read `done`). No-op when nothing
+   *  is held. */
+  function flushHeldOnAway(): void {
+    if (held.length === 0) return
+    const items = held.splice(0, held.length)
+    for (const it of items) {
+      if (deps.isEventUnresolved && !deps.isEventUnresolved(it.nodeId, it.eventId)) continue
+      buffer.push(it.event)
+    }
+    if (buffer.length > 0) scheduleFlush()
   }
 
   async function flush(): Promise<void> {
@@ -270,15 +315,18 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
   }
 
   const unsubscribe = deps.subscribe(onEvent)
+  const unsubPresence = deps.subscribePresence?.(flushHeldOnAway)
 
   return {
     stop() {
       unsubscribe()
+      unsubPresence?.()
       if (batchTimer) {
         clearTimeout(batchTimer)
         batchTimer = null
       }
       buffer.length = 0
+      held.length = 0
     },
     _flushNow: flush
   }

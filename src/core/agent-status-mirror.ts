@@ -782,6 +782,21 @@ function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
   }
 }
 
+/**
+ * Is the inbox event `eventId` on `nodeId` STILL unresolved? The desktop push-notify service's
+ * presence-aware hold uses this on the present→away flush to drop an event that got resolved while
+ * it was held: an approval/question the node has since left blocked/waiting for (`resolved:true` via
+ * `resolveUnresolvedFor`), or a `done` the desktop/browser user already read (`ackDone`). A missing
+ * event — never seen, or aged off the capped feed — is NOT relevant either (returns false), so a
+ * held push whose event the mirror no longer tracks is dropped rather than sent late. Pure read.
+ */
+export function isEventUnresolved(nodeId: string, eventId: string): boolean {
+  for (const e of inboxEvents) {
+    if (e.id === eventId && e.nodeId === nodeId) return !e.resolved
+  }
+  return false
+}
+
 /** Mark a node's unresolved approval/question events resolved (it left blocked/waiting). */
 function resolveUnresolvedFor(nodeId: string): void {
   for (const e of inboxEvents) {

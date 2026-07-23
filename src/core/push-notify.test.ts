@@ -563,6 +563,144 @@ describe('createPushNotify', () => {
     })
   })
 
+  describe('single-sender matrix (granted vs host)', () => {
+    // paired → host only, and neither → inert, are covered in the granted-mode block above. This
+    // pins the third leg: an UNPAIRED host identity (identity present, no phone pinned) must fall
+    // THROUGH to granted mode — the desktop granted-mode fallback (spec: 2026-07-21-push-grants).
+    it('unpaired host identity + grants → GRANTED mode only (host fields absent)', async () => {
+      const em = makeEmitter()
+      const getGrants = vi.fn(() => [{ deviceId: 'd', grant: 'tok-X' }])
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          getHostIdentity: () => ({ ...IDENTITY, hasPairedPhone: false }),
+          getGrants,
+          hostLabel: () => 'niova'
+        })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+      expect(body).not.toHaveProperty('hostDeviceId')
+      expect(body).not.toHaveProperty('hostPublicKeyB64')
+      expect(body.hostLabel).toBe('niova')
+      expect(fetchMock.mock.calls[0][1].headers.authorization).toBe('Bearer tok-X')
+      expect(getGrants).toHaveBeenCalled()
+      h.stop()
+    })
+  })
+
+  describe('presence-aware alert deferral', () => {
+    /** A manual present→away poke standing in for the desktop's powerMonitor edge detector. */
+    function presenceEmitter(): { subscribe: (cb: () => void) => () => void; away: () => void } {
+      let cb: (() => void) | null = null
+      return {
+        subscribe: (fn) => {
+          cb = fn
+          return () => {
+            cb = null
+          }
+        },
+        away: () => cb?.()
+      }
+    }
+
+    it('HOLDS alerts while the user is present, releasing them on the away edge', async () => {
+      const em = makeEmitter()
+      const pres = presenceEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, isUserPresent: () => true, subscribePresence: pres.subscribe })
+      )
+      em.emit(iev({ nodeId: 'a', id: 'e1', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', id: 'e2', title: 'B' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled() // held while present
+      pres.away()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events.map((e) => e.title)).toEqual(['A', 'B'])
+      h.stop()
+    })
+
+    it('on the away flush, DROPS held events resolved in the mirror and sends the rest', async () => {
+      const em = makeEmitter()
+      const pres = presenceEmitter()
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          isUserPresent: () => true,
+          subscribePresence: pres.subscribe,
+          // e2 got resolved (answered / read) while held → dropped; e1 still unresolved → sent.
+          isEventUnresolved: (_nodeId, eventId) => eventId !== 'e2'
+        })
+      )
+      em.emit(iev({ nodeId: 'a', id: 'e1', kind: 'approval', title: 'A' }))
+      em.emit(iev({ nodeId: 'b', id: 'e2', kind: 'done', title: 'B' }))
+      pres.away()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events.map((e) => e.title)).toEqual(['A'])
+      h.stop()
+    })
+
+    it('presence OFF (isUserPresent false) sends immediately — no hold', async () => {
+      const em = makeEmitter()
+      const pres = presenceEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, isUserPresent: () => false, subscribePresence: pres.subscribe })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(bodyOf().events[0].title).toBe('A')
+      h.stop()
+    })
+
+    it('no presence deps at all = exact legacy behavior (immediate send)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      h.stop()
+    })
+
+    it('bounds the hold queue, dropping the OLDEST past the cap of 50', async () => {
+      const em = makeEmitter()
+      const pres = presenceEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, isUserPresent: () => true, subscribePresence: pres.subscribe })
+      )
+      // 60 events on distinct nodes (so the per-node throttle never interferes). Cap 50 → oldest 10
+      // (t0..t9) drop.
+      for (let i = 0; i < 60; i++) em.emit(iev({ nodeId: `n${i}`, id: `e${i}`, title: `t${i}` }))
+      pres.away()
+      // 50 survivors flush 10/POST across sequential batch windows.
+      for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(2000)
+      const titles = fetchMock.mock.calls.flatMap((c) =>
+        JSON.parse(c[1].body).events.map((e: { title: string }) => e.title)
+      )
+      expect(titles).toHaveLength(50)
+      expect(titles).toContain('t59') // newest kept
+      expect(titles).not.toContain('t0') // oldest dropped
+      h.stop()
+    })
+
+    it('stop() clears the hold queue (a later away edge sends nothing)', async () => {
+      const em = makeEmitter()
+      const pres = presenceEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, isUserPresent: () => true, subscribePresence: pres.subscribe })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      h.stop()
+      pres.away()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+  })
+
   it('stop() unsubscribes so later events are ignored', async () => {
     const em = makeEmitter()
     const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))

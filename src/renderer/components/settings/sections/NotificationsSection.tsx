@@ -13,7 +13,7 @@ const ROWS = {
   },
   mobilePush: {
     title: 'Send push notifications to your paired phone',
-    keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval', 'question', 'done', 'completed', 'needs you', 'live activity', 'live activities', 'dynamic island', 'lock screen']
+    keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval', 'question', 'done', 'completed', 'needs you', 'live activity', 'live activities', 'dynamic island', 'lock screen', 'presence', 'idle', 'hold', 'defer', 'at this computer']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -24,6 +24,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
   const mobilePushNeedsYou = useSettings((s) => s.settings.mobilePushNeedsYou)
   const mobilePushDone = useSettings((s) => s.settings.mobilePushDone)
   const mobileLiveActivities = useSettings((s) => s.settings.mobileLiveActivities)
+  const mobilePushPresenceAware = useSettings((s) => s.settings.mobilePushPresenceAware)
   const update = useSettings((s) => s.update)
   // The OS refused our test notification (macOS permission denied). macOS never re-prompts
   // once the app's record exists, so the only way back is the System Settings pane.
@@ -119,6 +120,17 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
                 checked={mobileLiveActivities}
                 ariaLabel="Live Activities on your phone"
                 onChange={(on) => update({ mobileLiveActivities: on })}
+              />
+            }
+          />
+          <FieldRow
+            label="Hold phone alerts while you're at this computer"
+            description="Defer approval, question, and completed alerts while you're active here, then send them the moment you go idle or lock the screen. Live Activities are never held."
+            control={
+              <Switch
+                checked={mobilePushPresenceAware}
+                ariaLabel="Hold phone alerts while you're at this computer"
+                onChange={(on) => update({ mobilePushPresenceAware: on })}
               />
             }
           />
