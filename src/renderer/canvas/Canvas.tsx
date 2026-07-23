@@ -3615,10 +3615,18 @@ export function Canvas() {
         setConfirm({ message: res.error, onConfirm: () => setConfirm(null) })
         return
       }
+      // The file is context-budgeted by buildHandoff (long sessions: digest + verbatim tail,
+      // full copy beside it), so "read it" is always affordable. The wording pins the agent to
+      // CONTINUING rather than restarting — but conditionally: a handoff of a session with an
+      // in-progress task must be resumed without a greeting round-trip, while a handoff of a
+      // conversation that never got to a task (someone transfers right after "hey") has
+      // nothing to resume, and forbidding questions there would push the agent to invent work.
       const prompt =
-        `The file ${res.filePath} contains the COMPLETE prior conversation from a ` +
-        `${sourceAgentId} session, including every message and all tool calls and outputs. ` +
-        `Read the entire file first, then continue the task from where it left off.`
+        `The file ${res.filePath} is a handoff of the prior conversation from a ` +
+        `${sourceAgentId} session; the most recent exchange is at the END of the file. ` +
+        `Read the file, then continue seamlessly from exactly where the conversation left ` +
+        `off — as if you had been the assistant all along. If a task is in progress, resume ` +
+        `it immediately; do not greet, re-introduce yourself, or summarize the file back.`
       const node = createAgentNode(
         targetAgentId,
         nodesRef.current.length,
