@@ -849,11 +849,92 @@ export function onMirrorFlush(cb: (doc: MirrorFile) => void): () => void {
 }
 
 /**
- * Point the mirror at its file. Called once from main on launch; the path defaults to
- * `<userData>/agent-status.json`. Tests pass an explicit path (and thus never touch electron).
+ * Restore the persisted mirror doc into memory WITHOUT firing any seam. This is what makes the
+ * in-memory dedups survive a process RESTART.
+ *
+ * Field bug (owner screenshot): THREE identical "Finished — <same lastMessage>" APNs pushes, one
+ * per Server-Edition restart. Root cause: the mirror kept ALL its dedup in memory only, so every
+ * boot started with an empty `state` map + empty `inboxEvents`. Because the headless service is
+ * `Type=simple` (KillMode=control-group), a `systemctl restart` SIGTERMs the whole cgroup — the
+ * app's tmux server included — so its sessions die; each reconnect then cold-restores the node and
+ * re-launches `claude --resume`, whose completed turn re-emits `Stop` → a `done` carrying the SAME
+ * `last_assistant_message`. With `prevState === undefined` after boot, `produceInboxFromState`'s
+ * done-EDGE guard (`nextState === 'done' && prevState !== 'done'`) always fired, re-producing the
+ * done and re-firing `onInboxActionable` → the duplicate push (and, come the nightly auto-update
+ * timer, a nightly duplicate for every lingering done).
+ *
+ * Restoring `state` so `prevState` survives makes the done-edge guard suppress an identical
+ * re-`done` on its own; restoring `inboxEvents` makes the approval/question title-dedup
+ * (`newestUnresolved`) survive too, closing the same class for needs-you re-pushes. A restored
+ * state is NOT a new event — this NEVER calls a listener, so no push/live-update fires on boot.
+ * Fail-open: a missing / unreadable / corrupt file leaves memory empty, i.e. bit-for-bit legacy
+ * behavior. Stale entries are dropped with the SAME expiry sweep `buildFile`/`flush` apply, so a
+ * "working" from a long-dead session is never resurrected.
+ */
+function loadPersisted(file: string): void {
+  // Only seed empty memory — never clobber a live session (init runs once at boot, but guard so a
+  // stray re-init can't wipe in-flight state).
+  if (state.size > 0 || inboxEvents.length > 0) return
+  let doc: MirrorFile
+  try {
+    doc = JSON.parse(fs.readFileSync(file, 'utf-8')) as MirrorFile
+  } catch {
+    return // missing / unreadable / corrupt → empty (legacy behavior)
+  }
+  if (!doc || typeof doc !== 'object') return
+  const now = Date.now()
+  try {
+    // Main per-node state — apply the same expiry as buildFile so a stale "working" from a crashed
+    // session isn't resurrected past its window. This is what lets `prevState` survive the restart.
+    if (doc.nodes && typeof doc.nodes === 'object') {
+      for (const [id, e] of Object.entries(doc.nodes)) {
+        if (!e || typeof e !== 'object') continue
+        const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
+        if (now - updatedAt > EXPIRE_MS) continue
+        state.set(id, { state: e.state, agentId: e.agentId, sessionId: e.sessionId, updatedAt })
+      }
+    }
+    // Inbox feed — restore verbatim (already capped + carries `resolved` flags) so the
+    // approval/question title-dedup and the done-history survive. Ids continue monotonically from
+    // the max trailing `-<n>` seen (they are `${ts}-${seq}`; ts differs after a restart, so a
+    // collision is unlikely, but continuing the seq keeps them clean).
+    if (doc.inbox && Array.isArray(doc.inbox.events)) {
+      let events = doc.inbox.events.filter(
+        (e): e is InboxEvent => !!e && typeof e === 'object' && typeof e.id === 'string'
+      )
+      if (events.length > INBOX_EVENTS_CAP) events = events.slice(events.length - INBOX_EVENTS_CAP)
+      inboxEvents = events
+      let maxSeq = 0
+      for (const e of inboxEvents) {
+        const m = /-(\d+)$/.exec(e.id)
+        if (m) maxSeq = Math.max(maxSeq, Number(m[1]))
+      }
+      inboxSeq = maxSeq
+    }
+    // Per-node "doing now" — restore fresh entries only (same expiry as flush()).
+    if (doc.inbox && doc.inbox.nodes && typeof doc.inbox.nodes === 'object') {
+      for (const [id, n] of Object.entries(doc.inbox.nodes)) {
+        if (!n || typeof n !== 'object') continue
+        const updatedAt = typeof n.updatedAt === 'number' ? n.updatedAt : 0
+        if (now - updatedAt > EXPIRE_MS) continue
+        inboxNodes.set(id, n)
+      }
+    }
+  } catch {
+    // Any shape surprise → keep whatever restored so far (fail-open, never throw at boot).
+  }
+}
+
+/**
+ * Point the mirror at its file and RESTORE its persisted state into memory. Called once from each
+ * shell on launch; the path defaults to `<userData>/agent-status.json`. Tests pass an explicit path
+ * (and thus never touch electron). The restore (see `loadPersisted`) is what makes the in-memory
+ * dedups survive a restart — without it, a re-produced `done` re-fires the push (the duplicate-APNs
+ * field bug).
  */
 export function initAgentStatusMirror(filePath?: string): void {
   targetFile = filePath ?? path.join(platform().userDataDir, 'agent-status.json')
+  loadPersisted(targetFile)
 }
 
 function resolveFile(): string | null {
