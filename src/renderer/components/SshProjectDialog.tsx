@@ -2,8 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { useSshServers } from '../state/sshServers'
-import { useEntitlement } from '../state/entitlement'
-import { useUpgradeGate } from '../state/upgradeGate'
 import type { SshServer } from '@shared/ssh'
 
 interface SshProjectDialogProps {
@@ -33,20 +31,6 @@ const ROW_STYLE: React.CSSProperties = {
   cursor: 'pointer'
 }
 
-/** "PRO" pill shown on server rows while unlicensed — connecting is gated behind Pro. */
-const PRO_BADGE_STYLE: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  letterSpacing: 0.5,
-  lineHeight: '14px',
-  padding: '1px 6px',
-  borderRadius: 999,
-  color: 'var(--accent)',
-  border: '1px solid var(--accent)',
-  opacity: 0.9,
-  flexShrink: 0
-}
-
 /** Basename of an absolute remote path (for the project label). */
 function baseName(p: string): string {
   const trimmed = p.replace(/\/+$/, '')
@@ -72,8 +56,6 @@ function parentDir(p: string): string {
  */
 export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDialogProps) {
   const servers = useSshServers((s) => s.servers)
-  // Reactive so the badges disappear the moment an upgrade lands while the dialog is open.
-  const isPremium = useEntitlement((s) => s.isPremium)
   const [step, setStep] = useState<Step>('pick')
   const [server, setServer] = useState<SshServer | null>(null)
   const [path, setPath] = useState('~')
@@ -138,10 +120,6 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
 
   const connect = useCallback(
     async (srv: SshServer) => {
-      if (!useEntitlement.getState().isPremium) {
-        useUpgradeGate.getState().show('SSH Remote Projects')
-        return
-      }
       setServer(srv)
       setError('')
       setStep('connecting')
@@ -174,7 +152,6 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
           </p>
           <p className="confirm__msg">
             Pick a saved server to host this project's terminals.
-            {!isPremium && ' Connecting requires nodeterm Pro.'}
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '6px 0 14px' }}>
             {servers.length === 0 ? (
@@ -199,7 +176,6 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
                     }}
                   >
                     <span style={{ fontWeight: 600 }}>{s.label}</span>
-                    {!isPremium && <span style={PRO_BADGE_STYLE}>PRO</span>}
                   </span>
                   <span style={{ opacity: 0.6, fontSize: 12 }}>
                     {s.user}@{s.host}

@@ -74,7 +74,7 @@ export function SshSection({ isActive }: { isActive: boolean }): React.JSX.Eleme
     <SettingsSection
       id="ssh"
       title="Remote (SSH)"
-      description="Saved SSH servers appear under “New remote”. Opening a remote terminal is a Pro feature."
+      description="Saved SSH servers appear under “New remote”. Opening remote terminals over SSH is free."
       isActive={isActive}
       searchEntries={ENTRIES}
     >
