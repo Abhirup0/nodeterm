@@ -115,11 +115,17 @@ export function buildLinkMap(
  * pushed map — pushing only the active project's map deleted the link files of background
  * projects whose tmux sessions (and agents mid-task) were still running.
  * Node ids are globally unique across projects, so the maps merge without collisions.
+ *
+ * `agentIdOf` is the hook-status fallback for plain terminals where the user launched an
+ * agent CLI by hand: the serialized node carries no agentId, but the status store (fed by
+ * the managed hooks, node ids are per-core so background projects share it) knows who's
+ * running inside.
  */
 export function buildBackgroundLinkMaps(
   projects: Array<{ id: string; nodes: CanvasNodeState[]; bridges?: BridgeLink[] }>,
   activeProjectId: string | null,
-  sessionIdOf: (nodeId: string) => string | undefined
+  sessionIdOf: (nodeId: string) => string | undefined,
+  agentIdOf?: (nodeId: string) => string | undefined
 ): ContextLinkMap {
   const map: ContextLinkMap = {}
   for (const p of projects) {
@@ -129,14 +135,15 @@ export function buildBackgroundLinkMaps(
     const infoOf = (id: string): LinkNodeInfo => {
       const n = byId.get(id)!
       const sticky = n.kind === 'sticky'
+      const agentId = sticky ? undefined : (n.agentId ?? agentIdOf?.(id))
       return {
         id,
         title: n.title || id,
         cwd: n.cwd ?? '',
         note: sticky ? (n.text ?? '') : undefined,
         sticky,
-        agentId: sticky ? undefined : n.agentId,
-        sessionId: !sticky && n.agentId ? sessionIdOf(id) : undefined,
+        agentId,
+        sessionId: agentId ? sessionIdOf(id) : undefined,
         accountId: sticky ? undefined : n.accountId
       }
     }

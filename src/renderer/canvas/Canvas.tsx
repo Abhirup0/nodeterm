@@ -1713,13 +1713,18 @@ export function Canvas() {
     [onNodesChange, markDirty]
   )
 
-  // Resolve a node's agent id, with a tags fallback for not-yet-migrated legacy nodes.
+  // Resolve a node's agent id, with a tags fallback for not-yet-migrated legacy nodes and a
+  // hook-status fallback for plain terminals where the user launched an agent CLI by hand:
+  // every local session carries the hook env (pty-manager defaults agentId to 'claude'), so
+  // the managed hooks report who's actually running inside even when data.agentId was never
+  // set at node creation.
   const agentIdOf = useCallback((id: string): AgentId | undefined => {
     const n = nodesRef.current.find((x) => x.id === id)
     if (!n || n.type !== 'terminal') return undefined
     return (
       (n.data.agentId as AgentId | undefined) ??
-      (((n.data.tags as string[]) ?? []).includes('claude') ? 'claude' : undefined)
+      (((n.data.tags as string[]) ?? []).includes('claude') ? 'claude' : undefined) ??
+      useAgentStatus.getState().byId[id]?.agentId
     )
   }, [])
 
@@ -1835,11 +1840,16 @@ export function Canvas() {
 
   // Rewrite link files when a linked node's session starts/changes: main resolves
   // codex/gemini transcripts by sessionId, so a session that appears after the edge was
-  // drawn must trigger a rewrite. Primitive signature, not the byId map (see loopSig).
+  // drawn must trigger a rewrite. agentId is part of the signature for the same reason: a
+  // plain terminal's identity arrives from hooks after the fact, and the map entry gains
+  // its agentId/sessionId only once it's known. Primitive signature, not the byId map (see
+  // loopSig).
   const linkSessionSig = useAgentStatus((s) => {
     let sig = ''
     for (const e of linkEdges) {
-      sig += (s.byId[e.source]?.sessionId ?? '') + '|' + (s.byId[e.target]?.sessionId ?? '') + '|'
+      const a = s.byId[e.source]
+      const b = s.byId[e.target]
+      sig += `${a?.agentId ?? ''}:${a?.sessionId ?? ''}|${b?.agentId ?? ''}:${b?.sessionId ?? ''}|`
     }
     return sig
   })
@@ -1873,7 +1883,12 @@ export function Canvas() {
     // project's map would sever the links of background projects whose agents keep running.
     const { projects, activeProjectId } = useProjects.getState()
     const map = {
-      ...buildBackgroundLinkMaps(projects, activeProjectId, (id) => useAgentStatus.getState().byId[id]?.sessionId),
+      ...buildBackgroundLinkMaps(
+        projects,
+        activeProjectId,
+        (id) => useAgentStatus.getState().byId[id]?.sessionId,
+        (id) => useAgentStatus.getState().byId[id]?.agentId
+      ),
       ...buildLinkMap(valid, infoOf)
     }
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)

@@ -5,8 +5,12 @@ import type { NodeTerminalApi } from '@shared/types'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
- * `unread`, `session` and `sessionId` are persisted to localStorage so they survive a
- * reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
+ * `unread`, `session`, `sessionId` and `agentId` are persisted to localStorage so they survive
+ * a reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
+ * `agentId` is durable because a PLAIN terminal's agent identity exists nowhere else: an
+ * explicit agent node re-derives it from `data.agentId`, but a hand-launched `claude` in a
+ * plain terminal is only known here, and its context links must keep classifying across
+ * restarts (tmux keeps the session — and the agent — alive through them).
  *
  * ONE STORE PER CORE (stage 4): `createAgentStatusSession(persistKey?)` builds an isolated
  * instance — node ids are per-core, so status tables from two cores must never mix. The module
@@ -160,7 +164,7 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
       const data = JSON.parse(raw) as Record<string, Partial<AgentNodeStatus>>
       const out: Record<string, AgentNodeStatus> = {}
       for (const [id, v] of Object.entries(data)) {
-        out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId }
+        out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId, agentId: v.agentId }
         // A recurring job (cron/schedule — and tmux keeps in-session loops alive too) outlives
         // the app: restore its card. Minimal shape check so a corrupt entry can't break load.
         if (v.loop && typeof v.loop === 'object' && v.loop.kind) {
@@ -185,8 +189,14 @@ export function createAgentStatusSession(persistKey?: string): AgentStatusSessio
     try {
       const out: Record<string, Partial<AgentNodeStatus>> = {}
       for (const [id, v] of Object.entries(byId)) {
-        if (v.unread || v.session || v.sessionId || v.loop) {
-          out[id] = { unread: v.unread, session: v.session, sessionId: v.sessionId, loop: v.loop }
+        if (v.unread || v.session || v.sessionId || v.loop || v.agentId) {
+          out[id] = {
+            unread: v.unread,
+            session: v.session,
+            sessionId: v.sessionId,
+            agentId: v.agentId,
+            loop: v.loop
+          }
         }
       }
       localStorage.setItem(persistKey, JSON.stringify(out))

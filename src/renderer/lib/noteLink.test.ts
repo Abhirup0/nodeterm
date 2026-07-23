@@ -186,6 +186,32 @@ describe('buildBackgroundLinkMaps', () => {
       sessionId: 'sess-b2'
     })
   })
+  it('falls back to the hook-reported agentId for plain terminals', () => {
+    // A hand-launched `claude` in a plain terminal: the serialized node has no agentId, but
+    // the status store (fed by the managed hooks) knows who's running inside.
+    const plainProjects = [
+      {
+        id: 'p-bg',
+        nodes: [node({ id: 'm1', title: 'Manual', cwd: '/m' }), node({ id: 'm2', title: 'Also', cwd: '/m' })],
+        bridges: [{ id: 'e', source: 'm1', target: 'm2' }]
+      }
+    ]
+    const map = buildBackgroundLinkMaps(
+      plainProjects,
+      null,
+      (id) => (id === 'm2' ? 'sess-m2' : undefined),
+      (id) => (id === 'm2' ? 'claude' : undefined)
+    )
+    expect(map['m1']).toContainEqual({
+      id: 'm2',
+      title: 'Also',
+      cwd: '/m',
+      agentId: 'claude',
+      sessionId: 'sess-m2'
+    })
+    // m2's entry for m1 stays a bare terminal (no agentId reported for m1).
+    expect(map['m2']).toContainEqual({ id: 'm1', title: 'Manual', cwd: '/m' })
+  })
   it('drops edges whose endpoints are gone from the serialized nodes', () => {
     const map = buildBackgroundLinkMaps(
       [{ id: 'p', nodes: [node({ id: 'z1' })], bridges: [{ id: 'e', source: 'z1', target: 'gone' }] }],
