@@ -3615,10 +3615,16 @@ export function Canvas() {
         setConfirm({ message: res.error, onConfirm: () => setConfirm(null) })
         return
       }
+      // The file is context-budgeted by buildHandoff (long sessions: digest + verbatim tail,
+      // full copy beside it), so "read it" is always affordable. The wording pins the agent to
+      // resuming: an earlier phrasing let the reader finish the file, end its turn, and greet
+      // with "what would you like to work on?" — the task must be treated as already assigned.
       const prompt =
-        `The file ${res.filePath} contains the COMPLETE prior conversation from a ` +
-        `${sourceAgentId} session, including every message and all tool calls and outputs. ` +
-        `Read the entire file first, then continue the task from where it left off.`
+        `The file ${res.filePath} is a handoff of the prior conversation from a ` +
+        `${sourceAgentId} session; the live task state is at the END of the file. ` +
+        `Read the file, then resume that task immediately from where it left off. ` +
+        `Do not greet, do not summarize the file back, and do not ask what to work on — ` +
+        `the task in the file is already assigned to you.`
       const node = createAgentNode(
         targetAgentId,
         nodesRef.current.length,
