@@ -14,6 +14,13 @@
 // unchanged — curl succeeds, no candidate scan, no re-POST. A host with no candidate files
 // behaves exactly as before (nothing posts).
 //
+// Empty-endpoint self-heal: a session spawned when NO endpoint file existed yet (a phone injects
+// NODETERM_NODE_ID + NODETERM_HOOK_ENDPOINT="$NT_EP" where $NT_EP resolved empty on a bare host)
+// carries a node id but no token. The gate below keys on the NODE ID, not the token, so such a
+// session still reaches nt_send_request — whose failover sources a live sibling endpoint (a Server
+// Edition installed later, right next to it) and posts under it. Gating on the token instead would
+// exit before that failover ran, leaving the session dark until it was recreated.
+//
 // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): when
 // NODETERM_PERM_WAIT_SECS is set (> 0) in the session env AND the incoming hook is a
 // PermissionRequest, the script generates a pendingId, drops the request JSON under
@@ -31,7 +38,14 @@ export function buildManagedScript(agentId: string): string {
     'if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then',
     '  . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :',
     'fi',
-    'if [ -z "$NODETERM_HOOK_TOKEN" ] || [ -z "$NODETERM_NODE_ID" ]; then',
+    '# Gate on the NODE ID only — it is what marks a nodeterm-spawned session (a user\'s own',
+    '# terminal has neither var and exits here, bit-for-bit legacy no-op). The token is NOT',
+    '# required at this point: a phone-spawned session whose endpoint was empty/dead at spawn',
+    '# (NODETERM_HOOK_ENDPOINT="" because no host process existed yet) carries a node id but no',
+    '# token, and nt_send_request below sources a live sibling endpoint (e.g. a headless Server',
+    '# Edition that came up AFTER the session) to heal it. Gating on the token here instead would',
+    '# exit before that failover ever ran, leaving such a session dark until it was recreated.',
+    'if [ -z "$NODETERM_NODE_ID" ]; then',
     '  exit 0',
     'fi',
     'payload=$(cat)',

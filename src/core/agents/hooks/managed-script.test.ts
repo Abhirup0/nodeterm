@@ -18,6 +18,14 @@ describe('buildManagedScript', () => {
   it('still no-ops without node id / endpoint', () => {
     expect(s).toContain('NODETERM_NODE_ID')
   })
+  it('gates the hook body on the NODE ID only (not the token) so an empty-endpoint session self-heals', () => {
+    // A phone-spawned session created before any host process existed has a node id but no token
+    // (its baked NODETERM_HOOK_ENDPOINT resolved empty). The gate must exit on a MISSING NODE ID,
+    // NOT on a missing token — otherwise the failover in nt_send_request never runs and the session
+    // stays dark until it is recreated. See buildManagedScript's "Empty-endpoint self-heal" note.
+    expect(s).toContain('if [ -z "$NODETERM_NODE_ID" ]; then\n  exit 0\nfi')
+    expect(s).not.toContain('if [ -z "$NODETERM_HOOK_TOKEN" ] || [ -z "$NODETERM_NODE_ID" ]; then')
+  })
 
   describe('deterministic hook-reply approvals (PermissionRequest wait branch)', () => {
     it('gates the wait branch on NODETERM_PERM_WAIT_SECS > 0', () => {
