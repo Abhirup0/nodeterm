@@ -54,6 +54,7 @@ import {
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
+import { createSessionReaper } from '../core/session-budget'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1190,6 +1191,12 @@ app.whenReady().then(async () => {
   // local-project nodes, and a REMOTE sweep of each connected SSH project's host over its
   // ControlMaster (a Mac→SSH node's acks land on the REMOTE fs, invisible to the local sweep).
   // sshProjectManager is created below; the tick resolves it lazily.
+  // Session budget: reap long-idle DETACHED nt- tmux sessions on THIS machine under memory
+  // pressure or past a count cap (core/session-budget.ts — the tmux counterpart of the WebGL
+  // budget). Attached sessions are never touched; a reaped node cold-restores on next open.
+  // Local sockets only — a remote SSH host's sessions are reaped by that host's own
+  // nodeterm-server, never across the wire. Timer is unref'd; no explicit stop needed.
+  createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() }).start()
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })

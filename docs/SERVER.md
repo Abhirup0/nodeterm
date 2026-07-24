@@ -169,6 +169,27 @@ The whole point of this mode is that it adds **no network attack surface**:
 The phone's own SSH session into the host is the trust boundary; nodeterm adds nothing listening
 beside it.
 
+### Session budget (idle-session reaper)
+
+tmux sessions deliberately outlive their clients (that is the continuity contract), so a host that
+serves many SSH projects slowly accumulates **detached** agent sessions nobody will ever come back
+to — a field report counted 95 sessions holding 34 GB of idle `claude` processes. Every
+nodeterm-server (headless or serving) runs a **session budget** (`src/core/session-budget.ts`, the
+tmux counterpart of the renderer's WebGL budget): every 10 minutes it sweeps the local
+`node-terminal` **and** SSH-remote `nodeterm-rmt` sockets and reaps the **least-recently-active
+detached** `nt-*` sessions when
+
+- host **available memory** drops below a watermark (default 10% of RAM, floor 1 GB) — the
+  primary, pressure-driven trigger; or
+- the **detached session count** exceeds a cap (default 48) — the accumulation backstop.
+
+**Attached sessions are never touched**, a grace window (default 6 h since last activity) protects
+recent work, kills are re-verified against a fresh listing, and each sweep reaps at most a small
+batch (default 8) so convergence is gradual. A reaped session is indistinguishable from a reboot
+to its node: on next open it **cold-restores** (scrollback snapshot + `claude --resume`). Tuning /
+kill switch via env: `NODETERM_SESSION_MIN_AVAILABLE_MB`, `NODETERM_SESSION_MAX_DETACHED`,
+`NODETERM_SESSION_GRACE_HOURS`, `NODETERM_SESSION_REAP_BATCH`, `NODETERM_SESSION_REAP_DISABLED=1`.
+
 ## Security model
 
 Single-user auth. There is one password; sessions are per-browser.
