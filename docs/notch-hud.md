@@ -15,12 +15,15 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
 {forward:true})`. Its own renderer entry `hud.html` (add to electron.vite.config.ts
 `renderer.input`) sharing the existing preload plus a small HUD-specific API.
 
-- **Geometry** from `screen.getPrimaryDisplay()`: strip at `bounds.y`, full `bounds.width`, height
-  = notch bar height (`workArea.y - bounds.y`, floor 24). The notch is centered at `bounds.width/2`;
-  Electron exposes no `auxiliaryTopLeftArea`, so assume a centered notch and place the mascot slot
-  just LEFT of center (fake notch width ~200 px when `workArea.y === bounds.y`, i.e. no physical
-  notch → center on a virtual pill). Re-assert on `screen` `display-metrics-changed` +
-  `display-added/removed`.
+- **Geometry** from `screen.getPrimaryDisplay()`: the window spans the full top edge (`bounds`,
+  `y = bounds.y`), sized to the EXPANDED box (`HUD_WINDOW_HEIGHT`); we never resize the frame. Main
+  sends the renderer everything it needs to draw the capsule: `bar` (= `workArea.y - bounds.y`,
+  floor `NOTCH_BAR_FLOOR` 24 — the fused top zone height), `width`, `notchWidth` (= `NOTCH_WIDTH`,
+  ~200, a tunable — Electron exposes no `auxiliaryTopLeftArea`, so assume a centered notch of this
+  width), `notchCenterX` (= `bounds.width/2`), and `hasNotch` (`inset > 0 && inset >= NOTCH_MIN_BAR`
+  32 — a notched Mac's menu bar is ~37 px vs ~24 on a notchless display; when false the renderer
+  draws a standalone floating pill instead of fusing). Re-asserted on `screen`
+  `display-metrics-changed` + `display-added/removed`.
 - **Click-through with a hotspot**: window stays mouse-ignoring; the renderer reports pointer
   enter/leave of the indicator rect over IPC → main toggles `setIgnoreMouseEvents(false/true,
   {forward:true})`. Click in the hotspot → expand; click outside the expanded panel → collapse
@@ -50,21 +53,49 @@ Row shape sent to the HUD:
   panel is opened — a nodeterm-native "you looked at it" signal (better than agent-notch's
   terminal-bundle-id sniff). Drop a node from the HUD when it's gone + idle > 6 h.
 
-## Indicator + panel (hud renderer)
+## Indicator + panel (hud renderer) — the DynamicNotch capsule
 
 Reuse `src/renderer/lib/mascot.ts` (`CLAUDE_MASCOT` data-URI + `CODEX_MASCOT` geometry +
 `pet-codex.webp`) and the walk-cycle CSS from AgentMascot/styles.css — plain DOM, no React
 coupling needed (React optional; keep the HUD lean). Master clock 120 ms.
-- **Indicator (collapsed)**: right-aligned toward the notch — a slot per agent kind that has a
-  working/done node: claude → 2-frame coral pixel mascot walking (2.5 fps); codex → the pet
-  spritesheet first-row crop (8 frames, 120 ms, `image-rendering: pixelated`); a shimmering green
-  blob for a done-unseen slot. Nothing shown when all idle.
-- **Panel (expanded)**: up to ~6 session rows, newest-active first. Each row: animated mascot/green
-  check + title + `model · reltime` tag (blue working / gray idle / green done) + a `You: <prompt>`
-  (or `activity`) second line + a `▸ N subagents` disclosure (child rows: label + state). A **Go**
-  button (or row-tap) → IPC → main mirrors the notification-click handler:
+
+The HUD is **one black rounded-bottom capsule (`.hud-capsule`) that EXTENDS the physical notch** —
+fused, seamless: its TOP edge is at `y=0` sharing the notch's black (top corners SQUARE), only the
+BOTTOM corners are rounded (`--capsule-radius`), and it is anchored at the notch's horizontal center
+(`left: var(--notch-center-x); translateX(-50%)`). The mascots/rows live INSIDE it. The capsule IS
+the click-through hotspot (`pointerenter` → main `setIgnoreMouse(false)`, leave → `true` + collapse);
+the transparent rest of the window stays click-through. Hidden entirely when idle (no empty pill).
+
+- **Collapsed capsule**: width = `--notch-width` (so it reads as the notch itself), height =
+  `--bar + --capsule-drop` — it hangs `--capsule-drop` (~28 px) BELOW the menu-bar line, the classic
+  Dynamic-Island bulge. The indicator content is pushed past the fused top zone
+  (`padding-top: var(--bar)`) so the **mascots sit in that drop zone, below the bar line** — the
+  intended content zone (this is what fixes the old "mascots floating below the bar, beside the
+  notch" reading: the black capsule now frames them there, reading as the notch swelling). A slot per
+  agent kind that is working: claude → 2-frame coral pixel mascot walking; codex → the pet
+  spritesheet first-row crop (`image-rendering: pixelated`); plus a shimmering green blob for a
+  done-unseen slot and a red "needs you" dot for a waiting session (so the capsule is never an empty
+  black pill). Nothing shown when all idle.
+- **Expanded panel**: clicking grows the SAME black surface — width → `--panel-width`, height
+  (driven by `max-height`, so content of unknown height animates) → the rows box, bottom corners
+  still rounded, top still fused — a spring-ish `--capsule-dur` (~220 ms) `--capsule-ease` expand
+  from the notch, NOT a separate floating panel. Rows fade in and start below the bar line
+  (`padding-top: calc(var(--bar) + 4px)`). Up to ~6 session rows, newest-active first. Each row:
+  animated mascot/green check + title + `model · reltime` tag (blue working / gray idle / green
+  done) + a `You: <prompt>` (or `activity`) second line + a `▸ N subagents` disclosure (child rows:
+  label + state). A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
   `getMainWindow().show()/focus()` + `sendToMain(app:focus-node, nodeId)` → `Canvas.focusNodeById`,
   and clears that node's done latch.
+- **Notchless fallback** (`hasNotch === false`, e.g. an external monitor or a display with no menu
+  bar): the `.notchless` root class draws the capsule as a **standalone floating pill** — a small
+  `--pill-top-gap` above it and all-corner `--pill-radius`, since there is no notch to fuse with.
+  Collapsed height = `--pill-height`; the mascots center in the pill (no `--bar` padding to clear).
+
+**Tunables** (main constants in `notch-hud.ts`; CSS vars in `hud.css :root`, defaults in parens —
+tune on a Mac): `NOTCH_WIDTH` (200) / `--notch-width`, `NOTCH_MIN_BAR` (32, notch-detection
+threshold), `NOTCH_BAR_FLOOR` (24), `--capsule-drop` (28 px bulge — must exceed the tallest mascot),
+`--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur`/`--capsule-ease`,
+and the notchless `--pill-top-gap` (6) / `--pill-radius` (18) / `--pill-height` (30).
 
 ## Settings + lifecycle
 

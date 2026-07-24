@@ -24,10 +24,16 @@ export interface HudRow {
 }
 export interface HudPush {
   rows: HudRow[]
-  /** Notch/menu-bar strip height in px (indicator vertical placement). */
+  /** Notch/menu-bar strip height in px (the capsule's fused top zone; content sits below it). */
   bar: number
   /** Primary-display width in px. */
   width: number
+  /** Assumed physical notch width in px — the capsule's collapsed (fused) width. */
+  notchWidth: number
+  /** Notch horizontal center in px (= width / 2) — where the capsule anchors. */
+  notchCenterX: number
+  /** True when a physical notch is present (fuse to it); false = draw a standalone floating pill. */
+  hasNotch: boolean
 }
 
 export interface HudApi {
