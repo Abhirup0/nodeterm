@@ -1,0 +1,55 @@
+// Tiny, HUD-only preload (docs/notch-hud.md). The Notch HUD is a separate BrowserWindow with a
+// minimal surface — it does not need the full `window.nodeTerminal` API, so it gets its own bridge
+// exposing exactly the four HUD channels. contextIsolation stays on; no node integration.
+
+import { contextBridge, ipcRenderer } from 'electron'
+import { IPC } from '../shared/ipc'
+
+export interface HudSubagentRow {
+  id: string
+  label?: string
+  state: 'working' | 'done'
+}
+export interface HudRow {
+  nodeId: string
+  agentId?: string
+  title: string
+  model?: string
+  state: 'working' | 'needsYou' | 'done' | 'idle'
+  prompt?: string
+  activity?: string
+  contextPercent?: number
+  subagents: HudSubagentRow[]
+  updatedAt: number
+}
+export interface HudPush {
+  rows: HudRow[]
+  /** Notch/menu-bar strip height in px (indicator vertical placement). */
+  bar: number
+  /** Primary-display width in px. */
+  width: number
+}
+
+export interface HudApi {
+  /** main → hud: subscribe to row/geometry pushes. Returns an unsubscribe. */
+  onRows(cb: (push: HudPush) => void): () => void
+  /** hud → main: toggle window click-through (true = pass clicks through). */
+  setIgnoreMouse(ignore: boolean): void
+  /** hud → main: a row was clicked — focus that node in nodeterm. */
+  focusNode(nodeId: string): void
+  /** hud → main: the panel expanded (true) / collapsed (false). */
+  setExpanded(expanded: boolean): void
+}
+
+const api: HudApi = {
+  onRows(cb) {
+    const handler = (_e: unknown, push: HudPush): void => cb(push)
+    ipcRenderer.on(IPC.hudRows, handler)
+    return () => ipcRenderer.removeListener(IPC.hudRows, handler)
+  },
+  setIgnoreMouse: (ignore) => ipcRenderer.send(IPC.hudSetIgnoreMouse, ignore),
+  focusNode: (nodeId) => ipcRenderer.send(IPC.hudFocusNode, nodeId),
+  setExpanded: (expanded) => ipcRenderer.send(IPC.hudExpanded, expanded)
+}
+
+contextBridge.exposeInMainWorld('hud', api)
