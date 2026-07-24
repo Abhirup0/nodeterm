@@ -31,7 +31,8 @@ import {
   setNotchHudEnabled,
   destroyNotchHud,
   notchHudOnAgentEvent,
-  notchHudOnContextUpdate
+  notchHudOnContextUpdate,
+  assertRegularDockPresence
 } from './notch-hud'
 import {
   initAgentStatusMirror,
@@ -363,6 +364,9 @@ function createWindow(): BrowserWindow {
   win.webContents.on('render-process-gone', () => ptyManager.dropClient(presenceId))
 
   win.on('ready-to-show', () => win.show())
+  // The main window is a regular app window; establishing its Dock presence explicitly means the
+  // later focusable:false Notch HUD panel can never leave the app looking like an accessory.
+  win.on('show', () => assertRegularDockPresence())
 
   // macOS: closing the window hides it instead of destroying it. The app deliberately
   // outlives its window (tmux sessions, hook server, updater); destroying the window
@@ -739,7 +743,16 @@ app.whenReady().then(async () => {
   initAgentStatusMirror()
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
-  initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, settingsStore.get().notchHud)
+  //
+  // Create the HUD only AFTER the main window is visible. The HUD is a focusable:false (non-
+  // activating) panel; if it is shown while the main window is still loading (created with
+  // show:false, shown on 'ready-to-show'), it can be the only orderFront-ed window on screen and
+  // demote the app to accessory — the Dock icon then disappears. Gating on the main window's first
+  // 'show' guarantees a regular window has established the app's Dock presence first.
+  const startNotchHud = (): void =>
+    initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, settingsStore.get().notchHud)
+  if (win.isVisible()) startNotchHud()
+  else win.once('show', startNotchHud)
   settingsStore.onChange((s) => setNotchHudEnabled(s.notchHud))
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra

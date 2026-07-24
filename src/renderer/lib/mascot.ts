@@ -122,6 +122,55 @@ export const CLAUDE_MASCOT = {
   frameCount: CLAUDE_FRAMES.length
 }
 
+// --- "Done, unseen" pixel blob (Notch HUD) -------------------------------------------------
+//
+// agent-notch draws a shimmering green blob on a 7×7 grid of crisp pixels for a finished-but-
+// unseen agent slot. We reproduce the SHAPE as a static 7×7 green circle sprite (crisp pixels via
+// image-rendering:pixelated) and let CSS drive the shimmer (opacity pulse) — same reuse pattern as
+// the Claude sprite above, so the HUD stays plain-DOM with no per-pixel JS.
+
+/** systemGreen — matches agent-notch's NSColor.systemGreen done blob. */
+export const DONE_GREEN = 'rgb(48, 209, 88)'
+
+/** 7×7 filled-circle mask (1 = green pixel). */
+export const DONE_BLOB_ART: readonly (readonly number[])[] = [
+  [0, 0, 1, 1, 1, 0, 0],
+  [0, 1, 1, 1, 1, 1, 0],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [0, 1, 1, 1, 1, 1, 0],
+  [0, 0, 1, 1, 1, 0, 0]
+]
+export const DONE_BLOB_GRID = 7
+const DONE_BLOB_SCALE = 3 // render at 3× (21×21) so the browser downscales by a clean /3
+
+function buildDoneBlobSprite(): string {
+  if (typeof document === 'undefined') return '' // no DOM in tests
+  const size = DONE_BLOB_GRID * DONE_BLOB_SCALE
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  ctx.imageSmoothingEnabled = false
+  ctx.fillStyle = DONE_GREEN
+  for (let y = 0; y < DONE_BLOB_GRID; y++) {
+    for (let x = 0; x < DONE_BLOB_GRID; x++) {
+      if (DONE_BLOB_ART[y][x]) {
+        ctx.fillRect(x * DONE_BLOB_SCALE, y * DONE_BLOB_SCALE, DONE_BLOB_SCALE, DONE_BLOB_SCALE)
+      }
+    }
+  }
+  return canvas.toDataURL('image/png')
+}
+
+/** Green "done, unseen" pixel blob (7×7). `src` is a data: URI PNG, or '' outside a DOM. */
+export const DONE_BLOB = {
+  src: buildDoneBlobSprite(),
+  grid: DONE_BLOB_GRID
+}
+
 // --- Codex pet spritesheet geometry (asset imported by the component) ----------------------
 
 /** pet-codex.webp layout: 8 cols × 9 rows of 192×208 frames; walk = the first row. */

@@ -4,7 +4,8 @@
 // and row clicks to focus the node in nodeterm.
 
 import './hud.css'
-import { CLAUDE_MASCOT, CODEX_MASCOT } from '../lib/mascot'
+import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
+import { orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
 
 // Local mirror of the preload's HUD contract (src/preload/hud.ts) — kept self-contained so this
@@ -96,21 +97,32 @@ function reltime(ts: number): string {
 
 // ---- Mascot / icon builders ----------------------------------------------------------------
 
+// Indicator mascot heights in the menu-bar strip (px). agent-notch draws Claude ~ the bar height
+// and the Codex pet at 26px; these are the sensible defaults — NAIL EXACTLY ON A MAC (the notch
+// bar height varies by model, and 26px overflows a short bar). Aspect ratios are preserved from
+// the sprite geometry, so only the height matters.
+const HUD_CLAUDE_H = 18
+const HUD_CODEX_H = 24
+
 function claudeMascot(): HTMLElement {
   const el = document.createElement('span')
   el.className = 'mascot mascot--claude'
-  el.style.setProperty('--mascot-w', `${CLAUDE_MASCOT.frameWidth}px`)
-  el.style.setProperty('--mascot-h', `${CLAUDE_MASCOT.frameHeight}px`)
+  const h = HUD_CLAUDE_H
+  const w = Math.round((h * CLAUDE_MASCOT.frameWidth) / CLAUDE_MASCOT.frameHeight)
+  el.style.setProperty('--mascot-w', `${w}px`)
+  el.style.setProperty('--mascot-h', `${h}px`)
   el.style.backgroundImage = `url(${CLAUDE_MASCOT.src})`
   return el
 }
 function codexMascot(): HTMLElement {
   const el = document.createElement('span')
   el.className = 'mascot mascot--codex'
-  el.style.setProperty('--cmascot-w', `${CODEX_MASCOT.frameWidth}px`)
-  el.style.setProperty('--cmascot-h', `${CODEX_MASCOT.frameHeight}px`)
-  el.style.setProperty('--cmascot-sheet-w', `${CODEX_MASCOT.frameWidth * CODEX_MASCOT.cols}px`)
-  el.style.setProperty('--cmascot-sheet-h', `${CODEX_MASCOT.frameHeight * CODEX_MASCOT.rows}px`)
+  const h = HUD_CODEX_H
+  const w = Math.round((h * CODEX_MASCOT.frameWidth) / CODEX_MASCOT.frameHeight)
+  el.style.setProperty('--cmascot-w', `${w}px`)
+  el.style.setProperty('--cmascot-h', `${h}px`)
+  el.style.setProperty('--cmascot-sheet-w', `${w * CODEX_MASCOT.cols}px`)
+  el.style.setProperty('--cmascot-sheet-h', `${h * CODEX_MASCOT.rows}px`)
   el.style.backgroundImage = `url(${codexPet})`
   return el
 }
@@ -120,6 +132,15 @@ function workingMascot(agentId?: string): HTMLElement {
   const dot = document.createElement('span')
   dot.className = 'mascot mascot--dot'
   return dot
+}
+function doneBlob(): HTMLElement {
+  const blob = document.createElement('span')
+  blob.className = 'done-blob'
+  // 7×7 crisp green pixel circle (agent-notch look); CSS drives the shimmer. Falls back to the
+  // CSS-only round blob when the sprite couldn't be built (no DOM canvas).
+  if (DONE_BLOB.src) blob.style.backgroundImage = `url(${DONE_BLOB.src})`
+  else blob.classList.add('done-blob--fallback')
+  return blob
 }
 function rowIcon(row: HudRow): HTMLElement {
   if (row.state === 'working') return workingMascot(row.agentId)
@@ -149,12 +170,10 @@ function renderIndicator(rows: HudRow[]): void {
       doneUnseen = true
     }
   }
-  for (const agentId of workingAgents) indicator.append(workingMascot(agentId))
-  if (doneUnseen) {
-    const blob = document.createElement('span')
-    blob.className = 'done-blob'
-    indicator.append(blob)
-  }
+  // Left→right paint order: a "done" blob sits furthest from the notch, then the working mascots
+  // with Claude nearest the notch (rightmost) — agent-notch's slot order.
+  if (doneUnseen) indicator.append(doneBlob())
+  for (const agentId of orderIndicatorAgents(workingAgents)) indicator.append(workingMascot(agentId))
 }
 
 // ---- Expanded panel ------------------------------------------------------------------------
@@ -162,7 +181,15 @@ function renderIndicator(rows: HudRow[]): void {
 function renderPanel(rows: HudRow[]): void {
   panel.replaceChildren()
   const shown = rows.slice(0, 6)
-  for (const row of shown) panel.append(buildRow(row))
+  shown.forEach((row, i) => {
+    // Dithered pixel separator between rows (agent-notch's DitherSeparator).
+    if (i > 0) {
+      const sep = document.createElement('div')
+      sep.className = 'hud-sep'
+      panel.append(sep)
+    }
+    panel.append(buildRow(row))
+  })
 }
 
 function buildRow(row: HudRow): HTMLElement {
