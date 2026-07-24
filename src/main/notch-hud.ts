@@ -8,7 +8,7 @@
 // extra streams in (the normalized agent-event stream for prompt+subagents, and context-update for
 // the model) via the module-level notchHudOn* functions, which no-op when the HUD is off.
 
-import { BrowserWindow, ipcMain, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, screen } from 'electron'
 import { join } from 'path'
 import { IPC } from '../shared/ipc'
 import { getMainWindow, sendToMain } from './main-window'
@@ -32,6 +32,32 @@ const HUD_WINDOW_HEIGHT = 460
 const PUSH_DEBOUNCE_MS = 150
 /** Low-frequency sweep so stale (gone + idle > 6h) nodes drop even with no live events. */
 const SWEEP_MS = 10 * 60 * 1000
+
+/**
+ * Keep the app a REGULAR Dock app even though the HUD is a `focusable:false` (non-activating
+ * panel) overlay. On macOS `focusable:false` maps to AppKit's `setDisableKeyOrMainWindow:YES`, so
+ * the HUD window can never become the app's key/main window. If such a panel is the only window
+ * that is orderFront-ed on screen (e.g. it shows before the main window has finished loading, or
+ * while the main window is hidden by hide-on-close), macOS re-evaluates the app as having no
+ * regular window and drops its Dock tile — the "Dock icon disappears once the HUD opens" bug.
+ * Asserting `regular` + `dock.show()` is idempotent and cheap, and guarantees the HUD never
+ * demotes the app's Dock presence. No-op off macOS.
+ */
+export function assertRegularDockPresence(): void {
+  if (process.platform !== 'darwin') return
+  try {
+    // Idempotent: re-asserting 'regular' when already regular is a no-op.
+    app.setActivationPolicy('regular')
+  } catch {
+    /* older Electron / transient — ignore */
+  }
+  // `dock.show()` returns a Promise in recent Electron; swallow it either way.
+  try {
+    void Promise.resolve(app.dock?.show()).catch(() => {})
+  } catch {
+    /* ignore */
+  }
+}
 
 // ---- Singleton (mirror main-window.ts) -----------------------------------------------------
 
@@ -225,6 +251,9 @@ class NotchHudController {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     // Passive by default: the strip is click-through; the renderer flips this OFF over the hotspot.
     win.setIgnoreMouseEvents(true, { forward: true })
+    // The HUD must NEVER affect the Dock: this is a regular Dock app. Creating a focusable:false
+    // panel can otherwise demote the app to accessory and drop the Dock icon — re-assert here.
+    assertRegularDockPresence()
 
     win.on('closed', () => {
       if (hudWin === win) hudWin = null
@@ -238,6 +267,9 @@ class NotchHudController {
     }
     win.webContents.on('did-finish-load', () => {
       win.showInactive() // show without stealing focus
+      // Showing the panel is exactly when macOS re-evaluates the app's window set — re-assert the
+      // regular Dock policy so the freshly-shown non-activating panel can't demote us to accessory.
+      assertRegularDockPresence()
       this.pushNow()
     })
   }
