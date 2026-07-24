@@ -80,6 +80,13 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M7.4 7.4 13 13M10.8 10.8l1.4-1.4M9.4 9.4l1.2-1.2" />
     </>
   ),
+  presence: (
+    <>
+      <rect x="2.5" y="3" width="11" height="10" rx="2" />
+      <circle cx="6" cy="6.6" r="1.5" />
+      <path d="M3.8 11c.2-1.3 1.2-2 2.2-2s2 .7 2.2 2M9.6 6.5h2.4M9.6 9h2" />
+    </>
+  ),
   remote: (
     <>
       <circle cx="8" cy="8" r="5.5" />
