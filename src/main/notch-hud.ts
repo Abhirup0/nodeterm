@@ -25,6 +25,18 @@ import { createHudModel, type HudModel } from './notch-hud-model'
 
 /** Minimum strip height when there is no physical notch (menu-bar height floor). */
 const NOTCH_BAR_FLOOR = 24
+/**
+ * Assumed physical notch WIDTH (px). Electron exposes no `auxiliaryTopLeftArea`, so we assume a
+ * centered notch of this width and FUSE the capsule to it (its collapsed width). ~200 px covers the
+ * 14"/16" MacBook notch. TUNE ON A MAC if the capsule reads narrower/wider than the physical notch.
+ */
+const NOTCH_WIDTH = 200
+/**
+ * A top inset (`workArea.y - bounds.y`) at least this tall (px) means a PHYSICAL notch is present:
+ * a notched Mac's menu bar is ~37 px, a notchless display's is ~24–25 px. Below this we treat the
+ * display as notchless and draw a standalone floating pill instead of fusing to a notch. TUNABLE.
+ */
+const NOTCH_MIN_BAR = 32
 /** Total window height — sized to the EXPANDED box (we never resize the frame; the renderer scales
  *  a CSS transform). Capped to the display height. */
 const HUD_WINDOW_HEIGHT = 460
@@ -196,15 +208,37 @@ class NotchHudController {
     this.ipcBound = false
   }
 
-  private geometry(): { x: number; y: number; width: number; height: number; bar: number } {
+  private geometry(): {
+    x: number
+    y: number
+    width: number
+    height: number
+    bar: number
+    notchWidth: number
+    notchCenterX: number
+    hasNotch: boolean
+  } {
     const d = screen.getPrimaryDisplay()
     const b = d.bounds
     const wa = d.workArea
     // The notch bar height is the strip between the display top and the usable work area
     // (menu-bar / notch). Floor at 24 so we always have room for the mascots.
-    const bar = Math.max(NOTCH_BAR_FLOOR, wa.y - b.y)
+    const inset = wa.y - b.y
+    const bar = Math.max(NOTCH_BAR_FLOOR, inset)
     const height = Math.min(HUD_WINDOW_HEIGHT, b.height)
-    return { x: b.x, y: b.y, width: b.width, height, bar }
+    // A physical notch is present only when the display actually has a menu bar (inset > 0) AND that
+    // inset is as tall as a notched Mac's menu bar. Otherwise the renderer draws a floating pill.
+    const hasNotch = inset > 0 && inset >= NOTCH_MIN_BAR
+    return {
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height,
+      bar,
+      notchWidth: NOTCH_WIDTH,
+      notchCenterX: Math.round(b.width / 2),
+      hasNotch
+    }
   }
 
   private reposition(): void {
@@ -290,7 +324,14 @@ class NotchHudController {
     this.model.prune(now)
     const rows = this.model.buildRows(now, this.deps.getNodeTitle)
     const g = this.geometry()
-    w.webContents.send(IPC.hudRows, { rows, bar: g.bar, width: g.width })
+    w.webContents.send(IPC.hudRows, {
+      rows,
+      bar: g.bar,
+      width: g.width,
+      notchWidth: g.notchWidth,
+      notchCenterX: g.notchCenterX,
+      hasNotch: g.hasNotch
+    })
   }
 }
 

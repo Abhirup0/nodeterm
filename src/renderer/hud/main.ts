@@ -31,6 +31,9 @@ interface HudPush {
   rows: HudRow[]
   bar: number
   width: number
+  notchWidth: number
+  notchCenterX: number
+  hasNotch: boolean
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -47,15 +50,18 @@ declare global {
 
 const root = document.getElementById('hud') as HTMLDivElement
 
-// The single interactive hotspot (indicator + panel).
-const hotspot = document.createElement('div')
-hotspot.className = 'hud-hotspot'
+// One black rounded-bottom surface — the DynamicNotch capsule — fused to the physical notch. It IS
+// the interactive hotspot: the walking mascots live INSIDE it (collapsed), and clicking it grows
+// the SAME surface downward into the session panel (expanded).
+const capsule = document.createElement('div')
+// Start hidden so there is no flash of an empty black pill before the first rows push.
+capsule.className = 'hud-capsule hud-capsule--hidden'
 const indicator = document.createElement('div')
 indicator.className = 'hud-indicator'
 const panel = document.createElement('div')
 panel.className = 'hud-panel'
-hotspot.append(indicator, panel)
-root.append(hotspot)
+capsule.append(indicator, panel)
+root.append(capsule)
 
 let expanded = false
 let latestRows: HudRow[] = []
@@ -64,13 +70,14 @@ const openSubs = new Set<string>()
 
 // ---- Interaction: click-through hotspot + expand/collapse ----------------------------------
 
-// While the window is click-through (setIgnoreMouse(true,{forward:true})), the OS still forwards
-// MOVE events, so pointerenter fires and we can flip click-through OFF to accept clicks. Leaving
-// the hotspot re-enables click-through and collapses the panel (the click-away).
-hotspot.addEventListener('pointerenter', () => {
+// The capsule IS the hotspot. While the window is click-through (setIgnoreMouse(true,{forward:true})),
+// the OS still forwards MOVE events, so pointerenter fires and we flip click-through OFF to accept
+// clicks. Leaving the capsule re-enables click-through and collapses the panel (the click-away). The
+// transparent rest of the window stays click-through throughout.
+capsule.addEventListener('pointerenter', () => {
   window.hud.setIgnoreMouse(false)
 })
-hotspot.addEventListener('pointerleave', () => {
+capsule.addEventListener('pointerleave', () => {
   window.hud.setIgnoreMouse(true)
   if (expanded) setExpanded(false)
 })
@@ -79,7 +86,7 @@ indicator.addEventListener('click', () => setExpanded(!expanded))
 function setExpanded(next: boolean): void {
   if (expanded === next) return
   expanded = next
-  hotspot.classList.toggle('expanded', expanded)
+  capsule.classList.toggle('expanded', expanded)
   window.hud.setExpanded(expanded)
 }
 
@@ -162,16 +169,26 @@ function renderIndicator(rows: HudRow[]): void {
   indicator.replaceChildren()
   const workingAgents: string[] = []
   let doneUnseen = false
+  let needsYou = false
   for (const r of rows) {
     if (r.state === 'working') {
       const id = r.agentId || 'unknown'
       if (!workingAgents.includes(id)) workingAgents.push(id)
     } else if (r.state === 'done') {
       doneUnseen = true
+    } else if (r.state === 'needsYou') {
+      needsYou = true
     }
   }
-  // Left→right paint order: a "done" blob sits furthest from the notch, then the working mascots
-  // with Claude nearest the notch (rightmost) — agent-notch's slot order.
+  // Left→right paint order, centered inside the capsule's drop zone: a red "needs you" dot and the
+  // green "done" blob sit furthest left, then the working mascots with Claude last (notch-side).
+  // Surfacing needsYou here keeps the collapsed capsule meaningful (never an empty black pill) for a
+  // session that is waiting on the user even when nothing is actively working.
+  if (needsYou) {
+    const d = document.createElement('span')
+    d.className = 'needs-dot'
+    indicator.append(d)
+  }
   if (doneUnseen) indicator.append(doneBlob())
   for (const agentId of orderIndicatorAgents(workingAgents)) indicator.append(workingMascot(agentId))
 }
@@ -291,12 +308,19 @@ function render(rows: HudRow[]): void {
   latestRows = rows
   renderIndicator(rows)
   renderPanel(rows)
+  // Idle → hide the whole capsule (no empty black pill); active → the fused capsule shows.
+  capsule.classList.toggle('hud-capsule--hidden', rows.length === 0)
   // Auto-collapse if there is nothing to show.
   if (rows.length === 0 && expanded) setExpanded(false)
 }
 
 function applyGeometry(push: HudPush): void {
-  document.documentElement.style.setProperty('--bar', `${push.bar}px`)
+  const rs = document.documentElement.style
+  rs.setProperty('--bar', `${push.bar}px`)
+  if (typeof push.notchWidth === 'number') rs.setProperty('--notch-width', `${push.notchWidth}px`)
+  if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
+  // No physical notch → draw a standalone floating pill instead of fusing to y=0.
+  document.documentElement.classList.toggle('notchless', push.hasNotch === false)
 }
 
 window.hud.onRows((push: HudPush) => {
