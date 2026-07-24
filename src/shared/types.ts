@@ -688,6 +688,10 @@ export interface Settings {
    *  hook holds briefly for a phone/canvas Approve/Deny before falling through to the normal
    *  interactive prompt. Off ⇒ the env var is absent ⇒ exact legacy behavior. Claude-only. */
   hookReplyApprovals: boolean
+  /** macOS Notch HUD (docs/notch-hud.md): a transparent always-on-top strip by the notch showing
+   *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
+   *  macOS + desktop only (ignored on other platforms / Server Edition). */
+  notchHud: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
 }
@@ -741,6 +745,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Deterministic hook-reply approvals default ON (existing users pick it up on hydrate). Only
   // affects Claude terminal sessions; off reproduces the pre-feature launch bit-for-bit.
   hookReplyApprovals: true,
+  // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
+  notchHud: true,
   speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 

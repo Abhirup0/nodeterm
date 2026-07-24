@@ -49,6 +49,15 @@ export const IPC = {
    *  `external` opt). See core/ack-sweep.ts. */
   agentUnreadClear: 'agent:unread-clear',
   agentSubagentActivity: 'agent:subagent-activity',
+  /** macOS Notch HUD (docs/notch-hud.md). main → hud: push the current row array. */
+  hudRows: 'hud:rows',
+  /** hud → main: toggle window click-through on hotspot enter/leave. Arg: `ignore: boolean`. */
+  hudSetIgnoreMouse: 'hud:set-ignore-mouse',
+  /** hud → main: a HUD row was clicked — focus the node in nodeterm + clear its done latch.
+   *  Arg: `nodeId: string`. Reuses the notification-click focus path. */
+  hudFocusNode: 'hud:focus-node',
+  /** hud → main: the panel expanded/collapsed. `true` clears every done latch (you looked). */
+  hudExpanded: 'hud:expanded',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
   /** Canvas sync: a client casts its local node mutations here; the core reflector

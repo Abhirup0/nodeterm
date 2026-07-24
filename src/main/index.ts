@@ -27,6 +27,13 @@ import {
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import {
+  initNotchHud,
+  setNotchHudEnabled,
+  destroyNotchHud,
+  notchHudOnAgentEvent,
+  notchHudOnContextUpdate
+} from './notch-hud'
+import {
   initAgentStatusMirror,
   onMirrorFlush,
   flush as flushAgentStatusMirror,
@@ -729,6 +736,10 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+  // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
+  // reads the same agent-status seams the mirror does. Live-toggled via settings below.
+  initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, settingsStore.get().notchHud)
+  settingsStore.onChange((s) => setNotchHudEnabled(s.notchHud))
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.
@@ -946,6 +957,8 @@ app.whenReady().then(async () => {
   }
   const contextTail = createContextTail((payload) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
+    // Feed the macOS Notch HUD the model name (keyed by sessionId; no-op off/non-darwin).
+    notchHudOnContextUpdate(payload as { sessionId?: string; model?: string; usedPercent?: number })
     // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
     // sessionId; map it back to the node via the raw-listener's nodeId↔sessionId association.
     const cw = payload as { sessionId?: string; usedPercent?: number }
@@ -1117,6 +1130,8 @@ app.whenReady().then(async () => {
     // the same single source of truth as the mirror/phone. Then broadcast the enriched event.
     const enriched = recordAgentEvent(e) ?? e
     sendToMain(IPC.agentStatus, enriched)
+    // Feed the macOS Notch HUD its prompt (ev.task on newTurn) + subagent grouping (no-op off/non-darwin).
+    notchHudOnAgentEvent(enriched)
   }
   hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
@@ -1624,6 +1639,7 @@ app.on('window-all-closed', () => {
 let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
+  destroyNotchHud()
   workspaceWatcher.dispose()
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.

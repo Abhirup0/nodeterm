@@ -2,15 +2,24 @@ import { useSettings } from '../../../state/settings'
 import { NODE_COLORS } from '../../../state/workspace'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
+import { FieldRow } from '../FieldRow'
+import { Switch } from '@renderer/ui/Switch'
 import { cn } from '@renderer/ui/cn'
 
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+
 const ROWS = {
-  accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] }
+  accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
+  notchHud: {
+    title: 'Notch HUD',
+    keywords: ['notch', 'hud', 'mascot', 'menu bar', 'overlay', 'agent', 'status', 'macos']
+  }
 }
 const ENTRIES = Object.values(ROWS)
 
 export function AppearanceSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const accent = useSettings((s) => s.settings.accent)
+  const notchHud = useSettings((s) => s.settings.notchHud)
   const update = useSettings((s) => s.update)
   return (
     <SettingsSection
@@ -39,6 +48,21 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
           </div>
         </div>
       </SearchableRow>
+      {isMac && (
+        <SearchableRow {...ROWS.notchHud}>
+          <FieldRow
+            label="Notch HUD"
+            description="Show walking agent mascots by the notch while agents work; click to expand a mini session panel. macOS only."
+            control={
+              <Switch
+                checked={notchHud}
+                ariaLabel="macOS Notch HUD"
+                onChange={(on) => update({ notchHud: on })}
+              />
+            }
+          />
+        </SearchableRow>
+      )}
     </SettingsSection>
   )
 }

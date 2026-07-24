@@ -24,9 +24,18 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
  */
 export class SettingsStore {
   private cache: Settings = DEFAULT_SETTINGS
+  private listeners = new Set<(s: Settings) => void>()
 
   private get filePath(): string {
     return path.join(platform().userDataDir, 'settings.json')
+  }
+
+  /** Subscribe to saves (fires after each successful `settings:save`). Additive; used by the
+   *  desktop shell to create/destroy runtime-toggled subsystems (e.g. the Notch HUD). Returns an
+   *  unsubscribe. Never throws into a save. */
+  onChange(cb: (s: Settings) => void): () => void {
+    this.listeners.add(cb)
+    return () => this.listeners.delete(cb)
   }
 
   /** Load synchronously into cache (call after app is ready). */
@@ -51,6 +60,13 @@ export class SettingsStore {
       const tmp = `${this.filePath}.tmp`
       await fs.writeFile(tmp, JSON.stringify(this.cache, null, 2), 'utf-8')
       await fs.rename(tmp, this.filePath)
+      for (const cb of this.listeners) {
+        try {
+          cb(this.cache)
+        } catch {
+          // A listener must never break a settings save (or its siblings).
+        }
+      }
     })
   }
 }
