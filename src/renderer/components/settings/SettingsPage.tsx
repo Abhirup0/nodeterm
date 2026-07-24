@@ -18,6 +18,7 @@ import { NotificationsSection } from './sections/NotificationsSection'
 import { CommitSection } from './sections/CommitSection'
 import { TmuxSection } from './sections/TmuxSection'
 import { LicenseSection } from './sections/LicenseSection'
+import { PresenceIdentitySection } from './sections/PresenceIdentitySection'
 import { RemoteSection } from './sections/RemoteSection'
 import { TeamAccessSection } from './sections/TeamAccessSection'
 import { SshSection } from './sections/SshSection'
@@ -79,6 +80,7 @@ export function SettingsPage({
             <CommitSection isActive={active === 'commit'} />
             <TmuxSection isActive={active === 'tmux'} />
             <LicenseSection isActive={active === 'license'} />
+            <PresenceIdentitySection isActive={active === 'presence'} />
             <RemoteSection isActive={active === 'remote'} onClose={onClose} />
             <TeamAccessSection isActive={active === 'team-access'} onClose={onClose} />
             <SshSection isActive={active === 'ssh'} />
