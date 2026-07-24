@@ -23,15 +23,25 @@ body {
   height: 100%;
 }
 
-/* The interactive hotspot: the indicator + (when expanded) the panel. Anchored at the notch
-   center (left:50%) and pulled left so the mascots walk just LEFT of the notch. */
+/* The interactive hotspot: the indicator + (when expanded) the panel. The notch is centered on
+   the display (left:50%); COLLAPSED, the hotspot sits just LEFT of it — its right edge lands at
+   the notch's left edge, so the mascots walk beside the notch, not on top of it. translateX(-50%)
+   alone (the old value) only centered the hotspot ON the notch. `--notch-half-w` is half the
+   notch's width (main can override; ~100px covers 14"/16" MacBooks, and on a notchless display it
+   just parks the mascots left of the virtual center). EXPANDED, the panel re-centers under the
+   notch. */
 .hud-hotspot {
   position: absolute;
   left: 50%;
   top: 0;
-  transform: translateX(-50%);
+  transform: translateX(calc(-100% - var(--notch-half-w, 100px)));
   display: flex;
   flex-direction: column;
+  align-items: flex-end; /* indicator hugs the notch side */
+  transition: transform 0.2s ease;
+}
+.hud-hotspot.expanded {
+  transform: translateX(-50%);
   align-items: center;
 }
 
