@@ -40,6 +40,7 @@ import {
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
+import { createSessionReaper } from '../core/session-budget'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -349,6 +350,15 @@ export async function startServer(
   }
   await hookServer.start()
 
+  // Session budget (docs/SERVER.md): reap long-idle DETACHED nt- tmux sessions under memory
+  // pressure (10%-of-RAM watermark) or past a count cap, on BOTH the local socket and the
+  // SSH-remote socket (`nodeterm-rmt`) — a host serving SSH projects accumulates sessions there,
+  // and this standing process is the natural owner of reaping them (field report: 95 sessions /
+  // 34 GB idle claude). Attached sessions are never touched; a reaped node cold-restores on next
+  // open. Kill switch + tuning via NODETERM_SESSION_* env (core/session-budget.ts).
+  const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
+  sessionReaper.start()
+
   // Headless notification host: every core service above (incl. the loopback hook server, which
   // is its own listener and MUST run) is booted, but we bind NO public HTTP/WS listener — no
   // renderer serving, no auth surface, no open port. The granted push senders reach the phone over
@@ -359,6 +369,7 @@ export async function startServer(
       port: 0, // nothing bound
       async close() {
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
+        sessionReaper.stop()
         await ptyManager.killAll()
         hookServer.stop()
       }
@@ -392,6 +403,7 @@ export async function startServer(
     port,
     async close() {
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
+      sessionReaper.stop()
       await ptyManager.killAll()
       // Close the loopback hook-server listener (it would otherwise die with the process anyway).
       hookServer.stop()
