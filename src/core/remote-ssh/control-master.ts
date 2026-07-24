@@ -46,6 +46,13 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
     'ControlPersist=300',
     '-o',
     'BatchMode=no',
+    // Unknown host → record it and connect, instead of aborting. The master is backgrounded
+    // (`-M -N`, no tty), so the default `StrictHostKeyChecking=ask` can never get its yes/no
+    // answered and the whole connection fails — the "server not in known_hosts" error users hit.
+    // `accept-new` auto-accepts a FIRST-SEEN host key (writing it to known_hosts) but STILL
+    // refuses a host whose recorded key later CHANGED, so MITM protection on known hosts stays.
+    '-o',
+    'StrictHostKeyChecking=accept-new',
     // Keepalives on the ONE connection every terminal multiplexes over: keep NAT/firewall
     // entries warm, and detect a dead link in ~60s (15s × 4) instead of hanging half-dead
     // after sleep/wake or a network change. The client then exits 255 and the renderer's
@@ -83,6 +90,11 @@ export function childArgs(conn: SshConnection, controlPath: string, remote?: str
     `ControlPath=${controlPath}`,
     '-o',
     'ControlPersist=300',
+    // Matters when this child is the one that actually touches the host (it became the master, or
+    // fell back to a direct connection because the master was gone): a first-seen host key must be
+    // recorded and accepted rather than abort a backgrounded, tty-less exec. See masterArgs.
+    '-o',
+    'StrictHostKeyChecking=accept-new',
     // Meaningful only when this child ends up owning the transport (became the master, or fell
     // back to a direct connection) — a mux client rides the master's keepalives. Same values as
     // masterArgs, for the same reason: detect a dead link in ~60s instead of hanging half-dead.
