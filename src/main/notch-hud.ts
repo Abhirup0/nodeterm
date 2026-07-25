@@ -27,10 +27,11 @@ import { createHudModel, type HudModel } from './notch-hud-model'
 const NOTCH_BAR_FLOOR = 24
 /**
  * Assumed physical notch WIDTH (px). Electron exposes no `auxiliaryTopLeftArea`, so we assume a
- * centered notch of this width and FUSE the capsule to it (its collapsed width). ~200 px covers the
- * 14"/16" MacBook notch. TUNE ON A MAC if the capsule reads narrower/wider than the physical notch.
+ * centered notch of this width, and the capsule butts against its LEFT edge. Field-tuned to 168 px
+ * (200 left a visible gap — the capsule sat too far left). TUNE ON A MAC: raise it to push the
+ * capsule LEFT, lower it to slide the capsule RIGHT toward the notch.
  */
-const NOTCH_WIDTH = 200
+const NOTCH_WIDTH = 168
 /**
  * A top inset (`workArea.y - bounds.y`) at least this tall (px) means a PHYSICAL notch is present:
  * a notched Mac's menu bar is ~37 px, a notchless display's is ~24–25 px. Below this we treat the
