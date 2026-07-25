@@ -1,6 +1,6 @@
 // Tiny, HUD-only preload (docs/notch-hud.md). The Notch HUD is a separate BrowserWindow with a
 // minimal surface — it does not need the full `window.nodeTerminal` API, so it gets its own bridge
-// exposing exactly the four HUD channels. contextIsolation stays on; no node integration.
+// exposing exactly the HUD channels. contextIsolation stays on; no node integration.
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
@@ -45,6 +45,8 @@ export interface HudApi {
   focusNode(nodeId: string): void
   /** hud → main: the panel expanded (true) / collapsed (false). */
   setExpanded(expanded: boolean): void
+  /** hud → main: remove this row from the HUD (a session stuck in `working`). */
+  dismiss(nodeId: string): void
 }
 
 const api: HudApi = {
@@ -55,7 +57,8 @@ const api: HudApi = {
   },
   setIgnoreMouse: (ignore) => ipcRenderer.send(IPC.hudSetIgnoreMouse, ignore),
   focusNode: (nodeId) => ipcRenderer.send(IPC.hudFocusNode, nodeId),
-  setExpanded: (expanded) => ipcRenderer.send(IPC.hudExpanded, expanded)
+  setExpanded: (expanded) => ipcRenderer.send(IPC.hudExpanded, expanded),
+  dismiss: (nodeId) => ipcRenderer.send(IPC.hudDismiss, nodeId)
 }
 
 contextBridge.exposeInMainWorld('hud', api)

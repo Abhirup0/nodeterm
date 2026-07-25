@@ -208,3 +208,26 @@ describe('buildIndicator + ordering', () => {
     expect(ind.doneUnseen).toBe(true)
   })
 })
+
+describe('dismiss', () => {
+  it('hides a stuck row until its state genuinely changes', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'stuck', state: 'working', agentId: 'claude', ts: T0 }))
+    expect(rowFor(m.buildRows(T0 + 1, titleOf), 'stuck')?.state).toBe('working')
+
+    m.dismiss('stuck')
+    expect(rowFor(m.buildRows(T0 + 2, titleOf), 'stuck')).toBeUndefined()
+    // Still hidden on a repeat build and on a mirror flush that keeps it working.
+    m.applyMirrorFlush({ nodes: { stuck: { state: 'working', agentId: 'claude', updatedAt: T0 } } } as never)
+    expect(rowFor(m.buildRows(T0 + 3, titleOf), 'stuck')).toBeUndefined()
+
+    // A real state change earns the row back.
+    m.applyStateChange(stateChange({ nodeId: 'stuck', state: 'done', ts: T0 + 4 }))
+    expect(rowFor(m.buildRows(T0 + 5, titleOf), 'stuck')?.state).toBe('done')
+  })
+
+  it('ignores an unknown node', () => {
+    const m = createHudModel()
+    expect(() => m.dismiss('nope')).not.toThrow()
+  })
+})
