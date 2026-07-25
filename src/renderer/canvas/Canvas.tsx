@@ -3717,17 +3717,21 @@ export function Canvas() {
         return
       }
       // The file is context-budgeted by buildHandoff (long sessions: digest + verbatim tail,
-      // full copy beside it), so "read it" is always affordable. The wording pins the agent to
-      // CONTINUING rather than restarting — but conditionally: a handoff of a session with an
-      // in-progress task must be resumed without a greeting round-trip, while a handoff of a
-      // conversation that never got to a task (someone transfers right after "hey") has
-      // nothing to resume, and forbidding questions there would push the agent to invent work.
+      // full copy beside it), so "read it" is always affordable.
+      //
+      // The prompt hands over CONTEXT, not control. An earlier wording told the target to resume
+      // the task immediately: transferring is one click, the file can describe half-finished
+      // destructive work, and the person doing the transfer is usually MOVING the conversation
+      // (different agent, different machine) rather than asking for the next step to run
+      // unattended. So the target reads itself in, states where things stand — which is also how
+      // the human catches a misread before it costs anything — and waits.
       const prompt =
         `The file ${res.filePath} is a handoff of the prior conversation from a ` +
         `${sourceAgentId} session; the most recent exchange is at the END of the file. ` +
-        `Read the file, then continue seamlessly from exactly where the conversation left ` +
-        `off — as if you had been the assistant all along. If a task is in progress, resume ` +
-        `it immediately; do not greet, re-introduce yourself, or summarize the file back.`
+        `Read the whole file first so you have the full context. Then STOP: make no changes, ` +
+        `run nothing, and start no task. Reply with a short recap of where the work stands — ` +
+        `what was done, what is unfinished, anything ambiguous — and ask me what I want to do ` +
+        `next. Wait for my answer before doing anything else.`
       // An SSH project's transfer target must run on the SAME host as the source: the handoff
       // file was written there (buildHandoff's remote branch), and `cwd` is a remote path. A
       // local node here would open in a directory that doesn't exist on this machine and could
