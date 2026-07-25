@@ -14,7 +14,8 @@
   --bar: 32px; /* menu-bar / notch strip height (from main) — the fused top zone */
   --notch-width: 200px; /* physical notch width (from main) = the capsule's collapsed width */
   --notch-center-x: 50%; /* notch horizontal center in px (from main) — the capsule anchor */
-  --capsule-drop: 28px; /* how far the collapsed capsule bulges BELOW the bar line (holds mascots) */
+  /* Unused while collapsed (the capsule never exceeds --bar); kept for the expand math only. */
+  --capsule-drop: 0px;
   --capsule-radius: 16px; /* bottom-corner radius of the fused capsule */
   --panel-width: 400px; /* expanded panel width */
   --panel-max-h: 420px; /* expanded panel max content height (rows scroll past it) */
@@ -50,47 +51,58 @@ body {
   height: 100%;
 }
 
-/* The DynamicNotch capsule: one black surface anchored at the notch's horizontal center, its TOP
-   edge at y=0 so it shares (fuses with) the notch's black — top corners SQUARE, bottom corners
-   rounded, so the top blends into the notch and only the bottom reads as a rounded pill. COLLAPSED
-   it is `--notch-width` wide and hangs `--capsule-drop` px below the bar line (the Dynamic-Island
-   bulge that holds the mascots). EXPANDED the SAME surface grows to `--panel-width` wide and taller,
-   revealing the session rows — a smooth width+height expand from the notch, not a separate panel.
-   `max-height` (not `height`) drives the vertical grow so the reveal animates with content of
-   unknown height. */
+/* The DynamicNotch capsule: one black surface at y=0 that shares the notch's black. COLLAPSED it
+   sits to the LEFT of the notch, exactly `--bar` tall and only as wide as its mascots — the notch
+   appears WIDER, never taller (owner's call: no extra height). Its right edge butts against the
+   notch (square), only the bottom-left corner rounds. EXPANDED the same surface re-centres under
+   the notch and grows DOWNWARD into the session panel. `max-height` (not `height`) drives the
+   vertical grow so the reveal animates with content of unknown height. */
 .hud-capsule {
   position: absolute;
   top: 0;
-  left: var(--notch-center-x, 50%);
-  transform: translateX(-50%);
-  width: var(--notch-width, 200px);
+  /* Anchored at the notch's LEFT edge and grown leftward (translateX(-100%)): the capsule widens
+     the notch SIDEWAYS instead of adding height below it (owner: "notch'a ekstra height vermek
+     istemiyorum"). Collapsed height is exactly the bar, so the strip never gets taller than the
+     real notch. */
+  left: calc(var(--notch-center-x, 50%) - var(--notch-width, 200px) / 2);
+  transform: translateX(-100%);
+  /* Shrink-to-fit so however many mascots are running, none clip. */
+  width: auto;
   height: auto;
-  max-height: calc(var(--bar) + var(--capsule-drop));
+  max-height: var(--bar);
   overflow: hidden;
   background: var(--capsule-bg);
-  /* Top corners square (blend into the notch); bottom corners rounded. */
-  border-radius: 0 0 var(--capsule-radius) var(--capsule-radius);
+  /* Right side square (it butts against the notch and shares its black); only the bottom-LEFT
+     corner rounds, so the pair reads as one wider notch. */
+  border-radius: 0 0 0 var(--capsule-radius);
   box-shadow: 0 12px 44px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
   align-items: center;
   will-change: width, max-height;
   transition:
-    width var(--capsule-dur) var(--capsule-ease),
     max-height var(--capsule-dur) var(--capsule-ease),
     border-radius var(--capsule-dur) var(--capsule-ease);
 }
 .hud-capsule--hidden {
   display: none; /* idle: no empty black pill */
 }
+/* EXPANDED: re-centre under the notch and grow DOWNWARD into the panel. The height only appears
+   on click — collapsed, the strip is never taller than the real notch. */
 .hud-capsule.expanded {
+  left: var(--notch-center-x, 50%);
+  transform: translateX(-50%);
   width: var(--panel-width);
   max-height: calc(var(--bar) + var(--panel-max-h) + 20px);
+  border-radius: 0 0 var(--capsule-radius) var(--capsule-radius);
 }
 
 /* Notchless display: a standalone floating pill (no notch to fuse with) — a small top gap and
    all-corner radius so it reads as its own Dynamic-Island-like element, not a black bar at y=0. */
 .notchless .hud-capsule {
+  /* No notch to butt against — centre the pill instead of hanging it off the notch's left edge. */
+  left: var(--notch-center-x, 50%);
+  transform: translateX(-50%);
   top: var(--pill-top-gap);
   max-height: var(--pill-height);
   border-radius: var(--pill-radius);
@@ -100,20 +112,19 @@ body {
   border-radius: var(--pill-radius);
 }
 
-/* --- Collapsed indicator: the mascots, centered in the drop zone BELOW the menu-bar line ---
-   `padding-top: var(--bar)` pushes the mascots past the fused top zone (the physical notch), so
-   they sit in the few px of capsule that hang below the bar — exactly where a Dynamic Island shows
-   content. This is the intended zone (fixes the old "floating below the bar" reading: the black
-   capsule now frames them there). Hidden when expanded (the rows carry their own icons). */
+/* --- Collapsed indicator: the mascots, BOTTOM-LEFT inside the sideways notch extension ---
+   The capsule is exactly bar-tall, so the mascots stand on the bar's bottom edge, left-packed,
+   inside black that butts against the notch — the notch reads as wider, never taller.
+   Hidden when expanded (the rows carry their own icons). */
 .hud-indicator {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  /* Bottom-LEFT: the mascots stand on the bar's bottom edge, left-packed (owner's placement). */
+  align-items: flex-end;
+  justify-content: flex-start;
   gap: 8px;
-  width: 100%;
-  height: calc(var(--bar) + var(--capsule-drop));
-  padding-top: var(--bar);
-  padding-bottom: 3px;
+  width: auto;
+  height: var(--bar);
+  padding: 0 8px 3px 10px;
 }
 .hud-capsule.expanded .hud-indicator {
   display: none;
