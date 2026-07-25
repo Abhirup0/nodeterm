@@ -309,15 +309,21 @@ export function createAgentStatusSession(
     clearUnread: (id, opts) =>
       set((s) => {
         const prev = s.byId[id]
-        if (!prev?.unread) return s
-        // Cross-surface ACK: reading a FINISHED session here dismisses the paired phone's lingering
-        // DONE Live Activity and marks its Inbox card seen (via the core mirror's `ackDone`). Gated
-        // on the node's LATEST state being `done` — a working-state focus (unread from an earlier
-        // turn while a new turn is now live) must not ack. Fire-and-forget; the mirror no-ops when
-        // there is no unresolved done event, so a stray call is harmless + idempotent.
-        // SUPPRESSED for an `external` clear — one the host drove FROM a phone read-ack it swept
-        // (`agent:unread-clear`): re-acking here would loop host→renderer→ackDone straight back.
+        if (!prev) return s
+        // The ACK runs even when there is no unread flag to clear. A session you were LOOKING at
+        // when it finished never got marked unread (see the `watching` gate in Canvas), so opening
+        // it is the only "I read it" signal there will ever be — and without the ack the notch
+        // capsule and the phone's Live Activity kept glowing for a session the user watched end.
+        // `ackDone` is a no-op when there is no unresolved done event, so a stray call costs
+        // nothing.
+        // Cross-surface ACK: reading a FINISHED session dismisses the paired phone's lingering DONE
+        // Live Activity, clears the notch capsule's green blob and marks its Inbox card seen (all
+        // via the core mirror's `ackDone`). Gated on the node's LATEST state being `done` — a
+        // working-state focus (unread from an earlier turn while a new turn is now live) must not
+        // ack. SUPPRESSED for an `external` clear — one the host drove FROM a phone read-ack it
+        // swept (`agent:unread-clear`): re-acking would loop host→renderer→ackDone straight back.
         if (prev.state === 'done' && !opts?.external) ackDone?.(id)
+        if (!prev.unread) return s
         const byId = { ...s.byId, [id]: { ...prev, unread: false } }
         save(byId)
         return { byId }

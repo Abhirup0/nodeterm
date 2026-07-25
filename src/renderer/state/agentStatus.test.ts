@@ -132,6 +132,18 @@ describe('clearUnread — cross-surface ack vs. external (host-driven) clear', (
     expect(acked).toEqual([])
   })
 
+  it('acks a done with NO unread flag — the session the user watched finish', () => {
+    const acked: string[] = []
+    const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
+    const id = 'nt-watched'
+    // Watching the node when it finished means markUnread was skipped, so opening it is the only
+    // read signal there will ever be. Without this ack the notch blob / phone activity kept glowing.
+    store.getState().setState(id, 'done', 'claude')
+    store.getState().clearUnread(id)
+    expect(acked).toEqual(['nt-watched'])
+    expect(store.getState().byId[id].unread).toBeFalsy()
+  })
+
   it('a non-done unread clear never acks (regardless of the external flag)', () => {
     const acked: string[] = []
     const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
