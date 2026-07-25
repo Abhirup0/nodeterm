@@ -18,15 +18,15 @@ describe('buildCodexHooksAndTrust', () => {
     expect(buildCodexHooksAndTrust(null, 'cmd', '/h/hooks.json')).toBeNull()
   })
 
-  it('prepends the managed handler to all six events + emits one trust entry per event', () => {
+  it('appends the managed handler to all six events + emits one trust entry per event', () => {
     const command = buildManagedCommand('/home/u/.nodeterm/agent-hooks/codex.sh')
     const built = buildCodexHooksAndTrust({}, command, '/home/u/.codex/hooks.json')
     expect(built).not.toBeNull()
     const { config, trustEntries } = built!
-    // one definition per subscribed event, our managed handler first
+    // one definition per subscribed event, our managed handler last
     for (const ev of CODEX_EVENTS) {
       const defs = config.hooks?.[ev]
-      expect(defs?.[0]?.hooks?.[0]?.command).toBe(command)
+      expect(defs?.at(-1)?.hooks?.[0]?.command).toBe(command)
     }
     expect(trustEntries).toHaveLength(CODEX_EVENTS.length)
     expect(trustEntries.every((e) => e.command === command)).toBe(true)
@@ -38,20 +38,40 @@ describe('buildCodexHooksAndTrust', () => {
     const first = buildCodexHooksAndTrust({}, command, '/x/hooks.json')!
     const second = buildCodexHooksAndTrust(first.config, command, '/x/hooks.json')!
     for (const ev of CODEX_EVENTS) {
-      // exactly one managed handler at the head, none trailing
+      // exactly one managed handler, still at the tail
       const defs = second.config.hooks?.[ev] ?? []
       const managed = defs.filter((d) => d.hooks?.some((h) => h.command === command))
       expect(managed).toHaveLength(1)
+      expect(defs.at(-1)?.hooks?.[0]?.command).toBe(command)
     }
   })
 
-  it('preserves a user-authored hook in a subscribed event (kept AFTER the managed handler)', () => {
+  it('preserves a user-authored hook at its original index before the managed handler', () => {
     const command = buildManagedCommand('/x/agent-hooks/codex.sh')
     const userDef = { hooks: [{ type: 'command' as const, command: 'echo mine' }] }
     const built = buildCodexHooksAndTrust({ hooks: { Stop: [userDef] } }, command, '/x/hooks.json')!
     const stop = built.config.hooks?.Stop ?? []
-    expect(stop[0]?.hooks?.[0]?.command).toBe(command)
-    expect(stop.some((d) => d.hooks?.some((h) => h.command === 'echo mine'))).toBe(true)
+    expect(stop[0]).toEqual(userDef)
+    expect(stop.at(-1)?.hooks?.[0]?.command).toBe(command)
+  })
+
+  it('keeps two user definitions at their trust-key indices and trusts the managed tail', () => {
+    const command = buildManagedCommand('/x/agent-hooks/codex.sh')
+    const firstUserDef = { hooks: [{ type: 'command' as const, command: 'echo first' }] }
+    const secondUserDef = { hooks: [{ type: 'command' as const, command: 'echo second' }] }
+    const built = buildCodexHooksAndTrust(
+      { hooks: { SessionStart: [firstUserDef, secondUserDef] } },
+      command,
+      '/x/hooks.json'
+    )!
+    const sessionStart = built.config.hooks?.SessionStart ?? []
+    expect(sessionStart[0]).toEqual(firstUserDef)
+    expect(sessionStart[1]).toEqual(secondUserDef)
+    expect(sessionStart[2]?.hooks?.[0]?.command).toBe(command)
+    expect(built.trustEntries.find((entry) => entry.eventLabel === 'session_start')).toMatchObject({
+      groupIndex: 2,
+      handlerIndex: 0
+    })
   })
 
   it('sweeps a stale managed handler out of an event we no longer subscribe to', () => {
