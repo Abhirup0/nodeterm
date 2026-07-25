@@ -103,6 +103,13 @@ import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
+import {
+  FIT_NODE_OPTIONS,
+  isMeasured,
+  nodeFitRect,
+  viewportForRect,
+  type FocusableNode
+} from '../lib/nodeFocus'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
@@ -690,6 +697,7 @@ export function Canvas() {
     screenToFlowPosition,
     setCenter,
     getZoom,
+    getInternalNode,
     getNodes,
     getNodesBounds
   } = useReactFlow()
@@ -3735,15 +3743,31 @@ export function Canvas() {
       // overshot large terminals (their body never fit the viewport). fitView sizes the zoom
       // to the node and resolves group-relative positions itself; the clamp keeps a small
       // node from filling the whole screen and a huge one from being fit microscopic.
-      void fitView({
-        nodes: [{ id: node.id }],
-        duration: 300,
-        padding: 0.2,
-        minZoom: 0.25,
-        maxZoom: 1.15
-      })
+      //
+      // …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
+      // (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
+      // bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
+      // empty canvas, node off-screen. That is precisely the state a node is in for the first
+      // tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
+      // sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
+      // tick, so measuring can lose the race and only a second attempt would work. In that
+      // window we frame the node ourselves from its persisted size — see lib/nodeFocus.
+      //
+      // The measured check must read React Flow's OWN store (`getInternalNode`), not our node
+      // object: `measured` only reaches our state one render later, when `onNodesChange` applies
+      // the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
+      if (isMeasured(getInternalNode(node.id))) {
+        void fitView({ nodes: [{ id: node.id }], duration: 300, ...FIT_NODE_OPTIONS })
+        return
+      }
+      const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
+      const wrap = flowWrapRef.current?.getBoundingClientRect()
+      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
+      // Size unknowable / no pane yet: leave the camera where it is. Standing still beats
+      // teleporting the user to the origin, which is the bug this branch exists for.
+      if (viewport) void setViewport(viewport, { duration: 300 })
     },
-    [fitView]
+    [fitView, setViewport, getInternalNode]
   )
 
   const onNodeDoubleClick = useCallback(
