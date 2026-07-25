@@ -74,14 +74,26 @@ const openSubs = new Set<string>()
 // the OS still forwards MOVE events, so pointerenter fires and we flip click-through OFF to accept
 // clicks. Leaving the capsule re-enables click-through and collapses the panel (the click-away). The
 // transparent rest of the window stays click-through throughout.
+// HOVER OPENS IT (owner: "üzerine gelince genişleme yok"). A short dwell keeps a pointer merely
+// crossing the top edge from popping the panel; leaving collapses immediately. Clicking still
+// toggles, so the panel can also be dismissed without moving away.
+const HOVER_OPEN_MS = 180
+let hoverTimer: number | undefined
+
 capsule.addEventListener('pointerenter', () => {
   window.hud.setIgnoreMouse(false)
+  window.clearTimeout(hoverTimer)
+  hoverTimer = window.setTimeout(() => setExpanded(true), HOVER_OPEN_MS)
 })
 capsule.addEventListener('pointerleave', () => {
+  window.clearTimeout(hoverTimer)
   window.hud.setIgnoreMouse(true)
   if (expanded) setExpanded(false)
 })
-indicator.addEventListener('click', () => setExpanded(!expanded))
+indicator.addEventListener('click', () => {
+  window.clearTimeout(hoverTimer)
+  setExpanded(!expanded)
+})
 
 function setExpanded(next: boolean): void {
   if (expanded === next) return
@@ -108,8 +120,8 @@ function reltime(ts: number): string {
 // and the Codex pet at 26px; these are the sensible defaults — NAIL EXACTLY ON A MAC (the notch
 // bar height varies by model, and 26px overflows a short bar). Aspect ratios are preserved from
 // the sprite geometry, so only the height matters.
-const HUD_CLAUDE_H = 18
-const HUD_CODEX_H = 24
+const HUD_CLAUDE_H = 13
+const HUD_CODEX_H = 17
 
 function claudeMascot(): HTMLElement {
   const el = document.createElement('span')
