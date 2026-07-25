@@ -5,7 +5,13 @@
  * filter and the restart choreography can all share exactly one set of rules.
  */
 import { canResume, resumeCommand } from '../../shared/agents/config'
-import { deliverCommand, type DeliveryIo } from './command-delivery'
+import {
+  DELIVERY_ATTEMPTS,
+  KILL_LINE,
+  VERIFY_TIMEOUT_MS,
+  deliverCommand,
+  type DeliveryIo
+} from './command-delivery'
 
 /** In-band exit command per agent CLI. Only agents listed here can be restarted in place —
  *  an unknown CLI has no safe way to be asked to quit. */
@@ -57,11 +63,46 @@ export type RestartOutcome = 'restarted' | 'exit-timeout' | 'not-eligible'
 export const RESTART_EXIT_TIMEOUT_MS = 6000
 export const RESTART_POLL_MS = 250
 
+/** How long the resume delivery may take before this restart stops waiting for it. The delivery's
+ *  own retry chain is bounded (DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS, then a fail-open submit), so
+ *  the slack is only there to let the last attempt land. A backstop, not a policy: nothing in a
+ *  restart may wait forever — the awaiting node is held un-restartable and, in a bulk run, every
+ *  node after it is blocked and the summary the user is waiting for never arrives. */
+export const RESTART_DELIVERY_TIMEOUT_MS = DELIVERY_ATTEMPTS * VERIFY_TIMEOUT_MS + 1000
+
 /**
- * In-place CLI restart: ask the agent to quit, wait until a SHELL owns the pane, then
+ * One bounded pane query. Unbounded, a wedged tmux server (or a relay whose IPC never answers)
+ * would hang the restart — and with it the bulk run's summary — forever. A lapsed, failed or
+ * empty query reads as `null`: "we cannot see this pane right now".
+ */
+async function queryPane(fn: () => Promise<string | null>, ms: number): Promise<string | null> {
+  let lapse: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<null>((r) => {
+        lapse = setTimeout(() => r(null), ms)
+      })
+    ])
+  } catch {
+    return null // transient IPC failure — same reading as "cannot see it"
+  } finally {
+    clearTimeout(lapse)
+  }
+}
+
+/**
+ * In-place CLI restart: ask the agent to quit, wait until the CLI has let go of the pane, then
  * echo-deliver the resume command into it. Never force-kills — on timeout the CLI is left
- * running and the caller reports the node. `paneCommand` errors count as "not a shell yet";
- * the timeout is the backstop.
+ * running and the caller reports the node. Once the exit has been sent, `paneCommand` errors count
+ * as "not a shell yet"; the timeout is the backstop.
+ *
+ * NOTHING is written until one `paneCommand` has come back non-null. The exit command is
+ * irreversible — the conversation is only recoverable through the `--resume` that follows it — so
+ * a pane we cannot WATCH must never be quit: with tmux switched off in Settings, or absent from
+ * the machine, the query answers null forever, and quitting first would leave the agent dead, the
+ * relaunch never sent, and the user told (after 6s of polling) that "the session was left
+ * running". The pre-flight makes that state a plain `'not-eligible'`, with an untouched pane.
  *
  * Resolves only once the resume line has actually LEFT the pane (deliverCommand's echo-verify
  * retries run for up to DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS after the first write). The
@@ -74,8 +115,21 @@ export async function performRestartResume(d: {
   sessionId: string
   io: DeliveryIo
   paneCommand: () => Promise<string | null>
+  /**
+   * The exact launch line to relaunch with, when the caller has one. `withPermissionMode` is the
+   * app's single funnel for every CLI launch, and it needs the ACTIVE mode — an async read that
+   * belongs to the node, not to this module. Without it a canvas running in `acceptEdits` / `plan`
+   * would come back from a bulk restart in the default mode and start prompting.
+   *
+   * Eligibility is still decided by the bare `resumeCommand` below: a session id this app would
+   * not put on a command line (SAFE_SESSION_ID) refuses the restart before anything is written,
+   * whatever the caller passes.
+   */
+  command?: string
   timeoutMs?: number
   pollMs?: number
+  /** Backstop for the resume delivery; see RESTART_DELIVERY_TIMEOUT_MS. */
+  deliveryTimeoutMs?: number
   /**
    * Handed `deliverCommand`'s cancel the moment a delivery starts — and only then. The delivery
    * outlives this promise (it runs on its own echo-verify timers), so its lifetime belongs to
@@ -85,15 +139,18 @@ export async function performRestartResume(d: {
   onDelivery?: (cancel: () => void) => void
   /**
    * "Is the pane we are restarting still there?" — asked before the exit is written, on every
-   * poll, and once more before the delivery. A session can die under a restart (the node is
-   * deleted or respawned, or another client destroys the tmux session): its io then silently
-   * no-ops and reporting `'restarted'` would put a phantom in the bulk summary.
+   * poll, and once more after the delivery, before a restart is reported. A session can die under
+   * a restart (the node is deleted or respawned, or another client destroys the tmux session): its
+   * io then silently no-ops and reporting `'restarted'` would put a phantom in the bulk summary.
    */
   isLive?: () => boolean
 }): Promise<RestartOutcome> {
   const exit = exitSequence(d.agentId)
-  const cmd = resumeCommand(d.agentId, d.sessionId)
-  if (!exit || !cmd) return 'not-eligible'
+  const base = resumeCommand(d.agentId, d.sessionId)
+  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
+  // validates the session id before it reaches a command line.
+  if (!exit || !base) return 'not-eligible'
+  const cmd = d.command ?? base
   const timeoutMs = d.timeoutMs ?? RESTART_EXIT_TIMEOUT_MS
   const pollMs = d.pollMs ?? RESTART_POLL_MS
   // A dead session is not a restart that failed — there is no pane left to fail in. `'not-eligible'`
@@ -101,42 +158,74 @@ export async function performRestartResume(d: {
   // is still running and refused to quit, sending the user to look at a pane that is gone.
   const gone = (): boolean => !!d.isLive && !d.isLive()
   if (gone()) return 'not-eligible'
+  // ── Pre-flight: prove we can SEE this pane before quitting anything in it (see the header).
+  // Reported as `'not-eligible'`, the outcome that means "not a target right now" and is the one
+  // the menu and the notice already have wording for. Nothing has been written at this point.
+  const before = await queryPane(d.paneCommand, timeoutMs)
+  if (before === null || gone()) return 'not-eligible'
+  // Clear the prompt before typing the exit command. The pane is a REPL the user types into: a
+  // half-written prompt left in it would otherwise be submitted as `…refactor the/exit` — the
+  // draft lost and a real turn started (tokens, possibly edits) — and the CLI, still running,
+  // would then be reported as an exit timeout.
+  //
+  // ASSUMPTION, unverified on a real build: Ctrl-U is "clear line" inside the Claude and codex
+  // TUIs (it is in every readline/ZLE prompt, and it is what command-delivery.ts already relies on
+  // for its rewrites). If a TUI binds it to something else this becomes one stray keystroke before
+  // the exit command — no worse than today's blind write. Belongs in the manual test matrix.
+  d.io.write(KILL_LINE)
   d.io.write(exit + '\r')
   const deadline = Date.now() + timeoutMs
+  let last: string | null = null
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs))
-    let pane: string | null = null
-    let lapse: ReturnType<typeof setTimeout> | undefined
-    try {
-      // The query must be bounded, not just its rejection: a wedged tmux server can leave it
-      // pending forever, and the deadline below is only read once it settles — an unbounded
-      // await would hang this restart, and with it the bulk run's summary, permanently. A
-      // lapsed query resolves null, which reads as "not a shell yet".
-      const remaining = Math.max(0, deadline - Date.now())
-      pane = await Promise.race([
-        d.paneCommand(),
-        new Promise<null>((r) => {
-          lapse = setTimeout(() => r(null), remaining)
-        })
-      ])
-    } catch {
-      // transient IPC failure — keep polling until the deadline
-    } finally {
-      clearTimeout(lapse)
-    }
+    const pane = await queryPane(d.paneCommand, Math.max(0, deadline - Date.now()))
     if (gone()) return 'not-eligible' // stop polling a pane that no longer exists
+    // Two ways to know the CLI let go of the pane. The allowlist is the confident one and is
+    // taken immediately. The other — "the foreground command is no longer what it was before the
+    // exit" — covers the shells the allowlist cannot know (`nu`, `xonsh`, `pwsh`, anything the
+    // user set as `defaultShell`), where waiting for a listed shell would time out with the agent
+    // already quit and never resumed. It is required on two CONSECUTIVE polls: a single changed
+    // reading can be a momentary foreground child of a still-running CLI, and typing the resume
+    // line into a live CLI would send it as a message.
     if (isShellCommand(pane)) break
+    if (pane !== null && pane !== before && pane === last) break
+    last = pane
     if (Date.now() > deadline) return 'exit-timeout'
   }
   // Awaited, not fire-and-forget: see the header. `deliverCommand` is started inside the executor
   // (synchronously, so `onDelivery` still hands the cancel out before any await) and announces the
-  // end of the delivery — submitted, fail-open or cancelled — through `resolve`.
-  await new Promise<void>((resolve) => {
-    // Two statements on purpose: `d.onDelivery?.(deliverCommand(…))` short-circuits the ARGUMENT
-    // too when no callback was passed — nothing would be delivered and this promise would never
-    // settle.
-    const cancelDelivery = deliverCommand(d.io, cmd, resolve)
-    d.onDelivery?.(cancelDelivery)
+  // end of the delivery — submitted, fail-open or cancelled — through `settle`.
+  await new Promise<void>((resolve, reject) => {
+    let lapse: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    let started = false
+    // A settle announced from INSIDE deliverCommand's synchronous body is only applied below,
+    // after it has returned: that body can announce the end of the delivery and then throw (a
+    // transport that rejects the very first write ends the delivery, then reports), and a promise
+    // resolved first could no longer be rejected — the restart would claim success for a resume
+    // line that never reached the pane.
+    const settle = (): void => {
+      settled = true
+      if (!started) return
+      clearTimeout(lapse)
+      resolve()
+    }
+    try {
+      // Two statements on purpose: `d.onDelivery?.(deliverCommand(…))` short-circuits the ARGUMENT
+      // too when no callback was passed — nothing would be delivered and this promise would never
+      // settle.
+      const cancelDelivery = deliverCommand(d.io, cmd, settle)
+      started = true
+      d.onDelivery?.(cancelDelivery)
+    } catch (e) {
+      reject(e) // the caller counts a failure; no timer has been armed yet
+      return
+    }
+    if (settled) return resolve() // an io that echoes inside write() finishes the delivery there
+    // Bounded even so. The delivery's own retry chain is finite, but this await holds the node
+    // (and, in a bulk run, every node after it and the summary), so it must not depend on a third
+    // party announcing itself.
+    lapse = setTimeout(resolve, d.deliveryTimeoutMs ?? RESTART_DELIVERY_TIMEOUT_MS)
   })
   // The session can have died while the line was being verified — the delivery is then cancelled by
   // the teardown and nothing reached the pane, so don't claim a restart.

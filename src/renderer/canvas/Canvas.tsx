@@ -161,6 +161,7 @@ import {
   canTransferFrom,
   canContextLink,
   canControlCanvas,
+  createdAgentId,
   resumeCommand,
   withPermissionMode,
   AGENT_CONFIG,
@@ -352,19 +353,14 @@ const ropeEdge = (id: string, source: string, target: string, color: string): Ed
 const minimapNodeColor = (n: Node): string =>
   (n.data as { color?: string })?.color ?? '#0a84ff'
 
-/** The agent a terminal node was CREATED as — `data.agentId` with the legacy `tags` fallback.
- *  Deliberately NOT `agentIdOf`, whose extra hook-status fallback also reports a plain terminal
- *  someone typed `claude` into by hand: TerminalNode's restart closure captures exactly the
- *  derivation below, so a node offered a restart on the strength of the wider one would get a row
- *  whose closure refuses every click. Anything else (a shell, a sticky, an editor) is undefined,
- *  which `restartEligibility` reads as `not-resumable`. */
-const restartAgentIdOf = (n: Node | undefined): string | undefined => {
-  if (!n || n.type !== 'terminal') return undefined
-  return (
-    (n.data.agentId as string | undefined) ??
-    (((n.data.tags as string[]) ?? []).includes('claude') ? 'claude' : undefined)
-  )
-}
+/** The agent a terminal node was CREATED as. Deliberately NOT `agentIdOf`, whose extra hook-status
+ *  fallback also reports a plain terminal someone typed `claude` into by hand: TerminalNode's
+ *  restart closure captures `createdAgentId` too — the ONE shared derivation — so a node offered a
+ *  restart on the strength of the wider one would get a row whose closure refuses every click.
+ *  Anything that is not a terminal (a sticky, an editor) is undefined, which `restartEligibility`
+ *  reads as `not-resumable`. */
+const restartAgentIdOf = (n: Node | undefined): string | undefined =>
+  !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
 
 // The minimap subscribes to agent status HERE, in its own tiny component — not in Canvas.
 // Canvas must not subscribe to the whole status map (every working/waiting flip would re-render
@@ -3633,17 +3629,26 @@ export function Canvas() {
         : outcome === 'exit-timeout'
           ? {
               kind: 'error',
-              text: 'Restart failed: the CLI did not quit in time. The session was left running.'
+              // Deliberately does NOT claim the session is still running: what we know is that the
+              // pane never came back to a shell within the timeout, so the resume was not sent.
+              // Nothing is ever force-killed, so the pane is exactly as the CLI left it — which is
+              // what the user has to go and look at.
+              text:
+                'Restart failed: the pane did not return to a shell in time, so the CLI was not ' +
+                'relaunched. Nothing was killed — check the pane.'
             }
           : {
               kind: 'error',
               // 'not-eligible' is every "not a target right now": the gate re-checked and refused,
               // the tmux session is closed / ended / gone (which the menu row cannot see — only the
-              // node knows its session state), or a restart of this node was already in flight (the
+              // node knows its session state), the pane cannot be observed at all (persistent tmux
+              // sessions off, or no tmux on this machine — the restart needs to watch the pane to
+              // know when the CLI has quit), or a restart of this node was already in flight (the
               // per-node action and the bulk one can reach the same node).
               text:
-                'Restart skipped: this session is busy, already restarting, or no longer attached ' +
-                '(closed, ended, or nothing to resume). Nothing was written to the pane.'
+                'Restart skipped: this session is busy, already restarting, not attached ' +
+                '(closed, ended, or nothing to resume), or its pane cannot be watched without ' +
+                'persistent tmux sessions. Nothing was written to the pane.'
             }
     )
   }, [])
@@ -4078,9 +4083,11 @@ export function Canvas() {
               : !agentRestartFn(ids[0])
                 ? 'This terminal is not attached right now.'
                 : // Not every dead end is visible from here: the closure ALSO refuses a tmux
-                  // session that is closed / ended / gone, and only the node itself knows that. So
-                  // that case reaches the user through `restartAgentNode`'s skip notice, which
-                  // names it, rather than through a hint this row cannot compute.
+                  // session that is closed / ended / gone, and a pane it cannot observe at all
+                  // (tmux off / absent — it pre-flights one `pane_current_command` before writing
+                  // anything). Only the node knows the first, and the second costs an IPC that must
+                  // not run per menu RENDER. Both reach the user through `restartAgentNode`'s skip
+                  // notice, which names them, rather than through a hint this row cannot compute.
                   undefined
             return [
               {

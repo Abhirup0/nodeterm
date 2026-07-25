@@ -119,7 +119,7 @@ describe('performRestartResume', () => {
     pane = 'zsh'
     await vi.advanceTimersByTimeAsync(5000)
     expect(await p).toBe('restarted')
-    expect(written[0]).toBe('/exit\r')
+    expect(written.slice(0, 2)).toEqual(['\x15', '/exit\r'])
     expect(written.join('')).toContain('claude --resume sid-1')
   })
 
@@ -138,19 +138,146 @@ describe('performRestartResume', () => {
     expect(written.join('')).not.toContain('--resume')
   })
 
-  it('gives up when the pane query itself never settles', async () => {
+  it('gives up when the pane query wedges after the exit was sent', async () => {
     const { written, io } = fakeIo()
+    let first = true
     const p = performRestartResume({
       agentId: 'claude',
       sessionId: 'sid-1',
       io,
-      paneCommand: () => new Promise<string | null>(() => {}), // wedged tmux server: never settles
+      // The pre-flight answers, so the exit IS written; then the tmux server wedges and no poll
+      // ever settles. The deadline, not the query, has to end the restart.
+      paneCommand: () => {
+        if (!first) return new Promise<string | null>(() => {})
+        first = false
+        return Promise.resolve('claude')
+      },
       timeoutMs: 1000,
       pollMs: 100
     })
     await vi.advanceTimersByTimeAsync(2000)
     expect(await p).toBe('exit-timeout')
     expect(written.join('')).not.toContain('--resume')
+  })
+
+  it('writes NOTHING when the pane cannot be observed at all (tmux off / no tmux binary)', async () => {
+    const { written, io } = fakeIo()
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => null, // no tmux session to query — the poll could never end
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    // Quitting a CLI whose pane we cannot watch would leave it dead and never resumed, and then
+    // report a 6-second "the session was left running".
+    expect(await p).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('writes nothing when the pre-flight pane query itself wedges', async () => {
+    const { written, io } = fakeIo()
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: () => new Promise<string | null>(() => {}),
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(await p).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('clears the pending input line before asking the CLI to quit', async () => {
+    const { written, io } = fakeIo()
+    let pane = 'claude'
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => pane,
+      timeoutMs: 6000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(250)
+    pane = 'zsh'
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('restarted')
+    // Half-typed user text in the prompt would otherwise be SUBMITTED as `…the/exit`.
+    expect(written[0]).toBe('\x15')
+    expect(written[1]).toBe('/exit\r')
+  })
+
+  it('takes a pane command that CHANGED away from the CLI as proof it quit', async () => {
+    const { written, io } = fakeIo()
+    let pane = 'claude'
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => pane,
+      timeoutMs: 6000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(250)
+    pane = 'nu' // a shell outside the allowlist — the user's `defaultShell`
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('restarted')
+    expect(written.join('')).toContain('claude --resume sid-1')
+  })
+
+  it('does not take a one-poll flicker for a quit (never types into a live CLI)', async () => {
+    const { written, io } = fakeIo()
+    let pane = 'claude'
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => pane,
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(150)
+    pane = 'node' // a momentary foreground child of the CLI, not its exit
+    await vi.advanceTimersByTimeAsync(100)
+    pane = 'claude'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await p).toBe('exit-timeout')
+    expect(written.join('')).not.toContain('--resume')
+  })
+
+  it("launches with the caller's command when one is given (permission mode)", async () => {
+    const { written, io } = fakeIo()
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      command: 'claude --resume sid-1 --permission-mode plan',
+      paneCommand: async () => 'zsh',
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('restarted')
+    expect(written.join('')).toContain('claude --resume sid-1 --permission-mode plan')
+  })
+
+  it('ignores an override for a session id that could never be resumed', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performRestartResume({
+        agentId: 'claude',
+        sessionId: '-bad',
+        io,
+        command: 'claude --resume -bad --permission-mode plan',
+        paneCommand: async () => 'zsh'
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([])
   })
 
   it('refuses an agent without an exit sequence', async () => {
@@ -257,6 +384,35 @@ describe('performRestartResume', () => {
     expect(written.join('')).not.toContain('--resume')
   })
 
+  it('never reports a restart whose resume line the transport refused', async () => {
+    // A relay socket still CONNECTING throws InvalidStateError on the very first write. The
+    // delivery ends itself (command-delivery.ts) — but ending is not delivering, so the restart
+    // must come back as a REJECTION the caller counts as a failure, not as 'restarted'.
+    const written: string[] = []
+    const io = {
+      write(dta: string) {
+        written.push(dta)
+        if (dta.includes('--resume'))
+          throw new DOMException('Still in CONNECTING state.', 'InvalidStateError')
+      },
+      onData: () => () => {}
+    }
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'zsh',
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    const settled = p.then(
+      (o) => ({ ok: true, o }),
+      (e) => ({ ok: false, e })
+    )
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(await settled).toEqual({ ok: false, e: expect.any(DOMException) })
+  })
+
   it('hands out no cancel when nothing was delivered', async () => {
     const { io } = fakeIo()
     const handles: Array<() => void> = []
@@ -272,6 +428,48 @@ describe('performRestartResume', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(await p).toBe('exit-timeout')
     expect(handles).toEqual([])
+  })
+})
+
+describe('performRestartResume — the delivery await is bounded', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.doUnmock('./command-delivery')
+    vi.resetModules()
+  })
+
+  it('stops waiting on a delivery that never announces it settled', async () => {
+    // A transport whose write() throws used to kill deliverCommand's retry callback before it
+    // could submit — `onSettled` then never fired, this await never settled, the node stayed
+    // locked out by guardConcurrentRestart for the app's life and the bulk loop hung with no
+    // summary. The transport is fixed in command-delivery.ts; this is the belt to that braces —
+    // NOTHING may wait forever, whatever the delivery does.
+    vi.doMock('./command-delivery', () => ({
+      VERIFY_TIMEOUT_MS: 2000,
+      DELIVERY_ATTEMPTS: 3,
+      KILL_LINE: '\x15',
+      deliverCommand: () => () => {} // started, never settles
+    }))
+    const mod = await import('./agent-restart')
+    let outcome: string | undefined
+    void mod
+      .performRestartResume({
+        agentId: 'claude',
+        sessionId: 'sid-1',
+        io: { write: () => {}, onData: () => () => {} },
+        paneCommand: async () => 'zsh',
+        timeoutMs: 1000,
+        pollMs: 100
+      })
+      .then((o) => (outcome = o))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(outcome).toBeUndefined() // still holding the node, as designed
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(outcome).toBe('restarted')
   })
 })
 
