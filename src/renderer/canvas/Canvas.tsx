@@ -59,6 +59,7 @@ import {
   IconLock,
   IconMarkdown,
   IconReload,
+  IconPower,
   IconNote,
   IconPhone,
   IconProject,
@@ -4058,7 +4059,12 @@ export function Canvas() {
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
         ? ([
             { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) },
-            { label: 'Reload terminal', icon: <IconReload />, onClick: () => reloadTerminals(ids) }
+            {
+              label: 'Reattach terminal',
+              icon: <IconReload />,
+              hint: 'Rebuilds the view and re-attaches to the same session. Nothing running is interrupted.',
+              onClick: () => reloadTerminals(ids)
+            }
           ] as MenuItem[])
         : []),
       // Restart the agent CLI itself (single selection): quit it and relaunch with `--resume`, so a
@@ -4092,7 +4098,7 @@ export function Canvas() {
             return [
               {
                 label: 'Restart agent (resume)',
-                icon: <IconReload />,
+                icon: <IconPower />,
                 disabled: !!why,
                 hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
                 onClick: () => void restartAgentNode(ids[0])
@@ -4291,7 +4297,7 @@ export function Canvas() {
             ? [
                 {
                   label: 'Restart idle agent sessions (resume)',
-                  icon: <IconReload />,
+                  icon: <IconPower />,
                   hint: 'Quits each idle agent CLI and relaunches it with --resume.',
                   onClick: restartIdleAgents
                 } as MenuItem
@@ -6072,8 +6078,8 @@ export function Canvas() {
             {
               id: 'restart-idle-agents',
               label: 'Restart idle agent sessions (resume)',
-              hint: 'new model update',
-              icon: <IconReload />,
+              hint: 'pick up a new model',
+              icon: <IconPower />,
               run: restartIdleAgents
             } as Command
           ]

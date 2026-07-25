@@ -58,7 +58,7 @@ import {
   restartEligibility
 } from '../terminal/agent-restart'
 import { FindBar } from '../components/FindBar'
-import { IconSearch, IconChat, IconMic } from '../components/icons'
+import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
@@ -1833,6 +1833,25 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             </button>
           </Tooltip>
         )}
+        {/* Reattach: rebuild THIS node's view and re-attach to the same session (the context
+            menu's "Reattach terminal", one click away). In the header because the cases that
+            need it are exactly the ones where the node is unusable — a pane that never painted,
+            a scroll that stopped responding after a long sleep — and a right-click on a dead
+            view is the last thing a user wants to hunt for. Distinct from "Restart agent
+            (resume)", which quits the CLI itself; this touches nothing but the viewer. */}
+        <Tooltip label="Reattach — rebuild this view; the session keeps running">
+          <button
+            className="term-node__reattach nodrag"
+            onClick={(e) => {
+              e.stopPropagation()
+              updateNodeData(id, (n) => ({
+                respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+              }))
+            }}
+          >
+            <IconReload />
+          </button>
+        </Tooltip>
         <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
           <button
             className="term-node__search nodrag"

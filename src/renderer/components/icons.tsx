@@ -158,6 +158,15 @@ export const IconReload = () => (
   </svg>
 )
 
+/** Power symbol — restarting a PROCESS (the agent CLI), as opposed to IconReload's
+ *  circular arrow, which reloads a VIEW. The two restart actions must not share a glyph. */
+export const IconPower = () => (
+  <svg {...S}>
+    <path d="M12 3v9" />
+    <path d="M7.5 6.3a7.5 7.5 0 1 0 9 0" />
+  </svg>
+)
+
 export const IconBranch = () => (
   <svg {...S}>
     <circle cx="6" cy="6" r="2.5" />
