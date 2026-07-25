@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { getViewportForBounds } from '@xyflow/system'
-import { FIT_NODE_OPTIONS, isMeasured, nodeFitRect, viewportForRect } from './nodeFocus'
+import {
+  FIT_NODE_OPTIONS,
+  absolutePosition,
+  isMeasured,
+  nodeFitRect,
+  viewportForRect
+} from './nodeFocus'
 import type { FocusableNode } from './nodeFocus'
 
 const term = (over: Partial<FocusableNode> = {}): FocusableNode => ({
@@ -9,6 +15,33 @@ const term = (over: Partial<FocusableNode> = {}): FocusableNode => ({
   width: 600,
   height: 400,
   ...over
+})
+
+describe('absolutePosition', () => {
+  it('returns the position of a top-level node unchanged', () => {
+    expect(absolutePosition(term(), [term()])).toEqual({ x: 4000, y: 3000 })
+  })
+
+  it('adds the group origin for a child (what node PLACEMENT needs)', () => {
+    // The regression this guards: Duplicate / Branch / Transfer positioned the new node from the
+    // source's raw `position`, which for a grouped node is relative to its frame — so a copy made
+    // top-level landed the group's own x/y away from the node it came from.
+    const group: FocusableNode = { id: 'g', position: { x: 5000, y: 200 } }
+    const child = term({ id: 'c', position: { x: 50, y: 60 }, parentId: 'g' })
+    expect(absolutePosition(child, [group, child])).toEqual({ x: 5050, y: 260 })
+  })
+
+  it('answers even when the node has no size at all', () => {
+    const n: FocusableNode = { id: 'x', position: { x: 12, y: 34 } }
+    expect(absolutePosition(n, [n])).toEqual({ x: 12, y: 34 })
+    expect(nodeFitRect(n, [n])).toBeNull()
+  })
+
+  it('stops on a parent cycle instead of looping', () => {
+    const a: FocusableNode = { id: 'a', position: { x: 10, y: 10 }, parentId: 'b' }
+    const b: FocusableNode = { id: 'b', position: { x: 20, y: 20 }, parentId: 'a' }
+    expect(absolutePosition(a, [a, b])).toEqual({ x: 30, y: 30 })
+  })
 })
 
 describe('nodeFitRect', () => {

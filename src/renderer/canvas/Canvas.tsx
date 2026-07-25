@@ -106,6 +106,7 @@ import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import {
   FIT_NODE_OPTIONS,
+  absolutePosition,
   isMeasured,
   nodeFitRect,
   viewportForRect,
@@ -244,6 +245,10 @@ import {
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 const GRID = 24
+
+/** Diagonal offset for a copy made without a cursor position (⌘K, agent CLI) — the classic
+ *  "duplicate appears slightly off the original" nudge. */
+const DUPLICATE_NUDGE = 28
 
 /** How long a successful worktree notice stays on screen before fading itself out. */
 const NOTICE_MS = 6000
@@ -2059,6 +2064,47 @@ export function Canvas() {
     }
   }, [])
 
+  /** The group frame under an absolute canvas point, or undefined. Later entries win, so the
+   *  frame drawn on top of another is the one that takes the node. */
+  const groupAtPoint = useCallback((pt: { x: number; y: number }): string | undefined => {
+    let hit: string | undefined
+    const all = nodesRef.current as FocusableNode[]
+    for (const n of nodesRef.current) {
+      if (n.type !== 'group') continue
+      const r = nodeFitRect(n as FocusableNode, all)
+      if (!r) continue
+      if (pt.x >= r.x && pt.x <= r.x + r.width && pt.y >= r.y && pt.y <= r.y + r.height) hit = n.id
+    }
+    return hit
+  }, [])
+
+  /** Where a node spawned FROM another node (Duplicate / Branch / Transfer) goes when the action
+   *  carried no cursor position (⌘K, an agent CLI call): just right of its source.
+   *  Read in ABSOLUTE coordinates on purpose — a grouped node's `position` is relative to its
+   *  group frame, and using it raw threw the new node the group's own x/y away from the source. */
+  const besideNode = useCallback((source: CanvasNode): { x: number; y: number } => {
+    const p = absolutePosition(source as FocusableNode, nodesRef.current as FocusableNode[])
+    const width =
+      (source.measured?.width as number | undefined) ?? (source.width as number | undefined) ?? 600
+    return { x: p.x + width + 32, y: p.y }
+  }, [])
+
+  /** Put a spawned node at an ABSOLUTE canvas point — the point the user right-clicked, so the
+   *  node appears where the menu was opened. Landing inside a group frame parents it into that
+   *  frame (`parentInto` converts to group-relative), which is what keeps it from sitting on top
+   *  of the group as an unrelated top-level node. */
+  const placeSpawned = useCallback(
+    (node: CanvasNode, pos: { x: number; y: number }): CanvasNode => {
+      const placed = { ...node, position: pos, parentId: undefined, extent: undefined }
+      // A group frame is never nested into another (the model is one level deep — see
+      // groupSelectedNodes/ungroupNodes); it just lands where it was dropped.
+      if (placed.type === 'group') return placed
+      const groupId = groupAtPoint(pos)
+      return groupId ? parentInto(placed, groupId) : placed
+    },
+    [groupAtPoint, parentInto]
+  )
+
   const addTerminal = useCallback(
     (
       center?: { x: number; y: number },
@@ -3547,16 +3593,28 @@ export function Canvas() {
     [setNodes]
   )
 
+  /** `at` is the right-click position in flow coordinates: the copies land where the menu was
+   *  opened. A multi-node duplicate keeps its arrangement — the selection's top-left is what
+   *  lands on the cursor. Without a cursor (⌘K / an agent CLI call) the classic diagonal nudge
+   *  applies, in ABSOLUTE space so a grouped node's copy still appears beside it. */
   const duplicateNodes = useCallback(
-    (ids: string[]) => {
+    (ids: string[], at?: { x: number; y: number }) => {
       const set = new Set(ids)
       setNodes((ns) => {
-        const copies = ns.filter((n) => set.has(n.id)).map((n) => duplicateNode(n))
+        const sources = ns.filter((n) => set.has(n.id))
+        if (!sources.length) return ns
+        const all = ns as FocusableNode[]
+        const abs = sources.map((n) => absolutePosition(n as FocusableNode, all))
+        const dx = at ? at.x - Math.min(...abs.map((p) => p.x)) : DUPLICATE_NUDGE
+        const dy = at ? at.y - Math.min(...abs.map((p) => p.y)) : DUPLICATE_NUDGE
+        const copies = sources.map((n, i) =>
+          placeSpawned(duplicateNode(n), { x: abs[i].x + dx, y: abs[i].y + dy })
+        )
         return [...ns.map((n) => ({ ...n, selected: false })), ...copies]
       })
       markDirty()
     },
-    [setNodes, markDirty]
+    [setNodes, markDirty, placeSpawned]
   )
 
   // Reload a terminal in place: bump `respawnNonce`, which re-runs TerminalNode's lifecycle
@@ -3586,7 +3644,10 @@ export function Canvas() {
   // We already know the current session id from the hooks; only fall back to parsing the
   // terminal output if it's unknown.
   const branchClaude = useCallback(
-    async (nodeId: string, opts?: { interactive?: boolean }): Promise<{ ok: boolean; error?: string; newNodeId?: string }> => {
+    async (
+      nodeId: string,
+      opts?: { interactive?: boolean; at?: { x: number; y: number } }
+    ): Promise<{ ok: boolean; error?: string; newNodeId?: string }> => {
       const source = nodesRef.current.find((n) => n.id === nodeId) as CanvasNode | undefined
       if (!source) return { ok: false, error: `no node with id ${nodeId}` }
       const known = useAgentStatus.getState().byId[nodeId]?.sessionId
@@ -3616,23 +3677,22 @@ export function Canvas() {
         ),
         title: `${source.data.title} (original)`
       }
-      copy.position = {
-        x: source.position.x + ((source.width as number) ?? 600) + 32,
-        y: source.position.y
-      }
       copy.selected = true
-      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), copy])
+      // Where the user right-clicked when the action came from the node menu; beside the source
+      // otherwise (the agent-CLI `branch` verb and the header action have no cursor).
+      const placed = placeSpawned(copy, opts?.at ?? besideNode(source))
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), placed])
       markDirty()
-      return { ok: true, newNodeId: copy.id }
+      return { ok: true, newNodeId: placed.id }
     },
-    [api, setNodes, markDirty]
+    [api, setNodes, markDirty, placeSpawned, besideNode]
   )
 
   // Transfer this agent's full conversation to a different agent. We render the source
   // agent's native transcript to a handoff file (main) and open a target node that reads it
   // and continues. The source node stays. Mirrors branchClaude's placement.
   const transferConversation = useCallback(
-    async (sourceNodeId: string, targetAgentId: AgentId) => {
+    async (sourceNodeId: string, targetAgentId: AgentId, at?: { x: number; y: number }) => {
       const source = nodesRef.current.find((n) => n.id === sourceNodeId) as CanvasNode | undefined
       if (!source) return
       const sourceAgentId = source.data.agentId
@@ -3686,15 +3746,12 @@ export function Canvas() {
         source.data.accountId,
         activePermissionMode()
       )
-      node.position = {
-        x: source.position.x + ((source.width as number) ?? 600) + 32,
-        y: source.position.y
-      }
       node.selected = true
-      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
+      const placed = placeSpawned(node, at ?? besideNode(source))
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), placed])
       markDirty()
     },
-    [setNodes, markDirty]
+    [setNodes, markDirty, placeSpawned, besideNode]
   )
 
   const setNodesColor = useCallback(
@@ -3845,8 +3902,10 @@ export function Canvas() {
     return node.selected && selected.length > 0 ? selected : [node.id]
   }, [])
 
+  /** `at` is where the menu was opened, in flow coordinates: every entry that SPAWNS a node
+   *  (Duplicate / Branch / Transfer) puts it there, instead of somewhere the user never pointed. */
   const selectionItems = useCallback(
-    (ids: string[]): MenuItem[] => [
+    (ids: string[], at?: { x: number; y: number }): MenuItem[] => [
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
       ...((): MenuItem[] => {
         // "Group …" only when something is actually groupable (top-level, not itself a group —
@@ -3877,7 +3936,7 @@ export function Canvas() {
       })(),
       { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
       { type: 'separator' },
-      { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
+      { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids, at) },
       ...(ids.length === 1 && (() => {
         const a = agentIdOf(ids[0])
         return !!a && canBranch(a)
@@ -3886,7 +3945,7 @@ export function Canvas() {
             {
               label: 'Branch conversation',
               icon: <IconBranch />,
-              onClick: () => void branchClaude(ids[0])
+              onClick: () => void branchClaude(ids[0], { at })
             }
           ] as MenuItem[])
         : []),
@@ -3913,7 +3972,7 @@ export function Canvas() {
                 (tg): MenuItem => ({
                   label: tg.label,
                   icon: <AgentIcon agentId={tg.id} />,
-                  onClick: () => void transferConversation(ids[0], tg.id)
+                  onClick: () => void transferConversation(ids[0], tg.id, at)
                 })
               )
             ] as MenuItem[]
@@ -4140,7 +4199,7 @@ export function Canvas() {
       const items =
         node.type === 'group'
           ? groupItems(node.id, screenToFlowPosition({ x: e.clientX, y: e.clientY }))
-          : selectionItems(targetIds(node))
+          : selectionItems(targetIds(node), screenToFlowPosition({ x: e.clientX, y: e.clientY }))
       setMenu({ x: e.clientX, y: e.clientY, items })
     },
     [groupItems, selectionItems, targetIds, screenToFlowPosition]
@@ -4149,9 +4208,16 @@ export function Canvas() {
   const onSelectionContextMenu = useCallback(
     (e: React.MouseEvent, selected: Node[]) => {
       e.preventDefault()
-      setMenu({ x: e.clientX, y: e.clientY, items: selectionItems(selected.map((n) => n.id)) })
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: selectionItems(
+          selected.map((n) => n.id),
+          screenToFlowPosition({ x: e.clientX, y: e.clientY })
+        )
+      })
     },
-    [selectionItems]
+    [selectionItems, screenToFlowPosition]
   )
 
   // Title/color/text edits go through updateNodeData; watch them so they persist too.
