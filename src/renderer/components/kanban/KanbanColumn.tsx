@@ -28,10 +28,12 @@ interface KanbanColumnProps {
   /** Drop on the column body: a card lands at the END of this column; a column lands BEFORE it. */
   onDropOnColumn: () => void
   onDropBeforeCard: (nodeId: string) => void
+  /** Right-click on a card — bubbles the cursor position + node id up to the board menu. */
+  onCardContext: (nodeId: string, x: number, y: number) => void
 }
 
 export function KanbanColumn({
-  column, cards, statusById, metaOf, onRename, onRecolor, onDelete, onOpenCard,
+  column, cards, statusById, metaOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropBeforeCard
 }: KanbanColumnProps) {
@@ -134,6 +136,7 @@ export function KanbanColumn({
             status={statusById[s.id]}
             meta={metaOf(s.id)}
             onOpen={() => onOpenCard(s.id)}
+            onContext={(x, y) => onCardContext(s.id, x, y)}
             onDragStart={() => onCardDragStart(s.id)}
             onDragEnd={onDragEnd}
             onDropBefore={() => onDropBeforeCard(s.id)}

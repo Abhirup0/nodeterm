@@ -106,7 +106,7 @@ function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remainin
  * last-known data shown on stale/error. Compact pill = mini-bar + one "N% label" per limit,
  * e.g. "93% 5h · 39% wk · 13% Fable" — the bar tracks whichever limit is closest to biting.
  */
-export function UsageIndicator(): JSX.Element | null {
+export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): JSX.Element | null {
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -248,7 +248,7 @@ export function UsageIndicator(): JSX.Element | null {
   }
 
   return (
-    <div className="usage-indicator" ref={popRef}>
+    <div className={`usage-indicator${overBoard ? ' usage-indicator--board' : ''}`} ref={popRef}>
       {open && (
         <div className="usage-popover">
           <div className="usage-popover__head">

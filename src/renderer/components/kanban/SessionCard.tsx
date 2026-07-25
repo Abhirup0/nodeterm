@@ -14,9 +14,11 @@ interface SessionCardProps {
   onDragEnd: () => void
   /** A dragged card was dropped on this card — insert it before this one. */
   onDropBefore: () => void
+  /** Right-click on the card — opens the actions menu at the cursor. */
+  onContext: (x: number, y: number) => void
 }
 
-export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropBefore }: SessionCardProps) {
+export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropBefore, onContext }: SessionCardProps) {
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   const badge =
@@ -57,6 +59,10 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
         onDropBefore()
       }}
       onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onContext(e.clientX, e.clientY)
+      }}
       title="Open card"
     >
       <div className="kanban-card__row">
