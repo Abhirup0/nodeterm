@@ -82,6 +82,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Keep the Air awake for THIS step too. caffeinate wrapped only build+notarize; an
+          # ~800MB upload is long enough for idle sleep to disconnect the runner mid-transfer,
+          # which cancels the step (v0.2.25) — and a cancel, unlike an error, the retry loop
+          # below can't catch. `-w $$` ties the assertion to this shell's lifetime.
+          caffeinate -dims -w $$ &
           tag="${GITHUB_REF_NAME}"
           # The linux job may already have created the release for this tag; tolerate the race.
           # Created as PRERELEASE: a half-built release must never become "latest" (the site and
