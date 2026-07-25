@@ -5409,6 +5409,11 @@ export function Canvas() {
         // or with nothing focused, still flags unread.
         const watching = document.hasFocus() && cs.activeId === e.nodeId
         if (!watching) cs.markUnread(e.nodeId)
+        // Watched it finish? Then it is already read. Nothing marks it unread in this branch, so
+        // without an explicit ack there would never BE a read signal — and the notch capsule's
+        // green blob and the phone's Live Activity would keep glowing for a turn the user sat and
+        // watched end. The mirror no-ops when there is no unresolved done event.
+        else if (sound === 'done') void window.nodeTerminal.ackDone(e.nodeId)
         // Sound first: it is the one alert that also fires while you're in the app but looking at
         // another node — the case OS notifications deliberately skip.
         const snd = useSettings.getState().settings
