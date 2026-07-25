@@ -154,6 +154,7 @@ export function KanbanColumn({
                   onCreate(o.choice)
                 }}
               >
+                <span className="kanban-col__newicon">{o.icon}</span>
                 {o.label}
               </button>
             ))}

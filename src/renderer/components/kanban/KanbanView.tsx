@@ -12,6 +12,7 @@ import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
 import type { ModalSpawn } from './ModalTerminal'
 import { ContextMenu, type MenuItem } from '../ContextMenu'
+import { IconAgent, IconExternal, IconNote, IconSwitch, IconTerminal, IconTrash, IconWeb } from '../icons'
 
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
  *  itself stores only column assignments. */
@@ -42,6 +43,7 @@ export interface KanbanCreateOption {
   key: string
   label: string
   choice: KanbanCreateChoice
+  icon: JSX.Element
 }
 
 interface KanbanViewProps {
@@ -97,16 +99,18 @@ export function KanbanView({
     ...BUILTIN_AGENT_IDS.map((id) => ({
       key: id,
       label: AGENT_CONFIG[id].label,
-      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice
+      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice,
+      icon: <IconAgent />
     })),
     ...customAgents.map((a) => ({
       key: a.id,
       label: a.label,
-      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice
+      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice,
+      icon: <IconAgent />
     })),
-    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' } },
-    { key: 'browser', label: 'Browser', choice: { kind: 'browser' } },
-    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' } }
+    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' }, icon: <IconTerminal /> },
+    { key: 'browser', label: 'Browser', choice: { kind: 'browser' }, icon: <IconWeb /> },
+    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' }, icon: <IconNote /> }
   ]
   const byId = new Map(sessions.map((s) => [s.id, s]))
 
@@ -155,13 +159,13 @@ export function KanbanView({
         }))
     ]
     return [
-      { label: 'Open card', onClick: () => setModalNodeId(nodeId) },
-      { label: 'Open on canvas', onClick: () => onOpenNode(nodeId) },
+      { label: 'Open card', icon: <IconExternal />, onClick: () => setModalNodeId(nodeId) },
+      { label: 'Open on canvas', icon: <IconExternal />, onClick: () => onOpenNode(nodeId) },
       ...(moveTargets.length
-        ? ([{ type: 'submenu', label: 'Move to', children: moveTargets }] as MenuItem[])
+        ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
       { type: 'separator' },
-      { label: 'Delete', danger: true, onClick: () => onDeleteNode(nodeId) }
+      { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => onDeleteNode(nodeId) }
     ]
   }
 

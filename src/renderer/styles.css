@@ -2874,7 +2874,8 @@ body,
 .tab-menu,
 .controls-cluster,
 .dock,
-.dictation {
+.dictation,
+.kanban-overlay {
   -webkit-app-region: no-drag;
 }
 
@@ -6479,7 +6480,9 @@ body,
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 16px;
+  /* Extra bottom room so the columns' cards clear the floating usage pill (bottom-left, z 26)
+     — the board's foot mirror of the top title strip. */
+  padding: 16px 16px 56px;
   height: 100%;
   box-sizing: border-box;
 }
@@ -6785,6 +6788,9 @@ body,
   flex-direction: column;
 }
 .kanban-col__newmenu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: none;
   border: none;
   border-radius: 5px;
@@ -6793,6 +6799,20 @@ body,
   text-align: left;
   padding: 6px 8px;
   cursor: pointer;
+}
+.kanban-col__newicon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  flex: 0 0 auto;
+}
+.kanban-col__newicon svg {
+  width: 14px;
+  height: 14px;
+}
+.kanban-col__newmenu button:hover .kanban-col__newicon {
+  color: #fff;
 }
 .kanban-col__newmenu button:hover {
   background: var(--accent);
