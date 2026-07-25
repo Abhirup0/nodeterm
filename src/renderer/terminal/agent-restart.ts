@@ -26,6 +26,13 @@ export function isShellCommand(cmd: string | null | undefined): boolean {
 
 export type IneligibleReason = 'working' | 'no-session' | 'not-resumable'
 
+/** States in which the pane must be left alone. `blocked` is here for a sharper reason than
+ *  politeness: it means a permission / question dialog owns the prompt (see normalize.ts —
+ *  Claude's PermissionRequest, codex's permission.asked / question.asked), so writing `/exit`
+ *  would be typed AS THE ANSWER to that dialog instead of quitting the CLI. Both states report
+ *  the reason `'working'`: to the user they are the same "busy, try again in a moment". */
+const BUSY_STATES = new Set(['working', 'blocked'])
+
 /** Single gate shared by the node menu, the bulk filter and the choreography itself.
  *  `not-resumable` wins over the other two: a CLI we cannot quit or resume can never be
  *  restarted, so there is nothing for the user to fix by waiting or picking another node. */
@@ -36,8 +43,9 @@ export function restartEligibility(
 ): { ok: true } | { ok: false; reason: IneligibleReason } {
   if (!agentId || !canResume(agentId) || !exitSequence(agentId))
     return { ok: false, reason: 'not-resumable' }
-  // Quitting mid-turn would abandon work the agent is in the middle of.
-  if (state === 'working') return { ok: false, reason: 'working' }
+  // Quitting mid-turn would abandon work the agent is in the middle of; quitting a blocked
+  // session would answer its dialog with the exit command (see BUSY_STATES).
+  if (BUSY_STATES.has(state ?? '')) return { ok: false, reason: 'working' }
   // Without a provider session id there is nothing to resume into.
   if (!sessionId) return { ok: false, reason: 'no-session' }
   return { ok: true }

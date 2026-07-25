@@ -26,6 +26,9 @@ describe('restartEligibility', () => {
     expect(restartEligibility('claude', 'waiting', 'abc-123')).toEqual({ ok: true })
     expect(restartEligibility('codex', 'done', 'abc-123')).toEqual({ ok: true })
   })
+  it('treats a blocked (permission prompt) session as busy — /exit would answer the prompt', () => {
+    expect(restartEligibility('claude', 'blocked', 'abc')).toEqual({ ok: false, reason: 'working' })
+  })
   it('flags working / missing session / non-resumable, in that priority', () => {
     expect(restartEligibility('claude', 'working', 'abc')).toEqual({ ok: false, reason: 'working' })
     expect(restartEligibility('claude', 'waiting', undefined)).toEqual({
