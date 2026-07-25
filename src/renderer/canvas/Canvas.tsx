@@ -4324,6 +4324,22 @@ export function Canvas() {
     [activeProjectId, viewCenter, setNodes, markDirty, seedBoard, api]
   )
 
+  // Delete a session from the board — same confirm + teardown as the canvas Delete key.
+  const deleteNodeFromKanban = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      const label = (node?.data.title as string) || 'this session'
+      setConfirm({
+        message: `Delete ${label}? Its terminal session will end.`,
+        onConfirm: () => {
+          deleteNodes([nodeId])
+          setConfirm(null)
+        }
+      })
+    },
+    [deleteNodes]
+  )
+
   const openNodeFromKanban = useCallback(
     (nodeId: string) => {
       const id = useProjects.getState().activeProjectId
@@ -6066,6 +6082,7 @@ export function Canvas() {
           onCreateNode={createNodeInColumn}
           onRenameNode={(nodeId, title) => renameSession(activeProjectId, nodeId, title)}
           onEditSticky={editStickyText}
+          onDeleteNode={deleteNodeFromKanban}
         />
       )}
       <UpdateCard />
@@ -6247,7 +6264,7 @@ export function Canvas() {
             z-index (5 collapsed, 13 with the popover open) competes in the same context as the
             sidebar and the open popover wins. It uses no React Flow hooks, and .flow-wrap is
             position:relative, so its absolute left/bottom anchors are unchanged. */}
-        <UsageIndicator />
+        <UsageIndicator overBoard={kanbanOpen} />
 
         <PresenceNamePrompt />
 

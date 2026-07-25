@@ -4839,6 +4839,14 @@ body,
 .usage-indicator:has(.usage-popover) {
   z-index: 13;
 }
+/* Kanban board is an opaque overlay at z 25; while it's open the usage pill must sit ABOVE it
+   (same layer as the controls cluster) so it stays visible in the board's bottom-left corner. */
+.usage-indicator--board {
+  z-index: 26;
+}
+.usage-indicator--board:has(.usage-popover) {
+  z-index: 60; /* over the board + banners, below ConfirmDialog/palette (70) */
+}
 .usage-pill {
   display: inline-flex;
   align-items: center;

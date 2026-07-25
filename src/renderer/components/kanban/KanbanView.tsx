@@ -11,6 +11,7 @@ import {
 import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
 import type { ModalSpawn } from './ModalTerminal'
+import { ContextMenu, type MenuItem } from '../ContextMenu'
 
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
  *  itself stores only column assignments. */
@@ -52,6 +53,8 @@ interface KanbanViewProps {
   onRenameNode: (nodeId: string, title: string) => void
   /** Write-through a sticky node's body text (only fired for kind 'sticky'). */
   onEditSticky: (nodeId: string, text: string) => void
+  /** Permanently delete a node (ends its session) — routed through the canvas confirm. */
+  onDeleteNode: (nodeId: string) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -60,11 +63,13 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
  *  agent-status listeners must keep running, and display:none would 0×0-resize every
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
 export function KanbanView({
-  board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky
+  board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode
 }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
   const [modalNodeId, setModalNodeId] = useState<string | null>(null)
+  // Right-click card menu (open on canvas / move / delete).
+  const [cardMenu, setCardMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
   const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
@@ -118,6 +123,31 @@ export function KanbanView({
   const sessionsFor = (ids: string[]) =>
     ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []))
 
+  // Right-click menu for a card: open on canvas, move to another column, delete.
+  const cardMenuItems = (nodeId: string): MenuItem[] => {
+    const curColId = columnForNode(board, nodeId)?.id ?? null
+    const moveTargets: MenuItem[] = [
+      ...(curColId !== null
+        ? [{ label: 'Ungrouped', onClick: () => commit(assignNode(board, nodeId, null, null)) }]
+        : []),
+      ...board.columns
+        .filter((c) => c.id !== curColId)
+        .map((c) => ({
+          label: c.title,
+          onClick: () => commit(assignNode(board, nodeId, c.id, null))
+        }))
+    ]
+    return [
+      { label: 'Open card', onClick: () => setModalNodeId(nodeId) },
+      { label: 'Open on canvas', onClick: () => onOpenNode(nodeId) },
+      ...(moveTargets.length
+        ? ([{ type: 'submenu', label: 'Move to', children: moveTargets }] as MenuItem[])
+        : []),
+      { type: 'separator' },
+      { label: 'Delete', danger: true, onClick: () => onDeleteNode(nodeId) }
+    ]
+  }
+
   return (
     <div className="kanban-overlay">
       {/* Title strip: names the board's project AND pushes the columns below the top-right
@@ -139,6 +169,7 @@ export function KanbanView({
           onDragEnd={() => (dragRef.current = null)}
           onDropOnColumn={() => dropOnColumn(null)}
           onDropBeforeCard={(id) => dropBeforeCard(null, id)}
+          onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
         />
         {board.columns.map((col) => (
           <KanbanColumn
@@ -158,6 +189,7 @@ export function KanbanView({
             onDragEnd={() => (dragRef.current = null)}
             onDropOnColumn={() => dropOnColumn(col.id)}
             onDropBeforeCard={(id) => dropBeforeCard(col.id, id)}
+            onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
           />
         ))}
         <button
@@ -167,6 +199,15 @@ export function KanbanView({
           + Add column
         </button>
       </div>
+      {cardMenu && byId.has(cardMenu.nodeId) && (
+        <ContextMenu
+          x={cardMenu.x}
+          y={cardMenu.y}
+          zIndex={60}
+          items={cardMenuItems(cardMenu.nodeId)}
+          onClose={() => setCardMenu(null)}
+        />
+      )}
       {modalNodeId && byId.has(modalNodeId) && (
         <CardModal
           session={byId.get(modalNodeId)!}
