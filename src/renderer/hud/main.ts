@@ -65,6 +65,8 @@ root.append(capsule)
 
 let expanded = false
 let latestRows: HudRow[] = []
+// Notch width from main's geometry push — drives the symmetric right-hand padding.
+let notchWidthPx = 168
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
 
@@ -99,6 +101,7 @@ function setExpanded(next: boolean): void {
   if (expanded === next) return
   expanded = next
   capsule.classList.toggle('expanded', expanded)
+  syncCapsuleSymmetry() // expanded: drop the padding so the panel gets the full width
   window.hud.setExpanded(expanded)
 }
 
@@ -316,10 +319,24 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 
 // ---- Render + geometry ---------------------------------------------------------------------
 
+// The capsule is CENTRED on the notch and its content (the mascots) occupies only the strip LEFT of
+// it, so we pad the right by `notch + content` — that makes the black stick out by exactly the same
+// amount on both sides (owner: "soldan ne kadar genişlettiysen sağdan da o kadar"). The content width
+// is measured, not guessed, so it stays symmetric as slots come and go.
+function syncCapsuleSymmetry(): void {
+  if (expanded) {
+    capsule.style.paddingRight = ''
+    return
+  }
+  const ext = indicator.offsetWidth
+  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx + ext}px` : ''
+}
+
 function render(rows: HudRow[]): void {
   latestRows = rows
   renderIndicator(rows)
   renderPanel(rows)
+  syncCapsuleSymmetry()
   // Idle → hide the whole capsule (no empty black pill); active → the fused capsule shows.
   capsule.classList.toggle('hud-capsule--hidden', rows.length === 0)
   // Auto-collapse if there is nothing to show.
@@ -329,7 +346,10 @@ function render(rows: HudRow[]): void {
 function applyGeometry(push: HudPush): void {
   const rs = document.documentElement.style
   rs.setProperty('--bar', `${push.bar}px`)
-  if (typeof push.notchWidth === 'number') rs.setProperty('--notch-width', `${push.notchWidth}px`)
+  if (typeof push.notchWidth === 'number') {
+    notchWidthPx = push.notchWidth
+    rs.setProperty('--notch-width', `${push.notchWidth}px`)
+  }
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
   // No physical notch → draw a standalone floating pill instead of fusing to y=0.
   document.documentElement.classList.toggle('notchless', push.hasNotch === false)

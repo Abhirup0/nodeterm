@@ -60,21 +60,19 @@ body {
 .hud-capsule {
   position: absolute;
   top: 0;
-  /* Anchored at the notch's LEFT edge and grown leftward (translateX(-100%)): the capsule widens
-     the notch SIDEWAYS instead of adding height below it (owner: "notch'a ekstra height vermek
-     istemiyorum"). Collapsed height is exactly the bar, so the strip never gets taller than the
-     real notch. */
-  left: calc(var(--notch-center-x, 50%) - var(--notch-width, 200px) / 2);
-  transform: translateX(-100%);
+  /* CENTRED on the notch and widened SIDEWAYS, never taller (owner: "notch'a ekstra height
+     vermek istemiyorum"). The mascots occupy only the strip LEFT of the notch; main.ts pads the
+     right by `notch + content` so the black sticks out by the SAME amount on both sides. */
+  left: var(--notch-center-x, 50%);
+  transform: translateX(-50%);
   /* Shrink-to-fit so however many mascots are running, none clip. */
   width: auto;
   height: auto;
   max-height: var(--bar);
   overflow: hidden;
   background: var(--capsule-bg);
-  /* Right side square (it butts against the notch and shares its black); only the bottom-LEFT
-     corner rounds, so the pair reads as one wider notch. */
-  border-radius: 0 0 0 var(--capsule-radius);
+  /* Both bottom corners round — the notch simply reads as a wider notch. */
+  border-radius: 0 0 var(--capsule-radius) var(--capsule-radius);
   box-shadow: 0 12px 44px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
@@ -177,8 +175,8 @@ body {
 
 /* A generic (gemini/custom) working slot: a pulsing coral dot. */
 .mascot--dot {
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: rgb(217, 120, 87);
   animation: hud-pulse 1.1s ease-in-out infinite;
@@ -198,8 +196,9 @@ body {
 /* Green "done, unseen" blob — a 7×7 crisp green pixel circle (agent-notch look), built as a sprite
    in lib/mascot.ts and shown as a pixelated background; CSS drives the shimmer. */
 .done-blob {
-  width: 12px;
-  height: 12px;
+  /* Scaled with the mascots (they shrank ~0.72×) so the slot reads evenly. */
+  width: 9px;
+  height: 9px;
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;
