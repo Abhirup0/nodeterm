@@ -258,6 +258,8 @@ interface ConfirmState {
   confirmLabel?: string
   cancelLabel?: string
   danger?: boolean
+  /** Report-only (an error, a "not ready yet"): one dismiss button, no destructive default. */
+  alert?: boolean
   /** Set when an AGENT asked for this dialog: it is answered by an explicit click, never by an
    *  Enter the user aimed at their terminal (see components/confirm-key). */
   requestedBy?: string
@@ -3597,7 +3599,7 @@ export function Canvas() {
           const error = res.error ?? 'Branch failed.'
           // The error dialog is for humans; agent-CLI calls get the error in the reply instead.
           if (opts?.interactive !== false) {
-            setConfirm({ message: error, onConfirm: () => setConfirm(null) })
+            setConfirm({ message: error, alert: true, onConfirm: () => setConfirm(null) })
           }
           return { ok: false, error }
         }
@@ -3638,6 +3640,7 @@ export function Canvas() {
       if (!sourceAgentId || !sessionId) {
         setConfirm({
           message: 'Conversation not ready to transfer yet.',
+          alert: true,
           onConfirm: () => setConfirm(null)
         })
         return
@@ -3650,7 +3653,7 @@ export function Canvas() {
         source.data.accountId
       )
       if ('error' in res) {
-        setConfirm({ message: res.error, onConfirm: () => setConfirm(null) })
+        setConfirm({ message: res.error, alert: true, onConfirm: () => setConfirm(null) })
         return
       }
       // The file is context-budgeted by buildHandoff (long sessions: digest + verbatim tail,
@@ -3665,13 +3668,19 @@ export function Canvas() {
         `Read the file, then continue seamlessly from exactly where the conversation left ` +
         `off — as if you had been the assistant all along. If a task is in progress, resume ` +
         `it immediately; do not greet, re-introduce yourself, or summarize the file back.`
+      // An SSH project's transfer target must run on the SAME host as the source: the handoff
+      // file was written there (buildHandoff's remote branch), and `cwd` is a remote path. A
+      // local node here would open in a directory that doesn't exist on this machine and could
+      // never read the file it was told to read.
+      const { projects, activeProjectId } = useProjects.getState()
+      const projectSsh = projects.find((p) => p.id === activeProjectId)?.ssh
       const node = createAgentNode(
         targetAgentId,
         nodesRef.current.length,
         source.data.cwd,
         undefined,
         prompt,
-        undefined,
+        source.data.sshRemoteTmux ? projectSsh : undefined,
         // Inherit the source's Claude account (dropped by the factory unless the target is claude),
         // so a claude→claude transfer resumes the transcript from the right account dir.
         source.data.accountId,
@@ -6498,6 +6507,7 @@ export function Canvas() {
           confirmLabel={confirm.confirmLabel}
           cancelLabel={confirm.cancelLabel}
           danger={confirm.danger}
+          alert={confirm.alert}
           // The user did not open this one — an agent did. It appeared under their hands, so it is
           // answered by a click, never by a keystroke aimed somewhere else (components/confirm-key).
           enterConfirms={!confirm.requestedBy}
