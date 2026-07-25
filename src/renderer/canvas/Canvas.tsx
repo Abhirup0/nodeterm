@@ -4238,8 +4238,18 @@ export function Canvas() {
   const kanbanSessions = useMemo(
     () =>
       nodes
-        .filter((n) => n.type === 'terminal' || n.type === 'sticky')
+        .filter((n) => n.type === 'terminal' || n.type === 'sticky' || n.type === 'browser')
         .map((n) => {
+          if (n.type === 'browser') {
+            return {
+              id: n.id,
+              title: (n.data.title as string) || 'Browser',
+              color: (n.data.color as string) ?? NODE_COLORS[0],
+              kind: 'browser' as const,
+              url: n.data.url as string | undefined,
+              spawn: {}
+            }
+          }
           if (n.type === 'sticky') {
             const text = ((n.data.text as string) ?? '').trim()
             return {
@@ -4289,7 +4299,9 @@ export function Canvas() {
           ? createTerminalNode(index, project?.cwd, at, undefined, project?.ssh)
           : choice.kind === 'sticky'
             ? createStickyNode(index, at)
-            : createAgentNode(
+            : choice.kind === 'browser'
+              ? createBrowserNode(index, '', at)
+              : createAgentNode(
                 choice.agentId,
                 index,
                 project?.cwd,
@@ -4319,7 +4331,9 @@ export function Canvas() {
           ? 'Terminal'
           : choice.kind === 'sticky'
             ? 'Sticky note'
-            : agentConfig(choice.agentId)?.label ??
+            : choice.kind === 'browser'
+              ? 'Browser'
+              : agentConfig(choice.agentId)?.label ??
               useSettings.getState().settings.customAgents.find((a) => a.id === choice.agentId)
                 ?.label ??
               choice.agentId
@@ -4347,6 +4361,15 @@ export function Canvas() {
       })
     },
     [deleteNodes]
+  )
+
+  // Persist a browser card's navigation (url/title) from the modal webview back to the node.
+  const browserNavFromKanban = useCallback(
+    (nodeId: string, patch: { url?: string; title?: string }) => {
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...patch } } : n)))
+      markDirty()
+    },
+    [setNodes, markDirty]
   )
 
   const openNodeFromKanban = useCallback(
@@ -6120,6 +6143,7 @@ export function Canvas() {
           onEditSticky={editStickyText}
           onDeleteNode={deleteNodeFromKanban}
           onModalNodeChange={(id) => (kanbanModalNodeRef.current = id)}
+          onBrowserNav={browserNavFromKanban}
         />
       )}
       <UpdateCard />

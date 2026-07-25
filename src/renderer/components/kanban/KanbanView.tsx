@@ -19,10 +19,12 @@ export interface KanbanSession {
   id: string
   title: string
   color: string
-  kind: 'terminal' | 'sticky'
+  kind: 'terminal' | 'sticky' | 'browser'
   agentId?: string
   /** Sticky note body — shown in the expanded detail row. */
   text?: string
+  /** Browser node URL (kind 'browser' only) — shown on the card, opened in the modal webview. */
+  url?: string
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
    *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn
@@ -32,6 +34,7 @@ export interface KanbanSession {
 export type KanbanCreateChoice =
   | { kind: 'terminal' }
   | { kind: 'sticky' }
+  | { kind: 'browser' }
   | { kind: 'agent'; agentId: AgentId }
 
 /** One "+ New" menu entry (label + the choice it fires). */
@@ -58,6 +61,8 @@ interface KanbanViewProps {
   /** Reports which node's card modal is open (null = none) so the canvas can target it — e.g.
    *  the dictation shortcut dictates into the open card's session, not a canvas selection. */
   onModalNodeChange: (nodeId: string | null) => void
+  /** Persist a browser card's navigation (url/title) from the modal webview to the node. */
+  onBrowserNav: (nodeId: string, patch: { url?: string; title?: string }) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -67,7 +72,7 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
 export function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange
+  onModalNodeChange, onBrowserNav
 }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
@@ -100,6 +105,7 @@ export function KanbanView({
       choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice
     })),
     { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' } },
+    { key: 'browser', label: 'Browser', choice: { kind: 'browser' } },
     { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' } }
   ]
   const byId = new Map(sessions.map((s) => [s.id, s]))
@@ -232,6 +238,7 @@ export function KanbanView({
           }}
           onRename={(t) => onRenameNode(modalNodeId, t)}
           onEditSticky={(t) => onEditSticky(modalNodeId, t)}
+          onBrowserNav={(patch) => onBrowserNav(modalNodeId, patch)}
         />
       )}
     </div>

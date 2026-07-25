@@ -69,6 +69,7 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
         <span className="kanban-card__title">{session.title}</span>
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
+        {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}
         {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}

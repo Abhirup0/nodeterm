@@ -8335,3 +8335,19 @@ body,
   border-radius: 8px;
   padding: 6px 12px;
 }
+
+/* Shared browser surface (canvas node + kanban card modal): toolbar on top, webview fills. */
+.browser-surface {
+  flex: 1;
+  min-height: 0;
+  height: 100%; /* the canvas node's .editor-node__body is display:block, so flex:1 alone is inert */
+  display: flex;
+  flex-direction: column;
+}
+/* In the card modal the browser pane fills the main area (no node header/toolbar chrome). */
+.kanban-modal__pane[data-kind='browser'] {
+  flex-direction: column;
+}
+.kanban-modal__pane[data-kind='browser'] .browser-surface {
+  width: 100%;
+}
