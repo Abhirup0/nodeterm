@@ -50,7 +50,13 @@ import {
   type SessionLife
 } from '../terminal/terminal-config'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
-import { deliverCommand } from '../terminal/command-delivery'
+import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
+import {
+  guardConcurrentRestart,
+  performRestartResume,
+  registerAgentRestart,
+  restartEligibility
+} from '../terminal/agent-restart'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
@@ -1171,6 +1177,54 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       })
     })()
 
+    // In-place agent restart (Canvas node menu / bulk palette): ask the CLI to quit, wait until a
+    // shell owns the pane again, then relaunch it with the provider's own `--resume` — so a newly
+    // released model shows up in the CLI's model list without losing the conversation.
+    //
+    // Registered HERE, in the effect body, not in the spawn continuation above: an ADOPTED terminal
+    // (park → remount) returns from that continuation immediately and never reaches it, yet its
+    // agent is just as restartable. The effect body runs on every mount, fresh or adopted.
+    //
+    // Everything the closure needs is read at CALL time. The provider session id and the agent
+    // state arrive asynchronously over the agent-status hooks — usually well after mount — and
+    // `sessionId` (this effect's PTY session) is still null while `create()` is in flight.
+    const restartIo: DeliveryIo = {
+      // The SAME write path the cold-restore delivery above uses, gated on the session's own
+      // lifetime: a delivery still running when this session is torn down must neither write into
+      // nor subscribe to a dead transport. A PARK deliberately does not trip `life.dead` — the PTY
+      // is alive and adoptable, so a restart that began before the unmount still lands in its pane.
+      write: (d) => {
+        if (sessionId && !life.dead) transport.write(sessionId, d)
+      },
+      onData: (cb) => (sessionId && !life.dead ? transport.onData(sessionId, cb) : () => {})
+    }
+    const unregisterRestart = registerAgentRestart(
+      id,
+      guardConcurrentRestart(id, async () => {
+        const st = useAgentStatus.getState().byId[id]
+        const agentSessionId = st?.sessionId
+        const gate = restartEligibility(agentId, st?.state, agentSessionId)
+        // No live PTY session (spawn still in flight, or the node is closed/ended) means there is
+        // no pane to restart in — the same "nothing to do here" the gate reports.
+        if (!gate.ok || !agentId || !agentSessionId || !sessionId || life.dead) return 'not-eligible'
+        return performRestartResume({
+          agentId,
+          sessionId: agentSessionId,
+          io: restartIo,
+          // Session-scoped (`api`, not the global preload), like readScrollback above: a relay
+          // tab's pane lives on the host, and only its own api can see it.
+          paneCommand: () => api.pty.paneCommand(id),
+          // The delivery outlives this promise (echo-verify timers), so hand its lifetime to the
+          // session: a real teardown runs `cleanups`, and a session that died while we waited for
+          // the shell cancels it outright rather than parking a timer on a corpse.
+          onDelivery: (cancel) => {
+            if (life.dead) cancel()
+            else cleanups.push(cancel)
+          }
+        })
+      })
+    )
+
     // Coalesce observer bursts: dragging the NodeResizer fires per animation frame, and every
     // call is a full cell-geometry measure + a resize IPC → node-pty → tmux (which redraws the
     // whole pane). One trailing fit per settle is enough — the canvas node frame itself still
@@ -1207,6 +1261,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
     return () => {
       disposed = true
+      // Nothing may restart a node that is no longer mounted — park, respawn and real teardown all
+      // pass through here. A remount re-registers (superseding, so a stale unregister is inert).
+      unregisterRestart()
       observer.disconnect()
       visibilityObserver.disconnect()
       if (resizeTimer) clearTimeout(resizeTimer)

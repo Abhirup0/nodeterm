@@ -70,6 +70,13 @@ export async function performRestartResume(d: {
   paneCommand: () => Promise<string | null>
   timeoutMs?: number
   pollMs?: number
+  /**
+   * Handed `deliverCommand`'s cancel the moment a delivery starts — and only then. The delivery
+   * outlives this promise (it runs on its own echo-verify timers), so its lifetime belongs to
+   * whoever owns the transport: a node torn down mid-restart cancels it here instead of letting
+   * a retry rewrite, or the fail-open submit, land in a dead session.
+   */
+  onDelivery?: (cancel: () => void) => void
 }): Promise<RestartOutcome> {
   const exit = exitSequence(d.agentId)
   const cmd = resumeCommand(d.agentId, d.sessionId)
@@ -102,8 +109,41 @@ export async function performRestartResume(d: {
     if (isShellCommand(pane)) break
     if (Date.now() > deadline) return 'exit-timeout'
   }
-  deliverCommand(d.io, cmd)
+  // Two statements on purpose: `d.onDelivery?.(deliverCommand(…))` short-circuits the ARGUMENT
+  // too when no callback was passed, which would deliver nothing at all.
+  const cancelDelivery = deliverCommand(d.io, cmd)
+  d.onDelivery?.(cancelDelivery)
   return 'restarted'
+}
+
+// ── One restart at a time, per node ──────────────────────────────────────────────────────
+const inFlight = new Set<string>()
+
+/**
+ * Serialize a node's restarts. The per-node menu action and the bulk palette action can both
+ * reach the same node, and two runs against one pane would write two `/exit` lines (the second
+ * typed INTO the CLI the first is resuming) and two resume commands.
+ *
+ * The refused call reports `'not-eligible'` deliberately: the run already in flight owns this
+ * node's outcome and will report it, and `'not-eligible'` is the one outcome `summarizeOutcomes`
+ * does not count — so a doubled request is neither counted twice as restarted nor reported as a
+ * failure the user could act on. (The alternative, a fifth outcome, would break that frozen line.)
+ */
+export function guardConcurrentRestart(
+  nodeId: string,
+  fn: () => Promise<RestartOutcome>
+): () => Promise<RestartOutcome> {
+  return async () => {
+    if (inFlight.has(nodeId)) return 'not-eligible'
+    inFlight.add(nodeId)
+    try {
+      return await fn()
+    } finally {
+      // Released on rejection too: a transport that threw once must not leave the node
+      // permanently un-restartable for the rest of the app's run.
+      inFlight.delete(nodeId)
+    }
+  }
 }
 
 // ── Node registry (same park-surviving pattern as TerminalNode's restartSubs) ────────────

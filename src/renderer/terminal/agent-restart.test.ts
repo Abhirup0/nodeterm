@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   agentRestartFn,
   exitSequence,
+  guardConcurrentRestart,
   isShellCommand,
   performRestartResume,
   registerAgentRestart,
@@ -152,6 +153,89 @@ describe('performRestartResume', () => {
       })
     ).toBe('not-eligible')
     expect(written).toEqual([]) // quitting a CLI we cannot resume would just lose the session
+  })
+
+  it('hands the delivery cancel to the caller, which stops it writing (node teardown)', async () => {
+    // An io that never echoes back: the delivery stays alive on its verify timer, exactly the
+    // window in which a node can unmount under it.
+    const written: string[] = []
+    const io = { write: (d: string) => written.push(d), onData: () => () => {} }
+    let cancel: (() => void) | undefined
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'zsh',
+      timeoutMs: 1000,
+      pollMs: 100,
+      onDelivery: (c) => {
+        cancel = c
+      }
+    })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(await p).toBe('restarted')
+    expect(typeof cancel).toBe('function')
+    const delivered = written.length
+    cancel?.()
+    await vi.advanceTimersByTimeAsync(30_000)
+    // No rewrite retries, no fail-open submit: nothing more reaches the torn-down transport.
+    expect(written.length).toBe(delivered)
+  })
+
+  it('hands out no cancel when nothing was delivered', async () => {
+    const { io } = fakeIo()
+    const handles: Array<() => void> = []
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'claude',
+      timeoutMs: 1000,
+      pollMs: 100,
+      onDelivery: (c) => handles.push(c)
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await p).toBe('exit-timeout')
+    expect(handles).toEqual([])
+  })
+})
+
+describe('guardConcurrentRestart', () => {
+  it('refuses a second call while one is in flight, without running it twice', async () => {
+    let runs = 0
+    let release: (o: RestartOutcome) => void = () => {}
+    const guarded = guardConcurrentRestart('n1', () => {
+      runs += 1
+      return new Promise<RestartOutcome>((r) => (release = r))
+    })
+    const first = guarded()
+    expect(await guarded()).toBe('not-eligible') // menu + bulk hitting one node
+    expect(runs).toBe(1)
+    release('restarted')
+    expect(await first).toBe('restarted')
+    const second = guarded() // guard released once the run settled
+    expect(runs).toBe(2)
+    release('exit-timeout')
+    expect(await second).toBe('exit-timeout')
+  })
+
+  it('guards per node, not globally', async () => {
+    const pending = (): Promise<RestartOutcome> => new Promise(() => {})
+    const a = guardConcurrentRestart('n1', pending)
+    const b = guardConcurrentRestart('n2', async () => 'restarted')
+    void a()
+    expect(await b()).toBe('restarted')
+  })
+
+  it('releases the guard when the run throws', async () => {
+    let runs = 0
+    const guarded = guardConcurrentRestart('n3', async () => {
+      runs += 1
+      throw new Error('ipc died')
+    })
+    await expect(guarded()).rejects.toThrow('ipc died')
+    await expect(guarded()).rejects.toThrow('ipc died')
+    expect(runs).toBe(2)
   })
 })
 
