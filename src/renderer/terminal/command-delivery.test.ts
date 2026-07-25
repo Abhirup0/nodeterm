@@ -120,6 +120,33 @@ describe('deliverCommand', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('announces the end of the delivery exactly once, however it ends', () => {
+    // Verified submit.
+    const a = fakeIo()
+    let ends = 0
+    deliverCommand(a.io, CMD, () => (ends += 1))
+    expect(ends).toBe(0) // started, but the line is still un-submitted in the pane
+    a.emit(CMD)
+    expect(ends).toBe(1)
+    a.emit(CMD) // late echo
+    expect(ends).toBe(1)
+
+    // Fail-open submit after the last attempt.
+    const b = fakeIo()
+    ends = 0
+    deliverCommand(b.io, CMD, () => (ends += 1))
+    vi.advanceTimersByTime(VERIFY_TIMEOUT_MS * DELIVERY_ATTEMPTS)
+    expect(ends).toBe(1)
+
+    // Cancelled (node teardown), and a repeat cancel must not announce twice.
+    const c = fakeIo()
+    ends = 0
+    const cancel = deliverCommand(c.io, CMD, () => (ends += 1))
+    cancel()
+    cancel()
+    expect(ends).toBe(1)
+  })
+
   it('ignores echo arriving after submit (no double Enter)', () => {
     const f = fakeIo()
     deliverCommand(f.io, CMD)

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  __resetAgentRestartForTests,
   agentRestartFn,
   exitSequence,
   guardConcurrentRestart,
@@ -72,6 +73,24 @@ function fakeIo() {
         return () => {
           cb = null
         }
+      }
+    }
+  }
+}
+
+/** An io the shell never echoes back: deliverCommand cannot verify the line, so it sits
+ *  un-submitted in the pane for its whole retry window — the state a second restart must never
+ *  write into. */
+function silentIo() {
+  const written: string[] = []
+  return {
+    written,
+    io: {
+      write(d: string) {
+        written.push(d)
+      },
+      onData() {
+        return () => {}
       }
     }
   }
@@ -156,10 +175,7 @@ describe('performRestartResume', () => {
   })
 
   it('hands the delivery cancel to the caller, which stops it writing (node teardown)', async () => {
-    // An io that never echoes back: the delivery stays alive on its verify timer, exactly the
-    // window in which a node can unmount under it.
-    const written: string[] = []
-    const io = { write: (d: string) => written.push(d), onData: () => () => {} }
+    const { written, io } = silentIo()
     let cancel: (() => void) | undefined
     const p = performRestartResume({
       agentId: 'claude',
@@ -173,13 +189,68 @@ describe('performRestartResume', () => {
       }
     })
     await vi.advanceTimersByTimeAsync(200)
-    expect(await p).toBe('restarted')
-    expect(typeof cancel).toBe('function')
+    expect(typeof cancel).toBe('function') // handed out as the delivery STARTS, not when it ends
     const delivered = written.length
     cancel?.()
+    expect(await p).toBe('restarted') // cancelling settles the delivery, and with it the restart
     await vi.advanceTimersByTimeAsync(30_000)
     // No rewrite retries, no fail-open submit: nothing more reaches the torn-down transport.
     expect(written.length).toBe(delivered)
+  })
+
+  it('resolves only once the resume line has left the pane', async () => {
+    const { io } = silentIo()
+    let settled = false
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'zsh',
+      timeoutMs: 1000,
+      pollMs: 100
+    }).then((o) => {
+      settled = true
+      return o
+    })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(settled).toBe(false) // written, but still un-submitted through the verify retries
+    await vi.advanceTimersByTimeAsync(10_000) // the last attempt submits fail-open
+    expect(await p).toBe('restarted')
+  })
+
+  it('writes nothing when the session is already gone', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performRestartResume({
+        agentId: 'claude',
+        sessionId: 'sid-1',
+        io,
+        paneCommand: async () => 'zsh',
+        isLive: () => false
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('reports no restart when the session dies while we wait for the shell', async () => {
+    const { written, io } = fakeIo()
+    let live = true
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'claude',
+      timeoutMs: 5000,
+      pollMs: 100,
+      isLive: () => live
+    })
+    await vi.advanceTimersByTimeAsync(150)
+    live = false // the node was deleted / its tmux session destroyed under us
+    await vi.advanceTimersByTimeAsync(200)
+    // Not 'exit-timeout': nothing timed out, the pane simply stopped existing — and not
+    // 'restarted', which would put a phantom in the bulk summary.
+    expect(await p).toBe('not-eligible')
+    expect(written.join('')).not.toContain('--resume')
   })
 
   it('hands out no cancel when nothing was delivered', async () => {
@@ -201,6 +272,41 @@ describe('performRestartResume', () => {
 })
 
 describe('guardConcurrentRestart', () => {
+  // The in-flight set is module-global: a test that leaves a restart running would otherwise
+  // refuse the next test's restart of the same node id.
+  beforeEach(() => {
+    __resetAgentRestartForTests()
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('holds the node until the delivery settles, not merely until the restart resolves', async () => {
+    const { written, io } = silentIo()
+    const run = guardConcurrentRestart('n-overlap', () =>
+      performRestartResume({
+        agentId: 'claude',
+        sessionId: 'sid-1',
+        io,
+        paneCommand: async () => 'zsh',
+        timeoutMs: 1000,
+        pollMs: 100
+      })
+    )
+    const probe = guardConcurrentRestart('n-overlap', async () => 'restarted')
+    const first = run()
+    await vi.advanceTimersByTimeAsync(150)
+    // The resume line is in the pane but NOT submitted (no echo to verify it).
+    expect(written.join('')).toContain('claude --resume sid-1')
+    // A second menu/bulk click landing in that window would splice `/exit` into the pending line
+    // and submit `claude --resume sid-1/exit`.
+    expect(await run()).toBe('not-eligible')
+    expect(await probe()).toBe('not-eligible')
+    expect(written.filter((w) => w === '/exit\r')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(10_000) // the fail-open submit ends the delivery
+    expect(await first).toBe('restarted')
+    expect(await probe()).toBe('restarted') // pane free again
+  })
+
   it('refuses a second call while one is in flight, without running it twice', async () => {
     let runs = 0
     let release: (o: RestartOutcome) => void = () => {}
@@ -240,6 +346,8 @@ describe('guardConcurrentRestart', () => {
 })
 
 describe('agent restart registry', () => {
+  beforeEach(() => __resetAgentRestartForTests())
+
   it('registers, resolves and unregisters; re-register supersedes', () => {
     const a = async (): Promise<RestartOutcome> => 'restarted'
     const un = registerAgentRestart('n1', a)

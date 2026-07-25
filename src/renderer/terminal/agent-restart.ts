@@ -62,6 +62,12 @@ export const RESTART_POLL_MS = 250
  * echo-deliver the resume command into it. Never force-kills — on timeout the CLI is left
  * running and the caller reports the node. `paneCommand` errors count as "not a shell yet";
  * the timeout is the backstop.
+ *
+ * Resolves only once the resume line has actually LEFT the pane (deliverCommand's echo-verify
+ * retries run for up to DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS after the first write). The
+ * un-submitted line is the pane's most fragile moment — anything typed into it during that window
+ * is spliced into the command — so "this restart is over" must mean the delivery settled, not that
+ * it was started. `guardConcurrentRestart` frees the node on exactly that boundary.
  */
 export async function performRestartResume(d: {
   agentId: string
@@ -77,12 +83,24 @@ export async function performRestartResume(d: {
    * a retry rewrite, or the fail-open submit, land in a dead session.
    */
   onDelivery?: (cancel: () => void) => void
+  /**
+   * "Is the pane we are restarting still there?" — asked before the exit is written, on every
+   * poll, and once more before the delivery. A session can die under a restart (the node is
+   * deleted or respawned, or another client destroys the tmux session): its io then silently
+   * no-ops and reporting `'restarted'` would put a phantom in the bulk summary.
+   */
+  isLive?: () => boolean
 }): Promise<RestartOutcome> {
   const exit = exitSequence(d.agentId)
   const cmd = resumeCommand(d.agentId, d.sessionId)
   if (!exit || !cmd) return 'not-eligible'
   const timeoutMs = d.timeoutMs ?? RESTART_EXIT_TIMEOUT_MS
   const pollMs = d.pollMs ?? RESTART_POLL_MS
+  // A dead session is not a restart that failed — there is no pane left to fail in. `'not-eligible'`
+  // (uncounted) rather than `'exit-timeout'`, which claims something sharper and false: that the CLI
+  // is still running and refused to quit, sending the user to look at a pane that is gone.
+  const gone = (): boolean => !!d.isLive && !d.isLive()
+  if (gone()) return 'not-eligible'
   d.io.write(exit + '\r')
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -106,14 +124,23 @@ export async function performRestartResume(d: {
     } finally {
       clearTimeout(lapse)
     }
+    if (gone()) return 'not-eligible' // stop polling a pane that no longer exists
     if (isShellCommand(pane)) break
     if (Date.now() > deadline) return 'exit-timeout'
   }
-  // Two statements on purpose: `d.onDelivery?.(deliverCommand(…))` short-circuits the ARGUMENT
-  // too when no callback was passed, which would deliver nothing at all.
-  const cancelDelivery = deliverCommand(d.io, cmd)
-  d.onDelivery?.(cancelDelivery)
-  return 'restarted'
+  // Awaited, not fire-and-forget: see the header. `deliverCommand` is started inside the executor
+  // (synchronously, so `onDelivery` still hands the cancel out before any await) and announces the
+  // end of the delivery — submitted, fail-open or cancelled — through `resolve`.
+  await new Promise<void>((resolve) => {
+    // Two statements on purpose: `d.onDelivery?.(deliverCommand(…))` short-circuits the ARGUMENT
+    // too when no callback was passed — nothing would be delivered and this promise would never
+    // settle.
+    const cancelDelivery = deliverCommand(d.io, cmd, resolve)
+    d.onDelivery?.(cancelDelivery)
+  })
+  // The session can have died while the line was being verified — the delivery is then cancelled by
+  // the teardown and nothing reached the pane, so don't claim a restart.
+  return gone() ? 'not-eligible' : 'restarted'
 }
 
 // ── One restart at a time, per node ──────────────────────────────────────────────────────
@@ -123,6 +150,11 @@ const inFlight = new Set<string>()
  * Serialize a node's restarts. The per-node menu action and the bulk palette action can both
  * reach the same node, and two runs against one pane would write two `/exit` lines (the second
  * typed INTO the CLI the first is resuming) and two resume commands.
+ *
+ * The node is held for the WHOLE run, delivery included (see performRestartResume's header): a
+ * second `/exit` arriving while the resume line sits un-submitted in the pane would be spliced
+ * into it and submit `claude --resume <sid>/exit` — the exact mangled line command-delivery.ts
+ * exists to prevent, and likeliest precisely when echo verification is being slow.
  *
  * The refused call reports `'not-eligible'` deliberately: the run already in flight owns this
  * node's outcome and will report it, and `'not-eligible'` is the one outcome `summarizeOutcomes`
@@ -159,6 +191,14 @@ export function registerAgentRestart(nodeId: string, fn: () => Promise<RestartOu
 
 export function agentRestartFn(nodeId: string): (() => Promise<RestartOutcome>) | undefined {
   return restartFns.get(nodeId)
+}
+
+/** TEST ONLY (house pattern: webgl-budget's `__resetWebglBudgetForTests`): both maps above are
+ *  module-global, so a test that leaves a restart in flight would otherwise refuse the next
+ *  test's restart of the same node id. */
+export function __resetAgentRestartForTests(): void {
+  inFlight.clear()
+  restartFns.clear()
 }
 
 /** One toast line for the bulk action; zero-count parts are omitted. */

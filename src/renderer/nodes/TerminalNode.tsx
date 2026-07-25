@@ -1198,15 +1198,22 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       },
       onData: (cb) => (sessionId && !life.dead ? transport.onData(sessionId, cb) : () => {})
     }
+    // Is there still a pane to restart in? A spawn in flight has no session yet; a real teardown
+    // flips `life.dead`; and a session another client DESTROYED (or one recycled with no
+    // replacement) is gone while this component happily stays mounted showing the overlay — the
+    // same states the park branch in the cleanup below refuses to park. Writing `/exit` into any of
+    // them reaches nothing and would be reported as a 6-second "failed (exit timeout)".
+    const restartTarget = (): boolean => {
+      const coNow = getCo(termKey)
+      return !!sessionId && !life.dead && !coNow.closed && !coNow.ended
+    }
     const unregisterRestart = registerAgentRestart(
       id,
       guardConcurrentRestart(id, async () => {
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
-        // No live PTY session (spawn still in flight, or the node is closed/ended) means there is
-        // no pane to restart in — the same "nothing to do here" the gate reports.
-        if (!gate.ok || !agentId || !agentSessionId || !sessionId || life.dead) return 'not-eligible'
+        if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
         return performRestartResume({
           agentId,
           sessionId: agentSessionId,
@@ -1214,9 +1221,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           // Session-scoped (`api`, not the global preload), like readScrollback above: a relay
           // tab's pane lives on the host, and only its own api can see it.
           paneCommand: () => api.pty.paneCommand(id),
-          // The delivery outlives this promise (echo-verify timers), so hand its lifetime to the
-          // session: a real teardown runs `cleanups`, and a session that died while we waited for
-          // the shell cancels it outright rather than parking a timer on a corpse.
+          // Re-asked on every poll: a session that dies under the restart reports honestly instead
+          // of counting a phantom, and stops polling a pane that no longer exists.
+          isLive: restartTarget,
+          // The delivery has its own (echo-verify) lifetime, so hand it to the session: a real
+          // teardown runs `cleanups`, and a session that died while we waited for the shell cancels
+          // it outright rather than parking a timer on a corpse.
           onDelivery: (cancel) => {
             if (life.dead) cancel()
             else cleanups.push(cancel)
