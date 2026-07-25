@@ -85,16 +85,20 @@ describe('createHudModel — state → bucket', () => {
 })
 
 describe('done latch', () => {
-  it('is cleared by noteFocus and by notePanelOpened', () => {
+  it('is cleared PER ROW by noteFocus, leaving the others unread', () => {
     const m = createHudModel()
     m.applyStateChange(stateChange({ nodeId: 'a', state: 'done' }))
     m.applyStateChange(stateChange({ nodeId: 'b', state: 'done' }))
+    m.applyStateChange(stateChange({ nodeId: 'c', state: 'done' }))
     expect(rowFor(m.buildRows(T0, titleOf), 'a')?.state).toBe('done')
     m.noteFocus('a')
     expect(rowFor(m.buildRows(T0, titleOf), 'a')).toBeUndefined()
+    // Reading one finished session must not swallow the two the user hasn't looked at yet.
     expect(rowFor(m.buildRows(T0, titleOf), 'b')?.state).toBe('done')
-    m.notePanelOpened()
+    expect(rowFor(m.buildRows(T0, titleOf), 'c')?.state).toBe('done')
+    m.noteFocus('b')
     expect(rowFor(m.buildRows(T0, titleOf), 'b')).toBeUndefined()
+    expect(rowFor(m.buildRows(T0, titleOf), 'c')?.state).toBe('done')
   })
 
   it('an explicit read-ack end does not raise the highlight', () => {

@@ -35,8 +35,6 @@ const NOTCH_WIDTH = 168
 /** Bounds for the user-tunable notch width (settings.notchWidth). */
 export const NOTCH_WIDTH_MIN = 100
 export const NOTCH_WIDTH_MAX = 320
-/** How long the panel must stay open before closing it counts as "read" (clears done latches). */
-const PANEL_READ_MS = 700
 /**
  * A top inset (`workArea.y - bounds.y`) at least this tall (px) means a PHYSICAL notch is present:
  * a notched Mac's menu bar is ~37 px, a notchless display's is ~24–25 px. Below this we treat the
@@ -118,10 +116,8 @@ class NotchHudController {
   private ipcBound = false
   private readonly onSetIgnoreMouse: (_e: unknown, ignore: boolean) => void
   private readonly onFocusNode: (_e: unknown, nodeId: string) => void
-  private readonly onExpanded: (_e: unknown, expanded: boolean) => void
+  private readonly onExpanded: () => void
   private readonly onDismiss: (_e: unknown, nodeId: string) => void
-  /** When the panel was opened (epoch ms), 0 while collapsed — gates the read-clear below. */
-  private panelOpenedAt = 0
   private readonly onDisplayChange: () => void
 
   constructor(
@@ -153,21 +149,12 @@ class NotchHudController {
       this.model.dismiss(nodeId)
       this.schedulePush()
     }
-    this.onExpanded = (_e, expanded) => {
-      // The done latch clears when the panel CLOSES, not when it opens — and only after it was
-      // open long enough to read (field bug: with hover-to-open the green blob vanished the instant
-      // the pointer arrived, before anything could be read). So: hover, read, leave → it clears.
-      if (expanded) {
-        this.panelOpenedAt = Date.now()
-        return
-      }
-      const openFor = this.panelOpenedAt ? Date.now() - this.panelOpenedAt : 0
-      this.panelOpenedAt = 0
-      if (openFor >= PANEL_READ_MS) {
-        this.model.notePanelOpened()
-        this.schedulePush()
-      }
-    }
+    // NOTE: opening/closing the panel deliberately marks NOTHING as read. It used to clear every
+    // done latch on close ("you looked at it"), which lost the plot with three finished sessions
+    // waiting: open the panel, click one, and the other two silently vanished unread. Read is now
+    // strictly per row — clicking/Go-ing a row clears that row (onFocusNode), and the × dismisses
+    // one by hand. The event is still wired because the renderer's expand state may drive more here.
+    this.onExpanded = () => {}
     this.onDisplayChange = () => this.reposition()
   }
 

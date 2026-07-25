@@ -95,10 +95,9 @@ export interface HudModel {
   applyAgentEvent(ev: NormalizedAgentEvent): void
   /** A context-update {sessionId, model, usedPercent} — the ONLY source of the model name. */
   applyContextUpdate(p: { sessionId?: string; model?: string; usedPercent?: number }): void
-  /** Clear a node's done highlight (the user looked at it). */
+  /** Clear ONE node's done highlight (the user opened that row). Read is per row on purpose:
+   *  a blanket "the panel was opened, so everything is read" loses sessions the user never saw. */
   noteFocus(nodeId: string): void
-  /** Clear EVERY node's done highlight (the panel was opened — "you looked at it"). */
-  notePanelOpened(): void
   /** Hide a row by hand (a stuck session). It returns if its state genuinely changes. */
   dismiss(nodeId: string): void
   /** Drop nodes gone from the mirror + idle > 6h. Returns true if anything changed. */
@@ -230,10 +229,6 @@ export function createHudModel(): HudModel {
     if (a && a.state === 'done') a.doneSeen = true
   }
 
-  function notePanelOpened(): void {
-    for (const a of nodes.values()) if (a.state === 'done') a.doneSeen = true
-  }
-
   function dismiss(nodeId: string): void {
     const a = nodes.get(nodeId)
     if (!a) return
@@ -295,7 +290,6 @@ export function createHudModel(): HudModel {
     applyAgentEvent,
     applyContextUpdate,
     noteFocus,
-    notePanelOpened,
     dismiss,
     prune,
     buildRows
