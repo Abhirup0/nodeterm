@@ -110,19 +110,19 @@ body {
   border-radius: var(--pill-radius);
 }
 
-/* --- Collapsed indicator: the mascots, BOTTOM-LEFT inside the sideways notch extension ---
-   The capsule is exactly bar-tall, so the mascots stand on the bar's bottom edge, left-packed,
-   inside black that butts against the notch — the notch reads as wider, never taller.
+/* --- Collapsed indicator: the mascots, LEFT and vertically CENTRED in the notch strip ---
+   The capsule is exactly bar-tall, so the mascots sit centred on the bar's midline, left-packed,
+   inside black that extends the notch — the notch reads as wider, never taller.
    Hidden when expanded (the rows carry their own icons). */
 .hud-indicator {
   display: flex;
-  /* Bottom-LEFT: the mascots stand on the bar's bottom edge, left-packed (owner's placement). */
-  align-items: flex-end;
+  /* Vertically CENTRED in the notch strip, horizontally left-packed (owner's placement). */
+  align-items: center;
   justify-content: flex-start;
   gap: 8px;
   width: auto;
   height: var(--bar);
-  padding: 0 8px 3px 10px;
+  padding: 0 8px 0 10px;
 }
 .hud-capsule.expanded .hud-indicator {
   display: none;
