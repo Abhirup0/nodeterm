@@ -60,10 +60,14 @@ Row shape sent to the HUD:
   EDGE — a turn ending while the HUD is running — raises the highlight. A restored `needsYou` still
   shows, because it genuinely still needs you.
 - **working watchdog**: a session leaves `working` only when something says so, and some exits say
-  nothing — Esc during a tool call, a killed CLI, a slept machine, a dropped SSH. So a `working`
-  node with no event for `WORKING_STALE_MS` (20 min, well past Claude's ~10 min Bash cap) stops
-  being displayed as working. DISPLAY-ONLY: nothing is mutated, so any later event restores the row
-  instantly; the 60 s sweep re-pushes so a row can age out with no event at all. An **interrupted**
+  nothing — Esc during a tool call, a killed CLI, a slept machine, a dropped SSH. The DECIDER is
+  central: `agent-status-mirror`'s `sweepStaleWorking` (window in `shared/agents/stale.ts`,
+  `WORKING_STALE_MS` 20 min, well past Claude's ~10 min Bash cap) moves the entry off working and
+  fires ONE end edge marked `stale`, which every `onNodeStateChange` consumer honors — the notch
+  drops the row AND the phone's Live Activity ends. The HUD keeps a DISPLAY-ONLY copy of the same
+  check so the capsule never depends on that edge arriving; nothing is mutated, so any later event
+  restores the row instantly, and the 60 s sweep re-pushes so a row can age out with no event at
+  all. An **interrupted**
   done (`NodeStateChange.interrupted`, Esc) never lights the green highlight — nothing was
   accomplished, so there is nothing to go and read (same rule as the notification path).
 - **dismiss** latches the RAW state, so the watchdog flipping a hidden row's display cannot count

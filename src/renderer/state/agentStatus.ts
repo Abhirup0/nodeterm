@@ -1,4 +1,5 @@
 import { create, type StoreApi, type UseBoundStore } from 'zustand'
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
 import type { NodeTerminalApi } from '@shared/types'
@@ -120,7 +121,10 @@ export const DONE_HOLDOFF_MS = 3000
 // all for this long decays to idle. Long on purpose:
 // a single silent tool run (e.g. a long build) fires no hooks between Pre- and PostToolUse,
 // so anything shorter would flip genuinely-running turns to idle.
-export const STALE_WORKING_MS = 30 * 60_000
+// One rule, three surfaces — the window lives in shared/agents/stale.ts and the mirror's sweep is
+// the decider (it fires a synthetic end edge). This local sweeper stays as the renderer's own
+// safety net for a badge whose events never reached the mirror.
+export const STALE_WORKING_MS = WORKING_STALE_MS
 // Esc/Ctrl-C interrupt inference: how long to wait for a hook event before concluding the
 // turn was cancelled without a final Stop.
 export const INTERRUPT_SETTLE_MS = 1500
