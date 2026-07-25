@@ -175,6 +175,9 @@ describe('6h drop', () => {
     const m = createHudModel()
     // present in mirror → never dropped, even if stale
     m.applyMirrorFlush({ v: 1, updatedAt: T0, nodes: { present: { state: 'done', updatedAt: T0 } } })
+    // A done restored from the mirror is pre-seen (see "mirror restore"), so give this one a LIVE
+    // finish too — the subject here is what prune keeps, not what the restore highlights.
+    m.applyStateChange(stateChange({ nodeId: 'present', state: 'done', ts: T0 }))
     // gone node, recently done
     m.applyStateChange(stateChange({ nodeId: 'gone', state: 'done', ts: T0 }))
     // it's not in the mirror flush above → presentInMirror stays false
@@ -233,5 +236,33 @@ describe('dismiss', () => {
   it('ignores an unknown node', () => {
     const m = createHudModel()
     expect(() => m.dismiss('nope')).not.toThrow()
+  })
+})
+
+describe('mirror restore', () => {
+  it('does not resurrect already-finished sessions on first sight', () => {
+    const m = createHudModel()
+    // Fresh process: the mirror file is read and it remembers hours of finished turns.
+    m.applyMirrorFlush({
+      nodes: {
+        old1: { state: 'done', agentId: 'claude', updatedAt: T0 },
+        old2: { state: 'done', agentId: 'codex', updatedAt: T0 }
+      }
+    } as never)
+    expect(m.buildRows(T0 + 1, titleOf)).toHaveLength(0)
+
+    // A turn that finishes while we ARE watching still lights up...
+    m.applyStateChange(stateChange({ nodeId: 'old1', state: 'working', ts: T0 + 2 }))
+    m.applyStateChange(stateChange({ nodeId: 'old1', state: 'done', ts: T0 + 3 }))
+    expect(rowFor(m.buildRows(T0 + 4, titleOf), 'old1')?.state).toBe('done')
+    // ...and a later flush repeating the same done doesn't clear it (only first sight is pre-seen).
+    m.applyMirrorFlush({ nodes: { old1: { state: 'done', updatedAt: T0 + 3 } } } as never)
+    expect(rowFor(m.buildRows(T0 + 5, titleOf), 'old1')?.state).toBe('done')
+  })
+
+  it('still surfaces a needs-you restored from the mirror', () => {
+    const m = createHudModel()
+    m.applyMirrorFlush({ nodes: { a: { state: 'waiting', updatedAt: T0 } } } as never)
+    expect(rowFor(m.buildRows(T0 + 1, titleOf), 'a')?.state).toBe('needsYou')
   })
 })

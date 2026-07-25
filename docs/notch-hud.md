@@ -54,6 +54,11 @@ Row shape sent to the HUD:
   or closing the panel clears NOTHING — an earlier "the panel was opened, so you looked at it"
   blanket clear meant that with three finished sessions waiting, opening the panel and clicking one
   silently swallowed the other two. Drop a node from the HUD when it's gone + idle > 6 h.
+  A `done` first learned about from a MIRROR FLUSH is seeded as already-seen: the mirror keeps
+  entries for hours and is re-read at every launch, so without that rule every app start (and every
+  re-enable of the setting) resurrected old finished sessions as fresh green blobs. Only a live done
+  EDGE — a turn ending while the HUD is running — raises the highlight. A restored `needsYou` still
+  shows, because it genuinely still needs you.
 
 ## Indicator + panel (hud renderer) — the DynamicNotch capsule
 

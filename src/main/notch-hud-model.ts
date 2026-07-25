@@ -157,6 +157,10 @@ export function createHudModel(): HudModel {
     const seen = new Set<string>()
     for (const [nodeId, n] of Object.entries(doc.nodes ?? {})) {
       seen.add(nodeId)
+      // Is this the FIRST time this process hears of the node? The mirror keeps entries for hours
+      // and is re-read at every launch, so a node we're meeting through the file is HISTORY, not an
+      // event that just happened here — see the done-seeding rule below.
+      const firstSighting = !nodes.has(nodeId)
       const a = ensure(nodeId, n.updatedAt)
       a.presentInMirror = true
       if (n.agentId) a.agentId = n.agentId
@@ -168,6 +172,11 @@ export function createHudModel(): HudModel {
         const bucket = bucketState(n.state)
         if (bucket === 'done') {
           if (a.state !== 'done') a.state = 'done'
+          // A `done` we learn about from the mirror on FIRST sight is pre-seen: it finished before
+          // this HUD existed. Otherwise every app launch (and every re-enable of the setting)
+          // resurrected up to 6 h of already-read "finished" sessions as fresh green blobs. Only a
+          // live done EDGE — a turn that ends while we're watching — earns the highlight.
+          if (firstSighting) a.doneSeen = true
         } else {
           a.state = bucket
           if (bucket === 'working') a.doneSeen = false
