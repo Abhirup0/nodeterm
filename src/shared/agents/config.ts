@@ -96,6 +96,27 @@ export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_M
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>
   (AGENT_CONFIG as Record<string, AgentConfig>)[id]
 
+/**
+ * The agent a terminal node was CREATED as: `data.agentId`, with the legacy `tags` fallback for
+ * nodes serialized before `agentId` existed. Node data is deserialized (hand-editable) JSON, so
+ * the shapes are checked at runtime rather than trusted from the type.
+ *
+ * Deliberately NOT a hook-status fallback (Canvas's wider `agentIdOf`), which also reports a plain
+ * terminal someone typed `claude` into by hand.
+ *
+ * ONE definition on purpose: the canvas menu decides from it whether to OFFER an in-place restart,
+ * and the node's restart closure captures it to decide whether to RUN one. Two copies that drift
+ * apart silently produce a menu row whose closure refuses every click.
+ */
+export function createdAgentId(
+  data: { agentId?: unknown; tags?: unknown } | undefined
+): AgentId | undefined {
+  if (!data) return undefined
+  if (typeof data.agentId === 'string' && data.agentId) return data.agentId as AgentId
+  const tags = Array.isArray(data.tags) ? data.tags : []
+  return tags.includes('claude') ? 'claude' : undefined
+}
+
 // Session ids are interpolated into a shell command line (written into the live shell on a
 // cold restart), so accept only the safe charset agents actually use (UUIDs etc.) — never a
 // flag-like or metacharacter-bearing value.

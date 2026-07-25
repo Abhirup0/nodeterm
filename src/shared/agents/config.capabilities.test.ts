@@ -11,6 +11,7 @@ import {
   canResume,
   canSubagent,
   canTransferFrom,
+  createdAgentId,
   hasHooks,
   hasPermissionMode,
   hasUsage
@@ -46,5 +47,25 @@ describe('opencode capabilities', () => {
     for (const can of [canSubagent, canRecur, canBranch, hasUsage, canChat, canTransferFrom, canRename, hasPermissionMode]) {
       expect(can('opencode')).toBe(false)
     }
+  })
+})
+
+describe('createdAgentId', () => {
+  it('reads data.agentId, with the legacy tags fallback', () => {
+    expect(createdAgentId({ agentId: 'codex' })).toBe('codex')
+    expect(createdAgentId({ tags: ['claude', 'x'] })).toBe('claude')
+    expect(createdAgentId({ agentId: 'gemini', tags: ['claude'] })).toBe('gemini')
+  })
+
+  it('is undefined for a plain terminal, a foreign tag, or nothing at all', () => {
+    expect(createdAgentId({})).toBeUndefined()
+    expect(createdAgentId({ tags: ['review'] })).toBeUndefined()
+    expect(createdAgentId(undefined)).toBeUndefined()
+  })
+
+  it('tolerates hand-edited project.json shapes', () => {
+    // node data is deserialized JSON: nothing guarantees these types at runtime.
+    expect(createdAgentId({ agentId: 42 })).toBeUndefined()
+    expect(createdAgentId({ tags: 'claude' })).toBeUndefined()
   })
 })

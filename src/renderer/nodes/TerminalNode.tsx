@@ -75,7 +75,7 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, resumeCommand, withPermissionMode, agentConfig, type AgentId } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, createdAgentId, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -404,9 +404,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
-  // Derive the node's agent once. The `tags` fallback keeps not-yet-migrated legacy
-  // claude nodes working until they're re-serialized with `agentId`.
-  const agentId = (data.agentId as AgentId | undefined) ?? (tags.includes('claude') ? 'claude' : undefined)
+  // Derive the node's agent once, through the shared helper — the canvas menu decides whether to
+  // offer this node's in-place restart from the SAME derivation, and a second copy drifting from
+  // this one yields a row whose closure refuses every click.
+  const agentId = createdAgentId(data)
   // Gate each former `isClaude` site by the capability it actually represents.
   const showStatus = !!agentId && hasHooks(agentId) // status badge + session-title capture
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
@@ -1214,10 +1215,23 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         const agentSessionId = st?.sessionId
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
         if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        // Built HERE, not inside the choreography: `withPermissionMode` is the single funnel for
+        // every CLI launch path (shared/agents/config.ts) and the mode is a renderer-side, async
+        // read — exactly as the cold-restore relaunch above does it. Without it a canvas running
+        // in acceptEdits/plan would come back from a restart in the default mode, silently.
+        // Re-resolved at call time for the same reason as there: the mode is a property of how a
+        // session is launched, not of the node.
+        const base = resumeCommand(agentId, agentSessionId)
+        const command = base
+          ? withPermissionMode(base, agentId, await ensureActivePermissionMode())
+          : undefined
         return performRestartResume({
           agentId,
           sessionId: agentSessionId,
           io: restartIo,
+          // An unusable session id leaves this undefined and performRestartResume refuses the
+          // restart on its own `resumeCommand` gate — nothing is written either way.
+          command,
           // Session-scoped (`api`, not the global preload), like readScrollback above: a relay
           // tab's pane lives on the host, and only its own api can see it.
           paneCommand: () => api.pty.paneCommand(id),
