@@ -3914,6 +3914,13 @@ body,
      the newlines and still collapses runs of spaces, exactly as `normal` did — so the messages that
      carry no newlines at all are unchanged. */
   white-space: pre-line;
+  /* `pre-line` only breaks at whitespace, so one long unbroken token — a URL, an absolute path,
+     a base64 blob, all common in the agent-authored text the canvas-control write approval shows
+     ("Agent X wants to send…") — forced the message area into HORIZONTAL scrolling. Measured in
+     Chrome: a 400-char token overflows at any box width; with this it wraps and the overflow is
+     gone. A dialog whose whole job is "read this, then approve it" must never hide half the text
+     off to the side. */
+  overflow-wrap: anywhere;
 }
 
 /* The grant disclosure (`ConsentNotice` → describeGrant) shown ABOVE the SAS body in the host
