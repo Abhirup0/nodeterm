@@ -7,7 +7,8 @@ import {
   firstPromptLine,
   buildIndicator,
   HUD_STALE_DROP_MS,
-  type HudRow
+  type HudRow,
+  WORKING_STALE_MS
 } from './notch-hud-model'
 
 const T0 = 1_000_000
@@ -192,9 +193,11 @@ describe('6h drop', () => {
     expect(rowFor(rows, 'present')?.state).toBe('done')
   })
 
-  it('never drops a working node', () => {
+  it('never drops a LIVE working node', () => {
     const m = createHudModel()
     m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', ts: T0 }))
+    // Keep it alive across the 6h mark — a node still reporting activity is never dropped.
+    m.applyNowChange({ nodeId: 'w', ts: T0 + HUD_STALE_DROP_MS, activity: 'still going' } as never)
     expect(m.prune(T0 + HUD_STALE_DROP_MS + 1)).toBe(false)
     expect(rowFor(m.buildRows(T0 + HUD_STALE_DROP_MS + 1, titleOf), 'w')?.state).toBe('working')
   })
@@ -264,5 +267,35 @@ describe('mirror restore', () => {
     const m = createHudModel()
     m.applyMirrorFlush({ nodes: { a: { state: 'waiting', updatedAt: T0 } } } as never)
     expect(rowFor(m.buildRows(T0 + 1, titleOf), 'a')?.state).toBe('needsYou')
+  })
+})
+
+describe('working watchdog', () => {
+  it('stops showing a working node nobody has heard from, and restores it on any event', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', agentId: 'claude', ts: T0 }))
+    // A long turn is still working — the gap has to be big before we presume anything.
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS - 1, titleOf), 'w')?.state).toBe('working')
+    // Past the window (Esc during a tool call, killed CLI, slept machine): the row goes quiet.
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS + 1, titleOf), 'w')).toBeUndefined()
+    // DISPLAY-only: one live event and it's back, no state was destroyed.
+    m.applyNowChange({ nodeId: 'w', ts: T0 + WORKING_STALE_MS + 2, activity: 'Running tests' } as never)
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS + 3, titleOf), 'w')?.state).toBe('working')
+  })
+
+  it('lets a stale working node be pruned once it is gone from the mirror', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', ts: T0 }))
+    expect(m.prune(T0 + WORKING_STALE_MS + 1)).toBe(false) // stale, but not yet past the 6h drop
+    expect(m.prune(T0 + HUD_STALE_DROP_MS + 1)).toBe(true)
+  })
+})
+
+describe('interrupted turns', () => {
+  it('an Esc-interrupted done never lights the finished highlight', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'a', state: 'working', ts: T0 }))
+    m.applyStateChange({ ...stateChange({ nodeId: 'a', state: 'done', ts: T0 + 1 }), interrupted: true })
+    expect(rowFor(m.buildRows(T0 + 2, titleOf), 'a')).toBeUndefined()
   })
 })

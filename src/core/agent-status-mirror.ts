@@ -513,6 +513,10 @@ export interface NodeStateChange {
   /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
    *  event, letting an intent answer the held hook. Absent otherwise. */
   pendingId?: string
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+   *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
+   *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
+  interrupted?: boolean
   /** done only: this 'end' was produced by an explicit desktop/browser READ of the finished
    *  session (`ackDone`), NOT the natural turn-end edge. Both send event:'end', which is what the
    *  phone uses to dismiss the Live Activity — `ack` only distinguishes them for internal
@@ -1129,7 +1133,13 @@ function produceInboxFromState(
     // working from re-entering, and the normalizer collapses an Esc-spam into one done).
     const detail = firstLine(ev.lastMessage, INBOX_DETAIL_MAX) || undefined
     const title = ev.interrupted ? 'Stopped' : 'Finished'
-    fireNodeStateChange({ ...stateBase, event: 'end', state: 'done', message: title })
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'end',
+      state: 'done',
+      message: title,
+      ...(ev.interrupted ? { interrupted: true } : {})
+    })
     pushInboxEvent({
       ...baseEvent,
       kind: 'done',
