@@ -51,9 +51,12 @@ export function deliverCommand(io: DeliveryIo, cmd: string): () => void {
     if (timer) clearTimeout(timer)
     unsub?.()
   }
+  // Close the delivery BEFORE writing Enter: an io whose write echoes back synchronously
+  // (the restart choreography's pane io does) would otherwise re-enter this listener while
+  // the tail still matches and submit forever.
   const submit = (): void => {
-    io.write('\r')
     finish()
+    io.write('\r')
   }
   const tryOnce = (): void => {
     if (done) return
