@@ -11,6 +11,10 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   cancelLabel?: string
   danger?: boolean
+  /** Nothing to decide — the dialog only REPORTS (an error, a "not ready yet"). Renders a single
+   *  dismiss button instead of the destructive default pair: an error message offering
+   *  "Cancel / Delete" reads as though dismissing it will delete something. */
+  alert?: boolean
   /** An explicit opt-in shown above the buttons (e.g. "Delete the worktree directory from disk
    *  too"). The caller owns the value, so it can also swap the confirm label / danger styling. */
   option?: { label: string; checked: boolean; onChange: (checked: boolean) => void }
@@ -34,14 +38,19 @@ interface ConfirmDialogProps {
 export function ConfirmDialog({
   message,
   body,
-  confirmLabel = 'Delete',
+  confirmLabel,
   cancelLabel = 'Cancel',
-  danger = true,
+  danger: dangerProp,
+  alert = false,
   option,
   enterConfirms = true,
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
+  // An alert has nothing destructive to warn about and nothing to cancel; anything else keeps the
+  // historical destructive defaults ("Delete", danger styling, focus parked on the safe button).
+  const danger = dangerProp ?? !alert
+  const confirmText = confirmLabel ?? (alert ? 'OK' : 'Delete')
   // One id per instance, for the lifetime of the component (mount order == paint order == stack).
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
@@ -98,15 +107,17 @@ export function ConfirmDialog({
           {/* The DESTRUCTIVE button never takes focus: autoFocus on it is what turned a stray Enter
               (or Space) into a deletion. On a danger dialog the safe button is the focused one; on a
               harmless one the primary action may keep it. */}
-          <button className="confirm__btn" autoFocus={danger} onClick={onCancel}>
-            {cancelLabel}
-          </button>
+          {!alert && (
+            <button className="confirm__btn" autoFocus={danger} onClick={onCancel}>
+              {cancelLabel}
+            </button>
+          )}
           <button
             className={`confirm__btn${danger ? ' danger' : ' primary'}`}
             autoFocus={!danger}
             onClick={onConfirm}
           >
-            {confirmLabel}
+            {confirmText}
           </button>
         </div>
       </div>
