@@ -203,6 +203,8 @@ export function buildMirrorUsage(
 export const INBOX_EVENTS_CAP = 50
 export const INBOX_TITLE_MAX = 120
 export const INBOX_DETAIL_MAX = 240
+/** Cap for the `You: …` prompt line carried on a working start edge (Live Activity + notch). */
+export const PROMPT_MAX = 120
 export const INBOX_ACTIVITY_MAX = 80
 // Question options (spec: interactive-push-live-activities): first question only, ≤4 choices,
 // each label clipped to 60 chars.
@@ -257,6 +259,10 @@ export interface InboxNodeNow {
   tool?: string
   /** Context-window fill 0–100 (from context-tail), when known. */
   contextPercent?: number
+  /** ≤PROMPT_MAX — the first line of the user prompt that opened the CURRENT turn ("You: …").
+   *  Set on a new turn, cleared with `activity` when the turn ends, so a phone poll (which has no
+   *  access to the push edges) can render the same line the push carries and the notch shows. */
+  prompt?: string
   updatedAt: number
 }
 export interface MirrorInbox {
@@ -517,6 +523,11 @@ export interface NodeStateChange {
   /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
    *  event, letting an intent answer the held hook. Absent otherwise. */
   pendingId?: string
+  /** working START edge only: the first line of the user prompt that opened this turn ("You: …"),
+   *  ≤PROMPT_MAX. The one line that says WHAT a session is working on — the notch capsule shows it,
+   *  and it rides the Live Activity so the phone reads the same thing. Absent when the turn started
+   *  without a prompt we saw (a resumed session, a tool-driven working edge). */
+  prompt?: string
   /** done only: this 'end' was produced by the stale-working SWEEP, not by the session itself —
    *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
    *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
@@ -1053,7 +1064,19 @@ function produceInboxFromState(
   // done-holdoff means a held-off late working keeps `nextState === 'done'`, so it never reaches
   // here — no spurious 'start'.
   if (nextState === 'working' && prevState !== 'working') {
-    fireNodeStateChange({ ...stateBase, event: 'start', state: 'working' })
+    // A genuine new turn carries the user's prompt — the "You: …" line every surface shows.
+    const prompt = ev.newTurn ? firstLine(ev.task, PROMPT_MAX) : ''
+    if (prompt) {
+      // Persist it too, so the phone's POLL path (which never sees push edges) reads the same line.
+      const cur = inboxNodes.get(nodeId)
+      inboxNodes.set(nodeId, { ...cur, prompt, updatedAt: now })
+    }
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'start',
+      state: 'working',
+      ...(prompt ? { prompt } : {})
+    })
   }
   // approval/question dedup is TITLE-based (not edge-based): a re-asserted needs-you with the SAME
   // ask is a no-op, but a genuinely different ask still lands — so the guard can't be a plain
@@ -1164,7 +1187,8 @@ function produceInboxFromState(
 /** Clear a node's live activity (keep any contextPercent). Idempotent; no-op if nothing set. */
 function clearActivity(nodeId: string, now: number): void {
   const n = inboxNodes.get(nodeId)
-  if (!n || n.activity === undefined) return
+  if (!n || (n.activity === undefined && n.prompt === undefined)) return
+  // The turn is over: both the tool line AND the "You: …" prompt describe work in progress.
   inboxNodes.set(nodeId, { contextPercent: n.contextPercent, updatedAt: now })
 }
 
@@ -1202,7 +1226,13 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
     const activity = toolActivity(toolName, toolInput)
     const cur = inboxNodes.get(nodeId)
     if (cur?.activity === activity && cur?.tool === toolName) return // no change
-    inboxNodes.set(nodeId, { activity, tool: toolName, contextPercent: cur?.contextPercent, updatedAt: now })
+    inboxNodes.set(nodeId, {
+      activity,
+      tool: toolName,
+      contextPercent: cur?.contextPercent,
+      prompt: cur?.prompt,
+      updatedAt: now
+    })
     fireNodeNowChange({ nodeId, activity, contextPercent: cur?.contextPercent, ts: now })
     scheduleWrite()
   } else if (hook === 'PermissionRequest') {
@@ -1242,7 +1272,13 @@ export function recordContextUsage(nodeId: string, percent: number): void {
   const cur = inboxNodes.get(nodeId)
   if (cur?.contextPercent === clamped) return
   const now = Date.now()
-  inboxNodes.set(nodeId, { activity: cur?.activity, tool: cur?.tool, contextPercent: clamped, updatedAt: now })
+  inboxNodes.set(nodeId, {
+    activity: cur?.activity,
+    tool: cur?.tool,
+    contextPercent: clamped,
+    prompt: cur?.prompt,
+    updatedAt: now
+  })
   fireNodeNowChange({ nodeId, activity: cur?.activity, contextPercent: clamped, ts: now })
   scheduleWrite()
 }
