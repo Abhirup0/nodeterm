@@ -47,7 +47,8 @@ const HUD_WINDOW_HEIGHT = 460
 /** Debounce for coalescing feed changes into one push to the HUD renderer. */
 const PUSH_DEBOUNCE_MS = 150
 /** Low-frequency sweep so stale (gone + idle > 6h) nodes drop even with no live events. */
-const SWEEP_MS = 10 * 60 * 1000
+// Also the tick that lets the model's working watchdog and the relative times age without events.
+const SWEEP_MS = 60 * 1000
 
 /**
  * Keep the app a REGULAR Dock app even though the HUD is a `focusable:false` (non-activating
@@ -168,7 +169,10 @@ class NotchHudController {
     screen.on('display-added', this.onDisplayChange)
     screen.on('display-removed', this.onDisplayChange)
     this.sweepTimer = setInterval(() => {
-      if (this.model.prune(Date.now())) this.schedulePush()
+      // Always re-push: the working watchdog and the relative timestamps both age with the clock,
+      // so a row has to be able to change with no incoming event at all.
+      this.model.prune(Date.now())
+      this.schedulePush()
     }, SWEEP_MS)
     this.sweepTimer.unref?.()
   }

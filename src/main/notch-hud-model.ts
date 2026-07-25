@@ -13,6 +13,18 @@ import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-s
 /** A node dropped once it's gone from the mirror AND has been idle longer than this. */
 export const HUD_STALE_DROP_MS = 6 * 60 * 60 * 1000
 
+/**
+ * A `working` node with NO event for this long stops being displayed as working.
+ *
+ * A session leaves `working` only when something says so — and some exits say nothing: an Esc
+ * during a tool call, a killed CLI, a machine that slept, an SSH drop. The node then walks its
+ * mascot forever. This is the watchdog, and it is deliberately DISPLAY-ONLY: the state is not
+ * mutated, so any later event (a tool result, a new turn, a mirror flush) brings the row straight
+ * back. 20 min is well past a real gap between hook events — Claude's Bash tool caps out around 10
+ * — so a genuinely long turn is never hidden.
+ */
+export const WORKING_STALE_MS = 20 * 60 * 1000
+
 /** The phone-facing bucket the HUD colors rows by. `idle` = a seen/finished session. */
 export type HudRowState = 'working' | 'needsYou' | 'done' | 'idle'
 
@@ -141,8 +153,10 @@ export function createHudModel(): HudModel {
       // A fresh working edge clears a stale done highlight.
       a.doneSeen = false
     } else if (c.state === 'done') {
-      // New done → unseen (highlight it) unless this end was an explicit read-ack.
-      a.doneSeen = c.ack === true ? true : false
+      // New done → unseen (highlight it) unless this end was an explicit read-ack, or the turn was
+      // INTERRUPTED (Esc): nothing was accomplished, so there is nothing to go and read. Same rule
+      // the notification path uses.
+      a.doneSeen = c.ack === true || c.interrupted === true
     }
   }
 
@@ -243,14 +257,15 @@ export function createHudModel(): HudModel {
     if (!a) return
     // Latch the state we're hiding AT, not a boolean: a node stuck in `working` stays hidden, but
     // the moment it really moves (done / needs-you / a new turn) it earns its row back.
-    a.dismissedAt = displayState(a)
+    a.dismissedAt = a.state
     if (a.state === 'done') a.doneSeen = true
   }
 
   function prune(now: number): boolean {
     let changed = false
     for (const [nodeId, a] of nodes) {
-      if (a.state === 'working') continue
+      // A LIVE working node is never dropped; a stale one (watchdog above) is fair game.
+      if (a.state === 'working' && now - a.updatedAt <= WORKING_STALE_MS) continue
       if (a.presentInMirror) continue
       if (now - a.updatedAt > HUD_STALE_DROP_MS) {
         nodes.delete(nodeId)
@@ -260,19 +275,23 @@ export function createHudModel(): HudModel {
     return changed
   }
 
-  function displayState(a: NodeAccum): HudRowState {
+  function displayState(a: NodeAccum, now: number): HudRowState {
     // A done session that's been acknowledged demotes to idle (drops out of the row list below).
     if (a.state === 'done' && a.doneSeen) return 'idle'
+    // Watchdog: a working session nobody has heard from in WORKING_STALE_MS is presumed gone.
+    if (a.state === 'working' && now - a.updatedAt > WORKING_STALE_MS) return 'idle'
     return a.state
   }
 
-  function buildRows(_now: number, getTitle: (nodeId: string) => string | undefined): HudRow[] {
+  function buildRows(now: number, getTitle: (nodeId: string) => string | undefined): HudRow[] {
     const rows: HudRow[] = []
     for (const [nodeId, a] of nodes) {
-      const state = displayState(a)
+      const state = displayState(a, now)
       // The HUD shows active sessions only — nothing when a node is idle/seen.
       if (state === 'idle') continue
-      if (a.dismissedAt === state) continue
+      // Compare against the RAW state, not the display one: the watchdog can flip a dismissed
+      // node's display to idle and back without that counting as "it changed".
+      if (a.dismissedAt === a.state) continue
       a.dismissedAt = undefined
       const model = a.sessionId ? modelBySession.get(a.sessionId) : undefined
       rows.push({
