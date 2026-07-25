@@ -1048,16 +1048,24 @@ export function Canvas() {
   // does NOT close the overlay itself; it bumps `dictationStopSignal` so DictationOverlay can
   // decide what "press again" means from its own current phase (stop-and-transcribe while
   // recording, dismiss otherwise) — see the `stopSignal` prop doc.
+  // The node whose kanban card modal is open (null = none). The dictation shortcut targets THIS
+  // when set, since no canvas node is selected while the board covers the canvas.
+  const kanbanModalNodeRef = useRef<string | null>(null)
   const toggleDictation = useCallback(() => {
     setDictationOpen((open) => {
       if (open) {
         setDictationStopSignal((n) => n + 1)
         return true
       }
-      const sel = nodesRef.current.find((n) => n.selected && n.type === 'terminal')
+      // A kanban card modal open over the board wins (nothing on the canvas is selected then);
+      // otherwise fall back to the selected canvas terminal.
+      const modalId = kanbanModalNodeRef.current
+      const target = modalId
+        ? nodesRef.current.find((n) => n.id === modalId && n.type === 'terminal')
+        : nodesRef.current.find((n) => n.selected && n.type === 'terminal')
       setDictationTarget(
-        sel
-          ? { kind: 'terminal', nodeId: sel.id, title: (sel.data.title as string) || 'Untitled' }
+        target
+          ? { kind: 'terminal', nodeId: target.id, title: (target.data.title as string) || 'Untitled' }
           : null
       )
       setDictationNonce((n) => n + 1)
@@ -6111,6 +6119,7 @@ export function Canvas() {
           onRenameNode={(nodeId, title) => renameSession(activeProjectId, nodeId, title)}
           onEditSticky={editStickyText}
           onDeleteNode={deleteNodeFromKanban}
+          onModalNodeChange={(id) => (kanbanModalNodeRef.current = id)}
         />
       )}
       <UpdateCard />

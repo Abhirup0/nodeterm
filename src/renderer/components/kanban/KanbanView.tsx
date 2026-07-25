@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useAgentStatus } from '../../state/agentStatus'
@@ -55,6 +55,9 @@ interface KanbanViewProps {
   onEditSticky: (nodeId: string, text: string) => void
   /** Permanently delete a node (ends its session) — routed through the canvas confirm. */
   onDeleteNode: (nodeId: string) => void
+  /** Reports which node's card modal is open (null = none) so the canvas can target it — e.g.
+   *  the dictation shortcut dictates into the open card's session, not a canvas selection. */
+  onModalNodeChange: (nodeId: string | null) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -63,13 +66,21 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
  *  agent-status listeners must keep running, and display:none would 0×0-resize every
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
 export function KanbanView({
-  board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode
+  board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
+  onModalNodeChange
 }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
   const [modalNodeId, setModalNodeId] = useState<string | null>(null)
   // Right-click card menu (open on canvas / move / delete).
   const [cardMenu, setCardMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
+  // Opening a card = you're looking at that session: clear its unread badge, and report the open
+  // node to the canvas (dictation shortcut targeting).
+  useEffect(() => {
+    onModalNodeChange(modalNodeId)
+    if (modalNodeId) useAgentStatus.getState().clearUnread(modalNodeId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalNodeId])
   const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
