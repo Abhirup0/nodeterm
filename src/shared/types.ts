@@ -633,6 +633,12 @@ export interface Settings {
   gitAutoFetch: boolean
   /** Whether the one-time notification consent prompt has been shown. */
   notifyConsentAsked: boolean
+  /** Play a retro sound effect when a turn finishes / a session needs you (renderer/lib/sfx.ts).
+   *  Unlike OS notifications this fires whether or not the window is focused — the point is to
+   *  catch a finish while you're looking at ANOTHER node. Throttled per node. */
+  soundEffects: boolean
+  /** Sound-effect volume, 0..1. */
+  soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
@@ -721,6 +727,8 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyOnClaudeDone: true,
   gitAutoFetch: true,
   notifyConsentAsked: false,
+  soundEffects: true,
+  soundVolume: 0.5,
   customAgents: [],
   claudeAccounts: [],
   systemAccountLabel: '',
