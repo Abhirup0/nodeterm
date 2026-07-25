@@ -269,6 +269,15 @@ class NotchHudController {
       focusable: false,
       skipTaskbar: true,
       show: false,
+      // LOAD-BEARING (field bug: the capsule rendered as a detached black box BELOW the menu bar
+      // instead of fused with the notch). AppKit's -[NSWindow constrainFrameRect:toScreen:] pushes
+      // every window down so it can't overlap the menu bar / notch strip; Electron only skips that
+      // constraint when enableLargerThanScreen is set. Without it our y = display.bounds.y request
+      // is silently clamped to workArea.y and the window can never paint over the notch.
+      enableLargerThanScreen: true,
+      // NSPanel (non-activating), the same window class agent-notch uses for its indicator: floats
+      // over fullscreen spaces and never takes key/main.
+      type: 'panel',
       // Do not steal the space or animate; it is a passive overlay.
       acceptFirstMouse: true,
       backgroundColor: '#00000000',
@@ -324,13 +333,18 @@ class NotchHudController {
     this.model.prune(now)
     const rows = this.model.buildRows(now, this.deps.getNodeTitle)
     const g = this.geometry()
+    // Did AppKit still push us below the menu bar despite enableLargerThanScreen (older macOS, an
+    // unusual display arrangement)? Then the window CANNOT paint over the notch, and reserving the
+    // fused top strip would only make the capsule a tall detached box — the exact field bug. Tell
+    // the renderer so it drops the reserved strip and draws a compact pill instead.
+    const clamped = w.getBounds().y > g.y
     w.webContents.send(IPC.hudRows, {
       rows,
       bar: g.bar,
       width: g.width,
       notchWidth: g.notchWidth,
       notchCenterX: g.notchCenterX,
-      hasNotch: g.hasNotch
+      hasNotch: g.hasNotch && !clamped
     })
   }
 }
