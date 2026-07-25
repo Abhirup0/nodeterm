@@ -1137,3 +1137,35 @@ describe('createLiveUpdatePush', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+
+describe('live-update: the You: prompt line', () => {
+  it('rides the working start edge only', async () => {
+    const posts: any[] = []
+    let emit: ((c: any) => void) | null = null
+    const h = createLiveUpdatePush({
+      subscribeStateChange: (cb) => {
+        emit = cb
+        return () => {}
+      },
+      subscribeNowChange: () => () => {},
+      getHostIdentity: () => ({ hostDeviceId: 'h', hostToken: 't', hasPairedPhone: true }) as never,
+      mobilePushEnabled: () => true,
+      mobileLiveActivities: () => true,
+      isPackaged: () => true,
+      apiBase: 'https://example.invalid',
+      fetchImpl: (async (_u: string, init: any) => {
+        posts.push(JSON.parse(init.body))
+        return { ok: true, status: 200, json: async () => ({}) } as never
+      }) as never
+    })
+    emit!({ nodeId: 'n1', event: 'start', state: 'working', prompt: 'fix the login bug', ts: 1 })
+    emit!({ nodeId: 'n1', event: 'end', state: 'done', prompt: 'should be dropped', ts: 2 })
+    await h._flushNow()
+    const items = posts.flatMap((p) => p.updates)
+    expect(items.find((i: any) => i.state === 'working')?.prompt).toBe('fix the login bug')
+    // An end edge never carries a stale You: line.
+    expect(items.find((i: any) => i.state === 'done')?.prompt).toBeUndefined()
+    h.stop()
+  })
+})

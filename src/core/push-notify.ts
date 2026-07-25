@@ -352,6 +352,9 @@ const MAX_UPDATES_PER_CALL = 20
 // Live-activity field caps (Apple content-state stays small).
 const LIVE_ACTIVITY_MAX = 80
 const LIVE_MESSAGE_MAX = 120
+// The `You: …` line. Same cap the mirror already applied — clipped again here because the field
+// crosses a process/network boundary and the backend caps independently.
+const LIVE_PROMPT_MAX = 120
 
 /** One entry of the `/v1/push/live-update` `updates[]` array (backend contract). */
 export interface LiveUpdateItem {
@@ -363,6 +366,9 @@ export interface LiveUpdateItem {
   activity?: string
   contextPercent?: number
   message?: string
+  /** working START edge only: the first line of the user prompt that opened the turn — rendered as
+   *  `You: …`, the same line the notch capsule shows. Omitted on every other event. */
+  prompt?: string
   /** needsYou only (spec: interactive-push-live-activities addendum): 'approval' | 'question'.
    *  Omitted otherwise — the backend also forces null on non-needsYou content-state. */
   kind?: 'approval' | 'question'
@@ -489,6 +495,9 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       // ticks' 5). The now-tick sender (emitNow) deliberately omits this.
       edge: true,
       ...(c.message ? { message: c.message.slice(0, LIVE_MESSAGE_MAX) } : {}),
+      // The prompt rides the working start edge only (the mirror sets it there), so a needs-you or
+      // an end never carries a stale "You:" line.
+      ...(c.state === 'working' && c.prompt ? { prompt: c.prompt.slice(0, LIVE_PROMPT_MAX) } : {}),
       ...(needsYou && c.kind ? { kind: c.kind } : {}),
       ...(needsYou && c.options && c.options.length > 0 ? { options: c.options } : {}),
       ...(needsYou && c.multiSelect ? { multiSelect: true } : {}),
