@@ -201,6 +201,76 @@ export function __resetAgentRestartForTests(): void {
   restartFns.clear()
 }
 
+// ── Bulk run: who gets restarted, and how the run is summed up ──────────────────────────
+
+/** One canvas node as the bulk action sees it. `agentId` is the agent the node was CREATED as
+ *  (`data.agentId`, legacy `tags` fallback) — the very value the node's restart closure captured,
+ *  not a hook-detected one, so this filter and that closure agree on what is an agent. */
+export interface BulkRestartCandidate {
+  id: string
+  agentId: string | undefined
+  state: string | undefined
+  sessionId: string | undefined
+  /** Is the node MOUNTED and wired, i.e. does it have a registered restart closure? Registration
+   *  is unconditional for every terminal node, so this answers only "can I reach this pane", never
+   *  "is this an agent" — `agentId` above is the one that decides that. */
+  wired: boolean
+}
+
+export interface BulkRestartPlan {
+  /** Node ids to restart, in canvas order. */
+  runnable: string[]
+  skipped: { working: number; noSession: number }
+}
+
+/**
+ * Partition the canvas for a bulk restart. Two counting rules the summary line depends on:
+ *
+ * - A node that was never a restart target — a plain shell, or a CLI with no `--resume` / no exit
+ *   sequence — is not counted at all. It is not "skipped": the action never claimed it, and
+ *   counting every terminal on the canvas would drown the real skips.
+ * - A node that IS eligible but has no registration (parked, or not mounted yet) is counted as a
+ *   no-session skip rather than dropped silently. There is no pane this canvas can reach, which is
+ *   what "no session" says to the user, and it keeps the counts adding up to the number of nodes
+ *   the action considered — a node vanishing from the summary reads as a bug.
+ */
+export function planBulkRestart(candidates: BulkRestartCandidate[]): BulkRestartPlan {
+  const plan: BulkRestartPlan = { runnable: [], skipped: { working: 0, noSession: 0 } }
+  for (const c of candidates) {
+    const gate = restartEligibility(c.agentId, c.state, c.sessionId)
+    if (!gate.ok) {
+      if (gate.reason === 'working') plan.skipped.working++
+      else if (gate.reason === 'no-session') plan.skipped.noSession++
+      // 'not-resumable' — never a target, see above.
+      continue
+    }
+    if (!c.wired) {
+      plan.skipped.noSession++
+      continue
+    }
+    plan.runnable.push(c.id)
+  }
+  return plan
+}
+
+/**
+ * The bulk run's one line. `'not-eligible'` outcomes are folded into the no-session skips: the
+ * closure re-checks at call time and reports it for a node that stopped being a target between the
+ * plan and its turn (its session died, the pane went away, or a restart was already in flight for
+ * it). `summarizeOutcomes` deliberately counts neither those nor a fifth part, so folding them here
+ * is what keeps them from vanishing — the alternative, a fifth part, is spec-frozen shut.
+ */
+export function summarizeBulkRestart(
+  outcomes: RestartOutcome[],
+  skipped: { working: number; noSession: number }
+): string {
+  const notEligible = outcomes.filter((o) => o === 'not-eligible').length
+  return summarizeOutcomes(outcomes, {
+    working: skipped.working,
+    noSession: skipped.noSession + notEligible
+  })
+}
+
 /** One toast line for the bulk action; zero-count parts are omitted. */
 export function summarizeOutcomes(
   outcomes: RestartOutcome[],

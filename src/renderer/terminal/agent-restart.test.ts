@@ -6,9 +6,12 @@ import {
   guardConcurrentRestart,
   isShellCommand,
   performRestartResume,
+  planBulkRestart,
   registerAgentRestart,
   restartEligibility,
+  summarizeBulkRestart,
   summarizeOutcomes,
+  type BulkRestartCandidate,
   type RestartOutcome
 } from './agent-restart'
 
@@ -371,5 +374,72 @@ describe('summarizeOutcomes', () => {
       summarizeOutcomes(['restarted', 'restarted', 'exit-timeout'], { working: 2, noSession: 1 })
     ).toBe('2 restarted · 1 failed (exit timeout) · 2 skipped (working) · 1 skipped (no session)')
     expect(summarizeOutcomes(['restarted'], { working: 0, noSession: 0 })).toBe('1 restarted')
+  })
+})
+
+describe('planBulkRestart', () => {
+  const cand = (over: Partial<BulkRestartCandidate> & { id: string }): BulkRestartCandidate => ({
+    agentId: 'claude',
+    state: 'waiting',
+    sessionId: `sid-${over.id}`,
+    wired: true,
+    ...over
+  })
+
+  it('runs the eligible nodes and counts the busy / session-less ones', () => {
+    const plan = planBulkRestart([
+      cand({ id: 'a' }),
+      cand({ id: 'b', state: 'working' }),
+      cand({ id: 'c', state: 'blocked' }), // permission prompt — busy, same bucket
+      cand({ id: 'd', sessionId: undefined }),
+      cand({ id: 'e', agentId: 'codex' })
+    ])
+    expect(plan.runnable).toEqual(['a', 'e'])
+    expect(plan.skipped).toEqual({ working: 2, noSession: 1 })
+  })
+
+  it('ignores nodes that were never restart targets, instead of counting them as skips', () => {
+    const plan = planBulkRestart([
+      cand({ id: 'shell', agentId: undefined }), // plain terminal
+      cand({ id: 'gem', agentId: 'gemini' }), // no exit sequence / no --resume
+      cand({ id: 'a' })
+    ])
+    expect(plan.runnable).toEqual(['a'])
+    expect(plan.skipped).toEqual({ working: 0, noSession: 0 })
+  })
+
+  it('counts an eligible but unwired node (parked / not mounted) as a no-session skip', () => {
+    const plan = planBulkRestart([cand({ id: 'a' }), cand({ id: 'parked', wired: false })])
+    expect(plan.runnable).toEqual(['a'])
+    expect(plan.skipped).toEqual({ working: 0, noSession: 1 })
+  })
+
+  it('keeps canvas order', () => {
+    const plan = planBulkRestart([cand({ id: 'z' }), cand({ id: 'm' }), cand({ id: 'a' })])
+    expect(plan.runnable).toEqual(['z', 'm', 'a'])
+  })
+})
+
+describe('summarizeBulkRestart', () => {
+  it("folds 'not-eligible' outcomes into the no-session skips (the line stays four parts)", () => {
+    expect(
+      summarizeBulkRestart(['restarted', 'not-eligible', 'not-eligible'], {
+        working: 1,
+        noSession: 1
+      })
+    ).toBe('1 restarted · 1 skipped (working) · 3 skipped (no session)')
+  })
+
+  it('reports a run where every node was busy', () => {
+    expect(summarizeBulkRestart([], { working: 2, noSession: 0 })).toBe(
+      '0 restarted · 2 skipped (working)'
+    )
+  })
+
+  it('matches summarizeOutcomes when nothing turned out ineligible', () => {
+    const outcomes: RestartOutcome[] = ['restarted', 'exit-timeout']
+    expect(summarizeBulkRestart(outcomes, { working: 0, noSession: 0 })).toBe(
+      summarizeOutcomes(outcomes, { working: 0, noSession: 0 })
+    )
   })
 })

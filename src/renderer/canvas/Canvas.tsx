@@ -115,6 +115,14 @@ import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { transport } from '../terminal/local-transport'
 import { sshFs } from '../terminal/ssh-fs'
+import {
+  agentRestartFn,
+  planBulkRestart,
+  restartEligibility,
+  summarizeBulkRestart,
+  type BulkRestartPlan,
+  type RestartOutcome
+} from '../terminal/agent-restart'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
@@ -342,6 +350,20 @@ const ropeEdge = (id: string, source: string, target: string, color: string): Ed
 
 const minimapNodeColor = (n: Node): string =>
   (n.data as { color?: string })?.color ?? '#0a84ff'
+
+/** The agent a terminal node was CREATED as — `data.agentId` with the legacy `tags` fallback.
+ *  Deliberately NOT `agentIdOf`, whose extra hook-status fallback also reports a plain terminal
+ *  someone typed `claude` into by hand: TerminalNode's restart closure captures exactly the
+ *  derivation below, so a node offered a restart on the strength of the wider one would get a row
+ *  whose closure refuses every click. Anything else (a shell, a sticky, an editor) is undefined,
+ *  which `restartEligibility` reads as `not-resumable`. */
+const restartAgentIdOf = (n: Node | undefined): string | undefined => {
+  if (!n || n.type !== 'terminal') return undefined
+  return (
+    (n.data.agentId as string | undefined) ??
+    (((n.data.tags as string[]) ?? []).includes('claude') ? 'claude' : undefined)
+  )
+}
 
 // The minimap subscribes to agent status HERE, in its own tiny component — not in Canvas.
 // Canvas must not subscribe to the whole status map (every working/waiting flip would re-render
@@ -3579,6 +3601,98 @@ export function Canvas() {
     [setNodes]
   )
 
+  // Restart ONE agent CLI in place: quit it and relaunch it with the provider's own `--resume`, so
+  // a newly released model shows up in its model list without losing the conversation. The node's
+  // registered closure owns the whole choreography (and re-checks eligibility + liveness at call
+  // time, so a stale menu cannot force a restart onto a session that just went busy); all that is
+  // left here is telling the user how it went. Up to ~6s of exit polling plus the echo-verified
+  // resume line, hence the await before the notice.
+  const restartAgentNode = useCallback(async (nodeId: string) => {
+    const fn = agentRestartFn(nodeId)
+    if (!fn) return // node unmounted between opening the menu and clicking
+    const outcome = await fn()
+    // 'info' fades itself out; anything that did NOT restart is left on screen to be read and
+    // dismissed — the pane is untouched either way (nothing is ever killed).
+    setNotice(
+      outcome === 'restarted'
+        ? { kind: 'info', text: 'Agent restarted — conversation resumed.' }
+        : outcome === 'exit-timeout'
+          ? {
+              kind: 'error',
+              text: 'Restart failed: the CLI did not quit in time. The session was left running.'
+            }
+          : {
+              kind: 'error',
+              // 'not-eligible' covers all three: the gate re-checked and refused, the pane went
+              // away, or a restart of this node was already in flight (the per-node action and the
+              // bulk one can reach the same node).
+              text: 'Restart skipped: this session is busy, already restarting, or has nothing to resume.'
+            }
+    )
+  }, [])
+
+  // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
+  // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
+  const bulkRestartPlan = useCallback((): BulkRestartPlan => {
+    const byId = useAgentStatus.getState().byId
+    return planBulkRestart(
+      nodesRef.current.map((n) => ({
+        id: n.id,
+        agentId: restartAgentIdOf(n),
+        state: byId[n.id]?.state,
+        sessionId: byId[n.id]?.sessionId,
+        // Registration is unconditional for every terminal node, so this says only "mounted and
+        // wired", never "is an agent" — `agentId` above is what decides that.
+        wired: !!agentRestartFn(n.id)
+      }))
+    )
+  }, [])
+
+  /** Does this canvas hold anything the bulk restart owns? Busy / session-less agent nodes count:
+   *  the action still has something to report about them, and hiding the entry the moment an agent
+   *  starts working would make it flicker in and out of the menu. */
+  const hasRestartableAgents = useCallback((): boolean => {
+    const p = bulkRestartPlan()
+    return p.runnable.length + p.skipped.working + p.skipped.noSession > 0
+  }, [bulkRestartPlan])
+
+  // Bulk in-place restart (new model / CLI update): quit + resume every IDLE agent session on the
+  // active project's canvas. Working (or permission-blocked) sessions are never interrupted — they
+  // are skipped and counted, as are nodes with nothing to resume. Confirmed first: the palette runs
+  // a fuzzy-matched row on Enter, and this one reaches every agent on the canvas at once.
+  const restartIdleAgents = useCallback(() => {
+    const plan = bulkRestartPlan()
+    if (!plan.runnable.length) {
+      // Nothing to run, but the skips are still the answer to "why did nothing happen?".
+      setNotice({ kind: 'info', text: summarizeBulkRestart([], plan.skipped) })
+      return
+    }
+    setConfirm({
+      message:
+        `Restart ${plan.runnable.length} idle agent ${plan.runnable.length > 1 ? 'sessions' : 'session'}? ` +
+        `Each CLI quits and relaunches with --resume, so the conversation continues. ` +
+        `Sessions that are working are skipped.`,
+      confirmLabel: 'Restart',
+      onConfirm: () => {
+        setConfirm(null)
+        void (async () => {
+          const outcomes: RestartOutcome[] = []
+          // Sequential on purpose (spec): each restart types into its own pane and then verifies
+          // the echo of the resume line, and the whole canvas shares one PTY transport. The user
+          // gets ONE notice at the end rather than a progress UI — the run is a handful of nodes
+          // and each is visibly restarting in its own pane meanwhile.
+          for (const id of plan.runnable) {
+            const fn = agentRestartFn(id)
+            // Unmounted since the plan was made: 'not-eligible' is folded into the no-session
+            // skips by summarizeBulkRestart, so it is still counted.
+            outcomes.push(fn ? await fn() : 'not-eligible')
+          }
+          setNotice({ kind: 'info', text: summarizeBulkRestart(outcomes, plan.skipped) })
+        })()
+      }
+    })
+  }, [bulkRestartPlan, setConfirm])
+
   // Run Claude's /branch in this node, then open a new node that resumes the original
   // conversation (claude -r <ORIGINAL_ID>). The source node stays on the new branch.
   // We already know the current session id from the hooks; only fall back to parsing the
@@ -3918,6 +4032,39 @@ export function Canvas() {
             { label: 'Reload terminal', icon: <IconReload />, onClick: () => reloadTerminals(ids) }
           ] as MenuItem[])
         : []),
+      // Restart the agent CLI itself (single selection): quit it and relaunch with `--resume`, so a
+      // newly released model appears in its model list with the conversation intact. Unlike "Reload
+      // terminal" above (which re-attaches the pane and leaves the CLI running) this one types into
+      // the session, so the row is shown only for a CLI we know how to quit AND resume.
+      ...(ids.length === 1
+        ? (() => {
+            const n = nodesRef.current.find((x) => x.id === ids[0])
+            const st = useAgentStatus.getState().byId[ids[0]]
+            const gate = restartEligibility(restartAgentIdOf(n), st?.state, st?.sessionId)
+            // 'not-resumable' is permanent (a plain shell, gemini, a custom CLI with no exit
+            // command) — no row at all. The other two are temporary, so the row stays and says
+            // what to wait for instead of disappearing and teaching nothing.
+            if (!gate.ok && gate.reason === 'not-resumable') return []
+            // The registry answers "is this node mounted and wired" only: every terminal node
+            // registers, agent or not.
+            const why = !gate.ok
+              ? gate.reason === 'working'
+                ? 'This session is busy — restart it once its turn (or permission prompt) is done.'
+                : 'Nothing to resume yet — this session has not reported an id.'
+              : !agentRestartFn(ids[0])
+                ? 'This terminal is not attached right now.'
+                : undefined
+            return [
+              {
+                label: 'Restart agent (resume)',
+                icon: <IconReload />,
+                disabled: !!why,
+                hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
+                onClick: () => void restartAgentNode(ids[0])
+              }
+            ] as MenuItem[]
+          })()
+        : []),
       { type: 'separator' },
       { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => deleteNodes(ids) }
     ],
@@ -3933,6 +4080,7 @@ export function Canvas() {
       toggleCollapseNodes,
       toggleMarkdown,
       reloadTerminals,
+      restartAgentNode,
       deleteNodes
     ]
   )
@@ -4101,7 +4249,19 @@ export function Canvas() {
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
-          { label: 'Fit view', icon: <IconFit />, onClick: fitAll }
+          { label: 'Fit view', icon: <IconFit />, onClick: fitAll },
+          // Project-wide: restart every idle agent CLI in place (new model pickup). Hidden on a
+          // canvas with no restartable agent node — there it could only ever report "0 restarted".
+          ...(hasRestartableAgents()
+            ? [
+                {
+                  label: 'Restart idle agent sessions (resume)',
+                  icon: <IconReload />,
+                  hint: 'Quits each idle agent CLI and relaunches it with --resume.',
+                  onClick: restartIdleAgents
+                } as MenuItem
+              ]
+            : [])
         ]
       })
     },
@@ -4119,7 +4279,9 @@ export function Canvas() {
       openWorktreeDialog,
       isSshProject,
       selectAll,
-      fitView
+      fitView,
+      hasRestartableAgents,
+      restartIdleAgents
     ]
   )
 
@@ -5867,7 +6029,20 @@ export function Canvas() {
         run: () => void connectRemote()
       },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
-      { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() }
+      { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
+      // Hidden when the canvas has no restartable agent node — the row would have nothing to act
+      // on. `hint` is searchable, so "new model" / "update" find it too.
+      ...(hasRestartableAgents()
+        ? [
+            {
+              id: 'restart-idle-agents',
+              label: 'Restart idle agent sessions (resume)',
+              hint: 'new model update',
+              icon: <IconReload />,
+              run: restartIdleAgents
+            } as Command
+          ]
+        : [])
     ]
     const store = useProjects.getState()
     store.projects
@@ -5954,7 +6129,9 @@ export function Canvas() {
     goToNode,
     bufferCache,
     connectRemote,
-    addSshTerminal
+    addSshTerminal,
+    hasRestartableAgents,
+    restartIdleAgents
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
