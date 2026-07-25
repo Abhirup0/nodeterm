@@ -3,6 +3,7 @@ export type SettingsSectionId =
   | 'shell'
   | 'behavior'
   | 'appearance'
+  | 'notch'
   | 'phone'
   | 'speech'
   | 'agents'
@@ -20,10 +21,17 @@ export type SettingsSectionId =
   | 'updates'
   | 'privacy'
 
+export interface SettingsSectionRef {
+  id: SettingsSectionId
+  title: string
+  /** Only meaningful on macOS (the notch capsule) — hidden elsewhere by `visibleSettingsGroups`. */
+  macOnly?: boolean
+}
+
 export interface SettingsGroup {
   id: string
   title: string
-  sections: { id: SettingsSectionId; title: string }[]
+  sections: SettingsSectionRef[]
 }
 
 // Grouped by what the user is DOING, not by where the code lives: AI work first (it is what
@@ -55,6 +63,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     title: 'Interface',
     sections: [
       { id: 'appearance', title: 'Appearance' },
+      { id: 'notch', title: 'Notch', macOnly: true },
       { id: 'notifications', title: 'Notifications' },
       { id: 'speech', title: 'Speech' }
     ]
@@ -85,4 +94,16 @@ export const FIRST_SECTION_ID: SettingsSectionId = 'agents'
 
 export function allSectionIds(): SettingsSectionId[] {
   return SETTINGS_GROUPS.flatMap((g) => g.sections.map((s) => s.id))
+}
+
+/**
+ * The groups as the sidebar should render them for this platform: a mac-only section is dropped
+ * entirely off macOS (an empty group would be dropped too, though none exists today). Pure — the
+ * caller passes the platform so this stays testable.
+ */
+export function visibleSettingsGroups(isMac: boolean): SettingsGroup[] {
+  if (isMac) return SETTINGS_GROUPS
+  return SETTINGS_GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => !s.macOnly) })).filter(
+    (g) => g.sections.length > 0
+  )
 }

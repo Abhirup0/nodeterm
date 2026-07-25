@@ -34,6 +34,7 @@ interface HudPush {
   notchWidth: number
   notchCenterX: number
   hasNotch: boolean
+  hoverExpand: boolean
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -68,6 +69,8 @@ let expanded = false
 let latestRows: HudRow[] = []
 // Notch width from main's geometry push — drives the symmetric right-hand padding.
 let notchWidthPx = 168
+// Hover-to-expand (settings.notchHoverExpand). Off = the capsule only expands on click.
+let hoverExpand = true
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
 
@@ -86,7 +89,7 @@ let hoverTimer: number | undefined
 capsule.addEventListener('pointerenter', () => {
   window.hud.setIgnoreMouse(false)
   window.clearTimeout(hoverTimer)
-  hoverTimer = window.setTimeout(() => setExpanded(true), HOVER_OPEN_MS)
+  if (hoverExpand) hoverTimer = window.setTimeout(() => setExpanded(true), HOVER_OPEN_MS)
 })
 capsule.addEventListener('pointerleave', () => {
   window.clearTimeout(hoverTimer)
@@ -370,6 +373,7 @@ function applyGeometry(push: HudPush): void {
     rs.setProperty('--notch-width', `${push.notchWidth}px`)
   }
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
+  if (typeof push.hoverExpand === 'boolean') hoverExpand = push.hoverExpand
   // No physical notch → draw a standalone floating pill instead of fusing to y=0.
   document.documentElement.classList.toggle('notchless', push.hasNotch === false)
 }

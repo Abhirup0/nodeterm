@@ -698,6 +698,12 @@ export interface Settings {
    *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
    *  macOS + desktop only (ignored on other platforms / Server Edition). */
   notchHud: boolean
+  /** Assumed physical notch width in px. macOS exposes no API for it (Electron has no
+   *  `auxiliaryTopLeftArea`), so the capsule has to assume one — this is the knob that makes it sit
+   *  flush on YOUR Mac. Bigger = the capsule sits further left. */
+  notchWidth: number
+  /** Expand the notch panel on hover (after a short dwell). Off = click the capsule to expand. */
+  notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
 }
@@ -755,6 +761,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hookReplyApprovals: true,
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
+  notchWidth: 168,
+  notchHoverExpand: true,
   speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 

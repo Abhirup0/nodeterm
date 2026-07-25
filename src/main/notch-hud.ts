@@ -32,6 +32,9 @@ const NOTCH_BAR_FLOOR = 24
  * capsule LEFT, lower it to slide the capsule RIGHT toward the notch.
  */
 const NOTCH_WIDTH = 168
+/** Bounds for the user-tunable notch width (settings.notchWidth). */
+export const NOTCH_WIDTH_MIN = 100
+export const NOTCH_WIDTH_MAX = 320
 /** How long the panel must stay open before closing it counts as "read" (clears done latches). */
 const PANEL_READ_MS = 700
 /**
@@ -93,6 +96,20 @@ export interface NotchHudDeps {
   getNodeTitle: (nodeId: string) => string | undefined
 }
 
+/** The user-tunable part of the HUD (Settings → Interface → Notch). Applied live, no restart. */
+export interface NotchHudTunables {
+  enabled: boolean
+  /** Assumed physical notch width in px — the knob that makes the capsule sit flush. */
+  notchWidth: number
+  /** Expand the panel on hover (else click-only). */
+  hoverExpand: boolean
+}
+
+/** Clamp a hand-editable width to something that can't push the capsule off the display. */
+function sanitizeNotchWidth(px: number): number {
+  return Number.isFinite(px) ? Math.max(NOTCH_WIDTH_MIN, Math.min(NOTCH_WIDTH_MAX, Math.round(px))) : NOTCH_WIDTH
+}
+
 class NotchHudController {
   private model: HudModel = createHudModel()
   private unsubs: (() => void)[] = []
@@ -107,7 +124,10 @@ class NotchHudController {
   private panelOpenedAt = 0
   private readonly onDisplayChange: () => void
 
-  constructor(private deps: NotchHudDeps) {
+  constructor(
+    private deps: NotchHudDeps,
+    private tunables: { notchWidth: number; hoverExpand: boolean }
+  ) {
     this.onSetIgnoreMouse = (_e, ignore) => {
       // Ignore-mouse ON = click-through (the strip is transparent to the app beneath); OFF while the
       // pointer is over the hotspot/panel so clicks land. `forward` keeps move events flowing so the
@@ -229,6 +249,12 @@ class NotchHudController {
     this.ipcBound = false
   }
 
+  /** Apply live tunables and re-push, so a slider drag moves the capsule as you drag. */
+  setTunables(t: { notchWidth: number; hoverExpand: boolean }): void {
+    this.tunables = { notchWidth: t.notchWidth, hoverExpand: t.hoverExpand }
+    this.schedulePush()
+  }
+
   private geometry(): {
     x: number
     y: number
@@ -256,7 +282,7 @@ class NotchHudController {
       width: b.width,
       height,
       bar,
-      notchWidth: NOTCH_WIDTH,
+      notchWidth: sanitizeNotchWidth(this.tunables.notchWidth),
       notchCenterX: Math.round(b.width / 2),
       hasNotch
     }
@@ -364,6 +390,7 @@ class NotchHudController {
       bar: g.bar,
       width: g.width,
       notchWidth: g.notchWidth,
+      hoverExpand: this.tunables.hoverExpand,
       notchCenterX: g.notchCenterX,
       hasNotch: g.hasNotch && !clamped
     })
@@ -384,25 +411,33 @@ function supported(): boolean {
  * Create the HUD (if darwin + enabled). Idempotent. `deps.getNodeTitle` is retained so a later
  * `setNotchHudEnabled(true)` (settings toggle) can recreate it without re-plumbing.
  */
-export function initNotchHud(deps: NotchHudDeps, enabled: boolean): void {
+export function initNotchHud(deps: NotchHudDeps, t: NotchHudTunables): void {
   controllerDeps = deps
-  if (!supported() || !enabled) return
+  if (!supported() || !t.enabled) return
   if (controller) return
-  controller = new NotchHudController(deps)
+  controller = new NotchHudController(deps, t)
   controller.start()
 }
 
-/** Live settings toggle: create or destroy the HUD window without a restart. */
-export function setNotchHudEnabled(enabled: boolean): void {
+/**
+ * Live settings apply: create/destroy the window on the enable toggle, and push the geometry
+ * tunables (notch width, hover-expand) straight through to a running HUD — no restart, so the
+ * width slider can be dragged while watching the capsule move.
+ */
+export function applyNotchHudSettings(t: NotchHudTunables): void {
   if (!supported()) return
-  if (enabled) {
-    if (controller || !controllerDeps) return
-    controller = new NotchHudController(controllerDeps)
-    controller.start()
-  } else {
+  if (!t.enabled) {
     controller?.stop()
     controller = null
+    return
   }
+  if (controller) {
+    controller.setTunables(t)
+    return
+  }
+  if (!controllerDeps) return
+  controller = new NotchHudController(controllerDeps, t)
+  controller.start()
 }
 
 /** Tear the HUD down (app quit). */

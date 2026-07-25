@@ -6,6 +6,7 @@ import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import { keyLabel } from '@shared/platform-utils'
 import { useSettings } from '../../state/settings'
 import { useEntitlement } from '../../state/entitlement'
+import { Switch } from '@renderer/ui/Switch'
 import { AgentIcon } from '../../lib/agentIcons'
 import {
   OnbBrandMark,
@@ -14,6 +15,7 @@ import {
   SceneAgents,
   SceneDictation,
   SceneKanban,
+  SceneNotch,
   SceneNotify,
   ScenePhone
 } from './scenes'
@@ -32,9 +34,20 @@ function formatSize(mb: number): string {
   return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`
 }
 
-/** Info step + the setting it configures, one per screen. Step 0 is the welcome cover;
- *  the last step is the mobile-app announcement (info-only). */
-const STEP_COUNT = 6
+/** Info step + the setting it configures, one per screen. Step 0 is the welcome cover; the last
+ *  step is the mobile-app announcement (info-only). Steps are addressed by ID, not index, because
+ *  the notch step only exists on macOS — an index-keyed tour would shift under it. */
+const STEPS = [
+  'cover',
+  'agents',
+  'dictation',
+  'kanban',
+  'notify',
+  ...(isMac ? (['notch'] as const) : []),
+  'phone'
+] as const
+type StepId = (typeof STEPS)[number]
+const STEP_COUNT = STEPS.length
 
 /**
  * First-run setup tour: welcome → agents → dictation → kanban → notifications. Each step
@@ -101,7 +114,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
   const [kanbanTried, setKanbanTried] = useState(false)
   const [kanbanPulse, setKanbanPulse] = useState(0)
   useEffect(() => {
-    if (step !== 3) return
+    if (STEPS[step] !== 'kanban') return
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
         e.preventDefault()
@@ -145,17 +158,18 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
   const dictKeys = shortcutKeyParts(settings.speech.shortcut, isMac)
   const dictHold = isHoldChord(settings.speech.shortcut)
 
+  const stepId: StepId = STEPS[step] ?? 'cover'
   const next = () => setStep((s) => Math.min(s + 1, STEP_COUNT - 1))
   const back = () => setStep((s) => Math.max(s - 1, 0))
 
   return createPortal(
     <div className="onb">
-      {step === 0 && <OnbGhostCanvas />}
+      {stepId === 'cover' && <OnbGhostCanvas />}
       <button className="onb-skip" onClick={onClose}>
         Skip setup
       </button>
 
-      {step === 0 ? (
+      {stepId === 'cover' ? (
         <div className="onb-cover">
           <div className="onb-cover__brand">
             <OnbBrandMark />
@@ -193,16 +207,17 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
       ) : (
         <div className="onb-card">
           <div className="onb-scene">
-            {step === 1 && <SceneAgents agentId={agentId} label={agent.label} color={agent.color} />}
-            {step === 2 && <SceneDictation keys={dictKeys.map((k) => keyLabel(k, isMac))} hold={dictHold} />}
-            {step === 3 && <SceneKanban pulseKey={kanbanPulse} />}
-            {step === 4 && <SceneNotify />}
-            {step === 5 && <ScenePhone />}
+            {stepId === 'agents' && <SceneAgents agentId={agentId} label={agent.label} color={agent.color} />}
+            {stepId === 'dictation' && <SceneDictation keys={dictKeys.map((k) => keyLabel(k, isMac))} hold={dictHold} />}
+            {stepId === 'kanban' && <SceneKanban pulseKey={kanbanPulse} />}
+            {stepId === 'notify' && <SceneNotify />}
+            {stepId === 'notch' && <SceneNotch />}
+            {stepId === 'phone' && <ScenePhone />}
           </div>
           <div className="onb-pane">
             <div className="onb-step-no">Step {step} of {STEP_COUNT - 1}</div>
 
-            {step === 1 && (
+            {stepId === 'agents' && (
               <>
                 <h2>Everything is a node</h2>
                 <p>
@@ -230,7 +245,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               </>
             )}
 
-            {step === 2 && (
+            {stepId === 'dictation' && (
               <>
                 <h2>Talk to your terminal</h2>
                 <p>
@@ -276,7 +291,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               </>
             )}
 
-            {step === 3 && (
+            {stepId === 'kanban' && (
               <>
                 <h2>One project, two views</h2>
                 <p>
@@ -302,7 +317,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               </>
             )}
 
-            {step === 4 && (
+            {stepId === 'notify' && (
               <>
                 <h2>Know when an agent needs you</h2>
                 <p>
@@ -319,7 +334,34 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               </>
             )}
 
-            {step === 5 && (
+            {stepId === 'notch' && (
+              <>
+                <h2>Your agents, inside the notch</h2>
+                <p>
+                  On a MacBook, nodeterm can grow the notch into a small black capsule: a walking
+                  mascot for every agent that's working, a red dot when one needs you, and a green
+                  blob when one has finished and you haven't looked yet.
+                </p>
+                <p>
+                  Point at it and it opens a mini panel of your live sessions — hit <strong>Go</strong>{' '}
+                  and nodeterm comes forward with that node centred.
+                </p>
+                <div className="onb-toggle-row">
+                  <Switch
+                    checked={settings.notchHud}
+                    ariaLabel="Notch HUD"
+                    onChange={(on) => update({ notchHud: on })}
+                  />
+                  <span>Show the notch HUD</span>
+                </div>
+                <div className="onb-fineprint">
+                  Fine-tune it any time in Settings → Interface → Notch — including the notch width,
+                  which is what makes the capsule sit flush on your Mac.
+                </div>
+              </>
+            )}
+
+            {stepId === 'phone' && (
               <>
                 <h2>Your sessions, in your pocket</h2>
                 <p>

@@ -7434,6 +7434,15 @@ body,
   color: var(--muted);
   margin-bottom: 8px;
 }
+.onb-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 4px;
+  font-size: 13px;
+  color: var(--text, #f5f5f7);
+}
+
 .onb-fineprint {
   margin-top: 10px;
   font-size: 11.5px;
@@ -7969,8 +7978,117 @@ body,
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.14);
 }
+.onb-mini__bar--short {
+  flex: 0 0 46px;
+}
 
 /* -- notify scene -- */
+/* --- Step: the notch capsule (SceneNotch) ------------------------------------------------
+   A laptop lid seen from the front: the black top bar carries the notch, the capsule grows out
+   of it sideways (never taller — the whole point of the real design), and every loop the mini
+   session panel drops out of the capsule and retracts. */
+.onb-scene--notch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.onb-lid {
+  position: relative;
+  width: 78%;
+  max-width: 340px;
+  border-radius: 12px 12px 6px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #0b0b0d;
+  overflow: visible;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+}
+.onb-lid__bar {
+  position: relative;
+  height: 26px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  border-radius: 11px 11px 0 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
+}
+.onb-lid__screen {
+  height: 132px;
+  border-radius: 0 0 5px 5px;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(163, 141, 255, 0.16), transparent 60%),
+    #101014;
+}
+/* The capsule: notch-black, top corners square (fused to the bar), bottom corners rounded. */
+.onb-capsule {
+  position: absolute;
+  top: 0;
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding-left: 8px;
+  background: #000;
+  border-radius: 0 0 10px 10px;
+  animation: onb-capsule 6s ease-in-out infinite;
+}
+.onb-capsule__left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Stands in for the physical notch the capsule is fused to. */
+.onb-capsule__notch {
+  width: 62px;
+  height: 26px;
+}
+.onb-capsule__blob {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgb(48, 209, 88);
+  animation: onb-blob 1.6s ease-in-out infinite;
+}
+@keyframes onb-capsule {
+  0%, 10% { padding-right: 8px; }
+  30%, 100% { padding-right: 8px; }
+}
+@keyframes onb-blob {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+/* The mini session panel dropping out of the capsule. */
+.onb-notchpanel {
+  position: absolute;
+  top: 26px;
+  width: 168px;
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #000;
+  border-radius: 0 0 12px 12px;
+  transform-origin: top center;
+  animation: onb-notchpanel 6s ease-in-out infinite;
+}
+.onb-notchpanel__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.onb-notchpanel__go {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 600;
+  color: #0a84ff;
+  background: rgba(10, 132, 255, 0.18);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+@keyframes onb-notchpanel {
+  0%, 22% { transform: scaleY(0.05); opacity: 0; }
+  34%, 72% { transform: scaleY(1); opacity: 1; }
+  86%, 100% { transform: scaleY(0.05); opacity: 0; }
+}
+
 .onb-scene--notify {
   display: flex;
   align-items: center;
