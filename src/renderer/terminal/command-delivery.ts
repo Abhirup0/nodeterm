@@ -51,9 +51,9 @@ export function deliverCommand(io: DeliveryIo, cmd: string): () => void {
     if (timer) clearTimeout(timer)
     unsub?.()
   }
-  // Close the delivery BEFORE writing Enter: an io whose write echoes back synchronously
-  // (the restart choreography's pane io does) would otherwise re-enter this listener while
-  // the tail still matches and submit forever.
+  // Close the delivery BEFORE writing Enter: an io whose write echoes back synchronously (the
+  // in-place restart choreography feeds one) would otherwise re-enter the listener below while
+  // the tail still matches, and submit forever.
   const submit = (): void => {
     finish()
     io.write('\r')
@@ -62,7 +62,8 @@ export function deliverCommand(io: DeliveryIo, cmd: string): () => void {
     if (done) return
     attempt += 1
     echoed = ''
-    io.write(cmd)
+    // Arm the verify timer BEFORE the write, for the same synchronous-echo io: an echo landing
+    // inside write() finishes the delivery, and a timer armed after that would outlive it.
     timer = setTimeout(() => {
       if (done) return
       if (attempt >= DELIVERY_ATTEMPTS) {
@@ -72,6 +73,7 @@ export function deliverCommand(io: DeliveryIo, cmd: string): () => void {
       io.write(KILL_LINE)
       tryOnce()
     }, VERIFY_TIMEOUT_MS)
+    io.write(cmd)
   }
 
   unsub = io.onData((chunk) => {

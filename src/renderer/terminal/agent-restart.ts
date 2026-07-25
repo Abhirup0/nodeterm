@@ -81,10 +81,23 @@ export async function performRestartResume(d: {
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs))
     let pane: string | null = null
+    let lapse: ReturnType<typeof setTimeout> | undefined
     try {
-      pane = await d.paneCommand()
+      // The query must be bounded, not just its rejection: a wedged tmux server can leave it
+      // pending forever, and the deadline below is only read once it settles — an unbounded
+      // await would hang this restart, and with it the bulk run's summary, permanently. A
+      // lapsed query resolves null, which reads as "not a shell yet".
+      const remaining = Math.max(0, deadline - Date.now())
+      pane = await Promise.race([
+        d.paneCommand(),
+        new Promise<null>((r) => {
+          lapse = setTimeout(() => r(null), remaining)
+        })
+      ])
     } catch {
       // transient IPC failure — keep polling until the deadline
+    } finally {
+      clearTimeout(lapse)
     }
     if (isShellCommand(pane)) break
     if (Date.now() > deadline) return 'exit-timeout'

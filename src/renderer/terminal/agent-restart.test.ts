@@ -114,6 +114,21 @@ describe('performRestartResume', () => {
     expect(written.join('')).not.toContain('--resume')
   })
 
+  it('gives up when the pane query itself never settles', async () => {
+    const { written, io } = fakeIo()
+    const p = performRestartResume({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: () => new Promise<string | null>(() => {}), // wedged tmux server: never settles
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await p).toBe('exit-timeout')
+    expect(written.join('')).not.toContain('--resume')
+  })
+
   it('refuses an agent without an exit sequence', async () => {
     const { io } = fakeIo()
     expect(
@@ -124,6 +139,19 @@ describe('performRestartResume', () => {
         paneCommand: async () => 'zsh'
       })
     ).toBe('not-eligible')
+  })
+
+  it('refuses — without writing the exit — a session id we could never resume into', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performRestartResume({
+        agentId: 'claude',
+        sessionId: '-bad', // rejected by resumeCommand's SAFE_SESSION_ID
+        io,
+        paneCommand: async () => 'zsh'
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([]) // quitting a CLI we cannot resume would just lose the session
   })
 })
 

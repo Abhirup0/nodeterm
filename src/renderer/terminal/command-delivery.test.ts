@@ -27,6 +27,29 @@ function fakeIo() {
   }
 }
 
+/** A transport that echoes back from INSIDE write() — the shape the in-place restart
+ *  choreography feeds deliverCommand. Every other case here uses an io that never echoes on
+ *  write, so only this one can catch a re-entrant submit. */
+function echoingIo() {
+  const writes: string[] = []
+  let cb: ((chunk: string) => void) | undefined
+  return {
+    writes,
+    io: {
+      write: (d: string) => {
+        writes.push(d)
+        cb?.(d)
+      },
+      onData: (fn: (chunk: string) => void) => {
+        cb = fn
+        return () => {
+          cb = undefined
+        }
+      }
+    }
+  }
+}
+
 describe('cleanEcho', () => {
   it('strips CSI, OSC and other escape sequences plus line breaks', () => {
     const noisy = '\x1b[1;32mprompt\x1b[0m \x1b]0;title\x07ec' + '\r\n' + 'ho text\x1b[K'
@@ -84,6 +107,17 @@ describe('deliverCommand', () => {
     vi.advanceTimersByTime(VERIFY_TIMEOUT_MS * DELIVERY_ATTEMPTS)
     f.emit(CMD)
     expect(f.writes).toEqual([CMD])
+  })
+
+  it('submits once against an io that echoes synchronously inside write', () => {
+    const f = echoingIo()
+    deliverCommand(f.io, CMD)
+    // The echo lands while write() is still on the stack: submit must already be closed, or it
+    // re-enters this listener (the tail still matches) and Enters forever.
+    expect(f.writes).toEqual([CMD, '\r'])
+    expect(f.writes.filter((w) => w === '\r')).toHaveLength(1)
+    // ...and a delivery finished inside write() must leave no verify timer behind.
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('ignores echo arriving after submit (no double Enter)', () => {
