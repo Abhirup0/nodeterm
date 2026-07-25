@@ -3576,8 +3576,13 @@ body,
 }
 
 .confirm {
-  width: 320px;
+  width: 420px;
   max-width: 90vw;
+  /* Cap the height so a long message (e.g. an agent control-write preview) can
+     never grow the box past the viewport — the message area scrolls instead. */
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
   background: rgba(40, 40, 42, 0.99);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -3894,6 +3899,11 @@ body,
 
 .confirm__msg {
   margin: 0 0 16px;
+  /* The scrollable region once the box hits its max-height, so the action buttons
+     below stay on-screen instead of being pushed past the viewport. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
