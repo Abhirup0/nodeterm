@@ -86,6 +86,10 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
   label + state). A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
   `getMainWindow().show()/focus()` + `sendToMain(app:focus-node, nodeId)` → `Canvas.focusNodeById`,
   and clears that node's done latch.
+- **Dismissing a row**: hovering a row reveals a `×` (right-click on the row does the same) →
+  `IPC.hudDismiss` → `model.dismiss(nodeId)`. It latches the state the row was hidden AT
+  (`dismissedAt`), so a session hung in `working` (agent died mid-turn) stays hidden while any
+  genuine state change brings the row back. HUD-local only — the node/terminal is untouched.
 - **Notchless fallback** (`hasNotch === false`, e.g. an external monitor or a display with no menu
   bar): the `.notchless` root class draws the capsule as a **standalone floating pill** — a small
   `--pill-top-gap` above it and all-corner `--pill-radius`, since there is no notch to fuse with.
@@ -107,5 +111,6 @@ renderer entry).
 
 ## Out of scope (v1)
 
-Pet-switching config, non-darwin (Windows/Linux) HUD, per-row context menu, multi-monitor notch
+Pet-switching config, non-darwin (Windows/Linux) HUD, a full per-row context menu (dismiss is a
+right-click / hover ×, not a menu), multi-monitor notch
 precision beyond centering, the SDK chat node in the panel.

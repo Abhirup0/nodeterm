@@ -40,6 +40,7 @@ interface HudApi {
   setIgnoreMouse(ignore: boolean): void
   focusNode(nodeId: string): void
   setExpanded(expanded: boolean): void
+  dismiss(nodeId: string): void
 }
 
 declare global {
@@ -265,6 +266,24 @@ function buildRow(row: HudRow): HTMLElement {
   el.append(icon, title, tag, sub)
 
   if (row.subagents.length > 0) el.append(buildSubs(row))
+
+  // Dismiss (hover ×, or right-click anywhere on the row): a session can hang in `working` when its
+  // agent dies mid-turn, and the HUD would carry it forever. Hiding is local to the HUD — the node
+  // and its terminal are untouched, and a real state change brings the row back.
+  const dismiss = (e: Event): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    window.hud.dismiss(row.nodeId)
+  }
+  el.addEventListener('contextmenu', dismiss)
+
+  const close = document.createElement('button')
+  close.className = 'hud-row__close'
+  close.title = 'Remove from HUD'
+  close.setAttribute('aria-label', 'Remove from HUD')
+  close.textContent = '×'
+  close.addEventListener('click', dismiss)
+  el.append(close)
 
   const go = document.createElement('button')
   go.className = 'hud-row__go'

@@ -254,9 +254,41 @@ body {
   padding: 7px 8px;
   border-radius: 9px;
   cursor: pointer;
+  position: relative;
+  transition: padding-right 0.12s ease;
 }
 .hud-row:hover {
   background: rgba(255, 255, 255, 0.06);
+  /* Make room for the dismiss × instead of letting it sit on top of the tag. */
+  padding-right: 26px;
+}
+
+/* Dismiss (×): hover-only, so an idle HUD stays clean. Right-click on the row does the same. */
+.hud-row__close {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 17px;
+  height: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.hud-row:hover .hud-row__close {
+  opacity: 1;
+}
+.hud-row__close:hover {
+  color: #fff;
+  background: rgba(255, 69, 58, 0.75);
 }
 .hud-row__icon {
   grid-row: 1 / span 2;

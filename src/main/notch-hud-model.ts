@@ -60,6 +60,10 @@ interface NodeAccum {
   presentInMirror: boolean
   /** The done highlight has been acknowledged (focused / panel opened) → demote to idle. */
   doneSeen: boolean
+  /** The state this node was manually dismissed AT — hidden until it moves off that state.
+   *  (A session can hang in `working` forever if its agent dies mid-turn; the HUD would show it
+   *  for good. Dismiss hides it, and any genuine state change brings it back.) */
+  dismissedAt?: HudRowState
 }
 
 /** Map an agent's 4-state model to the HUD's 3 live buckets (waiting/blocked collapse to needsYou). */
@@ -95,6 +99,8 @@ export interface HudModel {
   noteFocus(nodeId: string): void
   /** Clear EVERY node's done highlight (the panel was opened — "you looked at it"). */
   notePanelOpened(): void
+  /** Hide a row by hand (a stuck session). It returns if its state genuinely changes. */
+  dismiss(nodeId: string): void
   /** Drop nodes gone from the mirror + idle > 6h. Returns true if anything changed. */
   prune(now: number): boolean
   /** Build the row array (active sessions, newest-active first), joining titles in. */
@@ -228,6 +234,15 @@ export function createHudModel(): HudModel {
     for (const a of nodes.values()) if (a.state === 'done') a.doneSeen = true
   }
 
+  function dismiss(nodeId: string): void {
+    const a = nodes.get(nodeId)
+    if (!a) return
+    // Latch the state we're hiding AT, not a boolean: a node stuck in `working` stays hidden, but
+    // the moment it really moves (done / needs-you / a new turn) it earns its row back.
+    a.dismissedAt = displayState(a)
+    if (a.state === 'done') a.doneSeen = true
+  }
+
   function prune(now: number): boolean {
     let changed = false
     for (const [nodeId, a] of nodes) {
@@ -253,6 +268,8 @@ export function createHudModel(): HudModel {
       const state = displayState(a)
       // The HUD shows active sessions only — nothing when a node is idle/seen.
       if (state === 'idle') continue
+      if (a.dismissedAt === state) continue
+      a.dismissedAt = undefined
       const model = a.sessionId ? modelBySession.get(a.sessionId) : undefined
       rows.push({
         nodeId,
@@ -279,6 +296,7 @@ export function createHudModel(): HudModel {
     applyContextUpdate,
     noteFocus,
     notePanelOpened,
+    dismiss,
     prune,
     buildRows
   }

@@ -102,6 +102,7 @@ class NotchHudController {
   private readonly onSetIgnoreMouse: (_e: unknown, ignore: boolean) => void
   private readonly onFocusNode: (_e: unknown, nodeId: string) => void
   private readonly onExpanded: (_e: unknown, expanded: boolean) => void
+  private readonly onDismiss: (_e: unknown, nodeId: string) => void
   /** When the panel was opened (epoch ms), 0 while collapsed — gates the read-clear below. */
   private panelOpenedAt = 0
   private readonly onDisplayChange: () => void
@@ -125,6 +126,11 @@ class NotchHudController {
         sendToMain(IPC.appFocusNode, nodeId)
       }
       this.model.noteFocus(nodeId)
+      this.schedulePush()
+    }
+    this.onDismiss = (_e, nodeId) => {
+      if (typeof nodeId !== 'string' || !nodeId) return
+      this.model.dismiss(nodeId)
       this.schedulePush()
     }
     this.onExpanded = (_e, expanded) => {
@@ -210,6 +216,7 @@ class NotchHudController {
     ipcMain.on(IPC.hudSetIgnoreMouse, this.onSetIgnoreMouse)
     ipcMain.on(IPC.hudFocusNode, this.onFocusNode)
     ipcMain.on(IPC.hudExpanded, this.onExpanded)
+    ipcMain.on(IPC.hudDismiss, this.onDismiss)
     this.ipcBound = true
   }
 
@@ -218,6 +225,7 @@ class NotchHudController {
     ipcMain.removeListener(IPC.hudSetIgnoreMouse, this.onSetIgnoreMouse)
     ipcMain.removeListener(IPC.hudFocusNode, this.onFocusNode)
     ipcMain.removeListener(IPC.hudExpanded, this.onExpanded)
+    ipcMain.removeListener(IPC.hudDismiss, this.onDismiss)
     this.ipcBound = false
   }
 

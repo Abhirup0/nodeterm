@@ -58,6 +58,8 @@ export const IPC = {
   hudFocusNode: 'hud:focus-node',
   /** hud → main: the panel expanded/collapsed. `true` clears every done latch (you looked). */
   hudExpanded: 'hud:expanded',
+  /** hud → main: dismiss one HUD row by hand (a stuck session). Arg: `nodeId: string`. */
+  hudDismiss: 'hud:dismiss',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
