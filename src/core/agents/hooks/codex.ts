@@ -160,19 +160,20 @@ export function buildCodexHooksAndTrust(
     }
   }
 
-  // Prepend our managed handler to each subscribed event (idempotent — strip any
-  // prior managed copy first) and record the matching trust entry at
-  // groupIndex 0 / handlerIndex 0.
+  // Why: Codex keys hook trust by index, so prepending shifts user hooks out
+  // from under their stored hashes and silently disables them. Append our
+  // managed handler to keep existing indices stable (idempotent — strip any
+  // prior managed copy first) and trust its actual index.
   const trustEntries: CodexTrustEntry[] = []
   for (const eventName of CODEX_EVENTS) {
     const current = Array.isArray(nextHooks[eventName]) ? nextHooks[eventName] : []
     const cleaned = removeManagedFromDefinitions(current)
     const definition: HookDefinition = { hooks: [{ type: 'command', command }] }
-    nextHooks[eventName] = [definition, ...cleaned]
+    nextHooks[eventName] = [...cleaned, definition]
     trustEntries.push({
       sourcePath,
       eventLabel: CODEX_EVENT_LABEL[eventName],
-      groupIndex: 0,
+      groupIndex: cleaned.length,
       handlerIndex: 0,
       command
     })
@@ -263,9 +264,12 @@ export function installCodexHooks(): void {
   }
 
   try {
-    // Prepending keeps the status hook ahead of any user hooks so a slow user
-    // hook can't leave the badge stale. The trust entry is keyed by the local
-    // hooks.json path (computeTrustKey realpath's it to match how codex keys it).
+    // Why: appending keeps user-hook indices stable so their existing Codex
+    // trust entries remain valid. The cost is the one prepending used to buy —
+    // a slow user hook ahead of ours can delay the badge — which is the lesser
+    // failure next to silently disabling the user's whole hook chain. The
+    // managed trust entry is keyed by the local hooks.json path (computeTrustKey
+    // realpath's it to match how codex keys it).
     const built = buildCodexHooksAndTrust(config, command, hooksFile)
     if (!built) return
     writeHooksJson(hooksFile, built.config)
