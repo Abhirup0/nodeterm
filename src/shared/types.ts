@@ -432,6 +432,10 @@ export interface PtyApi {
   /** Is tmux available on this host (else the silent plain-shell fallback), plus a suggested
    *  install command for the "tmux not found" banner. */
   tmuxStatus(): Promise<TmuxStatus>
+  /** The command currently in the foreground of a node's tmux pane (e.g. 'claude', 'zsh'), by
+   *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
+   *  callers must read as "not observed", never as evidence of a particular command. */
+  paneCommand(persistKey: string): Promise<string | null>
   /** The agent session's display name (`/rename` name, else auto name) read from its transcript,
    *  resolved strictly by sessionId; null if unknown. Keeps a node title in sync with the
    *  `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.

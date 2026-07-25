@@ -175,6 +175,19 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`
   )
 }
+/**
+ * Ask the REMOTE tmux which command is in the foreground of a node's pane — the remote
+ * counterpart of `PtyManager.paneCommand`'s local `display-message` path. The format is
+ * single-quoted so `#{…}` survives the remote shell verbatim (same idiom as the
+ * `bracket_paste_flag` probe in `remoteTmuxSendKeysArgs`).
+ */
+export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
+  )
+}
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
   return childArgs(conn, controlPath, 'command -v tmux')
 }

@@ -24,7 +24,8 @@ import {
   remoteTmuxKillArgs,
   remoteTmuxPtyArgs,
   remoteTmuxSendKeysArgs,
-  remoteCapturePaneArgs
+  remoteCapturePaneArgs,
+  remotePaneCommandArgs
 } from './remote-ssh/control-master'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { bracketedInjection } from './paste-injection'
@@ -690,6 +691,7 @@ export class PtyManager {
       this.sendText(persistKey, text, enter === undefined ? undefined : { enter })
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
+    platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
   }
 
   /** Feeds the renderer's "tmux not found" banner. Without tmux the app silently degrades to a
@@ -1936,6 +1938,50 @@ export class PtyManager {
       return true
     } catch {
       return false
+    }
+  }
+
+  /**
+   * The command currently in the foreground of a node's tmux pane (e.g. 'claude', 'zsh') — how
+   * the in-place agent restart observes that the CLI has exited and a shell owns the pane again.
+   * null when it is unknown: no live session, tmux unavailable, or the query failed. Unknown is
+   * never evidence of a particular command, so every failure path answers null rather than
+   * throwing — the caller polls this behind its own deadline.
+   *
+   * Mirrors `sendText`'s dispatch: an SSH-project node has no LOCAL tmux session to target, so a
+   * session registered with `sshRemote` is queried on the REMOTE tmux over the project's
+   * ControlMaster (`remotePaneCommandArgs`); everything else asks the local socket.
+   */
+  async paneCommand(persistKey: string): Promise<string | null> {
+    const target = sessionName(persistKey)
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return null
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remotePaneCommandArgs(sshRemote.conn, sshRemote.controlPath, target)
+        )
+        return stdout.trim() || null
+      } catch {
+        return null
+      }
+    }
+    if (!this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'display-message',
+        '-p',
+        '-t',
+        target,
+        '#{pane_current_command}'
+      ])
+      return stdout.trim() || null
+    } catch {
+      return null
     }
   }
 

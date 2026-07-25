@@ -69,6 +69,7 @@ const api: NodeTerminalApi = {
     sendText: (persistKey, text, opts) =>
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
+    paneCommand: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey),
     readSessionName: (sessionId, accountId) =>
       ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId),
     onData: (sessionId, listener) => {

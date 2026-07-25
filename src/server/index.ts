@@ -197,7 +197,8 @@ export async function startServer(
   // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
   // The others (ptyGenerateName / ptyGenerateGroupName → commit-message.ts; ptyReadSessionName
   // → transcript-reader.ts) depend on src/main-resident modules and are stubbed by the bridge
-  // in Task 8. readScrollback + sendText are already registered inside PtyManager.registerIpc().
+  // in Task 8. readScrollback + sendText + paneCommand are already registered inside
+  // PtyManager.registerIpc().
   platform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )

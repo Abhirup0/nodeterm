@@ -219,6 +219,10 @@ export function buildRealApi(
       client
         .request(IPC.ptyTmuxStatus)
         .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: 'linux' })) as Promise<TmuxStatus>,
+    // Unknown on failure (null), never a rejection: the restart poller reads null as "not a
+    // shell yet" and gives up on its own deadline.
+    paneCommand: (persistKey) =>
+      client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
     // No server handler — the session-name poll degrades to no adopted name.
     readSessionName: () => Promise.resolve(''),
     onData: (sessionId, listener) =>

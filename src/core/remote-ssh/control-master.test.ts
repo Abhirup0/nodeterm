@@ -8,6 +8,7 @@ import {
   remoteTmuxSendKeysArgs,
   probeSaysAbsent,
   remoteCapturePaneArgs,
+  remotePaneCommandArgs,
   remoteTmuxPtyArgs,
   listDirArgs,
   mkDirArgs,
@@ -153,6 +154,15 @@ describe('remoteCapturePaneArgs', () => {
   it('captures the recent ~200 lines (-S -200) when not full', () => {
     const args = remoteCapturePaneArgs(conn, '/s.sock', 'nt-x', false)
     expect(args[args.length - 1]).toBe(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t nt-x -S -200`)
+  })
+})
+
+describe('remotePaneCommandArgs', () => {
+  it('asks the remote tmux for the pane_current_command of the session', () => {
+    const args = remotePaneCommandArgs(conn, '/s.sock', 'nt-x')
+    expect(args[args.length - 1]).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t nt-x '#{pane_current_command}'`
+    )
   })
 })
 

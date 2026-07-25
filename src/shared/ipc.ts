@@ -18,6 +18,9 @@ export const IPC = {
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   ptyTmuxStatus: 'pty:tmux-status',
+  /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
+   *  agent restart sees that the CLI has exited and a shell owns the pane again. */
+  ptyPaneCommand: 'pty:pane-command',
   ptyReadSessionName: 'pty:read-session-name',
   claudeReadTranscript: 'claude:read-transcript',
   chatReadTranscript: 'chat:read-transcript',
