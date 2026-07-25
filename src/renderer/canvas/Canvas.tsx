@@ -119,6 +119,7 @@ import {
   agentRestartFn,
   planBulkRestart,
   restartEligibility,
+  settleRestart,
   summarizeBulkRestart,
   type BulkRestartPlan,
   type RestartOutcome
@@ -3610,7 +3611,20 @@ export function Canvas() {
   const restartAgentNode = useCallback(async (nodeId: string) => {
     const fn = agentRestartFn(nodeId)
     if (!fn) return // node unmounted between opening the menu and clicking
-    const outcome = await fn()
+    let outcome: RestartOutcome
+    try {
+      outcome = await fn()
+    } catch {
+      // The transport under the restart threw (a relay socket still CONNECTING rejects the very
+      // first write). Unhandled, this rejection made the action a silent no-op — the user clicked
+      // and nothing at all came back. The exit command may or may not have reached the pane, so
+      // the message sends them to look rather than claiming either.
+      setNotice({
+        kind: 'error',
+        text: 'Restart failed: this session could not be reached. Check the pane before retrying.'
+      })
+      return
+    }
     // 'info' fades itself out; anything that did NOT restart is left on screen to be read and
     // dismissed — the pane is untouched either way (nothing is ever killed).
     setNotice(
@@ -3623,10 +3637,13 @@ export function Canvas() {
             }
           : {
               kind: 'error',
-              // 'not-eligible' covers all three: the gate re-checked and refused, the pane went
-              // away, or a restart of this node was already in flight (the per-node action and the
-              // bulk one can reach the same node).
-              text: 'Restart skipped: this session is busy, already restarting, or has nothing to resume.'
+              // 'not-eligible' is every "not a target right now": the gate re-checked and refused,
+              // the tmux session is closed / ended / gone (which the menu row cannot see — only the
+              // node knows its session state), or a restart of this node was already in flight (the
+              // per-node action and the bulk one can reach the same node).
+              text:
+                'Restart skipped: this session is busy, already restarting, or no longer attached ' +
+                '(closed, ended, or nothing to resume). Nothing was written to the pane.'
             }
     )
   }, [])
@@ -3684,10 +3701,17 @@ export function Canvas() {
           for (const id of plan.runnable) {
             const fn = agentRestartFn(id)
             // Unmounted since the plan was made: 'not-eligible' is folded into the no-session
-            // skips by summarizeBulkRestart, so it is still counted.
-            outcomes.push(fn ? await fn() : 'not-eligible')
+            // skips by summarizeBulkRestart, so it is still counted. `settleRestart` turns a
+            // REJECTED restart into a counted failure — an escaping rejection here would abandon
+            // every node after it and swallow the summary the user confirmed this run for.
+            outcomes.push(fn ? await settleRestart(fn) : 'not-eligible')
           }
-          setNotice({ kind: 'info', text: summarizeBulkRestart(outcomes, plan.skipped) })
+          // A line reporting failures must not fade itself out from under the user; a clean run
+          // may. Same rule as the per-node notices above.
+          setNotice({
+            kind: outcomes.some((o) => o === 'exit-timeout') ? 'error' : 'info',
+            text: summarizeBulkRestart(outcomes, plan.skipped)
+          })
         })()
       }
     })
@@ -4053,7 +4077,11 @@ export function Canvas() {
                 : 'Nothing to resume yet — this session has not reported an id.'
               : !agentRestartFn(ids[0])
                 ? 'This terminal is not attached right now.'
-                : undefined
+                : // Not every dead end is visible from here: the closure ALSO refuses a tmux
+                  // session that is closed / ended / gone, and only the node itself knows that. So
+                  // that case reaches the user through `restartAgentNode`'s skip notice, which
+                  // names it, rather than through a hint this row cannot compute.
+                  undefined
             return [
               {
                 label: 'Restart agent (resume)',

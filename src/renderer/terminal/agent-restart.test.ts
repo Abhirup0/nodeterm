@@ -9,6 +9,7 @@ import {
   planBulkRestart,
   registerAgentRestart,
   restartEligibility,
+  settleRestart,
   summarizeBulkRestart,
   summarizeOutcomes,
   type BulkRestartCandidate,
@@ -417,6 +418,39 @@ describe('planBulkRestart', () => {
   it('keeps canvas order', () => {
     const plan = planBulkRestart([cand({ id: 'z' }), cand({ id: 'm' }), cand({ id: 'a' })])
     expect(plan.runnable).toEqual(['z', 'm', 'a'])
+  })
+})
+
+describe('settleRestart', () => {
+  it('passes a resolved outcome through untouched', async () => {
+    await expect(settleRestart(async () => 'restarted')).resolves.toBe('restarted')
+    await expect(settleRestart(async () => 'exit-timeout')).resolves.toBe('exit-timeout')
+    await expect(settleRestart(async () => 'not-eligible')).resolves.toBe('not-eligible')
+  })
+
+  it('turns a thrown restart into a counted failure', async () => {
+    await expect(
+      settleRestart(async () => {
+        // what a CONNECTING relay websocket does to the very first write
+        throw new DOMException('Still in CONNECTING state.', 'InvalidStateError')
+      })
+    ).resolves.toBe('exit-timeout')
+  })
+
+  it('lets a bulk run keep going, and reach its summary, past a throwing node', async () => {
+    const fns: (() => Promise<RestartOutcome>)[] = [
+      async () => 'restarted',
+      async () => {
+        throw new Error('ws send failed')
+      },
+      async () => 'restarted'
+    ]
+    const outcomes: RestartOutcome[] = []
+    for (const fn of fns) outcomes.push(await settleRestart(fn))
+    expect(outcomes).toEqual(['restarted', 'exit-timeout', 'restarted'])
+    expect(summarizeBulkRestart(outcomes, { working: 0, noSession: 0 })).toBe(
+      '2 restarted · 1 failed (exit timeout)'
+    )
   })
 })
 

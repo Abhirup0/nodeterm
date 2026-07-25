@@ -254,6 +254,30 @@ export function planBulkRestart(candidates: BulkRestartCandidate[]): BulkRestart
 }
 
 /**
+ * Run one node's restart closure and always come back with an outcome — a REJECTION becomes
+ * `'exit-timeout'`.
+ *
+ * The choreography's writes are unguarded all the way down to the socket
+ * (`io.write` → `transport.write` → the relay client's `ws.send`, which throws `InvalidStateError`
+ * on a CONNECTING socket), so one unlucky node can reject. In a bulk loop that rejection would
+ * abandon every node after it AND lose the summary the user is waiting for, which is far worse than
+ * whatever went wrong on the one node.
+ *
+ * `'exit-timeout'` — the "N failed" bucket — rather than the uncounted `'not-eligible'`: a throw
+ * means the restart was attempted and did not complete, possibly leaving a stray `/exit` in the
+ * pane, so it needs the same "go look at that node" reading a timeout gets. Filing it as a skip
+ * would tell the user nothing happened there, which is exactly what we do not know. (A fifth
+ * outcome is not an option — the summary line is spec-frozen at four parts.)
+ */
+export async function settleRestart(fn: () => Promise<RestartOutcome>): Promise<RestartOutcome> {
+  try {
+    return await fn()
+  } catch {
+    return 'exit-timeout'
+  }
+}
+
+/**
  * The bulk run's one line. `'not-eligible'` outcomes are folded into the no-session skips: the
  * closure re-checks at call time and reports it for a node that stopped being a target between the
  * plan and its turn (its session died, the pane went away, or a restart was already in flight for
