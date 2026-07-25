@@ -48,10 +48,12 @@ Row shape sent to the HUD:
   prompt?, activity?, contextPercent?,
   subagents: [{ id, label?, state: 'working'|'done' }] }
 ```
-- **done latch + clear**: `done` state is latched by the mirror already; clear a node's done
-  highlight when the user focuses that node in nodeterm (reuse `app:focus-node`) OR after the HUD
-  panel is opened — a nodeterm-native "you looked at it" signal (better than agent-notch's
-  terminal-bundle-id sniff). Drop a node from the HUD when it's gone + idle > 6 h.
+- **done latch + clear**: `done` state is latched by the mirror already. Clearing is **strictly per
+  row**: clicking/Go-ing a row (`hudFocusNode` → `model.noteFocus`) clears THAT node, and reading the
+  session inside nodeterm clears it through the mirror's read-ack (`state:'done', ack:true`). Opening
+  or closing the panel clears NOTHING — an earlier "the panel was opened, so you looked at it"
+  blanket clear meant that with three finished sessions waiting, opening the panel and clicking one
+  silently swallowed the other two. Drop a node from the HUD when it's gone + idle > 6 h.
 
 ## Indicator + panel (hud renderer) — the DynamicNotch capsule
 
