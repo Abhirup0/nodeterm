@@ -9,21 +9,18 @@
 
 import type { NormalizedAgentEvent, AgentState } from '../shared/agents/normalize'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 
 /** A node dropped once it's gone from the mirror AND has been idle longer than this. */
 export const HUD_STALE_DROP_MS = 6 * 60 * 60 * 1000
 
 /**
- * A `working` node with NO event for this long stops being displayed as working.
- *
- * A session leaves `working` only when something says so — and some exits say nothing: an Esc
- * during a tool call, a killed CLI, a machine that slept, an SSH drop. The node then walks its
- * mascot forever. This is the watchdog, and it is deliberately DISPLAY-ONLY: the state is not
- * mutated, so any later event (a tool result, a new turn, a mirror flush) brings the row straight
- * back. 20 min is well past a real gap between hook events — Claude's Bash tool caps out around 10
- * — so a genuinely long turn is never hidden.
+ * The HUD's belt-and-braces copy of the stale-working rule. The DECIDER is the mirror's sweep
+ * (`sweepStaleWorking`), which fires a synthetic end edge every surface honors; this display-only
+ * check just means the capsule never depends on that edge arriving. Same window, one constant
+ * (shared/agents/stale.ts) — nothing is mutated, so any later event restores the row.
  */
-export const WORKING_STALE_MS = 20 * 60 * 1000
+export { WORKING_STALE_MS }
 
 /** The phone-facing bucket the HUD colors rows by. `idle` = a seen/finished session. */
 export type HudRowState = 'working' | 'needsYou' | 'done' | 'idle'
@@ -154,9 +151,9 @@ export function createHudModel(): HudModel {
       a.doneSeen = false
     } else if (c.state === 'done') {
       // New done → unseen (highlight it) unless this end was an explicit read-ack, or the turn was
-      // INTERRUPTED (Esc): nothing was accomplished, so there is nothing to go and read. Same rule
-      // the notification path uses.
-      a.doneSeen = c.ack === true || c.interrupted === true
+      // INTERRUPTED (Esc) / swept as STALE: nothing was accomplished, so there is nothing to go and
+      // read. Same rule the notification path uses.
+      a.doneSeen = c.ack === true || c.interrupted === true || c.stale === true
     }
   }
 

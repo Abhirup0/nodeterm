@@ -42,7 +42,8 @@ import {
   type MirrorFile,
   type MirrorUsage,
   type NodeStateChange,
-  type NodeNowChange
+  type NodeNowChange,
+  sweepStaleWorking
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -1492,5 +1493,46 @@ describe('isEventUnresolved (presence-hold flush lookup)', () => {
     const id = _inboxSnapshot().events.find((e) => e.kind === 'approval')!.id
     expect(isEventUnresolved('n3', 'no-such-id')).toBe(false)
     expect(isEventUnresolved('other-node', id)).toBe(false)
+  })
+})
+
+
+describe('stale-working sweep (shared/agents/stale)', () => {
+  it('ends a working node nobody has heard from, once, without an inbox event', () => {
+    _resetForTest()
+    const edges: NodeStateChange[] = []
+    const un = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent({
+      nodeId: 'n1',
+      agentId: 'claude',
+      kind: 'state',
+      state: 'working',
+      newTurn: true,
+      task: 'do a thing'
+    } as never)
+    const before = _inboxSnapshot().events.length
+    edges.length = 0
+
+    // Not yet stale.
+    expect(sweepStaleWorking(Date.now(), 20 * 60_000)).toEqual([])
+    // Nothing heard for the whole window → presumed gone.
+    const swept = sweepStaleWorking(Date.now() + 21 * 60_000, 20 * 60_000)
+    expect(swept).toEqual(['n1'])
+    expect(edges).toHaveLength(1)
+    expect(edges[0]).toMatchObject({ nodeId: 'n1', event: 'end', state: 'done', stale: true })
+    // Nothing "finished", so the feed (and the push it drives) stays untouched.
+    expect(_inboxSnapshot().events.length).toBe(before)
+    // Idempotent: it is no longer working, so a second sweep says nothing.
+    expect(sweepStaleWorking(Date.now() + 40 * 60_000, 20 * 60_000)).toEqual([])
+    un()
+  })
+
+  it('self-heals — a later event puts the node back to working', () => {
+    _resetForTest()
+    recordAgentEvent({ nodeId: 'n2', agentId: 'claude', kind: 'state', state: 'working' } as never)
+    expect(sweepStaleWorking(Date.now() + 21 * 60_000, 20 * 60_000)).toEqual(['n2'])
+    expect(_snapshot().n2.state).toBe('done')
+    recordAgentEvent({ nodeId: 'n2', agentId: 'claude', kind: 'state', state: 'working', newTurn: true } as never)
+    expect(_snapshot().n2.state).toBe('working')
   })
 })
