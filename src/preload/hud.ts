@@ -34,6 +34,8 @@ export interface HudPush {
   notchCenterX: number
   /** True when a physical notch is present (fuse to it); false = draw a standalone floating pill. */
   hasNotch: boolean
+  /** Expand the panel on hover (settings.notchHoverExpand); false = click-only. */
+  hoverExpand: boolean
 }
 
 export interface HudApi {

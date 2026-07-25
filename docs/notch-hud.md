@@ -103,9 +103,19 @@ and the notchless `--pill-top-gap` (6) / `--pill-radius` (18) / `--pill-height` 
 
 ## Settings + lifecycle
 
-New `settings.notchHud` (default **true**). `initNotchHud(win)` from `index.ts`, guarded
-`process.platform === 'darwin'` and the setting; toggling the setting creates/destroys the HUD
-window live. Three-surfaces: desktop/macOS-only — `src/server` and iOS untouched (pure reader of
+**Settings → Interface → Notch** (`NotchSection.tsx`, macOS-only: `nav.ts` marks the section
+`macOnly` and `visibleSettingsGroups(isMac)` drops it elsewhere) owns all three knobs:
+`notchHud` (default **true**), `notchWidth` (default 168 — the assumed notch width, i.e. the
+flush-alignment knob, clamped to `NOTCH_WIDTH_MIN/MAX` in main) and `notchHoverExpand`
+(default true; off = click-only, the renderer reads it from the `hoverExpand` push field).
+`initNotchHud(deps, tunables)` from `index.ts`, guarded `process.platform === 'darwin'`;
+`settingsStore.onChange` → `applyNotchHudSettings(tunables)` creates/destroys the window on the
+enable toggle and pushes width/hover into a RUNNING controller (`setTunables`), so the width
+slider moves the capsule as you drag it.
+
+The first-run tour has a macOS-only **notch step** (`OnboardingFlow`'s `STEPS` is ID-keyed
+precisely so this step can be absent off macOS, plus `SceneNotch` in `scenes.tsx`): scene on the
+left, explanation + a live `notchHud` toggle on the right, like every other step. Three-surfaces: desktop/macOS-only — `src/server` and iOS untouched (pure reader of
 existing main state; the no-electron tests stay green because all new code is in `src/main` + a
 renderer entry).
 

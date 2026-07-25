@@ -28,7 +28,8 @@ import {
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
 import {
   initNotchHud,
-  setNotchHudEnabled,
+  applyNotchHudSettings,
+  type NotchHudTunables,
   destroyNotchHud,
   notchHudOnAgentEvent,
   notchHudOnContextUpdate,
@@ -749,11 +750,15 @@ app.whenReady().then(async () => {
   // show:false, shown on 'ready-to-show'), it can be the only orderFront-ed window on screen and
   // demote the app to accessory — the Dock icon then disappears. Gating on the main window's first
   // 'show' guarantees a regular window has established the app's Dock presence first.
+  const notchTunables = (): NotchHudTunables => {
+    const s = settingsStore.get()
+    return { enabled: s.notchHud, notchWidth: s.notchWidth, hoverExpand: s.notchHoverExpand }
+  }
   const startNotchHud = (): void =>
-    initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, settingsStore.get().notchHud)
+    initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, notchTunables())
   if (win.isVisible()) startNotchHud()
   else win.once('show', startNotchHud)
-  settingsStore.onChange((s) => setNotchHudEnabled(s.notchHud))
+  settingsStore.onChange(() => applyNotchHudSettings(notchTunables()))
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgentId } from '@shared/agents/config'
 import { AgentIcon } from '../../lib/agentIcons'
 import { IconTerminal, IconNote, IconEditor } from '../icons'
+import { AgentMascot } from '../../nodes/AgentMascot'
 
 /**
  * Animated scenes for the first-run setup tour (OnboardingFlow). All motion is CSS-only
@@ -228,6 +229,42 @@ export function SceneKanban({ pulseKey }: { pulseKey?: number }) {
 }
 
 /** A mock OS notification sliding in — what enabling notifications buys you. */
+/**
+ * The macOS notch capsule: a laptop lid whose notch grows sideways into a black capsule with a
+ * walking mascot + a green "finished" blob, then drops the mini session panel out of it. Same
+ * geometry story as the real HUD (fused to the notch, extends left/right, never taller).
+ */
+export function SceneNotch() {
+  return (
+    <div className="onb-scene-canvas onb-scene--notch" aria-hidden="true">
+      <div className="onb-lid">
+        <div className="onb-lid__bar">
+          <div className="onb-capsule">
+            <span className="onb-capsule__left">
+              <AgentMascot agentId="claude" />
+              <span className="onb-capsule__blob" />
+            </span>
+            <span className="onb-capsule__notch" />
+          </div>
+          <div className="onb-notchpanel">
+            <div className="onb-notchpanel__row">
+              <span className="onb-mini__dot" style={{ background: '#d97757' }} />
+              <span className="onb-mini__bar" />
+              <span className="onb-notchpanel__go">Go</span>
+            </div>
+            <div className="onb-notchpanel__row">
+              <span className="onb-mini__dot" style={{ background: '#30d158' }} />
+              <span className="onb-mini__bar onb-mini__bar--short" />
+              <span className="onb-notchpanel__go">Go</span>
+            </div>
+          </div>
+        </div>
+        <div className="onb-lid__screen" />
+      </div>
+    </div>
+  )
+}
+
 export function SceneNotify() {
   return (
     <div className="onb-scene-canvas onb-scene--notify" aria-hidden="true">

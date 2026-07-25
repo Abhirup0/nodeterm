@@ -1,6 +1,9 @@
 import { cn } from '@renderer/ui/cn'
 import { Input } from '@renderer/ui/Input'
-import { SETTINGS_GROUPS, type SettingsSectionId } from './nav'
+import { visibleSettingsGroups, type SettingsSectionId } from './nav'
+
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+const GROUPS = visibleSettingsGroups(isMac)
 import { matchesQuery } from './search'
 import { SectionIcon } from './SettingsIcons'
 
@@ -65,7 +68,7 @@ export function SettingsSidebar({
       </div>
 
       <nav className="min-h-0 flex-1 space-y-5 overflow-y-auto px-3 pb-4">
-        {SETTINGS_GROUPS.map((group) => (
+        {GROUPS.map((group) => (
           <div key={group.id} className="space-y-0.5">
             <p className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-2">
               {group.title}

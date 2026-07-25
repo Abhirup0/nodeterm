@@ -328,8 +328,10 @@ body {
   color: #8e8e93;
 }
 .hud-row__sub {
-  grid-column: 2 / span 2;
+  /* Column 2 ONLY: spanning into column 3 ran the `You: …` line UNDER the Go button. */
+  grid-column: 2;
   grid-row: 2;
+  min-width: 0;
   font-family: var(--hud-mono);
   font-size: 11px;
   color: #98989d;

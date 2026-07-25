@@ -10,6 +10,13 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
     </>
   ),
   shell: <path d="M3 4.5 6 8l-3 3.5M8 11.5h5" />,
+  // A screen with the notch bitten out of its top edge.
+  notch: (
+    <>
+      <path d="M2 5V4.5A1.5 1.5 0 0 1 3.5 3h2v1.2a1 1 0 0 0 1 1h2.6a1 1 0 0 0 1-1V3h2.4A1.5 1.5 0 0 1 14 4.5V11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11V5Z" />
+      <path d="M5.5 9.2h1.2M9.3 9.2h1.2" />
+    </>
+  ),
   behavior: (
     <>
       <path d="M2.5 5.5h6M10.5 5.5h3M2.5 10.5h3M7.5 10.5h6" />
