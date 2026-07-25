@@ -14,6 +14,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
 import { LocalTransport } from '../terminal/local-transport'
+import { droppedPaths } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
@@ -75,11 +76,6 @@ import { hintLabel } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
-
-/** Backslash-escape shell-special characters, like a native terminal does on file drop. */
-function escapeDroppedPath(p: string): string {
-  return p.replace(/([ \t"'`\\()&;|<>$!*?[\]{}#~])/g, '\\$1')
-}
 
 /**
  * Resolve the `sshRemote` create option for an SSH-project terminal: the owning project's live
@@ -1374,38 +1370,25 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
 
     let paths: string[]
     if (data.sshRemoteTmux) {
-      // Remote terminal: a local path is useless on the remote host. Upload each file over the
-      // project's ControlMaster and paste the REMOTE absolute path instead. Fail-open: skip nulls.
-      // scp takes seconds and pastes nothing until it's done, so show an overlay while it runs —
-      // without it a drop looks like it silently did nothing.
+      // Remote terminal: uploading over the ControlMaster takes seconds and pastes nothing until
+      // it's done, so show an overlay while it runs — without it a drop looks like it silently did
+      // nothing. (The upload + REMOTE-path resolution itself lives in the shared droppedPaths.)
       const projectId = useProjects.getState().activeProjectId
       if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
       setUploadNote({
         text: `Uploading ${files.length === 1 ? files[0].name : `${files.length} files`}…`,
       })
-      let uploaded: (string | null)[] = []
       try {
-        uploaded = await Promise.all(
-          files.map((f) => {
-            const lp = window.nodeTerminal.getPathForFile(f)
-            return lp
-              ? window.nodeTerminal.sshProject.uploadFile(projectId, lp, f.name).catch(() => null)
-              : Promise.resolve(null)
-          })
-        )
+        paths = await droppedPaths(files, { sshRemoteTmux: true, projectId })
       } finally {
         setUploadNote(null)
       }
-      paths = uploaded.filter((p): p is string => !!p).map(escapeDroppedPath)
       if (!paths.length) {
         setUploadNote({ text: 'Upload failed', failed: true })
         uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
       }
     } else {
-      paths = files
-        .map((f) => window.nodeTerminal.getPathForFile(f))
-        .filter(Boolean)
-        .map(escapeDroppedPath)
+      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
     }
     if (!paths.length) return
     // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
