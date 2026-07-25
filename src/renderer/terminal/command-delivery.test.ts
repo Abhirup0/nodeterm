@@ -147,6 +147,68 @@ describe('deliverCommand', () => {
     expect(ends).toBe(1)
   })
 
+  // ── A transport that throws ────────────────────────────────────────────────────────────
+  // `io.write` is unguarded all the way down to the relay client's `ws.send`, which throws
+  // InvalidStateError while the socket is still CONNECTING. Every one of these used to STRAND the
+  // delivery: `done` stayed false, so `onSettled` never fired and whoever awaited it (the in-place
+  // restart) waited forever — node locked out, bulk run hung, no summary.
+
+  /** Throws from write() on the nth write (1-based), succeeds otherwise. */
+  function throwingIo(failOn: (d: string, n: number) => boolean) {
+    const writes: string[] = []
+    let cb: ((chunk: string) => void) | undefined
+    return {
+      writes,
+      emit: (chunk: string) => cb?.(chunk),
+      io: {
+        write: (d: string) => {
+          writes.push(d)
+          if (failOn(d, writes.length))
+            throw new DOMException('Still in CONNECTING state.', 'InvalidStateError')
+        },
+        onData: (fn: (chunk: string) => void) => {
+          cb = fn
+          return () => {
+            cb = undefined
+          }
+        }
+      }
+    }
+  }
+
+  it('settles the delivery when the retry write throws, instead of stranding it', () => {
+    const f = throwingIo((d) => d === '\x15')
+    let ends = 0
+    deliverCommand(f.io, CMD, () => (ends += 1))
+    vi.advanceTimersByTime(VERIFY_TIMEOUT_MS) // echo never came → kill-line → throw
+    expect(ends).toBe(1)
+    expect(vi.getTimerCount()).toBe(0) // no retry chain left behind
+    vi.advanceTimersByTime(VERIFY_TIMEOUT_MS * DELIVERY_ATTEMPTS)
+    expect(f.writes.filter((w) => w === '\r')).toHaveLength(0) // nothing more reaches the transport
+  })
+
+  it('settles — and leaves no live retry chain — when the very first write throws', () => {
+    const f = throwingIo((_d, n) => n === 1)
+    let ends = 0
+    expect(() => deliverCommand(f.io, CMD, () => (ends += 1))).toThrow('CONNECTING')
+    // The caller sees the failure (the restart counts it), but the delivery is OVER: no timer that
+    // would rewrite `claude --resume <sid>` into the pane seconds later, under whatever the user
+    // typed next.
+    expect(ends).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(VERIFY_TIMEOUT_MS * DELIVERY_ATTEMPTS)
+    expect(f.writes).toEqual([CMD])
+  })
+
+  it('does not let a throwing Enter escape into the echo listener', () => {
+    const f = throwingIo((d) => d === '\r')
+    let ends = 0
+    deliverCommand(f.io, CMD, () => (ends += 1))
+    expect(() => f.emit(CMD)).not.toThrow() // the throw would surface inside the PTY data callback
+    expect(ends).toBe(1) // the line was written and verified; only Enter was lost
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('ignores echo arriving after submit (no double Enter)', () => {
     const f = fakeIo()
     deliverCommand(f.io, CMD)

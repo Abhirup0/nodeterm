@@ -13,7 +13,9 @@ export const DELIVERY_ATTEMPTS = 3
 /** Long enough to be unambiguous in the echo stream, short enough that a ZLE wrap/redraw
  *  sequence interleaved mid-line rarely lands inside the matched window. */
 export const ECHO_TAIL_CHARS = 24
-const KILL_LINE = '\x15' // Ctrl-U — clear the pending input line before a rewrite
+/** Ctrl-U — clear the pending input line before a rewrite. Exported because the in-place restart
+ *  choreography clears the line the same way before typing its exit command (agent-restart.ts). */
+export const KILL_LINE = '\x15'
 
 // CSI (\x1b[...X), OSC (\x1b]...BEL|ST) and single-char ESC sequences.
 // eslint-disable-next-line no-control-regex
@@ -57,12 +59,37 @@ export function deliverCommand(io: DeliveryIo, cmd: string, onSettled?: () => vo
     unsub?.()
     onSettled?.()
   }
+  /**
+   * Every write goes through here. `io.write` is unguarded all the way down to the relay client's
+   * `ws.send`, which throws InvalidStateError while the socket is still CONNECTING — and a throw
+   * used to STRAND the delivery: it killed the retry callback before `submit()`, so `done` stayed
+   * false, `onSettled` never fired, and whoever awaited it (the in-place restart) waited forever —
+   * that node locked out of restarts for the rest of the app's run and the bulk loop hung with no
+   * summary. A transport that cannot be written to ENDS the delivery instead: `finish()` first
+   * (clearing the retry chain, so no rewrite lands in the pane seconds later, spliced under
+   * whatever the user typed meanwhile), then report.
+   *
+   * `propagate` is for the FIRST write only, the one still on the caller's stack: there the throw
+   * is the caller's answer — the restart counts it as a failure and tells the user to check the
+   * pane. Later writes happen on timers and inside the PTY data callback, where a throw has
+   * nowhere to go but the transport itself, so they are contained.
+   */
+  const write = (data: string, propagate = false): boolean => {
+    try {
+      io.write(data)
+      return true
+    } catch (e) {
+      finish()
+      if (propagate) throw e
+      return false
+    }
+  }
   // Close the delivery BEFORE writing Enter: an io whose write echoes back synchronously (the
   // in-place restart choreography feeds one) would otherwise re-enter the listener below while
   // the tail still matches, and submit forever.
   const submit = (): void => {
     finish()
-    io.write('\r')
+    write('\r')
   }
   const tryOnce = (): void => {
     if (done) return
@@ -76,10 +103,10 @@ export function deliverCommand(io: DeliveryIo, cmd: string, onSettled?: () => vo
         submit() // fail-open: unverified submit beats a never-launched agent
         return
       }
-      io.write(KILL_LINE)
+      if (!write(KILL_LINE)) return // transport gone — the delivery is over, not stuck
       tryOnce()
     }, VERIFY_TIMEOUT_MS)
-    io.write(cmd)
+    write(cmd, attempt === 1)
   }
 
   unsub = io.onData((chunk) => {
