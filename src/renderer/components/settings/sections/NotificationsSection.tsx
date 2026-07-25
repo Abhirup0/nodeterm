@@ -5,11 +5,16 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
 import { Button } from '@renderer/ui/Button'
+import { playSfx } from '@renderer/lib/sfx'
 
 const ROWS = {
   notify: {
     title: 'Notify when a turn finishes in the background',
     keywords: ['notify', 'notification', 'claude', 'background', 'turn', 'done']
+  },
+  sound: {
+    title: 'Play a sound when a turn finishes or needs you',
+    keywords: ['sound', 'audio', 'sfx', 'effect', 'chime', 'beep', 'retro', '8-bit', 'chiptune', 'volume', 'mute', 'finished', 'needs you']
   },
   mobilePush: {
     title: 'Send push notifications to your paired phone',
@@ -20,6 +25,8 @@ const ENTRIES = Object.values(ROWS)
 
 export function NotificationsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const notifyOnClaudeDone = useSettings((s) => s.settings.notifyOnClaudeDone)
+  const soundEffects = useSettings((s) => s.settings.soundEffects)
+  const soundVolume = useSettings((s) => s.settings.soundVolume)
   const mobilePushEnabled = useSettings((s) => s.settings.mobilePushEnabled)
   const mobilePushNeedsYou = useSettings((s) => s.settings.mobilePushNeedsYou)
   const mobilePushDone = useSettings((s) => s.settings.mobilePushDone)
@@ -71,6 +78,62 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
             </Button>
           </div>
         )}
+      </SearchableRow>
+      <SearchableRow {...ROWS.sound}>
+        <FieldRow
+          label="Play a sound when a turn finishes or needs you"
+          description="A short retro chirp for a finished turn and a crackly one when a session needs you. Plays whether or not the window is focused, so you catch a finish while looking at another node."
+          control={
+            <Switch
+              checked={soundEffects}
+              ariaLabel="Sound effects"
+              onChange={(on) => {
+                update({ soundEffects: on })
+                // Enabling plays the finish chirp — it doubles as the volume preview AND as the
+                // user gesture a browser needs before it will let us make noise at all.
+                if (on) playSfx('done', soundVolume)
+              }}
+            />
+          }
+        />
+        <div
+          className={
+            'mt-3 space-y-3 border-l border-white/10 pl-4' +
+            (soundEffects ? '' : ' pointer-events-none opacity-40')
+          }
+          aria-disabled={!soundEffects}
+        >
+          <FieldRow
+            label="Volume"
+            control={
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round(soundVolume * 100)}
+                  aria-label="Sound effect volume"
+                  onChange={(e) => update({ soundVolume: Number(e.target.value) / 100 })}
+                  onMouseUp={() => playSfx('done', soundVolume)}
+                  className="w-40 accent-[var(--accent)]"
+                />
+                <span className="w-9 text-right text-[12px] text-white/50 tabular-nums">
+                  {Math.round(soundVolume * 100)}%
+                </span>
+              </div>
+            }
+          />
+          <FieldRow
+            label="Preview"
+            control={
+              <div className="flex items-center gap-2">
+                <Button onClick={() => playSfx('done', soundVolume)}>Finished</Button>
+                <Button onClick={() => playSfx('needsYou', soundVolume)}>Needs you</Button>
+              </div>
+            }
+          />
+        </div>
       </SearchableRow>
       <SearchableRow {...ROWS.mobilePush}>
         <FieldRow

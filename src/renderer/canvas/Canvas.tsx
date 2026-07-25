@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { playSfx, primeSfx } from '@renderer/lib/sfx'
 import {
   addEdge,
   applyEdgeChanges,
@@ -5246,7 +5247,22 @@ export function Canvas() {
   // normalizers (`shared/agents/normalize.ts`): working / waiting / blocked / done. On a turn
   // finishing / needing attention while the window is in the background: mark unread +
   // (with consent, throttled) notify.
+  // Browsers (Server Edition) keep an AudioContext suspended until a user gesture, so the very
+  // first chirp would be swallowed. Prime it on the first interaction; Electron doesn't need it.
+  useEffect(() => {
+    const prime = (): void => primeSfx()
+    window.addEventListener('pointerdown', prime, { once: true })
+    window.addEventListener('keydown', prime, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', prime)
+      window.removeEventListener('keydown', prime)
+    }
+  }, [])
+
   const notifyCooldownRef = useRef<Record<string, number>>({})
+  // Sound effects have their OWN cooldown: they fire whether or not the window is focused, so they
+  // can't share the notification one (which only ticks in the background).
+  const sfxCooldownRef = useRef<Record<string, number>>({})
   useEffect(() => {
     // Notification context = the node's folder name (or its title).
     const contextFor = (nodeId: string): string => {
@@ -5265,12 +5281,22 @@ export function Canvas() {
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
       // "<folder> — Claude finished" + last assistant message as the body.
-      const alert = (statusText: string, fallbackBody: string) => {
+      const alert = (statusText: string, fallbackBody: string, sound: 'done' | 'needsYou') => {
         // Unread unless the user is actively in this node's terminal (focused window +
         // this node is the active terminal). So a finish while you're in another terminal,
         // or with nothing focused, still flags unread.
         const watching = document.hasFocus() && cs.activeId === e.nodeId
         if (!watching) cs.markUnread(e.nodeId)
+        // Sound first: it is the one alert that also fires while you're in the app but looking at
+        // another node — the case OS notifications deliberately skip.
+        const snd = useSettings.getState().settings
+        if (snd.soundEffects) {
+          const t = Date.now()
+          if (t - (sfxCooldownRef.current[e.nodeId] ?? 0) >= 5000) {
+            sfxCooldownRef.current[e.nodeId] = t
+            playSfx(sound, snd.soundVolume)
+          }
+        }
         // OS notification only when the whole window is in the background.
         if (document.hasFocus()) return
         const s = useSettings.getState().settings
@@ -5301,10 +5327,12 @@ export function Canvas() {
             // Interrupted turns (Esc/Ctrl-C) alert nobody: the user did it themselves, and
             // the turn didn't complete, so it isn't a loop iteration either.
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
-            alert('finished', `${agentLabel} finished its turn.`)
+            alert('finished', `${agentLabel} finished its turn.`, 'done')
           }
-          if (e.state === 'blocked') alert('needs input', `${agentLabel} needs permission to continue.`)
-          else if (e.state === 'waiting') alert('needs input', `${agentLabel} is waiting for your response.`)
+          if (e.state === 'blocked')
+            alert('needs input', `${agentLabel} needs permission to continue.`, 'needsYou')
+          else if (e.state === 'waiting')
+            alert('needs input', `${agentLabel} is waiting for your response.`, 'needsYou')
           break
         case 'subagent-start':
           if (e.toolUseId) {
