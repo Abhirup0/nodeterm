@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { hasUsage } from '@shared/agents/config'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
+import { useProjects } from '../../state/projects'
 import { useSession } from '../../session/session'
 import { useSettings } from '../../state/settings'
 import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
+import { droppedPaths } from '../../terminal/file-drop'
 import { parseOsc52 } from '../../terminal/osc52'
 import {
   attachReplay,
@@ -59,6 +61,8 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const termRef = useRef<Terminal | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
+  const [dropping, setDropping] = useState(false)
+  const [uploading, setUploading] = useState(false)
 
   // Same search machinery as the canvas node: capture-indexed matches + xterm highlight.
   const readBuffer = useCallback((): string => {
@@ -246,8 +250,50 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId])
 
+  // File drop → paste the path(s) into the co-attached session, just like the canvas node.
+  const onDragOver = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dropping) setDropping(true)
+  }
+  const onDragLeave = (e: React.DragEvent) => {
+    const rt = e.relatedTarget as Node | null
+    if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
+  }
+  const onDrop = async (e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer.files)
+    setDropping(false)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    const term = termRef.current
+    if (!term) return
+    let paths: string[]
+    if (spawn.sshRemoteTmux) {
+      const projectId = useProjects.getState().activeProjectId
+      setUploading(true)
+      try {
+        paths = await droppedPaths(files, { sshRemoteTmux: true, projectId })
+      } finally {
+        setUploading(false)
+      }
+    } else {
+      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+    }
+    if (!paths.length) return
+    term.focus()
+    term.paste(paths.join(' ') + ' ')
+  }
+
   return (
-    <div className="kanban-modal__termwrap">
+    <div
+      className={`kanban-modal__termwrap${dropping ? ' kanban-modal__termwrap--drop' : ''}`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {uploading && <div className="kanban-modal__upload">Uploading…</div>}
       {searchOpen && (
         <FindBar
           query={search.query}

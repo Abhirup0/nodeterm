@@ -8310,3 +8310,28 @@ body,
 .ctx-menu--scroll::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Modal terminal file-drop affordance (mirrors the canvas node's dropping state). */
+.kanban-modal__termwrap--drop::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: rgba(10, 132, 255, 0.06);
+  pointer-events: none;
+  z-index: 3;
+}
+.kanban-modal__upload {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 4;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
