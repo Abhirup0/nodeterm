@@ -125,11 +125,15 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
-    '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]` — open N Claude sessions.',
-    '- `open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]` — open',
+    '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]` — open N plain terminals.',
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]` — open N Claude sessions.',
+    '- `open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]` — open',
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
-    '  hands its worktree path down as the cwd.',
+    '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
+    '  start until every listed station has gone idle, and is context-linked to them so it can read',
+    '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
+    '  status-reporting agent nodes (claude/codex/gemini) may be waited on; a plain terminal never',
+    '  reports finishing, so waiting on one is refused.',
     '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
     '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
     '- `open-browser --url U` — open a navigable browser node.',
@@ -152,8 +156,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
-    'output. If not, they are separate stations; if it does, sequence it yourself, because a',
-    'station cannot wait for another one. Then break the task into 2-5 independent workstreams;',
+    'output. If not, they are separate stations, open them all at once; if it does, open the',
+    'downstream one with `--after <upstream-id>` and it starts itself when the upstream goes',
+    'idle (do not poll for that yourself). Then break the task into 2-5 workstreams;',
     'per stream `open-worktree --branch <slug>` then `open-agent --agent claude --group <groupId>',
     '--prompt "<concrete task>"` (each stream on its own branch, no tree conflicts). Members land',
     'in grid slots inside the frame automatically; align the frames themselves with',
@@ -277,11 +282,19 @@ sh "${shimPath}" <verb> [args]
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
-- \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>]\` — open N sessions of any agent CLI.
+- \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]\` — open N plain terminals (default 1).
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
+  \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
+  every listed station has gone idle — that is how you express "B needs what A produces" without
+  sitting in a poll loop. The armed node is also context-linked to each station it waits on, so
+  it can read their work the moment it wakes. Only agent nodes that report status
+  (claude/codex/gemini) can be waited on — waiting on a plain terminal is refused, because a
+  plain terminal never reports finishing and the node would hang forever. Note the semantics:
+  "idle" is the end of a station's TURN, not proof its whole job is done — right for a station
+  given one self-contained prompt, wrong if you expect a long conversation first.
 - \`show-image <path>\` — open an image file as a node.
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).
@@ -332,10 +345,10 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
 
 0. First decide what is actually independent. For every "and then" in your plan, ask: does
    the next step READ the previous step's output? If it does not, there is no dependency and
-   the wait is wasted — those steps are separate stations. If it does, do NOT open them as
-   parallel stations: a station cannot wait for another one. Either sequence them yourself
-   (open the downstream station once the upstream is done and you have read its result), or
-   keep the dependent part in your own session. Fan out breadth; keep chains to yourself.
+   the wait is wasted — those steps are separate stations, open them all at once. If it does,
+   the dependency is real: open the downstream station with \`--after <upstream-id>\` and it
+   will start itself when the upstream goes idle. Do not fake this by polling in your own
+   session; that is what \`--after\` exists to replace.
 1. Break the task into 2–5 independent workstreams (by subsystem, not by file).
 2. Per workstream, give it its own branch + kitchen station:
    \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then

@@ -178,6 +178,7 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, planBridges, type LinkEndpoint } from '../lib/noteLink'
+import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
@@ -332,6 +333,12 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
   ephemeralNodes: [],
   ephemeralEdges: []
 }
+
+// Delivering an armed node's held launch (canvas-control `--after`) can lose the race against
+// that node's own PTY coming up, and a dropped launch is exactly the thing its dependency was
+// waiting for — so a refused delivery is retried a few times instead of vanishing.
+const LAUNCH_DELIVERY_ATTEMPTS = 5
+const LAUNCH_RETRY_MS = 400
 
 // A "spawned by" rope: control-capable agent → node it opened (or browser popup → opener).
 // Display-only (never a context link) but persisted per project as `ropes`, so the lineage
@@ -835,6 +842,63 @@ export function Canvas() {
     }
     return sig
   })
+  // The states this canvas is actually WAITING on — armed nodes' deps only. Same discipline as
+  // loopSig: subscribing to the whole byId map would re-render the canvas on every hook event
+  // of every node. Reads nodesRef (assigned during render) so it stays current without adding
+  // `nodes` to a store selector.
+  const armedDepSig = useAgentStatus((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      const p = n.data.pendingLaunch
+      if (!p) continue
+      sig += `${n.id}:`
+      for (const d of p.after) sig += `${d}=${s.byId[d]?.state ?? ''},`
+      sig += '|'
+    }
+    return sig
+  })
+  // Bumped to re-run the launch effect after a refused delivery (see LAUNCH_RETRY_MS).
+  const [launchRetry, setLaunchRetry] = useState(0)
+  // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
+  // succeeded — clearing `pendingLaunch` is a state update that can lag a re-render, and this
+  // action is irreversible, so the set (not the node data) is what guarantees exactly-once.
+  const launchInFlight = useRef<Set<string>>(new Set())
+  const launchAttempts = useRef<Map<string, number>>(new Map())
+  // Fire armed nodes whose upstream stations have all gone idle. This is the edge that makes
+  // the canvas a graph rather than a fan-out: the dependent starts itself, with no orchestrator
+  // sitting in a poll loop burning context.
+  useEffect(() => {
+    const live = new Set(nodes.map((n) => n.id))
+    const ready = launchesToFire(
+      nodes as unknown as ArmedNode[],
+      useAgentStatus.getState().byId,
+      live
+    ).filter((f) => !launchInFlight.current.has(f.id))
+    for (const f of ready) {
+      launchInFlight.current.add(f.id)
+      const attempt = (launchAttempts.current.get(f.id) ?? 0) + 1
+      launchAttempts.current.set(f.id, attempt)
+      void api.pty.sendText(f.id, f.command).then((ok) => {
+        if (ok) {
+          setNodes((ns) =>
+            ns.map((n) => (n.id === f.id ? { ...n, data: { ...n.data, pendingLaunch: undefined } } : n))
+          )
+          markDirty()
+          return
+        }
+        // Refused: the node's tmux session is most likely still coming up. Let it back out of
+        // flight and re-run shortly — a launch that silently vanishes is worse than a late one.
+        launchInFlight.current.delete(f.id)
+        if (attempt < LAUNCH_DELIVERY_ATTEMPTS) {
+          setTimeout(() => setLaunchRetry((v) => v + 1), LAUNCH_RETRY_MS)
+        } else {
+          console.warn('[pending-launch] gave up delivering held launch for', f.id)
+        }
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/launchRetry are the triggers
+  }, [nodes, armedDepSig, launchRetry])
+
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
   const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
@@ -1012,9 +1076,30 @@ export function Canvas() {
           }
         : e
     )
-    const extra = ephemeralEdges.length || ropes.length ? [...ephemeralEdges, ...ropes] : []
+    // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
+    // wait is on. Derived from node data every time rather than persisted — a pending dependency
+    // is a STATE that ends when the launch fires, unlike the context bridge `--after` also draws,
+    // which is a durable relation and stays.
+    const deps = dependencyEdges(nodes as unknown as ArmedNode[], new Set(nodes.map((n) => n.id))).map(
+      (e) => ({
+        ...e,
+        type: 'default' as const,
+        animated: true,
+        label: '⏳ waits for',
+        labelStyle: { fill: '#8e8e93', fontSize: 11, fontWeight: 600 },
+        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+        labelBgPadding: [6, 3] as [number, number],
+        labelBgBorderRadius: 5,
+        style: { stroke: '#8e8e93', strokeWidth: 1.5, strokeDasharray: '6 4' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#8e8e93', width: 14, height: 14 }
+      })
+    )
+    const extra =
+      ephemeralEdges.length || ropes.length || deps.length
+        ? [...ephemeralEdges, ...ropes, ...deps]
+        : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, nodes])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -4619,13 +4704,19 @@ export function Canvas() {
       // `lookup` defaults to the live canvas, but the open/spawn verbs pass their own: they
       // create and bridge nodes in the SAME tick, and setNodes is async — nodesRef has not
       // seen them yet, so resolving them off the canvas would skip every one as "no such node".
+      // `drawn` accumulates across the calls ONE command makes (--after bridges each new node to
+      // each dep after already bridging them to the opener): linkEdgesRef is a render-time ref,
+      // so it cannot see edges added earlier in this same tick, and without the accumulator a
+      // pair reachable twice would be added twice under two different ids.
+      const drawn: { source: string; target: string }[] = []
       const bridgeTo = (
         fromId: string,
         targetIds: string[],
         lookup: (id: string) => LinkEndpoint | null = linkEndpointOf
       ) => {
-        const plan = planBridges(fromId, targetIds, lookup, linkEdgesRef.current)
+        const plan = planBridges(fromId, targetIds, lookup, [...linkEdgesRef.current, ...drawn])
         if (plan.edges.length) {
+          drawn.push(...plan.edges)
           setLinkEdges((es) => [...es, ...plan.edges.map((e) => ({ ...e, type: 'default' }))])
           markDirty()
         }
@@ -4672,6 +4763,56 @@ export function Canvas() {
           return null
         }
         return g.id
+      }
+      // Validate `--after` (open-terminal / open-claude / open-agent): the ids this node's
+      // launch waits on. Only a node running a hook-REPORTING agent may be waited on — a plain
+      // terminal never emits a done event, so waiting on one would stall the dependent forever.
+      // Refusing here is the whole guardrail: `launchesToFire` cannot tell "will never report"
+      // from "has not reported yet", and it must not, or a fan-out would fire every dependent
+      // instantly. Returns the ids, or null with the error already replied.
+      const resolveAfter = (): string[] | null | undefined => {
+        if (!args.after) return undefined
+        const ids = (args.after ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        if (ids.length === 0) return undefined
+        for (const depId of ids) {
+          const dep = nodesRef.current.find((nd) => nd.id === depId)
+          if (!dep) {
+            reply({ ok: false, error: `${verb}: --after names no existing node (${depId})` })
+            return null
+          }
+          const depAgent = agentIdOf(depId)
+          if (!depAgent || !hasHooks(depAgent)) {
+            reply({
+              ok: false,
+              error: `${verb}: --after ${depId} is not an agent session that reports when it is done — only claude/codex/gemini nodes can be waited on`
+            })
+            return null
+          }
+        }
+        return ids
+      }
+      // Hold a freshly-built node's launch instead of running it on open. The factories already
+      // composed the exact command (agent CLI + permission-mode flag + prompt, or --cmd), so it
+      // is MOVED rather than rebuilt — a second construction site is how the two drift apart.
+      const armAfter = (node: CanvasNode, after: string[]): CanvasNode => {
+        const command = node.data.initialCommand as string | undefined
+        if (!after.length || !command) return node
+        // If the wait is ALREADY over, don't arm at all — leave the command as the node's
+        // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`
+        // (which waits for the shell prompt and echo-verifies). Arming would instead hand
+        // delivery to the canvas effect, which would race the node's PTY into existence and
+        // could fire into a session that does not exist yet.
+        const live = new Set(nodesRef.current.map((nd) => nd.id))
+        const unmet = unmetDeps(
+          { id: node.id, data: { pendingLaunch: { after, command } } },
+          useAgentStatus.getState().byId,
+          live
+        )
+        if (!unmet.length) return node
+        return {
+          ...node,
+          data: { ...node.data, initialCommand: undefined, pendingLaunch: { after, command } }
+        }
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
       // clamp children landing outside it), then drop each node into the next grid slot
@@ -4732,20 +4873,27 @@ export function Canvas() {
             const groupCwd = intoGroupId
               ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
               : undefined
+            const after = resolveAfter()
+            if (after === null) return // bad --after, already replied
             const make = (i: number): CanvasNode =>
-              createTerminalNode(
-                nodesRef.current.length + i,
-                args.cwd || groupCwd || srcCwd,
-                placeBelow(i),
-                args.cmd
+              armAfter(
+                createTerminalNode(
+                  nodesRef.current.length + i,
+                  args.cwd || groupCwd || srcCwd,
+                  placeBelow(i),
+                  args.cmd
+                ),
+                after ?? []
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
             reply({
               ok: true,
-              message: `opened ${count} terminal(s): ${ids.join(', ')}`,
-              result: { ids, id: ids[0] }
+              message:
+                `opened ${count} terminal(s): ${ids.join(', ')}` +
+                (after?.length ? `\nwaiting for ${after.join(', ')} before running` : ''),
+              result: { ids, id: ids[0], after: after ?? [] }
             })
             return
           }
@@ -4771,16 +4919,21 @@ export function Canvas() {
               projStore.getProject(projStore.activeProjectId ?? ''),
               useSettings.getState().settings.claudeAccounts
             )
+            const after = resolveAfter()
+            if (after === null) return // bad --after, already replied
             const make = (i: number): CanvasNode =>
-              createAgentNode(
-                agentId,
-                nodesRef.current.length + i,
-                args.cwd || groupCwd || srcCwd,
-                placeBelow(i),
-                args.prompt,
-                undefined,
-                account,
-                activePermissionMode()
+              armAfter(
+                createAgentNode(
+                  agentId,
+                  nodesRef.current.length + i,
+                  args.cwd || groupCwd || srcCwd,
+                  placeBelow(i),
+                  args.prompt,
+                  undefined,
+                  account,
+                  activePermissionMode()
+                ),
+                after ?? []
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -4793,14 +4946,24 @@ export function Canvas() {
                 ? linkEndpointOf(id)
                 : ids.includes(id)
                   ? { kind: 'terminal', contextCapable: canContextLink(agentId) }
-                  : null
+                  : linkEndpointOf(id)
             const bridged = bridgeTo(sourceNodeId, ids, openedEndpoint).linked
+            // A dependency is also a READING relationship: the whole reason to wait for a
+            // station is to consume what it produced. So `--after` additionally bridges each new
+            // node to each dep — that link is durable and outlives the dashed waiting edge.
+            const depLinked = (after ?? []).length
+              ? ids.flatMap((nid) => bridgeTo(nid, after ?? [], openedEndpoint).linked)
+              : []
             reply({
               ok: true,
               message:
                 `opened ${count} ${agentId} session(s): ${ids.join(', ')}` +
-                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : ''),
-              result: { ids, linked: bridged }
+                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
+                (after?.length
+                  ? `\nwaiting for ${after.join(', ')} before running` +
+                    (depLinked.length ? ` (and linked to read them)` : '')
+                  : ''),
+              result: { ids, linked: bridged, after: after ?? [] }
             })
             return
           }

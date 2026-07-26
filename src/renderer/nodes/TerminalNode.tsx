@@ -25,7 +25,7 @@ import {
   makeDirListingLookup
 } from '../terminal/file-links'
 import { sshFs } from '../terminal/ssh-fs'
-import type { FsApi } from '@shared/types'
+import type { FsApi, PendingLaunch } from '@shared/types'
 import {
   attachReplay,
   closedByLabel,
@@ -444,6 +444,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // Held launch (canvas-control `--after`). Canvas owns firing it; the node only surfaces that
+  // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
+  // "waits for term-17" tells the user nothing.
+  const pendingLaunch = data.pendingLaunch as PendingLaunch | undefined
+  const pendingWaitingOn = (pendingLaunch?.after ?? [])
+    .map((depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId)
+    .join(', ')
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId
@@ -1687,6 +1694,31 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             <span className="term-node__status-dot" />
             {status.loop.kind.toUpperCase()}
             {status.loop.count > 0 ? ` ×${status.loop.count}` : ''}
+          </span>
+        )}
+        {/* Armed by canvas-control `--after`: this node holds its launch until the stations it
+            waits on go idle. Shown because an armed node is otherwise indistinguishable from one
+            that simply failed to start — and it carries the manual escape, because agent state is
+            transient: after an app restart nothing will ever report `done` again, so without a
+            "run now" an armed node left over from before the restart would be a dead end. */}
+        {pendingLaunch && (
+          <span
+            className="term-node__status term-node__status--queued nodrag"
+            title={`Waiting for ${pendingWaitingOn} to finish, then runs:\n${pendingLaunch.command}`}
+          >
+            <span className="term-node__status-dot" />
+            QUEUED
+            <button
+              className="term-node__queued-run"
+              title="Run now without waiting"
+              onClick={(e) => {
+                e.stopPropagation()
+                void api.pty.sendText(id, pendingLaunch.command)
+                updateNodeData(id, { pendingLaunch: undefined })
+              }}
+            >
+              ▶
+            </button>
           </span>
         )}
         {(status?.state === 'waiting' || status?.state === 'blocked') && (
