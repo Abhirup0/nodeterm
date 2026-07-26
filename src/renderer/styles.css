@@ -1327,7 +1327,7 @@ body,
   color: #6cb0ff;
 }
 
-.term-node__reattach {
+.term-node__refresh {
   background: transparent;
   border: none;
   color: var(--muted);
@@ -1340,7 +1340,7 @@ body,
   align-items: center;
 }
 
-.term-node__reattach:hover {
+.term-node__refresh:hover {
   background: rgba(10, 132, 255, 0.18);
   color: #6cb0ff;
 }

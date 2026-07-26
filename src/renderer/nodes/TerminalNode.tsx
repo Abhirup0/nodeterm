@@ -1833,15 +1833,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             </button>
           </Tooltip>
         )}
-        {/* Reattach: rebuild THIS node's view and re-attach to the same session (the context
-            menu's "Reattach terminal", one click away). In the header because the cases that
+        {/* Refresh: rebuild THIS node's view and re-attach to the same session (the context
+            menu's "Refresh terminal", one click away). In the header because the cases that
             need it are exactly the ones where the node is unusable — a pane that never painted,
             a scroll that stopped responding after a long sleep — and a right-click on a dead
-            view is the last thing a user wants to hunt for. Distinct from "Restart agent
-            (resume)", which quits the CLI itself; this touches nothing but the viewer. */}
-        <Tooltip label="Reattach — rebuild this view; the session keeps running">
+            view is the last thing a user wants to hunt for. Distinct from "Restart agent",
+            which quits the CLI itself; this touches nothing but the viewer. */}
+        <Tooltip label="Refresh — rebuild this view; the session keeps running">
           <button
-            className="term-node__reattach nodrag"
+            className="term-node__refresh nodrag"
             onClick={(e) => {
               e.stopPropagation()
               updateNodeData(id, (n) => ({

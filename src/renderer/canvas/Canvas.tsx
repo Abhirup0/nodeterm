@@ -4060,7 +4060,7 @@ export function Canvas() {
         ? ([
             { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) },
             {
-              label: 'Reattach terminal',
+              label: 'Refresh terminal',
               icon: <IconReload />,
               hint: 'Rebuilds the view and re-attaches to the same session. Nothing running is interrupted.',
               onClick: () => reloadTerminals(ids)
@@ -4097,7 +4097,7 @@ export function Canvas() {
                   undefined
             return [
               {
-                label: 'Restart agent (resume)',
+                label: 'Restart agent',
                 icon: <IconPower />,
                 disabled: !!why,
                 hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
@@ -4296,7 +4296,7 @@ export function Canvas() {
           ...(hasRestartableAgents()
             ? [
                 {
-                  label: 'Restart idle agent sessions (resume)',
+                  label: 'Restart idle agent sessions',
                   icon: <IconPower />,
                   hint: 'Quits each idle agent CLI and relaunches it with --resume.',
                   onClick: restartIdleAgents
@@ -6077,7 +6077,7 @@ export function Canvas() {
         ? [
             {
               id: 'restart-idle-agents',
-              label: 'Restart idle agent sessions (resume)',
+              label: 'Restart idle agent sessions',
               hint: 'pick up a new model',
               icon: <IconPower />,
               run: restartIdleAgents
