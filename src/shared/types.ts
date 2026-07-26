@@ -655,6 +655,13 @@ export interface Settings {
   /** Usage providers hidden from the pill + popover (Settings → Usage toggles). Hiding is a
    *  DISPLAY choice — credentials and fetchers are untouched, so re-enabling is instant. */
   hiddenUsageProviders: string[]
+  /** Ids of node right-click menu rows the user has hidden; empty = everything visible. Only ids
+   *  in HIDEABLE_MENU_ITEMS (renderer/lib/ui-visibility.ts) can hide — Delete and the other
+   *  recovery actions stay put whatever this array says. */
+  hiddenNodeMenuItems: string[]
+  /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
+   *  HIDEABLE_HEADER_BUTTONS the same way. */
+  hiddenHeaderButtons: string[]
   /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
    *  'remaining' is the historical default; orca users tend to expect 'used'. */
   usagePercentMode: 'used' | 'remaining'
@@ -746,6 +753,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: [],
   hiddenUsageProviders: [],
+  // Nothing hidden out of the box, so existing users see the menu and header they already know.
+  hiddenNodeMenuItems: [],
+  hiddenHeaderButtons: [],
   usagePercentMode: 'remaining',
   defaultAgent: 'claude',
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
