@@ -68,13 +68,20 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !isTopDialog(id)) return
-      e.preventDefault()
-      e.stopPropagation()
+      // A rename in progress owns Esc first (cancel the edit, not the modal).
       if (editingTitleRef.current) {
-        // Esc during a rename cancels the EDIT, not the modal.
+        e.preventDefault()
+        e.stopPropagation()
         setEditingTitle(false)
         return
       }
+      // Terminal focused → Esc belongs to the SESSION (agent "esc to interrupt"), not the modal.
+      // Don't consume it: leave it to xterm's own handler. Close the modal via ×, the scrim, or
+      // Esc while focus is elsewhere (the board-log composer, the header, etc.).
+      const ae = document.activeElement
+      if (ae && ae.closest('.kanban-modal__term')) return
+      e.preventDefault()
+      e.stopPropagation()
       onClose()
     }
     // Capture phase: beat the canvas/global keydown listeners to the Escape.
