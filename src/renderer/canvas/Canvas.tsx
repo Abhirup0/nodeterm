@@ -5443,10 +5443,15 @@ export function Canvas() {
       }
       const an = useAgentNodes.getState()
       switch (e.kind) {
-        case 'state':
+        case 'state': {
+          // An `idle` done (the CLI went quiet at its prompt — see normalize) is a RESCUE for a
+          // node stuck on `working` after an Esc that ran no turn-end hook. It may ONLY move a
+          // working node: blocked/waiting is also "idle at the prompt", and clearing it there
+          // would drop a live approval off the badge. Same rule as the mirror's reduceEntry.
+          const stuckRescueSkip = e.idle === true && cs.byId[e.nodeId]?.state !== 'working'
           // `pendingId` (deterministic approvals) rides a `blocked` event; the store keeps it only
           // while blocked so the header's Approve/Deny buttons appear + vanish with the state.
-          if (e.state) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId)
+          if (e.state && !stuckRescueSkip) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId)
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
@@ -5465,6 +5470,7 @@ export function Canvas() {
           else if (e.state === 'waiting')
             alert('needs input', `${agentLabel} is waiting for your response.`, 'needsYou')
           break
+        }
         case 'subagent-start':
           if (e.toolUseId) {
             an.start(e.toolUseId, {

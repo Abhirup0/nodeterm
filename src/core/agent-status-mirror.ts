@@ -288,6 +288,10 @@ export function reduceEntry(
   if (ev.sessionId) next.sessionId = ev.sessionId
 
   if (ev.kind === 'state' && ev.state) {
+    // An `idle` done (Claude went quiet at its prompt) is a RESCUE, not a turn end: it may only
+    // move a node that is still `working`. A node that is blocked/waiting is ALSO idle at the
+    // prompt — clearing it there would drop a live approval — and one already done needs nothing.
+    if (ev.idle && prev?.state !== 'working') return next
     // Done-holdoff: a late, non-newTurn `working` (out-of-order parallel hook, or an in-flight
     // tool POST at interrupt) must not resurrect a turn that just finished. Only a genuine new
     // turn (UserPromptSubmit) may. Leave state + updatedAt untouched so the window keeps

@@ -1536,3 +1536,30 @@ describe('stale-working sweep (shared/agents/stale)', () => {
     expect(_snapshot().n2.state).toBe('working')
   })
 })
+
+
+describe('idle_prompt rescue (Esc that ran no Stop hook)', () => {
+  it('moves a stuck working node off working', () => {
+    const prev = reduceEntry(undefined, ev({ state: 'working' }), 1000)
+    expect(prev.state).toBe('working')
+    const next = reduceEntry(prev, ev({ state: 'done', idle: true, interrupted: true }), 2000)
+    expect(next.state).toBe('done')
+    expect(next.updatedAt).toBe(2000)
+  })
+
+  it('never clears a pending approval / question — those are idle at the prompt too', () => {
+    for (const state of ['blocked', 'waiting'] as const) {
+      const prev = reduceEntry(undefined, ev({ state }), 1000)
+      const next = reduceEntry(prev, ev({ state: 'done', idle: true, interrupted: true }), 2000)
+      expect(next.state).toBe(state)
+      expect(next.updatedAt).toBe(1000) // untouched, so the freshness window keeps measuring
+    }
+  })
+
+  it('is a no-op on an already-finished node (it fires after every normal turn)', () => {
+    const prev = reduceEntry(undefined, ev({ state: 'done' }), 1000)
+    const next = reduceEntry(prev, ev({ state: 'done', idle: true, interrupted: true }), 2000)
+    expect(next.state).toBe('done')
+    expect(next.updatedAt).toBe(1000)
+  })
+})
