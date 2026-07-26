@@ -102,10 +102,11 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
           every direct child, so a heading + caption + list must arrive as a single node. */}
       <SearchableRow {...ROWS.menuItems}>
         <div>
-          <h4 className="text-sm font-medium text-text">Node menu items</h4>
+          <h4 className="text-[13px] font-medium text-text">Node menu items</h4>
           <p className="mt-1 text-[13px] leading-relaxed text-muted">
-            Which rows the node right-click menu offers — it applies to the next right-click.
-            Destructive and recovery actions (Delete, Restart agent) are always shown.
+            Which rows the node right-click menu offers (and, for Colors, the group frame's colour
+            strip too) — it applies to the next right-click. Destructive and recovery actions
+            (Delete, Restart agent) are never hidden here.
           </p>
           <VisibilityToggles
             rows={HIDEABLE_MENU_ITEMS}
@@ -117,7 +118,7 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
       </SearchableRow>
       <SearchableRow {...ROWS.headerButtons}>
         <div>
-          <h4 className="text-sm font-medium text-text">Terminal header buttons</h4>
+          <h4 className="text-[13px] font-medium text-text">Terminal header buttons</h4>
           <p className="mt-1 text-[13px] leading-relaxed text-muted">
             Which icon buttons the terminal node header shows. Close and the terminal Search
             button are always shown, as are the right-click menu's destructive and recovery

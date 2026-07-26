@@ -19,12 +19,12 @@ export interface HideableRow {
 
 /** Hideable node right-click menu entries, in menu order. */
 export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
-  { id: 'group', label: 'Group' },
+  { id: 'group', label: 'Group node / Group selection' },
   { id: 'remove-from-group', label: 'Remove from group' },
   { id: 'colors', label: 'Colors' },
   { id: 'duplicate', label: 'Duplicate' },
   { id: 'align-grid', label: 'Align to grid' },
-  { id: 'collapse', label: 'Collapse' },
+  { id: 'collapse', label: 'Collapse / Expand' },
   { id: 'markdown-view', label: 'Markdown view' },
   { id: 'refresh-terminal', label: 'Refresh terminal' }
 ]
