@@ -201,6 +201,7 @@ import { sshHostKey } from '@shared/ssh'
 import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
 import { KanbanView, type KanbanCreateChoice, type KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, defaultKanban } from '../lib/kanban'
+import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
 import { isKanbanOpen, useViewMode } from '../state/viewMode'
@@ -362,6 +363,19 @@ const minimapNodeColor = (n: Node): string =>
  *  reads as `not-resumable`. */
 const restartAgentIdOf = (n: Node | undefined): string | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
+
+/** Drop the separators a hidden row leaves dangling: the menu's rules are written between blocks,
+ *  so hiding every row of a block would otherwise emit two rules in a row (or one hanging at the
+ *  top / bottom). Also drops a rule directly under a section label, which reads as a double line.
+ *  Cheap and total, so the builders can stay plain array literals instead of tracking what is left. */
+const tidySeparators = (items: MenuItem[]): MenuItem[] =>
+  items
+    .filter((item, i, all) => {
+      if (item.type !== 'separator') return true
+      const prev = all[i - 1]
+      return !!prev && prev.type !== 'separator' && prev.type !== 'label'
+    })
+    .filter((item, i, all) => item.type !== 'separator' || i < all.length - 1)
 
 // The minimap subscribes to agent status HERE, in its own tiny component — not in Canvas.
 // Canvas must not subscribe to the whole status map (every working/waiting flip would re-render
@@ -3980,8 +3994,13 @@ export function Canvas() {
     return node.selected && selected.length > 0 ? selected : [node.id]
   }, [])
 
-  const selectionItems = useCallback(
-    (ids: string[]): MenuItem[] => [
+  const selectionItems = useCallback((ids: string[]): MenuItem[] => {
+    // Rows the user chose to hide (Settings). Read here rather than through a selector because the
+    // menu is rebuilt on every open — a toggle applies to the next right-click with no reload.
+    // Destructive/recovery rows (Delete, Restart agent, Branch/Transfer) are not hideable at all:
+    // `isHidden` only answers for ids in its own inventory.
+    const hidden = useSettings.getState().settings.hiddenNodeMenuItems
+    return tidySeparators([
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
       ...((): MenuItem[] => {
         // "Group …" only when something is actually groupable (top-level, not itself a group —
@@ -3995,13 +4014,13 @@ export function Canvas() {
           (nid) => !!nodesRef.current.find((nd) => nd.id === nid)?.parentId
         )
         const items: MenuItem[] = []
-        if (groupable)
+        if (groupable && !isHidden('group', hidden))
           items.push({
             label: ids.length > 1 ? 'Group selection' : 'Group node',
             icon: <IconGroup />,
             onClick: () => groupSelection(ids)
           })
-        if (parented)
+        if (parented && !isHidden('remove-from-group', hidden))
           items.push({
             label: 'Remove from group',
             icon: <IconUngroup />,
@@ -4010,9 +4029,15 @@ export function Canvas() {
         if (items.length) items.push({ type: 'separator' })
         return items
       })(),
-      { type: 'colors', onPick: (c) => setNodesColor(ids, c) },
+      ...(isHidden('colors', hidden)
+        ? []
+        : ([{ type: 'colors', onPick: (c) => setNodesColor(ids, c) }] as MenuItem[])),
       { type: 'separator' },
-      { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) },
+      ...(isHidden('duplicate', hidden)
+        ? []
+        : ([
+            { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids) }
+          ] as MenuItem[])),
       ...(ids.length === 1 && (() => {
         const a = agentIdOf(ids[0])
         return !!a && canBranch(a)
@@ -4054,17 +4079,41 @@ export function Canvas() {
             ] as MenuItem[]
           })()
         : []),
-      { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) },
-      { label: 'Collapse / Expand', icon: <IconCollapse />, onClick: () => toggleCollapseNodes(ids) },
+      ...(isHidden('align-grid', hidden)
+        ? []
+        : ([
+            { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) }
+          ] as MenuItem[])),
+      ...(isHidden('collapse', hidden)
+        ? []
+        : ([
+            {
+              label: 'Collapse / Expand',
+              icon: <IconCollapse />,
+              onClick: () => toggleCollapseNodes(ids)
+            }
+          ] as MenuItem[])),
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
         ? ([
-            { label: 'Markdown view', icon: <IconMarkdown />, onClick: () => toggleMarkdown(ids) },
-            {
-              label: 'Refresh terminal',
-              icon: <IconReload />,
-              hint: 'Rebuilds the view and re-attaches to the same session. Nothing running is interrupted.',
-              onClick: () => reloadTerminals(ids)
-            }
+            ...(isHidden('markdown-view', hidden)
+              ? []
+              : [
+                  {
+                    label: 'Markdown view',
+                    icon: <IconMarkdown />,
+                    onClick: () => toggleMarkdown(ids)
+                  }
+                ]),
+            ...(isHidden('refresh-terminal', hidden)
+              ? []
+              : [
+                  {
+                    label: 'Refresh terminal',
+                    icon: <IconReload />,
+                    hint: 'Rebuilds the view and re-attaches to the same session. Nothing running is interrupted.',
+                    onClick: () => reloadTerminals(ids)
+                  }
+                ])
           ] as MenuItem[])
         : []),
       // Restart the agent CLI itself (single selection): quit it and relaunch with `--resume`, so a
@@ -4108,23 +4157,22 @@ export function Canvas() {
         : []),
       { type: 'separator' },
       { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => deleteNodes(ids) }
-    ],
-    [
-      groupSelection,
-      removeFromGroup,
-      setNodesColor,
-      duplicateNodes,
-      branchClaude,
-      transferConversation,
-      agentIdOf,
-      alignToGrid,
-      toggleCollapseNodes,
-      toggleMarkdown,
-      reloadTerminals,
-      restartAgentNode,
-      deleteNodes
-    ]
-  )
+    ])
+  }, [
+    groupSelection,
+    removeFromGroup,
+    setNodesColor,
+    duplicateNodes,
+    branchClaude,
+    transferConversation,
+    agentIdOf,
+    alignToGrid,
+    toggleCollapseNodes,
+    toggleMarkdown,
+    reloadTerminals,
+    restartAgentNode,
+    deleteNodes
+  ])
 
   /** "New <agent>" creation entries shared by the pane and group context menus.
    *  `at` is the flow position to create at; with `groupId` the node is parented into that group. */

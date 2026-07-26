@@ -64,6 +64,7 @@ import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
+import { isHidden } from '../lib/ui-visibility'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import type { ClientId } from '@shared/presence'
@@ -363,6 +364,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
   const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
+  // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
+  // button are absent from `isHidden`'s inventory and stay put whatever the list says.
+  const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -1839,19 +1844,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             a scroll that stopped responding after a long sleep — and a right-click on a dead
             view is the last thing a user wants to hunt for. Distinct from "Restart agent",
             which quits the CLI itself; this touches nothing but the viewer. */}
-        <Tooltip label="Refresh — rebuild this view; the session keeps running">
-          <button
-            className="term-node__refresh nodrag"
-            onClick={(e) => {
-              e.stopPropagation()
-              updateNodeData(id, (n) => ({
-                respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
-              }))
-            }}
-          >
-            <IconReload />
-          </button>
-        </Tooltip>
+        {!isHidden('refresh', hiddenHeaderButtons) && (
+          <Tooltip label="Refresh — rebuild this view; the session keeps running">
+            <button
+              className="term-node__refresh nodrag"
+              onClick={(e) => {
+                e.stopPropagation()
+                updateNodeData(id, (n) => ({
+                  respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+                }))
+              }}
+            >
+              <IconReload />
+            </button>
+          </Tooltip>
+        )}
         <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
           <button
             className="term-node__search nodrag"
@@ -1861,31 +1868,37 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
             <IconSearch />
           </button>
         </Tooltip>
-        <Tooltip label="Dictate into this terminal">
-          <button
-            className="term-node__mic nodrag"
-            onClick={(e) => {
-              e.stopPropagation()
-              window.dispatchEvent(new CustomEvent('nodeterm:dictate', { detail: { nodeId: id } }))
-            }}
-          >
-            <IconMic />
-          </button>
-        </Tooltip>
-        <Tooltip label="Name with AI (from terminal output)">
-          <button className="term-node__ai nodrag" disabled={naming} onClick={nameWithAi}>
-            {naming ? '…' : '✦'}
-          </button>
-        </Tooltip>
-        <Tooltip label="Comments & activity">
-          <button
-            className="term-node__chat nodrag"
-            aria-pressed={commentsOpen}
-            onClick={() => setCommentsOpen((v) => !v)}
-          >
-            <IconChat />
-          </button>
-        </Tooltip>
+        {!isHidden('mic', hiddenHeaderButtons) && (
+          <Tooltip label="Dictate into this terminal">
+            <button
+              className="term-node__mic nodrag"
+              onClick={(e) => {
+                e.stopPropagation()
+                window.dispatchEvent(new CustomEvent('nodeterm:dictate', { detail: { nodeId: id } }))
+              }}
+            >
+              <IconMic />
+            </button>
+          </Tooltip>
+        )}
+        {!isHidden('ai-name', hiddenHeaderButtons) && (
+          <Tooltip label="Name with AI (from terminal output)">
+            <button className="term-node__ai nodrag" disabled={naming} onClick={nameWithAi}>
+              {naming ? '…' : '✦'}
+            </button>
+          </Tooltip>
+        )}
+        {!isHidden('comments', hiddenHeaderButtons) && (
+          <Tooltip label="Comments & activity">
+            <button
+              className="term-node__chat nodrag"
+              aria-pressed={commentsOpen}
+              onClick={() => setCommentsOpen((v) => !v)}
+            >
+              <IconChat />
+            </button>
+          </Tooltip>
+        )}
         <button
           className="term-node__close"
           title="Close (ends the session)"
