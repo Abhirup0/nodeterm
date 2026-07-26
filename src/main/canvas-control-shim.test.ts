@@ -198,6 +198,20 @@ describe('canvas-control shim over a unix socket', () => {
     })
   })
 
+  it('carries a comma-joined --to list through unmangled (link)', async () => {
+    state.seen = null
+    await callShim(['link', '--to', 'n2,n3', '--from', 'n1'], {
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_SOCK: sock,
+      NODETERM_HOOK_TOKEN: 'tok-remote'
+    })
+    expect(lastSeen()?.path).toBe('/control/link')
+    expect(parseControlBody(lastSeen()?.body ?? '', 'application/x-www-form-urlencoded')).toEqual({
+      nodeId: 'node-1',
+      args: { to: 'n2,n3', from: 'n1' }
+    })
+  })
+
   it('prefers the socket over a port when both are advertised', async () => {
     state.seen = null
     await callShim(['list'], { NODETERM_HOOK_SOCK: sock })

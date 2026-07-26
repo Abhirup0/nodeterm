@@ -14,6 +14,7 @@ export type ControlVerb =
   | 'group'
   | 'arrange'
   | 'align'
+  | 'link'
   | 'spawn-team'
   | 'open-worktree'
   | 'close-worktree'
@@ -39,6 +40,7 @@ const VERBS: ControlVerb[] = [
   'group',
   'arrange',
   'align',
+  'link',
   'spawn-team',
   'open-worktree',
   'close-worktree',
@@ -75,6 +77,7 @@ export function parseControlRequest(
   if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
+  if (v === 'link' && !args.to) return { error: 'link requires --to <id,id>' }
   if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
   if (v === 'open-worktree' && !args.branch) return { error: 'open-worktree requires --branch <name>' }
   if (v === 'close-worktree' && !args.group) return { error: 'close-worktree requires --group <id>' }
@@ -132,8 +135,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `open-browser --url U` — open a navigable browser node.',
     '- `group --nodes <id,id> [--label L]` / `arrange --nodes <id,id> [--layout grid|row|column] [--cols N]` /',
     '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — organize the canvas.',
+    '- `link --to <id,id> [--from <id>]` — context-link nodes so each can READ the other\'s transcript',
+    '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
+    '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
+    '  you did not open, or to link two OTHER nodes together.',
     '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
-    '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected to you.',
+    '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected + context-linked to you.',
     '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
     '  wrapped in a bound group frame (terminals inside it run in the worktree). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
@@ -143,12 +150,18 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
     '  Both ask the user to confirm a dialog and may be denied.',
     '',
-    'Orchestration ("Build with Nodeterm orchestration"): break the task into 2-5 independent',
-    'workstreams; per stream `open-worktree --branch <slug>` then `open-agent --agent claude',
-    '--group <groupId> --prompt "<concrete task>"` (each stream on its own branch, no tree',
-    'conflicts). Members land in grid slots inside the frame automatically; align the frames',
-    'themselves with `arrange --nodes <groupId,…> --layout row` (pass GROUP ids — arrange/align',
-    'are top-level only) and `rename` each by subject. The user merges when a stream is done;',
+    'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
+    'independent — for every "and then", ask whether the next step READS the previous step\'s',
+    'output. If not, they are separate stations; if it does, sequence it yourself, because a',
+    'station cannot wait for another one. Then break the task into 2-5 independent workstreams;',
+    'per stream `open-worktree --branch <slug>` then `open-agent --agent claude --group <groupId>',
+    '--prompt "<concrete task>"` (each stream on its own branch, no tree conflicts). Members land',
+    'in grid slots inside the frame automatically; align the frames themselves with',
+    '`arrange --nodes <groupId,…> --layout row` (pass GROUP ids — arrange/align are top-level',
+    'only) and `rename` each by subject. When a station goes idle, READ what it did through the',
+    'context link (the linked-context CLI — see the get-linked-context section in your global',
+    'agent instructions) and reconcile the streams into ONE synthesis yourself; a station you',
+    'never read is one you cannot vouch for. The user merges when a stream is done;',
     '`close-worktree --group <id>` releases a finished station.'
   ].join('\n')
 }
@@ -248,7 +261,7 @@ exit 1
 export function buildCanvasSkillBody(shimPath: string): string {
   return `---
 name: manage-nodeterm-canvas
-description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
+description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, link nodes so you can read back what they produced, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, collect or synthesize the results of agents you opened, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
 ---
 
 # Manage the nodeterm canvas
@@ -276,9 +289,14 @@ Verbs:
 - \`group --nodes <id,id> [--label "Frontend Team"]\` — wrap nodes in a labeled group frame.
 - \`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]\` — tidy layout, no overlap.
 - \`align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter\` — align edges/centers.
+- \`link --to <id,id> [--from <id>]\` — context-link nodes, so each can READ the other's
+  transcript on demand with the get-linked-context skill. \`--from\` defaults to you. Nothing is
+  pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.
+  Agent sessions you open (\`open-claude\`/\`open-agent\`/\`spawn-team\`) are linked to you
+  automatically; use \`link\` for nodes you did not open, or to link two OTHER nodes together.
 - \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
   open one agent per role (each prompt starts that member working), arrange them in a grid,
-  wrap them in a labeled group, and connect each to you. Max 8 roles per call.
+  wrap them in a labeled group, and connect + context-link each to you. Max 8 roles per call.
 - \`open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]\` — create a git
   worktree (new branch off base, default: the repo's default branch) and wrap it in a bound
   group frame (or bind it to an existing empty group). Terminals created inside the group
@@ -312,6 +330,12 @@ Typical requests this skill covers:
 When the user says "Build with Nodeterm orchestration" (or asks you to orchestrate a build
 across Nodeterm sessions), be the orchestration chef — plan the kitchen, then run it:
 
+0. First decide what is actually independent. For every "and then" in your plan, ask: does
+   the next step READ the previous step's output? If it does not, there is no dependency and
+   the wait is wasted — those steps are separate stations. If it does, do NOT open them as
+   parallel stations: a station cannot wait for another one. Either sequence them yourself
+   (open the downstream station once the upstream is done and you have read its result), or
+   keep the dependent part in your own session. Fan out breadth; keep chains to yourself.
 1. Break the task into 2–5 independent workstreams (by subsystem, not by file).
 2. Per workstream, give it its own branch + kitchen station:
    \`open-worktree --branch <slug>\` → note the returned \`groupId\`, then
@@ -322,8 +346,15 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
    out side by side — after opening all stations, align the frames with
    \`arrange --nodes <groupId,groupId,…> --layout row\` (arrange/align work on top-level
    nodes, so pass the GROUP ids, not the children). \`rename\` each group by subject.
-4. Track progress (their status badges show working/waiting) and coordinate: when a stream
-   finishes, the user merges from the group's chip (never merge for them); release a finished
+4. Track progress (their status badges show working/waiting) and coordinate.
+5. Collect the results yourself — this is the half most orchestrators skip. Every station you
+   opened is context-linked to you, so when one goes idle, read what it actually did with the
+   **get-linked-context** skill (summary or transcript for that node id) instead of asking the
+   user to relay it. Then do the work only you can do: reconcile the streams against each
+   other, name the conflicts and the leftovers, and report ONE synthesis. A station you never
+   read is a station whose work you cannot vouch for — say so rather than assuming it went
+   fine. Stations you did not open are not linked; \`link --to <id>\` them first.
+6. Hand back: the user merges from the group's chip (never merge for them); release a finished
    station with \`close-worktree --group <id>\` (unbind keeps the directory).
 `
 }

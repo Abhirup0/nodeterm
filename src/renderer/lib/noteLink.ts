@@ -22,6 +22,76 @@ export function classifyLink(a: LinkEndpoint, b: LinkEndpoint): LinkKind | null 
   return other.kind === 'terminal' ? 'note' : null
 }
 
+/** One node the plan refused to link, with the reason to report back to the caller. */
+export interface SkippedBridge {
+  id: string
+  why: string
+}
+
+export interface BridgePlan {
+  /** Edges to append (already deduped against `existing` AND within the batch). */
+  edges: BridgeLink[]
+  linked: string[]
+  skipped: SkippedBridge[]
+}
+
+/**
+ * Plan the link edges connecting `fromId` to each of `targetIds` — the batch form of what
+ * onConnect does for one hand-drawn edge, used by the canvas-control `link` verb and by the
+ * open-agent / spawn-team fan-out (which link every session they open back to the opener).
+ *
+ * Pure so the refusal matrix is testable: the callers live inside Canvas.tsx, where node
+ * lookup is a ref read and the result is a setState. `lookup` is injected because a caller
+ * that links nodes it created in the SAME tick cannot resolve them off the canvas yet
+ * (setNodes is async), and `existing` is passed in rather than read, so a batch also dedupes
+ * against itself and not just against what is already on screen.
+ */
+export function planBridges(
+  fromId: string,
+  targetIds: string[],
+  lookup: (id: string) => LinkEndpoint | null,
+  existing: readonly { source: string; target: string }[]
+): BridgePlan {
+  const edges: BridgeLink[] = []
+  const linked: string[] = []
+  const skipped: SkippedBridge[] = []
+  const se = lookup(fromId)
+  const linkedAlready = (a: string, b: string) =>
+    [...existing, ...edges].some(
+      (e) => (e.source === a && e.target === b) || (e.source === b && e.target === a)
+    )
+  for (const tid of targetIds) {
+    if (tid === fromId) {
+      skipped.push({ id: tid, why: 'same node' })
+      continue
+    }
+    const te = lookup(tid)
+    if (!se || !te) {
+      skipped.push({ id: tid, why: 'no such node' })
+      continue
+    }
+    const kind = classifyLink(se, te)
+    if (!kind) {
+      skipped.push({
+        id: tid,
+        why: 'not linkable (needs two context-capable agents, or a sticky + terminal)'
+      })
+      continue
+    }
+    // Note edges are stored sticky→terminal regardless of the direction they were requested
+    // in, so styling and the link map can key off "source is sticky" (mirrors onConnect).
+    const source = kind === 'note' && te.kind === 'sticky' ? tid : fromId
+    const target = source === fromId ? tid : fromId
+    if (linkedAlready(source, target)) {
+      skipped.push({ id: tid, why: 'already linked' })
+      continue
+    }
+    edges.push({ id: `bridge-${source}-${target}`, source, target })
+    linked.push(tid)
+  }
+  return { edges, linked, skipped }
+}
+
 /** Longest note text pushed inline; longer notes are truncated with a pointer to the skill. */
 const NOTE_PUSH_MAX = 2000
 

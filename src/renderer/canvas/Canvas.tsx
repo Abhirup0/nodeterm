@@ -177,7 +177,7 @@ import {
   reconnectRelayTab,
   type RelayTab,
 } from '../session/relay-tab'
-import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, type LinkEndpoint } from '../lib/noteLink'
+import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
@@ -4609,6 +4609,28 @@ export function Canvas() {
       const placeBelow = (i = 0) => ({ x: srcAbs.x + srcW / 2 + i * 460, y: belowY + 210 })
       const connect = (newId: string) =>
         setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId, edgeColor)])
+      // Draw real CONTEXT links (persisted `bridges`), not the display-only ropes `connect`
+      // draws — a rope is lineage decoration, a bridge is what get-linked-context reads. This
+      // is what lets an orchestrator fan IN: read back what the nodes it opened produced.
+      // Deliberately SILENT: the manual onConnect path pushes a one-shot discovery note into
+      // each endpoint, but doing that here would inject a prompt into every member of a team
+      // the agent just spawned — the exact intrusion that push was reverted for. The link
+      // still works: it is pull-based, and the CLI/skill is already installed in the session.
+      // `lookup` defaults to the live canvas, but the open/spawn verbs pass their own: they
+      // create and bridge nodes in the SAME tick, and setNodes is async — nodesRef has not
+      // seen them yet, so resolving them off the canvas would skip every one as "no such node".
+      const bridgeTo = (
+        fromId: string,
+        targetIds: string[],
+        lookup: (id: string) => LinkEndpoint | null = linkEndpointOf
+      ) => {
+        const plan = planBridges(fromId, targetIds, lookup, linkEdgesRef.current)
+        if (plan.edges.length) {
+          setLinkEdges((es) => [...es, ...plan.edges.map((e) => ({ ...e, type: 'default' }))])
+          markDirty()
+        }
+        return plan
+      }
       // Append a freshly-created node, draw its connecting edge, and mark the canvas dirty so it
       // persists. Returns the new node id. A node opened by a grouped agent joins that group
       // (parentInto converts back to group-relative coords), so the control fan-out stays inside
@@ -4763,10 +4785,22 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            // Context-link the new session(s) back to the opener (same rationale as spawn-team:
+            // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
+            // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
+            const openedEndpoint = (id: string): LinkEndpoint | null =>
+              id === sourceNodeId
+                ? linkEndpointOf(id)
+                : ids.includes(id)
+                  ? { kind: 'terminal', contextCapable: canContextLink(agentId) }
+                  : null
+            const bridged = bridgeTo(sourceNodeId, ids, openedEndpoint).linked
             reply({
               ok: true,
-              message: `opened ${count} ${agentId} session(s): ${ids.join(', ')}`,
-              result: { ids }
+              message:
+                `opened ${count} ${agentId} session(s): ${ids.join(', ')}` +
+                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : ''),
+              result: { ids, linked: bridged }
             })
             return
           }
@@ -4877,6 +4911,37 @@ export function Canvas() {
             reply({ ok: true, message: `aligned ${ids.length} node(s) to ${edge}`, result: { count: ids.length } })
             return
           }
+          case 'link': {
+            // Fan-in edge: link the caller (or --from) to nodes so each can READ the other's
+            // transcript on demand. Pull-based and non-destructive — nothing is injected.
+            const from = (args.from ?? sourceNodeId).trim()
+            const targets = (args.to ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+            if (targets.length === 0) {
+              reply({ ok: false, error: 'link requires --to <id,id>' })
+              return
+            }
+            if (!linkEndpointOf(from)) {
+              reply({ ok: false, error: `link: --from names no existing node (${from})` })
+              return
+            }
+            const { linked, skipped } = bridgeTo(from, targets)
+            if (linked.length === 0) {
+              reply({
+                ok: false,
+                error: `link: nothing linked — ${skipped.map((s) => `${s.id}: ${s.why}`).join('; ')}`
+              })
+              return
+            }
+            const note = skipped.length
+              ? ` (skipped ${skipped.map((s) => `${s.id}: ${s.why}`).join('; ')})`
+              : ''
+            reply({
+              ok: true,
+              message: `linked ${from} ↔ ${linked.join(', ')}${note}`,
+              result: { from, linked, skipped }
+            })
+            return
+          }
           case 'spawn-team': {
             let roles: { title?: string; prompt?: string; agent?: string }[]
             try {
@@ -4926,11 +4991,25 @@ export function Canvas() {
             )
             setNodes(next)
             memberIds.forEach((mid) => connect(mid))
+            // …and CONTEXT-link each member back to the conductor, so the fan-out has a fan-in:
+            // once a member is done, the conductor reads what it produced via get-linked-context
+            // instead of asking the user to relay it. Members whose agent isn't context-capable
+            // (a custom agent) just keep the display rope.
+            const memberEndpoint = (id: string): LinkEndpoint | null => {
+              if (id === sourceNodeId) return linkEndpointOf(id)
+              const m = members.find((x) => x.id === id)
+              if (!m) return null
+              const a = m.data.agentId as AgentId | undefined
+              return { kind: m.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
+            }
+            const bridged = bridgeTo(sourceNodeId, memberIds, memberEndpoint).linked
             markDirty()
             reply({
               ok: true,
-              message: `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}`,
-              result: { groupId: teamGroup.id, memberIds }
+              message:
+                `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}` +
+                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : ''),
+              result: { groupId: teamGroup.id, memberIds, linked: bridged }
             })
             return
           }
