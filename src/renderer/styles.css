@@ -8388,3 +8388,27 @@ body,
 .kanban-modal__pane[data-kind='browser'] .browser-surface {
   width: 100%;
 }
+
+/* Reorder drop indicator: an accent line at the card edge the drop will land on. */
+.kanban-card--drop-before,
+.kanban-card--drop-after {
+  position: relative;
+}
+.kanban-card--drop-before::before,
+.kanban-card--drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent);
+  z-index: 2;
+}
+.kanban-card--drop-before::before {
+  top: -5px;
+}
+.kanban-card--drop-after::after {
+  bottom: -5px;
+}

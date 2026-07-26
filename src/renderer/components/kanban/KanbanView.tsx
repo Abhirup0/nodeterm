@@ -134,11 +134,21 @@ export function KanbanView({
     // a column dropped on Ungrouped is a no-op — Ungrouped is always first
   }
 
-  const dropBeforeCard = (columnId: string | null, nodeId: string) => {
+  const dropAtCard = (columnId: string | null, targetNodeId: string, side: 'before' | 'after') => {
     const drag = takeDrag()
     if (!drag) return
-    if (drag.kind === 'card') commit(assignNode(board, drag.id, columnId, nodeId))
-    else if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+    if (drag.kind === 'column') {
+      if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+      return
+    }
+    // "after this card" = "before the NEXT card in the column" (null = end of column).
+    const ids = columnId === null ? unassigned(board, sessions.map((s) => s.id)) : assignedTo(board, columnId)
+    let beforeId: string | null = targetNodeId
+    if (side === 'after') {
+      const i = ids.indexOf(targetNodeId)
+      beforeId = i >= 0 && i + 1 < ids.length ? ids[i + 1] : null
+    }
+    commit(assignNode(board, drag.id, columnId, beforeId))
   }
 
   const sessionsFor = (ids: string[]) =>
@@ -189,7 +199,7 @@ export function KanbanView({
           onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
           onDragEnd={() => (dragRef.current = null)}
           onDropOnColumn={() => dropOnColumn(null)}
-          onDropBeforeCard={(id) => dropBeforeCard(null, id)}
+          onDropAtCard={(id, side) => dropAtCard(null, id, side)}
           onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
         />
         {board.columns.map((col) => (
@@ -209,7 +219,7 @@ export function KanbanView({
             onColumnDragStart={() => (dragRef.current = { kind: 'column', id: col.id })}
             onDragEnd={() => (dragRef.current = null)}
             onDropOnColumn={() => dropOnColumn(col.id)}
-            onDropBeforeCard={(id) => dropBeforeCard(col.id, id)}
+            onDropAtCard={(id, side) => dropAtCard(col.id, id, side)}
             onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
           />
         ))}

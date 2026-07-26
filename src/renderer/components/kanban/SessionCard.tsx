@@ -12,15 +12,21 @@ interface SessionCardProps {
   onOpen: () => void
   onDragStart: () => void
   onDragEnd: () => void
-  /** A dragged card was dropped on this card — insert it before this one. */
-  onDropBefore: () => void
+  /** A dragged card was dropped on this card — before it (top half) or after it (bottom half). */
+  onDropAt: (side: 'before' | 'after') => void
   /** Right-click on the card — opens the actions menu at the cursor. */
   onContext: (x: number, y: number) => void
 }
 
-export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropBefore, onContext }: SessionCardProps) {
+export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
+  // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).
+  const [dropSide, setDropSide] = useState<'before' | 'after' | null>(null)
+  const sideFor = (e: React.DragEvent): 'before' | 'after' => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    return e.clientY < r.top + r.height / 2 ? 'before' : 'after'
+  }
   const badge =
     session.kind !== 'sticky' && status?.state === 'working'
       ? 'running'
@@ -41,7 +47,9 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
   const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
   return (
     <div
-      className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}`}
+      className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}${
+        dropSide ? ` kanban-card--drop-${dropSide}` : ''
+      }`}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
@@ -50,13 +58,21 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
       }}
       onDragEnd={() => {
         setDragging(false)
+        setDropSide(null)
         onDragEnd()
       }}
-      onDragOver={(e) => e.preventDefault()}
+      onDragOver={(e) => {
+        e.preventDefault()
+        const side = sideFor(e)
+        if (side !== dropSide) setDropSide(side)
+      }}
+      onDragLeave={() => setDropSide(null)}
       onDrop={(e) => {
         e.preventDefault()
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card
-        onDropBefore()
+        const side = sideFor(e)
+        setDropSide(null)
+        onDropAt(side)
       }}
       onClick={onOpen}
       onContextMenu={(e) => {
