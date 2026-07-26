@@ -4257,34 +4257,44 @@ export function Canvas() {
   )
 
   const groupItems = useCallback(
-    (groupId: string, at?: { x: number; y: number }): MenuItem[] => [
-      { type: 'label', label: 'Group' },
-      {
-        label: 'New terminal',
-        icon: <IconTerminal />,
-        onClick: () => addTerminal(at, undefined, groupId)
-      },
-      ...agentCreationItems(at, groupId),
-      { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at, groupId) },
-      { type: 'separator' },
-      { type: 'colors', onPick: (c) => setNodesColor([groupId], c) },
-      { type: 'separator' },
-      ...(groupHasWorktree(groupId)
-        ? []
-        : [
-            {
-              label: 'Bind to worktree…',
-              icon: <IconBranch />,
-              // On an SSH project the row stays, greyed, with the reason: the user learns the
-              // feature exists and why it is off, instead of wondering where it went.
-              disabled: isSshProject,
-              hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
-              onClick: () => openWorktreeDialog(groupId)
-            } as MenuItem
-          ]),
-      { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
-      { label: 'Delete (keeps nodes)', icon: <IconTrash />, danger: true, onClick: () => ungroup(groupId) }
-    ],
+    (groupId: string, at?: { x: number; y: number }): MenuItem[] =>
+      // The group frame has its own colors strip; it answers to the same "Colors" toggle as the
+      // node menu, so hiding it in Settings hides it everywhere a right-click can reach it.
+      tidySeparators([
+        { type: 'label', label: 'Group' },
+        {
+          label: 'New terminal',
+          icon: <IconTerminal />,
+          onClick: () => addTerminal(at, undefined, groupId)
+        },
+        ...agentCreationItems(at, groupId),
+        { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at, groupId) },
+        { type: 'separator' },
+        ...(isHidden('colors', useSettings.getState().settings.hiddenNodeMenuItems)
+          ? []
+          : ([{ type: 'colors', onPick: (c) => setNodesColor([groupId], c) }] as MenuItem[])),
+        { type: 'separator' },
+        ...(groupHasWorktree(groupId)
+          ? []
+          : [
+              {
+                label: 'Bind to worktree…',
+                icon: <IconBranch />,
+                // On an SSH project the row stays, greyed, with the reason: the user learns the
+                // feature exists and why it is off, instead of wondering where it went.
+                disabled: isSshProject,
+                hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
+                onClick: () => openWorktreeDialog(groupId)
+              } as MenuItem
+            ]),
+        { label: 'Ungroup', icon: <IconUngroup />, onClick: () => ungroup(groupId) },
+        {
+          label: 'Delete (keeps nodes)',
+          icon: <IconTrash />,
+          danger: true,
+          onClick: () => ungroup(groupId)
+        }
+      ]),
     [
       setNodesColor,
       ungroup,
