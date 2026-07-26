@@ -4,7 +4,8 @@ import {
   buildContextLinkNote,
   buildLinkMap,
   buildNotePushMessage,
-  classifyLink
+  classifyLink,
+  planBridges
 } from './noteLink'
 import type { CanvasNodeState } from '@shared/types'
 
@@ -26,6 +27,70 @@ describe('classifyLink', () => {
   it('sticky ↔ sticky and sticky ↔ non-terminal form nothing', () => {
     expect(classifyLink(sticky(), sticky())).toBeNull()
     expect(classifyLink(sticky(), { kind: 'editor', contextCapable: false })).toBeNull()
+  })
+})
+
+describe('planBridges', () => {
+  // Canvas: n1 (conductor) + n2/n3 context-capable agents, p1 a plain terminal, s1 a sticky.
+  const canvas: Record<string, { kind: string; contextCapable: boolean }> = {
+    n1: term(true),
+    n2: term(true),
+    n3: term(true),
+    p1: term(false),
+    s1: sticky()
+  }
+  const lookup = (id: string) => canvas[id] ?? null
+
+  it('links every context-capable target and reports the edges', () => {
+    const plan = planBridges('n1', ['n2', 'n3'], lookup, [])
+    expect(plan.linked).toEqual(['n2', 'n3'])
+    expect(plan.skipped).toEqual([])
+    expect(plan.edges).toEqual([
+      { id: 'bridge-n1-n2', source: 'n1', target: 'n2' },
+      { id: 'bridge-n1-n3', source: 'n1', target: 'n3' }
+    ])
+  })
+
+  it('skips a target that is not linkable, without losing the ones that are', () => {
+    const plan = planBridges('n1', ['p1', 'n2'], lookup, [])
+    expect(plan.linked).toEqual(['n2'])
+    expect(plan.skipped).toEqual([
+      { id: 'p1', why: 'not linkable (needs two context-capable agents, or a sticky + terminal)' }
+    ])
+  })
+
+  it('skips self-links and unknown nodes', () => {
+    const plan = planBridges('n1', ['n1', 'ghost'], lookup, [])
+    expect(plan.edges).toEqual([])
+    expect(plan.skipped).toEqual([
+      { id: 'n1', why: 'same node' },
+      { id: 'ghost', why: 'no such node' }
+    ])
+  })
+
+  it('dedupes against an existing edge in EITHER direction', () => {
+    const plan = planBridges('n1', ['n2'], lookup, [{ source: 'n2', target: 'n1' }])
+    expect(plan.edges).toEqual([])
+    expect(plan.skipped).toEqual([{ id: 'n2', why: 'already linked' }])
+  })
+
+  it('dedupes within the batch itself, not just against the canvas', () => {
+    const plan = planBridges('n1', ['n2', 'n2'], lookup, [])
+    expect(plan.linked).toEqual(['n2'])
+    expect(plan.edges).toHaveLength(1)
+    expect(plan.skipped).toEqual([{ id: 'n2', why: 'already linked' }])
+  })
+
+  it('stores a note link sticky→terminal even when asked terminal→sticky', () => {
+    const plan = planBridges('n1', ['s1'], lookup, [])
+    expect(plan.edges).toEqual([{ id: 'bridge-s1-n1', source: 's1', target: 'n1' }])
+    expect(plan.linked).toEqual(['s1'])
+  })
+
+  it('refuses everything when the source node does not exist', () => {
+    const plan = planBridges('ghost', ['n2'], lookup, [])
+    expect(plan.edges).toEqual([])
+    expect(plan.skipped).toEqual([{ id: 'n2', why: 'no such node' }])
   })
 })
 

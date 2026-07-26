@@ -63,6 +63,21 @@ describe('parseControlRequest', () => {
       args: { nodes: 'a', edge: 'left' }
     })
   })
+  it('link requires --to; --from is optional and it is not destructive', () => {
+    expect(parseControlRequest('link', {})).toEqual({ error: 'link requires --to <id,id>' })
+    expect(parseControlRequest('link', { to: 'n2,n3' })).toEqual({
+      verb: 'link',
+      args: { to: 'n2,n3' }
+    })
+    expect(parseControlRequest('link', { to: 'n2', from: 'n1' })).toEqual({
+      verb: 'link',
+      args: { to: 'n2', from: 'n1' }
+    })
+    // A context link is pull-only (nothing is pushed into the endpoints), so it never
+    // goes through the confirm dialog.
+    expect(isDestructiveVerb('link')).toBe(false)
+  })
+
   it('open-agent requires --agent, and is not destructive', () => {
     expect(parseControlRequest('open-agent', {})).toEqual({ error: 'open-agent requires --agent <id>' })
     expect(parseControlRequest('open-agent', { agent: 'codex' })).toEqual({
