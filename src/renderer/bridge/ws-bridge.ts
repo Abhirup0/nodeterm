@@ -33,6 +33,7 @@ import {
   type ClaudeUsage,
   type ProviderUsage,
   type RemoteAccountUsage,
+  type RemoteUsageQuery,
   type Settings,
   type SpeechApi,
   type SpeechModelInfo,
@@ -535,8 +536,8 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
       // Real, but structurally empty on the server: `usage:remote` is registered by the same core
       // service, and the server shell injects no SSH deps (it has no SSH projects), so it answers
       // `[]` rather than rejecting.
-      remote: (force?: boolean) =>
-        client.request(IPC.usageRemote, force) as Promise<RemoteAccountUsage[]>,
+      remote: (query?: RemoteUsageQuery) =>
+        client.request(IPC.usageRemote, query) as Promise<RemoteAccountUsage[]>,
       setProviderCookie: (provider: string, cookie: string) =>
         client.request(IPC.usageSetProviderCookie, provider, cookie) as Promise<boolean>,
       cookieProviders: () =>

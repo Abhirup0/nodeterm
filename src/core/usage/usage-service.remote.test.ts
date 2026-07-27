@@ -49,8 +49,8 @@ function start(remote?: RemoteUsageDeps): void {
   service = startUsageService({ shouldPoll: () => false, remote })
 }
 
-const callRemote = (force?: boolean): Promise<RemoteAccountUsage[]> =>
-  platform.handlers[IPC.usageRemote](force) as Promise<RemoteAccountUsage[]>
+const callRemote = (query?: { hostKey?: string; force?: boolean }): Promise<RemoteAccountUsage[]> =>
+  platform.handlers[IPC.usageRemote](query) as Promise<RemoteAccountUsage[]>
 
 describe('usage:remote', () => {
   it('answers empty — never rejects — on a shell with no SSH deps', async () => {
@@ -75,7 +75,7 @@ describe('usage:remote', () => {
     await callRemote()
     await callRemote()
     expect(run).toHaveBeenCalledTimes(1)
-    await callRemote(true)
+    await callRemote({ force: true })
     expect(run).toHaveBeenCalledTimes(2)
   })
 
@@ -112,6 +112,26 @@ describe('usage:remote', () => {
     start({ targets: () => [target('root@alpha'), target('root@beta')], run })
     const rows = await callRemote()
     expect(rows.map((r) => r.usage.status)).toEqual(['ok', 'error'])
+  })
+
+  it('reads only the named host — the scoped indicator shows one machine', async () => {
+    const run = vi.fn(async () => OK_REPLY)
+    start({ targets: () => [target('root@alpha'), target('root@beta')], run })
+    const rows = await callRemote({ hostKey: 'root@beta' })
+    expect(rows.map((r) => r.hostKey)).toEqual(['root@beta'])
+    // The other host is not read at all: an ssh exec per connected project, every time the
+    // popover opened, is the cost this scoping exists to avoid.
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the other host’s cache while you look at this one', async () => {
+    const run = vi.fn(async () => OK_REPLY)
+    start({ targets: () => [target('root@alpha'), target('root@beta')], run })
+    await callRemote({ hostKey: 'root@alpha' })
+    await callRemote({ hostKey: 'root@beta' })
+    // Switching back must not re-read: eviction is against the FULL target list, not the query.
+    await callRemote({ hostKey: 'root@alpha' })
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('survives a throwing target provider', async () => {

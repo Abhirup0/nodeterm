@@ -7,9 +7,7 @@ import {
   limitKey,
   enabledProviders,
   hasAnyUsage,
-  providerLabel,
-  remotePillSegments,
-  shortHostLabel
+  providerLabel
 } from './usage-limits'
 import type { ProviderUsage, RemoteAccountUsage, UsageLimit } from './types'
 
@@ -157,40 +155,6 @@ function remoteRow(over: Partial<RemoteAccountUsage> & { limits?: UsageLimit[] }
     ...rest
   }
 }
-
-describe('shortHostLabel', () => {
-  it('takes the hostname, without the user or the domain', () => {
-    expect(shortHostLabel('deploy@build-01.internal.example.com')).toBe('build-01')
-    expect(shortHostLabel('niova')).toBe('niova')
-  })
-
-  it('keeps a bare IP whole — chopping at the dot would print "10"', () => {
-    expect(shortHostLabel('root@10.0.0.4')).toBe('10.0.0.4')
-    expect(shortHostLabel('root@fe80::1')).toBe('fe80::1')
-  })
-})
-
-describe('remotePillSegments', () => {
-  it('gives one segment per host, carrying its worst limit', () => {
-    const segs = remotePillSegments([
-      remoteRow({ limits: [limit({ usedPercent: 60 })] }),
-      remoteRow({
-        hostKey: 'root@alpha.example.com',
-        accountId: 'a1',
-        label: 'Work',
-        limits: [limit({ kind: 'weekly_all', usedPercent: 91 })]
-      }),
-      remoteRow({ hostKey: 'root@beta', label: 'root@beta', limits: [limit({ usedPercent: 5 })] })
-    ])
-    // Two accounts on one host collapse into ONE segment — the pill shares a line with the canvas.
-    expect(segs.map((s) => s.label)).toEqual(['alpha', 'beta'])
-    expect(segs[0].limit.usedPercent).toBe(91)
-  })
-
-  it('skips hosts with nothing to report', () => {
-    expect(remotePillSegments([remoteRow(), remoteRow({ hostKey: 'root@beta' })])).toEqual([])
-  })
-})
 
 describe('hasAnyUsage with remote rows', () => {
   it('shows the pill for a user whose Claude only runs on a server', () => {
