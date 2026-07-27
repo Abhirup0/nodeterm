@@ -9,6 +9,7 @@ import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 import { hintLabel } from '@shared/platform-utils'
+import { pdfBlobUrl } from '../lib/pdfBlob'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
 const IMAGE_MIME: Record<string, string> = {
@@ -25,7 +26,7 @@ const IMAGE_MIME: Record<string, string> = {
 
 /**
  * A code editor node backed by Monaco. Reads the file on mount, auto-detects the language
- * from the path, and saves back with ⌘S (or the Save button). Image files are shown as a
+ * from the path, and saves back with ⌘S (or the Save button). Image and PDF files are shown as a
  * preview instead of being opened as (binary) text.
  */
 export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
@@ -41,6 +42,8 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [imageSrc, setImageSrc] = useState('')
   const [imageDims, setImageDims] = useState('')
   const [imageError, setImageError] = useState('')
+  const [pdfSrc, setPdfSrc] = useState('')
+  const [pdfError, setPdfError] = useState('')
   const [loadError, setLoadError] = useState('')
   const filePath = (data.filePath as string) ?? ''
   // Set by a worktree removal sweep (`displacedByWorktree` / `resetDisplacedCwd` in Canvas.tsx):
@@ -56,9 +59,12 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const fileName = filePath.split('/').pop() || 'untitled'
   const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
   const isImage = ext in IMAGE_MIME
+  // PDFs go to the platform's own viewer (zoom / search / pages / print all come for free)
+  // instead of Monaco, which would render the binary as garbage text.
+  const isPdf = ext === 'pdf'
 
   const togglePreview = () => {
-    if (isImage) return
+    if (isImage || isPdf) return
     setPreview((p) => {
       const next = !p
       if (next && editorRef.current) setPreviewHtml(renderMarkdown(editorRef.current.getValue()))
@@ -123,6 +129,48 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
         })
       return () => {
         disposed = true
+      }
+    }
+
+    // PDFs: read the bytes and hand them to the platform viewer as a blob URL. Deliberately the
+    // same read path as images, which is what makes this work in an SSH project too — `fs` is the
+    // remote fs there, so the bytes come back over the ControlMaster.
+    if (isPdf) {
+      let disposed = false
+      let url = ''
+      const readBinary = fs.readBinary
+      if (typeof readBinary !== 'function') {
+        setPdfError('PDF preview needs an app restart.')
+        return
+      }
+      readBinary(filePath)
+        .then((b64) => {
+          if (disposed) return
+          const tooBig = b64 ? tooLargeSize(b64) : null
+          if (tooBig != null) {
+            setPdfError(`PDF too large to preview (${formatBytes(tooBig)}).`)
+            return
+          }
+          if (!b64) {
+            setPdfError('Couldn’t read this PDF.')
+            return
+          }
+          const made = pdfBlobUrl(b64)
+          if (!made) {
+            setPdfError('Couldn’t read this PDF.')
+            return
+          }
+          url = made
+          setPdfSrc(made)
+        })
+        .catch(() => {
+          if (!disposed) setPdfError('Couldn’t read this PDF.')
+        })
+      return () => {
+        disposed = true
+        // A blob URL pins its bytes in memory until revoked — a few unclosed PDF nodes would
+        // otherwise hold tens of MB each for the life of the window.
+        if (url) URL.revokeObjectURL(url)
       }
     }
 
@@ -198,12 +246,12 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <div className="term-node__header">
         <span className="term-node__title-text" title={filePath}>
           {fileName}
-          {!isImage && dirty ? ' ●' : ''}
+          {!isImage && !isPdf && dirty ? ' ●' : ''}
         </span>
         <span className="term-node__spacer" />
         {fileMissing ? null : isImage ? (
           imageDims && <span className="editor-node__dims">{imageDims}</span>
-        ) : (
+        ) : isPdf ? null : (
           <>
             <button
               className="editor-node__toggle"
@@ -251,6 +299,17 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
               />
             ) : (
               <span className="editor-node__loading">{imageError || 'Loading…'}</span>
+            )}
+          </div>
+        ) : isPdf ? (
+          // `nowheel` so scrolling pages the document instead of zooming the canvas, and the
+          // iframe is the platform's own viewer (Chromium's on desktop, the browser's on the
+          // Server Edition) — no bundled PDF engine of ours to keep patched.
+          <div className="editor-node__pdf nodrag nowheel">
+            {pdfSrc ? (
+              <iframe src={pdfSrc} title={fileName} />
+            ) : (
+              <span className="editor-node__loading">{pdfError || 'Loading…'}</span>
             )}
           </div>
         ) : loadError ? (
