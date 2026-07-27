@@ -10,7 +10,8 @@
 // contract: when the next model ships, its limit arrives as another array entry and this file
 // does not change. Binding a `fableWeekly` slot (or a `seven_day_fable` field) would recreate
 // the exact rigidity Anthropic just moved away from.
-import type { UsageLimit } from '../../shared/types'
+import type { ClaudeUsage, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
+import { findLimit } from '../../shared/usage-limits'
 
 /** `percent`/`utilization` are portions USED, 0–100. Clamp — the server is not our validator. */
 function clampPercent(v: unknown): number | null {
@@ -102,4 +103,36 @@ export function mapUsageLimits(data: unknown): UsageLimit[] {
     if (mapped.length > 0) return mapped
   }
   return legacyLimits(body)
+}
+
+/** Back-compat view of one limit as the old remaining-percent window. */
+function asWindow(limit: UsageLimit | null): ClaudeUsageWindow | null {
+  if (!limit) return null
+  return { leftPercent: 100 - limit.usedPercent, resetsAt: limit.resetsAt }
+}
+
+/**
+ * A full `ClaudeUsage` snapshot from a raw `/api/oauth/usage` body. Shared by the LOCAL fetch
+ * (usage-service) and the REMOTE one (remote-claude-usage), which differ only in who performs
+ * the request — the payload, and therefore its normalization, is identical.
+ */
+export function usageFromPayload(data: unknown, email: string | null, now: number): ClaudeUsage {
+  const limits = mapUsageLimits(data)
+  return {
+    limits,
+    session: asWindow(findLimit(limits, 'session')),
+    weekly: asWindow(findLimit(limits, 'weekly_all')),
+    email,
+    updatedAt: now,
+    status: 'ok'
+  }
+}
+
+/** An empty snapshot carrying only the identity we managed to resolve. */
+export function emptyUsage(
+  email: string | null,
+  now: number,
+  status: ClaudeUsage['status']
+): ClaudeUsage {
+  return { limits: [], session: null, weekly: null, email, updatedAt: now, status }
 }

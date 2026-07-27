@@ -3,7 +3,7 @@
 //
 // The parsing that produces `UsageLimit[]` from a raw provider payload is service-side and
 // lives in core/usage — only the vocabulary lives here.
-import type { ProviderUsage, UsageLimit } from './types'
+import type { ProviderUsage, RemoteAccountUsage, UsageLimit } from './types'
 
 /**
  * Human label for a limit. A scoped limit is named by its model ("Fable"); everything else
@@ -72,19 +72,67 @@ export function enabledProviders(providers: ProviderUsage[]): ProviderUsage[] {
  */
 export function hasAnyUsage(
   claude: { status: string } | null | undefined,
-  providers: ProviderUsage[]
+  providers: ProviderUsage[],
+  remote: readonly RemoteAccountUsage[] = []
 ): boolean {
   if (claude && (claude.status === 'ok' || claude.status === 'error')) return true
-  return enabledProviders(providers).length > 0
+  if (enabledProviders(providers).length > 0) return true
+  // A remote row counts for the same reason a local Claude one does — and it is the whole point
+  // of remote usage: someone whose Claude only ever runs on a server had no indicator at all.
+  return remote.some((r) => r.usage.status === 'ok' || r.usage.status === 'error')
 }
 
 /**
- * Every usage provider the app can read, in display order — Claude first (the primary agent),
- * then the rest alphabetically. The Settings toggles iterate this, so a new provider gets its
- * on/off switch by being added here.
+ * Short, human name for an ssh `user@host` — what the collapsed pill labels a remote segment
+ * with, since `deploy@build-01.internal.example.com` cannot share a row with three other
+ * numbers. Bare IPs are kept whole: chopping at the first dot would turn 10.0.0.4 into "10".
+ */
+export function shortHostLabel(hostKey: string): string {
+  const host = hostKey.includes('@') ? hostKey.slice(hostKey.indexOf('@') + 1) : hostKey
+  if (!host) return hostKey
+  if (/^[\d.]+$/.test(host) || host.includes(':')) return host // IPv4 / IPv6
+  const first = host.split('.')[0]
+  return first || host
+}
+
+/**
+ * One pill segment per remote HOST, carrying that host's worst limit.
+ *
+ * Per host, not per account: a host with three managed accounts would otherwise push three more
+ * numbers into a pill that already shares a line with the canvas. The full per-account breakdown
+ * is what the popover is for.
+ */
+export function remotePillSegments(
+  remote: readonly RemoteAccountUsage[]
+): { hostKey: string; label: string; limit: UsageLimit }[] {
+  const byHost = new Map<string, UsageLimit[]>()
+  for (const r of remote) {
+    if (r.usage.status !== 'ok' || r.usage.limits.length === 0) continue
+    const acc = byHost.get(r.hostKey)
+    if (acc) acc.push(...r.usage.limits)
+    else byHost.set(r.hostKey, [...r.usage.limits])
+  }
+  const out: { hostKey: string; label: string; limit: UsageLimit }[] = []
+  for (const [hostKey, limits] of byHost) {
+    const worst = primaryLimit(limits)
+    if (worst) out.push({ hostKey, label: shortHostLabel(hostKey), limit: worst })
+  }
+  return out
+}
+
+/**
+ * Every usage source the app can read, in display order — Claude first (the primary agent) with
+ * its SSH-host variant beside it, then the rest alphabetically. The Settings toggles iterate
+ * this, so a new provider gets its on/off switch by being added here.
+ *
+ * `claude-remote` is not a provider but a SOURCE of Claude usage (the accounts on connected SSH
+ * hosts). It gets its own switch because the cost profile differs: those rows are read over an
+ * ssh round-trip on someone else's machine, so wanting Claude usage without them is a reasonable
+ * position — and the local toggle must not silently take remote hosts down with it.
  */
 export const USAGE_PROVIDER_IDS = [
   'claude',
+  'claude-remote',
   'codex',
   'gemini',
   'grok',
@@ -99,6 +147,7 @@ export const USAGE_PROVIDER_IDS = [
  * entry to borrow a label from.
  */
 const PROVIDER_LABELS: Record<string, string> = {
+  'claude-remote': 'Claude on SSH hosts',
   grok: 'Grok',
   kimi: 'Kimi',
   minimax: 'MiniMax',

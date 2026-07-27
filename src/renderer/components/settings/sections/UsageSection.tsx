@@ -23,6 +23,9 @@ const ROWS = {
       'hide',
       'toggle',
       'claude',
+      'remote',
+      'ssh',
+      'host',
       'codex',
       'gemini',
       'grok',
@@ -48,6 +51,8 @@ function labelFor(provider: string): string {
 
 const PROVIDER_BLURBS: Record<string, string> = {
   claude: 'Session, weekly and per-model limits from your Claude subscription.',
+  'claude-remote':
+    "Limits for the Claude accounts on your connected SSH projects' hosts. Each read runs on the host itself over the existing connection — the credential never leaves it.",
   codex: 'Session and weekly limits from your ChatGPT (Codex) subscription.',
   gemini: 'Per-model hourly quota from the Gemini CLI sign-in.',
   grok: 'Weekly credits and monthly budget from the Grok CLI sign-in.',

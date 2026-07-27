@@ -13,12 +13,15 @@ import { promisify } from 'util'
 import { IPC } from '../../shared/ipc'
 import type {
   ClaudeUsage,
-  ClaudeUsageWindow,
   ProviderUsage,
-  UsageLimit
+  RemoteAccountUsage
 } from '../../shared/types'
-import { findLimit } from '../../shared/usage-limits'
-import { mapUsageLimits } from './claude-usage-map'
+import { emptyUsage, usageFromPayload } from './claude-usage-map'
+import {
+  fetchRemoteUsage,
+  type RemoteUsageRunner,
+  type RemoteUsageTarget
+} from './remote-claude-usage'
 import { fetchCodexUsage } from './codex-usage'
 import { fetchGeminiUsage } from './gemini-usage'
 import { fetchGrokUsage } from './grok-usage'
@@ -147,16 +150,6 @@ export async function resolveClaudeAccessToken(accountId?: string): Promise<stri
   return (await resolveCreds(accountId)).accessToken
 }
 
-/** Back-compat view of one limit as the old remaining-percent window. */
-function asWindow(limit: UsageLimit | null): ClaudeUsageWindow | null {
-  if (!limit) return null
-  return { leftPercent: 100 - limit.usedPercent, resetsAt: limit.resetsAt }
-}
-
-function emptyUsage(email: string | null, now: number, status: ClaudeUsage['status']): ClaudeUsage {
-  return { limits: [], session: null, weekly: null, email, updatedAt: now, status }
-}
-
 export async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
   const now = Date.now()
   const { accessToken, email } = await resolveCreds(accountId)
@@ -175,15 +168,7 @@ export async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
       return emptyUsage(email, now, status)
     }
     const data = (await res.json()) as Record<string, any>
-    const limits = mapUsageLimits(data)
-    return {
-      limits,
-      session: asWindow(findLimit(limits, 'session')),
-      weekly: asWindow(findLimit(limits, 'weekly_all')),
-      email,
-      updatedAt: now,
-      status: 'ok'
-    }
+    return usageFromPayload(data, email, now)
   } catch {
     return emptyUsage(email, now, 'error')
   }
@@ -210,6 +195,21 @@ export interface UsageServiceOptions {
    * phone-facing `usage` block refreshes when a poll lands. Best-effort; must never throw.
    */
   onCacheUpdate?: () => void
+  /**
+   * Claude accounts living on the hosts of connected SSH projects. Injected the same way Context
+   * Link takes its remote deps: core owns the command + the parsing, the shell owns the
+   * ControlMaster. Absent ⇒ `usage:remote` answers `[]` — which is exactly right for the Server
+   * Edition (no SSH projects there) and needs no capability check in the UI.
+   */
+  remote?: RemoteUsageDeps
+}
+
+export interface RemoteUsageDeps {
+  /** The rows to offer right now (see `remoteUsageTargets`). Re-read per request — projects
+   *  connect and disconnect under us. Must never throw. */
+  targets: () => RemoteUsageTarget[]
+  /** Run a POSIX sh command on that target's host; null when it could not run. */
+  run: RemoteUsageRunner
 }
 
 export interface UsageService {
@@ -338,6 +338,58 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
       return providersCache
     }
     return runProviders()
+  })
+
+  // Remote (SSH host) Claude accounts. Cached per target under the same debounce and, like the
+  // providers above, fetched ON DEMAND rather than polled: each row costs an ssh exec plus an
+  // HTTPS request made on someone else's machine, and the pill is informational. The renderer
+  // asks on mount, when the popover opens, and whenever the set of connected projects changes.
+  const remoteCache = new Map<string, { at: number; usage: ClaudeUsage }>()
+  const remoteInFlight = new Map<string, Promise<ClaudeUsage>>()
+
+  const runRemote = async (
+    deps: RemoteUsageDeps,
+    target: RemoteUsageTarget
+  ): Promise<ClaudeUsage> => {
+    const pending = remoteInFlight.get(target.key)
+    if (pending) return pending
+    const p = fetchRemoteUsage(target, deps.run, Date.now())
+    remoteInFlight.set(target.key, p)
+    try {
+      const u = await p
+      remoteCache.set(target.key, { at: Date.now(), usage: u })
+      return u
+    } finally {
+      remoteInFlight.delete(target.key)
+    }
+  }
+
+  platform().handle(IPC.usageRemote, async (force?: boolean): Promise<RemoteAccountUsage[]> => {
+    const deps = opts.remote
+    if (!deps) return []
+    let targets: RemoteUsageTarget[] = []
+    try {
+      targets = deps.targets()
+    } catch {
+      return [] // a throwing provider must never break the popover
+    }
+    // Rows for hosts that have since disconnected would otherwise sit in the cache forever,
+    // reporting numbers from a connection that no longer exists.
+    const live = new Set(targets.map((t) => t.key))
+    for (const key of [...remoteCache.keys()]) if (!live.has(key)) remoteCache.delete(key)
+    // One slow / unreachable host must not withhold the others.
+    const rows = await Promise.all(
+      targets.map(async (t): Promise<RemoteAccountUsage> => {
+        const cached = remoteCache.get(t.key)
+        const fresh = cached && Date.now() - cached.at < REFETCH_DEBOUNCE_MS
+        const usage =
+          !force && fresh
+            ? cached.usage
+            : await runRemote(deps, t).catch(() => emptyUsage(null, Date.now(), 'error'))
+        return { hostKey: t.hostKey, accountId: t.accountId, label: t.label, usage }
+      })
+    )
+    return rows
   })
 
   // Poll the system account AND every local managed account (spec: mobile-usage-inbox), so the

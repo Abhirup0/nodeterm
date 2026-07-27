@@ -5097,6 +5097,18 @@ body,
   color: rgba(255, 255, 255, 0.45);
   margin-bottom: 4px;
 }
+/* Host chip on a remote (SSH) account row — the same email can be signed in on several
+   machines, so the row has to say WHERE these numbers came from. */
+.usage-account__host {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.08);
+  vertical-align: middle;
+}
 
 /* ---- Claude context-window meter (per-node header pill + popover) ---- */
 .ctx-meter {

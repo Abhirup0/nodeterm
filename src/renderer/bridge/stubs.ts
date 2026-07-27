@@ -232,6 +232,9 @@ export function buildStubApi(): Omit<
       // Empty, not a reject: "no providers configured" is a real answer and the popover
       // renders it as nothing. This one needs no cast — the honest type already fits.
       providers: () => Promise.resolve([]),
+      // Same reasoning as `providers`: "no connected SSH hosts" is a real answer, and it is the
+      // permanently correct one on a shell with no SSH projects.
+      remote: () => Promise.resolve([]),
       setProviderCookie: U('usage.setProviderCookie'),
       cookieProviders: () => Promise.resolve({}),
       onUpdate: noopUnsub

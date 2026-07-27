@@ -596,6 +596,19 @@ export class SshProjectManager {
     return this.conns.get(projectId)?.claudeAutoPermissionMode
   }
 
+  /**
+   * Every LIVE connection as `{ projectId, hostKey }`. Feeds the remote-usage target list, which
+   * needs both halves: the host key to match accounts against, and a project whose ControlMaster
+   * can carry the read. Hosts shared by several projects are deduped by the caller
+   * (`remoteUsageTargets`), not here — this is the raw map.
+   */
+  connectedHosts(): { projectId: string; hostKey: string }[] {
+    return [...this.conns.entries()].map(([projectId, c]) => ({
+      projectId,
+      hostKey: sshHostKey(c.conn)
+    }))
+  }
+
   /** `user@host` key of a connected project (matches ClaudeAccount.host). */
   hostKeyFor(projectId: string): string | undefined {
     const c = this.conns.get(projectId)
