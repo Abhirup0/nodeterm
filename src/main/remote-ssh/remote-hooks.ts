@@ -6,7 +6,7 @@
 // runner so the flow is unit-testable without real ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
-import { mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
+import { buildManagedHookCommand, mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import {
   buildCodexHooksAndTrust,
   buildManagedCommand as buildCodexManagedCommand,
@@ -140,7 +140,7 @@ export class RemoteHooks {
         } catch {
           cfg = {}
         }
-        const merged = mergeManagedHook(cfg, `sh "${script}"`, t.events)
+        const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), t.events)
         await this.r.run(
           childArgs(conn, controlPath, `mkdir -p $(dirname ${config}) && cat > ${config}`),
           JSON.stringify(merged, null, 2)
@@ -279,7 +279,7 @@ export class RemoteHooks {
       } catch {
         cfg = {}
       }
-      const merged = mergeManagedHook(cfg, `sh "${script}"`, events)
+      const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), events)
       await this.r.run(
         childArgs(conn, controlPath, `mkdir -p ${posixQuote(accountDir)} && cat > ${posixQuote(config)}`),
         JSON.stringify(merged, null, 2)

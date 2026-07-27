@@ -41,12 +41,17 @@ describe('RemoteHooks.setup', () => {
           (c.stdin ?? '').includes('NODETERM_HOOK_SOCK=/home/u/.nodeterm/hook-p1.sock')
       )
     ).toBe(true)
-    // managed script written to the absolute path + config merged with `sh "<abs script>"`.
+    // managed script written to the absolute path + config merged with the guarded command.
     expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/agent-hooks/claude.sh'))).toBe(true)
     expect(joined.some((j) => j.includes('cat > /home/u/.claude/settings.json'))).toBe(true)
     expect(calls.some((c) => (c.stdin ?? '').includes('--unix-socket'))).toBe(true)
-    // merged config is JSON, so the command quotes are escaped: sh \"<abs script>\".
-    expect(calls.some((c) => (c.stdin ?? '').includes('sh \\"/home/u/.nodeterm/agent-hooks/claude.sh\\"'))).toBe(true)
+    // The merged command guards on the script still existing — a removed ~/.nodeterm must not
+    // make every prompt fail the hook (a non-zero UserPromptSubmit hook blocks the prompt).
+    expect(
+      calls.some((c) =>
+        (c.stdin ?? '').includes("if [ -r '/home/u/.nodeterm/agent-hooks/claude.sh' ]; then sh ")
+      )
+    ).toBe(true)
     expect(calls.some((c) => (c.stdin ?? '').includes('"hooks"'))).toBe(true)
     // no unexpanded tilde survives in any remote path/command.
     expect(joined.some((j) => j.includes('~/'))).toBe(false)

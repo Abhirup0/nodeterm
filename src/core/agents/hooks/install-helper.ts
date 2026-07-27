@@ -24,6 +24,28 @@ function scriptPathFor(scriptFileName: string): string {
   return path.join(platform().userDataDir, 'agent-hooks', scriptFileName)
 }
 
+/**
+ * The managed hook command: run our script, but ONLY if it is still on disk.
+ *
+ * The guard is not cosmetic. A bare `sh "<path>"` exits non-zero when the script is gone, and a
+ * non-zero UserPromptSubmit hook BLOCKS the prompt — so one stale entry bricks every Claude
+ * session on that machine ("cannot open …: No such file", nothing can be submitted) until the
+ * user hand-edits settings.json. The entry goes stale in ordinary situations: the app is
+ * uninstalled, its user-data dir is cleared, or the server edition ran with a `--data-dir` under
+ * a temp path that later got cleaned (see the installHooks note in src/server/config.ts).
+ *
+ * Missing script → swallow stdin (hooks are fed JSON on stdin) and exit 0: the agent simply runs
+ * without status, which is exactly what an uninstalled nodeterm should look like.
+ *
+ * Codex builds its own equivalent (`buildManagedCommand` in codex.ts) — its exact bytes are
+ * hashed into config.toml's trust entries, so the two must stay separate.
+ */
+export function buildManagedHookCommand(scriptPath: string): string {
+  // POSIX single-quote escape so $, `, " and \ in the path are taken literally.
+  const q = `'${scriptPath.replaceAll("'", "'\\''")}'`
+  return `if [ -r ${q} ]; then sh ${q}; else cat >/dev/null 2>&1 || :; fi`
+}
+
 // The marker identifying OUR entry: the `agent-hooks/<scriptFile>` tail of the managed
 // command. A bare "agent-hooks" substring is NOT enough — other tools use the same dir
 // name (e.g. `~/.someapp/agent-hooks/claude-hook.sh`), and matching them would delete a
@@ -76,7 +98,7 @@ export function installHooksInto(opts: InstallHooksOptions): void {
     /* fail open */
   }
 
-  const command = `sh "${sp}"`
+  const command = buildManagedHookCommand(sp)
   let config: Settings = {}
   try {
     config = JSON.parse(readFileSync(configPath, 'utf8')) as Settings
