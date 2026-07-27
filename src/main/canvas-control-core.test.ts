@@ -78,6 +78,15 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('link')).toBe(false)
   })
 
+  it('verify requires --node and is not destructive (it only opens read-only reviewers)', () => {
+    expect(parseControlRequest('verify', {})).toEqual({ error: 'verify requires --node <id>' })
+    expect(parseControlRequest('verify', { node: 'n1', lenses: 'security,tests' })).toEqual({
+      verb: 'verify',
+      args: { node: 'n1', lenses: 'security,tests' }
+    })
+    expect(isDestructiveVerb('verify')).toBe(false)
+  })
+
   it('open-agent requires --agent, and is not destructive', () => {
     expect(parseControlRequest('open-agent', {})).toEqual({ error: 'open-agent requires --agent <id>' })
     expect(parseControlRequest('open-agent', { agent: 'codex' })).toEqual({

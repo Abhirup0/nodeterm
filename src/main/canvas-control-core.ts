@@ -15,6 +15,7 @@ export type ControlVerb =
   | 'arrange'
   | 'align'
   | 'link'
+  | 'verify'
   | 'spawn-team'
   | 'open-worktree'
   | 'close-worktree'
@@ -41,6 +42,7 @@ const VERBS: ControlVerb[] = [
   'arrange',
   'align',
   'link',
+  'verify',
   'spawn-team',
   'open-worktree',
   'close-worktree',
@@ -78,6 +80,7 @@ export function parseControlRequest(
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
   if (v === 'link' && !args.to) return { error: 'link requires --to <id,id>' }
+  if (v === 'verify' && !args.node) return { error: 'verify requires --node <id>' }
   if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
   if (v === 'open-worktree' && !args.branch) return { error: 'open-worktree requires --branch <name>' }
   if (v === 'close-worktree' && !args.group) return { error: 'close-worktree requires --group <id>' }
@@ -143,6 +146,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
     '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
     '  you did not open, or to link two OTHER nodes together.',
+    '- `verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--synthesis off]` — open a',
+    '  review panel over that node\'s work: one reviewer per lens, each armed behind the target and linked',
+    '  to it, plus a judge armed behind the panel that merges the findings into one verdict. Reviewers are',
+    '  told not to change files. Prefer this over asking one agent to double-check itself.',
     '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
     '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected + context-linked to you.',
     '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
@@ -307,6 +314,15 @@ Verbs:
   pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.
   Agent sessions you open (\`open-claude\`/\`open-agent\`/\`spawn-team\`) are linked to you
   automatically; use \`link\` for nodes you did not open, or to link two OTHER nodes together.
+- \`verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--agent <id>] [--synthesis off] [--label L]\` —
+  open a review PANEL over that node's work: one reviewer per lens, each armed behind the target
+  (they start when it goes idle) and linked to it so they can read what it actually did, plus a
+  judge armed behind the whole panel that merges their findings into one verdict
+  (\`--synthesis off\` skips the judge). Default lenses are correctness, security, tests; any word
+  works as a lens, known ones just get a sharper brief. Reviewers are told NOT to change files —
+  they share one checkout, and finding is a separate job from fixing. Use this instead of asking
+  one agent "are you sure?": several INDEPENDENT looks from different angles catch what one pass,
+  or several identical passes, cannot.
 - \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
   open one agent per role (each prompt starts that member working), arrange them in a grid,
   wrap them in a labeled group, and connect + context-link each to you. Max 8 roles per call.
@@ -367,7 +383,12 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
    other, name the conflicts and the leftovers, and report ONE synthesis. A station you never
    read is a station whose work you cannot vouch for — say so rather than assuming it went
    fine. Stations you did not open are not linked; \`link --to <id>\` them first.
-6. Hand back: the user merges from the group's chip (never merge for them); release a finished
+6. Verify before you report. When a station's work matters — anything touching money, auth, data
+   migration or a public API — run \`verify --node <stationId>\` instead of re-reading it yourself.
+   You cannot independently check work you were part of planning; a panel of reviewers who each
+   look through ONE lens, and who did not watch it being written, can. Fold their verdict into
+   your synthesis, and say which findings you accepted and which you dismissed and why.
+7. Hand back: the user merges from the group's chip (never merge for them); release a finished
    station with \`close-worktree --group <id>\` (unbind keeps the directory).
 `
 }
