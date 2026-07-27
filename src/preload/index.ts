@@ -333,6 +333,7 @@ const api: NodeTerminalApi = {
     fetch: (accountId?: string) => ipcRenderer.invoke(IPC.usageFetch, accountId),
     refresh: (accountId?: string) => ipcRenderer.invoke(IPC.usageRefresh, accountId),
     providers: (force?: boolean) => ipcRenderer.invoke(IPC.usageProviders, force),
+    remote: (force?: boolean) => ipcRenderer.invoke(IPC.usageRemote, force),
     setProviderCookie: (provider: string, cookie: string) =>
       ipcRenderer.invoke(IPC.usageSetProviderCookie, provider, cookie),
     cookieProviders: () => ipcRenderer.invoke(IPC.usageCookieProviders),

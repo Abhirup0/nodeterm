@@ -1253,6 +1253,22 @@ export interface ClaudeUsage {
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
 }
 
+/**
+ * One REMOTE (SSH host) Claude identity's usage, read on that host over the project's
+ * ControlMaster. Separate from the local per-account rows because the identity is only
+ * meaningful together with the host it lives on — the same email can be logged in on two
+ * machines with two different quotas in flight.
+ */
+export interface RemoteAccountUsage {
+  /** `user@host` of the connection the numbers came from. */
+  hostKey: string
+  /** Managed remote account id, or null for that host's system `~/.claude`. */
+  accountId: string | null
+  /** Display label: the managed account's label, else the host key. */
+  label: string
+  usage: ClaudeUsage
+}
+
 export interface UsageApi {
   /** Returns the latest snapshot (cached if fresh, else a fresh fetch). Optional account id
    *  targets a managed account; omitted = the system account (also the pushed one). */
@@ -1263,6 +1279,11 @@ export interface UsageApi {
    *  `force` to bypass the cache debounce. Providers that aren't signed in come back
    *  'unavailable' rather than being omitted, so the caller can tell "off" from "broken". */
   providers(force?: boolean): Promise<ProviderUsage[]>
+  /** Usage for every Claude identity on the hosts of the CONNECTED SSH projects, read on those
+   *  hosts (the credential never crosses back). On-demand like `providers`, not polled — each row
+   *  costs an ssh round-trip. Empty when nothing is connected, or on a shell with no SSH projects
+   *  (Server Edition), so callers need no capability check. */
+  remote(force?: boolean): Promise<RemoteAccountUsage[]>
   /** Store (or, with an empty string, clear) a provider's browser cookie. Resolves to whether one
    *  is now stored. Write-only by design — nothing reads the value back across this boundary. */
   setProviderCookie(provider: string, cookie: string): Promise<boolean>

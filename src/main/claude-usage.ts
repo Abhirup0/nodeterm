@@ -3,15 +3,22 @@
 // the Server Edition boots the same code. All that is left here is the one thing core cannot
 // know: whether a desktop window is focused.
 import type { BrowserWindow } from 'electron'
-import { startUsageService, type UsageService } from '../core/usage/usage-service'
+import {
+  startUsageService,
+  type RemoteUsageDeps,
+  type UsageService
+} from '../core/usage/usage-service'
 
 export { resolveClaudeAccessToken } from '../core/usage/usage-service'
 
 /** Extra usage-service wiring the shell owns: the local managed accounts to poll for the mobile
- *  `usage` mirror block, and the mirror-flush callback fired on every cache update. */
+ *  `usage` mirror block, the mirror-flush callback fired on every cache update, and the SSH
+ *  ControlMaster access remote-host usage is read over (desktop-only — the Server Edition has no
+ *  SSH projects, so it passes none and `usage:remote` answers empty). */
 export interface InitClaudeUsageOpts {
   localAccounts?: () => string[]
   onCacheUpdate?: () => void
+  remote?: RemoteUsageDeps
 }
 
 /** Start the usage service on the focused-window poll gate and return it, so the caller can wire
@@ -22,7 +29,8 @@ export function initClaudeUsage(win: BrowserWindow, opts: InitClaudeUsageOpts = 
   const service = startUsageService({
     shouldPoll: () => win.isFocused(),
     localAccounts: opts.localAccounts,
-    onCacheUpdate: opts.onCacheUpdate
+    onCacheUpdate: opts.onCacheUpdate,
+    remote: opts.remote
   })
 
   const onFocus = (): void => service.refreshIfStale()

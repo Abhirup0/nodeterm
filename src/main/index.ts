@@ -88,6 +88,7 @@ import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
+import { remoteUsageTargets } from '../core/usage/remote-claude-usage'
 import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
@@ -1499,6 +1500,30 @@ app.whenReady().then(async () => {
     localAccounts: localClaudeAccountIds,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
+    },
+    // Remote (SSH host) Claude usage. Same shape as the Context Link remote deps: core owns the
+    // command and the parsing, main owns the ControlMaster. `sshProjectManager` is assigned just
+    // below, so both closures read it lazily — they only ever run after a project has connected.
+    remote: {
+      targets: () =>
+        remoteUsageTargets(
+          sshProjectManager?.connectedHosts() ?? [],
+          settingsStore.get().claudeAccounts ?? []
+        ),
+      run: async (target, command) => {
+        const mgr = sshProjectManager
+        const ref = mgr?.refForProject(target.projectId)
+        if (!mgr || !ref) return null
+        try {
+          const { stdout } = await mgr.sshRun(childArgs(ref.conn, ref.controlPath, command))
+          // Deliberately not gated on the exit code: the remote script exits 0 on its own
+          // short-circuits but curl's exit status rides through on a network failure, and the
+          // marker block is what says whether the read completed.
+          return stdout
+        } catch {
+          return null
+        }
+      }
     }
   })
   setMirrorUsageProvider(() =>

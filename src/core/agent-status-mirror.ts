@@ -322,9 +322,12 @@ export function reduceEntry(
  * Deliberately drops the local `settings` block: a slice carries per-host settings that the SSH
  * push injects itself (Task 2 of mobile-agent-launch-parity), never this host's local block.
  *
- * `usage` is likewise DROPPED (spec: mobile-usage-inbox): a remote host's account credentials
- * live on that host, so the desktop cannot answer for them — a host running nodeterm itself
- * writes its own mirror with its own usage. `server` (install metadata) is DROPPED for the same
+ * `usage` is likewise DROPPED (spec: mobile-usage-inbox): the block describes THIS machine's
+ * local accounts, and a host running nodeterm itself writes its own mirror with its own usage.
+ * (The desktop CAN now read a host's Claude usage — see core/usage/remote-claude-usage — but
+ * pushing those numbers back to the very host they were read on would be a round trip to
+ * nowhere. Surfacing remote usage on the phone means teaching the phone to ask, not padding
+ * this slice.) `server` (install metadata) is DROPPED for the same
  * reason (it describes THIS host's install, not the remote's — a remote nodeterm writes its own).
  * `inbox` is KEPT but filtered to the slice's node ids (both the `events` feed and the per-node
  * `nodes` map).

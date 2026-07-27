@@ -105,6 +105,9 @@ export const IPC = {
   usageUpdate: 'usage:update',
   /** Non-Claude providers (codex, …) as one list; Claude keeps its own account-aware channels. */
   usageProviders: 'usage:providers',
+  /** Claude usage for the connected SSH hosts' accounts, read ON those hosts over their
+   *  ControlMasters. Empty on a shell without SSH projects. */
+  usageRemote: 'usage:remote',
   /** Store/clear a provider's browser cookie (minimax, opencode). Write-only: no channel reads
    *  it back. */
   usageSetProviderCookie: 'usage:set-provider-cookie',
