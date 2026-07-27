@@ -918,9 +918,16 @@ export class PtyManager {
     // server returns that one itself when the socket drains. Scoped to THIS view: the other view's
     // (e.g. the still-open modal's) renderer pause is untouched.
     this.releaseFlow(existing, sub, 'renderer')
+    // A tmux-backed join needs the mouse-tracking mode-enable sequences tmux only emits at its own
+    // attach — a mid-stream subscriber missed them, and neither the `screen` capture nor a SIGWINCH
+    // redraw re-sends them, so without this the joiner can't wheel-scroll tmux history until a
+    // keystroke. `persistKey` is set iff tmux-backed (local or remote), which is exactly the gate:
+    // our tmux always runs `mouse on`, so enabling these unconditionally matches its client state.
+    // Rides `base` so it reaches the renderer on BOTH the resized and screen-painted branches.
+    const coAttachMouse = existing.persistKey ? true : undefined
     const base: PtyCreateResult = existing.accountFallback
-      ? { sessionId: existingId, fresh: false, accountFallback: true }
-      : { sessionId: existingId, fresh: false }
+      ? { sessionId: existingId, fresh: false, accountFallback: true, coAttachMouse }
+      : { sessionId: existingId, fresh: false, coAttachMouse }
     if (resized) return Promise.resolve(base) // tmux is redrawing this client — do not paint twice
     // An empty capture (plain shell — no tmux to capture; a tmux/ssh blip) is OMITTED, never sent
     // as '': the renderer must not reset a terminal for nothing. A plain-shell joiner therefore

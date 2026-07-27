@@ -71,6 +71,20 @@ export interface PtyCreateResult {
    */
   screen?: string
   /**
+   * This create JOINED a live TMUX-backed session (co-attach), so the fresh xterm must be told
+   * tmux's mouse-tracking is on. tmux emits the mouse-enable DECSET sequences (`?1000h ?1002h
+   * ?1006h`) to a client ONLY at its own attach — a mid-stream subscriber (the kanban card modal,
+   * a second window) never sees them, and neither `screen` (`capture-pane` carries no private
+   * modes) nor a SIGWINCH redraw re-emits them. Without them xterm treats the wheel as local
+   * scrollback (empty on the alternate screen), so the joiner cannot scroll tmux's history until a
+   * keystroke makes the app re-request mouse. The renderer writes `CO_ATTACH_MOUSE_SEQ` when this
+   * is set. Since our tmux is always `mouse on` (local and remote), enabling these unconditionally
+   * on a tmux-backed join matches tmux's own invariant client state; the enable is idempotent.
+   * Set on BOTH join branches (screen-painted and resized) — the resize does not deliver them.
+   * Absent for a plain-shell join (no tmux ⇒ no tmux mouse) and for the solo spawn path.
+   */
+  coAttachMouse?: boolean
+  /**
    * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
    * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
    *
