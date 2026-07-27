@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClaudeUsage, ProviderUsage, RemoteAccountUsage, UsageLimit } from '@shared/types'
 import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
+import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
+import { scopeFromKey, scopeUsage, usageScopeKey } from '../lib/usageScope'
 import { formatResetCountdown, formatTimeAgo, percentNumber, percentText, severityColor } from '../lib/usageFormat'
 import {
   enabledProviders,
@@ -11,8 +13,7 @@ import {
   limitLabel,
   limitShortLabel,
   primaryLimit,
-  providerLabel,
-  remotePillSegments
+  providerLabel
 } from '@shared/usage-limits'
 import { systemAccountDisplay } from '../state/workspace'
 
@@ -160,6 +161,15 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
     [claudeAccounts]
   )
 
+  // The indicator follows the ACTIVE project: on a local project it is this machine, on an SSH
+  // project it is that host and nothing else. Showing every source at once is what made the panel
+  // unreadable once remote hosts joined it.
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const scopeHostKey = useProjects((s) =>
+    usageScopeKey(s.projects.find((p) => p.id === s.activeProjectId))
+  )
+  const scope = useMemo(() => scopeFromKey(scopeHostKey), [scopeHostKey])
+
   useEffect(() => {
     void window.nodeTerminal.usage.fetch().then(setUsage)
     return window.nodeTerminal.usage.onUpdate(setUsage)
@@ -180,29 +190,32 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
     }
   }, [open])
 
-  // Which SSH projects are connected right now, as a stable primitive. It is the dependency that
-  // matters for remote usage: a project connecting AFTER mount adds rows nobody would otherwise
-  // see until the popover was opened, and a disconnect must retire them. (Zustand compares with
-  // Object.is, so a joined string re-renders only when the set actually changes.)
-  const sshProjectKey = useSshConn((s) => Object.keys(s.byProject).sort().join(','))
-
-  // Remote (SSH host) Claude accounts. Same cadence as `providers` — mount, popover open, and
-  // now a change in connected projects — never a poll: each row is an ssh exec plus an HTTPS
+  // Remote (SSH host) Claude accounts, for THIS project's host only. Same cadence as
+  // `providers` — mount, popover open — plus the moment the project's connection comes up
+  // (`sshUp`: an SSH project is usually opened before its master is ready, and without this the
+  // pill stays empty until you click it). Never polled: each row is an ssh exec plus an HTTPS
   // request made on the host, which is not a price to pay every 15 minutes for a pill nobody may
-  // be looking at. Answers `[]` with nothing connected, and on shells without SSH projects.
+  // be looking at.
+  const sshUp = useSshConn((s) => !!s.byProject[activeProjectId])
   useEffect(() => {
+    if (!scopeHostKey || !sshUp) {
+      // Leaving the rows up after a switch would attribute one machine's numbers to another.
+      setRemote((prev) => (prev.length ? [] : prev))
+      return
+    }
     let cancelled = false
-    void window.nodeTerminal.usage.remote().then((rows) => {
+    void window.nodeTerminal.usage.remote({ hostKey: scopeHostKey }).then((rows) => {
       if (!cancelled) setRemote(rows)
     })
     return () => {
       cancelled = true
     }
-  }, [open, sshProjectKey])
+  }, [open, scopeHostKey, sshUp])
 
   // Fetch each account's usage on demand when the popover opens (system row uses `usage`).
+  // Skipped entirely on an SSH project: those identities are not what this project spends.
   useEffect(() => {
-    if (!open || accounts.length === 0) return
+    if (scope.kind !== 'local' || !open || accounts.length === 0) return
     let cancelled = false
     for (const a of accounts) {
       void window.nodeTerminal.usage.fetch(a.id).then((u) => {
@@ -212,7 +225,7 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
     return () => {
       cancelled = true
     }
-  }, [open, accounts])
+  }, [open, accounts, scope.kind])
 
   // Close the popover on an outside click.
   useEffect(() => {
@@ -225,50 +238,57 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
   }, [open])
 
   // Settings → Usage toggles are a display choice, applied before any other rule — a hidden
-  // provider is invisible here even when signed in and mid-limit.
+  // provider is invisible here even when signed in and mid-limit. Scoping runs after them: the
+  // toggles say what you never want to see, the scope says what belongs to where you are.
   const hidden = new Set(hiddenProviders)
-  const visibleProviders = providers.filter((p) => !hidden.has(p.provider))
-  const claudeUsage = hidden.has('claude') ? null : usage
-  // Its own switch, not Claude's: hiding the local rows must not silently take the SSH hosts
-  // down with them, and vice versa.
-  const visibleRemote = hidden.has('claude-remote') ? [] : remote
+  const scoped = scopeUsage({
+    scope,
+    claude: hidden.has('claude') ? null : usage,
+    accounts,
+    providers: providers.filter((p) => !hidden.has(p.provider)),
+    // Its own switch, not Claude's: hiding the local rows must not silently take the SSH hosts
+    // down with them, and vice versa.
+    remote: hidden.has('claude-remote') ? [] : remote
+  })
+  const claudeUsage = scoped.claude
+  const visibleProviders = scoped.providers
+  const visibleRemote = scoped.remote
 
   // Only providers the user has actually enabled reach the pill; render whenever ANY of them
   // (Claude included) has something to say. Both rules are pure and pinned by tests — gating on
   // Claude alone, which is what this did, left a Codex-only user with no pill at all.
   const enabled = enabledProviders(visibleProviders)
-  const remoteSegments = remotePillSegments(visibleRemote)
   if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote)) return null
 
-  const limits = claudeUsage?.limits ?? []
-  const status = claudeUsage?.status ?? 'unavailable'
-  const hasData = limits.length > 0 || enabled.length > 0 || remoteSegments.length > 0
+  // On an SSH project these are the HOST's limits — same shape, same labels, read somewhere else.
+  const limits = scoped.pillLimits
+  const status = claudeUsage?.status ?? visibleRemote[0]?.usage.status ?? 'unavailable'
+  const hasData = limits.length > 0 || enabled.length > 0
   const fetching = refreshing
   const isError = status === 'error'
   // The pill leads with whatever is closest to biting, so a scoped model cap that is nearly
   // exhausted can't hide behind a comfortable 5h window. Considers every enabled provider, not
-  // just Claude, so an exhausted Codex window drives the bar too — and every connected host, so
-  // an agent fleet burning a server's quota surfaces without opening the popover.
-  const primary = primaryLimit([
-    ...limits,
-    ...enabled.flatMap((p) => p.limits),
-    ...remoteSegments.map((s) => s.limit)
-  ])
+  // just Claude, so an exhausted Codex window drives the bar too.
+  const primary = primaryLimit([...limits, ...enabled.flatMap((p) => p.limits)])
+  const updatedAt = claudeUsage?.updatedAt ?? visibleRemote[0]?.usage.updatedAt ?? null
 
   const refresh = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
     if (refreshing) return
     setRefreshing(true)
     try {
-      // The remote rows are forced past their debounce too — ⟳ is the only way to make a host
-      // re-read before the cache expires, and "refresh" that skipped half the panel would be a
-      // lie. Settled independently: a host that has gone away must not withhold the local answer.
-      const [local, rows] = await Promise.all([
-        window.nodeTerminal.usage.refresh(),
-        window.nodeTerminal.usage.remote(true).catch((): RemoteAccountUsage[] => [])
-      ])
-      setUsage(local)
-      setRemote(rows)
+      // ⟳ refreshes what is actually on screen. On an SSH project that is the host — forced past
+      // its debounce, since this is the only way to make it re-read before the cache expires —
+      // and the local snapshot is left alone rather than spending a request on rows nobody can see.
+      if (scope.kind === 'ssh') {
+        setRemote(
+          await window.nodeTerminal.usage
+            .remote({ hostKey: scope.hostKey, force: true })
+            .catch((): RemoteAccountUsage[] => [])
+        )
+      } else {
+        setUsage(await window.nodeTerminal.usage.refresh())
+      }
     } finally {
       setRefreshing(false)
     }
@@ -315,18 +335,6 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
             </span>
           )
         })}
-        {/* One segment per connected HOST, labelled by its short hostname — the pill's whole job
-            for a user whose Claude runs on a server, where every number above is empty. */}
-        {remoteSegments.map((s, i) => (
-          <span key={s.hostKey} className="usage-pill__provider">
-            {(limits.length > 0 || enabled.length > 0 || i > 0) && (
-              <span className="usage-pill__sep">·</span>
-            )}
-            <span className="usage-pill__num" title={s.hostKey}>
-              {percentNumber(s.limit.usedPercent, percentMode)}% {s.label}
-            </span>
-          </span>
-        ))}
         {isError && hasData && <span className="usage-pill__dim">⚠</span>}
       </>
     )
@@ -338,55 +346,70 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
         <div className="usage-popover">
           <div className="usage-popover__head">
             <span className="usage-popover__title">✦ Usage</span>
-            {/* Timestamp tracks the Claude snapshot, the only one that is polled. Absent when
-                Claude is not signed in and the panel is showing other providers only. */}
-            {usage && (
-              <span className="usage-popover__ago">Updated {formatTimeAgo(usage.updatedAt)}</span>
+            {/* Tracks whichever snapshot the panel is actually showing — the local poll's, or
+                the host read's on an SSH project. Absent when neither has answered yet. */}
+            {updatedAt !== null && (
+              <span className="usage-popover__ago">Updated {formatTimeAgo(updatedAt)}</span>
             )}
           </div>
-          {accounts.length > 0 && usage ? (
-            <>
-              <AccountUsageBlock
-                mode={percentMode}
-                label={systemAccountDisplay(systemLabelSetting, usage.email)}
-                // Avoid printing the email twice when it's already the display label.
-                email={systemLabelSetting.trim() ? (usage.email ?? undefined) : undefined}
-                u={usage}
-              />
-              {accounts.map((a) => (
-                <AccountUsageBlock key={a.id} mode={percentMode} label={a.label} email={a.email} u={acctUsage[a.id] ?? null} />
-              ))}
-            </>
-          ) : (
-            <>
-              {/* Claude's rows are bare when it is the only provider; once others share the
-                  panel they need a heading of their own to stay attributable. */}
-              {enabled.length > 0 && limits.length > 0 && (
-                <div className="usage-account__label">Claude</div>
-              )}
-              {limits.map((l) => (
-                <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
-              ))}
-              {!hasData && <div className="usage-popover__empty">No usage data.</div>}
-              {usage?.email && (
-                <div className="usage-account">
-                  <div className="usage-account__label">Claude Account</div>
-                  <div className="usage-account__email">{usage.email}</div>
-                </div>
-              )}
-            </>
-          )}
-          {/* Remote hosts sit between the local Claude rows and the other providers: they are
-              still Claude, just read somewhere else. */}
+          {/* The local Claude section belongs to a LOCAL project only. On an SSH project the
+              remote blocks below carry the same limits, and rendering both would print the
+              host's numbers twice under two different headings. */}
+          {scope.kind === 'local' &&
+            (scoped.accounts.length > 0 && claudeUsage ? (
+              <>
+                <AccountUsageBlock
+                  mode={percentMode}
+                  label={systemAccountDisplay(systemLabelSetting, claudeUsage.email)}
+                  // Avoid printing the email twice when it's already the display label.
+                  email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
+                  u={claudeUsage}
+                />
+                {scoped.accounts.map((a) => (
+                  <AccountUsageBlock key={a.id} mode={percentMode} label={a.label} email={a.email} u={acctUsage[a.id] ?? null} />
+                ))}
+              </>
+            ) : (
+              <>
+                {/* Claude's rows are bare when it is the only provider; once others share the
+                    panel they need a heading of their own to stay attributable. */}
+                {enabled.length > 0 && limits.length > 0 && (
+                  <div className="usage-account__label">Claude</div>
+                )}
+                {limits.map((l) => (
+                  <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
+                ))}
+                {!hasData && <div className="usage-popover__empty">No usage data.</div>}
+                {claudeUsage?.email && (
+                  <div className="usage-account">
+                    <div className="usage-account__label">Claude Account</div>
+                    <div className="usage-account__email">{claudeUsage.email}</div>
+                  </div>
+                )}
+              </>
+            ))}
+          {/* On an SSH project these are the whole panel; the host badge is what says the numbers
+              were read somewhere other than this machine. */}
           {visibleRemote.map((r) => (
             <RemoteUsageBlock key={`${r.hostKey}#${r.accountId ?? ''}`} row={r} mode={percentMode} />
           ))}
+          {scope.kind === 'ssh' && visibleRemote.length === 0 && (
+            <div className="usage-popover__empty">
+              No usage from this host yet — it is read once the project connects.
+            </div>
+          )}
           {visibleProviders.map((p) => (
             <ProviderBlock key={p.provider} u={p} mode={percentMode} />
           ))}
         </div>
       )}
-      <button className="usage-pill" onClick={() => setOpen((v) => !v)} title="Agent usage">
+      {/* The SSH pill is visually identical to the local one — same labels, same bar — so the
+          title is what answers "whose numbers are these?" without opening the popover. */}
+      <button
+        className="usage-pill"
+        onClick={() => setOpen((v) => !v)}
+        title={scope.kind === 'ssh' ? `Agent usage on ${scope.hostKey}` : 'Agent usage'}
+      >
         <span className="usage-pill__icon">✦</span>
         {pillBody}
       </button>

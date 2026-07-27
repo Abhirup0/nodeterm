@@ -1269,6 +1269,15 @@ export interface RemoteAccountUsage {
   usage: ClaudeUsage
 }
 
+/** What the usage indicator wants from the remote hosts right now. */
+export interface RemoteUsageQuery {
+  /** Read only this `user@host` — the machine the active project runs on. Omitted = every
+   *  connected host, which no scoped UI asks for but keeps the channel general. */
+  hostKey?: string
+  /** Bypass the cache debounce (the ⟳ button). */
+  force?: boolean
+}
+
 export interface UsageApi {
   /** Returns the latest snapshot (cached if fresh, else a fresh fetch). Optional account id
    *  targets a managed account; omitted = the system account (also the pushed one). */
@@ -1279,11 +1288,12 @@ export interface UsageApi {
    *  `force` to bypass the cache debounce. Providers that aren't signed in come back
    *  'unavailable' rather than being omitted, so the caller can tell "off" from "broken". */
   providers(force?: boolean): Promise<ProviderUsage[]>
-  /** Usage for every Claude identity on the hosts of the CONNECTED SSH projects, read on those
-   *  hosts (the credential never crosses back). On-demand like `providers`, not polled — each row
-   *  costs an ssh round-trip. Empty when nothing is connected, or on a shell with no SSH projects
-   *  (Server Edition), so callers need no capability check. */
-  remote(force?: boolean): Promise<RemoteAccountUsage[]>
+  /** Usage for the Claude identities on connected SSH hosts, read on those hosts (the credential
+   *  never crosses back). On-demand like `providers`, not polled — each row costs an ssh
+   *  round-trip, which is also why the caller should name the ONE host it is showing. Empty when
+   *  nothing is connected, or on a shell with no SSH projects (Server Edition), so callers need
+   *  no capability check. */
+  remote(query?: RemoteUsageQuery): Promise<RemoteAccountUsage[]>
   /** Store (or, with an empty string, clear) a provider's browser cookie. Resolves to whether one
    *  is now stored. Write-only by design — nothing reads the value back across this boundary. */
   setProviderCookie(provider: string, cookie: string): Promise<boolean>

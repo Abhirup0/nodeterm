@@ -82,43 +82,10 @@ export function hasAnyUsage(
   return remote.some((r) => r.usage.status === 'ok' || r.usage.status === 'error')
 }
 
-/**
- * Short, human name for an ssh `user@host` — what the collapsed pill labels a remote segment
- * with, since `deploy@build-01.internal.example.com` cannot share a row with three other
- * numbers. Bare IPs are kept whole: chopping at the first dot would turn 10.0.0.4 into "10".
- */
-export function shortHostLabel(hostKey: string): string {
-  const host = hostKey.includes('@') ? hostKey.slice(hostKey.indexOf('@') + 1) : hostKey
-  if (!host) return hostKey
-  if (/^[\d.]+$/.test(host) || host.includes(':')) return host // IPv4 / IPv6
-  const first = host.split('.')[0]
-  return first || host
-}
-
-/**
- * One pill segment per remote HOST, carrying that host's worst limit.
- *
- * Per host, not per account: a host with three managed accounts would otherwise push three more
- * numbers into a pill that already shares a line with the canvas. The full per-account breakdown
- * is what the popover is for.
- */
-export function remotePillSegments(
-  remote: readonly RemoteAccountUsage[]
-): { hostKey: string; label: string; limit: UsageLimit }[] {
-  const byHost = new Map<string, UsageLimit[]>()
-  for (const r of remote) {
-    if (r.usage.status !== 'ok' || r.usage.limits.length === 0) continue
-    const acc = byHost.get(r.hostKey)
-    if (acc) acc.push(...r.usage.limits)
-    else byHost.set(r.hostKey, [...r.usage.limits])
-  }
-  const out: { hostKey: string; label: string; limit: UsageLimit }[] = []
-  for (const [hostKey, limits] of byHost) {
-    const worst = primaryLimit(limits)
-    if (worst) out.push({ hostKey, label: shortHostLabel(hostKey), limit: worst })
-  }
-  return out
-}
+// (A per-host pill segment lived here while the pill showed every connected host at once. The
+// indicator is scoped to the active project now — at most ONE machine is ever in view — so the
+// host's limits take the pill's ordinary Claude slot and the segment has nothing left to say.
+// See renderer/lib/usageScope.ts.)
 
 /**
  * Every usage source the app can read, in display order — Claude first (the primary agent) with

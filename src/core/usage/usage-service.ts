@@ -14,7 +14,8 @@ import { IPC } from '../../shared/ipc'
 import type {
   ClaudeUsage,
   ProviderUsage,
-  RemoteAccountUsage
+  RemoteAccountUsage,
+  RemoteUsageQuery
 } from '../../shared/types'
 import { emptyUsage, usageFromPayload } from './claude-usage-map'
 import {
@@ -364,19 +365,25 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     }
   }
 
-  platform().handle(IPC.usageRemote, async (force?: boolean): Promise<RemoteAccountUsage[]> => {
+  platform().handle(IPC.usageRemote, async (query?: RemoteUsageQuery): Promise<RemoteAccountUsage[]> => {
     const deps = opts.remote
     if (!deps) return []
-    let targets: RemoteUsageTarget[] = []
+    let all: RemoteUsageTarget[] = []
     try {
-      targets = deps.targets()
+      all = deps.targets()
     } catch {
       return [] // a throwing provider must never break the popover
     }
     // Rows for hosts that have since disconnected would otherwise sit in the cache forever,
-    // reporting numbers from a connection that no longer exists.
-    const live = new Set(targets.map((t) => t.key))
+    // reporting numbers from a connection that no longer exists. Evicted against the FULL target
+    // list rather than the caller's filtered one: switching between two SSH projects would
+    // otherwise throw away each host's cache on the way to the other.
+    const live = new Set(all.map((t) => t.key))
     for (const key of [...remoteCache.keys()]) if (!live.has(key)) remoteCache.delete(key)
+    // The scoped indicator asks for ONE host — the machine the active project runs on — so the
+    // other connections cost nothing while you are not looking at them.
+    const targets = query?.hostKey ? all.filter((t) => t.hostKey === query.hostKey) : all
+    const force = query?.force
     // One slow / unreachable host must not withhold the others.
     const rows = await Promise.all(
       targets.map(async (t): Promise<RemoteAccountUsage> => {
