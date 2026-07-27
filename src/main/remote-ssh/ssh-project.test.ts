@@ -1,4 +1,6 @@
 import { promises as fs } from 'fs'
+import os from 'os'
+import path from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
@@ -357,6 +359,104 @@ describe('SshProjectManager', () => {
     const unknown = mgrWithClaude(null)
     await unknown.mgr.connect('p3', conn)
     expect((await unknown.mgr.remoteAccountAdd('p3', 'acc1'))?.versionSupported).toBe(true)
+  })
+
+  // --- downloadFile (remote → this machine) -------------------------------------------------
+  // These run against a REAL temp directory: collision resolution, the `.part` staging file and
+  // the rename are filesystem behavior, and mocking the fs would only test the mock.
+  describe('downloadFile', () => {
+    const tmpDirs: string[] = []
+    async function destDir(): Promise<string> {
+      const d = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-dl-'))
+      tmpDirs.push(d)
+      return d
+    }
+    afterEach(async () => {
+      for (const d of tmpDirs.splice(0)) await fs.rm(d, { recursive: true, force: true })
+    })
+
+    /** `isDir` decides what the remote `test -d` probe answers; scp "succeeds" by creating the
+     *  local target it was told to write, so the rename step is exercised for real. */
+    function makeDlMgr(isDir = false, scpCode = 0) {
+      const scpCalls: string[][] = []
+      const run = vi.fn(async (args: string[]) => ({
+        code: args.join(' ').includes('test -d') ? (isDir ? 0 : 1) : 0,
+        stdout: ''
+      }))
+      const runScp = vi.fn(async (args: string[]) => {
+        scpCalls.push(args)
+        if (scpCode === 0) {
+          const local = args[args.length - 1]
+          if (isDir) await fs.mkdir(local, { recursive: true })
+          else await fs.writeFile(local, 'payload')
+        }
+        return { code: scpCode }
+      })
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run,
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      return { mgr, scpCalls, runScp }
+    }
+
+    it('lands the file under its remote basename and stages through .part', async () => {
+      const { mgr, scpCalls } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      expect(res).toEqual({ ok: true, localPath: path.join(dir, 'notes.md'), dir: false })
+      expect(await fs.readFile(path.join(dir, 'notes.md'), 'utf8')).toBe('payload')
+      // scp wrote to `<target>.part`, never straight to the final name.
+      expect(scpCalls[0][scpCalls[0].length - 1]).toBe(path.join(dir, 'notes.md.part'))
+      expect(await fs.readdir(dir)).toEqual(['notes.md'])
+    })
+
+    it('never overwrites an existing file — it takes the next (n) name', async () => {
+      const { mgr } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      await fs.writeFile(path.join(dir, 'notes.md'), 'mine')
+      const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      expect(res).toMatchObject({ ok: true, localPath: path.join(dir, 'notes (2).md') })
+      expect(await fs.readFile(path.join(dir, 'notes.md'), 'utf8')).toBe('mine')
+    })
+
+    it('passes -r for a remote directory (probed on the host, not taken from the renderer)', async () => {
+      const { mgr, scpCalls } = makeDlMgr(true)
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const res = await mgr.downloadFile('p1', '/srv/repo/docs', dir)
+      expect(res).toMatchObject({ ok: true, dir: true })
+      expect(scpCalls[0]).toContain('-r')
+    })
+
+    it('a failed transfer leaves nothing behind — no target, no .part', async () => {
+      const { mgr } = makeDlMgr(false, 1)
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      expect(res.ok).toBe(false)
+      expect(await fs.readdir(dir)).toEqual([])
+    })
+
+    it('refuses a remote path that names nothing downloadable, without invoking scp', async () => {
+      const { mgr, runScp } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      for (const p of ['/', '/srv/repo/..', '~']) {
+        expect((await mgr.downloadFile('p1', p, dir)).ok).toBe(false)
+      }
+      expect(runScp).not.toHaveBeenCalled()
+    })
+
+    it('fails (never throws) when the project is not connected', async () => {
+      const { mgr } = makeDlMgr()
+      expect(await mgr.downloadFile('nope', '/x/y.txt', await destDir())).toMatchObject({ ok: false })
+    })
   })
 
   it('uploadFile fails open (null) when not connected', async () => {

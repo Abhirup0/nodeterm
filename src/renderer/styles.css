@@ -3606,6 +3606,99 @@ body,
   text-overflow: ellipsis;
 }
 
+/* Per-row download button. Hidden until the row is hovered/selected (and always reachable by
+   keyboard focus) so the tree stays a tree — the context menu carries the same action. */
+.ex-dl {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 0 4px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.ex-row:hover .ex-dl,
+.ex-row.selected .ex-dl,
+.ex-dl:focus-visible {
+  opacity: 1;
+}
+
+.ex-dl:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+/* Download strip: pinned under the tree, one row per transfer. */
+.ex-dls {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 30%;
+  overflow-y: auto;
+}
+
+.ex-dls__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ex-dls__row.done {
+  color: var(--text);
+}
+
+.ex-dls__row.error {
+  color: var(--danger, #ff6b6b);
+}
+
+.ex-dls__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ex-dls__act {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+/* The `+ .ex-dls__act` sibling is the dismiss ×: only the FIRST action pushes right. */
+.ex-dls__act + .ex-dls__act {
+  margin-left: 0;
+  color: var(--muted);
+}
+
+.ex-dls__spin {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ex-dls-spin 0.8s linear infinite;
+}
+
+@keyframes ex-dls-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ---- Confirm dialog ---- */
 .confirm-overlay {
   position: fixed;

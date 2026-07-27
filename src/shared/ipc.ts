@@ -170,6 +170,8 @@ export const IPC = {
   fsMkdir: 'fs:mkdir',
   fsExists: 'fs:exists',
   filesQuickOpen: 'files:quick-open',
+  /** Mint a one-shot HTTP download ticket (Server Edition only; every other shell answers null). */
+  filesDownloadTicket: 'files:download-ticket',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',
@@ -182,6 +184,7 @@ export const IPC = {
   sshListDir: 'ssh:list-dir',
   sshMkdir: 'ssh:mkdir',
   sshUploadFile: 'ssh:upload-file',
+  sshDownloadFile: 'ssh:download-file',
   sshFsList: 'sshFs:list',
   sshFsRead: 'sshFs:read',
   sshFsReadBinary: 'sshFs:read-binary',

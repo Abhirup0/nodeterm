@@ -21,6 +21,7 @@ import {
   type ClaudeApi,
   type ClaudeCliCaps,
   type ContextApi,
+  type DownloadTicket,
   type FilesApi,
   type FsApi,
   type GitApi,
@@ -381,7 +382,11 @@ export function buildFilesApi(
   }
 
   const files: FilesApi = {
-    quickOpen: (cwd) => client.request(IPC.filesQuickOpen, cwd) as Promise<string[]>
+    quickOpen: (cwd) => client.request(IPC.filesQuickOpen, cwd) as Promise<string[]>,
+    // A REAL implementation, not a stub: this is the browser's only way to get a file off the
+    // server, and it deliberately does not stream through this socket — it mints a ticket the
+    // browser redeems with a plain GET (src/server/download.ts).
+    downloadTicket: (p) => client.request(IPC.filesDownloadTicket, p) as Promise<DownloadTicket | null>
   }
 
   const context: ContextApi = {

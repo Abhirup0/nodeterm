@@ -4,7 +4,8 @@ import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
-import type { SshProjectStatusEvent } from '../../shared/types'
+import type { DownloadResult, SshProjectStatusEvent } from '../../shared/types'
+import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
 import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
 import {
@@ -17,6 +18,7 @@ import {
   remoteTmuxKillArgs,
   childArgs,
   scpArgs,
+  scpDownArgs,
   RMT_TMUX_SOCKET
 } from '../../core/remote-ssh/control-master'
 import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
@@ -51,6 +53,9 @@ interface Runners {
  *  `--permission-mode auto` for the whole connection. A DEFINITE version answer never retries —
  *  a CLI doesn't change under a live connection; the next connect re-probes anyway. */
 const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
+
+/** How many `name (n)` variants a download tries before falling back to a stamped name. */
+const DOWNLOAD_NAME_ATTEMPTS = 50
 
 /** Cap on how much master stderr we retain (a misconfigured host can spew) — enough for the error. */
 const MASTER_STDERR_CAP = 8 * 1024
@@ -449,6 +454,62 @@ export class SshProjectManager {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Pull a remote file (or directory tree) down to `destDir` over the project's ControlMaster —
+   * the mirror of `uploadFile`, and what the Explorer's Download action runs on an SSH project.
+   *
+   * Three things carry the safety here:
+   *  - **The local path is ours.** `destDir` is supplied by main (`app.getPath('downloads')` or a
+   *    folder the user picked in a native dialog); the renderer only names the REMOTE side, and
+   *    that name is basenamed + sanitized (`safeDownloadBasename`) before it is joined. So no
+   *    renderer string can steer the write, and `..` can never appear as a component.
+   *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate.
+   *  - **A failed transfer leaves no half-file under the real name.** scp writes to `<name>.part`
+   *    (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit 0 — the same
+   *    write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks the remains.
+   */
+  async downloadFile(projectId: string, remotePath: string, destDir: string): Promise<DownloadResult> {
+    const c = this.conns.get(projectId)
+    if (!c) return { ok: false, error: 'Not connected.' }
+    const name = safeDownloadBasename(remotePath)
+    if (!name) return { ok: false, error: 'That path cannot be downloaded.' }
+    try {
+      // Ask the REMOTE whether this is a directory rather than trusting the renderer's tree state:
+      // it decides `-r`, and the tree can be stale. A failed probe is not evidence of "file" —
+      // but `test -d` failing on a live master overwhelmingly means "not a directory", and the
+      // worst case of guessing wrong is a plain scp error, so this stays fail-open.
+      const probe = await this.r.run(childArgs(c.conn, c.controlPath, `test -d ${quoteRemotePath(remotePath)}`))
+      const isDir = probe.code === 0
+      await fs.mkdir(destDir, { recursive: true })
+      const finalPath = await this.freeDestPath(destDir, name)
+      const partPath = `${finalPath}.part`
+      await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
+      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, isDir))
+      if (res.code !== 0) {
+        await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
+        return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+      }
+      await fs.rename(partPath, finalPath)
+      return { ok: true, localPath: finalPath, dir: isDir }
+    } catch {
+      return { ok: false, error: 'The download could not be completed.' }
+    }
+  }
+
+  /** First `<dir>/<name>` variant that exists neither as the target nor as a leftover `.part`. */
+  private async freeDestPath(destDir: string, name: string): Promise<string> {
+    for (let attempt = 1; attempt <= DOWNLOAD_NAME_ATTEMPTS; attempt++) {
+      const candidate = path.join(destDir, candidateName(name, attempt))
+      const taken = await fs
+        .access(candidate)
+        .then(() => true)
+        .catch(() => false)
+      if (!taken) return candidate
+    }
+    // Every readable variant is taken: fall back to a stamped name rather than overwriting one.
+    return path.join(destDir, candidateName(name, Date.now()))
   }
 
   /**
@@ -889,6 +950,12 @@ export function initSshProject(
   ipcMain.handle(IPC.sshMkdir, (_e, projectId: string, dir: string) => mgr.makeDir(projectId, dir))
   ipcMain.handle(IPC.sshUploadFile, (_e, projectId: string, localPath: string, fileName: string) =>
     mgr.uploadFile(projectId, localPath, fileName)
+  )
+  // The DESTINATION is resolved here, in main: the OS Downloads folder unless the renderer passed
+  // a directory the user picked in the native folder dialog. The renderer never gets to name an
+  // arbitrary local write target for a remote payload.
+  ipcMain.handle(IPC.sshDownloadFile, (_e, projectId: string, remotePath: string, destDir?: string) =>
+    mgr.downloadFile(projectId, remotePath, destDir || app.getPath('downloads'))
   )
   return mgr
 }

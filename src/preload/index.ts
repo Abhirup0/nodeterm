@@ -170,6 +170,8 @@ const api: NodeTerminalApi = {
     mkdir: (projectId, dir) => ipcRenderer.invoke(IPC.sshMkdir, projectId, dir),
     uploadFile: (projectId, localPath, fileName) =>
       ipcRenderer.invoke(IPC.sshUploadFile, projectId, localPath, fileName),
+    downloadFile: (projectId, remotePath, destDir) =>
+      ipcRenderer.invoke(IPC.sshDownloadFile, projectId, remotePath, destDir),
     onStatus: (cb) => {
       const h = (_e: unknown, e: unknown) => cb(e as never)
       ipcRenderer.on(IPC.sshProjectStatus, h)
@@ -268,7 +270,11 @@ const api: NodeTerminalApi = {
     }
   },
   files: {
-    quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd)
+    quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd),
+    // Desktop has no HTTP surface to redeem a ticket on — the core handler answers null here, and
+    // the Explorer reads that as "this shell downloads over scp instead" (SSH) or "the file is
+    // already on this machine" (local project).
+    downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p)
   },
   updates: {
     onAvailable: (listener) => {
