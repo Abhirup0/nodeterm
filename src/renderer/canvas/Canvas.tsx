@@ -240,6 +240,7 @@ import {
   createSshTerminalNode,
   createStickyNode,
   createTerminalNode,
+  nodeSshFor,
   createVideoNode,
   createWebNode,
   isVideoFile,
@@ -324,6 +325,13 @@ interface PendingPeerState {
  */
 const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
+
+// Media nodes render off the LOCAL disk (the video allowlist and the webview's file loader have
+// no remote counterpart), so a host path from a remote agent could only resolve to a same-named
+// local file — or nothing. Refuse and say why, rather than opening a node that quietly shows the
+// wrong thing. `%s` is the verb.
+const MEDIA_SSH_NOTICE =
+  '%s cannot render a file from an SSH project: the viewer reads the local disk, and this path is on the remote host. Use --url, or copy the file to this machine first.'
 
 // Group labels counter-scale when zoomed OUT so they stay readable/clickable from afar
 // (like map labels): full inverse of the zoom, capped so far-out labels don't get huge,
@@ -4963,6 +4971,18 @@ export function Canvas() {
       }
       const srcTitle = (src.data.title as string) || sourceNodeId
       const srcCwd = src.data.cwd as string | undefined
+      // SSH projects: a node an agent opens has to run on the SAME host the agent runs on.
+      // Without this the factories build a LOCAL node carrying a REMOTE cwd — it opens on the
+      // desktop, in a directory that does not exist there. (The handoff path spelled this out and
+      // got it right; every control verb passed `undefined` and got it wrong.) The factory reads
+      // the node's cwd out of `remoteCwd`, so the effective cwd is threaded through there —
+      // otherwise `--cwd` would be silently replaced by the project root.
+      const ctlProject = (() => {
+        const st = useProjects.getState()
+        return st.getProject(st.activeProjectId ?? '')
+      })()
+      const ctlSsh = ctlProject?.ssh
+      const sshFor = (cwd?: string) => nodeSshFor(ctlSsh, cwd)
       // Place opened nodes BELOW the source and rope them to it (source flow-out → target
       // flow-in), mirroring how subagent/loop nodes attach — so they read as "hanging off" the
       // conversation instead of landing on top of unrelated nodes. `placeBelow` returns a node
@@ -5165,13 +5185,15 @@ export function Canvas() {
               : undefined
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
+            const termCwd = args.cwd || groupCwd || srcCwd
             const make = (i: number): CanvasNode =>
               armAfter(
                 createTerminalNode(
                   nodesRef.current.length + i,
-                  args.cwd || groupCwd || srcCwd,
+                  termCwd,
                   placeBelow(i),
-                  args.cmd
+                  args.cmd,
+                  sshFor(termCwd)
                 ),
                 after ?? []
               )
@@ -5211,15 +5233,16 @@ export function Canvas() {
             )
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
+            const agentCwd = args.cwd || groupCwd || srcCwd
             const make = (i: number): CanvasNode =>
               armAfter(
                 createAgentNode(
                   agentId,
                   nodesRef.current.length + i,
-                  args.cwd || groupCwd || srcCwd,
+                  agentCwd,
                   placeBelow(i),
                   args.prompt,
-                  undefined,
+                  sshFor(agentCwd),
                   account,
                   activePermissionMode()
                 ),
@@ -5263,14 +5286,27 @@ export function Canvas() {
               return
             }
             // EditorNode renders images via fs:read-binary → base64 data URL (not nt-media://),
-            // so no media allowlist entry is needed here.
-            const id = addAndConnect(createEditorNode(nodesRef.current.length, args.path, placeBelow()))
+            // so no media allowlist entry is needed here. On an SSH project the path the agent
+            // gave us is on the HOST, so the node has to read through the project's remote fs
+            // (`sshFs` routes fs.readBinary over the ControlMaster) — reading it locally would
+            // either miss or, worse, open a same-named local file.
+            const id = addAndConnect(
+              createEditorNode(nodesRef.current.length, args.path, placeBelow(), !!ctlSsh)
+            )
             reply({ ok: true, message: `showing image ${id}`, result: { id } })
             return
           }
           case 'show-video': {
             if (!args.path) {
               reply({ ok: false, error: 'show-video requires --path' })
+              return
+            }
+            // The video node streams through the LOCAL media allowlist, which has no remote
+            // counterpart — so on an SSH project a host path could only ever resolve to a local
+            // file of the same name, or nothing. Refuse with the reason rather than opening a
+            // node that silently shows the wrong thing (same call as worktrees-on-SSH).
+            if (ctlSsh) {
+              reply({ ok: false, error: MEDIA_SSH_NOTICE.replace('%s', 'show-video') })
               return
             }
             await window.nodeTerminal.media.allow(args.path)
@@ -5280,6 +5316,14 @@ export function Canvas() {
           }
           case 'show-web': {
             let webSrc: { url?: string; filePath?: string }
+            // A --url is host-independent and works from anywhere. A FILE is not: the webview
+            // loads it off the local disk, and on an SSH project the agent's path lives on the
+            // host. (--html is written locally by main, but a remote agent asking us to render
+            // its HTML would still be reaching across the same gap.)
+            if (ctlSsh && !args.url) {
+              reply({ ok: false, error: MEDIA_SSH_NOTICE.replace('%s', 'show-web --file/--html') })
+              return
+            }
             if (args.url) webSrc = { url: args.url }
             else if (args.file) webSrc = { filePath: args.file }
             else if (args.html) {
@@ -5452,7 +5496,7 @@ export function Canvas() {
                   shimPath: vShim,
                   focus: args.focus
                 }),
-                undefined,
+                sshFor(targetCwd),
                 vAccount,
                 vMode
               )
@@ -5476,7 +5520,7 @@ export function Canvas() {
                         agentId: reviewAgent,
                         shimPath: vShim
                       }),
-                      undefined,
+                      sshFor(targetCwd),
                       vAccount,
                       vMode
                     )
@@ -5556,7 +5600,7 @@ export function Canvas() {
                 srcCwd,
                 placeBelow(i),
                 r.prompt,
-                undefined,
+                sshFor(srcCwd),
                 teamAccount,
                 activePermissionMode()
               )

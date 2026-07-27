@@ -160,6 +160,24 @@ function terminalNodeSize(): { width: number; height: number } {
  * (the active SSH project's binding) is given, the node runs in REMOTE tmux on that host: its
  * `data.ssh`/`data.sshRemoteTmux`/`data.cwd` are stamped from the binding instead of `cwd`.
  */
+/**
+ * The `ssh` argument a node factory needs so a new node runs on the SAME host as the project.
+ *
+ * Two things are easy to get wrong here, and both have shipped as bugs: passing `undefined` on an
+ * SSH project builds a LOCAL node carrying a REMOTE cwd — it opens on the desktop, in a directory
+ * that does not exist there — and passing the project's `ssh` unchanged silently REPLACES the
+ * caller's cwd, because the factories read a node's cwd out of `remoteCwd`. So the effective cwd
+ * is threaded through `remoteCwd`, and a local project still yields `undefined` (byte-identical to
+ * the pre-SSH behaviour).
+ */
+export function nodeSshFor(
+  projectSsh: Project['ssh'] | undefined,
+  cwd?: string
+): Project['ssh'] | undefined {
+  if (!projectSsh) return undefined
+  return { server: projectSsh.server, remoteCwd: cwd || projectSsh.remoteCwd }
+}
+
 export function createTerminalNode(
   index: number,
   cwd?: string,
