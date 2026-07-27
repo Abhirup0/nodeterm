@@ -5,6 +5,8 @@ import {
   buildLinkMap,
   buildNotePushMessage,
   classifyLink,
+  hiddenLinkIds,
+  linkIdsCoveredByRopes,
   planBridges
 } from './noteLink'
 import type { CanvasNodeState } from '@shared/types'
@@ -91,6 +93,33 @@ describe('planBridges', () => {
     const plan = planBridges('ghost', ['n2'], lookup, [])
     expect(plan.edges).toEqual([])
     expect(plan.skipped).toEqual([{ id: 'n2', why: 'no such node' }])
+  })
+})
+
+describe('one edge per pair (hiddenLinkIds / linkIdsCoveredByRopes)', () => {
+  const link = { id: 'bridge-a-b', source: 'a', target: 'b' }
+  const rope = { id: 'ctrl-a-b', source: 'a', target: 'b' }
+
+  it('hides a link whose pair already has a rope — in either direction', () => {
+    expect(hiddenLinkIds([link], [rope])).toEqual(new Set(['bridge-a-b']))
+    expect(hiddenLinkIds([link], [{ id: 'ctrl-b-a', source: 'b', target: 'a' }])).toEqual(
+      new Set(['bridge-a-b'])
+    )
+  })
+
+  it('keeps a hand-drawn link that no rope covers', () => {
+    expect(hiddenLinkIds([link], [{ id: 'ctrl-a-c', source: 'a', target: 'c' }]).size).toBe(0)
+    expect(hiddenLinkIds([link], []).size).toBe(0)
+  })
+
+  it('deleting a rope also names the link it was standing in for', () => {
+    expect(linkIdsCoveredByRopes(['ctrl-a-b'], [rope], [link])).toEqual(['bridge-a-b'])
+  })
+
+  it('deleting an unrelated rope drops no link', () => {
+    const other = { id: 'ctrl-x-y', source: 'x', target: 'y' }
+    expect(linkIdsCoveredByRopes(['ctrl-x-y'], [rope, other], [link])).toEqual([])
+    expect(linkIdsCoveredByRopes([], [rope], [link])).toEqual([])
   })
 })
 
