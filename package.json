@@ -1,6 +1,6 @@
 {
   "name": "node-terminal",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": {
     "name": "enes",
