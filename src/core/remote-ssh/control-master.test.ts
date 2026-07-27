@@ -17,7 +17,9 @@ import {
   hookForwardCancelArgs,
   remoteHookEnvArgs,
   remoteEndpointFileContents,
-  scpArgs
+  scpArgs,
+  scpDownArgs,
+  remoteScpPath
 } from './control-master'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
@@ -233,6 +235,38 @@ describe('scpArgs', () => {
     // Modern scp uses SFTP (no remote shell), so the remote path must be RAW (NOT quoted) — a quoted
     // path makes the SFTP server open a file literally named `'…'`. SFTP handles spaces literally.
     expect(j).toContain(`/local/i m.png deploy@h.example.com:/home/u/.nodeterm/uploads/t/i m.png`)
+  })
+})
+
+describe('scpDownArgs', () => {
+  it('pulls remote → local over the master, with the remote side after host: (never an option)', () => {
+    const j = scpDownArgs(conn, '/s.sock', '/srv/app/notes.md', '/Users/e/Downloads/notes.md.part').join(' ')
+    expect(j).toContain('-o ControlPath=/s.sock')
+    expect(j).toContain('-o BatchMode=yes')
+    expect(j).toContain('-P 2222')
+    expect(j).toContain('deploy@h.example.com:/srv/app/notes.md /Users/e/Downloads/notes.md.part')
+    expect(j).not.toContain(' -r ')
+  })
+
+  it('adds -r for a directory tree', () => {
+    expect(scpDownArgs(conn, '/s.sock', '/srv/app/docs', '/d/docs.part', true)).toContain('-r')
+  })
+
+  it('a leading `-` in the remote path cannot become an scp option (it rides behind host:)', () => {
+    const args = scpDownArgs(conn, '/s.sock', '-oProxyCommand=touch /tmp/pwned', '/d/x')
+    expect(args).not.toContain('-oProxyCommand=touch /tmp/pwned')
+    expect(args).toContain('deploy@h.example.com:-oProxyCommand=touch /tmp/pwned')
+  })
+
+  it('sends a ~-relative path as RELATIVE — SFTP has no shell to expand the tilde', () => {
+    // The regression this guards: an SSH project's remoteCwd is home-relative, so the Explorer's
+    // paths are `~/…`; a literal `~` made scp look for a directory actually named `~`.
+    expect(remoteScpPath('~/work/report.pdf')).toBe('work/report.pdf')
+    expect(remoteScpPath('~')).toBe('.')
+    expect(remoteScpPath('/srv/app/x')).toBe('/srv/app/x')
+    expect(scpDownArgs(conn, '/s.sock', '~/a b.txt', '/d/x').join(' ')).toContain(
+      'deploy@h.example.com:a b.txt /d/x'
+    )
   })
 })
 

@@ -138,6 +138,7 @@ export function buildStubApi(): Omit<
       listDir: U('sshProject.listDir'),
       mkdir: U('sshProject.mkdir'),
       uploadFile: U('sshProject.uploadFile'),
+      downloadFile: U('sshProject.downloadFile'),
       onStatus: noopUnsub
     },
     sshFs: {

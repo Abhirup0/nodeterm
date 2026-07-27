@@ -552,6 +552,13 @@ export interface FsApi {
 export interface FilesApi {
   /** Fuzzy-open file index for a project root: root-relative `/`-paths ([] on failure). */
   quickOpen(cwd: string): Promise<string[]>
+  /**
+   * Mint a one-shot, short-TTL ticket for downloading `path` over HTTP, and resolve the URL to
+   * navigate to. Resolves **null** where the shell has no HTTP surface to redeem it on (Electron
+   * desktop, relay) — callers treat null as "downloading is not offered here" and hide the
+   * affordance rather than erroring.
+   */
+  downloadTicket(path: string): Promise<DownloadTicket | null>
 }
 
 export interface MediaApi {
@@ -895,7 +902,29 @@ export interface SshProjectApi {
    * success, or null on any failure (not connected, unresolved remote home, mkdir/scp failure).
    */
   uploadFile(projectId: string, localPath: string, fileName: string): Promise<string | null>
+  /**
+   * Pull a remote file (or, with a directory, the whole tree) down to this machine over the
+   * project's ControlMaster, into the OS Downloads folder unless `destDir` names another one.
+   * The DESTINATION is built in main (`app.getPath('downloads')` + the remote basename, collision-
+   * resolved) — the renderer only ever names the remote side, so no renderer string reaches the
+   * local write path. Never throws: a failure resolves `{ ok: false, error }`.
+   */
+  downloadFile(projectId: string, remotePath: string, destDir?: string): Promise<DownloadResult>
   onStatus(cb: (e: SshProjectStatusEvent) => void): () => void
+}
+
+/** Outcome of a file download (SSH pull). `localPath` is the absolute path actually written —
+ *  collision resolution may have renamed it (`notes.md` → `notes (2).md`). */
+export type DownloadResult =
+  | { ok: true; localPath: string; dir: boolean }
+  | { ok: false; error: string }
+
+/** A one-shot HTTP download ticket (Server Edition). `url` is same-origin and carries the token;
+ *  the browser does the transfer natively, so nothing streams through the WS bridge. */
+export interface DownloadTicket {
+  url: string
+  /** Filename the download will land under (a directory becomes `<name>.tar.gz`). */
+  name: string
 }
 
 /**

@@ -8,6 +8,8 @@ import fs from 'fs'
 import path from 'path'
 import type { Auth } from './auth'
 import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
+import { handleDownload } from './download'
+import type { DownloadTickets } from '../core/download-tickets'
 
 export const SESSION_COOKIE = 'nt_session'
 
@@ -38,6 +40,9 @@ export interface HttpHandlerOpts {
    * through to the normal cookie/login path.
    */
   trustProxy?: TrustProxyConfig
+  /** Ticket store backing `GET /download` (Explorer file downloads). Omitted in tests that don't
+   *  exercise it — the route then simply doesn't exist. */
+  downloadTickets?: DownloadTickets
 }
 
 /** Parse the `nt_session=` value out of a Cookie header. Exported for the WS upgrade (Task 5). */
@@ -223,7 +228,7 @@ function serveStatic(
 export function createHttpHandler(
   opts: HttpHandlerOpts
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
-  const { auth, rendererDir, trustProxy } = opts
+  const { auth, rendererDir, trustProxy, downloadTickets } = opts
 
   return function handler(req: http.IncomingMessage, res: http.ServerResponse): void {
     void handle(req, res).catch(() => {
@@ -340,6 +345,9 @@ export function createHttpHandler(
       else sendJson(res, 401, { error: 'unauthorized' })
       return
     }
+
+    // Authenticated: an Explorer download redeems its one-shot ticket here (see download.ts).
+    if (downloadTickets && (await handleDownload(req, res, url, downloadTickets))) return
 
     // Authenticated: serve static renderer files (index.html fallback for '/').
     serveStatic(req, res, rendererDir, pathname)

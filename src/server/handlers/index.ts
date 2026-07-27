@@ -1,5 +1,8 @@
-import type { Settings } from '../../shared/types'
+import { stat } from 'node:fs/promises'
+import type { DownloadTicket, Settings } from '../../shared/types'
 import type { ServerPlatform } from '../platform-server'
+import type { DownloadTickets } from '../../core/download-tickets'
+import { DOWNLOAD_PATH, downloadName } from '../download'
 import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
@@ -17,9 +20,26 @@ import { IPC } from '../../shared/ipc'
  *  routing on desktop, which the server edition does not have (terminals are local). */
 export function registerCoreHandlers(
   platform: ServerPlatform,
-  deps: { getSettings: () => Settings }
+  deps: { getSettings: () => Settings; downloadTickets?: DownloadTickets }
 ): { gitService: GitService } {
-  registerFsHandlers(platform)
+  // Explorer downloads: mint a one-shot ticket over this (authenticated) channel; the transfer
+  // itself is a plain HTTP GET the browser performs (src/server/download.ts). Statting here keeps
+  // the URL honest about the name — a folder arrives as `<name>.tar.gz`.
+  const { downloadTickets } = deps
+  registerFsHandlers(platform, {
+    issueDownloadTicket: downloadTickets
+      ? async (p: string): Promise<DownloadTicket | null> => {
+          let dir = false
+          try {
+            dir = (await stat(p)).isDirectory()
+          } catch {
+            return null
+          }
+          const token = downloadTickets.issue(p, dir)
+          return { url: `${DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`, name: downloadName(p, dir) }
+        }
+      : undefined
+  })
 
   const gitService = new GitService()
   // registers all git:* channels via the global core platform().handle

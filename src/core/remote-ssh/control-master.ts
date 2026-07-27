@@ -215,6 +215,40 @@ export function scpArgs(conn: SshConnection, controlPath: string, localPath: str
 }
 
 /**
+ * The remote side of an scp argument. A `~`-prefixed path (SSH projects default to a home-relative
+ * `remoteCwd`, so the Explorer's paths inherit it) must NOT travel as a literal `~`: modern scp
+ * speaks SFTP with no remote shell to expand it, and the transfer would fail looking for a
+ * directory actually named `~`. A RELATIVE path is the portable answer — SFTP resolves it against
+ * the login directory, and legacy (shell-mode) scp lands in the same place.
+ */
+export function remoteScpPath(p: string): string {
+  if (p === '~') return '.'
+  return p.startsWith('~/') ? p.slice(2) : p
+}
+
+/**
+ * scp argv that pulls `remotePath` DOWN to `localPath` over the project's ControlMaster — the
+ * mirror of `scpArgs`. `-r` copies a directory tree. Direction is the only real difference: the
+ * remote path is still passed raw after `host:` (see scpArgs — quoting it would make the SFTP
+ * server look for a literally-quoted name), and it can never be read as an option because it is
+ * concatenated behind `user@host:`. `localPath` is built by MAIN (never a renderer string), so
+ * the flag-smuggling guard that `uploadFile` needs has no counterpart here.
+ */
+export function scpDownArgs(
+  conn: SshConnection,
+  controlPath: string,
+  remotePath: string,
+  localPath: string,
+  recursive = false
+): string[] {
+  const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
+  if (conn.identityFile) args.push('-i', conn.identityFile)
+  if (recursive) args.push('-r')
+  args.push(`${conn.user}@${conn.host}:${remoteScpPath(remotePath)}`, localPath)
+  return args
+}
+
+/**
  * Reverse-forward the local hook server's loopback TCP port to a remote unix socket over the
  * existing master (`ssh -O forward -R <remoteSock>:127.0.0.1:<hookPort>`), so remote hook scripts
  * can POST to it via `curl --unix-socket`.

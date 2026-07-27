@@ -8,6 +8,7 @@ import { registerCoreHandlers } from './index'
 import { IPC } from '../../shared/ipc'
 import { DEFAULT_SETTINGS, type GitStatus } from '../../shared/types'
 import { initPlatform, resetPlatformForTests } from '../../core/platform'
+import { DownloadTickets } from '../../core/download-tickets'
 
 let repo: string, platform: ServerPlatform, ui: number
 beforeEach(() => {
@@ -60,5 +61,59 @@ describe('registerCoreHandlers (git)', () => {
     // The worktree dialog derives its default path from this: an empty answer would suggest
     // `/worktrees/…` at the filesystem ROOT, which the (often root-run) server would create.
     expect(await call(IPC.appUserDataDir)).toBe(repo)
+  })
+})
+
+describe('registerCoreHandlers (download tickets)', () => {
+  it('mints a redeemable ticket whose URL carries only the token', async () => {
+    const tickets = new DownloadTickets()
+    resetPlatformForTests()
+    const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
+    initPlatform(p2)
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
+    const res = await p2.dispatch(ui2, {
+      t: 'req',
+      id: 1,
+      method: IPC.filesDownloadTicket,
+      args: [path.join(repo, 'a.txt')]
+    })
+    expect(res.ok).toBe(true)
+    const ticket = (res as { result: { url: string; name: string } }).result
+    expect(ticket.name).toBe('a.txt')
+    expect(ticket.url).not.toContain(repo) // the path never travels in the URL
+    const token = new URL(ticket.url, 'http://x').searchParams.get('t')!
+    expect(tickets.redeem(token)).toMatchObject({ path: path.join(repo, 'a.txt'), dir: false })
+  })
+
+  it('names a directory ticket as a tarball', async () => {
+    const tickets = new DownloadTickets()
+    resetPlatformForTests()
+    const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
+    initPlatform(p2)
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
+    const res = await p2.dispatch(ui2, { t: 'req', id: 1, method: IPC.filesDownloadTicket, args: [repo] })
+    expect((res as { result: { name: string } }).result.name).toBe(`${path.basename(repo)}.tar.gz`)
+  })
+
+  it('answers null for a path that is not there (rather than a ticket that 404s later)', async () => {
+    const tickets = new DownloadTickets()
+    resetPlatformForTests()
+    const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
+    initPlatform(p2)
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
+    const res = await p2.dispatch(ui2, {
+      t: 'req',
+      id: 1,
+      method: IPC.filesDownloadTicket,
+      args: [path.join(repo, 'nope.txt')]
+    })
+    expect((res as { result: unknown }).result).toBeNull()
+  })
+
+  it('answers null where no shell wired a ticket store (desktop, relay)', async () => {
+    expect(await call(IPC.filesDownloadTicket, path.join(repo, 'a.txt'))).toBeNull()
   })
 })

@@ -14,6 +14,7 @@ import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
+import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
@@ -203,8 +204,11 @@ export async function startServer(
     ptyManager.captureSession(persistKey, full)
   )
 
-  // fs + git + commit handlers (shared with desktop core services).
-  registerCoreHandlers(platform, { getSettings: () => settingsStore.get() })
+  // fs + git + commit handlers (shared with desktop core services). The ticket store is shared
+  // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
+  // ticket minted over the socket is redeemable by the GET that follows it.
+  const downloadTickets = new DownloadTickets()
+  registerCoreHandlers(platform, { getSettings: () => settingsStore.get(), downloadTickets })
 
   // Board-log: same CorePlatform registrar as desktop, but the Server Edition has no SSH projects
   // (terminals are local), so the router only ever resolves a local folder cwd or unsupported —
@@ -378,7 +382,12 @@ export async function startServer(
   }
 
   const server = http.createServer(
-    createHttpHandler({ auth, rendererDir: config.rendererDir, trustProxy: config.trustProxy })
+    createHttpHandler({
+      auth,
+      rendererDir: config.rendererDir,
+      trustProxy: config.trustProxy,
+      downloadTickets
+    })
   )
   // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
   // so the WS close hook is what unsubscribes that client from the sessions it was watching.

@@ -7,6 +7,8 @@ import { sshFs } from '../terminal/ssh-fs'
 import { useSession } from '../session/session'
 import { promptDialog } from './promptDialog'
 import { ancestorDirs, createTargetDir, newEntryPath, parentDir } from '../lib/explorerCreate'
+import { canRevealLocally, downloadRoute, triggerBrowserDownload } from '../lib/download'
+import { isBrowserRuntime } from '../bridge/runtime'
 
 interface ExplorerPanelProps {
   onClose: () => void
@@ -21,6 +23,18 @@ interface ExplorerPanelProps {
 type ContextFn = (x: number, y: number, path: string, isDir: boolean) => void
 type OpenFn = (path: string) => void
 type SelectFn = (path: string) => void
+type DownloadFn = (path: string, isDir: boolean) => void
+
+/** One entry in the drawer's download strip. `localPath` is set once a desktop (scp) download has
+ *  landed, which is what makes it revealable. */
+interface DownloadItem {
+  id: number
+  name: string
+  dir: boolean
+  status: 'running' | 'done' | 'error'
+  detail?: string
+  localPath?: string
+}
 
 // Surface a transient error message (matches the Canvas listener at Canvas.tsx:380).
 const toast = (message: string): void => {
@@ -50,7 +64,8 @@ function TreeEntry({
   selected,
   onContext,
   onOpenFile,
-  onSelect
+  onSelect,
+  onDownload
 }: {
   entry: DirEntry
   path: string
@@ -62,6 +77,9 @@ function TreeEntry({
   onContext: ContextFn
   onOpenFile: OpenFn
   onSelect: SelectFn
+  /** Omitted where this tree can't be downloaded from (see lib/download.ts) — the row then has
+   *  no download button at all, rather than one that fails on click. */
+  onDownload?: DownloadFn
 }) {
   const open = useExplorer((s) => (s.expandedByProject[projectId] ?? []).includes(path))
   const [children, setChildren] = useState<DirEntry[] | null>(null)
@@ -131,6 +149,20 @@ function TreeEntry({
         <span className={`ex-chevron${entry.dir ? '' : ' hidden'}${open ? ' open' : ''}`}>›</span>
         <EntryIcon dir={entry.dir} />
         <span className="ex-name">{entry.name}</span>
+        {onDownload && (
+          <button
+            className="ex-dl"
+            title={entry.dir ? `Download ${entry.name} folder` : `Download ${entry.name}`}
+            aria-label="Download"
+            // The row's own onClick opens/expands — a download must not also do that.
+            onClick={(e) => {
+              e.stopPropagation()
+              onDownload(path, entry.dir)
+            }}
+          >
+            ⤓
+          </button>
+        )}
       </div>
       {entry.dir &&
         open &&
@@ -147,6 +179,7 @@ function TreeEntry({
             onContext={onContext}
             onOpenFile={onOpenFile}
             onSelect={onSelect}
+            onDownload={onDownload}
           />
         ))}
     </>
@@ -183,6 +216,74 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; path: string; dir: boolean } | null>(null)
+
+  // Downloading is only meaningful when the tree is NOT this machine's own filesystem, and the
+  // transport differs per shell — the whole decision is the pure `downloadRoute` (lib/download.ts).
+  const session = useSession()
+  const dlCtx = useMemo(
+    () => ({ browser: isBrowserRuntime(), ssh: !!ssh, source: session.source }),
+    [ssh, session.source]
+  )
+  const route = downloadRoute(dlCtx)
+  const [downloads, setDownloads] = useState<DownloadItem[]>([])
+  const dlSeq = useRef(0)
+
+  const patchDownload = useCallback((id: number, patch: Partial<DownloadItem>): void => {
+    setDownloads((list) => list.map((d) => (d.id === id ? { ...d, ...patch } : d)))
+  }, [])
+
+  /**
+   * Download one entry. `destDir` (desktop only) overrides the OS Downloads folder — it comes from
+   * the native folder picker, and main still builds the final path itself.
+   *
+   * Both routes report through the same strip, but they finish differently on purpose: an scp pull
+   * is ours from start to finish, so it ends as a revealable local file; an HTTP download is handed
+   * to the BROWSER at the first byte, and its own download shelf owns the progress from there — so
+   * the strip's job is just to cover the mint round-trip and then get out of the way.
+   */
+  const download = useCallback(
+    async (path: string, isDir: boolean, destDir?: string): Promise<void> => {
+      if (route === 'none') return
+      const id = ++dlSeq.current
+      const name = path.split('/').filter(Boolean).pop() || path
+      setDownloads((list) => [...list, { id, name, dir: isDir, status: 'running' }])
+      try {
+        if (route === 'scp') {
+          const res = await window.nodeTerminal.sshProject.downloadFile(project!.id, path, destDir)
+          if (res.ok) patchDownload(id, { status: 'done', localPath: res.localPath })
+          else patchDownload(id, { status: 'error', detail: res.error })
+          return
+        }
+        const ticket = await session.api.files.downloadTicket(path)
+        if (!ticket) {
+          patchDownload(id, { status: 'error', detail: 'Downloading is not available here.' })
+          return
+        }
+        triggerBrowserDownload(ticket.url, ticket.name)
+        patchDownload(id, { status: 'done', detail: 'Sent to your browser downloads.' })
+        // The browser has it now; the strip row would just be noise from here on.
+        setTimeout(() => setDownloads((list) => list.filter((d) => d.id !== id)), 4000)
+      } catch {
+        patchDownload(id, { status: 'error', detail: 'The download could not be started.' })
+      }
+    },
+    [route, project, session.api, patchDownload]
+  )
+
+  const onDownload = useMemo<DownloadFn | undefined>(
+    () => (route === 'none' ? undefined : (p, isDir) => void download(p, isDir)),
+    [route, download]
+  )
+
+  /** "Download to…" — desktop only (the browser has no native folder picker, and its own download
+   *  location is a browser setting, not ours to ask about). */
+  const downloadTo = useCallback(
+    async (path: string, isDir: boolean): Promise<void> => {
+      const dir = await window.nodeTerminal.dialog.selectFolder()
+      if (dir) await download(path, isDir, dir)
+    },
+    [download]
+  )
 
   useEffect(() => {
     if (cwd) fs.list(cwd).then(setRoots)
@@ -298,7 +399,37 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 onContext={onContext}
                 onOpenFile={handleOpenFile}
                 onSelect={setSelected}
+                onDownload={onDownload}
               />
+            ))}
+          </div>
+        )}
+
+        {downloads.length > 0 && (
+          <div className="ex-dls">
+            {downloads.map((d) => (
+              <div key={d.id} className={`ex-dls__row ${d.status}`}>
+                {d.status === 'running' && <span className="ex-dls__spin" />}
+                <span className="ex-dls__name" title={d.detail || d.localPath || d.name}>
+                  {d.name}
+                  {d.dir && d.status === 'running' ? ' (folder)' : ''}
+                </span>
+                {d.status === 'done' && d.localPath && (
+                  <button
+                    className="ex-dls__act"
+                    onClick={() => window.nodeTerminal.shell.reveal(d.localPath!)}
+                  >
+                    Reveal
+                  </button>
+                )}
+                <button
+                  className="ex-dls__act"
+                  aria-label="Dismiss"
+                  onClick={() => setDownloads((list) => list.filter((x) => x.id !== d.id))}
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -329,6 +460,35 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
               >
                 New Folder…
               </button>
+              {route !== 'none' && (
+                <>
+                  <div className="ctx-sep" />
+                  <button
+                    className="ctx-item"
+                    onClick={() => {
+                      const m = menu
+                      setMenu(null)
+                      void download(m.path, m.dir)
+                    }}
+                  >
+                    {/* scp -r brings a folder down AS a folder; the HTTP route has to archive it
+                        on the fly, and the user should know what will land in Downloads. */}
+                    {menu.dir ? (route === 'http' ? 'Download Folder (.tar.gz)' : 'Download Folder') : 'Download'}
+                  </button>
+                  {route === 'scp' && (
+                    <button
+                      className="ctx-item"
+                      onClick={() => {
+                        const m = menu
+                        setMenu(null)
+                        void downloadTo(m.path, m.dir)
+                      }}
+                    >
+                      Download to…
+                    </button>
+                  )}
+                </>
+              )}
               <div className="ctx-sep" />
               <button
                 className="ctx-item"
@@ -348,16 +508,22 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
               >
                 Copy Relative Path
               </button>
-              <div className="ctx-sep" />
-              <button
-                className="ctx-item"
-                onClick={() => {
-                  window.nodeTerminal.shell.reveal(menu.path)
-                  setMenu(null)
-                }}
-              >
-                Reveal in Finder
-              </button>
+              {/* Only where it can work: revealing an SSH project's REMOTE path in the local file
+                  manager did nothing, and in a browser tab the whole member is an inert stub. */}
+              {canRevealLocally(dlCtx) && (
+                <>
+                  <div className="ctx-sep" />
+                  <button
+                    className="ctx-item"
+                    onClick={() => {
+                      window.nodeTerminal.shell.reveal(menu.path)
+                      setMenu(null)
+                    }}
+                  >
+                    Reveal in Finder
+                  </button>
+                </>
+              )}
             </div>
           </>,
           document.body
