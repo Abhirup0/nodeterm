@@ -46,6 +46,7 @@ import {
   terminalKeyAction,
   toXtermText,
   SHIFT_ENTER_SEQ,
+  CO_ATTACH_MOUSE_SEQ,
   xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
@@ -898,7 +899,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen, coAttachMouse }) => {
         // REFUSED: core's tombstone says another client deleted this node while we weren't
         // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
         // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
@@ -1106,6 +1107,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
               term.write('\x1b[0m' + toXtermText(stripTrailingNewline(screen as string)))
             }
           }
+          // A CO-ATTACH JOINER (a second window on this node — rare on the canvas, but possible)
+          // missed the mouse-tracking mode tmux only emits at its own attach, so it can't
+          // wheel-scroll tmux history. Enable it (see CO_ATTACH_MOUSE_SEQ). Only ever set on a join,
+          // so this never fires on the solo spawn / warm-reattach-with-own-tmux-client path.
+          if (coAttachMouse) term.write(CO_ATTACH_MOUSE_SEQ)
         } catch (err) {
           // Never let a seed failure freeze the terminal: the live stream matters more than the
           // history. `finally` still opens the gate below.

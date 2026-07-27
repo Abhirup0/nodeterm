@@ -1169,6 +1169,89 @@ describe('a joiner is painted from the current screen', () => {
   })
 })
 
+// ── A joiner must be told tmux's mouse tracking is ON ─────────────────────────────────────────
+// tmux emits the mouse-enable DECSET sequences (?1000h/?1002h/?1006h) to a client ONLY at its own
+// attach. A co-attach subscriber (kanban card modal, second window) joins mid-stream and never
+// sees them; neither the `screen` capture (capture-pane carries no private modes) nor a SIGWINCH
+// redraw re-emits them. So the joiner's xterm reports no mouse events and the wheel can't scroll
+// tmux history until a keystroke wakes it. `coAttachMouse` tells the renderer to enable it — set on
+// EVERY tmux-backed join (both the screen-painted and the resized branch), never on a plain-shell
+// join (no tmux ⇒ no tmux mouse) nor on the solo spawn.
+describe('a tmux-backed joiner is told to enable mouse tracking', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  // A manager whose sessions are tmux-BACKED: force the tmux path (init()/tmuxStatus() aren't run
+  // in unit tests) and stub the has-session probe so no real tmux socket is touched.
+  async function tmuxManager() {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    ;(m as unknown as { tmuxPath: string }).tmuxPath = '/usr/bin/tmux'
+    vi.spyOn(m as unknown as { tmuxSessionExists: (k: string) => Promise<boolean> }, 'tmuxSessionExists').mockResolvedValue(false)
+    return m
+  }
+  const create = (clientId: number, cols = 80, rows = 24, persistKey = 'node-1') =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey }) as Promise<{
+      sessionId: string
+      fresh: boolean
+      screen?: string
+      coAttachMouse?: boolean
+    }>
+
+  it('sets coAttachMouse on a joiner whose grid EQUALS the pty (the screen-painted branch)', async () => {
+    const m = await tmuxManager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.screen).toBe('current screen') // equal grid → painted from the capture…
+    expect(b.coAttachMouse).toBe(true) // …which carries no mouse modes, so enable them explicitly
+  })
+
+  it('sets coAttachMouse on a joiner that SHRINKS the pty too (a SIGWINCH redraw re-emits no mouse modes)', async () => {
+    const m = await tmuxManager()
+    const capture = vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 120, 40)
+
+    const b = await create(BOB, 80, 24) // strictly smaller → the pty resizes, tmux redraws
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 })
+    expect(capture).not.toHaveBeenCalled() // tmux paints it; no screen rides the result…
+    expect(b.screen).toBeUndefined()
+    expect(b.coAttachMouse).toBe(true) // …but the redraw does NOT re-send mouse modes, so still enable
+  })
+
+  it('never sets coAttachMouse on the SOLO spawn (that client got its modes from its own tmux attach)', async () => {
+    await tmuxManager()
+    const a = await create(ALICE, 80, 24)
+    expect(a.coAttachMouse).toBeUndefined()
+  })
+
+  it('never sets coAttachMouse on a PLAIN-SHELL join (no tmux ⇒ no tmux mouse to enable)', async () => {
+    // The default manager has no tmux path, so the session is not persisted (persistKey unset).
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.fresh).toBe(false) // it did join the live session…
+    expect(b.coAttachMouse).toBeUndefined() // …but a plain shell has no tmux mouse to turn on
+  })
+})
+
 describe('tmuxAttachFlags', () => {
   it("keeps -D for the app's own client: exactly ONE tmux client per session", async () => {
     const { tmuxAttachFlags } = await import('./pty-manager')
