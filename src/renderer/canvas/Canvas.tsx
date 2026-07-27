@@ -188,8 +188,9 @@ import {
   reconnectRelayTab,
   type RelayTab,
 } from '../session/relay-tab'
-import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, planBridges, type LinkEndpoint } from '../lib/noteLink'
+import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import { pushSessionRename } from '../lib/sessionRename'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -1073,7 +1074,12 @@ export function Canvas() {
   )
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
-    const decorated = linkEdges.map((e) => {
+    // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
+    // (readable context), which drew two near-identical arrows between the same two nodes. The
+    // rope keeps the pixels; the bridge still exists in data (it is what authorizes reading) and
+    // rides the rope's delete, so it can never become an invisible link with nothing to click.
+    const hidden = hiddenLinkIds(linkEdges, controlEdges)
+    const decorated = linkEdges.filter((e) => !hidden.has(e.id)).map((e) => {
       const sel = !!e.selected
       const isNote = stickyIds.has(e.source)
       const stroke = sel ? '#ffffff' : accent
@@ -1096,12 +1102,19 @@ export function Canvas() {
           : { markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } })
       }
     })
-    // Control ropes: white + a removal hint while selected (mirrors the context-link look).
+    // Control ropes: white + a removal hint while selected (mirrors the context-link look). A
+    // rope that is also standing in for a hidden context bridge says so, so the one visible edge
+    // never under-reports what removing it will take with it.
+    const ropeCoversLink = new Set(
+      linkEdges.filter((e) => hidden.has(e.id)).map((e) => pairKey(e.source, e.target))
+    )
     const ropes = controlEdges.map((e) =>
       e.selected
         ? {
             ...e,
-            label: '⌫ to remove',
+            label: ropeCoversLink.has(pairKey(e.source, e.target))
+              ? '⇄ context · ⌫ to remove'
+              : '⌫ to remove',
             labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
             labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
             labelBgPadding: [6, 3] as [number, number],
@@ -1947,7 +1960,14 @@ export function Canvas() {
     (_e: React.MouseEvent, edge: Edge) => {
       // Control ropes are removable the same way as context links (ephemeral edges are not).
       if (controlEdgesRef.current.some((b) => b.id === edge.id)) {
+        // A rope may be the only DRAWN edge for a pair that also has a context bridge (see
+        // displayEdges) — take that bridge with it, or the nodes stay linked with nothing left
+        // on screen to unlink them.
+        const covered = new Set(
+          linkIdsCoveredByRopes([edge.id], controlEdgesRef.current, linkEdgesRef.current)
+        )
         setControlEdges((es) => es.filter((b) => b.id !== edge.id))
+        if (covered.size) setLinkEdges((es) => es.filter((b) => !covered.has(b.id)))
         markDirty()
         return
       }
@@ -3110,13 +3130,18 @@ export function Canvas() {
         const ropeIds = controlEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
         if (edgeIds.length || ropeIds.length) {
           e.preventDefault()
-          if (edgeIds.length) {
-            const drop = new Set(edgeIds)
+          // A selected rope may be standing in for a hidden context bridge — drop both, or the
+          // pair stays linked with no edge left to click (see displayEdges).
+          const drop = new Set([
+            ...edgeIds,
+            ...linkIdsCoveredByRopes(ropeIds, controlEdgesRef.current, linkEdgesRef.current)
+          ])
+          if (drop.size) {
             setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
           }
           if (ropeIds.length) {
-            const drop = new Set(ropeIds)
-            setControlEdges((es) => es.filter((b) => !drop.has(b.id)))
+            const dropRopes = new Set(ropeIds)
+            setControlEdges((es) => es.filter((b) => !dropRopes.has(b.id)))
           }
           markDirty()
         }
@@ -5714,8 +5739,10 @@ export function Canvas() {
             )
             markDirty()
             const agentId = target.data.agentId as AgentId | undefined
-            if (agentId && canRename(agentId)) {
-              void api.pty.sendText(id, `/rename ${title}`)
+            if (agentId && canRename(agentId) && title) {
+              // Gated: an agent that opens a node and renames it in the same breath would
+              // otherwise splice this line into the launch command still being typed.
+              void pushSessionRename(api.pty, id, title)
             }
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
             return
@@ -5845,7 +5872,7 @@ export function Canvas() {
       const agentId = liveAgent ?? storedAgent
       const name = title.trim()
       if (agentId && canRename(agentId) && name) {
-        void api.pty.sendText(id, `/rename ${name}`)
+        void pushSessionRename(api.pty, id, name)
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]
