@@ -4,6 +4,7 @@ import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stac
 import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { useAgentStatus } from '../../state/agentStatus'
+import { useCardPanel } from '../../state/cardPanel'
 import { useSession } from '../../session/session'
 import type { ProjectKanban } from '@shared/types'
 import type { KanbanSession } from './KanbanView'
@@ -43,8 +44,10 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const [searchOpen, setSearchOpen] = useState(false)
   const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
   const [naming, setNaming] = useState(false)
-  // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it.
-  const [panelOpen, setPanelOpen] = useState(true)
+  // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
+  // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
+  const panelOpen = useCardPanel((s) => s.open)
+  const togglePanel = useCardPanel((s) => s.toggle)
   const isTerminal = session.kind === 'terminal'
   const isBrowser = session.kind === 'browser'
 
@@ -161,7 +164,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             className="kanban-modal__action"
             title={panelOpen ? 'Hide comments & activity' : 'Show comments & activity'}
             aria-pressed={panelOpen}
-            onClick={() => setPanelOpen((v) => !v)}
+            onClick={togglePanel}
           >
             <IconChat />
           </button>
