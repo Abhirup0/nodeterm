@@ -19,7 +19,8 @@ import {
   terminalKeyAction,
   toXtermText,
   xtermScrollback,
-  SHIFT_ENTER_SEQ
+  SHIFT_ENTER_SEQ,
+  CO_ATTACH_MOUSE_SEQ
 } from '../../terminal/terminal-config'
 import { resolveSshRemote } from '../../nodes/TerminalNode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
@@ -227,6 +228,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
         // Start from a known-clean SGR state, then convert the capture's LFs to CRLFs.
         term.write('\x1b[0m' + toXtermText(stripTrailingNewline(res.screen)))
       }
+
+      // Co-attach joiners miss the mouse-tracking mode tmux only sends at its own attach, so the
+      // wheel can't scroll tmux history until a keystroke wakes it. Enable it here (see
+      // CO_ATTACH_MOUSE_SEQ). Painting content first, then the modes, keeps the seed untouched.
+      if (res.coAttachMouse) term.write(CO_ATTACH_MOUSE_SEQ)
 
       const ro = new ResizeObserver(() => {
         fit.fit()

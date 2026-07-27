@@ -230,6 +230,17 @@ export interface ResyncTarget {
 export const RESYNC_NOTICE = '\r\n\x1b[90m── reconnected — earlier output skipped ──\x1b[0m\r\n'
 
 /**
+ * The mouse-tracking mode-enable sequences tmux sends a client at attach (`mouse on`): X11 mouse
+ * (`?1000h`), button-event/drag tracking (`?1002h`) and SGR extended coordinates (`?1006h`). A
+ * co-attach JOINER (kanban card modal, second window) subscribes mid-stream and never receives
+ * them, so its xterm reports no mouse events and the wheel can't scroll tmux history. Write this
+ * into the joiner's xterm when `PtyCreateResult.coAttachMouse` is set (measured net client state
+ * for a `mouse on` server; the enable is idempotent, and any later app mode change flows over the
+ * live stream to the now-subscribed view).
+ */
+export const CO_ATTACH_MOUSE_SEQ = '\x1b[?1000h\x1b[?1002h\x1b[?1006h'
+
+/**
  * The capture generation of the LAST repaint issued for a terminal, so a deferred repaint can tell
  * that a newer capture has superseded it (see `repaintResync`). Weak, and keyed by the xterm itself:
  * a disposed terminal takes its counter with it, and no node id has to be threaded through.
