@@ -337,7 +337,12 @@ function createWindow(): BrowserWindow {
       sandbox: false,
       // Enables the <webview> tag used by WebNode (embedded content stays locked down —
       // no nodeintegration is set on the webview element itself).
-      webviewTag: true
+      webviewTag: true,
+      // Chromium's built-in PDF viewer is gated behind `plugins`, and without it an EditorNode
+      // showing a .pdf renders nothing at all. This is not the old NPAPI/Flash surface (that is
+      // long gone from Chromium) — in a current Electron the only thing it turns on is the PDF
+      // viewer. The browser (Server Edition) needs no equivalent: it has the viewer already.
+      plugins: true
     }
   })
 
