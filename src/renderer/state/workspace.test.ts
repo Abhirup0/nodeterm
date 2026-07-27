@@ -6,6 +6,7 @@ import {
   flowToNodeStates,
   groupSelectedNodes,
   nodeStatesToFlow,
+  nodeSshFor,
   reorderNodeBefore,
   reparentNode,
   resolveNewNodeAccount,
@@ -251,6 +252,39 @@ describe('accountId serialization', () => {
       data: { title: 'T', color: '#888', group: null }
     } as unknown as CanvasNode
     expect(flowToNodeStates([node])[0].accountId).toBeUndefined()
+  })
+})
+
+describe('nodeSshFor', () => {
+  const projectSsh = {
+    server: { host: 'h', user: 'u' },
+    remoteCwd: '/srv/app'
+  } as unknown as NonNullable<Parameters<typeof nodeSshFor>[0]>
+
+  it('is undefined for a local project, so nothing changes there', () => {
+    expect(nodeSshFor(undefined)).toBeUndefined()
+    expect(nodeSshFor(undefined, '/some/dir')).toBeUndefined()
+  })
+
+  it('threads the caller cwd through remoteCwd — the factories read a node cwd from there', () => {
+    // Passing the project's ssh unchanged would silently replace an explicit --cwd with the
+    // project root, which is the second half of this bug.
+    expect(nodeSshFor(projectSsh, '/srv/app/sub')).toEqual({
+      server: projectSsh.server,
+      remoteCwd: '/srv/app/sub'
+    })
+  })
+
+  it('falls back to the project root when no cwd is given', () => {
+    expect(nodeSshFor(projectSsh)).toEqual({ server: projectSsh.server, remoteCwd: '/srv/app' })
+    expect(nodeSshFor(projectSsh, '')).toEqual({ server: projectSsh.server, remoteCwd: '/srv/app' })
+  })
+
+  it('produces a node that actually runs on the host (remote tmux, remote cwd)', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, nodeSshFor(projectSsh, '/srv/app/sub'))
+    expect(node.data.sshRemoteTmux).toBe(true)
+    expect(node.data.ssh).toEqual(projectSsh.server)
+    expect(node.data.cwd).toBe('/srv/app/sub')
   })
 })
 
