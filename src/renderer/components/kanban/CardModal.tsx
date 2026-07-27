@@ -10,6 +10,7 @@ import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
 import { CardMetaBar } from './CardMetaBar'
 import { ModalTerminal } from './ModalTerminal'
+import { BrowserSurface } from '../../nodes/BrowserSurface'
 
 interface CardModalProps {
   session: KanbanSession
@@ -25,12 +26,14 @@ interface CardModalProps {
   onRename: (title: string) => void
   /** Sticky text write-through (only called for kind 'sticky'). */
   onEditSticky: (text: string) => void
+  /** Browser navigation write-through (only called for kind 'browser'). */
+  onBrowserNav: (patch: { url?: string; title?: string }) => void
 }
 
 /** Trello-style card popup over the board. Scrim click / Esc close it; the board (and the
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / markdown view (the node itself is hidden under the board). */
-export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky }: CardModalProps) {
+export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky, onBrowserNav }: CardModalProps) {
   const { api } = useSession()
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
@@ -43,6 +46,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it.
   const [panelOpen, setPanelOpen] = useState(true)
   const isTerminal = session.kind === 'terminal'
+  const isBrowser = session.kind === 'browser'
 
   const nameWithAi = async () => {
     setNaming(true)
@@ -64,13 +68,20 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !isTopDialog(id)) return
-      e.preventDefault()
-      e.stopPropagation()
+      // A rename in progress owns Esc first (cancel the edit, not the modal).
       if (editingTitleRef.current) {
-        // Esc during a rename cancels the EDIT, not the modal.
+        e.preventDefault()
+        e.stopPropagation()
         setEditingTitle(false)
         return
       }
+      // Terminal focused → Esc belongs to the SESSION (agent "esc to interrupt"), not the modal.
+      // Don't consume it: leave it to xterm's own handler. Close the modal via ×, the scrim, or
+      // Esc while focus is elsewhere (the board-log composer, the header, etc.).
+      const ae = document.activeElement
+      if (ae && ae.closest('.kanban-modal__term')) return
+      e.preventDefault()
+      e.stopPropagation()
       onClose()
     }
     // Capture phase: beat the canvas/global keydown listeners to the Escape.
@@ -176,8 +187,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
               <div className="kanban-modal__pane" data-kind={session.kind}>
                 {session.kind === 'terminal' ? (
                   // A live SECOND client on the node's session — keyed by node id so switching cards
-                  // remounts a fresh viewer. Chat has no PTY; it opens on the canvas. The markdown
-                  // view OVERLAYS the terminal (kept mounted — its viewer must not detach/re-seed).
+                  // remounts a fresh viewer.
                   <ModalTerminal
                     key={session.id}
                     nodeId={session.id}
@@ -185,8 +195,18 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
                     searchOpen={searchOpen}
                     onCloseSearch={() => setSearchOpen(false)}
                   />
+                ) : isBrowser ? (
+                  // A live browser webview seeded with the node's URL; navigation persists back to
+                  // the node (the canvas node picks it up on its next mount).
+                  <BrowserSurface
+                    key={session.id}
+                    nodeId={session.id}
+                    url={session.url ?? ''}
+                    onUrlChange={(u) => onBrowserNav({ url: u })}
+                    onTitleChange={(t) => onBrowserNav({ title: t })}
+                  />
                 ) : (
-                  <div className="kanban-modal__placeholder">Chat sessions open on the canvas.</div>
+                  <div className="kanban-modal__placeholder">Open on the canvas.</div>
                 )}
               </div>
             )}

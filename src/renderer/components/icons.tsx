@@ -210,6 +210,26 @@ export const IconSearch = () => (
   </svg>
 )
 
+export const IconWeb = () => (
+  <svg {...S}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" />
+  </svg>
+)
+
+export const IconExternal = () => (
+  <svg {...S}>
+    <path d="M9 5h10v10M19 5 8 16M5 9v10h10" />
+  </svg>
+)
+
+export const IconAgent = () => (
+  <svg {...S}>
+    <path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z" />
+    <path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" />
+  </svg>
+)
+
 export const IconMic = () => (
   <svg {...S}>
     <rect x="9" y="2" width="6" height="12" rx="3" />

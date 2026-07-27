@@ -7,7 +7,8 @@ import {
   firstPromptLine,
   buildIndicator,
   HUD_STALE_DROP_MS,
-  type HudRow
+  type HudRow,
+  WORKING_STALE_MS
 } from './notch-hud-model'
 
 const T0 = 1_000_000
@@ -85,16 +86,20 @@ describe('createHudModel — state → bucket', () => {
 })
 
 describe('done latch', () => {
-  it('is cleared by noteFocus and by notePanelOpened', () => {
+  it('is cleared PER ROW by noteFocus, leaving the others unread', () => {
     const m = createHudModel()
     m.applyStateChange(stateChange({ nodeId: 'a', state: 'done' }))
     m.applyStateChange(stateChange({ nodeId: 'b', state: 'done' }))
+    m.applyStateChange(stateChange({ nodeId: 'c', state: 'done' }))
     expect(rowFor(m.buildRows(T0, titleOf), 'a')?.state).toBe('done')
     m.noteFocus('a')
     expect(rowFor(m.buildRows(T0, titleOf), 'a')).toBeUndefined()
+    // Reading one finished session must not swallow the two the user hasn't looked at yet.
     expect(rowFor(m.buildRows(T0, titleOf), 'b')?.state).toBe('done')
-    m.notePanelOpened()
+    expect(rowFor(m.buildRows(T0, titleOf), 'c')?.state).toBe('done')
+    m.noteFocus('b')
     expect(rowFor(m.buildRows(T0, titleOf), 'b')).toBeUndefined()
+    expect(rowFor(m.buildRows(T0, titleOf), 'c')?.state).toBe('done')
   })
 
   it('an explicit read-ack end does not raise the highlight', () => {
@@ -171,6 +176,9 @@ describe('6h drop', () => {
     const m = createHudModel()
     // present in mirror → never dropped, even if stale
     m.applyMirrorFlush({ v: 1, updatedAt: T0, nodes: { present: { state: 'done', updatedAt: T0 } } })
+    // A done restored from the mirror is pre-seen (see "mirror restore"), so give this one a LIVE
+    // finish too — the subject here is what prune keeps, not what the restore highlights.
+    m.applyStateChange(stateChange({ nodeId: 'present', state: 'done', ts: T0 }))
     // gone node, recently done
     m.applyStateChange(stateChange({ nodeId: 'gone', state: 'done', ts: T0 }))
     // it's not in the mirror flush above → presentInMirror stays false
@@ -185,9 +193,11 @@ describe('6h drop', () => {
     expect(rowFor(rows, 'present')?.state).toBe('done')
   })
 
-  it('never drops a working node', () => {
+  it('never drops a LIVE working node', () => {
     const m = createHudModel()
     m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', ts: T0 }))
+    // Keep it alive across the 6h mark — a node still reporting activity is never dropped.
+    m.applyNowChange({ nodeId: 'w', ts: T0 + HUD_STALE_DROP_MS, activity: 'still going' } as never)
     expect(m.prune(T0 + HUD_STALE_DROP_MS + 1)).toBe(false)
     expect(rowFor(m.buildRows(T0 + HUD_STALE_DROP_MS + 1, titleOf), 'w')?.state).toBe('working')
   })
@@ -229,5 +239,63 @@ describe('dismiss', () => {
   it('ignores an unknown node', () => {
     const m = createHudModel()
     expect(() => m.dismiss('nope')).not.toThrow()
+  })
+})
+
+describe('mirror restore', () => {
+  it('does not resurrect already-finished sessions on first sight', () => {
+    const m = createHudModel()
+    // Fresh process: the mirror file is read and it remembers hours of finished turns.
+    m.applyMirrorFlush({
+      nodes: {
+        old1: { state: 'done', agentId: 'claude', updatedAt: T0 },
+        old2: { state: 'done', agentId: 'codex', updatedAt: T0 }
+      }
+    } as never)
+    expect(m.buildRows(T0 + 1, titleOf)).toHaveLength(0)
+
+    // A turn that finishes while we ARE watching still lights up...
+    m.applyStateChange(stateChange({ nodeId: 'old1', state: 'working', ts: T0 + 2 }))
+    m.applyStateChange(stateChange({ nodeId: 'old1', state: 'done', ts: T0 + 3 }))
+    expect(rowFor(m.buildRows(T0 + 4, titleOf), 'old1')?.state).toBe('done')
+    // ...and a later flush repeating the same done doesn't clear it (only first sight is pre-seen).
+    m.applyMirrorFlush({ nodes: { old1: { state: 'done', updatedAt: T0 + 3 } } } as never)
+    expect(rowFor(m.buildRows(T0 + 5, titleOf), 'old1')?.state).toBe('done')
+  })
+
+  it('still surfaces a needs-you restored from the mirror', () => {
+    const m = createHudModel()
+    m.applyMirrorFlush({ nodes: { a: { state: 'waiting', updatedAt: T0 } } } as never)
+    expect(rowFor(m.buildRows(T0 + 1, titleOf), 'a')?.state).toBe('needsYou')
+  })
+})
+
+describe('working watchdog', () => {
+  it('stops showing a working node nobody has heard from, and restores it on any event', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', agentId: 'claude', ts: T0 }))
+    // A long turn is still working — the gap has to be big before we presume anything.
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS - 1, titleOf), 'w')?.state).toBe('working')
+    // Past the window (Esc during a tool call, killed CLI, slept machine): the row goes quiet.
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS + 1, titleOf), 'w')).toBeUndefined()
+    // DISPLAY-only: one live event and it's back, no state was destroyed.
+    m.applyNowChange({ nodeId: 'w', ts: T0 + WORKING_STALE_MS + 2, activity: 'Running tests' } as never)
+    expect(rowFor(m.buildRows(T0 + WORKING_STALE_MS + 3, titleOf), 'w')?.state).toBe('working')
+  })
+
+  it('lets a stale working node be pruned once it is gone from the mirror', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'w', state: 'working', ts: T0 }))
+    expect(m.prune(T0 + WORKING_STALE_MS + 1)).toBe(false) // stale, but not yet past the 6h drop
+    expect(m.prune(T0 + HUD_STALE_DROP_MS + 1)).toBe(true)
+  })
+})
+
+describe('interrupted turns', () => {
+  it('an Esc-interrupted done never lights the finished highlight', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'a', state: 'working', ts: T0 }))
+    m.applyStateChange({ ...stateChange({ nodeId: 'a', state: 'done', ts: T0 + 1 }), interrupted: true })
+    expect(rowFor(m.buildRows(T0 + 2, titleOf), 'a')).toBeUndefined()
   })
 })

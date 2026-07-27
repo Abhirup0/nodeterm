@@ -81,8 +81,9 @@ import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 import { childArgs } from '../core/remote-ssh/control-master'
 import { posixQuote } from '../shared/ssh'
-import { buildHandoff } from './handoff'
+import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
+import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
@@ -120,7 +121,7 @@ import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
-import { SshFs, sshAppendArgs, sshTailArgs, sshSizeArgs } from './ssh-fs'
+import { SshFs, sshAppendArgs, sshTailArgs, sshSizeArgs, sshWriteArgs } from './ssh-fs'
 import { makeRemoteWorkspaceIO } from './remote-workspace-io'
 import {
   registerMediaScheme,
@@ -1111,6 +1112,35 @@ app.whenReady().then(async () => {
     if (!p && cwd) p = await transcriptPathForCwd(cwd)
     if (p) contextTail.track(sessionId, p)
   })
+  // The remote half of a handoff. Same three-line shape as the context-link deps above and for
+  // the same reason: reading (and here also WRITING) on an SSH project's host is the one thing
+  // the handoff builder cannot answer for itself. Absent deps ⇒ local-only, as before.
+  const handoffRemote: HandoffRemote = {
+    isRemoteNode: (nodeId) => !!ptyManager.sshRemoteForNode(nodeId),
+    hookedTranscriptPath: (nodeId) => transcriptPathOf(nodeId),
+    readRemoteFile: async (nodeId, filePath, maxBytes) => {
+      const rt = ptyManager.sshRemoteForNode(nodeId)
+      if (!rt) return null
+      const text = await remoteFile.readTail(
+        { conn: rt.conn, controlPath: rt.controlPath, path: filePath },
+        maxBytes
+      )
+      return text || null
+    },
+    writeRemoteFile: async (nodeId, filePath, content) => {
+      const rt = ptyManager.sshRemoteForNode(nodeId)
+      if (!rt || !sshProjectManager) return false
+      try {
+        const { code } = await sshProjectManager.sshRun(
+          sshWriteArgs(rt.conn, rt.controlPath, filePath),
+          content
+        )
+        return code === 0
+      } catch {
+        return false
+      }
+    }
+  }
   corePlatform.handle(
     IPC.handoffBuild,
     (
@@ -1119,7 +1149,7 @@ app.whenReady().then(async () => {
       sourceNodeId: string,
       cwd: string | undefined,
       accountId: string | undefined
-    ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId })
+    ) => buildHandoff({ sessionId, agentId, sourceNodeId, cwd, accountId, remote: handoffRemote })
   )
 
   installManagedAgentHooks()

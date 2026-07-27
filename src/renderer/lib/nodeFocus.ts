@@ -48,13 +48,16 @@ const sizeOf = (n: FocusableNode): { width: number; height: number } | null => {
 }
 
 /**
- * The node's rect in ABSOLUTE canvas coordinates, or null when its size is unknowable (in which
- * case the caller must leave the camera alone — a zero-size rect is what produces the origin jump).
- * A grouped node's `position` is relative to its group frame, so the parent chain is walked.
+ * The node's top-left in ABSOLUTE canvas coordinates. A grouped node's `position` is relative to
+ * its group frame, so the parent chain is walked. Needs no size — unlike `nodeFitRect` this always
+ * answers, which is what placement (as opposed to framing) needs: a node spawned next to a grouped
+ * source must be positioned in the same space the source really occupies, not at its raw
+ * group-relative `position`.
  */
-export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]): Rect | null {
-  const size = sizeOf(node)
-  if (!size) return null
+export function absolutePosition(
+  node: FocusableNode,
+  all: readonly FocusableNode[]
+): { x: number; y: number } {
   let x = node.position.x
   let y = node.position.y
   let parentId = node.parentId
@@ -68,7 +71,17 @@ export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]):
     y += parent.position.y
     parentId = parent.parentId
   }
-  return { x, y, ...size }
+  return { x, y }
+}
+
+/**
+ * The node's rect in ABSOLUTE canvas coordinates, or null when its size is unknowable (in which
+ * case the caller must leave the camera alone — a zero-size rect is what produces the origin jump).
+ */
+export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]): Rect | null {
+  const size = sizeOf(node)
+  if (!size) return null
+  return { ...absolutePosition(node, all), ...size }
 }
 
 /** The viewport that frames `rect` in a `containerWidth × containerHeight` pane, with the same

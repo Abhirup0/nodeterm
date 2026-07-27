@@ -94,6 +94,28 @@ export interface RecycledInfo {
 export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
+/**
+ * A launch a terminal node OWES once every station in `after` has gone idle — what the
+ * canvas-control `--after` flag arms instead of running the command on open. This is the
+ * difference between a fan-out and a graph: a downstream station starts when the upstream
+ * ones have produced something for it to read, without an orchestrator sitting in a poll loop.
+ *
+ * Persisted, because the wait can outlive an app restart — and note that agent state is NOT
+ * (it is rebuilt from live hook events), so after a restart an armed node has no way to learn
+ * that its deps already finished. That is why the node carries a manual "run now" escape:
+ * a stalled station must never be a dead end.
+ */
+export interface PendingLaunch {
+  /**
+   * Node ids to wait for. Only nodes running a hook-reporting agent may appear here — a plain
+   * terminal never reports `done`, so waiting on one would stall forever (refused at creation).
+   * A dep that no longer exists counts as satisfied: a deleted node can never report.
+   */
+  after: string[]
+  /** Delivered to the node's shell once the wait is over (agent CLI + prompt, or a plain command). */
+  command: string
+}
+
 export interface CanvasNodeState {
   id: string
   kind: NodeKind
@@ -119,6 +141,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Set while this node is armed but not yet launched — see PendingLaunch. */
+  pendingLaunch?: PendingLaunch
   /**
    * Claude-only: managed account this node runs on (CLAUDE_CONFIG_DIR injection).
    * Resolved once at node creation (explicit pick → project default → system default)

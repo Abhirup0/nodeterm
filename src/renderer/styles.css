@@ -1205,6 +1205,30 @@ body,
   color: var(--accent);
 }
 
+/* QUEUED: a node armed with canvas-control `--after`, holding its launch until the stations it
+   waits on go idle. Grey — it is not an alert, it is "not started yet". */
+.term-node__status--queued {
+  color: #8e8e93;
+  gap: 4px;
+}
+
+.term-node__queued-run {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  margin-left: 2px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.term-node__queued-run:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
 /* Deterministic hook-reply approvals: compact Approve/Deny buttons beside the NEEDS YOU badge. */
 .term-node__approve {
   display: inline-flex;
@@ -2892,7 +2916,8 @@ body,
 .tab-menu,
 .controls-cluster,
 .dock,
-.dictation {
+.dictation,
+.kanban-overlay {
   -webkit-app-region: no-drag;
 }
 
@@ -3593,8 +3618,13 @@ body,
 }
 
 .confirm {
-  width: 320px;
+  width: 420px;
   max-width: 90vw;
+  /* Cap the height so a long message (e.g. an agent control-write preview) can
+     never grow the box past the viewport — the message area scrolls instead. */
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
   background: rgba(40, 40, 42, 0.99);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -3911,6 +3941,11 @@ body,
 
 .confirm__msg {
   margin: 0 0 16px;
+  /* The scrollable region once the box hits its max-height, so the action buttons
+     below stay on-screen instead of being pushed past the viewport. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
@@ -3921,6 +3956,13 @@ body,
      the newlines and still collapses runs of spaces, exactly as `normal` did — so the messages that
      carry no newlines at all are unchanged. */
   white-space: pre-line;
+  /* `pre-line` only breaks at whitespace, so one long unbroken token — a URL, an absolute path,
+     a base64 blob, all common in the agent-authored text the canvas-control write approval shows
+     ("Agent X wants to send…") — forced the message area into HORIZONTAL scrolling. Measured in
+     Chrome: a 400-char token overflows at any box width; with this it wraps and the overflow is
+     gone. A dialog whose whole job is "read this, then approve it" must never hide half the text
+     off to the side. */
+  overflow-wrap: anywhere;
 }
 
 /* The grant disclosure (`ConsentNotice` → describeGrant) shown ABOVE the SAS body in the host
@@ -6497,7 +6539,9 @@ body,
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 16px;
+  /* Extra bottom room so the columns' cards clear the floating usage pill (bottom-left, z 26)
+     — the board's foot mirror of the top title strip. */
+  padding: 16px 16px 56px;
   height: 100%;
   box-sizing: border-box;
 }
@@ -6803,6 +6847,9 @@ body,
   flex-direction: column;
 }
 .kanban-col__newmenu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: none;
   border: none;
   border-radius: 5px;
@@ -6811,6 +6858,20 @@ body,
   text-align: left;
   padding: 6px 8px;
   cursor: pointer;
+}
+.kanban-col__newicon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  flex: 0 0 auto;
+}
+.kanban-col__newicon svg {
+  width: 14px;
+  height: 14px;
+}
+.kanban-col__newmenu button:hover .kanban-col__newicon {
+  color: #fff;
 }
 .kanban-col__newmenu button:hover {
   background: var(--accent);
@@ -8352,4 +8413,44 @@ body,
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 8px;
   padding: 6px 12px;
+}
+
+/* Shared browser surface (canvas node + kanban card modal): toolbar on top, webview fills. */
+.browser-surface {
+  flex: 1;
+  min-height: 0;
+  height: 100%; /* the canvas node's .editor-node__body is display:block, so flex:1 alone is inert */
+  display: flex;
+  flex-direction: column;
+}
+/* In the card modal the browser pane fills the main area (no node header/toolbar chrome). */
+.kanban-modal__pane[data-kind='browser'] {
+  flex-direction: column;
+}
+.kanban-modal__pane[data-kind='browser'] .browser-surface {
+  width: 100%;
+}
+
+/* Reorder drop indicator: an accent line at the card edge the drop will land on. */
+.kanban-card--drop-before,
+.kanban-card--drop-after {
+  position: relative;
+}
+.kanban-card--drop-before::before,
+.kanban-card--drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent);
+  z-index: 2;
+}
+.kanban-card--drop-before::before {
+  top: -5px;
+}
+.kanban-card--drop-after::after {
+  bottom: -5px;
 }

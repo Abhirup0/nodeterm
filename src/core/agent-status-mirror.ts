@@ -3,6 +3,7 @@ import path from 'path'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
+import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 
 /**
  * Mirrors the live per-node agent status to a small JSON file so an EXTERNAL reader (the
@@ -202,6 +203,8 @@ export function buildMirrorUsage(
 export const INBOX_EVENTS_CAP = 50
 export const INBOX_TITLE_MAX = 120
 export const INBOX_DETAIL_MAX = 240
+/** Cap for the `You: …` prompt line carried on a working start edge (Live Activity + notch). */
+export const PROMPT_MAX = 120
 export const INBOX_ACTIVITY_MAX = 80
 // Question options (spec: interactive-push-live-activities): first question only, ≤4 choices,
 // each label clipped to 60 chars.
@@ -256,6 +259,10 @@ export interface InboxNodeNow {
   tool?: string
   /** Context-window fill 0–100 (from context-tail), when known. */
   contextPercent?: number
+  /** ≤PROMPT_MAX — the first line of the user prompt that opened the CURRENT turn ("You: …").
+   *  Set on a new turn, cleared with `activity` when the turn ends, so a phone poll (which has no
+   *  access to the push edges) can render the same line the push carries and the notch shows. */
+  prompt?: string
   updatedAt: number
 }
 export interface MirrorInbox {
@@ -281,6 +288,10 @@ export function reduceEntry(
   if (ev.sessionId) next.sessionId = ev.sessionId
 
   if (ev.kind === 'state' && ev.state) {
+    // An `idle` done (Claude went quiet at its prompt) is a RESCUE, not a turn end: it may only
+    // move a node that is still `working`. A node that is blocked/waiting is ALSO idle at the
+    // prompt — clearing it there would drop a live approval — and one already done needs nothing.
+    if (ev.idle && prev?.state !== 'working') return next
     // Done-holdoff: a late, non-newTurn `working` (out-of-order parallel hook, or an in-flight
     // tool POST at interrupt) must not resurrect a turn that just finished. Only a genuine new
     // turn (UserPromptSubmit) may. Leave state + updatedAt untouched so the window keeps
@@ -445,6 +456,9 @@ function newestUnresolved(events: ReadonlyArray<InboxEvent>, nodeId: string): In
 // ---- Stateful singleton (production side) --------------------------------------------------
 
 const state = new Map<string, MirrorEntry>()
+/** How often the stale-working sweep runs. The window it enforces is WORKING_STALE_MS. */
+const STALE_SWEEP_MS = 60_000
+let sweepTimer: ReturnType<typeof setInterval> | null = null
 let targetFile: string | null = null
 let writeTimer: NodeJS.Timeout | null = null
 let writeSeq = 0
@@ -513,6 +527,19 @@ export interface NodeStateChange {
   /** approval needsYou only: the deterministic hook-reply ticket from the just-produced approval
    *  event, letting an intent answer the held hook. Absent otherwise. */
   pendingId?: string
+  /** working START edge only: the first line of the user prompt that opened this turn ("You: …"),
+   *  ≤PROMPT_MAX. The one line that says WHAT a session is working on — the notch capsule shows it,
+   *  and it rides the Live Activity so the phone reads the same thing. Absent when the turn started
+   *  without a prompt we saw (a resumed session, a tool-driven working edge). */
+  prompt?: string
+  /** done only: this 'end' was produced by the stale-working SWEEP, not by the session itself —
+   *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
+   *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
+  stale?: boolean
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+   *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
+   *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
+  interrupted?: boolean
   /** done only: this 'end' was produced by an explicit desktop/browser READ of the finished
    *  session (`ackDone`), NOT the natural turn-end edge. Both send event:'end', which is what the
    *  phone uses to dismiss the Live Activity — `ack` only distinguishes them for internal
@@ -957,6 +984,7 @@ function loadPersisted(file: string): void {
 export function initAgentStatusMirror(filePath?: string): void {
   targetFile = filePath ?? path.join(platform().userDataDir, 'agent-status.json')
   loadPersisted(targetFile)
+  startStaleSweep()
 }
 
 function resolveFile(): string | null {
@@ -1040,7 +1068,19 @@ function produceInboxFromState(
   // done-holdoff means a held-off late working keeps `nextState === 'done'`, so it never reaches
   // here — no spurious 'start'.
   if (nextState === 'working' && prevState !== 'working') {
-    fireNodeStateChange({ ...stateBase, event: 'start', state: 'working' })
+    // A genuine new turn carries the user's prompt — the "You: …" line every surface shows.
+    const prompt = ev.newTurn ? firstLine(ev.task, PROMPT_MAX) : ''
+    if (prompt) {
+      // Persist it too, so the phone's POLL path (which never sees push edges) reads the same line.
+      const cur = inboxNodes.get(nodeId)
+      inboxNodes.set(nodeId, { ...cur, prompt, updatedAt: now })
+    }
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'start',
+      state: 'working',
+      ...(prompt ? { prompt } : {})
+    })
   }
   // approval/question dedup is TITLE-based (not edge-based): a re-asserted needs-you with the SAME
   // ask is a no-op, but a genuinely different ask still lands — so the guard can't be a plain
@@ -1129,7 +1169,13 @@ function produceInboxFromState(
     // working from re-entering, and the normalizer collapses an Esc-spam into one done).
     const detail = firstLine(ev.lastMessage, INBOX_DETAIL_MAX) || undefined
     const title = ev.interrupted ? 'Stopped' : 'Finished'
-    fireNodeStateChange({ ...stateBase, event: 'end', state: 'done', message: title })
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'end',
+      state: 'done',
+      message: title,
+      ...(ev.interrupted ? { interrupted: true } : {})
+    })
     pushInboxEvent({
       ...baseEvent,
       kind: 'done',
@@ -1145,7 +1191,8 @@ function produceInboxFromState(
 /** Clear a node's live activity (keep any contextPercent). Idempotent; no-op if nothing set. */
 function clearActivity(nodeId: string, now: number): void {
   const n = inboxNodes.get(nodeId)
-  if (!n || n.activity === undefined) return
+  if (!n || (n.activity === undefined && n.prompt === undefined)) return
+  // The turn is over: both the tool line AND the "You: …" prompt describe work in progress.
   inboxNodes.set(nodeId, { contextPercent: n.contextPercent, updatedAt: now })
 }
 
@@ -1183,7 +1230,13 @@ export function recordRawToolEvent(nodeId: string, payload: Record<string, unkno
     const activity = toolActivity(toolName, toolInput)
     const cur = inboxNodes.get(nodeId)
     if (cur?.activity === activity && cur?.tool === toolName) return // no change
-    inboxNodes.set(nodeId, { activity, tool: toolName, contextPercent: cur?.contextPercent, updatedAt: now })
+    inboxNodes.set(nodeId, {
+      activity,
+      tool: toolName,
+      contextPercent: cur?.contextPercent,
+      prompt: cur?.prompt,
+      updatedAt: now
+    })
     fireNodeNowChange({ nodeId, activity, contextPercent: cur?.contextPercent, ts: now })
     scheduleWrite()
   } else if (hook === 'PermissionRequest') {
@@ -1223,7 +1276,13 @@ export function recordContextUsage(nodeId: string, percent: number): void {
   const cur = inboxNodes.get(nodeId)
   if (cur?.contextPercent === clamped) return
   const now = Date.now()
-  inboxNodes.set(nodeId, { activity: cur?.activity, tool: cur?.tool, contextPercent: clamped, updatedAt: now })
+  inboxNodes.set(nodeId, {
+    activity: cur?.activity,
+    tool: cur?.tool,
+    contextPercent: clamped,
+    prompt: cur?.prompt,
+    updatedAt: now
+  })
   fireNodeNowChange({ nodeId, activity: cur?.activity, contextPercent: clamped, ts: now })
   scheduleWrite()
 }
@@ -1284,6 +1343,53 @@ export function ackDone(nodeId: string): void {
   scheduleWrite()
 }
 
+/**
+ * The one place that decides a `working` session is gone (shared/agents/stale.ts).
+ *
+ * For each node that has been `working` with no event for `staleMs`: move the entry off working and
+ * fire ONE synthetic end edge, marked `stale` so no consumer treats it as an achievement. Every
+ * surface that already listens to `onNodeStateChange` inherits the fix — the notch drops the row,
+ * the phone's Live Activity ENDS instead of sitting on the Lock Screen until iOS's 8 h staleness.
+ *
+ * Deliberately NOT done here: no inbox event is pushed (nothing finished, so there is nothing to
+ * show in the feed or to notify about), and `updatedAt` is left alone — falsifying it would both
+ * rewrite history and arm the 3 s done-holdoff, which would swallow a real event arriving right
+ * after a wrong guess. The sweep is self-healing: one later event puts the node back to `working`.
+ *
+ * Returns the swept node ids (empty when nothing was stale). `now`/`staleMs` injected for tests.
+ */
+export function sweepStaleWorking(
+  now: number = Date.now(),
+  staleMs: number = WORKING_STALE_MS
+): string[] {
+  const swept: string[] = []
+  for (const [nodeId, e] of state) {
+    if (!isStaleWorking(e.state, e.updatedAt, now, staleMs)) continue
+    state.set(nodeId, { ...e, state: 'done' })
+    clearActivity(nodeId, now)
+    swept.push(nodeId)
+    fireNodeStateChange({
+      nodeId,
+      ...(e.agentId ? { agentId: e.agentId } : {}),
+      ...(e.sessionId ? { sessionId: e.sessionId } : {}),
+      event: 'end',
+      state: 'done',
+      message: 'Stopped',
+      stale: true,
+      ts: now
+    })
+  }
+  return swept
+}
+
+function startStaleSweep(): void {
+  if (sweepTimer) return
+  sweepTimer = setInterval(() => {
+    if (sweepStaleWorking().length > 0) scheduleWrite()
+  }, STALE_SWEEP_MS)
+  sweepTimer.unref?.()
+}
+
 function scheduleWrite(): void {
   if (writeTimer) return
   writeTimer = setTimeout(() => {
@@ -1326,6 +1432,8 @@ export async function flush(): Promise<void> {
 /** Reset all module state (in-memory map + config + listeners + inbox). Test-only. */
 export function _resetForTest(): void {
   state.clear()
+  if (sweepTimer) clearInterval(sweepTimer)
+  sweepTimer = null
   targetFile = null
   if (writeTimer) clearTimeout(writeTimer)
   writeTimer = null

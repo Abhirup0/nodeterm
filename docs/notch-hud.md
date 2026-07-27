@@ -48,10 +48,30 @@ Row shape sent to the HUD:
   prompt?, activity?, contextPercent?,
   subagents: [{ id, label?, state: 'working'|'done' }] }
 ```
-- **done latch + clear**: `done` state is latched by the mirror already; clear a node's done
-  highlight when the user focuses that node in nodeterm (reuse `app:focus-node`) OR after the HUD
-  panel is opened — a nodeterm-native "you looked at it" signal (better than agent-notch's
-  terminal-bundle-id sniff). Drop a node from the HUD when it's gone + idle > 6 h.
+- **done latch + clear**: `done` state is latched by the mirror already. Clearing is **strictly per
+  row**: clicking/Go-ing a row (`hudFocusNode` → `model.noteFocus`) clears THAT node, and reading the
+  session inside nodeterm clears it through the mirror's read-ack (`state:'done', ack:true`). Opening
+  or closing the panel clears NOTHING — an earlier "the panel was opened, so you looked at it"
+  blanket clear meant that with three finished sessions waiting, opening the panel and clicking one
+  silently swallowed the other two. Drop a node from the HUD when it's gone + idle > 6 h.
+  A `done` first learned about from a MIRROR FLUSH is seeded as already-seen: the mirror keeps
+  entries for hours and is re-read at every launch, so without that rule every app start (and every
+  re-enable of the setting) resurrected old finished sessions as fresh green blobs. Only a live done
+  EDGE — a turn ending while the HUD is running — raises the highlight. A restored `needsYou` still
+  shows, because it genuinely still needs you.
+- **working watchdog**: a session leaves `working` only when something says so, and some exits say
+  nothing — Esc during a tool call, a killed CLI, a slept machine, a dropped SSH. The DECIDER is
+  central: `agent-status-mirror`'s `sweepStaleWorking` (window in `shared/agents/stale.ts`,
+  `WORKING_STALE_MS` 20 min, well past Claude's ~10 min Bash cap) moves the entry off working and
+  fires ONE end edge marked `stale`, which every `onNodeStateChange` consumer honors — the notch
+  drops the row AND the phone's Live Activity ends. The HUD keeps a DISPLAY-ONLY copy of the same
+  check so the capsule never depends on that edge arriving; nothing is mutated, so any later event
+  restores the row instantly, and the 60 s sweep re-pushes so a row can age out with no event at
+  all. An **interrupted**
+  done (`NodeStateChange.interrupted`, Esc) never lights the green highlight — nothing was
+  accomplished, so there is nothing to go and read (same rule as the notification path).
+- **dismiss** latches the RAW state, so the watchdog flipping a hidden row's display cannot count
+  as "it changed".
 
 ## Indicator + panel (hud renderer) — the DynamicNotch capsule
 

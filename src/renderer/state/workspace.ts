@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/react'
-import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, Project } from '@shared/types'
+import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
 import { agentConfig, withPermissionMode } from '@shared/agents/config'
 import { sshHostKey } from '@shared/ssh'
@@ -56,6 +56,12 @@ export interface NodeData {
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
+  /**
+   * Terminal nodes armed with canvas-control's `--after`: the launch is held until every node
+   * in `after` reports idle. Unlike `initialCommand` this IS persisted — the wait is durable
+   * state, not a one-shot open event. Cleared the moment it fires.
+   */
+  pendingLaunch?: PendingLaunch
   /**
    * Transient respawn trigger: bumping this number tears down a terminal node's session and
    * recreates it (used to move an existing terminal into a worktree cwd). Not persisted —
@@ -939,6 +945,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         highScore: n.highScore,
         agentId,
         accountId: n.accountId,
+        pendingLaunch: n.pendingLaunch,
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
@@ -1001,6 +1008,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         highScore: n.data.highScore,
         agentId: n.data.agentId,
         accountId: n.data.accountId,
+        pendingLaunch: n.data.pendingLaunch,
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,

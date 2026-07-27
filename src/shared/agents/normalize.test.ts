@@ -163,10 +163,12 @@ describe('normalizeClaude — permission signals', () => {
     expect(e).toMatchObject({ kind: 'state', state: 'blocked' })
   })
 
-  // Claude Code fires an idle_prompt Notification AFTER a turn completes normally (after
-  // Stop). Mapping it to waiting resurrected NEEDS YOU on a finished node and left it
-  // stuck there until the next prompt.
-  it('Notification idle_prompt after Stop does NOT change state', () => {
+  // Claude Code fires an idle_prompt Notification whenever it is sitting at its prompt: after a
+  // normally-finished turn (already done → the consumers' working-only rule makes it a no-op) AND
+  // after an Esc that aborted a tool call without ever running Stop — the one case that left a node
+  // stuck on `working`. It is a RESCUE, hence `idle` + `interrupted`, never a celebration.
+  // Mapping it to `waiting` (the obvious reading) is what used to stick NEEDS YOU on finished nodes.
+  it('Notification idle_prompt → an idle, interrupted done (the stuck-working rescue)', () => {
     const e = normalizeClaude(
       env({
         hook_event_name: 'Notification',
@@ -174,7 +176,7 @@ describe('normalizeClaude — permission signals', () => {
         message: 'Claude is waiting for your input'
       })
     )
-    expect(e).toBeNull()
+    expect(e).toMatchObject({ kind: 'state', state: 'done', idle: true, interrupted: true })
   })
 
   it('Notification elicitation_dialog / agent_needs_input → waiting', () => {

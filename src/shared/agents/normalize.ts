@@ -12,6 +12,11 @@ export interface NormalizedAgentEvent {
   // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
   // skips the completion alert/unread for these (the user was right there).
   interrupted?: boolean
+  // done only: this `done` was inferred from the CLI going IDLE at its prompt (Claude's
+  // `idle_prompt` notification), not from a turn-end hook. It is a RESCUE signal: it may only
+  // move a node that is still `working` (see reduceEntry / the Canvas listener), because a
+  // pending approval/question is also "idle at the prompt" and must not be cleared by it.
+  idle?: boolean
   // true only for a genuine new turn (Claude UserPromptSubmit), so the renderer can
   // clear per-turn fan-out without clearing on every mid-turn tool event.
   newTurn?: boolean
@@ -223,6 +228,19 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     }
     if (p.notification_type === 'elicitation_dialog' || p.notification_type === 'agent_needs_input') {
       return { ...base, kind: 'state', state: 'waiting', lastMessage: p.last_assistant_message }
+    }
+    // `idle_prompt` = the CLI is sitting at its prompt waiting for you to type. It cannot be true
+    // while a turn runs, which makes it the ONE signal that rescues a node stuck on `working` when
+    // no turn-end hook ever fired — the Esc-during-a-tool-call case, where Claude aborts the tool
+    // and returns to "Interrupted · What should Claude do instead?" without running Stop.
+    //
+    // Marked `idle` (and `interrupted`, since nothing was accomplished) so consumers can apply the
+    // narrow rule this needs: it may only move a node that is still WORKING. It also fires after a
+    // normally-finished turn (already `done` → no-op) and can fire while an approval prompt is up
+    // (`blocked`/`waiting` → must NOT be cleared). Mapping it to `waiting` — the obvious reading —
+    // is what stuck NEEDS YOU on finished nodes before, hence the deliberate no-op default below.
+    if (p.notification_type === 'idle_prompt') {
+      return { ...base, kind: 'state', state: 'done', interrupted: true, idle: true }
     }
     return null
   }

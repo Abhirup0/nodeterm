@@ -12,6 +12,7 @@ import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
 import type { ModalSpawn } from './ModalTerminal'
 import { ContextMenu, type MenuItem } from '../ContextMenu'
+import { IconAgent, IconExternal, IconNote, IconSwitch, IconTerminal, IconTrash, IconWeb } from '../icons'
 
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
  *  itself stores only column assignments. */
@@ -19,10 +20,12 @@ export interface KanbanSession {
   id: string
   title: string
   color: string
-  kind: 'terminal' | 'sticky'
+  kind: 'terminal' | 'sticky' | 'browser'
   agentId?: string
   /** Sticky note body — shown in the expanded detail row. */
   text?: string
+  /** Browser node URL (kind 'browser' only) — shown on the card, opened in the modal webview. */
+  url?: string
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
    *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn
@@ -32,6 +35,7 @@ export interface KanbanSession {
 export type KanbanCreateChoice =
   | { kind: 'terminal' }
   | { kind: 'sticky' }
+  | { kind: 'browser' }
   | { kind: 'agent'; agentId: AgentId }
 
 /** One "+ New" menu entry (label + the choice it fires). */
@@ -39,6 +43,7 @@ export interface KanbanCreateOption {
   key: string
   label: string
   choice: KanbanCreateChoice
+  icon: JSX.Element
 }
 
 interface KanbanViewProps {
@@ -58,6 +63,8 @@ interface KanbanViewProps {
   /** Reports which node's card modal is open (null = none) so the canvas can target it — e.g.
    *  the dictation shortcut dictates into the open card's session, not a canvas selection. */
   onModalNodeChange: (nodeId: string | null) => void
+  /** Persist a browser card's navigation (url/title) from the modal webview to the node. */
+  onBrowserNav: (nodeId: string, patch: { url?: string; title?: string }) => void
 }
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
@@ -67,7 +74,7 @@ type Drag = { kind: 'card' | 'column'; id: string } | null
  *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
 export function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange
+  onModalNodeChange, onBrowserNav
 }: KanbanViewProps) {
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
@@ -92,15 +99,18 @@ export function KanbanView({
     ...BUILTIN_AGENT_IDS.map((id) => ({
       key: id,
       label: AGENT_CONFIG[id].label,
-      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice
+      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice,
+      icon: <IconAgent />
     })),
     ...customAgents.map((a) => ({
       key: a.id,
       label: a.label,
-      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice
+      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice,
+      icon: <IconAgent />
     })),
-    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' } },
-    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' } }
+    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' }, icon: <IconTerminal /> },
+    { key: 'browser', label: 'Browser', choice: { kind: 'browser' }, icon: <IconWeb /> },
+    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' }, icon: <IconNote /> }
   ]
   const byId = new Map(sessions.map((s) => [s.id, s]))
 
@@ -124,11 +134,21 @@ export function KanbanView({
     // a column dropped on Ungrouped is a no-op — Ungrouped is always first
   }
 
-  const dropBeforeCard = (columnId: string | null, nodeId: string) => {
+  const dropAtCard = (columnId: string | null, targetNodeId: string, side: 'before' | 'after') => {
     const drag = takeDrag()
     if (!drag) return
-    if (drag.kind === 'card') commit(assignNode(board, drag.id, columnId, nodeId))
-    else if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+    if (drag.kind === 'column') {
+      if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+      return
+    }
+    // "after this card" = "before the NEXT card in the column" (null = end of column).
+    const ids = columnId === null ? unassigned(board, sessions.map((s) => s.id)) : assignedTo(board, columnId)
+    let beforeId: string | null = targetNodeId
+    if (side === 'after') {
+      const i = ids.indexOf(targetNodeId)
+      beforeId = i >= 0 && i + 1 < ids.length ? ids[i + 1] : null
+    }
+    commit(assignNode(board, drag.id, columnId, beforeId))
   }
 
   const sessionsFor = (ids: string[]) =>
@@ -149,13 +169,13 @@ export function KanbanView({
         }))
     ]
     return [
-      { label: 'Open card', onClick: () => setModalNodeId(nodeId) },
-      { label: 'Open on canvas', onClick: () => onOpenNode(nodeId) },
+      { label: 'Open card', icon: <IconExternal />, onClick: () => setModalNodeId(nodeId) },
+      { label: 'Open on canvas', icon: <IconExternal />, onClick: () => onOpenNode(nodeId) },
       ...(moveTargets.length
-        ? ([{ type: 'submenu', label: 'Move to', children: moveTargets }] as MenuItem[])
+        ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
       { type: 'separator' },
-      { label: 'Delete', danger: true, onClick: () => onDeleteNode(nodeId) }
+      { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => onDeleteNode(nodeId) }
     ]
   }
 
@@ -179,7 +199,7 @@ export function KanbanView({
           onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
           onDragEnd={() => (dragRef.current = null)}
           onDropOnColumn={() => dropOnColumn(null)}
-          onDropBeforeCard={(id) => dropBeforeCard(null, id)}
+          onDropAtCard={(id, side) => dropAtCard(null, id, side)}
           onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
         />
         {board.columns.map((col) => (
@@ -199,7 +219,7 @@ export function KanbanView({
             onColumnDragStart={() => (dragRef.current = { kind: 'column', id: col.id })}
             onDragEnd={() => (dragRef.current = null)}
             onDropOnColumn={() => dropOnColumn(col.id)}
-            onDropBeforeCard={(id) => dropBeforeCard(col.id, id)}
+            onDropAtCard={(id, side) => dropAtCard(col.id, id, side)}
             onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
           />
         ))}
@@ -232,6 +252,7 @@ export function KanbanView({
           }}
           onRename={(t) => onRenameNode(modalNodeId, t)}
           onEditSticky={(t) => onEditSticky(modalNodeId, t)}
+          onBrowserNav={(patch) => onBrowserNav(modalNodeId, patch)}
         />
       )}
     </div>

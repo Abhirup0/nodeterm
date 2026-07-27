@@ -254,6 +254,45 @@ describe('accountId serialization', () => {
   })
 })
 
+describe('pendingLaunch round-trip', () => {
+  // Unlike initialCommand (one-shot, deliberately NOT persisted), an armed node's held launch
+  // must survive a reload — the station it waits on can take hours, and a restart in between
+  // must not silently turn the node into an idle shell that never runs anything.
+  it('persists the held launch and its dependencies', () => {
+    const node = {
+      id: 'term-3',
+      type: 'terminal',
+      position: { x: 0, y: 0 },
+      width: 600,
+      height: 400,
+      data: {
+        title: 'T',
+        color: '#888',
+        group: null,
+        agentId: 'claude',
+        pendingLaunch: { after: ['term-1', 'term-2'], command: 'claude "go"' }
+      }
+    } as unknown as CanvasNode
+    const states = flowToNodeStates([node])
+    expect(states[0].pendingLaunch).toEqual({ after: ['term-1', 'term-2'], command: 'claude "go"' })
+    expect(nodeStatesToFlow(states)[0].data.pendingLaunch).toEqual({
+      after: ['term-1', 'term-2'],
+      command: 'claude "go"'
+    })
+  })
+
+  it('stays undefined for an ordinary node', () => {
+    const node = {
+      id: 'term-4', type: 'terminal', position: { x: 0, y: 0 }, width: 1, height: 1,
+      data: { title: 'T', color: '#888', group: null, initialCommand: 'claude' }
+    } as unknown as CanvasNode
+    const states = flowToNodeStates([node])
+    expect(states[0].pendingLaunch).toBeUndefined()
+    // initialCommand is still not persisted — arming is what makes a launch durable.
+    expect((states[0] as { initialCommand?: string }).initialCommand).toBeUndefined()
+  })
+})
+
 describe('createAccountLoginNode', () => {
   it('produces a terminal node that logs the given account in', () => {
     const node = createAccountLoginNode('acct-1', 0)
