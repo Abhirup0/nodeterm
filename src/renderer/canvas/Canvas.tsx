@@ -179,6 +179,7 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
@@ -4794,7 +4795,10 @@ export function Canvas() {
       // Hold a freshly-built node's launch instead of running it on open. The factories already
       // composed the exact command (agent CLI + permission-mode flag + prompt, or --cmd), so it
       // is MOVED rather than rebuilt — a second construction site is how the two drift apart.
-      const armAfter = (node: CanvasNode, after: string[]): CanvasNode => {
+      // `extraLive` names nodes being created in this same tick — `verify` arms its judge on
+      // reviewers that are not on the canvas yet, and without this they would look DELETED,
+      // which counts as satisfied, and the judge would fire before a single review existed.
+      const armAfter = (node: CanvasNode, after: string[], extraLive?: Iterable<string>): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
         if (!after.length || !command) return node
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
@@ -4802,7 +4806,7 @@ export function Canvas() {
         // (which waits for the shell prompt and echo-verifies). Arming would instead hand
         // delivery to the canvas effect, which would race the node's PTY into existence and
         // could fire into a session that does not exist yet.
-        const live = new Set(nodesRef.current.map((nd) => nd.id))
+        const live = new Set([...nodesRef.current.map((nd) => nd.id), ...(extraLive ?? [])])
         const unmet = unmetDeps(
           { id: node.id, data: { pendingLaunch: { after, command } } },
           useAgentStatus.getState().byId,
@@ -5102,6 +5106,136 @@ export function Canvas() {
               ok: true,
               message: `linked ${from} ↔ ${linked.join(', ')}${note}`,
               result: { from, linked, skipped }
+            })
+            return
+          }
+          case 'verify': {
+            // A review PANEL over one node's work: one reviewer per lens, each armed behind the
+            // target (so they start when it goes idle) and linked to it (so they can read what it
+            // actually did), plus an optional judge armed behind the whole panel. Everything here
+            // is composed from the two primitives already built — `--after` and the context
+            // bridge; `verify` is the shape, not new machinery.
+            const targetId = (args.node ?? '').trim()
+            const target = nodesRef.current.find((nd) => nd.id === targetId)
+            if (!target) {
+              reply({ ok: false, error: `verify: --node names no existing node (${targetId})` })
+              return
+            }
+            const targetAgent = agentIdOf(targetId)
+            if (!targetAgent || !canContextLink(targetAgent)) {
+              reply({
+                ok: false,
+                error: `verify: ${targetId} is not an agent session whose work can be read — the reviewers would have nothing to look at`
+              })
+              return
+            }
+            const reviewAgent = ((args.agent as AgentId | undefined) || targetAgent) as AgentId
+            if (!canContextLink(reviewAgent)) {
+              reply({
+                ok: false,
+                error: `verify: --agent ${reviewAgent} cannot read linked context, so it cannot review anything`
+              })
+              return
+            }
+            const lenses = parseLenses(args.lenses)
+            const wantJudge = (args.synthesis ?? 'on').trim().toLowerCase() !== 'off'
+            const { shimPath: vShim } = await window.nodeTerminal.contextLink.info()
+            const targetTitle = (target.data.title as string) || targetId
+            const targetCwd = target.data.cwd as string | undefined
+            const live = nodesRef.current as CanvasNode[]
+            const vStore = useProjects.getState()
+            // Reviewers inherit the TARGET's account, not the caller's: they read that node's
+            // transcript, which is resolved inside its own account dir.
+            const vAccount = resolveNewNodeAccount(
+              target.data.accountId as string | undefined,
+              vStore.getProject(vStore.activeProjectId ?? ''),
+              useSettings.getState().settings.claudeAccounts
+            )
+            const vMode = activePermissionMode()
+            const reviewers = lenses.map((lens, i) => {
+              const node = createAgentNode(
+                reviewAgent,
+                live.length + i,
+                targetCwd,
+                placeBelow(i),
+                verifyLensPrompt({
+                  lens,
+                  targetTitle,
+                  targetId,
+                  agentId: reviewAgent,
+                  shimPath: vShim,
+                  focus: args.focus
+                }),
+                undefined,
+                vAccount,
+                vMode
+              )
+              return armAfter(
+                { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
+                [targetId]
+              )
+            })
+            const reviewerIds = reviewers.map((r) => r.id)
+            const judge = wantJudge
+              ? armAfter(
+                  (() => {
+                    const j = createAgentNode(
+                      reviewAgent,
+                      live.length + lenses.length,
+                      targetCwd,
+                      placeBelow(lenses.length),
+                      verifySynthesisPrompt({
+                        lenses,
+                        targetTitle,
+                        agentId: reviewAgent,
+                        shimPath: vShim
+                      }),
+                      undefined,
+                      vAccount,
+                      vMode
+                    )
+                    return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
+                  })(),
+                  reviewerIds,
+                  reviewerIds // the reviewers exist only in this tick — see armAfter
+                )
+              : null
+            const panelIds = [...reviewerIds, ...(judge ? [judge.id] : [])]
+            let next: CanvasNode[] = [...live, ...reviewers, ...(judge ? [judge] : [])]
+            next = arrangeNodes(next, panelIds, { layout: 'grid', origin: placeBelow(0) })
+            const vGroupCount = next.filter((nd) => nd.type === 'group').length
+            next = groupSelectedNodes(next, panelIds, vGroupCount)
+            const vGroup = next[0]
+            next = next.map((nd) =>
+              nd.id === vGroup.id
+                ? { ...nd, data: { ...nd.data, title: args.label || `Verify: ${targetTitle}` } }
+                : nd
+            )
+            setNodes(next)
+            panelIds.forEach((pid) => connect(pid))
+            // Same-tick lookup: the panel is not on the canvas yet (setNodes is async).
+            const panelEndpoint = (id: string): LinkEndpoint | null =>
+              panelIds.includes(id)
+                ? { kind: 'terminal', contextCapable: canContextLink(reviewAgent) }
+                : linkEndpointOf(id)
+            for (const rid of reviewerIds) bridgeTo(rid, [targetId], panelEndpoint)
+            bridgeTo(sourceNodeId, panelIds, panelEndpoint)
+            if (judge) bridgeTo(judge.id, reviewerIds, panelEndpoint)
+            markDirty()
+            reply({
+              ok: true,
+              message:
+                `verifying ${targetTitle} (${targetId}) with ${lenses.length} lens(es): ${lenses.join(', ')}` +
+                `\nreviewers: ${reviewerIds.join(', ')}` +
+                (judge ? `\nverdict node (runs after all reviewers): ${judge.id}` : '') +
+                `\nthey start when ${targetId} goes idle`,
+              result: {
+                groupId: vGroup.id,
+                targetId,
+                lenses,
+                reviewerIds,
+                judgeId: judge?.id ?? null
+              }
             })
             return
           }
