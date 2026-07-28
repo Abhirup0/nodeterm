@@ -306,6 +306,15 @@ export function buildStubApi(): Omit<
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
     closeWindow: noop,
+    // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow
+    // can, but `window.focus()` still helps when the page is merely blurred (not another OS app).
+    focusWindow: () => {
+      try {
+        window.focus()
+      } catch {
+        /* focus is a no-op in some embeddings — never throw into a drop handler */
+      }
+    },
     setBadgeCount: noop,
     getPathForFile: (): string => '',
     notify: async (payload: NotifyPayload): Promise<'shown' | 'failed' | 'skipped'> => {

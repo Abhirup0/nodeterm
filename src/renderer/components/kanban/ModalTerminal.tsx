@@ -288,6 +288,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
     }
     if (!paths.length) return
+    // A drag-drop from another OS app doesn't bring our window forward (esp. macOS), so the
+    // drag-source keeps keyboard focus — the user's next keystrokes would land in the wrong app.
+    // Raise our window FIRST, then focus the terminal, so typing after the drop reaches it.
+    window.nodeTerminal.focusWindow()
     term.focus()
     term.paste(paths.join(' ') + ' ')
   }
