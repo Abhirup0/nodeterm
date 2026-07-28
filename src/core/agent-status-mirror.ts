@@ -1159,7 +1159,23 @@ function produceInboxFromState(
     // The live-update headline folds the approval detail in (so Live Activities / push alerts read
     // "Edit App.tsx — src/components/App.tsx +2 −2"); a question / detail-less approval is just the title.
     const headline = clip(detail ? `${title} — ${detail}` : title, LIVE_MESSAGE_MAX)
-    if (prevState !== nextState) {
+    // Dedup a re-asserted SAME ask (title match) — BOUNDED (QUESTION_DEDUP_WINDOW_MS): only an
+    // unresolved same-title event still inside the window suppresses. A stale lingering same-title one
+    // (restored across a restart, or a long-abandoned turn) is SUPERSEDED — marked resolved so it
+    // stops muzzling — and the new ask fires. A different-title unresolved event never suppresses:
+    // that is a genuinely NEW ask. Always return the classification below so the broadcast
+    // enrichment stays consistent across the re-assert.
+    const dup = newestUnresolved(inboxEvents, nodeId)
+    const sameTitle = !!dup && dup.title === title
+    const freshDup = sameTitle && dup ? now - dup.ts < QUESTION_DEDUP_WINDOW_MS : false
+    const newAsk = !freshDup
+    // The needs-you live-update fires on the edge INTO needs-you — and also whenever the ASK
+    // ITSELF changes while we stay there. An agent asks in sequence: you answer on the desktop, it
+    // immediately asks the next thing, and the state never leaves `blocked`. Firing only on the
+    // state edge left the Lock Screen / island showing the ANSWERED question, with its options and
+    // its hook-reply ticket — stale, and answerable into the wrong ask (field report: "cevap
+    // vermeme rağmen gitmiyor"). A re-asserted SAME ask still fires nothing.
+    if (prevState !== nextState || newAsk) {
       fireNodeStateChange({
         ...stateBase,
         event: 'update',
@@ -1171,17 +1187,12 @@ function produceInboxFromState(
         ...(pendingId ? { pendingId } : {})
       })
     }
-    // Dedup a re-asserted SAME ask (title match) — BOUNDED (QUESTION_DEDUP_WINDOW_MS): only an
-    // unresolved same-title event still inside the window suppresses. A stale lingering same-title one
-    // (restored across a restart, or a long-abandoned turn) is SUPERSEDED — marked resolved so it
-    // stops muzzling — and the new ask fires. A different-title unresolved event never suppresses (a
-    // genuinely new ask) and is left untouched (it may still be pending). Always return the
-    // classification below so the broadcast enrichment stays consistent across the re-assert.
-    const dup = newestUnresolved(inboxEvents, nodeId)
-    const sameTitle = !!dup && dup.title === title
-    const freshDup = sameTitle && dup ? now - dup.ts < QUESTION_DEDUP_WINDOW_MS : false
-    if (!freshDup) {
-      if (sameTitle && dup) dup.resolved = true // supersede the stale same-title card
+    if (newAsk) {
+      // A NEW ask settles every older one for this node: the CLI blocks on an ask, so it cannot be
+      // asking something else unless the previous one was answered. Without this the Inbox kept a
+      // card per ask and the user had to dismiss answered questions by hand — the state never
+      // leaves `blocked` between them, so the transition-based resolve never ran.
+      resolveUnresolvedFor(nodeId)
       pushInboxEvent({
         ...baseEvent,
         kind,

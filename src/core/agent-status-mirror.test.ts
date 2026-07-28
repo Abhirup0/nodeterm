@@ -1563,3 +1563,44 @@ describe('idle_prompt rescue (Esc that ran no Stop hook)', () => {
     expect(next.updatedAt).toBe(1000)
   })
 })
+
+
+describe('consecutive asks (answered on the desktop)', () => {
+  it('a new ask settles the previous card and refreshes the live-update', () => {
+    _resetForTest()
+    const edges: NodeStateChange[] = []
+    const un = onNodeStateChange((c) => edges.push(c))
+
+    // Ask #1 — the edge into needs-you fires and a card appears.
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Edit App.tsx?' }))
+    const first = _inboxSnapshot().events.filter((e) => e.nodeId === 'n1' && e.kind === 'approval')
+    expect(first).toHaveLength(1)
+    expect(edges.filter((e) => e.state === 'needsYou')).toHaveLength(1)
+
+    // The user answers in the terminal; the agent immediately asks something else. The node never
+    // leaves `blocked`, which is exactly why the old card used to linger forever.
+    edges.length = 0
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Run npm test?' }))
+    const cards = _inboxSnapshot().events.filter((e) => e.nodeId === 'n1' && e.kind === 'approval')
+    expect(cards).toHaveLength(2)
+    expect(cards.find((c) => c.title === 'Edit App.tsx?')?.resolved).toBe(true)
+    expect(cards.find((c) => c.title === 'Run npm test?')?.resolved).toBeFalsy()
+    // …and the Lock Screen / island is told about the CURRENT ask, not left on the answered one.
+    const needs = edges.filter((e) => e.state === 'needsYou')
+    expect(needs).toHaveLength(1)
+    expect(needs[0].message).toContain('Run npm test?')
+    un()
+  })
+
+  it('a re-asserted SAME ask still fires nothing and adds no card', () => {
+    _resetForTest()
+    const edges: NodeStateChange[] = []
+    const un = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'blocked', lastMessage: 'Edit App.tsx?' }))
+    edges.length = 0
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'blocked', lastMessage: 'Edit App.tsx?' }))
+    expect(_inboxSnapshot().events.filter((e) => e.nodeId === 'n2')).toHaveLength(1)
+    expect(edges.filter((e) => e.state === 'needsYou')).toHaveLength(0)
+    un()
+  })
+})
