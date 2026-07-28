@@ -26,7 +26,6 @@ import {
   unlinkSync
 } from 'fs'
 import { randomUUID } from 'crypto'
-import { platform } from '../../platform'
 import { buildManagedScript } from './managed-script'
 import {
   computeTrustedHash,
@@ -83,8 +82,9 @@ function configTomlPath(): string {
   return path.join(codexHome(), 'config.toml')
 }
 
+/** Stable, machine-wide — the same rule as install-helper's `scriptPathFor` (see its note). */
 function scriptPath(): string {
-  return path.join(platform().userDataDir, 'agent-hooks', SCRIPT_FILE_NAME)
+  return path.join(homedir(), '.nodeterm', 'agent-hooks', SCRIPT_FILE_NAME)
 }
 
 // Why: match managed entries by the `agent-hooks/codex.sh` path segment (not

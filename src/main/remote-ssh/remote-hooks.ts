@@ -5,6 +5,7 @@
 // setup returns null (or, for codex, the agent simply runs without status). Takes an INJECTED
 // runner so the flow is unit-testable without real ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
+import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS } from '@shared/agents/hook-events'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import { buildManagedHookCommand, mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import {
@@ -46,17 +47,13 @@ export interface RemoteRunner {
 // Paths are relative to the remote $HOME and are made absolute once it is resolved at setup
 // (a literal `~` is NOT expanded inside double quotes or when passed as data, so the merged
 // hook command / endpoint file / `-R` bind path would otherwise carry an unexpanded tilde).
-const AGENT_TARGETS: { agentId: string; config: string; events: string[] }[] = [
-  {
-    agentId: 'claude',
-    config: '.claude/settings.json',
-    events: ['Stop', 'Notification', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SessionStart', 'SessionEnd', 'SubagentStop']
-  },
-  {
-    agentId: 'gemini',
-    config: '.gemini/settings.json',
-    events: ['Stop', 'Notification', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse']
-  }
+// The SAME lists the local installer uses (shared/agents/hook-events.ts). They were duplicated
+// here and had drifted: claude was missing StopFailure/PermissionRequest (an errored remote turn
+// stuck on "working"), and gemini was subscribed to CLAUDE's event names, which it never fires —
+// so remote gemini nodes reported nothing at all.
+const AGENT_TARGETS: { agentId: string; config: string; events: readonly string[] }[] = [
+  { agentId: 'claude', config: '.claude/settings.json', events: CLAUDE_HOOK_EVENTS },
+  { agentId: 'gemini', config: '.gemini/settings.json', events: GEMINI_HOOK_EVENTS }
 ]
 
 export class RemoteHooks {

@@ -10,7 +10,7 @@
 //   - fail open: a missing/unparseable settings.json defaults to {} (install) / returns
 //     early (remove); a write error is caught + warned, never thrown.
 import path from 'path'
-import { platform } from '../../platform'
+import { homedir } from 'os'
 import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
 import { buildManagedScript } from './managed-script'
 
@@ -20,8 +20,20 @@ type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
 /** Public alias for the hook settings shape, shared by local + remote merge callers. */
 export type HookSettings = Settings
 
+/**
+ * ONE script location per MACHINE — `~/.nodeterm/agent-hooks/<agent>.sh` — not one per instance.
+ *
+ * `settings.json` is shared by every agent session on the machine, but the path used to come from
+ * each instance's own `userDataDir`. So a second nodeterm (a Server Edition install, a dev build,
+ * an E2E run started with `--data-dir` under a temp path) rewrote the hook to ITS copy, and when
+ * that data dir later vanished the guarded command silently swallowed every event: hooks "worked"
+ * and did nothing, on every session on the box, until something reinstalled (field report).
+ *
+ * Every instance now writes identical bytes to the same stable path — which is also where the SSH
+ * remote installer already puts it (`$HOME/.nodeterm/agent-hooks/`), so local and remote agree.
+ */
 function scriptPathFor(scriptFileName: string): string {
-  return path.join(platform().userDataDir, 'agent-hooks', scriptFileName)
+  return path.join(homedir(), '.nodeterm', 'agent-hooks', scriptFileName)
 }
 
 /**
@@ -62,7 +74,17 @@ function isManaged(d: HookDef, marker: string): boolean {
   )
 }
 
-/** Pure: merge the managed `command` into each event, dropping any prior managed entry. */
+/**
+ * Pure: make the config's managed hooks EXACTLY ours — our command on every event in `events`, and
+ * no managed entry anywhere else.
+ *
+ * The second half is the repair. A managed entry is recognized by our own `agent-hooks/<agent>.sh`
+ * tail, so it is ours (or another nodeterm instance's) by construction — never a foreign tool's.
+ * Sweeping the events we DON'T subscribe to is what heals a settings.json two installers have
+ * fought over: whoever wrote last used to leave the loser's command behind on every event its own
+ * list lacked, and if the loser's script had since been deleted those events silently did nothing.
+ * It also cleans up after ourselves when an event leaves the list between versions.
+ */
 export function mergeManagedHook(config: HookSettings, command: string, events: readonly string[]): HookSettings {
   const marker = managedMarkerFor(command)
   const next: HookSettings = { ...config, hooks: { ...(config.hooks ?? {}) } }
@@ -70,6 +92,14 @@ export function mergeManagedHook(config: HookSettings, command: string, events: 
     const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d, marker))
     existing.push({ hooks: [{ type: 'command', command }] })
     next.hooks![ev] = existing
+  }
+  const managedEvents = new Set(events)
+  for (const ev of Object.keys(next.hooks!)) {
+    if (managedEvents.has(ev)) continue
+    const kept = next.hooks![ev].filter((d) => !isManaged(d, marker))
+    if (kept.length === next.hooks![ev].length) continue
+    if (kept.length === 0) delete next.hooks![ev]
+    else next.hooks![ev] = kept
   }
   return next
 }
