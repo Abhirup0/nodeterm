@@ -72,6 +72,7 @@ import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
+import { useViewMode } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
@@ -377,6 +378,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
   // effect), so effects outside that closure (font/cursor changes) resize through the same path.
   const applyFitRef = useRef<(() => void) | null>(null)
+  // This project shows the KANBAN board (an opaque overlay over the canvas). While it does, this
+  // canvas terminal is not visible — but it is still a co-attach subscriber, and its (often
+  // zoomed-small) grid would clamp a CARD-MODAL viewer of the same session to a tiny size, pushing
+  // an agent's input box off the bottom. So while the board is up we report "not viewing" (null),
+  // exactly like a park, and the visible modal drives the shared grid. A node only ever lives in the
+  // ACTIVE project's React Flow, so the active project's view is the one that matters.
+  const boardOpen = useViewMode(
+    (s) => s.viewByProject[useProjects.getState().activeProjectId ?? ''] === 'kanban'
+  )
+  const boardOpenRef = useRef(boardOpen)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
@@ -681,6 +692,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // the other viewer's (larger) grid. Zeroed here, so an adopting client always re-reports.
     let sentCols = 0
     let sentRows = 0
+    // Whether we've already reported "not viewing" because the kanban board is up (see boardOpen).
+    // Guards against re-sending the null on every ResizeObserver tick while the board stays open.
+    let boardParked = false
     // What we last REPORTED — the reference the letterbox is measured against — is published to a
     // module-level registry (`setFittedSize`), NOT held here: the `onSize` listener that reads it is
     // wired once and SURVIVES a park, so a closure variable would leave it comparing the pty's size
@@ -701,6 +715,22 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
      */
     const applyFit = () => {
       try {
+        // Board up → this canvas terminal is hidden behind the overlay. Report "not viewing" (null)
+        // so a card-modal viewer of the same session drives the grid instead of being clamped to our
+        // (possibly zoomed-tiny) canvas size. No modal viewer → no size vote at all → the pty simply
+        // keeps its last size (the "parked SOLO subscriber leaves the pty alone" case). When the board
+        // closes, the boardOpen effect re-runs applyFit and the `sentCols/sentRows` reset below forces
+        // a fresh report of the real fit.
+        if (boardOpenRef.current) {
+          if (sessionId && !boardParked) {
+            boardParked = true
+            sentCols = 0
+            sentRows = 0
+            transport.resize(sessionId, null, null)
+          }
+          return
+        }
+        boardParked = false
         const size = reportedSize(fit.proposeDimensions())
         if (!size) return
         if (size.cols === sentCols && size.rows === sentRows) return
@@ -1395,6 +1425,15 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     term.options.scrollback = xtermScrollback(tmuxScrollback)
     applyFitRef.current?.()
   }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
+
+  // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
+  // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen
+  // matches the ref's init value, and applyFit is guarded (no-op when nothing changed), so this
+  // never fires a redundant resize at mount on the common canvas-view path.
+  useEffect(() => {
+    boardOpenRef.current = boardOpen
+    applyFitRef.current?.()
+  }, [boardOpen])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
