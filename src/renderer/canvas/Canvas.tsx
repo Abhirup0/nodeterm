@@ -360,6 +360,22 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
   ephemeralEdges: []
 }
 
+/**
+ * An ephemeral card's position: its parent agent's position plus either the offset the user
+ * dragged it to or the laid-out default. Both live in the AGENT's coordinate space (the card
+ * inherits the agent's `parentId`), which is the whole point of storing an offset — grouping or
+ * ungrouping the agent flips that space between absolute and group-relative, and a stored
+ * position would then teleport the card by the group's own x/y.
+ */
+const offsetFrom = (
+  parent: { position: { x: number; y: number } },
+  stored: { x: number; y: number } | undefined,
+  fallback: { x: number; y: number }
+): { x: number; y: number } => {
+  const off = stored ?? fallback
+  return { x: parent.position.x + off.x, y: parent.position.y + off.y }
+}
+
 // Delivering an armed node's held launch (canvas-control `--after`) can lose the race against
 // that node's own PTY coming up, and a dropped launch is exactly the thing its dependency was
 // waiting for — so a refused delivery is retried a few times instead of vanishing.
@@ -947,8 +963,9 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/launchRetry are the triggers
   }, [nodes, armedDepSig, launchRetry])
 
-  // Selection state for ephemeral nodes (they live outside React Flow's managed nodes).
-  const [ephSel, setEphSel] = useState<Record<string, boolean>>({})
+  // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
+  // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
+  const ephSelId = useAgentNodes((s) => s.selectedId)
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     // Common case: no /loop running and no subagents → return a stable empty result so
     // this memo (which depends on `nodes`, i.e. recomputes every drag frame) stays cheap
@@ -984,9 +1001,14 @@ export function Canvas() {
         // with the group). Deliberately no extent:'parent' — the fan-out may hang below the
         // frame border without being clamped into it.
         ...(parent.parentId ? { parentId: parent.parentId } : {}),
-        position: ephemeralPos[lid] ?? { x: parent.position.x - 250, y: parent.position.y + ph + 60 },
+        position: offsetFrom(parent, ephemeralPos[lid], { x: -250, y: ph + 60 }),
         draggable: true,
-        selected: !!ephSel[lid],
+        // NOT selectable: React Flow's rubber band would otherwise sweep a whole fan-out of cards
+        // into the selection alongside the real nodes, and every selection action (Group,
+        // Duplicate, Delete, colors) would then be handed ids it cannot act on — the frame ends up
+        // drawn around the wrong things. Cards select one at a time, by click (`select` below).
+        selectable: false,
+        selected: ephSelId === lid,
         ...dims(lid, 230, 460, 92, 320),
         data: {
           title: st.loop.task ?? '',
@@ -1029,12 +1051,13 @@ export function Canvas() {
           type: 'subagent',
           // Same coordinate-space rule as the loop card above: inherit the agent's group.
           ...(parent.parentId ? { parentId: parent.parentId } : {}),
-          position: ephemeralPos[cid] ?? {
-            x: parent.position.x + (i % COLS) * COL_W,
-            y: parent.position.y + ph + 60 + Math.floor(i / COLS) * ROW_H
-          },
+          position: offsetFrom(parent, ephemeralPos[cid], {
+            x: (i % COLS) * COL_W,
+            y: ph + 60 + Math.floor(i / COLS) * ROW_H
+          }),
           draggable: true,
-          selected: !!ephSel[cid],
+          selectable: false, // see the loop card above
+          selected: ephSelId === cid,
           ...dims(cid, 230, 480, 96, 340),
           data: {
             title: v.label ?? '',
@@ -1062,7 +1085,7 @@ export function Canvas() {
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
-  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSel, nodes])
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, nodes])
 
   // Merge the persisted nodes with the ephemeral ones once per change (not per render),
   // so React Flow's array-identity short-circuit holds while panning/zooming.
@@ -1857,6 +1880,23 @@ export function Canvas() {
   }, [undo, redo])
 
   // ---- canvas interactions ----
+
+  /** The position of the agent node a card hangs off, in the CARD's own coordinate space (they
+   *  share a `parentId`). Undefined when the agent is gone — the card is on its way out too. */
+  const ephParentPosition = useCallback((cardId: string): { x: number; y: number } | undefined => {
+    const pid = cardId.startsWith('loop-')
+      ? cardId.slice('loop-'.length)
+      : useAgentNodes.getState().byId[cardId]?.parentNodeId
+    return pid ? nodesRef.current.find((n) => n.id === pid)?.position : undefined
+  }, [])
+
+  // Selecting a card is a SINGLE selection: React Flow can't clear the managed one for us
+  // (the cards are outside its selection), so clicking a card drops it here.
+  useEffect(() => {
+    if (!ephSelId) return
+    setNodes((ns) => (ns.some((n) => n.selected) ? ns.map((n) => ({ ...n, selected: false })) : ns))
+  }, [ephSelId, setNodes])
+
   const handleNodesChange: typeof onNodesChange = useCallback(
     (changes) => {
       // Ephemeral nodes (subagent / loop) live outside the managed state. Persist their drag
@@ -1867,10 +1907,20 @@ export function Canvas() {
       const isEph = (id: string) => isEphemeralNodeId(id, ephIds)
       const managed = changes.filter((c) => {
         if ('id' in c && isEph(c.id)) {
-          if (c.type === 'position' && c.position) useAgentNodes.getState().setPosition(c.id, c.position)
-          else if (c.type === 'select') setEphSel((prev) => ({ ...prev, [c.id]: c.selected }))
-          else if (c.type === 'dimensions' && c.dimensions && c.resizing)
-            useAgentNodes.getState().setSize(c.id, c.dimensions)
+          const store = useAgentNodes.getState()
+          // Stored as an OFFSET from the parent agent, never as a canvas position — see offsetFrom.
+          if (c.type === 'position' && c.position) {
+            const base = ephParentPosition(c.id)
+            store.setPosition(
+              c.id,
+              base ? { x: c.position.x - base.x, y: c.position.y - base.y } : c.position
+            )
+          }
+          // The cards are `selectable: false`, so React Flow never SELECTS one — but it still
+          // emits the deselect when the pane or another node is clicked, and that is what
+          // dismisses the card's resize frame.
+          else if (c.type === 'select' && !c.selected && store.selectedId === c.id) store.select(null)
+          else if (c.type === 'dimensions' && c.dimensions && c.resizing) store.setSize(c.id, c.dimensions)
           return false
         }
         return true
@@ -1878,7 +1928,7 @@ export function Canvas() {
       onNodesChange(managed)
       if (managed.some((c) => c.type !== 'select')) markDirty()
     },
-    [onNodesChange, markDirty]
+    [onNodesChange, markDirty, ephParentPosition]
   )
 
   // Resolve a node's agent id, with a tags fallback for not-yet-migrated legacy nodes and a
@@ -4548,6 +4598,43 @@ export function Canvas() {
     ]
   )
 
+  /** Right-click menu for an ephemeral card. The generic node menu is wrong for one: every
+   *  entry on it (Group, Duplicate, Align, Delete…) acts through the managed node array, which a
+   *  derived card is not in — so all of them silently did nothing. These are the actions a card
+   *  actually has. */
+  const ephemeralItems = useCallback((id: string): MenuItem[] => {
+    const st = useAgentNodes.getState()
+    const isLoop = id.startsWith('loop-')
+    return [
+      { type: 'label', label: isLoop ? 'Loop card' : 'Subagent card' },
+      {
+        label: st.expanded[id] ? 'Collapse' : 'Expand',
+        icon: <IconCollapse />,
+        onClick: () => useAgentNodes.getState().toggleExpanded(id)
+      },
+      {
+        label: 'Reset position',
+        icon: <IconGrid />,
+        onClick: () => useAgentNodes.getState().resetPlacement(id)
+      },
+      ...(isLoop
+        ? ([
+            {
+              // Same as the card's own ×: drops the CARD, never the cron/schedule job itself.
+              label: 'Dismiss card',
+              icon: <IconTrash />,
+              danger: true,
+              onClick: () => {
+                const pid = id.slice('loop-'.length)
+                useAgentStatus.getState().setLoop(pid, false)
+                useAgentNodes.getState().clearLoop(pid)
+              }
+            }
+          ] as MenuItem[])
+        : [])
+    ]
+  }, [])
+
   const onPaneContextMenu = useCallback(
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
@@ -4633,10 +4720,12 @@ export function Canvas() {
       const items =
         node.type === 'group'
           ? groupItems(node.id, screenToFlowPosition({ x: e.clientX, y: e.clientY }))
-          : selectionItems(targetIds(node), screenToFlowPosition({ x: e.clientX, y: e.clientY }))
+          : node.type === 'subagent' || node.type === 'loop'
+            ? ephemeralItems(node.id)
+            : selectionItems(targetIds(node), screenToFlowPosition({ x: e.clientX, y: e.clientY }))
       setMenu({ x: e.clientX, y: e.clientY, items })
     },
-    [groupItems, selectionItems, targetIds, screenToFlowPosition]
+    [groupItems, ephemeralItems, selectionItems, targetIds, screenToFlowPosition]
   )
 
   const onSelectionContextMenu = useCallback(
@@ -4646,7 +4735,8 @@ export function Canvas() {
         x: e.clientX,
         y: e.clientY,
         items: selectionItems(
-          selected.map((n) => n.id),
+          // Derived cards can't be acted on; filtering keeps the "N nodes" count honest too.
+          selected.filter((n) => n.type !== 'subagent' && n.type !== 'loop').map((n) => n.id),
           screenToFlowPosition({ x: e.clientX, y: e.clientY })
         )
       })
@@ -7133,7 +7223,7 @@ export function Canvas() {
             publisherRef.current?.flush()
             markDirty()
           }}
-          onPaneClick={() => setEphSel({})}
+          onPaneClick={() => useAgentNodes.getState().select(null)}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
