@@ -17,6 +17,10 @@ import {
 } from '@shared/usage-limits'
 import { systemAccountDisplay } from '../state/workspace'
 
+/** Grace period before a hover-opened popover closes, so the pointer can cross the pill's own
+ *  gap (or clip a corner en route elsewhere) without the panel flickering shut. */
+const USAGE_HOVER_CLOSE_MS = 220
+
 /**
  * A single limit row in the popover: bar, "% left", reset countdown. Bars render REMAINING
  * quota (the limit carries percent USED), which is the convention this pill has always used.
@@ -150,6 +154,7 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
   const [providers, setProviders] = useState<ProviderUsage[]>([])
   const [remote, setRemote] = useState<RemoteAccountUsage[]>([])
   const popRef = useRef<HTMLDivElement>(null)
+  const closeTimerRef = useRef<number | null>(null)
 
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
@@ -236,6 +241,22 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
     window.addEventListener('mousedown', onDown)
     return () => window.removeEventListener('mousedown', onDown)
   }, [open])
+
+  useEffect(() => () => { if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current) }, [])
+
+  // Hover opens it — the panel is a readout, so making the user click to see numbers they were
+  // already looking at is a step for nothing. The popover renders INSIDE this container, so
+  // travelling from the pill into it never leaves; only leaving the whole thing closes, and that
+  // is delayed so a pointer clipping the corner on its way elsewhere doesn't snap it shut.
+  const openNow = (): void => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = null
+    setOpen(true)
+  }
+  const closeSoon = (): void => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = window.setTimeout(() => setOpen(false), USAGE_HOVER_CLOSE_MS)
+  }
 
   // Settings → Usage toggles are a display choice, applied before any other rule — a hidden
   // provider is invisible here even when signed in and mid-limit. Scoping runs after them: the
@@ -341,7 +362,12 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
   }
 
   return (
-    <div className={`usage-indicator${overBoard ? ' usage-indicator--board' : ''}`} ref={popRef}>
+    <div
+      className={`usage-indicator${overBoard ? ' usage-indicator--board' : ''}`}
+      ref={popRef}
+      onMouseEnter={openNow}
+      onMouseLeave={closeSoon}
+    >
       {open && (
         <div className="usage-popover">
           <div className="usage-popover__head">
@@ -407,7 +433,10 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
           title is what answers "whose numbers are these?" without opening the popover. */}
       <button
         className="usage-pill"
+        // Hover already opens it; the click stays for the pointer-less paths (keyboard focus,
+        // touch) and as the way to dismiss it without moving the pointer away.
         onClick={() => setOpen((v) => !v)}
+        onFocus={openNow}
         title={scope.kind === 'ssh' ? `Agent usage on ${scope.hostKey}` : 'Agent usage'}
       >
         <span className="usage-pill__icon">✦</span>
