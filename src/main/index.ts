@@ -55,7 +55,8 @@ import {
   isEventUnresolved,
   type MirrorSettings,
   setNodeSessionName,
-  sessionNameSweepEntries
+  sessionNameSweepEntries,
+  nodeState
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -996,6 +997,29 @@ app.whenReady().then(async () => {
   // transcript — their PostToolUse is only a launch ack (see the raw listener below). The
   // context tails already read that transcript, so they surface the notification here and we
   // emit the synthetic subagent-end the hooks never send, then release the transcript tail.
+  /**
+   * A tool RESULT landed in a tracked transcript. Only interesting while the node is still in
+   * needs-you: an `AskUserQuestion` the user declined with Esc fires no PostToolUse and no Stop, so
+   * nothing ever moved the node off NEEDS YOU — badge, notch capsule and phone card all stuck until
+   * the next prompt. The result proves the ask settled; `working` is the honest next state (Claude
+   * carries on with "User declined to answer questions"), and any real event corrects it anyway.
+   */
+  const onToolResult = (sessionId: string): void => {
+    let nodeId: string | undefined
+    for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
+    if (!nodeId) return
+    const st = nodeState(nodeId)
+    if (st !== 'blocked' && st !== 'waiting') return
+    const ev = {
+      nodeId,
+      agentId: 'claude',
+      sessionId,
+      kind: 'state',
+      state: 'working'
+    } satisfies NormalizedAgentEvent
+    sendToMain(IPC.agentStatus, ev)
+    recordAgentEvent(ev)
+  }
   const onTaskNotification = (sessionId: string, n: TaskNotification): void => {
     let nodeId: string | undefined
     for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
@@ -1027,7 +1051,7 @@ app.whenReady().then(async () => {
         break
       }
     }
-  }, { onTaskNotification })
+  }, { onTaskNotification, onToolResult })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -1037,7 +1061,7 @@ app.whenReady().then(async () => {
   const remoteFile = new RemoteFile((args) =>
     sshProjectManager ? sshProjectManager.sshRun(args) : Promise.resolve({ code: 1, stdout: '' })
   )
-  const remoteContextTail = createRemoteContextTail(win, remoteFile, { onTaskNotification })
+  const remoteContextTail = createRemoteContextTail(win, remoteFile, { onTaskNotification, onToolResult })
   const remoteSubagentTail = createRemoteSubagentTail(win, remoteFile)
   // Remote transcript ref learned from the hook raw-listener, keyed by sessionId — lets the
   // search/chat read handlers (which receive only sessionId + cwd) read remotely without a
