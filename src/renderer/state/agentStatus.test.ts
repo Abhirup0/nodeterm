@@ -144,13 +144,26 @@ describe('clearUnread — cross-surface ack vs. external (host-driven) clear', (
     expect(store.getState().byId[id].unread).toBeFalsy()
   })
 
-  it('a non-done unread clear never acks (regardless of the external flag)', () => {
+  it('acks even while the node is WORKING — a previous turn may still be unread', () => {
     const acked: string[] = []
     const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
     const id = 'nt-3'
+    // The user opens a node whose last turn finished while a NEW turn is already running. That
+    // finish is on screen, so it is read; the mirror no-ops if there is nothing pending, and it
+    // only ever resolves `done` events, so a live approval is untouched.
     store.getState().setState(id, 'working', 'claude')
     store.getState().markUnread(id)
     store.getState().clearUnread(id)
+    expect(acked).toEqual(['nt-3'])
+  })
+
+  it('an EXTERNAL clear still never acks, whatever the state', () => {
+    const acked: string[] = []
+    const { store } = createAgentStatusSession(undefined, (id) => acked.push(id))
+    const id = 'nt-4'
+    store.getState().setState(id, 'working', 'claude')
+    store.getState().markUnread(id)
+    store.getState().clearUnread(id, { external: true })
     expect(acked).toEqual([])
   })
 })

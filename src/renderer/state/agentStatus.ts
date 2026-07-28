@@ -310,19 +310,23 @@ export function createAgentStatusSession(
       set((s) => {
         const prev = s.byId[id]
         if (!prev) return s
-        // The ACK runs even when there is no unread flag to clear. A session you were LOOKING at
-        // when it finished never got marked unread (see the `watching` gate in Canvas), so opening
-        // it is the only "I read it" signal there will ever be — and without the ack the notch
-        // capsule and the phone's Live Activity kept glowing for a session the user watched end.
-        // `ackDone` is a no-op when there is no unresolved done event, so a stray call costs
-        // nothing.
-        // Cross-surface ACK: reading a FINISHED session dismisses the paired phone's lingering DONE
-        // Live Activity, clears the notch capsule's green blob and marks its Inbox card seen (all
-        // via the core mirror's `ackDone`). Gated on the node's LATEST state being `done` — a
-        // working-state focus (unread from an earlier turn while a new turn is now live) must not
-        // ack. SUPPRESSED for an `external` clear — one the host drove FROM a phone read-ack it
-        // swept (`agent:unread-clear`): re-acking would loop host→renderer→ackDone straight back.
-        if (prev.state === 'done' && !opts?.external) ackDone?.(id)
+        // Cross-surface ACK: opening a session marks its finishes read EVERYWHERE — the notch
+        // capsule's green blob, the paired phone's lingering DONE Live Activity, and its Inbox
+        // Finished card (all via the core mirror's `ackDone`).
+        //
+        // Deliberately gated on NOTHING but the external flag:
+        //  - not on the unread flag, because a session you were LOOKING at when it finished never
+        //    got marked unread (the `watching` gate in Canvas), so opening it would be the only
+        //    read signal there ever is — and it was being dropped;
+        //  - not on the node's current state, because a node whose PREVIOUS turn finished while a
+        //    new one is already running left the phone showing a Finished card for a result the
+        //    user had open on screen.
+        // `ackDone` is a no-op when the node has no unresolved done event, and it only ever
+        // resolves `done` events — a live approval/question card is untouched.
+        //
+        // SUPPRESSED for an `external` clear — one the host drove FROM a phone read-ack it swept
+        // (`agent:unread-clear`): re-acking would loop host→renderer→ackDone straight back.
+        if (!opts?.external) ackDone?.(id)
         if (!prev.unread) return s
         const byId = { ...s.byId, [id]: { ...prev, unread: false } }
         save(byId)
