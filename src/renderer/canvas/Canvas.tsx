@@ -716,6 +716,13 @@ export function Canvas() {
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
+  // Where the camera stood before a double-click focus zoomed into a node — a click on empty
+  // canvas flies back to it (see onPaneClick). Armed ONLY by the double-click, because that is
+  // the gesture whose "before" the user still has in mind; a ⌘K/notification jump crosses
+  // projects, where the remembered viewport belongs to a canvas that is no longer on screen.
+  // Any camera move the USER makes disarms it (see onMove) — the offer is to undo the zoom, not
+  // to teleport out of wherever they have since navigated to.
+  const focusReturnRef = useRef<Viewport | null>(null)
   const nodesRef = useRef<CanvasNode[]>(nodes)
   // Live mirror of the derived board cards (defined far below), so the board-log emission funnel
   // in onKanbanChange — declared above kanbanSessions — can resolve a node's card title without a
@@ -1374,6 +1381,9 @@ export function Canvas() {
     committedRef.current = flow
     pastRef.current = []
     futureRef.current = []
+    // A remembered pre-zoom camera belongs to the canvas it was taken on — flying "back" to it
+    // from another project would frame a stretch of nothing.
+    focusReturnRef.current = null
     bumpHist((v) => v + 1)
     if (preserveViewportRef.current) {
       // In-place reload (external change / SSH reconcile): keep the user's current camera —
@@ -4145,10 +4155,25 @@ export function Canvas() {
 
   const onNodeDoubleClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
-      if (useSettings.getState().settings.doubleClickFocus) goToNode(node)
+      if (!useSettings.getState().settings.doubleClickFocus) return
+      // Remember the camera BEFORE the zoom so a click on empty canvas can put it back.
+      focusReturnRef.current = { ...viewportRef.current }
+      goToNode(node)
     },
     [goToNode]
   )
+
+  // Clicking empty canvas after a double-click focus flies back to the view the zoom came from:
+  // the way OUT of a node is the same gesture that already means "nothing here" (it clears the
+  // selection), so the zoom stops being a one-way trip that has to be undone by hand. React Flow
+  // only fires this for a genuine background click — a box-select drag and a right-click are
+  // filtered out upstream — and the ref is consumed, so the second click is an ordinary one.
+  const onPaneClick = useCallback(() => {
+    setEphSel({})
+    const back = focusReturnRef.current
+    focusReturnRef.current = null
+    if (back) void setViewport(back, { duration: 300 })
+  }, [setViewport])
 
   // Cmd/Ctrl+K toggles the command palette; Cmd/Ctrl+, opens settings.
   useEffect(() => {
@@ -4659,6 +4684,10 @@ export function Canvas() {
   const onMove = useCallback(
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
+      // React Flow passes d3's `sourceEvent` here, so it is set for a USER pan/zoom and absent
+      // for a programmatic one — which is what lets the focus animation itself survive while the
+      // user's own first wheel/drag drops the return offer.
+      if (_e) focusReturnRef.current = null
       markDirty()
       // Coalesce the zoom-% readout to one update per frame so a zoom gesture doesn't
       // re-render the whole Canvas on every intermediate viewport event.
@@ -7100,7 +7129,7 @@ export function Canvas() {
             publisherRef.current?.flush()
             markDirty()
           }}
-          onPaneClick={() => setEphSel({})}
+          onPaneClick={onPaneClick}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
