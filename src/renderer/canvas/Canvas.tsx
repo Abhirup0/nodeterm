@@ -349,6 +349,10 @@ const setGroupLabelBoost = (zoom: number): void => {
   document.documentElement.classList.toggle('group-labels-compact', boost >= 2)
 }
 
+/** Zoom a double-click on empty canvas pulls back to — far enough out to see the neighbours a
+ *  focused node was hiding, still close enough to read a terminal's headers. */
+const PANE_OVERVIEW_ZOOM = 0.55
+
 // Stable identity for the common case of no subagent/loop fan-out, so the ephemeral
 // memo doesn't allocate fresh arrays on every node change (e.g. each drag frame).
 const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
@@ -732,13 +736,6 @@ export function Canvas() {
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
-  // Where the camera stood before a double-click focus zoomed into a node — a click on empty
-  // canvas flies back to it (see onPaneClick). Armed ONLY by the double-click, because that is
-  // the gesture whose "before" the user still has in mind; a ⌘K/notification jump crosses
-  // projects, where the remembered viewport belongs to a canvas that is no longer on screen.
-  // Any camera move the USER makes disarms it (see onMove) — the offer is to undo the zoom, not
-  // to teleport out of wherever they have since navigated to.
-  const focusReturnRef = useRef<Viewport | null>(null)
   const nodesRef = useRef<CanvasNode[]>(nodes)
   // Live mirror of the derived board cards (defined far below), so the board-log emission funnel
   // in onKanbanChange — declared above kanbanSessions — can resolve a node's card title without a
@@ -1404,9 +1401,6 @@ export function Canvas() {
     committedRef.current = flow
     pastRef.current = []
     futureRef.current = []
-    // A remembered pre-zoom camera belongs to the canvas it was taken on — flying "back" to it
-    // from another project would frame a stretch of nothing.
-    focusReturnRef.current = null
     bumpHist((v) => v + 1)
     if (preserveViewportRef.current) {
       // In-place reload (external change / SSH reconcile): keep the user's current camera —
@@ -2197,6 +2191,35 @@ export function Canvas() {
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
   }, [getViewport, setViewport, wheelZoom, canvasLocked])
+
+  // Double-clicking EMPTY canvas pulls back to the overview zoom — the inverse of the node
+  // double-click, which frames one node. A fixed zoom, not "the camera the last focus came from":
+  // a remembered viewport depends on invisible state (which focus? still armed?), so the same
+  // gesture lands somewhere different every time; this one always ends up at the same scale.
+  // Anchored on the pointer, so the spot under the cursor stays put while the rest pulls back.
+  // React Flow has no pane-doubleclick callback, hence the native listener; the target must be
+  // the pane ITSELF (a node's own double-click is `onNodeDoubleClick`'s to handle), and its
+  // built-in `zoomOnDoubleClick` is off so d3 doesn't zoom in on the same event.
+  useEffect(() => {
+    const wrap = flowWrapRef.current
+    if (!wrap) return
+    const onDoubleClick = (e: MouseEvent) => {
+      if (canvasLocked) return
+      if (!(e.target as HTMLElement | null)?.classList.contains('react-flow__pane')) return
+      const { x, y, zoom } = getViewport()
+      if (Math.abs(zoom - PANE_OVERVIEW_ZOOM) < 1e-3) return
+      const rect = wrap.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const py = e.clientY - rect.top
+      const k = PANE_OVERVIEW_ZOOM / zoom
+      void setViewport(
+        { x: px - (px - x) * k, y: py - (py - y) * k, zoom: PANE_OVERVIEW_ZOOM },
+        { duration: 300 }
+      )
+    }
+    wrap.addEventListener('dblclick', onDoubleClick)
+    return () => wrap.removeEventListener('dblclick', onDoubleClick)
+  }, [getViewport, setViewport, canvasLocked])
 
   /** Flow-space point at the center of the visible canvas (for dock-added nodes). */
   const viewCenter = useCallback(() => {
@@ -4205,25 +4228,10 @@ export function Canvas() {
 
   const onNodeDoubleClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
-      if (!useSettings.getState().settings.doubleClickFocus) return
-      // Remember the camera BEFORE the zoom so a click on empty canvas can put it back.
-      focusReturnRef.current = { ...viewportRef.current }
-      goToNode(node)
+      if (useSettings.getState().settings.doubleClickFocus) goToNode(node)
     },
     [goToNode]
   )
-
-  // Clicking empty canvas after a double-click focus flies back to the view the zoom came from:
-  // the way OUT of a node is the same gesture that already means "nothing here" (it clears the
-  // selection), so the zoom stops being a one-way trip that has to be undone by hand. React Flow
-  // only fires this for a genuine background click — a box-select drag and a right-click are
-  // filtered out upstream — and the ref is consumed, so the second click is an ordinary one.
-  const onPaneClick = useCallback(() => {
-    useAgentNodes.getState().select(null)
-    const back = focusReturnRef.current
-    focusReturnRef.current = null
-    if (back) void setViewport(back, { duration: 300 })
-  }, [setViewport])
 
   // Cmd/Ctrl+K toggles the command palette; Cmd/Ctrl+, opens settings.
   useEffect(() => {
@@ -4774,10 +4782,6 @@ export function Canvas() {
   const onMove = useCallback(
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
-      // React Flow passes d3's `sourceEvent` here, so it is set for a USER pan/zoom and absent
-      // for a programmatic one — which is what lets the focus animation itself survive while the
-      // user's own first wheel/drag drops the return offer.
-      if (_e) focusReturnRef.current = null
       markDirty()
       // Coalesce the zoom-% readout to one update per frame so a zoom gesture doesn't
       // re-render the whole Canvas on every intermediate viewport event.
@@ -7219,7 +7223,7 @@ export function Canvas() {
             publisherRef.current?.flush()
             markDirty()
           }}
-          onPaneClick={onPaneClick}
+          onPaneClick={() => useAgentNodes.getState().select(null)}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
@@ -7240,7 +7244,9 @@ export function Canvas() {
           panOnScroll={canvasLocked ? false : !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
-          zoomOnDoubleClick={!canvasLocked}
+          // Off: a pane double-click is the overview-zoom gesture (see PANE_OVERVIEW_ZOOM) and a
+          // node's is "frame this node", so d3's zoom-in would fight both.
+          zoomOnDoubleClick={false}
           zoomActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
