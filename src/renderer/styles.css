@@ -7167,6 +7167,13 @@ body,
 .kanban-modal__term {
   flex: 1;
   min-width: 0;
+  /* min-height:0 is load-bearing: without it this flex item's automatic minimum is its CONTENT
+   * height, so once the terminal is free to use its own grid (the canvas node parks its size vote
+   * while the board is up) FitAddon and the host feed each other taller and taller — the pane ran
+   * away to ~200 rows. Pinned to 0, the host stays its flex allocation and fit measures the real
+   * visible height. */
+  min-height: 0;
+  overflow: hidden;
   padding: 8px;
 }
 
