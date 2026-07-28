@@ -388,7 +388,11 @@ export function buildFilesApi(
     // A REAL implementation, not a stub: this is the browser's only way to get a file off the
     // server, and it deliberately does not stream through this socket — it mints a ticket the
     // browser redeems with a plain GET (src/server/download.ts).
-    downloadTicket: (p) => client.request(IPC.filesDownloadTicket, p) as Promise<DownloadTicket | null>
+    downloadTicket: (p) => client.request(IPC.filesDownloadTicket, p) as Promise<DownloadTicket | null>,
+    // Also real, and the direction that matters here: the browser holds the bytes, the terminal
+    // runs on the server, so a pasted image only becomes nameable once the server has written it.
+    saveUpload: (name, dataBase64) =>
+      client.request(IPC.filesSaveUpload, name, dataBase64) as Promise<string | null>
   }
 
   const context: ContextApi = {

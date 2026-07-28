@@ -1,0 +1,55 @@
+import { describe, it, expect } from 'vitest'
+import { escapeDroppedPath, pastedFiles, uploadNameFor } from './file-drop'
+
+describe('escapeDroppedPath', () => {
+  it('escapes what a shell would otherwise interpret', () => {
+    expect(escapeDroppedPath('/tmp/Bishop Drew order.xlsx')).toBe('/tmp/Bishop\\ Drew\\ order.xlsx')
+    expect(escapeDroppedPath("/tmp/a'b$c")).toBe("/tmp/a\\'b\\$c")
+  })
+})
+
+describe('uploadNameFor', () => {
+  it('keeps the file s own name when it has one', () => {
+    expect(uploadNameFor(new File(['x'], 'report.pdf', { type: 'application/pdf' }))).toBe(
+      'report.pdf'
+    )
+  })
+
+  it('names clipboard bytes by their type — an agent should not have to guess', () => {
+    // A screenshot arrives as image/png with an EMPTY name; a suffix-less `pasted-<ts>` tells
+    // whatever reads the prompt nothing about what it is holding.
+    const name = uploadNameFor(new File(['x'], '', { type: 'image/png' }))
+    expect(name).toMatch(/^pasted-\d{8}-\d{6}\.png$/)
+    expect(uploadNameFor(new File(['x'], '', { type: 'image/jpeg' }))).toMatch(/\.jpg$/)
+  })
+
+  it('falls back to the subtype, then to .bin, for a type it has no table entry for', () => {
+    expect(uploadNameFor(new File(['x'], '', { type: 'audio/ogg' }))).toMatch(/\.ogg$/)
+    expect(uploadNameFor(new File(['x'], '', { type: '' }))).toMatch(/\.bin$/)
+  })
+})
+
+/** Minimal stand-in for the two shapes Chromium actually hands a paste. */
+const clipboard = (opts: { files?: File[]; items?: File[] }): DataTransfer =>
+  ({
+    files: (opts.files ?? []) as unknown as FileList,
+    items: (opts.items ?? []).map((f) => ({ kind: 'file', getAsFile: () => f })) as unknown as
+      DataTransferItemList
+  }) as DataTransfer
+
+describe('pastedFiles', () => {
+  const png = new File(['x'], 'a.png', { type: 'image/png' })
+
+  it('reads an OS file-manager copy off `files`', () => {
+    expect(pastedFiles(clipboard({ files: [png] }))).toEqual([png])
+  })
+
+  it('reads raw clipboard bytes off `items` — a screenshot never reaches `files`', () => {
+    expect(pastedFiles(clipboard({ items: [png] }))).toEqual([png])
+  })
+
+  it('answers empty for a text paste, which is xterm s to handle', () => {
+    expect(pastedFiles(clipboard({}))).toEqual([])
+    expect(pastedFiles(null)).toEqual([])
+  })
+})

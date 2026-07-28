@@ -10,7 +10,7 @@ import { useSession } from '../../session/session'
 import { useSettings } from '../../state/settings'
 import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
-import { droppedPaths } from '../../terminal/file-drop'
+import { droppedPaths, pastedFiles } from '../../terminal/file-drop'
 import { parseOsc52 } from '../../terminal/osc52'
 import {
   attachReplay,
@@ -267,20 +267,26 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     const rt = e.relatedTarget as Node | null
     if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
   }
-  const onDrop = async (e: React.DragEvent) => {
-    const files = Array.from(e.dataTransfer.files)
-    setDropping(false)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
+  /** Drop and paste share one path — same rule as the canvas node (see TerminalNode.insertFiles):
+   *  files become paths in the terminal, and only the window-raise differs. */
+  const insertFiles = async (files: File[], opts: { raiseWindow: boolean }) => {
     const term = termRef.current
-    if (!term) return
+    if (!term || !files.length) return
+    // Clipboard bytes must be written before they have a path, which is not instant either.
+    const needsWrite = files.some((f) => !window.nodeTerminal.getPathForFile(f))
     let paths: string[]
     if (spawn.sshRemoteTmux) {
       const projectId = useProjects.getState().activeProjectId
       setUploading(true)
       try {
         paths = await droppedPaths(files, { sshRemoteTmux: true, projectId })
+      } finally {
+        setUploading(false)
+      }
+    } else if (needsWrite) {
+      setUploading(true)
+      try {
+        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
       } finally {
         setUploading(false)
       }
@@ -291,9 +297,29 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // A drag-drop from another OS app doesn't bring our window forward (esp. macOS), so the
     // drag-source keeps keyboard focus — the user's next keystrokes would land in the wrong app.
     // Raise our window FIRST, then focus the terminal, so typing after the drop reaches it.
-    window.nodeTerminal.focusWindow()
+    // A paste came from this window, which already has focus.
+    if (opts.raiseWindow) window.nodeTerminal.focusWindow()
     term.focus()
     term.paste(paths.join(' ') + ' ')
+  }
+
+  const onDrop = async (e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer.files)
+    setDropping(false)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    await insertFiles(files, { raiseWindow: true })
+  }
+
+  // Cmd/Ctrl+V of a file or of raw image bytes; a text paste falls through to xterm untouched.
+  // Capture phase, because xterm's own paste listener sits on the textarea below this wrapper.
+  const onPaste = (e: React.ClipboardEvent) => {
+    const files = pastedFiles(e.clipboardData)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    void insertFiles(files, { raiseWindow: false })
   }
 
   return (
@@ -302,6 +328,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
+      onPasteCapture={onPaste}
     >
       {uploading && <div className="kanban-modal__upload">Uploading…</div>}
       {searchOpen && (

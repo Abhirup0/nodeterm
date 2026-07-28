@@ -1,5 +1,6 @@
 import type { CorePlatform } from './platform'
 import * as fsOps from './fs-ops'
+import { saveUpload } from './uploads'
 import { IPC } from '../shared/ipc'
 import type { DownloadTicket } from '../shared/types'
 
@@ -32,6 +33,11 @@ export function registerFsHandlers(
   platform.handle(IPC.fsMkdir, (dirPath: string) => fsOps.makeDir(dirPath))
   platform.handle(IPC.fsExists, (p: string) => fsOps.pathExists(p))
   platform.handle(IPC.filesQuickOpen, (cwd: string) => fsOps.listQuickOpenFiles(cwd))
+  // Bytes with no path on this machine (a clipboard paste, or a browser client's file) land in
+  // the managed uploads dir so the terminal has something to name. See core/uploads.ts.
+  platform.handle(IPC.filesSaveUpload, (name: string, dataBase64: string) =>
+    saveUpload(platform.userDataDir, name, dataBase64)
+  )
   platform.handle(IPC.filesDownloadTicket, (p: string) =>
     deps.issueDownloadTicket ? deps.issueDownloadTicket(p) : Promise.resolve(null)
   )

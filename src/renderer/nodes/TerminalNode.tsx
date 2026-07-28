@@ -14,7 +14,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { renderMarkdown } from '../lib/markdown'
 import { ChatPanel } from './ChatPanel'
 import { LocalTransport } from '../terminal/local-transport'
-import { droppedPaths } from '../terminal/file-drop'
+import { droppedPaths, pastedFiles } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
@@ -1497,14 +1497,19 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     const rt = e.relatedTarget as Node | null
     if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
   }
-  const onBodyDrop = async (e: React.DragEvent) => {
-    const files = Array.from(e.dataTransfer.files)
-    setDropping(false)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
+  /**
+   * Files arriving by DROP or by PASTE become paths in the terminal — what a native terminal does
+   * on a drop, and the only thing a shell (or an agent reading its prompt) can act on. Shared so
+   * Cmd/Ctrl+V behaves exactly like the drag, upload overlay included: the events differ only in
+   * how the files got here, and in whether our window needs raising afterwards.
+   */
+  const insertFiles = async (files: File[], opts: { raiseWindow: boolean }) => {
     const term = termRef.current
-    if (!term) return
+    if (!term || !files.length) return
+    // Clipboard bytes (a screenshot) have never been a file anywhere, so something has to write
+    // one before there is a path to paste — worth the same "this is going somewhere" overlay the
+    // SSH upload gets, since neither is instant and both paste nothing until they finish.
+    const needsWrite = files.some((f) => !window.nodeTerminal.getPathForFile(f))
 
     let paths: string[]
     if (data.sshRemoteTmux) {
@@ -1525,6 +1530,18 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         setUploadNote({ text: 'Upload failed', failed: true })
         uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
       }
+    } else if (needsWrite) {
+      if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
+      setUploadNote({ text: 'Saving pasted file…' })
+      try {
+        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+      } finally {
+        setUploadNote(null)
+      }
+      if (!paths.length) {
+        setUploadNote({ text: 'Could not save the pasted file', failed: true })
+        uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
+      }
     } else {
       paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
     }
@@ -1534,11 +1551,33 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     setArmed(false)
     // A drag-drop from another OS app doesn't bring our window forward (esp. macOS), so raise it
     // FIRST — otherwise the drag-source keeps keyboard focus and the user types into the wrong app.
-    window.nodeTerminal.focusWindow()
+    // A paste came from THIS window, which already has it.
+    if (opts.raiseWindow) window.nodeTerminal.focusWindow()
     term.focus()
     term.paste(paths.join(' ') + ' ')
     useAgentStatus.getState().setActive(id, true)
     presence.reportFocus(id)
+  }
+
+  const onBodyDrop = async (e: React.DragEvent) => {
+    const files = Array.from(e.dataTransfer.files)
+    setDropping(false)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    await insertFiles(files, { raiseWindow: true })
+  }
+
+  // Cmd/Ctrl+V of a FILE (copied in Finder/Explorer) or of raw image bytes (a screenshot). A paste
+  // carrying neither is ordinary text and belongs to xterm — hence the early return, and hence the
+  // CAPTURE phase: xterm listens on its own textarea below us, so stopping here is the only way to
+  // keep it from also pasting whatever text the clipboard happened to carry alongside the file.
+  const onBodyPaste = (e: React.ClipboardEvent) => {
+    const files = pastedFiles(e.clipboardData)
+    if (!files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    void insertFiles(files, { raiseWindow: false })
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
@@ -2016,6 +2055,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         onDragOver={onBodyDragOver}
         onDragLeave={onBodyDragLeave}
         onDrop={onBodyDrop}
+        onPasteCapture={onBodyPaste}
       >
         <div
           className={`term-node__xterm nodrag nowheel${co.letterbox ? ' letterboxed' : ''}`}

@@ -573,6 +573,13 @@ export interface FilesApi {
    * affordance rather than erroring.
    */
   downloadTicket(path: string): Promise<DownloadTicket | null>
+  /**
+   * Persist raw bytes (base64) as a file on the machine the terminals run on, and resolve its
+   * ABSOLUTE path — what a clipboard paste of an image has instead of a path, and what a browser
+   * client's dropped file has instead of a usable one. Resolves null when it could not be written
+   * (too large, unwritable); callers drop that file the way a failed drop does.
+   */
+  saveUpload(name: string, dataBase64: string): Promise<string | null>
 }
 
 export interface MediaApi {

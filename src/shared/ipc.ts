@@ -176,6 +176,8 @@ export const IPC = {
   filesQuickOpen: 'files:quick-open',
   /** Mint a one-shot HTTP download ticket (Server Edition only; every other shell answers null). */
   filesDownloadTicket: 'files:download-ticket',
+  /** Persist pasted/dropped bytes that have no path here, and answer their absolute path. */
+  filesSaveUpload: 'files:save-upload',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',

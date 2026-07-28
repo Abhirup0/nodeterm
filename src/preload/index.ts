@@ -275,7 +275,9 @@ const api: NodeTerminalApi = {
     // Desktop has no HTTP surface to redeem a ticket on — the core handler answers null here, and
     // the Explorer reads that as "this shell downloads over scp instead" (SSH) or "the file is
     // already on this machine" (local project).
-    downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p)
+    downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p),
+    saveUpload: (name: string, dataBase64: string) =>
+      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64)
   },
   updates: {
     onAvailable: (listener) => {
