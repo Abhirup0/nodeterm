@@ -424,6 +424,33 @@ export class WorkspaceStore {
    *    saved, or a rename inside that debounce window, resolves to undefined and the field is simply
    *    omitted — acceptable for an optional alert-title enrichment.
    */
+  /**
+   * The persisted node record for a node id (first project that has it), or undefined. The
+   * session-name sweep needs more than the title — `accountId` (managed Claude accounts scope the
+   * transcript root) and `titleAuto` (a hand-renamed node must not be overwritten). Same scan as
+   * `getNodeTitle`, which now delegates here.
+   */
+  getNode(nodeId: string): CanvasNodeState | undefined {
+    for (const e of this.index?.entries ?? []) {
+      let nodes: CanvasNodeState[] | undefined
+      if (e.project) nodes = e.project.nodes
+      else if (e.cache) nodes = e.cache.nodes
+      else if (e.cwd) {
+        const raw = this.lastWritten.get(projectFilePath(e.cwd))
+        if (raw) {
+          try {
+            nodes = (JSON.parse(raw) as ProjectFileV1).nodes
+          } catch {
+            // Corrupt cached content: skip this entry, keep scanning the others.
+          }
+        }
+      }
+      const node = nodes?.find((n) => n.id === nodeId)
+      if (node) return node
+    }
+    return undefined
+  }
+
   getNodeTitle(nodeId: string): string | undefined {
     for (const e of this.index?.entries ?? []) {
       let nodes: CanvasNodeState[] | undefined

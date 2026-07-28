@@ -40,6 +40,10 @@ export interface MirrorEntry {
   state?: AgentState
   agentId?: AgentId
   sessionId?: string
+  /** The agent's own session name (the `/rename` name, read from its transcript) — published by
+   *  the session-name sweep so a reader with no canvas (the phone) sees the CURRENT name, not
+   *  whatever the node title was when it was last open. Absent until resolved. */
+  name?: string
   /**
    * When the state was last asserted (freshness). Drives the done-holdoff and the expiry
    * sweep — refreshed by every state/session reduction (incl. same-state working from tool
@@ -75,7 +79,17 @@ export interface MirrorSettings {
 export interface MirrorFile {
   v: 1
   updatedAt: number
-  nodes: Record<string, { state?: AgentState; agentId?: AgentId; sessionId?: string; updatedAt: number }>
+  nodes: Record<
+    string,
+    {
+      state?: AgentState
+      agentId?: AgentId
+      sessionId?: string
+      /** The agent's own session name (see MirrorEntry.name). Absent until resolved. */
+      name?: string
+      updatedAt: number
+    }
+  >
   /** Host-level launch settings (permission mode, managed accounts). Additive/optional: absent
    *  on old files and whenever no settings provider is wired — the file shape is then byte-for-byte
    *  identical to before this block existed. */
@@ -364,7 +378,13 @@ export function buildFile(
     if (now - e.updatedAt > expireMs) continue
     // Undefined fields drop out of JSON.stringify — an idle node keeps agentId/sessionId
     // without a `state` key.
-    out.nodes[id] = { state: e.state, agentId: e.agentId, sessionId: e.sessionId, updatedAt: e.updatedAt }
+    out.nodes[id] = {
+      state: e.state,
+      agentId: e.agentId,
+      sessionId: e.sessionId,
+      ...(e.name ? { name: e.name } : {}),
+      updatedAt: e.updatedAt
+    }
   }
   if (settings) out.settings = settings
   if (usage) out.usage = usage
@@ -943,7 +963,13 @@ function loadPersisted(file: string): void {
         if (!e || typeof e !== 'object') continue
         const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
         if (now - updatedAt > EXPIRE_MS) continue
-        state.set(id, { state: e.state, agentId: e.agentId, sessionId: e.sessionId, updatedAt })
+        state.set(id, {
+          state: e.state,
+          agentId: e.agentId,
+          sessionId: e.sessionId,
+          ...(e.name ? { name: e.name } : {}),
+          updatedAt
+        })
       }
     }
     // Inbox feed — restore verbatim (already capped + carries `resolved` flags) so the
@@ -1324,6 +1350,35 @@ export function clearNode(nodeId: string): void {
  * working-state focus that slipped the renderer gate — fires no seam and schedules no write). Pure
  * apart from the seam + write; `now` is Date.now for parity with the rest of the module.
  */
+/**
+ * Publish a node's resolved session name into the mirror (the session-name sweep's only writer).
+ * A no-op when nothing changed or the node is unknown — the sweep asks for the entries first, so
+ * an unknown id here just means it went away mid-pass. Never touches `updatedAt`: this is not a
+ * state assertion, and bumping it would defeat the freshness/expiry rules.
+ */
+export function setNodeSessionName(nodeId: string, name: string): boolean {
+  const e = state.get(nodeId)
+  if (!e || !name || e.name === name) return false
+  state.set(nodeId, { ...e, name })
+  scheduleWrite()
+  return true
+}
+
+/** The entries the session-name sweep walks: id + what it needs to resolve and dedupe. */
+export function sessionNameSweepEntries(): {
+  nodeId: string
+  sessionId?: string
+  agentId?: string
+  name?: string
+}[] {
+  return [...state].map(([nodeId, e]) => ({
+    nodeId,
+    sessionId: e.sessionId,
+    agentId: e.agentId,
+    name: e.name
+  }))
+}
+
 export function ackDone(nodeId: string): void {
   if (!nodeId) return
   let latest: InboxEvent | undefined
