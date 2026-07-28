@@ -64,3 +64,29 @@ describe('mergeManagedHook', () => {
     expect(out.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: cmd }] }])
   })
 })
+
+describe('mergeManagedHook — repair sweep', () => {
+  const cmd = "if [ -r '/home/u/.nodeterm/agent-hooks/claude.sh' ]; then sh '/home/u/.nodeterm/agent-hooks/claude.sh'; else cat >/dev/null 2>&1 || :; fi"
+  const stale = "if [ -r '/tmp/gone/agent-hooks/claude.sh' ]; then sh '/tmp/gone/agent-hooks/claude.sh'; else cat >/dev/null 2>&1 || :; fi"
+
+  it("drops another instance's managed entry from events we don't subscribe to", () => {
+    // The field state: a second nodeterm wrote its own (since-deleted) script path, and every
+    // event outside OUR list kept pointing at it — silently doing nothing forever.
+    const before = {
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: stale }] }],
+        SubagentStop: [{ hooks: [{ type: 'command', command: stale }] }]
+      }
+    }
+    const out = mergeManagedHook(before, cmd, ['Stop'])
+    expect(out.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: cmd }] }])
+    expect(out.hooks!.SubagentStop).toBeUndefined()
+  })
+
+  it('never touches a foreign tool on an event we do not manage', () => {
+    const foreign = { hooks: [{ type: 'command', command: '~/.someapp/agent-hooks/other.sh' }] }
+    const before = { hooks: { SubagentStop: [foreign, { hooks: [{ type: 'command', command: stale }] }] } }
+    const out = mergeManagedHook(before, cmd, ['Stop'])
+    expect(out.hooks!.SubagentStop).toEqual([foreign])
+  })
+})

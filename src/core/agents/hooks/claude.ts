@@ -5,21 +5,8 @@ import path from 'path'
 import { installHooksInto, removeHooksFrom } from './install-helper'
 import { ensureFullscreenTuiInFile } from './claude-tui'
 import { claudeCliCaps } from '../../claude-cli'
+import { CLAUDE_HOOK_EVENTS } from '@shared/agents/hook-events'
 
-const CLAUDE_EVENTS = [
-  'SessionStart',
-  'UserPromptSubmit',
-  'Stop',
-  // Fires INSTEAD of Stop when the turn ends on an API/model error — without it the
-  // status badge sticks on "working" after any errored turn.
-  'StopFailure',
-  'Notification',
-  // Dedicated permission-prompt signal (→ blocked), more direct than Notification.
-  'PermissionRequest',
-  'SessionEnd',
-  'PreToolUse',
-  'PostToolUse'
-] as const
 
 const SCRIPT_FILE_NAME = 'claude.sh'
 
@@ -32,7 +19,7 @@ export function installClaudeHooks(): void {
     agentId: 'claude',
     scriptFileName: SCRIPT_FILE_NAME,
     configPath: configPath(),
-    events: CLAUDE_EVENTS
+    events: CLAUDE_HOOK_EVENTS
   })
 }
 
@@ -42,7 +29,7 @@ export function installClaudeHooksInto(configDir: string): void {
     agentId: 'claude',
     scriptFileName: SCRIPT_FILE_NAME,
     configPath: path.join(configDir, 'settings.json'),
-    events: CLAUDE_EVENTS
+    events: CLAUDE_HOOK_EVENTS
   })
 }
 
@@ -66,7 +53,7 @@ export async function ensureClaudeFullscreenTuiInto(configDir: string): Promise<
 export function removeClaudeHooks(): void {
   removeHooksFrom({
     configPath: configPath(),
-    events: CLAUDE_EVENTS,
+    events: CLAUDE_HOOK_EVENTS,
     scriptFileName: SCRIPT_FILE_NAME
   })
 }
