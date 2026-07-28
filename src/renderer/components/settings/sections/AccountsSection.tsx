@@ -20,6 +20,19 @@ const ROWS = {
 }
 const ENTRIES = Object.values(ROWS)
 
+/** `addingOn` sentinel for the local button — a host key can never be this. */
+const LOCAL_TARGET = ''
+
+/** Spinner + label for an Add button that is mid-setup. */
+function AddingLabel({ where }: { where: string }): React.JSX.Element {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="ui-spinner" aria-hidden />
+      Setting up on {where}…
+    </span>
+  )
+}
+
 /** Reads fresh settings then applies a transform to the accounts list (avoids stale closures
  *  after an awaited login resolves late). */
 function applyAccounts(fn: (accs: ClaudeAccount[]) => ClaudeAccount[]): void {
@@ -54,6 +67,15 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const sshByProject = useSshConn((s) => s.byProject)
   const [versionWarning, setVersionWarning] = useState(false)
   const [pendingRemove, setPendingRemove] = useState<ClaudeAccount | null>(null)
+  /**
+   * Which "Add account" button is mid-setup: the host key, or LOCAL_TARGET for this machine.
+   * Minting a REMOTE account is 10–15 s of real work on the host — mkdir, merging the status hook
+   * into the account dir's settings.json, installing the canvas-control + context-link skills, and
+   * a `claude --version` through a login shell — and until this state existed the button simply
+   * sat there, so the click read as "nothing happened" until the login node appeared.
+   */
+  const [addingOn, setAddingOn] = useState<string | null>(null)
+  const [addError, setAddError] = useState<string | null>(null)
 
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
@@ -109,15 +131,34 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   // `host` set → create the account dir + hook ON that SSH host (via the ctx projectId); the row
   // then carries the host chip and only appears in that host's projects.
   const onAddAccount = async (host?: string): Promise<void> => {
+    if (addingOn) return // one setup at a time — the buttons are disabled, this is the guard
     const projectId = host ? projectIdForHost(host) : undefined
-    const { id, versionSupported } = await window.nodeTerminal.claudeAccounts.add(
-      projectId ? { projectId } : undefined
-    )
+    setAddingOn(host ?? LOCAL_TARGET)
+    setAddError(null)
+    let added: { id: string; versionSupported: boolean }
+    try {
+      added = await window.nodeTerminal.claudeAccounts.add(projectId ? { projectId } : undefined)
+    } catch {
+      // The remote path does not reject on a failed setup (it answers with an empty configDir and
+      // lets the login node report the connection error), so reaching here means the call itself
+      // never landed. Say so: after a spinner, silence is the one outcome that teaches nothing.
+      setAddError(
+        host
+          ? `Could not set up an account on ${host}. Is the project still connected?`
+          : 'Could not set up the account.'
+      )
+      return
+    } finally {
+      // Cleared before the login wait below: `runLogin` resolves only when the user finishes
+      // logging in (up to 5 minutes), and a spinner running that long would claim the setup is
+      // still going when the thing to do next is on the canvas.
+      setAddingOn(null)
+    }
     // Non-blocking: the account still isolates config, but an old CLI's unscoped macOS keychain
     // service would collide across accounts — surface a dismissable warning.
-    if (!versionSupported) setVersionWarning(true)
+    if (!added.versionSupported) setVersionWarning(true)
     const account: ClaudeAccount = {
-      id,
+      id: added.id,
       label: 'New account',
       pending: true,
       createdAt: Date.now(),
@@ -279,18 +320,59 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           {activeHostKey ? (
             // Inside an SSH project: choose where the new account lives. "On this Mac" is a normal
             // local account; "On <host>" creates it on the remote host (usable only there).
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="primary" onClick={() => void onAddAccount()}>
-                Add account — On this Mac
-              </Button>
-              <Button variant="primary" onClick={() => void onAddAccount(activeHostKey)}>
-                Add account — On {activeHostKey}
-              </Button>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  disabled={addingOn !== null}
+                  onClick={() => void onAddAccount()}
+                >
+                  {addingOn === LOCAL_TARGET ? (
+                    <AddingLabel where="this Mac" />
+                  ) : (
+                    'Add account — On this Mac'
+                  )}
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={addingOn !== null}
+                  onClick={() => void onAddAccount(activeHostKey)}
+                >
+                  {addingOn === activeHostKey ? (
+                    <AddingLabel where={activeHostKey} />
+                  ) : (
+                    `Add account — On ${activeHostKey}`
+                  )}
+                </Button>
+              </div>
+              {/* A spinner says "wait"; this says what for. Setting up a remote account is a
+                  handful of ssh round-trips plus a login-shell `claude --version`, so it takes
+                  long enough that silence reads as a broken button. */}
+              {addingOn !== null ? (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  {addingOn === LOCAL_TARGET
+                    ? 'Creating the config dir and installing the status hook…'
+                    : `Creating the config dir on ${addingOn} and installing the status hook and agent skills over SSH — this takes a few seconds. The login terminal opens when it's ready.`}
+                </p>
+              ) : null}
+              {addError ? <p className="text-[12px] text-[#ff453a]">{addError}</p> : null}
             </div>
           ) : (
-            <Button variant="primary" onClick={() => void onAddAccount()}>
-              Add account
-            </Button>
+            <div className="space-y-2">
+              <Button
+                variant="primary"
+                disabled={addingOn !== null}
+                onClick={() => void onAddAccount()}
+              >
+                {addingOn === LOCAL_TARGET ? <AddingLabel where="this Mac" /> : 'Add account'}
+              </Button>
+              {addingOn !== null ? (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  Creating the config dir and installing the status hook…
+                </p>
+              ) : null}
+              {addError ? <p className="text-[12px] text-[#ff453a]">{addError}</p> : null}
+            </div>
           )}
 
           <p className="text-[12px] leading-relaxed text-muted">

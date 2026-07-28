@@ -635,6 +635,25 @@ body,
   font-size: 13px;
 }
 
+/* Generic inline "working…" spinner for buttons and rows. Sized to sit on a 13px label without
+   changing its line height. (The dictation overlay's own spinner below predates this and keeps
+   its class so its larger, overlay-specific sizing stays independent.) */
+.ui-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.85;
+  animation: ui-spin 0.8s linear infinite;
+}
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .dictation__spinner {
   width: 14px;
   height: 14px;
