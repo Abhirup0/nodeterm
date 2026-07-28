@@ -33,6 +33,60 @@ describe('loop node overrides vs per-turn fan-out', () => {
   })
 })
 
+describe('ephemeral card selection', () => {
+  beforeEach(() => {
+    useAgentNodes.setState({
+      byId: {},
+      activityById: {},
+      positions: {},
+      sizes: {},
+      expanded: {},
+      selectedId: null
+    })
+  })
+
+  // Cards are `selectable: false` in React Flow (a rubber band must never sweep a fan-out into
+  // the selection and hand those ids to Group / Duplicate / Delete), so selection lives here —
+  // and it is single: one card at a time.
+  it('selects one card at a time', () => {
+    useAgentNodes.getState().select('tu1')
+    expect(useAgentNodes.getState().selectedId).toBe('tu1')
+    useAgentNodes.getState().select('tu2')
+    expect(useAgentNodes.getState().selectedId).toBe('tu2')
+    useAgentNodes.getState().select(null)
+    expect(useAgentNodes.getState().selectedId).toBeNull()
+  })
+
+  it('drops the selection when the selected card disappears', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.select('tu1')
+    s.clearForParent('n1')
+    expect(useAgentNodes.getState().selectedId).toBeNull()
+  })
+
+  it('keeps the selection when a DIFFERENT parent’s fan-out is cleared', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.start('tu2', { parentNodeId: 'n2' })
+    s.select('tu1')
+    s.clearForParent('n2')
+    expect(useAgentNodes.getState().selectedId).toBe('tu1')
+  })
+
+  it('resetPlacement drops the dragged offset and the resized size', () => {
+    const s = useAgentNodes.getState()
+    s.setPosition('tu1', { x: 120, y: 40 })
+    s.setSize('tu1', { width: 400, height: 300 })
+    s.setPosition('tu2', { x: 1, y: 1 })
+    s.resetPlacement('tu1')
+    const st = useAgentNodes.getState()
+    expect(st.positions['tu1']).toBeUndefined()
+    expect(st.sizes['tu1']).toBeUndefined()
+    expect(st.positions['tu2']).toEqual({ x: 1, y: 1 })
+  })
+})
+
 describe('useAgentNodes.finish', () => {
   beforeEach(() => {
     useAgentNodes.setState({ byId: {}, activityById: {}, positions: {}, sizes: {}, expanded: {} })
@@ -77,20 +131,42 @@ describe('loop card override persistence', () => {
     fresh.getState().setPosition('loop-n1', { x: 42, y: 43 })
     fresh.getState().setSize('loop-n1', { width: 300, height: 120 })
     fresh.getState().setPosition('tu-sub', { x: 1, y: 2 }) // subagent — must NOT persist
-    const saved = JSON.parse(mem.get('nodeterm.loopCards')!)
+    const saved = JSON.parse(mem.get('nodeterm.loopCards.v2')!)
     expect(saved.positions['loop-n1']).toEqual({ x: 42, y: 43 })
     expect(saved.sizes['loop-n1']).toEqual({ width: 300, height: 120 })
     expect(saved.positions['tu-sub']).toBeUndefined()
     fresh.getState().clearLoop('n1')
-    const after = JSON.parse(mem.get('nodeterm.loopCards') ?? '{}')
+    const after = JSON.parse(mem.get('nodeterm.loopCards.v2') ?? '{}')
     expect(after.positions?.['loop-n1']).toBeUndefined()
+    vi.unstubAllGlobals()
+  })
+
+  it('ignores the v1 key, whose positions meant something else', async () => {
+    // v1 stored a canvas POSITION; v2 stores an offset from the parent agent. Reading a v1 entry
+    // as an offset would fling the card across the canvas, so the old key is simply not read.
+    const mem = new Map<string, string>([
+      [
+        'nodeterm.loopCards',
+        JSON.stringify({ positions: { 'loop-n3': { x: 4000, y: 3000 } }, sizes: {}, expanded: {} })
+      ]
+    ])
+    const store = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k)
+    }
+    const { vi } = await import('vitest')
+    vi.stubGlobal('localStorage', store)
+    vi.resetModules()
+    const { useAgentNodes: fresh } = await import('./agentNodes')
+    expect(fresh.getState().positions['loop-n3']).toBeUndefined()
     vi.unstubAllGlobals()
   })
 
   it('hydrates persisted loop-* overrides on load', async () => {
     const mem = new Map<string, string>([
       [
-        'nodeterm.loopCards',
+        'nodeterm.loopCards.v2',
         JSON.stringify({ positions: { 'loop-n2': { x: 9, y: 8 } }, sizes: {}, expanded: { 'loop-n2': true } })
       ]
     ])

@@ -53,8 +53,12 @@ export function SubagentNode({ id, data, selected }: NodeProps<CanvasNode>) {
     .filter(Boolean)
     .join(' · ')
 
+  // The cards are `selectable: false` in React Flow (a rubber band must not sweep a fan-out
+  // into the selection), so selecting one — which is what reveals its resize frame — is ours.
+  const select = () => useAgentNodes.getState().select(id)
+
   return (
-    <div className={`subagent-node${working ? ' working' : ' done'}`}>
+    <div onPointerDownCapture={select} className={`subagent-node${working ? ' working' : ' done'}`}>
       <NodeResizer isVisible={selected} minWidth={180} minHeight={84} color="#d97757" />
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div className="subagent-node__head nodrag" onClick={toggle} style={{ cursor: 'pointer' }}>

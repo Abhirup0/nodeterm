@@ -39,13 +39,30 @@ interface AgentNodesState {
    * expanded SubagentNode subscribes here, per id.
    */
   activityById: Record<string, string>
-  /** Per-ephemeral-node UI overrides (keyed by node id: subagent ids + `loop-<parentId>`). */
+  /**
+   * Per-ephemeral-node UI overrides (keyed by node id: subagent ids + `loop-<parentId>`).
+   * `positions` holds an OFFSET FROM THE PARENT AGENT NODE, not a canvas position: the card
+   * always shares the agent's coordinate space (it inherits the agent's `parentId`), so an
+   * offset survives the space CHANGING under it. Storing the position itself meant that
+   * grouping or ungrouping the agent — which flips its position between absolute and
+   * group-relative — teleported every card the user had dragged, by the group's own x/y.
+   */
   positions: Record<string, { x: number; y: number }>
   sizes: Record<string, { width: number; height: number }>
   expanded: Record<string, boolean>
-  setPosition(id: string, pos: { x: number; y: number }): void
+  /**
+   * The one selected ephemeral card, or null. Kept here (not in React Flow's selection) because
+   * the cards are `selectable: false`: a rubber-band or select-all must never sweep up a whole
+   * subagent fan-out and hand those ids to Group / Duplicate / Delete, which cannot act on a
+   * derived node. Cards select one at a time, by click, purely to show their resize frame.
+   */
+  selectedId: string | null
+  select(id: string | null): void
+  setPosition(id: string, offset: { x: number; y: number }): void
   setSize(id: string, size: { width: number; height: number }): void
   toggleExpanded(id: string): void
+  /** Drop a card's dragged position + resized size, returning it to its laid-out spot. */
+  resetPlacement(id: string): void
   start(toolUseId: string, viz: Omit<SubagentViz, 'state' | 'startedAt'>): void
   finish(toolUseId: string, result: SubagentResult): void
   /** Append a chunk of the subagent's live transcript. */
@@ -63,7 +80,10 @@ interface AgentNodesState {
 // Loop-card overrides survive restarts: the loop itself is persisted (agentStatus), so its
 // dragged position/size must be too, or every launch teleports the card back to the default
 // spot. Only `loop-*` keys are stored — subagent cards are per-turn.
-const LOOP_CARDS_KEY = 'nodeterm.loopCards'
+// v2: `positions` changed meaning from a canvas position to an offset from the parent agent
+// node. Reading a v1 entry as an offset would fling the card across the canvas, so the old key is
+// simply abandoned — the cost is one reset of a dragged loop card, not a mystery jump.
+const LOOP_CARDS_KEY = 'nodeterm.loopCards.v2'
 
 type Overrides = Pick<AgentNodesState, 'positions' | 'sizes' | 'expanded'>
 
@@ -94,11 +114,14 @@ function saveLoopOverrides(s: Overrides): void {
 export const useAgentNodes = create<AgentNodesState>((set) => ({
   byId: {},
   activityById: {},
+  selectedId: null,
   ...loadLoopOverrides(),
 
-  setPosition: (id, pos) =>
+  select: (id) => set((s) => (s.selectedId === id ? s : { selectedId: id })),
+
+  setPosition: (id, offset) =>
     set((s) => {
-      const next = { positions: { ...s.positions, [id]: pos } }
+      const next = { positions: { ...s.positions, [id]: offset } }
       if (id.startsWith('loop-')) saveLoopOverrides({ ...s, ...next })
       return next
     }),
@@ -113,6 +136,17 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       const next = { expanded: { ...s.expanded, [id]: !s.expanded[id] } }
       if (id.startsWith('loop-')) saveLoopOverrides({ ...s, ...next })
       return next
+    }),
+
+  resetPlacement: (id) =>
+    set((s) => {
+      if (!(id in s.positions) && !(id in s.sizes)) return s
+      const positions = { ...s.positions }
+      const sizes = { ...s.sizes }
+      delete positions[id]
+      delete sizes[id]
+      if (id.startsWith('loop-')) saveLoopOverrides({ ...s, positions, sizes })
+      return { positions, sizes }
     }),
 
   start: (toolUseId, viz) =>
@@ -154,7 +188,10 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
         delete sizes[id]
         delete expanded[id]
       }
-      return { byId, activityById, positions, sizes, expanded }
+      // A card that just vanished must not stay "selected" — a later card reusing the id would
+      // come back pre-selected.
+      const selectedId = s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId
+      return { byId, activityById, positions, sizes, expanded, selectedId }
     }),
 
   clearLoop: (parentNodeId) =>
@@ -168,6 +205,6 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       delete sizes[id]
       delete expanded[id]
       saveLoopOverrides({ positions, sizes, expanded })
-      return { positions, sizes, expanded }
+      return { positions, sizes, expanded, selectedId: s.selectedId === id ? null : s.selectedId }
     })
 }))
