@@ -1375,6 +1375,11 @@ export function setNodeSessionName(nodeId: string, name: string): boolean {
   return true
 }
 
+/** A node's current main state, or undefined when unknown. Read-only peek for the shells. */
+export function nodeState(nodeId: string): AgentState | undefined {
+  return state.get(nodeId)?.state
+}
+
 /** The entries the session-name sweep walks: id + what it needs to resolve and dedupe. */
 export function sessionNameSweepEntries(): {
   nodeId: string

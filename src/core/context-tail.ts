@@ -86,9 +86,42 @@ export function parseTaskNotifications(text: string): TaskNotification[] {
   return out
 }
 
+/**
+ * Did this chunk of transcript carry a TOOL RESULT? That is the moment a tool the CLI was blocked
+ * on has settled — which is the only signal we get when an ask ENDS without a hook.
+ *
+ * The case: an `AskUserQuestion` picker is up (node = needs-you) and the user presses Esc. Claude
+ * records "User declined to answer questions" as the tool's result and carries on, but the aborted
+ * tool fires no PostToolUse, and Stop does not run either — so nothing told us the ask was over and
+ * the node sat on NEEDS YOU (badge, notch capsule, phone card) until the next prompt hours later.
+ *
+ * Deliberately not decline-specific: any tool_result means the blocking tool finished, whatever the
+ * answer was. The caller only acts on it while the node is still in needs-you, so a normal turn's
+ * constant stream of results costs nothing.
+ */
+export function hasToolResult(text: string): boolean {
+  for (const line of text.split('\n')) {
+    const s = line.trim()
+    // Cheap pre-filter before the parse — this runs over every transcript chunk.
+    if (!s || !s.includes('tool_result')) continue
+    let o: { message?: { content?: unknown } }
+    try {
+      o = JSON.parse(s)
+    } catch {
+      continue
+    }
+    const content = o.message?.content
+    if (!Array.isArray(content)) continue
+    if (content.some((c) => (c as { type?: string })?.type === 'tool_result')) return true
+  }
+  return false
+}
+
 export interface ContextTailOptions {
   /** Fired when a tracked session's transcript announces a completed async subagent. */
   onTaskNotification?: (sessionId: string, n: TaskNotification) => void
+  /** Fired when a tracked session's transcript records a tool RESULT — see `hasToolResult`. */
+  onToolResult?: (sessionId: string) => void
 }
 
 interface Tracked {
@@ -190,6 +223,7 @@ export function createContextTail(
           if (opts?.onTaskNotification) {
             for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
           }
+          if (opts?.onToolResult && hasToolResult(complete)) opts.onToolResult(sessionId)
         }
       }
 

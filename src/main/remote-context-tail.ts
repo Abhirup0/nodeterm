@@ -8,7 +8,12 @@ import { type BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ContextWindowUsage } from '../shared/types'
 import { cachedWindowFor, resolveModelWindow } from '../core/model-window'
-import { parseLatestUsage, parseTaskNotifications, type ContextTailOptions } from '../core/context-tail'
+import {
+  parseLatestUsage,
+  parseTaskNotifications,
+  hasToolResult,
+  type ContextTailOptions
+} from '../core/context-tail'
 import { splitCompleteLines } from '../core/subagent-tail'
 import type { RemoteFile, RemoteFileRef } from './remote-ssh/remote-file'
 
@@ -63,6 +68,7 @@ export function createRemoteContextTail(
       t.used = latest.used
       t.model = latest.model ?? t.model
     }
+    if (opts?.onToolResult && hasToolResult(complete)) opts.onToolResult(sessionId)
     if (opts?.onTaskNotification) {
       for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
     }

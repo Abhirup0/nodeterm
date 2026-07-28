@@ -10,7 +10,9 @@
 import { resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
-import { recordAgentEvent, recordRawToolEvent, recordContextUsage } from '../core/agent-status-mirror'
+import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
+  nodeState
+} from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { setNodeTranscript } from '../core/context-link'
@@ -74,6 +76,25 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
 
+  /** See the identical handler in src/main/index.ts: a tool RESULT settles an ask that ended with
+   *  no hook (Esc on an AskUserQuestion), which otherwise left the node stuck on needs-you. */
+  const onToolResult = (sessionId: string): void => {
+    let nodeId: string | undefined
+    for (const [nid, sid] of nodeContextSession) if (sid === sessionId) nodeId = nid
+    if (!nodeId) return
+    const st = nodeState(nodeId)
+    if (st !== 'blocked' && st !== 'waiting') return
+    const ev = {
+      nodeId,
+      agentId: 'claude',
+      sessionId,
+      kind: 'state',
+      state: 'working'
+    } satisfies NormalizedAgentEvent
+    platform.broadcast(IPC.agentStatus, ev)
+    recordAgentEvent(ev)
+  }
+
   const contextTail =
     opts.contextTail ??
     createContextTail(
@@ -89,7 +110,7 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
           }
         }
       },
-      { onTaskNotification }
+      { onTaskNotification, onToolResult }
     )
 
   hooks.setListener((e) => {

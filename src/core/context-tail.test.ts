@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { createContextTail, parseLatestUsage, parseTaskNotifications } from './context-tail'
+import { createContextTail, parseLatestUsage, parseTaskNotifications, hasToolResult } from './context-tail'
 
 describe('parseLatestUsage', () => {
   it('returns the LAST assistant usage in the text (sum of input + cache tokens)', () => {
@@ -78,4 +78,40 @@ describe('createContextTail — task notifications', () => {
     expect(onTaskNotification.mock.calls[0][1]).toMatchObject({ toolUseId: 'tu-torn' })
     tail.untrack('s1')
   }, 8000)
+})
+
+
+describe('hasToolResult (the declined-ask rescue)', () => {
+  const decline = JSON.stringify({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_1', content: 'User declined to answer questions' }
+      ]
+    }
+  })
+
+  it('sees a tool result — the moment a blocking ask settled', () => {
+    expect(hasToolResult(decline)).toBe(true)
+    // Any tool result counts: the caller gates on the node still being in needs-you, so a normal
+    // turn's stream of results is free.
+    const ok = JSON.stringify({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'ok' }] }
+    })
+    expect(hasToolResult(`${ok}\n${decline}`)).toBe(true)
+  })
+
+  it('ignores everything else, including a mention of the words', () => {
+    const assistant = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'about to call a tool_result handler' }] }
+    })
+    expect(hasToolResult(assistant)).toBe(false)
+    expect(hasToolResult('')).toBe(false)
+    expect(hasToolResult('not json at all')).toBe(false)
+    // A torn line must not throw (the tail carries it to the next read).
+    expect(hasToolResult('{"type":"user","message":{"content":[{"type":"tool_res')).toBe(false)
+  })
 })
