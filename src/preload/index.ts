@@ -498,6 +498,7 @@ const api: NodeTerminalApi = {
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
+  focusWindow: () => ipcRenderer.send(IPC.appFocusWindow),
   setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
   // Absolute path of a dropped/picked File (File.path was removed in Electron 30+).
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

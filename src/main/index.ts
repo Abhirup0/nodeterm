@@ -533,6 +533,21 @@ app.whenReady().then(async () => {
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
 
+  // Bring the window forward after a file is dropped into a terminal. On macOS a drag-drop from
+  // another app does NOT activate the destination app, so without this the drag-source keeps OS
+  // keyboard focus and the user types into the wrong application. `getMainWindow()` (not the
+  // focused window — there may be none) restores + shows + focuses.
+  ipcMain.on(IPC.appFocusWindow, () => {
+    const w = getMainWindow()
+    if (!w) return
+    if (w.isMinimized()) w.restore()
+    w.show()
+    // On macOS `win.focus()` alone won't pull us in front of the still-active drag-source app —
+    // app-level focus with `steal` is what actually activates us across apps.
+    if (process.platform === 'darwin') app.focus({ steal: true })
+    w.focus()
+  })
+
   // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
     if (process.platform !== 'darwin' || !app.dock) return

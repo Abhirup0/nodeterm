@@ -33,6 +33,7 @@ export const IPC = {
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
   appCloseWindow: 'app:close-window',
+  appFocusWindow: 'app:focus-window',
   appNotify: 'app:notify',
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',

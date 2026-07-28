@@ -1745,6 +1745,12 @@ export interface NodeTerminalApi {
   onCloseNode(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
+  /** Bring the app window to the foreground (show + OS focus). Called after a file is DROPPED
+   *  into a terminal: on macOS a drag-drop from another app (Finder/browser) does not activate
+   *  the destination app, so the drag-source keeps keyboard focus and the user's next keystrokes
+   *  land in the WRONG application — `term.focus()` (DOM-only) can't fix that. Desktop raises the
+   *  BrowserWindow; the browser bridge does a best-effort `window.focus()`. */
+  focusWindow(): void
   /** Set the macOS Dock badge to the unread-message count (0 clears it). */
   setBadgeCount(count: number): void
   /** Absolute filesystem path for a dropped/picked File (for drag-into-terminal). */

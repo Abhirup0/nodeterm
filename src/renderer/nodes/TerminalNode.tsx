@@ -1493,6 +1493,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
     if (dwellRef.current) clearTimeout(dwellRef.current)
     setArmed(false)
+    // A drag-drop from another OS app doesn't bring our window forward (esp. macOS), so raise it
+    // FIRST — otherwise the drag-source keeps keyboard focus and the user types into the wrong app.
+    window.nodeTerminal.focusWindow()
     term.focus()
     term.paste(paths.join(' ') + ' ')
     useAgentStatus.getState().setActive(id, true)
