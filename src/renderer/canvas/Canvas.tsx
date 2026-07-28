@@ -4112,8 +4112,25 @@ export function Canvas() {
       // The measured check must read React Flow's OWN store (`getInternalNode`), not our node
       // object: `measured` only reaches our state one render later, when `onNodesChange` applies
       // the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
-      if (isMeasured(getInternalNode(node.id))) {
-        void fitView({ nodes: [{ id: node.id }], duration: 300, ...FIT_NODE_OPTIONS })
+      //
+      // The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
+      // a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
+      // is what kept a big node (a group frame most of all) further away than it needed to be.
+      // The free-rect solver reclaims the space the chrome does not actually occupy, so the node
+      // is framed tighter without sliding underneath anything. Falls back to the flat ratio when
+      // there is nothing sensible to solve — the same ratio the unmeasured branch below uses.
+      const internal = getInternalNode(node.id)
+      if (isMeasured(internal)) {
+        const wrap = flowWrapRef.current
+        const size = internal?.measured
+        const solved =
+          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
+        void fitView({
+          nodes: [{ id: node.id }],
+          duration: 300,
+          ...FIT_NODE_OPTIONS,
+          padding: solved ?? FIT_NODE_OPTIONS.padding
+        })
         return
       }
       const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
