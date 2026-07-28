@@ -33,7 +33,7 @@ export interface FocusableNode {
 /** Zoom/padding for framing a single node. Kept beside the maths so the fallback path and
  *  `fitView` cannot drift apart: the clamp keeps a small node from filling the screen and a
  *  huge one from being fit microscopic. */
-export const FIT_NODE_OPTIONS = { padding: 0.2, minZoom: 0.25, maxZoom: 1.15 } as const
+export const FIT_NODE_OPTIONS = { padding: 0.2, minZoom: 0.25, maxZoom: 1.38 } as const
 
 /** A `parentId` chain longer than this is a data bug (or a cycle) — stop walking. */
 const MAX_PARENT_DEPTH = 20
