@@ -1,4 +1,7 @@
 import fs from 'fs'
+import { readSessionName } from '../core/transcript-reader'
+import { startSessionNameSweep } from '../core/session-name-sweep'
+import { canRename, type AgentId } from '@shared/agents/config'
 import path from 'path'
 import http from 'http'
 
@@ -36,7 +39,9 @@ import {
   onNodeStateChange,
   onNodeNowChange,
   type MirrorSettings,
-  type MirrorServer
+  type MirrorServer,
+  setNodeSessionName,
+  sessionNameSweepEntries
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -225,6 +230,19 @@ export async function startServer(
   // scripts → start the loopback hook server. The hook server binds its own port independent of
   // the main HTTP server below.
   initAgentStatusMirror()
+
+  // Keep every agent node's session name fresh in the mirror — including nodes no canvas has
+  // mounted (the phone lists them all; see core/session-name-sweep.ts).
+  startSessionNameSweep({
+    entries: sessionNameSweepEntries,
+    node: (nodeId) => {
+      const n = workspaceStore.getNode(nodeId)
+      return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
+    },
+    resolve: (sessionId, accountId) => readSessionName(sessionId, accountId),
+    publish: setNodeSessionName,
+    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+  })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
   // provider applies. The provider is consulted at every flush (heartbeat ≤60s), so a settings

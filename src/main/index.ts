@@ -1,4 +1,7 @@
 import { join, resolve, posix } from 'path'
+import { startSessionNameSweep } from '../core/session-name-sweep'
+import { readSessionName as readSessionNameForSweep } from '../core/transcript-reader'
+import { canRename, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -50,7 +53,9 @@ import {
   onNodeStateChange,
   onNodeNowChange,
   isEventUnresolved,
-  type MirrorSettings
+  type MirrorSettings,
+  setNodeSessionName,
+  sessionNameSweepEntries
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -764,6 +769,19 @@ app.whenReady().then(async () => {
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
+
+  // Keep every agent node's session name fresh in the mirror — including nodes no canvas has
+  // mounted (the phone lists them all; see core/session-name-sweep.ts).
+  startSessionNameSweep({
+    entries: sessionNameSweepEntries,
+    node: (nodeId) => {
+      const n = workspaceStore.getNode(nodeId)
+      return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
+    },
+    resolve: (sessionId, accountId) => readSessionNameForSweep(sessionId, accountId),
+    publish: setNodeSessionName,
+    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+  })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
   //
