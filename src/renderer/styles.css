@@ -3641,13 +3641,42 @@ body,
 
 .ex-row:hover .ex-dl,
 .ex-row.selected .ex-dl,
-.ex-dl:focus-visible {
+.ex-dl:focus-visible,
+/* A transfer's own feedback must not depend on the pointer still being over the row — the user
+   may click and immediately look elsewhere, and that is exactly when "did it start?" is asked. */
+.ex-dl.running,
+.ex-dl.done,
+.ex-dl.error {
   opacity: 1;
 }
 
-.ex-dl:hover {
+.ex-dl:hover:not(:disabled) {
   color: var(--text);
   background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.ex-dl.running {
+  cursor: default;
+}
+
+.ex-dl.done {
+  color: var(--ok, #34c759);
+}
+
+.ex-dl.error {
+  color: var(--danger, #ff6b6b);
+  font-weight: 700;
+}
+
+/* Same spinner as the strip below, sized for a 26px row. */
+.ex-dl__spin {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ex-dls-spin 0.8s linear infinite;
 }
 
 /* Download strip: pinned under the tree, one row per transfer. */

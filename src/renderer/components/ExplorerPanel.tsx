@@ -25,6 +25,20 @@ type OpenFn = (path: string) => void
 type SelectFn = (path: string) => void
 type DownloadFn = (path: string, isDir: boolean) => void
 
+/** What a tree row's download button is showing right now. */
+type RowDownloadState = 'running' | 'done' | 'error'
+
+/** How long a finished row keeps its ✓ / ! before falling back to a plain ⤓. Long enough to be
+ *  read after a click, short enough that a tree of them doesn't stay decorated. */
+const ROW_FLASH_MS = 2200
+
+/** Row-button tooltip per state. The failure text points at the strip, which carries the reason. */
+const DL_TITLE: Record<RowDownloadState, string> = {
+  running: 'Downloading…',
+  done: 'Downloaded',
+  error: 'Download failed — see the list below'
+}
+
 /** One entry in the drawer's download strip. `localPath` is set once a desktop (scp) download has
  *  landed, which is what makes it revealable. */
 interface DownloadItem {
@@ -65,7 +79,8 @@ function TreeEntry({
   onContext,
   onOpenFile,
   onSelect,
-  onDownload
+  onDownload,
+  rowDl
 }: {
   entry: DirEntry
   path: string
@@ -80,10 +95,14 @@ function TreeEntry({
   /** Omitted where this tree can't be downloaded from (see lib/download.ts) — the row then has
    *  no download button at all, rather than one that fails on click. */
   onDownload?: DownloadFn
+  /** Download state per path — the whole map, so a row deep in the tree sees its own entry
+   *  without every level having to thread a single value down. */
+  rowDl: Record<string, RowDownloadState>
 }) {
   const open = useExplorer((s) => (s.expandedByProject[projectId] ?? []).includes(path))
   const [children, setChildren] = useState<DirEntry[] | null>(null)
   const rowRef = useRef<HTMLDivElement>(null)
+  const dl = rowDl[path]
 
   const toggleDir = useCallback(() => {
     useExplorer.getState().setExpanded(projectId, path, !open)
@@ -151,16 +170,20 @@ function TreeEntry({
         <span className="ex-name">{entry.name}</span>
         {onDownload && (
           <button
-            className="ex-dl"
-            title={entry.dir ? `Download ${entry.name} folder` : `Download ${entry.name}`}
+            className={`ex-dl${dl ? ` ${dl}` : ''}`}
+            title={dl ? DL_TITLE[dl] : entry.dir ? `Download ${entry.name} folder` : `Download ${entry.name}`}
             aria-label="Download"
+            aria-busy={dl === 'running'}
+            // A second click while the first transfer is still running would start a duplicate
+            // download and land it beside the first as `name (2)`.
+            disabled={dl === 'running'}
             // The row's own onClick opens/expands — a download must not also do that.
             onClick={(e) => {
               e.stopPropagation()
               onDownload(path, entry.dir)
             }}
           >
-            ⤓
+            {dl === 'running' ? <span className="ex-dl__spin" /> : dl === 'done' ? '✓' : dl === 'error' ? '!' : '⤓'}
           </button>
         )}
       </div>
@@ -180,6 +203,7 @@ function TreeEntry({
             onOpenFile={onOpenFile}
             onSelect={onSelect}
             onDownload={onDownload}
+            rowDl={rowDl}
           />
         ))}
     </>
@@ -227,6 +251,13 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const route = downloadRoute(dlCtx)
   const [downloads, setDownloads] = useState<DownloadItem[]>([])
   const dlSeq = useRef(0)
+  // Per-ROW download state, keyed by path. The strip at the bottom of the drawer reports the same
+  // transfers, but the user's eye is on the button they just pressed — and on the HTTP route the
+  // whole thing can be over before a glance travels down there. So the row answers for itself.
+  const [rowDl, setRowDl] = useState<Record<string, RowDownloadState>>({})
+  const setRowState = useCallback((path: string, state: RowDownloadState): void => {
+    setRowDl((m) => ({ ...m, [path]: state }))
+  }, [])
 
   const patchDownload = useCallback((id: number, patch: Partial<DownloadItem>): void => {
     setDownloads((list) => list.map((d) => (d.id === id ? { ...d, ...patch } : d)))
@@ -247,27 +278,47 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
       const id = ++dlSeq.current
       const name = path.split('/').filter(Boolean).pop() || path
       setDownloads((list) => [...list, { id, name, dir: isDir, status: 'running' }])
+      setRowState(path, 'running')
+      const finish = (state: RowDownloadState): void => {
+        setRowState(path, state)
+        // Clear the row back to a plain ⤓ after the flash. Keyed by PATH, so a second download of
+        // the same entry started meanwhile owns the row and its timer must not wipe that state.
+        setTimeout(
+          () =>
+            setRowDl((m) => {
+              if (m[path] !== state) return m
+              const next = { ...m }
+              delete next[path]
+              return next
+            }),
+          ROW_FLASH_MS
+        )
+      }
       try {
         if (route === 'scp') {
           const res = await window.nodeTerminal.sshProject.downloadFile(project!.id, path, destDir)
           if (res.ok) patchDownload(id, { status: 'done', localPath: res.localPath })
           else patchDownload(id, { status: 'error', detail: res.error })
+          finish(res.ok ? 'done' : 'error')
           return
         }
         const ticket = await session.api.files.downloadTicket(path)
         if (!ticket) {
           patchDownload(id, { status: 'error', detail: 'Downloading is not available here.' })
+          finish('error')
           return
         }
         triggerBrowserDownload(ticket.url, ticket.name)
         patchDownload(id, { status: 'done', detail: 'Sent to your browser downloads.' })
+        finish('done')
         // The browser has it now; the strip row would just be noise from here on.
         setTimeout(() => setDownloads((list) => list.filter((d) => d.id !== id)), 4000)
       } catch {
         patchDownload(id, { status: 'error', detail: 'The download could not be started.' })
+        finish('error')
       }
     },
-    [route, project, session.api, patchDownload]
+    [route, project, session.api, patchDownload, setRowState]
   )
 
   const onDownload = useMemo<DownloadFn | undefined>(
@@ -400,6 +451,7 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
                 onOpenFile={handleOpenFile}
                 onSelect={setSelected}
                 onDownload={onDownload}
+                rowDl={rowDl}
               />
             ))}
           </div>
