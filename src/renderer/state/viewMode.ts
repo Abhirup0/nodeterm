@@ -30,6 +30,18 @@ function save(v: Record<string, 'kanban'>): void {
 interface ViewModeState {
   viewByProject: Record<string, 'kanban'>
   toggle(projectId: string): void
+  /**
+   * A node whose CARD should be opened on the board, set by anything that "goes to" a node while
+   * the board is up — the notch HUD's Go, a notification click, ⌘K, the sessions sidebar. Those
+   * all funnel through `focusNodeById`, which frames the node on the CANVAS; with the board's
+   * opaque overlay on top, that looked like the button did nothing at all (field report: "kanban
+   * view'de notch'ın Go tuşu işe yaramıyor").
+   *
+   * KanbanView consumes it and clears it (one-shot, so re-requesting the same node works).
+   */
+  requestedCardNodeId: string | null
+  requestCard(nodeId: string): void
+  clearCardRequest(): void
 }
 
 export const useViewMode = create<ViewModeState>((set) => ({
@@ -37,13 +49,18 @@ export const useViewMode = create<ViewModeState>((set) => ({
   viewByProject: parseViewMap(
     typeof localStorage === 'undefined' ? null : localStorage.getItem(PROJECT_VIEW_KEY)
   ),
+  requestedCardNodeId: null,
+  requestCard: (nodeId) => set({ requestedCardNodeId: nodeId }),
+  clearCardRequest: () => set({ requestedCardNodeId: null }),
   toggle: (projectId) =>
     set((s) => {
       const next = { ...s.viewByProject }
       if (next[projectId]) delete next[projectId]
       else next[projectId] = 'kanban'
       if (typeof localStorage !== 'undefined') save(next)
-      return { viewByProject: next }
+      // Leaving the board (or entering it) drops any unconsumed request — it belonged to the view
+      // the user just left, and firing it later would pop a card out of nowhere.
+      return { viewByProject: next, requestedCardNodeId: null }
     })
 }))
 

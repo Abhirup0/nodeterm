@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useAgentStatus } from '../../state/agentStatus'
+import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
 import {
@@ -88,6 +89,14 @@ export function KanbanView({
     if (modalNodeId) useAgentStatus.getState().clearUnread(modalNodeId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modalNodeId])
+  // Someone asked for a card while the board is up (notch Go, a notification, ⌘K…). Open it here
+  // instead of framing the node on the canvas nobody can see under this overlay.
+  const requestedCardNodeId = useViewMode((s) => s.requestedCardNodeId)
+  useEffect(() => {
+    if (!requestedCardNodeId) return
+    setModalNodeId(requestedCardNodeId)
+    useViewMode.getState().clearCardRequest()
+  }, [requestedCardNodeId])
   const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)

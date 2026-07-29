@@ -4989,9 +4989,23 @@ body,
   filter: drop-shadow(0 0 3px rgba(255, 69, 58, 0.9));
   animation: mm-pulse 1.8s ease-in-out infinite;
 }
+/* Unread = clay, the agent-hook colour (RUNNING badge, working glow). Its own keyframes: at
+   minimap scale a node is a few pixels tall, so opacity alone reads as a faint flicker — the
+   stroke THICKENS on the beat as well, which is what makes it findable on a busy map. */
 .minimap .mm-unread {
-  filter: drop-shadow(0 0 3px rgba(10, 132, 255, 0.9));
-  animation: mm-pulse 2s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px rgba(217, 119, 87, 0.95));
+  animation: mm-pulse-unread 1.6s ease-in-out infinite;
+}
+@keyframes mm-pulse-unread {
+  0%,
+  100% {
+    stroke-opacity: 0.3;
+    stroke-width: 3px;
+  }
+  50% {
+    stroke-opacity: 1;
+    stroke-width: 6px;
+  }
 }
 @keyframes mm-pulse {
   0%,
