@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { DirEntry, FsApi } from '@shared/types'
+import { gitignoreAdd, gitignoreHasExact, gitignoreRemove } from '@shared/gitignore'
 import { useProjects } from '../state/projects'
 import { useExplorer } from '../state/explorer'
 import { sshFs } from '../terminal/ssh-fs'
@@ -20,7 +21,7 @@ interface ExplorerPanelProps {
   reveal?: { path: string; nonce: number } | null
 }
 
-type ContextFn = (x: number, y: number, path: string, isDir: boolean) => void
+type ContextFn = (x: number, y: number, path: string, isDir: boolean, ignored?: boolean) => void
 type OpenFn = (path: string) => void
 type SelectFn = (path: string) => void
 type DownloadFn = (path: string, isDir: boolean) => void
@@ -161,7 +162,7 @@ function TreeEntry({
         onContextMenu={(e) => {
           e.preventDefault()
           onSelect(path)
-          onContext(e.clientX, e.clientY, path, entry.dir)
+          onContext(e.clientX, e.clientY, path, entry.dir, entry.ignored)
         }}
         title={entry.name}
       >
@@ -239,7 +240,15 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   const [roots, setRoots] = useState<DirEntry[] | null>(null)
   const [version, setVersion] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string; dir: boolean } | null>(null)
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    path: string
+    dir: boolean
+    ignored?: boolean
+  } | null>(null)
+  /** Whether the ignored menu entry matches an EXACT .gitignore line (null = still resolving). */
+  const [menuExactIgnore, setMenuExactIgnore] = useState<boolean | null>(null)
 
   // Downloading is only meaningful when the tree is NOT this machine's own filesystem, and the
   // transport differs per shell — the whole decision is the pure `downloadRoute` (lib/download.ts).
@@ -364,7 +373,35 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reveal?.nonce, cwd])
 
-  const onContext: ContextFn = (x, y, path, isDir) => setMenu({ x, y, path, dir: isDir })
+  const onContext: ContextFn = (x, y, path, isDir, ignored) => {
+    setMenu({ x, y, path, dir: isDir, ignored })
+    // The "Remove from .gitignore" offer needs to know whether the entry is ignored by an EXACT
+    // line (removable) or by a broader pattern like `*.log` (nothing safe to remove — rewriting a
+    // user's pattern is not a menu click's call, so no item is shown). Resolved async while the
+    // menu opens; until then neither gitignore item renders for an ignored entry.
+    setMenuExactIgnore(null)
+    if (ignored && cwd && path !== cwd) {
+      const rel = path.slice(cwd.length + 1)
+      void fs
+        .read(`${cwd}/.gitignore`)
+        .then((content) => setMenuExactIgnore(gitignoreHasExact(content, rel)))
+        .catch(() => setMenuExactIgnore(false))
+    }
+  }
+
+  /** Add (or exact-line-remove) the entry to the project root's .gitignore, then re-list so the
+   *  row's dimming reflects the new truth. Read-modify-write via the pure gitignore helpers. */
+  const toggleGitignore = useCallback(
+    async (path: string, remove: boolean): Promise<void> => {
+      if (!cwd) return
+      const rel = path.slice(cwd.length + 1)
+      const gi = `${cwd}/.gitignore`
+      const cur = (await fs.exists(gi)) ? await fs.read(gi) : ''
+      await fs.write(gi, remove ? gitignoreRemove(cur, rel) : gitignoreAdd(cur, rel))
+      setVersion((v) => v + 1)
+    },
+    [cwd, fs]
+  )
 
   // Create a file or folder under the clicked entry (a dir targets itself, a file its
   // parent). Multi-segment names create intermediate dirs. Never overwrites: an existing
@@ -490,8 +527,22 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
       {menu &&
         createPortal(
           <>
-            <div className="tab-backdrop" style={{ zIndex: 78 }} onClick={() => setMenu(null)} />
-            <div className="ctx-menu" style={{ top: menu.y, left: menu.x, zIndex: 80 }}>
+            {/* stopPropagation everywhere (same as ContextMenu): this portal's React parent is the
+                drawer OVERLAY (not the aside), so a bubbled click lands on the overlay's
+                onClick={onClose} and closes the whole Explorer along with the menu. */}
+            <div
+              className="tab-backdrop"
+              style={{ zIndex: 78 }}
+              onClick={(e) => {
+                e.stopPropagation()
+                setMenu(null)
+              }}
+            />
+            <div
+              className="ctx-menu"
+              style={{ top: menu.y, left: menu.x, zIndex: 80 }}
+              onClick={(e) => e.stopPropagation()}
+            >
               <button
                 className="ctx-item"
                 onClick={() => {
@@ -560,6 +611,24 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
               >
                 Copy Relative Path
               </button>
+              {/* Root itself (the empty-area menu) is not an ignorable entry. An entry ignored by
+                  a broader PATTERN gets neither item: it cannot be "added" (already ignored) and
+                  there is no exact line to remove — see onContext. */}
+              {menu.path !== cwd && (!menu.ignored || menuExactIgnore) && (
+                <>
+                  <div className="ctx-sep" />
+                  <button
+                    className="ctx-item"
+                    onClick={() => {
+                      const m = menu
+                      setMenu(null)
+                      void toggleGitignore(m.path, !!m.ignored)
+                    }}
+                  >
+                    {menu.ignored ? 'Remove from .gitignore' : 'Add to .gitignore'}
+                  </button>
+                </>
+              )}
               {/* Only where it can work: revealing an SSH project's REMOTE path in the local file
                   manager did nothing, and in a browser tab the whole member is an inert stub. */}
               {canRevealLocally(dlCtx) && (
