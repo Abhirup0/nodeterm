@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { GitFileChange, GitResult, GitStatus } from '@shared/types'
+import type { FsApi, GitFileChange, GitResult, GitStatus } from '@shared/types'
+import { gitignoreAdd } from '@shared/gitignore'
+import { sshFs } from '../terminal/ssh-fs'
 import type { GitHistoryItem, GitHistoryResult } from '@shared/git-history'
 import { promptDialog } from './promptDialog'
 import { useProjects } from '../state/projects'
@@ -133,7 +135,29 @@ export function SourceControlPanel({
 
   // This panel's core api (a stable context read — the local session's api IS window.nodeTerminal,
   // so `git` keeps its identity and every hook dep array it sits in behaves exactly as before).
-  const git = useSession().api.git
+  const { api } = useSession()
+  const git = api.git
+  // The fs the ACTIVE CHECKOUT lives on: an SSH project's repo is on the host, so its .gitignore
+  // must be read/written over the project's ControlMaster fs — the local fs would edit (or invent)
+  // a same-named file on this machine. Same routing the Explorer uses.
+  const fs = useMemo<FsApi>(
+    () => (project?.ssh ? sshFs(project.id) : api.fs),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project?.id, project?.ssh, api]
+  )
+
+  /**
+   * Append `relPath` (repo-root-relative — porcelain paths already are, and every scope cwd is a
+   * checkout root) to the scope's .gitignore. Read-modify-write through the pure helpers; the
+   * refresh that `act` runs afterwards is what makes the row disappear from CHANGES.
+   */
+  const addToGitignore = (relPath: string) =>
+    act(async () => {
+      const gi = `${cwd}/.gitignore`
+      const cur = (await fs.exists(gi)) ? await fs.read(gi) : ''
+      const ok = await fs.write(gi, gitignoreAdd(cur, relPath))
+      return ok ? { ok: true, message: '' } : { ok: false, message: 'Could not write .gitignore.' }
+    })
 
   const refresh = useCallback(async () => {
     setStatus(cwd ? await git.status(cwd) : null)
@@ -693,8 +717,23 @@ export function SourceControlPanel({
       {fileMenu &&
         createPortal(
           <>
-            <div className="tab-backdrop" style={{ zIndex: 78 }} onClick={() => setFileMenu(null)} />
-            <div className="ctx-menu" style={{ top: fileMenu.y, left: fileMenu.x, zIndex: 80 }}>
+            {/* stopPropagation everywhere (same as ContextMenu): this portal's React parent is the
+                drawer OVERLAY (not the aside), so a bubbled click lands on the overlay's
+                onClick={onClose} and closes the whole panel — dismissing the menu, or running a
+                file action like "Add to .gitignore", must not take the drawer down with it. */}
+            <div
+              className="tab-backdrop"
+              style={{ zIndex: 78 }}
+              onClick={(e) => {
+                e.stopPropagation()
+                setFileMenu(null)
+              }}
+            />
+            <div
+              className="ctx-menu"
+              style={{ top: fileMenu.y, left: fileMenu.x, zIndex: 80 }}
+              onClick={(e) => e.stopPropagation()}
+            >
               <button
                 className="ctx-item"
                 onClick={() => {
@@ -712,6 +751,19 @@ export function SourceControlPanel({
                 }}
               >
                 Copy Relative Path
+              </button>
+              <div className="ctx-sep" />
+              {/* Always "Add": a file this panel lists is by definition NOT ignored (git status
+                  never shows ignored files), so there is nothing to offer removal for here. */}
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  const m = fileMenu
+                  setFileMenu(null)
+                  void addToGitignore(m.path)
+                }}
+              >
+                Add to .gitignore
               </button>
               <div className="ctx-sep" />
               <button
