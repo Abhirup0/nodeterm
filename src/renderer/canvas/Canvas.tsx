@@ -450,13 +450,18 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
     [onNodeDoubleClick]
   )
   // Status language matches the canvas glows/badges: amber = working, red = needs you,
-  // accent blue = unread. The classes below add the minimap-scale glow/pulse (styles.css).
+  // clay = unread. The classes below add the minimap-scale glow/pulse (styles.css).
+  //
+  // Unread is CLAY (#d97757) — the agent-hook colour the RUNNING badge and the node's working glow
+  // already use — and not the accent blue it used to be: blue is also the fallback stroke for a
+  // node that carries no colour of its own, so "finished while you were away" was painted the
+  // exact shade as "nothing to report" and vanished into the map.
   const nodeStrokeColor = useCallback(
     (n: Node): string => {
       const st = statusById[n.id]
       if (st?.state === 'working') return '#ffd60a'
       if (st?.state === 'waiting' || st?.state === 'blocked') return '#ff453a'
-      if (st?.unread) return '#0a84ff'
+      if (st?.unread) return '#d97757'
       return (n.data as { color?: string })?.color ?? '#0a84ff'
     },
     [statusById]
@@ -1428,8 +1433,14 @@ export function Canvas() {
         pendingFocusRef.current = null
         const node = nodesRef.current.find((n) => n.id === pending)
         if (node) {
-          setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
-          goToNode(node)
+          // Same rule as focusNodeById: if the project we just landed on shows the BOARD, the
+          // node lives on a card, not on the canvas hidden under it.
+          if (isKanbanOpen(useProjects.getState().activeProjectId)) {
+            useViewMode.getState().requestCard(pending)
+          } else {
+            setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
+            goToNode(node)
+          }
           useAgentStatus.getState().setActive(pending, true)
           useAgentStatus.getState().clearUnread(pending)
         }
@@ -4813,6 +4824,15 @@ export function Canvas() {
     (nodeId: string) => {
       const node = nodesRef.current.find((n) => n.id === nodeId)
       if (node) {
+        // The board is a full-page overlay: framing the node on the canvas underneath it is
+        // invisible, which is why the notch's Go (and every other "go to node" path) read as
+        // broken there. On the board, "go to" means OPEN THE CARD.
+        if (isKanbanOpen(useProjects.getState().activeProjectId)) {
+          useViewMode.getState().requestCard(nodeId)
+          useAgentStatus.getState().setActive(nodeId, true)
+          useAgentStatus.getState().clearUnread(nodeId)
+          return
+        }
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
         goToNode(node)
         // Mark this node as the one being watched, so an agent still producing output does not
