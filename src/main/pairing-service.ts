@@ -127,8 +127,10 @@ async function buildRelayContext(
   }
 }
 
-/** How long the listener waits for the phone before giving up. */
-const PAIR_TIMEOUT_MS = 2 * 60 * 1000
+/** How long the listener waits for the phone before giving up. 10 minutes, not 2: the QR can
+ *  now be gated behind enabling Remote Login first, and a field report showed a user scanning a
+ *  long-expired QR — a wider window plus the UI's explicit timeout state beats a tight one. */
+const PAIR_TIMEOUT_MS = 10 * 60 * 1000
 /** Probe timeout for the "is sshd listening on :22?" check. */
 const SSH_PROBE_MS = 500
 /** Reject oversized POST bodies (a public key line is well under this). */

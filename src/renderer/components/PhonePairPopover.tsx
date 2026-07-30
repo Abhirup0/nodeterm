@@ -6,9 +6,6 @@ import { useEntitlement } from '@renderer/state/entitlement'
 import { useUpgradeGate } from '@renderer/state/upgradeGate'
 import { usePhonePairing } from './settings/usePhonePairing'
 
-/** Same deep link the Phone settings section uses for the Remote Login toggle. */
-const REMOTE_LOGIN_SETTINGS_URL =
-  'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 /**
@@ -65,32 +62,34 @@ export function PhonePairPopover({
         <div className="phone-pair__title">Pair your phone</div>
 
         {phase === 'waiting' && qr ? (
-          <>
-            <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
-            <div className="phone-pair__hint">Scan with the nodeterm iOS app · waiting (2 min)</div>
-            {!sshOpen ? (
-              <div className="phone-pair__warn">
-                SSH isn&apos;t reachable — turn on <strong>Remote Login</strong>
-                {isMac ? (
-                  <>
-                    {' '}
-                    (
-                    <button
-                      className="phone-pair__link"
-                      onClick={() => window.nodeTerminal.shell.openExternal(REMOTE_LOGIN_SETTINGS_URL)}
-                    >
-                      System Settings
-                    </button>
-                    &nbsp;— watching, this clears itself).
-                  </>
-                ) : (
-                  '.'
-                )}
-              </div>
-            ) : sshHealed ? (
-              <div className="phone-pair__ok">✓ Remote Login is on.</div>
-            ) : null}
-          </>
+          !sshOpen ? (
+            // No QR while Remote Login is off — pairing against an unreachable sshd installs a
+            // key the phone can never use. The live probe flips sshOpen and the QR appears.
+            <div className="phone-pair__warn">
+              <strong>Remote Login</strong> is off — the pairing QR appears the moment it is on
+              {isMac ? (
+                <>
+                  {' '}
+                  (
+                  <button
+                    className="phone-pair__link"
+                    onClick={() => void window.nodeTerminal.pairing.openRemoteLoginSettings()}
+                  >
+                    System Settings
+                  </button>
+                  &nbsp;— watching).
+                </>
+              ) : (
+                '.'
+              )}
+            </div>
+          ) : (
+            <>
+              <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
+              <div className="phone-pair__hint">Scan with the nodeterm iOS app · waiting (10 min)</div>
+              {sshHealed ? <div className="phone-pair__ok">✓ Remote Login is on.</div> : null}
+            </>
+          )
         ) : phase === 'paired' ? (
           <div className="phone-pair__ok">✓ Paired — your phone can now connect.</div>
         ) : phase === 'timeout' ? (
