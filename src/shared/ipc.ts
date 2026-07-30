@@ -34,6 +34,9 @@ export const IPC = {
   appCloseNode: 'app:close-node',
   appCloseWindow: 'app:close-window',
   appFocusWindow: 'app:focus-window',
+  /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
+   *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
+  clipboardWrite: 'clipboard:write',
   appNotify: 'app:notify',
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',

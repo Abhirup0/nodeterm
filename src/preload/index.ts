@@ -1,4 +1,4 @@
-import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
   CanvasMutation,
@@ -241,7 +241,8 @@ const api: NodeTerminalApi = {
     setActiveRemote: (projectId) => ipcRenderer.invoke(IPC.gitSetActiveRemote, projectId)
   },
   clipboard: {
-    writeText: (text: string) => clipboard.writeText(text)
+    // Route to the MAIN process: renderer-side `clipboard` access is deprecated in Electron.
+    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
   },
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
