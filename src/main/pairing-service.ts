@@ -371,9 +371,19 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     timer = setTimeout(() => finish({ ok: false }), PAIR_TIMEOUT_MS)
     timer.unref?.()
 
+    // The phone reads /pair responses off a raw TCP socket (ATS blocks URLSession for bare-IP
+    // HTTP) and takes everything after the header block as the body, so every response must be
+    // framed with an explicit Content-Length — otherwise Node chunks the HTTP/1.1 response and
+    // the chunk-framing bytes corrupt the body on the phone.
+    const send = (res: ServerResponse, code: number, body = '', type?: string): void => {
+      const headers: Record<string, string | number> = { 'Content-Length': Buffer.byteLength(body) }
+      if (type) headers['Content-Type'] = type
+      res.writeHead(code, headers).end(body)
+    }
+
     async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (req.method !== 'POST' || req.url !== '/pair') {
-        res.writeHead(404).end()
+        send(res, 404)
         return
       }
       try {
@@ -382,7 +392,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         try {
           outer = JSON.parse(raw)
         } catch {
-          res.writeHead(400).end('bad json')
+          send(res, 400, 'bad json')
           return
         }
         // E2EE branch: when the phone sealed the request to our host key, the outer body is
@@ -393,26 +403,26 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         let sealed: Uint8Array | null = null // the shared key, set only on the encrypted path
         if (typeof outer.epk === 'string') {
           if (!hostKeys) {
-            res.writeHead(400).end('no host key')
+            send(res, 400, 'no host key')
             return
           }
           let shared: Uint8Array
           try {
             shared = deriveSharedKey(outer.epk, hostKeys.secretKey)
           } catch {
-            res.writeHead(400).end('bad epk')
+            send(res, 400, 'bad epk')
             return
           }
           const boxB64 = typeof outer.box === 'string' ? outer.box : ''
           const plain = decrypt(Uint8Array.from(Buffer.from(boxB64, 'base64')), shared)
           if (!plain) {
-            res.writeHead(400).end('decrypt failed')
+            send(res, 400, 'decrypt failed')
             return
           }
           try {
             body = JSON.parse(Buffer.from(plain).toString('utf8'))
           } catch {
-            res.writeHead(400).end('bad json')
+            send(res, 400, 'bad json')
             return
           }
           sealed = shared
@@ -425,12 +435,12 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
           }
         }
         if (body.token !== token) {
-          res.writeHead(403).end('bad token')
+          send(res, 403, 'bad token')
           return
         }
         const publicKey = typeof body.publicKey === 'string' ? body.publicKey.trim() : ''
         if (!isValidEd25519PublicKey(publicKey)) {
-          res.writeHead(400).end('unexpected key type')
+          send(res, 400, 'unexpected key type')
           return
         }
         // Mint a device identity: the deviceId stamps the key line (attributable + revocable);
@@ -475,17 +485,18 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             Uint8Array.from(Buffer.from(JSON.stringify(responseObj), 'utf8')),
             sealed
           )
-          res
-            .writeHead(200, { 'Content-Type': 'application/json' })
-            .end(JSON.stringify({ box: Buffer.from(respBox).toString('base64') }))
+          send(
+            res,
+            200,
+            JSON.stringify({ box: Buffer.from(respBox).toString('base64') }),
+            'application/json'
+          )
         } else {
-          res
-            .writeHead(200, { 'Content-Type': 'application/json' })
-            .end(JSON.stringify(responseObj))
+          send(res, 200, JSON.stringify(responseObj), 'application/json')
         }
         finish({ ok: true })
       } catch (err) {
-        res.writeHead(500).end('pairing failed')
+        send(res, 500, 'pairing failed')
         console.warn('[pairing] request failed:', err)
       }
     }
