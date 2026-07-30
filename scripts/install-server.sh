@@ -13,6 +13,13 @@
 # Idempotent: re-run it any time to pull the latest code, rebuild, and restart the service.
 set -euo pipefail
 
+# systemd SYSTEM units run with no HOME in their environment — the nightly auto-update oneshot
+# re-execs this script exactly that way, and `set -u` turned the bare $HOME below into a hard
+# stop (the pull succeeded but the rebuild/restart never ran, leaving the service on a stale
+# build). Resolve it from the passwd db when absent; npm/git below need it exported too.
+HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
+export HOME
+
 REPO_URL="${NODETERM_REPO_URL:-https://github.com/eneskirca/nodeterm}"
 APP_DIR="${NODETERM_APP_DIR:-$HOME/.nodeterm-server-app}"
 # Where the running server keeps its state (auth, sessions, workspace, scrollback). Matches the
