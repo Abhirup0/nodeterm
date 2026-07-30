@@ -647,6 +647,17 @@ app.whenReady().then(async () => {
   )
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
   ipcMain.handle(IPC.pairingProbeSsh, () => pairingService.probeSsh())
+  // Same pattern as appOpenNotificationSettings: a main-side constant deep link, NOT routed
+  // through shellOpenExternal's http(s)-only allowlist (which silently drops x-apple.* URLs —
+  // the "Open System Settings" button did nothing when it sent the URL from the renderer).
+  // The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and is
+  // harmless on newer macOS, which opens the Sharing pane either way.
+  ipcMain.handle(IPC.pairingOpenRemoteLoginSettings, () => {
+    if (process.platform !== 'darwin') return
+    void shell.openExternal(
+      'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
+    )
+  })
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
 

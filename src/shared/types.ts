@@ -1683,6 +1683,10 @@ export interface PairingApi {
   /** Live re-probe of 127.0.0.1:22, so the Remote Login warning can clear the moment the user
    *  flips the toggle in System Settings (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>
+  /** Open System Settings → General → Sharing (Remote Login). The deep link is a main-side
+   *  constant — x-apple.* schemes never pass shellOpenExternal's http(s) allowlist. macOS-only;
+   *  a no-op elsewhere. */
+  openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>
   /** Revoke a device: remove its registry entry and delete its authorized_keys line. */

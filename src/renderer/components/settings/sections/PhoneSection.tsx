@@ -35,12 +35,6 @@ function formatPairedAt(ms: number): string {
   })
 }
 
-/** Deep link straight to System Settings → General → Sharing (the Remote Login toggle lives
- *  there). The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and
- *  is harmless on newer macOS, which opens the Sharing pane either way. macOS-only. */
-const REMOTE_LOGIN_SETTINGS_URL =
-  'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
-
 /** The pairing host is this machine, so the renderer's own UA answers "is this a Mac?". */
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -134,7 +128,8 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
             <div className="space-y-3">
               {phase === 'timeout' ? (
                 <p className="text-sm text-muted">
-                  Pairing timed out. Start again and scan the new code within two minutes.
+                  Pairing timed out — that code no longer works. Start again and scan the fresh
+                  one within ten minutes.
                 </p>
               ) : null}
               <Button variant="primary" disabled={busy} onClick={() => void start()}>
@@ -145,32 +140,41 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
 
           {phase === 'waiting' && qr ? (
             <div className="space-y-3">
-              <img
-                src={qr}
-                width={240}
-                height={240}
-                alt="Pairing QR code"
-                className="rounded-lg bg-white p-2"
-              />
-              <p className="text-sm text-muted">Waiting for your phone… (2 min)</p>
               {!sshOpen ? (
+                // No QR until Remote Login is on: a pairing completed against an unreachable
+                // sshd installs a key the phone can never use — the scan must wait, not the fix.
+                // The live probe (usePhonePairing) flips sshOpen and the QR appears by itself.
                 <div className="space-y-2">
                   <p className="text-sm" style={{ color: '#ff9f0a' }}>
-                    SSH doesn&apos;t appear to be reachable — your phone won&apos;t be able to
-                    connect after pairing. Turn on <strong>Remote Login</strong>
-                    {isMac ? ' (watching — this notice clears by itself once it is on).' : '.'}
+                    <strong>Remote Login</strong> is off, so your phone wouldn&apos;t be able to
+                    connect after pairing. Turn it on — the QR appears here the moment it is
+                    {isMac ? ' (watching, no need to restart pairing).' : '.'}
                   </p>
                   {isMac ? (
-                    <Button onClick={() => window.nodeTerminal.shell.openExternal(REMOTE_LOGIN_SETTINGS_URL)}>
+                    <Button
+                      onClick={() => void window.nodeTerminal.pairing.openRemoteLoginSettings()}
+                    >
                       Open System Settings
                     </Button>
                   ) : null}
                 </div>
-              ) : sshHealed ? (
-                <p className="text-sm" style={{ color: '#30d158' }}>
-                  ✓ Remote Login is on — your phone can connect after pairing.
-                </p>
-              ) : null}
+              ) : (
+                <>
+                  <img
+                    src={qr}
+                    width={240}
+                    height={240}
+                    alt="Pairing QR code"
+                    className="rounded-lg bg-white p-2"
+                  />
+                  <p className="text-sm text-muted">Waiting for your phone… (10 min)</p>
+                  {sshHealed ? (
+                    <p className="text-sm" style={{ color: '#30d158' }}>
+                      ✓ Remote Login is on — scan away.
+                    </p>
+                  ) : null}
+                </>
+              )}
               <Button onClick={stop}>Cancel</Button>
             </div>
           ) : null}
