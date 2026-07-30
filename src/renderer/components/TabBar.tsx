@@ -10,6 +10,7 @@ import { sshAutoModeHint } from '../state/permissionMode'
 import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
+import { useMenuFlip } from '../ui/useMenuFlip'
 import { IconCanvasView, IconKanban } from './icons'
 import {
   ALL_PERMISSION_MODES,
@@ -89,7 +90,11 @@ export function TabBar({
   })
   const unreadSet = useMemo(() => new Set(unreadIds.split('|').filter(Boolean)), [unreadIds])
   const [menuId, setMenuId] = useState<string | null>(null)
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
+  // `flipBase` is the ANCHOR's top edge: when the menu would overflow the bottom of the window,
+  // it opens upward from the caret button instead (see useMenuFlip below).
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; flipBase: number } | null>(
+    null
+  )
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // Tab drag-reorder: the project id being dragged + the current drop target ('' = end zone).
@@ -146,8 +151,14 @@ export function TabBar({
   const openMenu = (id: string, anchor: HTMLElement) => {
     const r = anchor.getBoundingClientRect()
     setMenuId(id)
-    setMenuPos({ top: r.bottom + 4, left: r.left })
+    setMenuPos({ top: r.bottom + 4, left: r.left, flipBase: r.top - 4 })
   }
+
+  // Viewport-edge flip for the caret menu — same behavior as the right-click ContextMenu. The
+  // hook runs unconditionally (menuPos may be null while closed; the ref is simply unattached
+  // then) and re-measures on size changes, so EXPANDING the account/permission sub-lists near
+  // the bottom edge lifts the menu instead of growing it off-screen.
+  const menuFlip = useMenuFlip(menuPos?.top ?? 0, menuPos?.left ?? 0, menuPos?.flipBase)
 
   const startRename = (id: string, current: string) => {
     setEditingId(id)
@@ -352,8 +363,9 @@ export function TabBar({
         menuProject &&
         createPortal(
           <div
+            ref={menuFlip.ref}
             className="tab-menu"
-            style={{ top: menuPos.top, left: menuPos.left }}
+            style={{ top: menuFlip.top, left: menuFlip.left }}
             onClick={(e) => e.stopPropagation()}
           >
             <button onClick={() => startRename(menuProject.id, menuProject.name)}>Rename</button>

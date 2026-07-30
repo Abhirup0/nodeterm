@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { NODE_COLORS } from '../state/workspace'
+import { useMenuFlip } from '../ui/useMenuFlip'
 
 export type MenuItem =
   | {
@@ -49,26 +50,13 @@ export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMen
   // Keep the menu one above its backdrop (matches the default 46/45 CSS ordering).
   const backdropStyle = zIndex != null ? { zIndex } : undefined
   // Flip away from the viewport edges: a right-click near the bottom (or right) edge used to
-  // open the menu DOWNWARD off-screen, cutting the tail rows off. Measured after render but
-  // BEFORE paint (useLayoutEffect — no visible jump): if the menu would overflow below, it
-  // opens upward from the cursor (native-menu behavior); same flip horizontally. The margin
-  // clamp is the last resort for a menu taller than the viewport itself.
-  const menuRef = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState({ top: y, left: x })
-  useLayoutEffect(() => {
-    const el = menuRef.current
-    if (!el) return
-    const M = 6
-    const w = el.offsetWidth
-    const h = el.offsetHeight
-    const top = y + h > window.innerHeight - M ? Math.max(M, y - h) : y
-    const left = x + w > window.innerWidth - M ? Math.max(M, x - w) : x
-    // Identity-guarded: `items` often gets a fresh array identity per parent render, and an
-    // unconditional setPos would re-render forever.
-    setPos((p) => (p.top === top && p.left === left ? p : { top, left }))
-  }, [x, y, items])
+  // open the menu DOWNWARD off-screen, cutting the tail rows off. See useMenuFlip.
+  const flip = useMenuFlip(y, x)
+  const menuRef = flip.ref
   const menuStyle =
-    zIndex != null ? { top: pos.top, left: pos.left, zIndex: zIndex + 1 } : { top: pos.top, left: pos.left }
+    zIndex != null
+      ? { top: flip.top, left: flip.left, zIndex: zIndex + 1 }
+      : { top: flip.top, left: flip.left }
   // Index of the row whose submenu flyout is currently open (hover-driven).
   const [openSub, setOpenSub] = useState<number | null>(null)
   return createPortal(
