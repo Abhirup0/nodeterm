@@ -5,7 +5,7 @@ import { canRename, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, dialog, ipcMain, Notification, powerMonitor, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
@@ -552,6 +552,12 @@ app.whenReady().then(async () => {
     // app-level focus with `steal` is what actually activates us across apps.
     if (process.platform === 'darwin') app.focus({ steal: true })
     w.focus()
+  })
+
+  // System-clipboard write from the MAIN process. Renderer/preload `clipboard` access is deprecated
+  // in Electron (logs a warning per call); the renderer sends this instead. Text only, fire-and-forget.
+  ipcMain.on(IPC.clipboardWrite, (_e, text: string) => {
+    if (typeof text === 'string') clipboard.writeText(text)
   })
 
   // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.

@@ -669,6 +669,10 @@ export interface Settings {
   canvasDragMode: 'select' | 'pan'
   accent: string
   tmuxEnabled: boolean
+  /** GPU (WebGL) terminal rendering. Off routes every terminal to xterm's DOM renderer — an escape
+   *  hatch for machines where many live WebGL contexts destabilize the OS compositor (whole-window
+   *  flicker on some macOS GPUs). Default on. */
+  terminalGpuRendering: boolean
   tmuxScrollback: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
@@ -787,6 +791,7 @@ export const DEFAULT_SETTINGS: Settings = {
   canvasDragMode: 'select',
   accent: '#0a84ff',
   tmuxEnabled: true,
+  terminalGpuRendering: true,
   tmuxScrollback: 50000,
   commitAgent: 'claude',
   commitAgentCommand: '',

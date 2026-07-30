@@ -54,6 +54,12 @@ export const WEBGL_BUDGET = 12
 /** Live ceiling — `WEBGL_BUDGET` unless the shell raised it (see `setWebglBudget`). */
 let budget = WEBGL_BUDGET
 
+/** Master switch (Settings → the GPU-terminal-rendering toggle). When false, the coordinator
+ *  grants NOTHING and every terminal stays on xterm's DOM renderer — an escape hatch for machines
+ *  where many live WebGL contexts destabilize the OS compositor (observed as whole-window flicker
+ *  on some macOS GPUs). Default on; `setWebglEnabled` reclaims/re-grants live when it flips. */
+let enabled = true
+
 /**
  * Raise (or lower) the live budget. Called once at boot by the shell that knows its platform cap
  * (desktop raises the Chromium cap to `WEBGL_CONTEXT_CAP_DESKTOP`, so it can afford a higher
@@ -62,6 +68,29 @@ let budget = WEBGL_BUDGET
 export function setWebglBudget(n: number): void {
   if (!Number.isFinite(n) || n < 1) return
   budget = Math.floor(n)
+}
+
+/**
+ * Turn GPU (WebGL) terminal rendering on or off globally. OFF reclaims every currently-held
+ * context immediately (each client falls back to xterm's DOM renderer) and blocks all future
+ * grants; ON re-attempts a grant for every visible client, budget-gated as usual. Idempotent, and
+ * safe to call before any client registers (boot). This is the user-facing escape hatch for the
+ * macOS compositor-flicker case — see `enabled`.
+ */
+export function setWebglEnabled(on: boolean): void {
+  if (enabled === on) return
+  enabled = on
+  if (!on) {
+    // Drop every live context now (bypassing release delays) so the flicker stops on this frame.
+    for (const c of clients.values()) {
+      cancelAcquire(c)
+      reclaim(c)
+    }
+    return
+  }
+  // Back on: give every visible client a chance to re-acquire, oldest-visible first is irrelevant
+  // (tryGrant is budget-gated and never evicts a visible holder), so a simple sweep suffices.
+  for (const c of clients.values()) if (c.visible) tryGrant(c)
 }
 
 /** The live budget (test/introspection seam). */
@@ -223,6 +252,8 @@ function tryGrant(c: Client): void {
   cancelAcquire(c)
   // Guard: the client may have gone hidden or been disposed between debounce start and fire.
   if (!clients.has(c.id) || !c.visible || c.granted) return
+  // Master switch off → never grant; every terminal stays on the DOM renderer.
+  if (!enabled) return
   if (grantCount() < budget) {
     doGrant(c)
     return
@@ -361,4 +392,5 @@ export function __resetWebglBudgetForTests(): void {
   clients.clear()
   visibilityClock = 0
   budget = WEBGL_BUDGET
+  enabled = true
 }

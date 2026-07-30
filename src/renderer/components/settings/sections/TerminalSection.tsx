@@ -9,7 +9,11 @@ import { NumberField } from '@renderer/ui/NumberField'
 const ROWS = {
   fontSize: { title: 'Font size', keywords: ['font', 'size', 'text'] },
   fontFamily: { title: 'Font family', keywords: ['font', 'family', 'typeface', 'monospace'] },
-  cursorBlink: { title: 'Cursor blink', keywords: ['cursor', 'blink'] }
+  cursorBlink: { title: 'Cursor blink', keywords: ['cursor', 'blink'] },
+  gpu: {
+    title: 'GPU terminal rendering',
+    keywords: ['gpu', 'webgl', 'renderer', 'flicker', 'performance', 'graphics', 'acceleration']
+  }
 }
 const ENTRIES = Object.values(ROWS)
 
@@ -51,6 +55,19 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.cursorBlink}
               onChange={(v) => update({ cursorBlink: v })}
               ariaLabel="Cursor blink"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.gpu}>
+        <FieldRow
+          label="GPU terminal rendering"
+          description="Turn off if the window flickers. Terminals then use the DOM renderer (no WebGL)."
+          control={
+            <Switch
+              checked={settings.terminalGpuRendering !== false}
+              onChange={(v) => update({ terminalGpuRendering: v })}
+              ariaLabel="GPU terminal rendering"
             />
           }
         />

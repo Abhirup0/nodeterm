@@ -5,6 +5,7 @@ import {
   getWebglBudget,
   loseWebglContexts,
   setWebglBudget,
+  setWebglEnabled,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
   WEBGL_BUDGET,
   WEBGL_LOSS_STREAK_MAX,
@@ -97,6 +98,48 @@ describe('webgl-budget coordinator', () => {
     expect(extra.rec.acquires).toBe(0)
     expect(extra.rec.held).toBe(false)
     expect(clients.every((c) => c.rec.held)).toBe(true)
+  })
+
+  // ── The GPU-rendering master switch (Settings toggle → macOS flicker escape hatch) ──────────
+  it('setWebglEnabled(false) reclaims every live context and blocks new grants', () => {
+    const a = fakeClient('a')
+    const b = fakeClient('b')
+    grant(a)
+    grant(b)
+    expect(a.rec.held && b.rec.held).toBe(true)
+
+    setWebglEnabled(false)
+    // Every held context is reclaimed immediately (no release-delay wait) → all on DOM renderer.
+    expect(a.rec.held).toBe(false)
+    expect(b.rec.held).toBe(false)
+    expect(a.rec.releases).toBe(1)
+
+    // A newly-visible client is NOT granted while disabled, even under budget.
+    const c = fakeClient('c')
+    grant(c)
+    expect(c.rec.acquires).toBe(0)
+    expect(c.rec.held).toBe(false)
+  })
+
+  it('setWebglEnabled(true) re-grants the visible clients', () => {
+    const a = fakeClient('a')
+    grant(a)
+    setWebglEnabled(false)
+    expect(a.rec.held).toBe(false)
+
+    setWebglEnabled(true)
+    // `a` is still visible → it re-acquires immediately (no debounce; it never went hidden).
+    expect(a.rec.held).toBe(true)
+    expect(a.rec.acquires).toBe(2)
+  })
+
+  it('setWebglEnabled is idempotent (no reclaim on a redundant off→off)', () => {
+    const a = fakeClient('a')
+    grant(a)
+    setWebglEnabled(false)
+    expect(a.rec.releases).toBe(1)
+    setWebglEnabled(false) // no-op
+    expect(a.rec.releases).toBe(1)
   })
 
   it('releases a hidden holder after the release delay', () => {
