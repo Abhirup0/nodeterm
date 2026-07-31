@@ -8,6 +8,7 @@ import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { useEntitlement } from '@renderer/state/entitlement'
 import { usePhonePairing } from '../usePhonePairing'
+import { IOS_APP_STORE_URL } from '@renderer/lib/links'
 
 const ROWS = {
   remote: {
@@ -122,6 +123,15 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
           <p className="text-sm text-muted">
             Pair the nodeterm iOS app: scan this QR with your phone. Your phone generates its own
             key on-device — nothing secret leaves this machine except a single-use pairing token.
+          </p>
+          <p className="text-sm text-muted">
+            Don&apos;t have the app yet?{' '}
+            <button
+              className="cursor-pointer underline hover:text-text"
+              onClick={() => window.nodeTerminal.shell.openExternal(IOS_APP_STORE_URL)}
+            >
+              Get nodeterm for iOS on the App Store
+            </button>
           </p>
 
           {phase === 'idle' || phase === 'timeout' ? (
