@@ -8645,3 +8645,72 @@ body,
 .kanban-card--drop-after::after {
   bottom: -5px;
 }
+
+/* ---- one-shot mobile-launch announcement (MobileLaunchCard) ---- */
+.mlaunch__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40; /* the onboarding layer — the two never show together */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+}
+.mlaunch {
+  position: relative;
+  width: min(440px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  padding: 34px 34px 28px;
+  border-radius: 20px;
+  background: #0b0b0d;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+  text-align: center;
+  color: var(--text);
+}
+/* the promo's purple halo, behind the phone mockup */
+.mlaunch::before {
+  content: '';
+  position: absolute;
+  top: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 340px;
+  height: 340px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.38) 0%, rgba(139, 92, 246, 0) 68%);
+  pointer-events: none;
+}
+.mlaunch__title {
+  margin: 0 0 6px;
+  font-size: 27px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.mlaunch__title span {
+  color: #a78bfa;
+}
+.mlaunch__sub {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.mlaunch__scene {
+  position: relative; /* keeps the halo behind, the phone above */
+  display: flex;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.mlaunch__body {
+  margin: 0 0 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-align: left;
+}
+.mlaunch__actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
