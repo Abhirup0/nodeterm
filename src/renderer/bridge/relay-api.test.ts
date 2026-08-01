@@ -46,7 +46,6 @@ function fakeLocalApi() {
     settings: { NAME: 'local-settings' },
     dialog: { NAME: 'local-dialog' },
     license: { NAME: 'local-license' },
-    relayQuota: { NAME: 'local-relay-quota' },
     pty: { onData: ptyOnData },
     claude: { cliCaps: () => Promise.resolve({}), readTranscript: () => Promise.reject() },
     relayClient: { disconnect: vi.fn() }
@@ -92,7 +91,6 @@ describe('buildRelayApi', () => {
     expect(api.clipboard).toBe(local.clipboard)
     expect(api.settings).toBe(local.settings)
     expect(api.license).toBe(local.license)
-    expect(api.relayQuota).toBe(local.relayQuota)
   })
 
   it('routes the folder/file picker to the HOST fs, not the local native dialog', () => {

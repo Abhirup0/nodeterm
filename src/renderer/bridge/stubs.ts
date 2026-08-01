@@ -208,12 +208,6 @@ export function buildStubApi(): Omit<
       getStatus: U('license.getStatus'),
       onChange: noopUnsub
     },
-    relayQuota: {
-      // Server Edition does not host the phone relay; report unlimited so every quota
-      // surface hides in the browser instead of showing a broken meter.
-      getStatus: async () => ({ month: '', used: 0, limit: 5, unlimited: true }),
-      onChange: noopUnsub
-    },
     contextLink: {
       setLinks: pnoop,
       info: U('contextLink.info')

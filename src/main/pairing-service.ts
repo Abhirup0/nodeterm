@@ -43,17 +43,14 @@ const execFileAsync = promisify(execFile)
 
 /**
  * Optional relay dependencies injected into the pairing service. When present AND phone access is
- * enabled + Pro, a successful LAN pair ALSO provisions the phone for the relay (a device token +
+ * enabled, a successful LAN pair ALSO provisions the phone for the relay (a device token +
  * the host's relay identity), so it can reach this Mac from anywhere. Injected (not imported) so
  * `pairing-core` stays pure and this stays testable. Absent / any failure ⇒ LAN-only (the phone
  * still pairs; it just won't get relay access).
  */
 export interface PairingRelayDeps {
   getSettings(): Settings
-  isPremium(): boolean
   getEntitlement(): string | null
-  /** Free-tier relay taster: true while the monthly quota could still admit a bridge. */
-  quotaAvailable(): boolean
   loadHostKeyPair(): Promise<KeyPair>
   /** The relay WebSocket endpoint advertised to the phone. */
   relayEndpoint: string
@@ -100,17 +97,15 @@ async function mintRelayDevice(
 
 /**
  * Compute this host's relay reachability block WITHOUT any network call (just the host key →
- * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off, not Pro
- * and no free quota, blocked in dev, or (on Pro) no entitlement is stored.
+ * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off or
+ * blocked in dev.
  */
 async function buildRelayContext(
   deps: PairingRelayDeps | undefined
 ): Promise<{ block: RelayPairingBlock; entitlement: string | null } | null> {
   if (!deps || !deps.relayAllowed()) return null
   if (!deps.getSettings().phoneAccessEnabled) return null
-  if (!deps.isPremium() && !deps.quotaAvailable()) return null
   const entitlement = deps.getEntitlement() // null on free tier → mint by deviceId
-  if (deps.isPremium() && !entitlement) return null
   try {
     const keys = await deps.loadHostKeyPair()
     const hostPublicKeyB64 = publicKeyToB64(keys.publicKey)
