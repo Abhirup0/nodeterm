@@ -4,6 +4,7 @@ import type { SpeechModelInfo } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type BuiltinAgentId } from '@shared/agents/config'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import { keyLabel } from '@shared/platform-utils'
+import { IOS_APP_STORE_URL } from '../../lib/links'
 import { useSettings } from '../../state/settings'
 import { useEntitlement } from '../../state/entitlement'
 import { Switch } from '@renderer/ui/Switch'
@@ -370,9 +371,17 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   terminal from anywhere.
                 </p>
                 <p>
-                  The iOS app is in App Store review — <strong>coming soon</strong>. You'll find
-                  the pairing flow in Settings → Phone when it lands.
+                  Grab it from the App Store, then pair in seconds: Settings → Phone (or the
+                  phone button top-right) shows a QR — scan it and you're in.
                 </p>
+                <div className="onb-notify-actions">
+                  <button
+                    className="onb-btn onb-btn--primary"
+                    onClick={() => window.nodeTerminal.shell.openExternal(IOS_APP_STORE_URL)}
+                  >
+                    Get the iOS app
+                  </button>
+                </div>
               </>
             )}
 

@@ -5,6 +5,7 @@ import { useSettings } from '@renderer/state/settings'
 import { useEntitlement } from '@renderer/state/entitlement'
 import { useUpgradeGate } from '@renderer/state/upgradeGate'
 import { usePhonePairing } from './settings/usePhonePairing'
+import { IOS_APP_STORE_URL } from '@renderer/lib/links'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -127,6 +128,12 @@ export function PhonePairPopover({
           />
         </div>
 
+        <button
+          className="phone-pair__link phone-pair__footer"
+          onClick={() => window.nodeTerminal.shell.openExternal(IOS_APP_STORE_URL)}
+        >
+          Get the nodeterm iOS app ↗
+        </button>
         <button className="phone-pair__link phone-pair__footer" onClick={onOpenSettings}>
           All phone settings…
         </button>

@@ -287,7 +287,7 @@ export function SceneNotify() {
 }
 
 /** The mobile companion as a floating phone mockup: live session rows with real status
- *  badges + a terminal line — announced as coming soon (iOS is in App Store review). */
+ *  badges + a terminal line — live on the App Store (the step links to it). */
 export function ScenePhone() {
   return (
     <div className="onb-scene-canvas onb-scene--phone" aria-hidden="true">
@@ -320,7 +320,7 @@ export function ScenePhone() {
           </div>
         </div>
       </div>
-      <span className="onb-soon">COMING SOON</span>
+      <span className="onb-soon">ON THE APP STORE</span>
     </div>
   )
 }
