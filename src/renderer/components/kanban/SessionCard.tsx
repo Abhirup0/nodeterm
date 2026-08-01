@@ -1,13 +1,16 @@
 import { useState } from 'react'
-import type { KanbanCardMeta, KanbanPriority } from '@shared/types'
+import type { KanbanCardMeta, KanbanLabel, KanbanPriority } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
+import { LabelChips } from './LabelChips'
 import type { KanbanSession } from './KanbanView'
 
 interface SessionCardProps {
   session: KanbanSession
   status?: AgentNodeStatus
   meta?: KanbanCardMeta
+  /** Resolved board labels on this card (LabelChips) — resolved by the board, passed in. */
+  labels?: KanbanLabel[]
   /** Single click opens the card modal directly (the expand/collapse step was dropped). */
   onOpen: () => void
   onDragStart: () => void
@@ -18,7 +21,7 @@ interface SessionCardProps {
   onContext: (x: number, y: number) => void
 }
 
-export function SessionCard({ session, status, meta, onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
+export function SessionCard({ session, status, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).
@@ -90,6 +93,7 @@ export function SessionCard({ session, status, meta, onOpen, onDragStart, onDrag
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
+      <LabelChips labels={labels} size="sm" className="kanban-card__labels" />
       {(assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
           {priority !== undefined && PRIO_COLOR[priority] && (
