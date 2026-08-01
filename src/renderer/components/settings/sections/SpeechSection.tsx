@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SpeechModelInfo } from '@shared/types'
+import { modelAfterDelete, modelAfterDownload } from '@shared/speech'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import {
   buildModifierChord,
@@ -203,11 +204,16 @@ export function SpeechSection({
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [rowError, setRowError] = useState<Record<string, string>>({})
 
-  const refreshModels = useCallback(async (): Promise<void> => {
+  // Returns the fresh list as well as storing it: a caller that has just downloaded or deleted
+  // needs to decide the selection from the POST-change state, and `models` is a render behind.
+  const refreshModels = useCallback(async (): Promise<SpeechModelInfo[]> => {
     try {
-      setModels(await window.nodeTerminal.speech.models())
+      const next = await window.nodeTerminal.speech.models()
+      setModels(next)
+      return next
     } catch {
       // leave the last-known list on a transient read error
+      return []
     }
   }, [])
 
@@ -263,7 +269,16 @@ export function SpeechSection({
     setProgress((p) => ({ ...p, [m.id]: 0 }))
     try {
       await window.nodeTerminal.speech.downloadModel(m.id)
-      await refreshModels()
+      const fresh = await refreshModels()
+      // Downloading is not selecting — but the setting defaults to `tiny`, so someone whose first
+      // download is `base` is left pointed at a model that is not on disk, and dictation fails.
+      // `modelAfterDownload` adopts the fresh one only when the current pick has nothing behind
+      // it, so an already-working choice is never taken away by trying a second model.
+      // Read the settings back from the store, not the render scope: a download takes minutes,
+      // and this closure's `settings` is a snapshot from before it started.
+      const live = useSettings.getState().settings.speech
+      const adopt = modelAfterDownload(fresh, live.model, m.id)
+      if (adopt) update({ speech: { ...live, model: adopt } })
     } catch (err) {
       setRowError((e) => ({
         ...e,
@@ -284,7 +299,11 @@ export function SpeechSection({
     setBusy((b) => ({ ...b, [m.id]: true }))
     try {
       await window.nodeTerminal.speech.deleteModel(m.id)
-      await refreshModels()
+      const fresh = await refreshModels()
+      // Deleting the selected model leaves the same dangling pointer a first download does.
+      const live = useSettings.getState().settings.speech
+      const adopt = modelAfterDelete(fresh, live.model)
+      if (adopt) update({ speech: { ...live, model: adopt } })
     } catch (err) {
       setRowError((e) => ({ ...e, [m.id]: err instanceof Error ? err.message : 'Delete failed.' }))
     } finally {
