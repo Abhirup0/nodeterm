@@ -777,6 +777,11 @@ app.whenReady().then(async () => {
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
   const win = createWindow()
+  // NT_MULTI instances are throwaway dev sandboxes. The dock badge is the one marker that is
+  // always visible on macOS (the window title is hidden by titleBarStyle: 'hiddenInset', and the
+  // dev dock icon/name are Electron's own), so a test instance can never be mistaken for the
+  // real app.
+  if (NT_MULTI && process.platform === 'darwin') app.dock?.setBadge('TEST')
   // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
   initUpdater(() => {
