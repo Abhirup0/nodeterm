@@ -192,6 +192,9 @@ export const IPC = {
   sshMkdir: 'ssh:mkdir',
   sshUploadFile: 'ssh:upload-file',
   sshDownloadFile: 'ssh:download-file',
+  /** Cache a remote media file locally (scp over the ControlMaster) and allowlist it for
+   *  nt-media:// playback — how a VideoNode plays a file that lives on an SSH project's host. */
+  sshMediaAllow: 'ssh:media-allow',
   sshFsList: 'sshFs:list',
   sshFsRead: 'sshFs:read',
   sshFsReadBinary: 'sshFs:read-binary',

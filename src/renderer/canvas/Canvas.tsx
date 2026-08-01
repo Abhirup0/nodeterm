@@ -330,10 +330,10 @@ interface PendingPeerState {
 const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
 
-// Media nodes render off the LOCAL disk (the video allowlist and the webview's file loader have
-// no remote counterpart), so a host path from a remote agent could only resolve to a same-named
-// local file — or nothing. Refuse and say why, rather than opening a node that quietly shows the
-// wrong thing. `%s` is the verb.
+// The webview's file loader renders off the LOCAL disk and has no remote counterpart, so a host
+// path from a remote agent could only resolve to a same-named local file — or nothing. Refuse and
+// say why, rather than opening a node that quietly shows the wrong thing. `%s` is the verb.
+// (Videos no longer take this path: VideoNode fetches a host file into the local media cache.)
 const MEDIA_SSH_NOTICE =
   '%s cannot render a file from an SSH project: the viewer reads the local disk, and this path is on the remote host. Use --url, or copy the file to this machine first.'
 
@@ -2536,7 +2536,7 @@ export function Canvas() {
         ...ns.map((n) => (n.selected ? { ...n, selected: false } : n)),
         {
           ...(isVideoFile(filePath)
-            ? createVideoNode(ns.length, filePath, center ?? viewCenter())
+            ? createVideoNode(ns.length, filePath, center ?? viewCenter(), sshFs)
             : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)),
           selected: true
         }
@@ -5474,16 +5474,14 @@ export function Canvas() {
               reply({ ok: false, error: 'show-video requires --path' })
               return
             }
-            // The video node streams through the LOCAL media allowlist, which has no remote
-            // counterpart — so on an SSH project a host path could only ever resolve to a local
-            // file of the same name, or nothing. Refuse with the reason rather than opening a
-            // node that silently shows the wrong thing (same call as worktrees-on-SSH).
-            if (ctlSsh) {
-              reply({ ok: false, error: MEDIA_SSH_NOTICE.replace('%s', 'show-video') })
-              return
-            }
-            await window.nodeTerminal.media.allow(args.path)
-            const id = addAndConnect(createVideoNode(nodesRef.current.length, args.path, placeBelow()))
+            // On an SSH project the agent's path lives on the HOST: stamp the node `sshFs` so
+            // VideoNode pulls the file into the local media cache over the ControlMaster
+            // (media.allowSsh) — playing it locally would either miss or, worse, play a
+            // same-named local file. Local projects allowlist the local path as before.
+            if (!ctlSsh) await window.nodeTerminal.media.allow(args.path)
+            const id = addAndConnect(
+              createVideoNode(nodesRef.current.length, args.path, placeBelow(), !!ctlSsh)
+            )
             reply({ ok: true, message: `showing video ${id}`, result: { id } })
             return
           }

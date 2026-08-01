@@ -585,6 +585,13 @@ export interface FilesApi {
 export interface MediaApi {
   /** Allow an absolute local path to be served, and return its nt-media:// URL. */
   allow(absPath: string): Promise<string>
+  /**
+   * Allow a file that lives on an SSH project's HOST: main pulls it into a local cache over the
+   * project's ControlMaster (skipped when the cached copy's size still matches the remote), then
+   * allowlists the cached copy. Resolves the playable nt-media:// URL, or a reason it couldn't
+   * (not connected, transfer failed). Desktop only — the browser bridge rejects it.
+   */
+  allowSsh(projectId: string, remotePath: string): Promise<{ ok: true; url: string } | { ok: false; error: string }>
   /** Persist raw HTML to <userData>/agent-web/<id>.html, allowlist it, return its absolute path. */
   writeHtml(html: string): Promise<string>
 }

@@ -476,11 +476,15 @@ export function isVideoFile(path: string): boolean {
   return VIDEO_EXTS.includes(ext)
 }
 
-/** Creates a video player node for a local video file (streamed via nt-media://). */
+/** Creates a video player node for a video file (streamed via nt-media://). When `sshFs` is true,
+ *  `data.sshFs` is stamped so VideoNode fetches the file from the SSH project's host into the
+ *  local media cache (media.allowSsh) instead of allowlisting a local path — mirroring
+ *  createEditorNode's remote-fs flag. */
 export function createVideoNode(
   index: number,
   filePath: string,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  sshFs?: boolean
 ): CanvasNode {
   return {
     id: nextId('video'),
@@ -493,7 +497,8 @@ export function createVideoNode(
       title: filePath.split('/').pop() || 'video',
       color: '#bf5af2',
       group: null,
-      filePath
+      filePath,
+      ...(sshFs ? { sshFs: true } : {})
     }
   }
 }
