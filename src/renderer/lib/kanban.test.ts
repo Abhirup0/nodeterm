@@ -3,7 +3,9 @@ import type { ProjectKanban } from '@shared/types'
 import {
   addColumn, assignNode, assignedTo, defaultKanban, deleteColumn, moveColumn,
   cardMeta, columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn,
-  setCardDue, setCardPriority, toggleAssignee, unassigned
+  setCardDue, setCardPriority, toggleAssignee, unassigned,
+  boardLabels, cardMatchesLabelFilter, createLabel, deleteLabel, labelColor, labelsForCard,
+  recolorLabel, renameLabel, reorderLabels, toggleCardLabel
 } from './kanban'
 
 const board = (): ProjectKanban => ({
@@ -151,5 +153,101 @@ describe('card priority', () => {
     const cleared = setCardDue(k, 'n1', null)
     expect(cardMeta(cleared, 'n1')).toMatchObject({ priority: 'low', assignees: [enes] })
     expect(cardMeta(cleared, 'n1')?.dueAt).toBeUndefined()
+  })
+})
+
+describe('board labels', () => {
+  it('createLabel adds to the palette and returns the new id; labelColor normalizes garbage', () => {
+    const { k, id } = createLabel(board(), '  Bug ', 'red')
+    expect(boardLabels(k)).toHaveLength(1)
+    expect(boardLabels(k)[0]).toMatchObject({ id, name: 'Bug', color: 'red' })
+    expect(labelColor('nonsense')).toBe('default')
+    // a garbage color at create time is coerced to 'default'
+    const { k: k2 } = createLabel(board(), 'x', 'chartreuse' as never)
+    expect(boardLabels(k2)[0].color).toBe('default')
+  })
+
+  it('rename / recolor touch only the target label', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const idA = boardLabels(k)[0].id
+    k = createLabel(k, 'B', 'green').k
+    const idB = boardLabels(k)[1].id
+    k = recolorLabel(renameLabel(k, idA, 'Acil'), idA, 'orange')
+    expect(boardLabels(k)[0]).toMatchObject({ id: idA, name: 'Acil', color: 'orange' })
+    expect(boardLabels(k)[1]).toMatchObject({ id: idB, name: 'B', color: 'green' })
+  })
+
+  it('toggleCardLabel adds then removes; labelsForCard resolves in palette order and drops dangling', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = createLabel(k, 'B', 'green').k
+    const b = boardLabels(k)[1].id
+    k = toggleCardLabel(toggleCardLabel(k, 'n1', b), 'n1', a) // apply b then a
+    // resolved in PALETTE order (a before b), not application order
+    expect(labelsForCard(k, 'n1').map((l) => l.name)).toEqual(['A', 'B'])
+    // a card carrying a since-deleted id resolves to nothing for it
+    k = { ...k, meta: [{ nodeId: 'n1', labels: [a, 'ghost'] }] }
+    expect(labelsForCard(k, 'n1').map((l) => l.name)).toEqual(['A'])
+    // toggling a on again removes it
+    k = toggleCardLabel({ ...k, meta: [{ nodeId: 'n1', labels: [a] }] }, 'n1', a)
+    expect(cardMeta(k, 'n1')).toBeUndefined() // emptied meta entry is dropped
+  })
+
+  it('deleteLabel removes the label AND strips its id from every card', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = createLabel(k, 'B', 'green').k
+    const b = boardLabels(k)[1].id
+    k = toggleCardLabel(toggleCardLabel(k, 'n1', a), 'n1', b)
+    k = toggleCardLabel(k, 'n2', a)
+    k = deleteLabel(k, a)
+    expect(boardLabels(k).map((l) => l.name)).toEqual(['B'])
+    expect(cardMeta(k, 'n1')?.labels).toEqual([b]) // a stripped, b kept
+    expect(cardMeta(k, 'n2')).toBeUndefined() // n2 had only a → meta entry dropped
+  })
+
+  it('deleteLabel preserves a card entry that still has OTHER meta', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = setCardPriority(toggleCardLabel(k, 'n1', a), 'n1', 'high')
+    k = deleteLabel(k, a)
+    expect(cardMeta(k, 'n1')).toMatchObject({ priority: 'high' })
+    expect(cardMeta(k, 'n1')?.labels ?? []).toEqual([])
+  })
+
+  it('reorderLabels moves a label before another (null = end)', () => {
+    let k = createLabel(createLabel(createLabel(board(), 'A', 'blue').k, 'B', 'green').k, 'C', 'red').k
+    const [a, b, c] = boardLabels(k).map((l) => l.id)
+    expect(boardLabels(reorderLabels(k, c, a)).map((l) => l.name)).toEqual(['C', 'A', 'B'])
+    expect(boardLabels(reorderLabels(k, a, null)).map((l) => l.name)).toEqual(['B', 'C', 'A'])
+  })
+
+  it('cardMatchesLabelFilter: empty filter matches all; otherwise OR over the card labels', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = createLabel(k, 'B', 'green').k
+    const b = boardLabels(k)[1].id
+    k = toggleCardLabel(k, 'n1', a) // n1 has A only
+    expect(cardMatchesLabelFilter(k, 'n1', [])).toBe(true)
+    expect(cardMatchesLabelFilter(k, 'n1', [a])).toBe(true)
+    expect(cardMatchesLabelFilter(k, 'n1', [b])).toBe(false)
+    expect(cardMatchesLabelFilter(k, 'n1', [a, b])).toBe(true) // OR
+    expect(cardMatchesLabelFilter(k, 'n2', [a])).toBe(false) // n2 unlabelled
+  })
+
+  it('boardLabels tolerates a missing/garbage labels array', () => {
+    expect(boardLabels({ columns: [], assignments: [] })).toEqual([])
+    expect(boardLabels({ columns: [], assignments: [], labels: 'x' as never })).toEqual([])
+    expect(boardLabels({ columns: [], assignments: [], labels: [null, { id: 'z', name: 'Z', color: 'blue' }] as never })).toHaveLength(1)
+  })
+
+  it('setCardDue / toggleAssignee preserve existing labels', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = toggleCardLabel(k, 'n1', a)
+    k = setCardDue(k, 'n1', 123)
+    expect(cardMeta(k, 'n1')).toMatchObject({ dueAt: 123, labels: [a] })
+    k = toggleAssignee(k, 'n1', { name: 'enes', color: '#fff' })
+    expect(cardMeta(k, 'n1')?.labels).toEqual([a])
   })
 })

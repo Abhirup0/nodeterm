@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Handle,
   NodeResizer,
@@ -61,6 +61,8 @@ import {
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
 import { NodeTags } from '../components/NodeTags'
+import { LabelChips } from '../components/kanban/LabelChips'
+import { labelsForCard } from '../lib/kanban'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
@@ -421,6 +423,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
   const tags = (data.tags as string[]) ?? []
+  // Kanban labels applied to this card, resolved from the ACTIVE project's board palette (a node
+  // only ever lives in the active project). Read the kanban ref reactively; resolve in a memo so a
+  // fresh array doesn't churn the selector.
+  const projectKanbanForLabels = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban
+  )
+  const kanbanLabels = useMemo(
+    () => (projectKanbanForLabels ? labelsForCard(projectKanbanForLabels, id) : []),
+    [projectKanbanForLabels, id]
+  )
   // Derive the node's agent once, through the shared helper — the canvas menu decides whether to
   // offer this node's in-place restart from the SAME derivation, and a second copy drifting from
   // this one yields a row whose closure refuses every click.
@@ -2041,6 +2053,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
           onPrev={handlePrev}
           onClose={() => setSearchOpen(false)}
         />
+      )}
+
+      {kanbanLabels.length > 0 && (
+        <LabelChips labels={kanbanLabels} size="sm" className="term-node__labels nodrag" />
       )}
 
       {!collapsed && (

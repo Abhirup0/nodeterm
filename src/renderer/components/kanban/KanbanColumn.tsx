@@ -3,7 +3,7 @@ import type { KanbanColumn as KanbanColumnT } from '@shared/types'
 import type { AgentNodeStatus } from '../../state/agentStatus'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
-import type { KanbanCardMeta } from '@shared/types'
+import type { KanbanCardMeta, KanbanLabel } from '@shared/types'
 import type { KanbanCreateChoice, KanbanCreateOption, KanbanSession } from './KanbanView'
 
 interface KanbanColumnProps {
@@ -18,6 +18,8 @@ interface KanbanColumnProps {
   onOpenCard: (nodeId: string) => void
   /** Card metadata lookup (assignees/due) for the chips on each card. */
   metaOf: (nodeId: string) => KanbanCardMeta | undefined
+  /** Resolved board labels for a card (the colored label chips). */
+  labelsOf: (nodeId: string) => KanbanLabel[]
   /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked. */
   createOptions: KanbanCreateOption[]
   onCreate: (choice: KanbanCreateChoice) => void
@@ -33,7 +35,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, metaOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
+  column, cards, statusById, metaOf, labelsOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropAtCard
 }: KanbanColumnProps) {
@@ -135,6 +137,7 @@ export function KanbanColumn({
             session={s}
             status={statusById[s.id]}
             meta={metaOf(s.id)}
+            labels={labelsOf(s.id)}
             onOpen={() => onOpenCard(s.id)}
             onContext={(x, y) => onCardContext(s.id, x, y)}
             onDragStart={() => onCardDragStart(s.id)}

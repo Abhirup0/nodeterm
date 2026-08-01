@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import type { BoardLogAuthor, KanbanPriority, ProjectKanban } from '@shared/types'
-import { cardMeta, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
+import { cardMeta, labelsForCard, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
+import { LabelChips } from './LabelChips'
+import { LabelPicker } from './LabelPicker'
 import { loadIdentity, selectOthers, usePresence } from '../../state/presence'
 import { useBoardLog } from '../../state/boardLog'
 import { useProjects } from '../../state/projects'
@@ -32,7 +34,9 @@ interface CardMetaBarProps {
  *  author already seen in the board log — no separate membership system. */
 export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [labelsOpen, setLabelsOpen] = useState(false)
   const meta = cardMeta(board, nodeId)
+  const labels = labelsForCard(board, nodeId)
   const projectId = useProjects((s) => s.activeProjectId)
   const logEntries = useBoardLog((s) => s.entriesFor(projectId))
   const peers = usePresence(selectOthers)
@@ -91,6 +95,27 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
                 )
               })}
             </div>
+          )}
+        </div>
+      </div>
+      <div className="kanban-meta__group">
+        <span className="kanban-meta__label">Labels</span>
+        <div className="kanban-meta__row kanban-meta__row--labels">
+          <LabelChips labels={labels} size="md" />
+          <button
+            className="kanban-avatar kanban-avatar--add"
+            title="Add label"
+            onClick={() => setLabelsOpen((v) => !v)}
+          >
+            +
+          </button>
+          {labelsOpen && (
+            <>
+              <div className="label-picker__scrim" onMouseDown={() => setLabelsOpen(false)} />
+              <div className="label-picker__pop">
+                <LabelPicker board={board} nodeId={nodeId} onChange={onChange} />
+              </div>
+            </>
           )}
         </div>
       </div>

@@ -6,9 +6,11 @@ import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
 import {
-  addColumn, assignNode, assignedTo, cardMeta, columnForNode, deleteColumn, moveColumn,
+  addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
+  deleteColumn, labelsForCard, moveColumn,
   nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
 } from '../../lib/kanban'
+import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
 import { KanbanColumn } from './KanbanColumn'
 import type { ModalSpawn } from './ModalTerminal'
@@ -82,6 +84,17 @@ export function KanbanView({
   const [modalNodeId, setModalNodeId] = useState<string | null>(null)
   // Right-click card menu (open on canvas / move / delete).
   const [cardMenu, setCardMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
+  // Board label filter — transient (per board session; resets when you leave the board). Empty =
+  // show everything; otherwise a card must carry at least one selected label (cardMatchesLabelFilter).
+  const [labelFilter, setLabelFilter] = useState<string[]>([])
+  const [filterOpen, setFilterOpen] = useState(false)
+  // Drop ids no longer in the palette so a deleted label can't keep the board filtered to nothing.
+  const paletteLabels = boardLabels(board)
+  const activeFilter = labelFilter.filter((id) => paletteLabels.some((l) => l.id === id))
+  const visible = (ids: string[]): string[] =>
+    activeFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeFilter)) : ids
+  const toggleFilter = (id: string): void =>
+    setLabelFilter((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]))
   // Opening a card = you're looking at that session: clear its unread badge, and report the open
   // node to the canvas (dictation shortcut targeting).
   useEffect(() => {
@@ -195,13 +208,49 @@ export function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        {paletteLabels.length > 0 && (
+          <div className="kanban-header__filter">
+            <button
+              className={`kanban-filter-btn${activeFilter.length ? ' kanban-filter-btn--on' : ''}`}
+              title="Filter by label"
+              onClick={() => setFilterOpen((v) => !v)}
+            >
+              Filter{activeFilter.length ? ` · ${activeFilter.length}` : ''}
+            </button>
+            {filterOpen && (
+              <>
+                <div className="label-picker__scrim" onMouseDown={() => setFilterOpen(false)} />
+                <div className="kanban-filter-menu">
+                  {paletteLabels.map((l) => {
+                    const s = labelSwatch(l.color)
+                    const on = activeFilter.includes(l.id)
+                    return (
+                      <button key={l.id} className="kanban-filter-row" onClick={() => toggleFilter(l.id)}>
+                        <span className="kanban-label-chip" style={{ background: s.bg, color: s.fg }}>
+                          {l.name || 'Label'}
+                        </span>
+                        {on && <span className="label-picker__rowcheck">✓</span>}
+                      </button>
+                    )
+                  })}
+                  {activeFilter.length > 0 && (
+                    <button className="kanban-filter-clear" onClick={() => setLabelFilter([])}>
+                      Clear filter
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
       <div className="kanban-board">
         <KanbanColumn
           column={null}
-          cards={sessionsFor(unassigned(board, sessions.map((s) => s.id)))}
+          cards={sessionsFor(visible(unassigned(board, sessions.map((s) => s.id))))}
           statusById={statusById}
           metaOf={(id) => cardMeta(board, id)}
+          labelsOf={(id) => labelsForCard(board, id)}
           onOpenCard={setModalNodeId}
           createOptions={createOptions}
           onCreate={(choice) => onCreateNode(choice, null)}
@@ -215,9 +264,10 @@ export function KanbanView({
           <KanbanColumn
             key={col.id}
             column={col}
-            cards={sessionsFor(assignedTo(board, col.id))}
+            cards={sessionsFor(visible(assignedTo(board, col.id)))}
             statusById={statusById}
             metaOf={(id) => cardMeta(board, id)}
+            labelsOf={(id) => labelsForCard(board, id)}
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
             onDelete={() => commit(deleteColumn(board, col.id))}
