@@ -306,9 +306,9 @@ Verbs:
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).
 - \`open-browser --url U\` — open a navigable browser (back/forward/address bar) at a URL.
-  In an SSH project, nodes you open run on the HOST (same machine as you). The media viewers are
-  the exception: they read the DESKTOP's disk, so \`show-image\` works (it reads back over the
-  connection) but \`show-video\` and \`show-web --file/--html\` are refused for a host path —
+  In an SSH project, nodes you open run on the HOST (same machine as you). The media viewers
+  render on the DESKTOP: \`show-image\` and \`show-video\` still work with a host path (the
+  file is read/fetched back over the connection), but \`show-web --file/--html\` is refused —
   use \`--url\`, or copy the file to the desktop first.
 - \`group --nodes <id,id> [--label "Frontend Team"]\` — wrap nodes in a labeled group frame.
 - \`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]\` — tidy layout, no overlap.
