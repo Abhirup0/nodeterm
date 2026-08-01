@@ -691,6 +691,9 @@ export interface Settings {
    *  switch (the historical behavior). Off = every project defaults to expanded and a
    *  project switch never touches the user's expand/collapse choices. */
   sidebarAutoCollapse: boolean
+  /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
+   *  Personal machine-local preference; per-project explicit choices override it. */
+  defaultProjectView: 'canvas' | 'kanban'
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
@@ -820,6 +823,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
+  defaultProjectView: 'canvas',
   panHoverDelay: 600,
   doubleClickFocus: true,
   wheelZoom: false,

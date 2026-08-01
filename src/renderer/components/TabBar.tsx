@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
-import { useViewMode } from '../state/viewMode'
+import { useViewMode, viewFor } from '../state/viewMode'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSettings } from '../state/settings'
 import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
@@ -80,7 +80,7 @@ export function TabBar({
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
   const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
-  const kanbanActive = useViewMode((s) => !!activeId && !!s.viewByProject[activeId])
+  const kanbanActive = useViewMode((s) => !!activeId && viewFor(s, activeId) === 'kanban')
   // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
   const unreadIds = useAgentStatus((s) => {

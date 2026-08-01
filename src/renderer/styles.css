@@ -7401,6 +7401,28 @@ body,
 .term-node__labels {
   padding: 0 8px 4px;
 }
+/* Canvas node label row (unified with kanban labels): chips + an add button + the picker popover. */
+.term-node__labelrow {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 5px;
+}
+.term-node__labeladd {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.term-node__labeladd:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
 .kanban-meta__row--labels {
   position: relative;
   align-items: center;
@@ -7517,6 +7539,46 @@ body,
 }
 .label-picker__create:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+.label-picker__createrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.label-picker__createcolor {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  padding: 4px 5px;
+  cursor: pointer;
+}
+.label-picker__createcolor:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.label-picker__caret {
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.label-picker__createcolors {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  width: 170px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #262628;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 /* edit panel */
 .label-picker__edithead {
@@ -8192,6 +8254,37 @@ body,
   border-radius: 10px;
   padding: 12px 16px;
   color: rgba(235, 235, 245, 0.8);
+}
+.onb-defaultview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.onb-defaultview__label {
+  font-size: 13px;
+  color: rgba(235, 235, 245, 0.7);
+}
+.onb-seg {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.onb-seg__btn {
+  background: none;
+  border: none;
+  color: rgba(235, 235, 245, 0.75);
+  font-size: 13px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.onb-seg__btn + .onb-seg__btn {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+.onb-seg__btn.is-on {
+  background: var(--accent);
+  color: #fff;
 }
 .onb-tryit.is-done {
   border-style: solid;

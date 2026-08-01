@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import type { KanbanLabelColor, ProjectKanban } from '@shared/types'
 import {
-  KANBAN_LABEL_COLORS,
+  autoLabelColor,
   boardLabels,
   createLabel,
   deleteLabel,
@@ -11,13 +11,6 @@ import {
   toggleCardLabel
 } from '../../lib/kanban'
 import { LABEL_COLOR_OPTIONS, labelSwatch } from '../../lib/kanbanLabelColors'
-
-/** Auto-color for a newly created label: rotate the palette (skipping 'default') so consecutive
- *  new labels get distinct colors, Notion-style. */
-function nextLabelColor(board: ProjectKanban): KanbanLabelColor {
-  const colors = KANBAN_LABEL_COLORS.filter((c) => c !== 'default')
-  return colors[boardLabels(board).length % colors.length]
-}
 
 /**
  * Notion-style label picker: type to filter existing labels or CREATE a new one inline, click a row
@@ -35,6 +28,10 @@ export function LabelPicker({
 }): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
+  // Color chosen for the NEXT label created inline. Seeded to the rotating auto-color; the user can
+  // override it before hitting Create, and it re-seeds to the next auto-color after each create.
+  const [createColor, setCreateColor] = useState<KanbanLabelColor>(() => autoLabelColor(board))
+  const [colorMenuOpen, setColorMenuOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const all = boardLabels(board)
@@ -48,9 +45,11 @@ export function LabelPicker({
   const toggle = (id: string) => onChange(toggleCardLabel(board, nodeId, id))
   const create = () => {
     if (!canCreate) return
-    const { k, id } = createLabel(board, query.trim(), nextLabelColor(board))
+    const { k, id } = createLabel(board, query.trim(), createColor)
     onChange(toggleCardLabel(k, nodeId, id))
     setQuery('')
+    setColorMenuOpen(false)
+    setCreateColor(autoLabelColor(k)) // advance to the next auto-color for the following create
     inputRef.current?.focus()
   }
 
@@ -154,15 +153,44 @@ export function LabelPicker({
           )
         })}
         {canCreate && (
-          <button className="label-picker__create" onClick={create}>
-            Create{' '}
-            <span
-              className="kanban-label-chip"
-              style={{ background: labelSwatch(nextLabelColor(board)).bg, color: labelSwatch(nextLabelColor(board)).fg }}
+          <div className="label-picker__createrow">
+            <button
+              className="label-picker__createcolor"
+              title="Pick color"
+              onClick={() => setColorMenuOpen((v) => !v)}
             >
-              {query.trim()}
-            </span>
-          </button>
+              <span className="label-picker__swatch" style={{ background: labelSwatch(createColor).bg }} />
+              <span className="label-picker__caret">▾</span>
+            </button>
+            <button className="label-picker__create" onClick={create}>
+              Create{' '}
+              <span
+                className="kanban-label-chip"
+                style={{ background: labelSwatch(createColor).bg, color: labelSwatch(createColor).fg }}
+              >
+                {query.trim()}
+              </span>
+            </button>
+            {colorMenuOpen && (
+              <div className="label-picker__createcolors">
+                {LABEL_COLOR_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.color}
+                    className="label-picker__colorrow"
+                    onClick={() => {
+                      setCreateColor(opt.color)
+                      setColorMenuOpen(false)
+                      inputRef.current?.focus()
+                    }}
+                  >
+                    <span className="label-picker__swatch" style={{ background: opt.bg }} />
+                    <span className="label-picker__colorname">{opt.title}</span>
+                    {createColor === opt.color && <span className="label-picker__check">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

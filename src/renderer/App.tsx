@@ -5,6 +5,7 @@ import { PromptDialogHost } from './components/promptDialog'
 import { SessionProvider } from './session/session'
 import { localSession } from './session/localSession'
 import { useSettings } from './state/settings'
+import { useViewMode } from './state/viewMode'
 import { setWebglEnabled } from './terminal/webgl-budget'
 
 export default function App() {
@@ -15,6 +16,13 @@ export default function App() {
   useEffect(() => {
     setWebglEnabled(gpu !== false)
   }, [gpu])
+
+  // Keep the view-mode store's default in sync with the Settings choice, so projects the user
+  // hasn't explicitly toggled follow it (and flip live when the setting changes).
+  const defaultView = useSettings((s) => s.settings.defaultProjectView)
+  useEffect(() => {
+    useViewMode.getState().setDefaultView(defaultView === 'kanban' ? 'kanban' : 'canvas')
+  }, [defaultView])
 
   return (
     <SessionProvider session={localSession}>
