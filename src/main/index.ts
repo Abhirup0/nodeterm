@@ -152,6 +152,15 @@ if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT
 // before app 'ready' or the switch is silently ignored.
 app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXT_CAP_DESKTOP))
 
+// A throwaway NT_MULTI sandbox must not touch the real Keychain. The "node-terminal Safe Storage"
+// entry is keyed by the app NAME, which a dev instance shares with the installed app, so every
+// launch prompted for the login password and logged a scary os_crypt error when dismissed. The
+// mock keychain keeps safeStorage available in-process (no prompt, no error) while storing
+// nothing in the OS; the only consumer is the relay identity keypair, which already has a
+// documented plaintext fallback. Never set this for a real build: it would silently downgrade
+// at-rest encryption of that key.
+if (NT_MULTI && process.platform === 'darwin') app.commandLine.appendSwitch('use-mock-keychain')
+
 // First thing in bootstrap: install the Electron CorePlatform so anything in src/core
 // (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI
 // userData override so userDataDir reads the final path; nothing consumes it yet.
