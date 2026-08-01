@@ -99,7 +99,6 @@ import { initLicense, isPremium, getStoredEntitlement } from '../core/license'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
-import { initRelayQuota, broadcastRelayQuota, relayQuotaAvailable } from '../core/relay-quota'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
@@ -631,8 +630,6 @@ app.whenReady().then(async () => {
   // window over `pairing:done` so the settings section can show the paired/timeout state.
   const pairingService = createPairingService({
     getSettings: () => settingsStore.get(),
-    isPremium,
-    quotaAvailable: relayQuotaAvailable,
     getEntitlement: getStoredEntitlement,
     loadHostKeyPair: loadOrCreateKeyPair,
     relayEndpoint: RELAY_URL,
@@ -1609,16 +1606,7 @@ app.whenReady().then(async () => {
     buildMirrorUsage(usageService.snapshot(), settingsStore.get().claudeAccounts ?? [], Date.now())
   )
   initTelemetry(() => settingsStore.get())
-  // Declared before initLicense so its onChange hook can re-reconcile the standing host once the
-  // async launch-time entitlement refresh settles (fixes the boot race where Pro isn't yet valid
-  // when syncFromSettings first runs).
-  let standingHost: ReturnType<typeof initStandingHost> | undefined
-  initRelayQuota()
-  initLicense(() => {
-    standingHost?.syncFromSettings()
-    // A Pro flip changes `unlimited` in the quota status — push the fresh value.
-    broadcastRelayQuota()
-  })
+  initLicense(() => {})
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
@@ -1642,10 +1630,10 @@ app.whenReady().then(async () => {
   // Revocation reaches its sessions via `killRelayHostsByPeerKey` (peerRevoker, above).
   initRelayHost(win, corePlatform, {})
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach
-  // this Mac from anywhere. Honors settings.phoneAccessEnabled + the Pro gate internally.
-  standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput, hostBridge)
-  ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost?.setEnabled(!!enabled))
-  // Reconcile from persisted settings on launch (starts hosting if enabled + Pro).
+  // this Mac from anywhere. Honors settings.phoneAccessEnabled internally.
+  const standingHost = initStandingHost(win, ptyManager, () => settingsStore.get(), listProjectsOutput, hostBridge)
+  ipcMain.on(IPC.remoteStandingHostSet, (_e, enabled: boolean) => standingHost.setEnabled(!!enabled))
+  // Reconcile from persisted settings on launch (starts hosting if enabled).
   standingHost.syncFromSettings()
   // Interactive relay CLIENT (Stage 4): connect OUT to another desktop's host. `connectRelayClient`
   // runs the client half of mutual SAS approval and, once BOTH humans confirm, exposes the raw rpc.ts

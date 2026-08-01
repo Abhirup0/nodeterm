@@ -1,8 +1,7 @@
 // Standing (always-on) phone host — the desktop side of the iOS relay-client "reach my Mac from
 // anywhere" flow.
 //
-// When Settings → phoneAccessEnabled is on AND the device is Pro **or has free-tier quota left**,
-// this keeps a HOST relay
+// When Settings → phoneAccessEnabled is on, this keeps a HOST relay
 // connection registered under the host's stable id (base64url(sha256(hostPublicKey)).slice(0,22)),
 // so a previously-paired phone can join over the relay at any time and attach to the host's tmux
 // sessions after approval. Unlike the interactive host (a single-use offer you hand out), the
@@ -19,12 +18,11 @@
 // unit-tested `approved-devices-core`.
 
 import { randomUUID } from 'crypto'
-import { dialog, ipcMain, Notification, type BrowserWindow } from 'electron'
+import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import type { CanvasMutation, Settings } from '../../shared/types'
 import { PtyManager } from '../../core/pty-manager'
-import { getStoredEntitlement, isPremium } from '../../core/license'
-import { consumeRelayUse, peekRelayUse, relayQuotaAvailable } from '../../core/relay-quota'
+import { getStoredEntitlement } from '../../core/license'
 import { getDeviceId } from '../../core/device-id'
 import { createPhonePresence, type PhonePresence } from './phone-presence'
 import { publicKeyToB64, type KeyPair } from './e2ee'
@@ -113,15 +111,6 @@ function reportKeyLocked(err: Error): void {
   console.error('[standing-host] host identity is locked:', err.message)
 }
 
-/** Quota notices surface as OS notifications: the standing host has no UI of its own. */
-function notifyQuota(body: string): void {
-  try {
-    new Notification({ title: 'nodeterm — remote access', body }).show()
-  } catch {
-    // Notifications unavailable (headless/CI): the renderer banner still shows the state.
-  }
-}
-
 export interface StandingHost {
   /** Explicit toggle (from the Settings switch). Reconciles the connection immediately. */
   setEnabled(enabled: boolean): void
@@ -133,7 +122,7 @@ export interface StandingHost {
 
 /**
  * Wire the standing phone host. Idempotent to construct once; `setEnabled` / `syncFromSettings`
- * reconcile the live connection against (enabled && Pro && relay-allowed).
+ * reconcile the live connection against (enabled && relay-allowed).
  */
 export function initStandingHost(
   win: BrowserWindow,
@@ -217,27 +206,6 @@ export function initStandingHost(
     if (running && pendingCount() < TARGET_PENDING) void connectOne()
   }
 
-  // Charge a (peer, day) slot at APPROVAL time (auto-approve for a pinned device, or the human's
-  // OK for an unknown one) — never at bridge time, so a declined/timed-out prompt costs nothing.
-  // Returns whether the peer is admitted. On an exhausted race (another peer took the last slot
-  // between the earlier peek and now) it drops the session and refuses; 2nd+ use of the month
-  // notifies; 1st use / already-counted / Pro (unlimited) is silent.
-  function chargeAndAdmit(pooled: Pooled, pub: string | null): boolean {
-    const q = consumeRelayUse(pub ?? 'unknown-peer')
-    if (q.kind === 'exhausted') {
-      notifyQuota(
-        `Remote access limit reached (${q.limit}/${q.limit} this month). Upgrade to Pro for unlimited access.`
-      )
-      removeFromPool(pooled)
-      ensurePool()
-      return false
-    }
-    if (q.kind === 'ok' && q.used >= 2) {
-      notifyQuota(`Remote access ${q.used}/${q.limit} this month`)
-    }
-    return true
-  }
-
   function scheduleReconnect(): void {
     if (!running || reconnectTimer) return
     const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
@@ -281,19 +249,6 @@ export function initStandingHost(
     }
     const s = pooled.session
     const pub = s.peerPublicKeyB64()
-    // Free-tier admission GATE (non-mutating): refuse an over-limit free host a NEW pair before any
-    // approval, but DON'T charge yet — the slot is spent only when the pair is actually approved
-    // (pinned auto-approve, or the human's OK), never merely by bridging. A peer already counted
-    // today ('already') or Pro ('unlimited') falls straight through to the approval flow.
-    const q = peekRelayUse(pub ?? 'unknown-peer')
-    if (q.kind === 'exhausted') {
-      notifyQuota(
-        `Remote access limit reached (${q.limit}/${q.limit} this month). Upgrade to Pro for unlimited access.`
-      )
-      removeFromPool(pooled)
-      ensurePool()
-      return
-    }
     let store
     try {
       store = await loadApprovedDevices()
@@ -302,10 +257,7 @@ export function initStandingHost(
     }
     if (!pool.has(pooled)) return // torn down while the disk read was in flight
     if (pub && isPinned(store, pub)) {
-      // Auto-approve → this is the charge point for a pinned device. An exhausted race here drops
-      // the session inside the helper; only a genuine admission approves.
-      if (!chargeAndAdmit(pooled, pub)) return
-      s.approve()
+      s.approve() // pinned device → auto-approve silently
       return
     }
     // Unknown device → require the host human's approval (shared SAS dialog). Remember the pubkey +
@@ -327,11 +279,7 @@ export function initStandingHost(
     if (!running || opening || pendingCount() >= TARGET_PENDING) return
     opening = true
     try {
-      // Re-verify admission on every (re)connect: a lapsed Pro tears the host down; a
-      // free-tier host runs only while the monthly quota could still admit a bridge.
-      if (!isPremium() && !relayQuotaAvailable()) return stop()
       const entitlement = getStoredEntitlement() // null on free tier → mint by deviceId
-      if (isPremium() && !entitlement) return stop()
       // The host key is the identity every paired phone PINNED. If the OS keyring is locked we
       // cannot READ it (host-identity refuses to regenerate over it — that would rotate the
       // identity and force every phone to re-approve). There is nothing to advertise, so stop:
@@ -416,7 +364,7 @@ export function initStandingHost(
   }
 
   function reconcile(): void {
-    const want = enabled && (isPremium() || relayQuotaAvailable()) && relayAllowed()
+    const want = enabled && relayAllowed()
     if (want && !running) start()
     else if (!want && running) stop()
   }
@@ -430,9 +378,6 @@ export function initStandingHost(
     // browse socket may have already closed. Prefer the live peer's key, else the remembered one.
     const pub = p.session.peerPublicKeyB64() ?? p.approvalPub
     clearApproval(p)
-    // Charge the slot at the human's OK (a reject/timeout never reaches here → costs nothing). An
-    // exhausted race drops the session inside the helper; don't pin or approve a refused peer.
-    if (!chargeAndAdmit(p, pub)) return
     if (pub) {
       void loadApprovedDevices()
         .then((store) => saveApprovedDevices(pinDevice(store, pub)))
@@ -448,14 +393,6 @@ export function initStandingHost(
     removeFromPool(p) // drop this rejected session
     ensurePool()
   })
-
-  // Month rollover / quota changes can re-admit a stopped free-tier host (or retire an exhausted
-  // one). reconcile() is idempotent, so a slow hourly tick is safe and cheap.
-  // NOT cleared in stop(): stop() also fires transiently (exhaustion, lapsed Pro), and this tick is
-  // exactly what must revive hosting later. The interval is unref'd and dies with the process, and
-  // initStandingHost is constructed once, so there is nothing to clean up.
-  const reconcileTimer = setInterval(() => reconcile(), 60 * 60 * 1000)
-  reconcileTimer.unref?.()
 
   return {
     setEnabled(next) {

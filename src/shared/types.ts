@@ -734,7 +734,7 @@ export interface Settings {
    *  install count also rides the /v1/check call and is NOT gated on this toggle — see core/check.ts. */
   telemetryEnabled: boolean
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
-   *  (end-to-end encrypted). Pro-only; default off. Toggle in Settings → Phone. */
+   *  (end-to-end encrypted). Default off. Toggle in Settings → Phone. */
   phoneAccessEnabled: boolean
   /** Send APNs push notifications to relay-paired phones when an agent needs approval, asks a
    *  question, or finishes a turn (spec: apns-push). Default on — it only fires for users who
@@ -1525,19 +1525,6 @@ export interface LicenseApi {
   onChange(listener: (s: LicenseStatus) => void): () => void
 }
 
-/** Free-tier relay remote-access quota (spec 2026-07-15). Pro reports `unlimited: true`. */
-export interface RelayQuotaStatus {
-  month: string // '2026-07'
-  used: number // distinct (peer, local day) pairs consumed this month
-  limit: number // RELAY_QUOTA_LIMIT
-  unlimited: boolean // true when Pro
-}
-
-export interface RelayQuotaApi {
-  getStatus(): Promise<RelayQuotaStatus>
-  onChange(listener: (s: RelayQuotaStatus) => void): () => void
-}
-
 export interface RemoteHostApi {
   /**
    * Enter host mode: mint a pairing token, connect to the relay as the host, and return the
@@ -1739,7 +1726,6 @@ export interface NodeTerminalApi {
   updates: UpdateApi
   announcements: AnnouncementsApi
   license: LicenseApi
-  relayQuota: RelayQuotaApi
   contextLink: ContextLinkApi
   boardLog: BoardLogApi
   usage: UsageApi

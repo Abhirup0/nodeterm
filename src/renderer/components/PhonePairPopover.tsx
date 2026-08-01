@@ -2,8 +2,6 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
-import { useEntitlement } from '@renderer/state/entitlement'
-import { useUpgradeGate } from '@renderer/state/upgradeGate'
 import { usePhonePairing } from './settings/usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
 
@@ -27,13 +25,12 @@ export function PhonePairPopover({
 }): React.JSX.Element {
   const { phase, qr, sshOpen, sshHealed, error, busy, start } = usePhonePairing()
 
-  const isPremium = useEntitlement((s) => s.isPremium)
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
 
   const togglePhoneAccess = (next: boolean): void => {
     updateSettings({ phoneAccessEnabled: next })
-    // Start/stop the standing relay host immediately (main also honors the Pro gate).
+    // Start/stop the standing relay host immediately.
     window.nodeTerminal.remoteHost.setPhoneAccess(next)
   }
 
@@ -109,21 +106,12 @@ export function PhonePairPopover({
 
         <div className="phone-pair__row">
           <div className="phone-pair__row-text">
-            <div className="phone-pair__row-title">
-              Reach this Mac from anywhere
-              {!isPremium && <span className="phone-pair__pro">PRO</span>}
-            </div>
+            <div className="phone-pair__row-title">Reach this Mac from anywhere</div>
             <div className="phone-pair__row-sub">E2E encrypted over the relay — not just your LAN.</div>
           </div>
           <Switch
-            checked={isPremium && phoneAccessEnabled}
-            onChange={(next) => {
-              if (!isPremium) {
-                useUpgradeGate.getState().show('Remote access from your phone')
-                return
-              }
-              togglePhoneAccess(next)
-            }}
+            checked={phoneAccessEnabled}
+            onChange={togglePhoneAccess}
             ariaLabel="Reach this Mac from anywhere"
           />
         </div>

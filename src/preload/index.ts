@@ -322,14 +322,6 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.licenseChanged, handler)
     }
   },
-  relayQuota: {
-    getStatus: () => ipcRenderer.invoke(IPC.relayQuotaStatus),
-    onChange: (listener) => {
-      const h = (_e: unknown, s: Parameters<typeof listener>[0]) => listener(s)
-      ipcRenderer.on(IPC.relayQuotaChanged, h)
-      return () => ipcRenderer.removeListener(IPC.relayQuotaChanged, h)
-    }
-  },
   announcements: {
     fetch: () => ipcRenderer.invoke(IPC.announcementsFetch)
   },

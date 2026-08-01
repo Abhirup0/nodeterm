@@ -12,7 +12,7 @@
 //   the `onAgentStatus`/`onSubagentActivity` streams, `claude.cliCaps`, `userDataDir`) route over the
 //   relay RpcClient → they hit the REMOTE core. This is what makes the tab actually remote: its
 //   terminals, repos, files, canvas and presence all live on the host's machine.
-// • APP-GLOBAL namespaces (`updates`, `license`, `relayQuota`, `clipboard`, `shell`, `dialog`, `media`,
+// • APP-GLOBAL namespaces (`updates`, `license`, `clipboard`, `shell`, `dialog`, `media`,
 //   `settings`, `pairing`, `announcements`, `usage`, `ssh*`, `remote*`, `relay*`, notifications, menu events)
 //   stay LOCAL (`window.nodeTerminal.*`). Your update banner shows YOUR version, a file picker
 //   browses YOUR disk, your UI settings/theme are yours, and the relay-tunnel machinery itself is
@@ -73,7 +73,7 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
 
   const api: NodeTerminalApi = {
     // ── Base: every APP-GLOBAL namespace stays LOCAL. Spreading the whole preload gives the real
-    //    desktop implementations (updates/license/relayQuota/clipboard/shell/dialog/media/settings/pairing/
+    //    desktop implementations (updates/license/clipboard/shell/dialog/media/settings/pairing/
     //    announcements/usage/ssh*/remote*/relay*/notifications/menu events). The core-bound spreads
     //    below override the handful that must hit the remote core.
     ...local,
