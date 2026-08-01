@@ -261,6 +261,31 @@ export interface KanbanCardMeta {
   dueAt?: number
   /** Absent = no priority. */
   priority?: KanbanPriority
+  /** Ids of the board labels applied to this card (see ProjectKanban.labels). Absent/empty = none;
+   *  ids that no longer resolve to a label are dropped by readers (dangling-safe). */
+  labels?: string[]
+}
+
+/** The Notion label palette. A closed set so the chip colors and the picker can't desync; an
+ *  unknown value read from a hand-edited file falls back to 'default'. */
+export type KanbanLabelColor =
+  | 'default'
+  | 'gray'
+  | 'brown'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple'
+  | 'pink'
+  | 'red'
+
+/** A board-level label (Notion-style): defined once per board, applied to any number of cards by
+ *  id (KanbanCardMeta.labels). Order in ProjectKanban.labels is the palette's display order. */
+export interface KanbanLabel {
+  id: string
+  name: string
+  color: KanbanLabelColor
 }
 
 export interface ProjectKanban {
@@ -268,6 +293,9 @@ export interface ProjectKanban {
   assignments: KanbanAssignment[]
   /** Optional card metadata; tolerated as absent/malformed by every reader (lib normalizes). */
   meta?: KanbanCardMeta[]
+  /** Board-level label palette (Notion-style). Cards reference these by id in `meta[].labels`;
+   *  tolerated as absent/malformed by every reader. */
+  labels?: KanbanLabel[]
 }
 
 /** Who produced a board-log entry (a teammate on a shared board, or this user). */
