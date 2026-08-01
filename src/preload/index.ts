@@ -259,6 +259,8 @@ const api: NodeTerminalApi = {
   },
   media: {
     allow: (absPath: string) => ipcRenderer.invoke(IPC.mediaAllow, absPath),
+    allowSsh: (projectId: string, remotePath: string) =>
+      ipcRenderer.invoke(IPC.sshMediaAllow, projectId, remotePath),
     writeHtml: (html: string) => ipcRenderer.invoke(IPC.mediaWriteHtml, html)
   },
   browser: {

@@ -6,6 +6,8 @@ import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { DownloadResult, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
+import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
+import { allowMediaPath } from '../media-protocol'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
 import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
 import {
@@ -513,6 +515,75 @@ export class SshProjectManager {
   }
 
   /**
+   * Pull a remote FILE into the local media cache (for nt-media:// playback) and resolve its
+   * cached absolute path. The entry is keyed by (host, remote path) — see remoteMediaCacheName —
+   * so re-opening an unchanged file reuses the cached copy: reuse is gated on the remote size
+   * still matching (`wc -c` is portable where `stat -c/-f` is not). A FAILED size probe is not
+   * evidence of anything (a hiccup ≠ a changed file) — it falls through to a fresh transfer,
+   * whose own failure is the real error. Directories are refused: a player node plays one file.
+   */
+  async cacheMediaFile(
+    projectId: string,
+    remotePath: string,
+    cacheDir: string
+  ): Promise<{ ok: true; localPath: string } | { ok: false; error: string }> {
+    const c = this.conns.get(projectId)
+    if (!c) return { ok: false, error: 'Not connected.' }
+    const name = safeDownloadBasename(remotePath)
+    if (!name) return { ok: false, error: 'That path cannot be played.' }
+    try {
+      const dirProbe = await this.r.run(
+        childArgs(c.conn, c.controlPath, `test -d ${quoteRemotePath(remotePath)}`)
+      )
+      if (dirProbe.code === 0) return { ok: false, error: 'That path is a directory, not a video file.' }
+      const dest = path.join(cacheDir, remoteMediaCacheName(sshHostKey(c.conn), remotePath, name))
+      const sizeProbe = await this.r.run(
+        childArgs(c.conn, c.controlPath, `wc -c < ${quoteRemotePath(remotePath)}`)
+      )
+      const remoteSize = sizeProbe.code === 0 ? parseInt(sizeProbe.stdout.trim(), 10) : NaN
+      const cachedSize = await fs
+        .stat(dest)
+        .then((s) => s.size)
+        .catch(() => -1)
+      if (Number.isFinite(remoteSize) && remoteSize >= 0 && cachedSize === remoteSize) {
+        return { ok: true, localPath: dest }
+      }
+      await fs.mkdir(cacheDir, { recursive: true })
+      // Same write-then-rename discipline as downloadFile: never leave a half-copied file
+      // under the final name — nt-media would happily serve a truncated video.
+      const partPath = `${dest}.part`
+      await fs.rm(partPath, { force: true }).catch(() => {})
+      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false))
+      if (res.code !== 0) {
+        await fs.rm(partPath, { force: true }).catch(() => {})
+        return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+      }
+      await fs.rename(partPath, dest)
+      void this.pruneMediaCache(cacheDir, path.basename(dest))
+      return { ok: true, localPath: dest }
+    } catch {
+      return { ok: false, error: 'The file could not be fetched from the host.' }
+    }
+  }
+
+  /** Best-effort, bounded cache: keep the newest MEDIA_CACHE_KEEP entries. An evicted entry that
+   *  is still playing in an open node stops being seekable — acceptable for a 20-deep cache of a
+   *  convenience copy; the node re-fetches on next open. */
+  private async pruneMediaCache(cacheDir: string, except: string): Promise<void> {
+    try {
+      const names = (await fs.readdir(cacheDir)).filter((n) => !n.endsWith('.part'))
+      const entries = await Promise.all(
+        names.map(async (n) => ({ name: n, mtimeMs: (await fs.stat(path.join(cacheDir, n))).mtimeMs }))
+      )
+      for (const n of mediaCachePruneList(entries, except)) {
+        await fs.rm(path.join(cacheDir, n), { force: true }).catch(() => {})
+      }
+    } catch {
+      // pruning is best-effort — a fat cache is a nuisance, not a fault
+    }
+  }
+
+  /**
    * Authoritatively end the given nodes' REMOTE tmux sessions over the project's live master.
    * Called on project delete BEFORE disconnect, so the remote `nt-<id>` sessions are killed
    * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
@@ -970,5 +1041,15 @@ export function initSshProject(
   ipcMain.handle(IPC.sshDownloadFile, (_e, projectId: string, remotePath: string, destDir?: string) =>
     mgr.downloadFile(projectId, remotePath, destDir || app.getPath('downloads'))
   )
+  // A VideoNode in an SSH project plays a HOST file: pull it into the local media cache over the
+  // ControlMaster, allowlist the cached copy, and hand back its nt-media:// URL.
+  ipcMain.handle(IPC.sshMediaAllow, async (_e, projectId: string, remotePath: string) => {
+    const r = await mgr.cacheMediaFile(
+      projectId,
+      remotePath,
+      path.join(app.getPath('userData'), 'remote-media-cache')
+    )
+    return r.ok ? { ok: true, url: allowMediaPath(r.localPath) } : r
+  })
   return mgr
 }
