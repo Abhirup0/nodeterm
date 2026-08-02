@@ -101,7 +101,7 @@ export function classifyPrompt(prompt: string): { passphrase: boolean; keyPath?:
  *  is capped near 104 bytes, which userData eats). OS file permissions are the primary access
  *  control: the dir is 0700 and the socket is chmod'd 0600 right after bind, so only this user
  *  can connect at all. The bearer token stays as a second factor. */
-export function askpassSockPath(): string {
+function askpassSockPath(): string {
   return path.join(os.homedir(), '.nodeterm', `askpass-${instanceSockId()}.sock`)
 }
 

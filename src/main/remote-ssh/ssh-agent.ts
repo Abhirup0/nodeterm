@@ -39,7 +39,7 @@ import path from 'path'
  *  cannot import a main-process module, so the socket path is published in process.env under this
  *  name while the agent is up. NOT `SSH_AUTH_SOCK` itself - that would leak into every LOCAL
  *  terminal the app spawns and quietly repoint the user's own shell at our agent. */
-export const APP_AGENT_ENV = 'NODETERM_APP_AGENT_SOCK'
+const APP_AGENT_ENV = 'NODETERM_APP_AGENT_SOCK'
 
 /** Absolute ssh-agent binary. A GUI Electron app does not inherit the shell PATH (the exact
  *  reason sshBin()/findSsh() exist), and a bare `spawn('ssh-agent')` miss is only a console.error
@@ -58,7 +58,7 @@ const KEY_LIFETIME = '12h'
  *  connect dialog tears down its throwaway `ssh-browse-*` master a few hundred ms BEFORE the real
  *  project connects, and killing the agent in that gap would charge the user a second passphrase
  *  prompt to add one server. */
-export const IDLE_GRACE_MS = 10_000
+const IDLE_GRACE_MS = 10_000
 
 interface AgentChild {
   pid?: number
