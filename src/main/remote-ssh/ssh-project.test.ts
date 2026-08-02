@@ -1128,9 +1128,9 @@ describe('SshProjectManager', () => {
   it('bounds the wait by WALL CLOCK, not attempt count, when each check is slow', async () => {
     // Regression: the loop counted attempts, but every attempt is a real `ssh -O check` process
     // whose cost is not fixed (up to run()'s 15s execFile timeout against a bound-but-unresponsive
-    // master). A 3000-attempt ceiling therefore meant up to ~12 hours of "connecting", not the 5
-    // minutes intended. Here each check takes 3s and the master is dead, so the 5s budget must end
-    // it in a couple of checks rather than tens.
+    // master). An attempt-count ceiling therefore has no fixed wall-clock meaning: the same count
+    // spans seconds or minutes depending on per-check cost. Here each check takes 3s and the
+    // master is dead, so the 5s budget must end it in a couple of checks rather than tens.
     vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
     vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
     vi.useFakeTimers()

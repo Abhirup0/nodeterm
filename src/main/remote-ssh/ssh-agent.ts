@@ -21,7 +21,8 @@
 //  - A credential that lives ONLY in an agent (1Password, Secretive, a smartcard) has no key file
 //    to unlock, so overriding the socket would lock those users out. Most are unaffected because
 //    `IdentityAgent` in ~/.ssh/config overrides `SSH_AUTH_SOCK` and is the documented setup for
-//    them; ssh-project.ts covers the rest with a one-shot retry on the ambient agent.
+//    them; ssh-project.ts surfaces an error hint naming IdentityAgent for the rest (a hint, not
+//    a retry - see connectOnce's failure tail for why retrying on the ambient agent is wrong).
 //
 // The agent runs in the FOREGROUND (`-D`) as a direct child, so `kill()` really ends it (the
 // default double-forks away and would survive us), and with a default identity lifetime (`-t`)

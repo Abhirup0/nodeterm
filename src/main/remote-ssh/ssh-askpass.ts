@@ -8,7 +8,7 @@
 // successful unlock loads the key into an ssh-agent and every later connect (reconnect, watchdog
 // respawn) authenticates through it without askpass ever being invoked (measured against a real
 // sshd: second connect on a fresh master, zero prompts, even with SSH_ASKPASS removed). The agent
-// supersedes the in-app passphrase cache that used to live in ssh-passphrase-cache.ts: it holds
+// supersedes the in-app passphrase cache an earlier revision of this change used: it holds
 // the decrypted key in a purpose-built process instead of a plaintext string in Electron main
 // memory. That agent is nodeterm's OWN (ssh-agent.ts), spawned and killed with the app, so the
 // unlock lasts one app run rather than until the user's next logout. When no agent is reachable
@@ -321,7 +321,7 @@ export class AskpassServer {
   /**
    * Did THIS master ever ask for a passphrase? A connect that failed without ever asking had no
    * key FILE in play at all, which is what separates "wrong/declined passphrase" from "the only
-   * credential lives in an agent we are not pointing at" (see ssh-project's ambient-agent retry).
+   * credential lives in an agent we are not pointing at" (see connectOnce's agent-only hint).
    */
   askedBy(masterPid?: number): boolean {
     if (masterPid === undefined) return false

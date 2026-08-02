@@ -117,10 +117,10 @@ const MASTER_WATCHDOG_MS = 45_000
  *  These are WALL-CLOCK budgets, not attempt counts, and that distinction is load bearing: each
  *  check is a real `ssh -O check` process whose cost is not fixed. Normally it fails instantly
  *  (the control socket is not bound until after auth, so the connect is an immediate ENOENT), but
- *  against a bound-yet-unresponsive master it blocks until `run`'s own 15s execFile timeout. A
- *  3000-attempt ceiling therefore meant anywhere from 5 minutes to 12 hours depending on how the
- *  checks happened to behave, with the user watching "connecting" the whole time. A deadline
- *  bounds the wait regardless of per-check cost. */
+ *  against a bound-yet-unresponsive master it blocks until `run`'s own 15s execFile timeout. An
+ *  attempt-count ceiling (upstream bounded this loop at 50 checks) therefore has no fixed
+ *  wall-clock meaning, and no count can both cover a passphrase prompt a human takes minutes to
+ *  answer and still fail fast. A deadline bounds the wait regardless of per-check cost. */
 const BASE_WAIT_MS = 5_000
 /** Budget while the master process is still alive: mid-handshake, or waiting on the askpass
  *  passphrase prompt a human can take minutes to answer. Mirrors the askpass script's own curl
@@ -664,7 +664,7 @@ export class SshProjectManager {
       !cancelled &&
       /permission denied/i.test(stderr ?? '') &&
       !(this.r.askpassAsked?.(master.pid?.()) ?? false)
-        ? ' nodeterm authenticates through its own ssh-agent, so a key held only in your system agent is not offered — set IdentityAgent in ~/.ssh/config, or give this server an identity file.'
+        ? ' nodeterm authenticates through its own ssh-agent, so a key held only in your system agent is not offered. Set IdentityAgent in ~/.ssh/config, or give this server an identity file.'
         : ''
     const message = cancelled
       ? 'SSH connection cancelled: this key needs its passphrase.'

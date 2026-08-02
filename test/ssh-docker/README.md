@@ -66,12 +66,15 @@ docker run --rm -it --network nt-ssh-net \
 Swap `passuser` for `keyuser` (unencrypted key) or drop `-i` and use `pwuser` (password
 `pwpass123`) to exercise the other two accounts.
 
-## Empirical SSH_ASKPASS probe (Q1-Q5)
+## What pins the measured behaviors
 
-`matrix.sh` drives a fake `SSH_ASKPASS` helper against this container to answer the specific
-OpenSSH behaviors `ssh-askpass.ts` / `control-master.ts` assume (retry prompts are byte-identical,
-`$PPID` is the master pid, an empty answer abandons the key, and so on) - run it and read the
-labeled output for the raw evidence.
+`matrix.sh` measures the connect/ask matrix (the before/after prompt counts and the no-agent
+degradation) with a fake `SSH_ASKPASS` helper. The finer OpenSSH behaviors the code depends on
+are pinned by `askpass-e2e.test.ts` against the real ssh binary: `$PPID` is the exact master pid
+(cancel attribution), an empty answer abandons the key, and the unlocked key lands only in the
+app's own agent, never the ambient one. One behavior is read from OpenSSH's source rather than
+measured here: a retry re-invokes askpass with a byte-identical prompt (readpass.c), which is why
+retries are detected by (key, pid) instead of prompt text.
 
 ## Layout
 
