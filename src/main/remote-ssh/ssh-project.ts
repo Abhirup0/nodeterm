@@ -1,11 +1,12 @@
 import { promises as fs } from 'fs'
 import path from 'path'
-import { spawn, execFile, execFileSync } from 'child_process'
+import { spawn, execFile } from 'child_process'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { DownloadResult, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
+import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
 import { allowMediaPath } from '../media-protocol'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
@@ -113,58 +114,34 @@ interface Conn {
 
 /**
  * Resolve an absolute ssh path; GUI apps don't inherit the shell PATH.
- * Mirrors findSsh() in pty-manager.ts: a cached login-shell `command -v ssh` lookup with
- * common-location fallbacks. (Do NOT use the brief's always-returns-first stub.)
+ * Mirrors findSsh() in pty-manager.ts: subprocess-free (the old sync login-shell probe + `-V`
+ * spawns blocked the main thread) — walks the cached login-shell PATH from exec-path.ts, then
+ * the common locations. A MISS is only memoized once the async PATH probe has settled.
+ * (Do NOT use the brief's always-returns-first stub.)
  */
 let cachedSsh: string | null | undefined
 function sshBin(): string {
   if (cachedSsh !== undefined) return cachedSsh ?? 'ssh'
-  try {
-    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v ssh'], {
-      encoding: 'utf-8'
-    }).trim()
-    cachedSsh = out || null
-  } catch {
-    cachedSsh = null
-  }
-  if (!cachedSsh) {
-    for (const p of ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh']) {
-      try {
-        execFileSync(p, ['-V'], { stdio: 'ignore' })
-        cachedSsh = p
-        break
-      } catch {
-        // keep trying
-      }
-    }
-  }
-  return cachedSsh ?? 'ssh'
+  const found = findExecutableSync('ssh', [
+    '/usr/bin/ssh',
+    '/usr/local/bin/ssh',
+    '/opt/homebrew/bin/ssh'
+  ])
+  if (found || shellPathNow() !== undefined) cachedSsh = found
+  return found ?? 'ssh'
 }
 
 /** Resolve an absolute `scp` path the same way `sshBin()` resolves `ssh` (GUI apps lack shell PATH). */
 let cachedScp: string | null | undefined
 function scpBin(): string {
   if (cachedScp !== undefined) return cachedScp ?? 'scp'
-  try {
-    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v scp'], {
-      encoding: 'utf-8'
-    }).trim()
-    cachedScp = out || null
-  } catch {
-    cachedScp = null
-  }
-  if (!cachedScp) {
-    for (const p of ['/usr/bin/scp', '/usr/local/bin/scp', '/opt/homebrew/bin/scp']) {
-      try {
-        execFileSync(p, ['-V'], { stdio: 'ignore' })
-        cachedScp = p
-        break
-      } catch {
-        // keep trying
-      }
-    }
-  }
-  return cachedScp ?? 'scp'
+  const found = findExecutableSync('scp', [
+    '/usr/bin/scp',
+    '/usr/local/bin/scp',
+    '/opt/homebrew/bin/scp'
+  ])
+  if (found || shellPathNow() !== undefined) cachedScp = found
+  return found ?? 'scp'
 }
 
 export class SshProjectManager {

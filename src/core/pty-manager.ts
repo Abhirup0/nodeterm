@@ -34,6 +34,7 @@ import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
+import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 import { presenceHub } from './presence/hub'
 
@@ -99,7 +100,12 @@ bind -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X 
 `
 }
 
-/** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). */
+/** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). Subprocess-free:
+ *  the old fallback here was a SYNC login-shell `command -v tmux` — sourcing the profile
+ *  (nvm/conda: 100-800ms) on the main thread, re-triggered every 3s by the tmux-missing
+ *  banner's install poll, freezing all windows and IPC each time. Now it walks the cached
+ *  login-shell PATH instead; before that async probe settles a nonstandard location can be
+ *  missed, which init()'s post-probe ensureTmux() re-run and tmuxStatus()'s re-probe cover. */
 function findTmux(): string | null {
   for (const c of ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux', '/bin/tmux']) {
     try {
@@ -108,15 +114,7 @@ function findTmux(): string | null {
       // ignore
     }
   }
-  try {
-    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v tmux'], {
-      encoding: 'utf-8'
-    }).trim()
-    if (out) return out
-  } catch {
-    // ignore
-  }
-  return null
+  return findInPathString('tmux', shellPathNow() ?? process.env.PATH)
 }
 
 /** Resolve an absolute ssh path (GUI apps don't inherit the shell PATH). */
@@ -156,73 +154,17 @@ function spawnHelperArchMismatch(): string | null {
 
 function findSsh(): string | null {
   if (cachedSsh !== undefined) return cachedSsh
-  try {
-    const out = execFileSync(process.env.SHELL || '/bin/bash', ['-lc', 'command -v ssh'], {
-      encoding: 'utf-8'
-    }).trim()
-    cachedSsh = out || null
-  } catch {
-    cachedSsh = null
-  }
-  // Common fallback locations if the login shell lookup failed.
-  if (!cachedSsh) {
-    for (const p of ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh']) {
-      try {
-        execFileSync(p, ['-V'], { stdio: 'ignore' })
-        cachedSsh = p
-        break
-      } catch {
-        // keep trying
-      }
-    }
-  }
-  return cachedSsh ?? null
+  // Subprocess-free (was a sync login-shell `command -v ssh` + an `ssh -V` spawn per fallback,
+  // all blocking the main thread). A MISS is only memoized once the async login-shell PATH
+  // probe has settled — before that a custom-location ssh would be cached away forever.
+  const found = findExecutableSync('ssh', ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh'])
+  if (found || shellPathNow() !== undefined) cachedSsh = found
+  return found
 }
 
-/**
- * Resolve the user's REAL login-shell PATH once, and cache it.
- *
- * A GUI app launched from Finder/Dock inherits only a minimal PATH
- * (`/usr/bin:/bin:/usr/sbin:/sbin`) — it never sees `/usr/local/bin`, Homebrew
- * (`/opt/homebrew/bin`), `~/.local/bin`, nvm, bun, etc. So terminals we spawn would report
- * `command not found: claude` even though the tool is installed. We run the user's login +
- * interactive shell (so BOTH profile files and `.zshrc`/`.bashrc` PATH additions are seen) and
- * read back `$PATH`, printed between sentinels to survive any dotfile noise. Bounded by a timeout;
- * on any failure (hang, dotfile error, non-POSIX shell, Windows) we fall back to the inherited PATH.
- */
-let cachedShellPath: string | null | undefined
-let shellPathPromise: Promise<string | null> | null = null
-function resolveShellPath(): Promise<string | null> {
-  if (cachedShellPath !== undefined) return Promise.resolve(cachedShellPath)
-  if (shellPathPromise) return shellPathPromise
-  if (os.platform() === 'win32') {
-    cachedShellPath = null
-    return Promise.resolve(null)
-  }
-  const shell = process.env.SHELL || '/bin/bash'
-  const START = '__NT_PATH_START__'
-  const END = '__NT_PATH_END__'
-  // `-ilc` = login + interactive (matches VS Code's shell-env resolution): sources the profile
-  // files AND the interactive rc (`.zshrc`/`.bashrc`) where users commonly add nvm/bun/etc.
-  // Dotfiles routinely take hundreds of ms (nvm/conda init) and can hang, so this MUST be
-  // async — a synchronous probe here froze every window and all IPC for up to the 5s timeout.
-  // Prewarmed from init(); create() awaits it, so terminals still always get the real PATH.
-  // stderr is captured separately by execFile, so prompt/compinit noise can't pollute stdout.
-  shellPathPromise = runAsync(shell, ['-ilc', `command printf '${START}%s${END}' "$PATH"`], {
-    encoding: 'utf-8',
-    timeout: 5000
-  })
-    .then(({ stdout }) => {
-      const m = stdout.match(new RegExp(`${START}([\\s\\S]*?)${END}`))
-      return m?.[1]?.trim() || null
-    })
-    .catch(() => null) // login shell hung / errored / isn't POSIX — inherited-PATH fallback
-    .then((resolved) => {
-      cachedShellPath = resolved
-      return resolved
-    })
-  return shellPathPromise
-}
+// resolveShellPath (the one async login-shell PATH probe) lives in exec-path.ts now, shared by
+// every module that used to spawn its own sync login shell. Prewarmed from init(); create()
+// awaits it, so terminals still always get the real PATH.
 
 /**
  * A UTF-8 locale for spawned terminals, or null to leave the inherited locale untouched.
@@ -242,22 +184,11 @@ function resolveLocaleLang(): string | null {
 /**
  * Resolve an executable against the user's real login-shell PATH (reusing the cached probe),
  * returning its absolute path or null. GUI apps inherit only a minimal PATH, so a bare
- * `execFile('claude', …)` would fail even when the tool is installed — this walks the resolved
- * PATH entries and returns the first `bin` that exists and is accessible.
+ * `execFile('claude', …)` would fail even when the tool is installed.
  */
 export async function findInLoginPath(bin: string): Promise<string | null> {
   const shellPath = (await resolveShellPath()) ?? process.env.PATH ?? ''
-  for (const dir of shellPath.split(path.delimiter)) {
-    if (!dir) continue
-    const candidate = path.join(dir, bin)
-    try {
-      await fs.promises.access(candidate, fs.constants.X_OK)
-      return candidate
-    } catch {
-      // not here — keep looking
-    }
-  }
-  return null
+  return findInPathString(bin, shellPath)
 }
 
 /** A UI client: an Electron webContents id or a ServerPlatform uiId. */
@@ -577,8 +508,10 @@ export class PtyManager {
   /** Must run after app is ready (needs userData path). */
   init(getSettings: () => Settings): void {
     this.getSettings = getSettings
-    // Prewarm the login-shell PATH probe now so the first terminal spawn doesn't wait on it.
-    void resolveShellPath()
+    // Prewarm the login-shell PATH probe now so the first terminal spawn doesn't wait on it —
+    // and re-run the tmux probe once it lands: findTmux no longer spawns a login shell of its
+    // own, so a tmux living only on the user's shell PATH is invisible until this resolves.
+    void resolveShellPath().then(() => this.ensureTmux())
     this.ensureTmux()
   }
 
@@ -1104,7 +1037,7 @@ export class PtyManager {
     // terminal — and any agent CLI it launches — resolves exactly what a normal terminal would.
     // Reads the cache filled by the async probe: create() awaits it, and the detached/host
     // paths spawn late enough that the init()-time prewarm has long since settled.
-    const shellPath = cachedShellPath ?? null
+    const shellPath = shellPathNow() ?? null
     if (shellPath) env.PATH = shellPath
 
     // Same GUI-launch gap for the locale: with no LANG/LC_* the shell's `locale` is "C" (non-UTF-8),

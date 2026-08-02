@@ -1,26 +1,37 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { KanbanCardMeta, KanbanLabel, KanbanPriority } from '@shared/types'
 import { useAgentStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
 import { LabelChips } from './LabelChips'
 import type { KanbanSession } from './KanbanView'
 
+const PRIO_COLOR: Record<KanbanPriority, string> = {
+  low: '#8e8e93',
+  medium: '#ffd60a',
+  high: '#ff9f0a',
+  urgent: '#ff453a'
+}
+
 interface SessionCardProps {
   session: KanbanSession
   meta?: KanbanCardMeta
   /** Resolved board labels on this card (LabelChips) — resolved by the board, passed in. */
   labels?: KanbanLabel[]
+  // Every callback carries the node id so the column can pass ONE stable function to all its
+  // cards — per-card arrow closures would give each card fresh props and defeat the memo.
   /** Single click opens the card modal directly (the expand/collapse step was dropped). */
-  onOpen: () => void
-  onDragStart: () => void
+  onOpen: (nodeId: string) => void
+  onDragStart: (nodeId: string) => void
   onDragEnd: () => void
   /** A dragged card was dropped on this card — before it (top half) or after it (bottom half). */
-  onDropAt: (side: 'before' | 'after') => void
+  onDropAt: (nodeId: string, side: 'before' | 'after') => void
   /** Right-click on the card — opens the actions menu at the cursor. */
-  onContext: (x: number, y: number) => void
+  onContext: (nodeId: string, x: number, y: number) => void
 }
 
-export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
+export const SessionCard = memo(function SessionCard({
+  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext
+}: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
   // that map's identity changes on every hook event of every node, so one agent's working→idle
@@ -47,12 +58,6 @@ export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, o
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
   const priority = meta?.priority
-  const PRIO_COLOR: Record<KanbanPriority, string> = {
-    low: '#8e8e93',
-    medium: '#ffd60a',
-    high: '#ff9f0a',
-    urgent: '#ff453a'
-  }
   const hasDetail = !!status?.sessionId || !!status?.session || stickyPreview.includes('\n')
   return (
     <div
@@ -63,7 +68,7 @@ export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, o
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
         setDragging(true)
-        onDragStart()
+        onDragStart(session.id)
       }}
       onDragEnd={() => {
         setDragging(false)
@@ -81,12 +86,12 @@ export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, o
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card
         const side = sideFor(e)
         setDropSide(null)
-        onDropAt(side)
+        onDropAt(session.id, side)
       }}
-      onClick={onOpen}
+      onClick={() => onOpen(session.id)}
       onContextMenu={(e) => {
         e.preventDefault()
-        onContext(e.clientX, e.clientY)
+        onContext(session.id, e.clientX, e.clientY)
       }}
       title="Open card"
     >
@@ -150,4 +155,4 @@ export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, o
       )}
     </div>
   )
-}
+})
