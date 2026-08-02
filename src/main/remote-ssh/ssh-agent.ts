@@ -65,12 +65,30 @@ interface AgentChild {
   on(event: string, cb: (...args: unknown[]) => void): void
 }
 
+/** NT_MULTI sandboxes carry their identity in NT_USER_DATA; every other instance derives it from
+ *  its real userData dir. The second half matters because a bare `npm run dev` (app name
+ *  "node-terminal") and the installed app ("nodeterm") have different userData dirs, so the
+ *  single-instance lock does not stop them running side by side - under one fixed key the second
+ *  instance's start() rmSync's the first one's LIVE socket and its quit unlinks it again, leaving
+ *  that app silently agentless (a prompt per reconnect) for the rest of its run. Guarded require:
+ *  under plain node (vitest) the electron module is only a binary-path string with no `app`. */
+function defaultDataDirKey(): string {
+  if (process.env.NT_USER_DATA) return process.env.NT_USER_DATA
+  try {
+    const { app } = require('electron') as { app?: { getPath(name: string): string } }
+    if (app) return app.getPath('userData')
+  } catch {
+    // plain node (tests): no electron runtime
+  }
+  return 'default'
+}
+
 /** The socket lives in the same short, space-free home dir as the ControlMaster sockets: a unix
  *  socket path is capped near 104 bytes, which userData (~/Library/Application Support/…) eats.
  *  Keyed by data dir like `controlPathFor` is keyed by project id, so a second instance
- *  (`NT_MULTI=1`, ./dev-test.sh) binds its own socket instead of unlinking the first one's and
- *  silently leaving that app agentless when it quits. */
-export function agentSockPath(dataDirKey = process.env.NT_USER_DATA ?? 'default'): string {
+ *  (`NT_MULTI=1`, ./dev-test.sh, a dev build next to the installed app) binds its own socket
+ *  instead of unlinking the first one's and silently leaving that app agentless when it quits. */
+export function agentSockPath(dataDirKey = defaultDataDirKey()): string {
   const id = createHash('sha256').update(dataDirKey).digest('hex').slice(0, 8)
   return path.join(os.homedir(), '.nodeterm', `agent-${id}.sock`)
 }
@@ -101,6 +119,15 @@ export class AppSshAgent {
   }
 
   private async spawnAndWait(): Promise<void> {
+    // Publish the socket for the CORE ssh spawners that cannot import this file: remote PTYs
+    // (pty-manager) and remote git (remote-git) shell out to ssh themselves, and `childArgs` uses
+    // `ControlMaster=auto`, so with the master down one of them authenticates for real. Left
+    // inheriting the ambient socket, a remote PTY (which HAS a tty) prompts for the passphrase in
+    // the pane and, for anyone with `AddKeysToAgent yes` in their own ~/.ssh/config, loads the key
+    // into their login agent permanently. Published BEFORE anything that can fail, for the same
+    // fail-closed reason as `env()`: a sync throw below must degrade to prompting, never to the
+    // ambient agent.
+    process.env[APP_AGENT_ENV] = this.sockPath
     try {
       mkdirSync(path.dirname(this.sockPath), { recursive: true, mode: 0o700 })
       // `ssh-agent -a` refuses to bind over an existing file, and a crash leaves one behind.
@@ -121,14 +148,6 @@ export class AppSshAgent {
       this.child = null
       return
     }
-    // Publish the socket for the CORE ssh spawners that cannot import this file: remote PTYs
-    // (pty-manager) and remote git (remote-git) shell out to ssh themselves, and `childArgs` uses
-    // `ControlMaster=auto`, so with the master down one of them authenticates for real. Left
-    // inheriting the ambient socket, a remote PTY (which HAS a tty) prompts for the passphrase in
-    // the pane and, for anyone with `AddKeysToAgent yes` in their own ~/.ssh/config, loads the key
-    // into their login agent permanently. Set even when the spawn failed, for the same fail-closed
-    // reason as `env()`.
-    process.env[APP_AGENT_ENV] = this.sockPath
     // The socket appears a few ms after exec. Bounded: past this we simply proceed, and ssh prompts.
     const deadline = Date.now() + 1_000
     while (this.child && !existsSync(this.sockPath) && Date.now() < deadline) {

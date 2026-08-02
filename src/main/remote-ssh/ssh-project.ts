@@ -269,7 +269,10 @@ export class SshProjectManager {
   /** One in-flight connect attempt per project, so concurrent callers share it (see connect).
    *  The conn the attempt was started with rides along so a joiner with an EDITED endpoint can
    *  be detected instead of silently receiving a connection to the old server. */
-  private inFlight = new Map<string, { conn: SshConnection; attempt: Promise<ConnectResult> }>()
+  private inFlight = new Map<
+    string,
+    { conn: SshConnection; attempt: Promise<ConnectResult>; ticket: symbol }
+  >()
   private watchdog?: ReturnType<typeof setInterval>
   constructor(private r: Runners) {
     this.remoteHooks = new RemoteHooks({ run: r.run })
@@ -347,17 +350,22 @@ export class SshProjectManager {
       const after = (): Promise<ConnectResult> => this.connect(projectId, conn, remoteCwd)
       return inFlight.attempt.then(after, after)
     }
-    const attempt = this.connectOnce(projectId, conn, remoteCwd).finally(() => {
+    // The ticket is this attempt's claim on the project id. `disconnect` cancels a
+    // pre-registration attempt by dropping the entry that holds it; connectOnce re-checks the
+    // ticket before registering its master (see there).
+    const ticket = Symbol('ssh-connect-attempt')
+    const attempt = this.connectOnce(projectId, conn, remoteCwd, ticket).finally(() => {
       if (this.inFlight.get(projectId)?.attempt === attempt) this.inFlight.delete(projectId)
     })
-    this.inFlight.set(projectId, { conn, attempt })
+    this.inFlight.set(projectId, { conn, attempt, ticket })
     return attempt
   }
 
   private async connectOnce(
     projectId: string,
     conn: SshConnection,
-    remoteCwd?: string
+    remoteCwd?: string,
+    ticket?: symbol
   ): Promise<ConnectResult> {
     const existing = this.conns.get(projectId)
     if (existing && !sameEndpoint(existing.conn, conn)) {
@@ -458,6 +466,17 @@ export class SshProjectManager {
       // stores the unlocked key nowhere and every connect this run prompts again. Never fatal.
       await this.r.ensureAgent?.().catch(() => {})
       master = this.r.spawnMaster(masterArgs(conn, controlPath), this.r.masterEnvFor?.(conn.identityFile) ?? {})
+    }
+    // A disconnect can land while this attempt is still in the probes above, BEFORE any conns
+    // entry exists to tear down - its only lever is dropping this attempt's inFlight ticket
+    // (see disconnect). Registering the master anyway would resurrect a connection nothing owns
+    // (a deleted project, a cancelled connect-dialog browse): revalidateAll faithfully keeps
+    // every conns entry alive for the rest of the run, and a stuck entry also pins `conns`
+    // non-empty so the app agent's idle forget never fires. Kill whatever was just spawned or
+    // adopted and fail the attempt instead.
+    if (ticket && this.inFlight.get(projectId)?.ticket !== ticket) {
+      master.kill()
+      throw new Error('SSH connect cancelled')
     }
     this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
     // Wait until the master answers `-O check`. The bound is the master PROCESS, not a fixed
@@ -1208,7 +1227,16 @@ export class SshProjectManager {
    */
   async disconnect(projectId: string, opts?: { keepInFlight?: boolean; final?: boolean }): Promise<void> {
     const c = this.conns.get(projectId)
-    if (!c) return
+    if (!c) {
+      // No registered master, but an attempt may still be in flight for this id, inside
+      // connectOnce's pre-registration probes. Dropping its coalescing entry is what cancels
+      // it: connectOnce re-checks its ticket before registering the master. Returning without
+      // this left the attempt to complete as a master for a deleted project (or a cancelled
+      // browse) that only quit could remove.
+      if (!opts?.keepInFlight) this.inFlight.delete(projectId)
+      if (opts?.final && this.conns.size === 0) this.r.onIdle?.()
+      return
+    }
     // Remove the pushed agent-status mirror while the master is still alive: a file left behind
     // would freeze the phone's badges at the last event (the heartbeat that lets the phone detect
     // staleness dies with this connection). Best-effort.

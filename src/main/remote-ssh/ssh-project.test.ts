@@ -1302,6 +1302,44 @@ describe('SshProjectManager', () => {
       expect(spawnMaster).toHaveBeenCalledTimes(1)
     })
 
+    it('a final disconnect DURING the pre-registration probes cancels the attempt instead of leaking a master', async () => {
+      // The window: connectOnce is still inside mkdir/stat/ensureAgent and has put nothing in
+      // `conns` yet, so a project delete (or a cancelled connect-dialog browse) has no master to
+      // tear down. Pre-fix, disconnect() returned untouched and the attempt completed as a master
+      // nothing owned: revalidateAll kept it alive until quit, and with `conns` pinned non-empty
+      // the idle key-forget never fired again.
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
+      vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+      let releaseAgent!: () => void
+      const gate = new Promise<void>((r) => {
+        releaseAgent = r
+      })
+      const master = { kill: vi.fn(), on: vi.fn() }
+      const onIdle = vi.fn()
+      const onStatus = vi.fn()
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => master),
+        run: vi.fn(async () => ({ code: 0, stdout: '' })),
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus,
+        onIdle,
+        ensureAgent: vi.fn(() => gate)
+      })
+      const attempt = mgr.connect('p1', { host: 'h', user: 'u' })
+      attempt.catch(() => {}) // settled and asserted below
+      await new Promise((r) => setImmediate(r)) // let the attempt park inside ensureAgent
+      await mgr.disconnect('p1', { final: true }) // the project is deleted mid-attempt
+      // Nothing is connected, and the delete is user-facing: this IS the manager going idle.
+      expect(onIdle).toHaveBeenCalledTimes(1)
+      releaseAgent()
+      await expect(attempt).rejects.toThrow(/cancelled/)
+      // The just-spawned master was killed, nothing registered, and 'connected' never fired.
+      expect(master.kill).toHaveBeenCalled()
+      expect(onStatus.mock.calls.map((c) => c[0].status)).not.toContain('connected')
+    })
+
     it('reports idle ONLY on a user-facing disconnect that leaves nothing connected', async () => {
       // `onIdle` is what forgets the unlocked key. Internal teardowns empty `conns` routinely (an
       // endpoint edit, a failed connect, the watchdog dropping a stale master), and treating those

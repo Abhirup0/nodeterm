@@ -69,12 +69,12 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
   const [mkdirErr, setMkdirErr] = useState('')
   // Stable id for the temporary browse master, generated once.
   const browseIdRef = useRef(`ssh-browse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
-  const connectedRef = useRef(false)
+  const connectBegunRef = useRef(false)
 
   // Tear down the temporary browse master (best-effort) once it's no longer needed.
   const disconnectBrowse = useCallback(() => {
-    if (connectedRef.current) {
-      connectedRef.current = false
+    if (connectBegunRef.current) {
+      connectBegunRef.current = false
       void window.nodeTerminal.sshProject.disconnect(browseIdRef.current)
     }
   }, [])
@@ -126,8 +126,13 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
       setError('')
       setStep('connecting')
       try {
+        // Mark BEFORE the await: from the moment connect() is issued there is a master (or an
+        // in-flight attempt) that close/unmount must tear down. Marking only on success meant
+        // cancelling during 'connecting' skipped disconnectBrowse entirely, and once the attempt
+        // later landed (a slow host, or parked on the passphrase prompt) the browse master
+        // outlived the dialog for the rest of the app run.
+        connectBegunRef.current = true
         await window.nodeTerminal.sshProject.connect(browseIdRef.current, srv)
-        connectedRef.current = true
         await list('~')
         setStep('browse')
       } catch (err) {
