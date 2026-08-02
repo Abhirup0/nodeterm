@@ -462,6 +462,14 @@ export class SshProjectManager {
       }
     } else {
       if (leftover) await fs.rm(controlPath, { force: true }).catch(() => {})
+      // Ticket check BEFORE the agent is consulted, not only before registration below: start()'s
+      // first act is cancelScheduledStop(), so a doomed attempt reaching ensureAgent AFTER its own
+      // disconnect already fired onIdle would silently disarm the idle key-forget it triggered,
+      // and nothing would ever re-arm it - the unlocked key then survives to the 12h backstop.
+      // No await sits between this check and start()'s cancel, so no disconnect can interleave.
+      if (ticket && this.inFlight.get(projectId)?.ticket !== ticket) {
+        throw new Error('SSH connect cancelled')
+      }
       // The app-private agent has to be listening BEFORE ssh authenticates, or `AddKeysToAgent`
       // stores the unlocked key nowhere and every connect this run prompts again. Never fatal.
       await this.r.ensureAgent?.().catch(() => {})

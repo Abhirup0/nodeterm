@@ -1,9 +1,10 @@
-import { promises as fs } from 'fs'
+import { promises as fs, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { AskpassServer } from './ssh-askpass'
+import { AppSshAgent } from './ssh-agent'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
 
 const conn = { host: 'h', user: 'u' }
@@ -1338,6 +1339,50 @@ describe('SshProjectManager', () => {
       // The just-spawned master was killed, nothing registered, and 'connected' never fired.
       expect(master.kill).toHaveBeenCalled()
       expect(onStatus.mock.calls.map((c) => c[0].status)).not.toContain('connected')
+    })
+
+    it('a cancel BEFORE ensureAgent cannot defuse the idle key-forget its own disconnect armed', async () => {
+      // The ordering the previous test does not cover, wired like production: disconnect lands
+      // while the attempt is still in fs.mkdir, BEFORE ensureAgent was ever invoked. onIdle arms
+      // the agent's scheduled stop; the doomed attempt then resumes, and start()'s first act is
+      // cancelScheduledStop() - without the pre-ensureAgent ticket check it would silently disarm
+      // the key-forget it triggered, and the unlocked key would survive to the 12h backstop.
+      const sockDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-agent-'))
+      const sockPath = path.join(sockDir, 'a.sock')
+      const agent = new AppSshAgent((args) => {
+        void args
+        writeFileSync(sockPath, '') // "bind" instantly so start() resolves without polling out
+        return { kill: vi.fn(), on: vi.fn() }
+      }, sockPath)
+      await agent.start() // the agent already holds a key from an earlier connection
+      expect(agent.isRunning()).toBe(true)
+
+      let releaseMkdir!: () => void
+      const mkdirGate = new Promise<void>((r) => {
+        releaseMkdir = r
+      })
+      vi.spyOn(fs, 'mkdir').mockImplementation(() => mkdirGate as Promise<undefined>)
+      vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run: vi.fn(async () => ({ code: 0, stdout: '' })),
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn(),
+        ensureAgent: () => agent.start(),
+        onIdle: () => agent.scheduleStop(50)
+      })
+      const attempt = mgr.connect('p1', { host: 'h', user: 'u' })
+      attempt.catch(() => {})
+      await new Promise((r) => setImmediate(r)) // park inside fs.mkdir, before ensureAgent
+      await mgr.disconnect('p1', { final: true }) // arms the 50ms key-forget
+      releaseMkdir()
+      await expect(attempt).rejects.toThrow(/cancelled/)
+      await new Promise((r) => setTimeout(r, 200))
+      expect(agent.isRunning()).toBe(false) // the scheduled stop survived the doomed attempt
+      agent.stop()
+      await fs.rm(sockDir, { recursive: true, force: true }).catch(() => {})
     })
 
     it('reports idle ONLY on a user-facing disconnect that leaves nothing connected', async () => {
