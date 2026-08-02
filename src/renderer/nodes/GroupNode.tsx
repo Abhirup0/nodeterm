@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
-import { useWorktrees, WORKTREE_STATUS_THROTTLE_MS } from '../state/worktrees'
+import { useWorktrees, WORKTREE_STATUS_POLL_MS } from '../state/worktrees'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind'
 
@@ -28,6 +28,8 @@ export function setWorktreeActionHandler(
 export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, setNodes } = useReactFlow()
   const [showColors, setShowColors] = useState(false)
+  // The frame element, observed for viewport visibility by the worktree-status tick below.
+  const frameRef = useRef<HTMLDivElement | null>(null)
 
   const wt = data.worktree
   // The store is the ONLY caller of the worktree/status git IPC; it throttles
@@ -54,24 +56,54 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // e.g. the user restored it, or a git read failed transiently), and the poke carries the group id
   // so the store can flip staleness live instead of only at project load.
   //
-  // `git status` is the full Source-Control read (~10 git subprocesses), so it is gated on page
-  // visibility: a hidden tab / minimized window polls nothing, and a `visibilitychange` back to
-  // visible pokes immediately so the chip is correct the moment it is seen again. (Gating here
-  // rather than hoisting a single store-owned timer keeps the poll tied to the node's own
-  // mount/unmount lifecycle — no registry to leak — and the store's throttle already coalesces
-  // several groups on the same path.)
+  // `git status` is the full Source-Control read (ELEVEN git subprocesses — see git-service's
+  // `status`), and it is per BOUND GROUP: nothing coalesces two worktrees, because they are
+  // different paths. So the tick is gated twice and runs slowly:
+  //  - **page visibility** — a hidden tab / minimized window polls nothing, and a
+  //    `visibilitychange` back to visible pokes immediately so the chip is correct the moment it
+  //    is seen again;
+  //  - **viewport** — React Flow keeps every node MOUNTED regardless of the camera (we do not set
+  //    `onlyRenderVisibleElements`), so without this a frame parked off-screen kept spawning git
+  //    for a chip nobody could see. An IntersectionObserver against the document viewport is the
+  //    same shape the WebGL budget uses; entering the viewport pokes at once.
+  // The cadence is WORKTREE_STATUS_POLL_MS, deliberately far slower than the store's throttle
+  // floor: the throttle exists so several pokes in one window cost one read, NOT as a target rate.
+  // A dirty-file counter on a frame is ambient information (Source Control's own auto-fetch is
+  // 180 s); an explicit poke — visibility, viewport entry, mount — still refreshes within the 4 s
+  // floor, so the chip stays responsive to the things the user actually does.
+  //
+  // (Gating here rather than hoisting a single store-owned timer keeps the poll tied to the node's
+  // own mount/unmount lifecycle — no registry to leak.)
   useEffect(() => {
     if (!wtPath) return
+    const el = frameRef.current
+    // Assume visible when there is no element to observe (jsdom, or a pre-paint mount): the old
+    // behaviour, i.e. never quieter than it needs to be at the cost of a poll.
+    let onScreen = true
     const poke = (): void => {
-      if (document.visibilityState === 'hidden') return
+      if (document.visibilityState === 'hidden' || !onScreen) return
       void useWorktrees.getState().refreshStatus(wtPath, id)
     }
     poke()
-    const t = setInterval(poke, WORKTREE_STATUS_THROTTLE_MS)
+    const t = setInterval(poke, WORKTREE_STATUS_POLL_MS)
     document.addEventListener('visibilitychange', poke)
+    const io =
+      el && typeof IntersectionObserver !== 'undefined'
+        ? new IntersectionObserver(
+            (entries) => {
+              const next = entries[entries.length - 1]?.isIntersecting ?? true
+              const entered = next && !onScreen
+              onScreen = next
+              if (entered) poke()
+            },
+            { rootMargin: '200px' }
+          )
+        : null
+    if (el && io) io.observe(el)
     return () => {
       clearInterval(t)
       document.removeEventListener('visibilitychange', poke)
+      io?.disconnect()
     }
   }, [wtPath, id])
 
@@ -98,6 +130,7 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   return (
     <div
+      ref={frameRef}
       className={frameClass}
       style={{
         borderColor: bound && stale ? undefined : data.color,

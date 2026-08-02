@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import type { KanbanColumn as KanbanColumnT } from '@shared/types'
-import type { AgentNodeStatus } from '../../state/agentStatus'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
 import type { KanbanCardMeta, KanbanLabel } from '@shared/types'
@@ -10,7 +9,6 @@ interface KanbanColumnProps {
   /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
   column: KanbanColumnT | null
   cards: KanbanSession[]
-  statusById: Record<string, AgentNodeStatus>
   onRename?: (title: string) => void
   onRecolor?: (color: string) => void
   onDelete?: () => void
@@ -35,7 +33,7 @@ interface KanbanColumnProps {
 }
 
 export function KanbanColumn({
-  column, cards, statusById, metaOf, labelsOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
+  column, cards, metaOf, labelsOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropAtCard
 }: KanbanColumnProps) {
@@ -135,7 +133,6 @@ export function KanbanColumn({
           <SessionCard
             key={s.id}
             session={s}
-            status={statusById[s.id]}
             meta={metaOf(s.id)}
             labels={labelsOf(s.id)}
             onOpen={() => onOpenCard(s.id)}

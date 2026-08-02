@@ -2,27 +2,9 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { ScenePhone } from './onboarding/scenes'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
-
-/** One-shot flag: the mobile-launch announcement has been shown and closed (or pre-empted by
- *  the setup tour, whose phone step makes the same pitch to fresh installs). localStorage, not
- *  settings — it is per-machine presentation state, like dismissed announcement banners. */
-const MOBILE_LAUNCH_SEEN_KEY = 'nodeterm.seenMobileLaunch'
-
-export function markMobileLaunchSeen(): void {
-  try {
-    localStorage.setItem(MOBILE_LAUNCH_SEEN_KEY, '1')
-  } catch {
-    // storage unavailable: worst case the card shows again next launch
-  }
-}
-
-export function shouldShowMobileLaunch(): boolean {
-  try {
-    return localStorage.getItem(MOBILE_LAUNCH_SEEN_KEY) == null
-  } catch {
-    return false
-  }
-}
+// The seen-flag helpers live in lib/mobileLaunch: Canvas reads them on every launch, and importing
+// them from here would defeat this component's (and the onboarding scenes') code splitting.
+export { markMobileLaunchSeen, shouldShowMobileLaunch } from '@renderer/lib/mobileLaunch'
 
 /**
  * One-time launch announcement for nodeterm mobile (App Store release): a centered card over

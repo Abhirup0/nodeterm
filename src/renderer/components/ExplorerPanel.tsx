@@ -11,7 +11,7 @@ import { ancestorDirs, createTargetDir, newEntryPath, parentDir } from '../lib/e
 import { canRevealLocally, downloadRoute, triggerBrowserDownload } from '../lib/download'
 import { isBrowserRuntime } from '../bridge/runtime'
 
-interface ExplorerPanelProps {
+export interface ExplorerPanelProps {
   onClose: () => void
   /** Open a file as an editor node. `sshFs` is true for SSH projects (the path is remote, read/
    *  written over the project's ControlMaster fs); false/omitted for local + relay projects. */

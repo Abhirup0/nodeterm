@@ -6,7 +6,7 @@ import { useSettings } from '../state/settings'
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 import { keyLabel } from '@shared/platform-utils'
 
-interface ShortcutsPanelProps {
+export interface ShortcutsPanelProps {
   onClose: () => void
 }
 

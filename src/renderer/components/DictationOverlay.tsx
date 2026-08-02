@@ -24,7 +24,7 @@ export interface DictationTarget {
   title: string
 }
 
-interface DictationOverlayProps {
+export interface DictationOverlayProps {
   target: DictationTarget | null
   /** Bumped by Canvas's toggleDictation on a second shortcut/Dock-mic press while the overlay is
    *  already open. A no-op prop change is the signal (any new value ≠ close-then-reopen — the

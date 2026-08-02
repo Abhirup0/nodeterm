@@ -1,13 +1,12 @@
 import { useState } from 'react'
 import type { KanbanCardMeta, KanbanLabel, KanbanPriority } from '@shared/types'
-import type { AgentNodeStatus } from '../../state/agentStatus'
+import { useAgentStatus } from '../../state/agentStatus'
 import { ContextMeter } from '../ContextMeter'
 import { LabelChips } from './LabelChips'
 import type { KanbanSession } from './KanbanView'
 
 interface SessionCardProps {
   session: KanbanSession
-  status?: AgentNodeStatus
   meta?: KanbanCardMeta
   /** Resolved board labels on this card (LabelChips) — resolved by the board, passed in. */
   labels?: KanbanLabel[]
@@ -21,7 +20,14 @@ interface SessionCardProps {
   onContext: (x: number, y: number) => void
 }
 
-export function SessionCard({ session, status, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
+export function SessionCard({ session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext }: SessionCardProps) {
+  // THIS card's agent status, subscribed per card rather than threaded down from the board.
+  // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
+  // that map's identity changes on every hook event of every node, so one agent's working→idle
+  // flip re-rendered the whole board — every column, every card. The same rule Canvas follows
+  // (see its loopSig comment) and StatusAwareMiniMap demonstrates: subscribe where the value is
+  // read, so the re-render is confined to the one thing that changed.
+  const status = useAgentStatus((s) => s.byId[session.id])
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).

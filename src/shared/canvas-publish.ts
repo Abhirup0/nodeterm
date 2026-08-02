@@ -29,15 +29,30 @@ import type { CanvasMutation, CanvasNodeState } from './types'
 /** ~20 Hz while dragging — the same budget the presence cursor stream uses. */
 export const PUBLISH_INTERVAL_MS = 50
 
+/**
+ * A snapshot, or a thunk that produces one.
+ *
+ * The thunk is what makes the solo gate below actually free. Serializing the canvas is the
+ * expensive half of publishing (`flowToNodeStates` + `stableStringify` per node), and the caller
+ * runs inside a React effect keyed on the nodes array — i.e. once per DRAG FRAME. Passing an array
+ * meant that cost was paid before the publisher could decide it had nothing to do with it; passing
+ * a thunk lets it be paid only when a snapshot is actually going to be diffed or sent.
+ *
+ * A thunk MUST be pure and must close over the state as of the call (React Flow hands us a fresh
+ * immutable array per change, so `() => serialize(nodes)` satisfies this): the publisher may
+ * resolve it later — at the trailing edge of a throttle window, or when the first peer arrives.
+ */
+export type CanvasSnapshot = CanvasNodeState[] | (() => CanvasNodeState[])
+
 export interface CanvasPublisher {
   /** Diff `next` against the last published snapshot and send the mutations.
    *  `throttle` (drag frames) coalesces to at most one send per PUBLISH_INTERVAL_MS.
    *  With no peer attached (`shouldPublish` false) this DEGRADES TO adopt(): the snapshot becomes
    *  the baseline and nothing is diffed or sent — a solo user pays nothing for team sync. */
-  publish(next: CanvasNodeState[], opts?: { throttle?: boolean }): void
+  publish(next: CanvasSnapshot, opts?: { throttle?: boolean }): void
   /** Take `next` as the new baseline WITHOUT sending — the loop guard (a peer's mutation, or a
    *  programmatic project load). The next diff against it is empty. */
-  adopt(next: CanvasNodeState[]): void
+  adopt(next: CanvasSnapshot): void
   /** Send any coalesced drag frame immediately (drag settle / unmount). */
   flush(): void
   dispose(): void
@@ -92,6 +107,11 @@ function rebaseRefused(
  *   user must not pay for a feature they cannot use. The baseline still tracks the canvas, so the
  *   instant a peer joins the very next edit diffs correctly against what is actually on screen —
  *   there is no resync step and no missed mutation. Default: always publish.
+ *
+ *   With a thunk snapshot the gate covers the SERIALIZATION too, which is where the cost actually
+ *   was: a solo baseline is kept UNRESOLVED (just the thunk), and the first publish that has a peer
+ *   resolves it to diff against. Same baseline, same mutations — the work is merely deferred to the
+ *   moment something reads it, which for a solo user is never.
  */
 export function createCanvasPublisher(
   send: (m: CanvasMutation) => void | boolean,
@@ -99,21 +119,48 @@ export function createCanvasPublisher(
 ): CanvasPublisher {
   const intervalMs = opts.intervalMs ?? PUBLISH_INTERVAL_MS
   const shouldPublish = opts.shouldPublish ?? (() => true)
+  /** The baseline, held EITHER resolved (`last`) or unresolved (`lastLazy`) — never both. */
   let last: CanvasNodeState[] = []
-  let pending: CanvasNodeState[] | null = null
+  let lastLazy: (() => CanvasNodeState[]) | null = null
+  let pending: CanvasSnapshot | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
 
-  const emit = (next: CanvasNodeState[]): void => {
+  const resolve = (s: CanvasSnapshot): CanvasNodeState[] => (typeof s === 'function' ? s() : s)
+
+  /** The baseline to diff against, resolving a deferred one exactly once. */
+  const baseline = (): CanvasNodeState[] => {
+    if (lastLazy) {
+      last = lastLazy()
+      lastLazy = null
+    }
+    return last
+  }
+
+  /** Take a snapshot as the baseline. A thunk is stored unresolved — nothing has asked for it yet
+   *  and, for a solo user, nothing ever will. */
+  const setBaseline = (s: CanvasSnapshot): void => {
+    if (typeof s === 'function') {
+      lastLazy = s
+    } else {
+      last = s
+      lastLazy = null
+    }
+  }
+
+  const emit = (snapshot: CanvasSnapshot): void => {
     if (!shouldPublish()) {
-      last = next // solo: adopt as baseline, diff nothing, send nothing
+      setBaseline(snapshot) // solo: adopt as baseline, diff nothing, send nothing
       return
     }
-    const mutations = diffToMutations(last, next)
+    const prev = baseline()
+    const next = resolve(snapshot)
+    const mutations = diffToMutations(prev, next)
     const refused = new Set<string>()
     for (const m of mutations) {
       if (send(opts.src ? { ...m, src: opts.src } : m) === false) refused.add(mutationNodeId(m))
     }
-    last = refused.size ? rebaseRefused(last, next, refused) : next
+    last = refused.size ? rebaseRefused(prev, next, refused) : next
+    lastLazy = null
   }
 
   const onTimer = (): void => {
@@ -131,7 +178,7 @@ export function createCanvasPublisher(
         if (timer) clearTimeout(timer)
         timer = null
         pending = null
-        last = next
+        setBaseline(next)
         return
       }
       if (o?.throttle) {
@@ -152,7 +199,7 @@ export function createCanvasPublisher(
       emit(next)
     },
     adopt(next) {
-      last = next
+      setBaseline(next)
       pending = null
     },
     flush() {

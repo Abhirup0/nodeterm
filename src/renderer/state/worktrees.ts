@@ -20,8 +20,22 @@ export interface WorktreeStatus {
   hasOrigin: boolean
 }
 
-/** The chip re-renders constantly; without this, every render would spawn a `git status`. */
+/**
+ * Coalescing FLOOR, not a target rate: the chip re-renders constantly and several groups can poke
+ * within one window, so this is what stops every render (and every poke) from spawning a
+ * `git status`. An explicit poke — a group frame mounting, the tab becoming visible again, a frame
+ * scrolling into view — still gets a fresh read as soon as the floor allows.
+ */
 export const WORKTREE_STATUS_THROTTLE_MS = 4000
+
+/**
+ * How often a mounted, VISIBLE, on-screen group frame re-reads its worktree status in the
+ * background. `git.status()` is eleven git subprocesses and runs per bound group, so a tick at the
+ * throttle floor meant a canvas with three worktrees spawned ~8 processes a second forever, for a
+ * dirty-file counter nobody was reading. Ambient information gets an ambient cadence (Source
+ * Control's own auto-fetch is 180 s); everything the user actually does still pokes immediately.
+ */
+export const WORKTREE_STATUS_POLL_MS = 20_000
 
 /**
  * How many CONSECUTIVE "this is not a repo" reads it takes to declare a bound worktree missing.
