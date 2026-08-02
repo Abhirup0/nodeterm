@@ -7,10 +7,14 @@ export default defineConfig({
       'src/core/**/*.test.ts',
       'src/shared/**/*.test.ts',
       'src/main/**/*.test.ts',
+      'src/preload/**/*.test.ts',
       'src/renderer/**/*.test.ts',
       'src/server/**/*.test.ts',
       'test/server/**/*.test.ts',
-      'test/remote/**/*.test.ts'
+      'test/remote/**/*.test.ts',
+      // Opt-in end-to-end tests against a real sshd in Docker. They self-skip unless
+      // NODETERM_SSH_DOCKER is set, so a machine without Docker still runs a green suite.
+      'test/ssh-docker/**/*.test.ts'
     ],
     environment: 'node'
   },
