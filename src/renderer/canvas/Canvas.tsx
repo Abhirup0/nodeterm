@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { playSfx, primeSfx } from '@renderer/lib/sfx'
 import {
   addEdge,
@@ -895,7 +896,11 @@ export function Canvas() {
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
   // Exclude UNAVAILABLE closed projects (folder missing): reopenProject would activate them
   // unconditionally → a silent-discard empty canvas (the same case the palette guard blocks).
-  const closedProjects = useProjects((s) => s.projects.filter((p) => p.closed && !p.unavailable))
+  // useShallow: the filter derives a NEW array each call — without it, every useProjects write
+  // (each kanban board commit, each debounced canvas save) re-rendered the entire Canvas.
+  const closedProjects = useProjects(
+    useShallow((s) => s.projects.filter((p) => p.closed && !p.unavailable))
+  )
   // The active project's SSH server (if it's an SSH project) — drives the connection banner.
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server
@@ -5115,6 +5120,12 @@ export function Canvas() {
     [focusNodeById]
   )
 
+  // Stable identity for the memoized KanbanView — an inline arrow here would re-render the
+  // whole board on every Canvas render.
+  const setKanbanModalNode = useCallback((id: string | null) => {
+    kanbanModalNodeRef.current = id
+  }, [])
+
   const onPaletteQuery = useCallback((q: string) => {
     transcriptQueryRef.current = q
     // Reset any pending search so rapid keystrokes only fire one IPC call.
@@ -6195,6 +6206,13 @@ export function Canvas() {
     [activeProjectId, setNodes, markDirty, writeDisk]
   )
 
+  // Stable identity for the memoized KanbanView — an inline arrow would re-render the whole
+  // board on every Canvas render.
+  const renameNodeFromKanban = useCallback(
+    (nodeId: string, title: string) => renameSession(activeProjectId, nodeId, title),
+    [renameSession, activeProjectId]
+  )
+
   // Write-through a sticky node's body text from the kanban card modal (the canvas sticky
   // reads the same data.text path).
   const editStickyText = useCallback(
@@ -7256,10 +7274,10 @@ export function Canvas() {
           onChange={onKanbanChange}
           onOpenNode={openNodeFromKanban}
           onCreateNode={createNodeInColumn}
-          onRenameNode={(nodeId, title) => renameSession(activeProjectId, nodeId, title)}
+          onRenameNode={renameNodeFromKanban}
           onEditSticky={editStickyText}
           onDeleteNode={deleteNodeFromKanban}
-          onModalNodeChange={(id) => (kanbanModalNodeRef.current = id)}
+          onModalNodeChange={setKanbanModalNode}
           onBrowserNav={browserNavFromKanban}
         />
       )}

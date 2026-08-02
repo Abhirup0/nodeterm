@@ -3,9 +3,10 @@
 // inject into the remote shell). runRemoteGit returns the SAME { ok, out, err } shape as the local
 // git() helper so callers are transport-agnostic. A module-level resolver registry lets both
 // git-service.ts and commit-message.ts route the same way without threading a ref through every op.
-import { execFile, execFileSync } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { childArgs } from './control-master'
+import { findExecutableSync, shellPathNow } from '../exec-path'
 import { posixQuote, quoteRemotePath, type SshConnection } from '../../shared/ssh'
 
 const run = promisify(execFile)
@@ -23,32 +24,17 @@ export function remoteGitArgs(conn: SshConnection, controlPath: string, cwd: str
 let sshPath: string | null | undefined
 function findSsh(): string | null {
   if (sshPath !== undefined) return sshPath
-  // GUI apps don't inherit the shell PATH, so probe a login shell first (mirrors
-  // commit-message.ts). Kept self-contained — importing ssh-project.ts would pull in electron and
-  // break this module's pure vitest tests.
-  try {
-    const out = execFileSync('/usr/bin/env', ['sh', '-lc', 'command -v ssh'], {
-      encoding: 'utf-8'
-    }).trim()
-    if (out) {
-      execFileSync(out, ['-V'], { stdio: 'ignore' })
-      sshPath = out
-      return out
-    }
-  } catch {
-    /* fall back to the hardcoded paths */
-  }
-  for (const p of ['/usr/bin/ssh', '/usr/local/bin/ssh', '/opt/homebrew/bin/ssh']) {
-    try {
-      execFileSync(p, ['-V'], { stdio: 'ignore' })
-      sshPath = p
-      return p
-    } catch {
-      /* try next */
-    }
-  }
-  sshPath = null
-  return null
+  // GUI apps don't inherit the shell PATH. Subprocess-free (was a sync login-shell probe plus
+  // an `ssh -V` spawn per candidate, blocking the main thread): walk the cached login-shell
+  // PATH from exec-path.ts, then the hardcoded locations. A MISS is only memoized once the
+  // async PATH probe has settled, so a custom-location ssh isn't cached away forever.
+  const found = findExecutableSync('ssh', [
+    '/usr/bin/ssh',
+    '/usr/local/bin/ssh',
+    '/opt/homebrew/bin/ssh'
+  ])
+  if (found || shellPathNow() !== undefined) sshPath = found
+  return found
 }
 
 /** Run a git command on the remote over the master. Returns the same shape as the local git() helper. */

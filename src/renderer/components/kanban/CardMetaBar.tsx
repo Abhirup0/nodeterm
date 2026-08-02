@@ -3,7 +3,8 @@ import type { BoardLogAuthor, KanbanPriority, ProjectKanban } from '@shared/type
 import { cardMeta, labelsForCard, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
 import { LabelChips } from './LabelChips'
 import { LabelPicker } from './LabelPicker'
-import { loadIdentity, selectOthers, usePresence } from '../../state/presence'
+import { useShallow } from 'zustand/react/shallow'
+import { loadIdentity, selectFaces, usePresence } from '../../state/presence'
 import { useBoardLog } from '../../state/boardLog'
 import { useProjects } from '../../state/projects'
 
@@ -39,7 +40,10 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
   const labels = labelsForCard(board, nodeId)
   const projectId = useProjects((s) => s.activeProjectId)
   const logEntries = useBoardLog((s) => s.entriesFor(projectId))
-  const peers = usePresence(selectOthers)
+  // selectFaces + useShallow, NOT selectOthers: the pool only needs name+color, and applyDiff
+  // replaces the whole PeerState on every cursor patch (~20/s per peer) — subscribing to
+  // PeerState re-rendered the open card modal at cursor rate. Faces are cursor-immune.
+  const peers = usePresence(useShallow(selectFaces))
 
   const pool = useMemo(() => {
     const seen = new Map<string, BoardLogAuthor>()

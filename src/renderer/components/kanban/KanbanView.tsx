@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { ProjectKanban } from '@shared/types'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useViewMode } from '../../state/viewMode'
@@ -72,10 +72,17 @@ export interface KanbanViewProps {
 
 type Drag = { kind: 'card' | 'column'; id: string } | null
 
+/** Shared empty results — stable identities so memoized cards/columns see "no change". */
+const NO_LABELS: KanbanLabel[] = []
+const NO_CARDS: KanbanSession[] = []
+
 /** Full-page session board OVER the canvas. The canvas stays mounted underneath (its
  *  agent-status listeners must keep running, and display:none would 0×0-resize every
- *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more. */
-export function KanbanView({
+ *  terminal into a tmux SIGWINCH) — this is an opaque overlay, nothing more.
+ *  memo: Canvas re-renders on plenty the board doesn't care about (agent signatures, camera
+ *  banners…); with every prop stable (Canvas useCallbacks + memoized board/sessions) those
+ *  renders stop at this boundary. */
+export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
   onModalNodeChange, onBrowserNav
 }: KanbanViewProps) {
@@ -89,10 +96,11 @@ export function KanbanView({
   const [labelFilter, setLabelFilter] = useState<string[]>([])
   const [filterOpen, setFilterOpen] = useState(false)
   // Drop ids no longer in the palette so a deleted label can't keep the board filtered to nothing.
-  const paletteLabels = boardLabels(board)
-  const activeFilter = labelFilter.filter((id) => paletteLabels.some((l) => l.id === id))
-  const visible = (ids: string[]): string[] =>
-    activeFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeFilter)) : ids
+  const paletteLabels = useMemo(() => boardLabels(board), [board])
+  const activeFilter = useMemo(
+    () => labelFilter.filter((id) => paletteLabels.some((l) => l.id === id)),
+    [labelFilter, paletteLabels]
+  )
   const toggleFilter = (id: string): void =>
     setLabelFilter((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]))
   // Opening a card = you're looking at that session: clear its unread badge, and report the open
@@ -115,30 +123,53 @@ export function KanbanView({
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
   const customAgents = useSettings((s) => s.settings.customAgents)
   // "+ New" menu entries: the builtin agents, the user's custom agents, then terminal + sticky
-  // (same universe as the dock's add menu, minus canvas-only kinds).
-  const createOptions: KanbanCreateOption[] = [
-    ...BUILTIN_AGENT_IDS.map((id) => ({
-      key: id,
-      label: AGENT_CONFIG[id].label,
-      choice: { kind: 'agent', agentId: id } as KanbanCreateChoice,
-      icon: <IconAgent />
-    })),
-    ...customAgents.map((a) => ({
-      key: a.id,
-      label: a.label,
-      choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice,
-      icon: <IconAgent />
-    })),
-    { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' }, icon: <IconTerminal /> },
-    { key: 'browser', label: 'Browser', choice: { kind: 'browser' }, icon: <IconWeb /> },
-    { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' }, icon: <IconNote /> }
-  ]
-  const byId = new Map(sessions.map((s) => [s.id, s]))
+  // (same universe as the dock's add menu, minus canvas-only kinds). Memoized — a fresh array
+  // (with fresh icon elements) per render would re-render every memoized column.
+  const createOptions: KanbanCreateOption[] = useMemo(
+    () => [
+      ...BUILTIN_AGENT_IDS.map((id) => ({
+        key: id,
+        label: AGENT_CONFIG[id].label,
+        choice: { kind: 'agent', agentId: id } as KanbanCreateChoice,
+        icon: <IconAgent />
+      })),
+      ...customAgents.map((a) => ({
+        key: a.id,
+        label: a.label,
+        choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice,
+        icon: <IconAgent />
+      })),
+      { key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' }, icon: <IconTerminal /> },
+      { key: 'browser', label: 'Browser', choice: { kind: 'browser' }, icon: <IconWeb /> },
+      { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' }, icon: <IconNote /> }
+    ],
+    [customAgents]
+  )
+  const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
+
+  // Stable per-card label arrays: labelsForCard allocates a fresh array per call, and that
+  // identity churn alone would defeat SessionCard's memo. Recomputed only on a board change.
+  const labelsByCard = useMemo(() => {
+    const m = new Map<string, KanbanLabel[]>()
+    if (Array.isArray(board.meta)) {
+      for (const entry of board.meta) {
+        if (!entry?.nodeId) continue
+        const l = labelsForCard(board, entry.nodeId)
+        if (l.length) m.set(entry.nodeId, l)
+      }
+    }
+    return m
+  }, [board])
+  const labelsOf = useCallback((id: string) => labelsByCard.get(id) ?? NO_LABELS, [labelsByCard])
+  const metaOf = useCallback((id: string) => cardMeta(board, id), [board])
 
   // Prune dead nodes' assignments on every persisted change, so they never accumulate
   // in the shared file.
-  const commit = (next: ProjectKanban) =>
-    onChange(pruneAssignments(next, sessions.map((s) => s.id)))
+  const commit = useCallback(
+    (next: ProjectKanban) => onChange(pruneAssignments(next, sessionIds)),
+    [onChange, sessionIds]
+  )
 
   const takeDrag = (): Drag => {
     const d = dragRef.current
@@ -147,33 +178,80 @@ export function KanbanView({
   }
 
   // columnId null = the virtual Ungrouped column.
-  const dropOnColumn = (columnId: string | null) => {
-    const drag = takeDrag()
-    if (!drag) return
-    if (drag.kind === 'card') commit(assignNode(board, drag.id, columnId, null))
-    else if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
-    // a column dropped on Ungrouped is a no-op — Ungrouped is always first
-  }
+  const dropOnColumn = useCallback(
+    (columnId: string | null) => {
+      const drag = takeDrag()
+      if (!drag) return
+      if (drag.kind === 'card') commit(assignNode(board, drag.id, columnId, null))
+      else if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+      // a column dropped on Ungrouped is a no-op — Ungrouped is always first
+    },
+    [board, commit]
+  )
 
-  const dropAtCard = (columnId: string | null, targetNodeId: string, side: 'before' | 'after') => {
-    const drag = takeDrag()
-    if (!drag) return
-    if (drag.kind === 'column') {
-      if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
-      return
-    }
-    // "after this card" = "before the NEXT card in the column" (null = end of column).
-    const ids = columnId === null ? unassigned(board, sessions.map((s) => s.id)) : assignedTo(board, columnId)
-    let beforeId: string | null = targetNodeId
-    if (side === 'after') {
-      const i = ids.indexOf(targetNodeId)
-      beforeId = i >= 0 && i + 1 < ids.length ? ids[i + 1] : null
-    }
-    commit(assignNode(board, drag.id, columnId, beforeId))
-  }
+  const dropAtCard = useCallback(
+    (columnId: string | null, targetNodeId: string, side: 'before' | 'after') => {
+      const drag = takeDrag()
+      if (!drag) return
+      if (drag.kind === 'column') {
+        if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
+        return
+      }
+      // "after this card" = "before the NEXT card in the column" (null = end of column).
+      const ids = columnId === null ? unassigned(board, sessionIds) : assignedTo(board, columnId)
+      let beforeId: string | null = targetNodeId
+      if (side === 'after') {
+        const i = ids.indexOf(targetNodeId)
+        beforeId = i >= 0 && i + 1 < ids.length ? ids[i + 1] : null
+      }
+      commit(assignNode(board, drag.id, columnId, beforeId))
+    },
+    [board, commit, sessionIds]
+  )
 
-  const sessionsFor = (ids: string[]) =>
-    ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []))
+  // Per-column card lists in one pass, so a board render doesn't re-derive (and re-allocate)
+  // them per column — and their identities hold across renders that change neither the board,
+  // the sessions, nor the filter, which is what lets the memoized columns skip.
+  const columnCards = useMemo(() => {
+    const vis = (ids: string[]): string[] =>
+      activeFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeFilter)) : ids
+    const toCards = (ids: string[]): KanbanSession[] => {
+      const cards = ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []))
+      return cards.length ? cards : NO_CARDS
+    }
+    return {
+      ungrouped: toCards(vis(unassigned(board, sessionIds))),
+      byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
+    }
+  }, [board, byId, sessionIds, activeFilter])
+
+  // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
+  // across renders (the column binds its own id; cards bind theirs).
+  const handleCardDragStart = useCallback((id: string) => {
+    dragRef.current = { kind: 'card', id }
+  }, [])
+  const handleColumnDragStart = useCallback((columnId: string) => {
+    dragRef.current = { kind: 'column', id: columnId }
+  }, [])
+  const handleDragEnd = useCallback(() => {
+    dragRef.current = null
+  }, [])
+  const handleCardContext = useCallback(
+    (id: string, x: number, y: number) => setCardMenu({ nodeId: id, x, y }),
+    []
+  )
+  const handleRenameColumn = useCallback(
+    (columnId: string, t: string) => commit(renameColumn(board, columnId, t)),
+    [board, commit]
+  )
+  const handleRecolorColumn = useCallback(
+    (columnId: string, c: string) => commit(recolorColumn(board, columnId, c)),
+    [board, commit]
+  )
+  const handleDeleteColumn = useCallback(
+    (columnId: string) => commit(deleteColumn(board, columnId)),
+    [board, commit]
+  )
 
   // Right-click menu for a card: open on canvas, move to another column, delete.
   const cardMenuItems = (nodeId: string): MenuItem[] => {
@@ -246,37 +324,37 @@ export function KanbanView({
       <div className="kanban-board">
         <KanbanColumn
           column={null}
-          cards={sessionsFor(visible(unassigned(board, sessions.map((s) => s.id))))}
-          metaOf={(id) => cardMeta(board, id)}
-          labelsOf={(id) => labelsForCard(board, id)}
+          cards={columnCards.ungrouped}
+          metaOf={metaOf}
+          labelsOf={labelsOf}
           onOpenCard={setModalNodeId}
           createOptions={createOptions}
-          onCreate={(choice) => onCreateNode(choice, null)}
-          onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
-          onDragEnd={() => (dragRef.current = null)}
-          onDropOnColumn={() => dropOnColumn(null)}
-          onDropAtCard={(id, side) => dropAtCard(null, id, side)}
-          onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
+          onCreate={onCreateNode}
+          onCardDragStart={handleCardDragStart}
+          onDragEnd={handleDragEnd}
+          onDropOnColumn={dropOnColumn}
+          onDropAtCard={dropAtCard}
+          onCardContext={handleCardContext}
         />
         {board.columns.map((col) => (
           <KanbanColumn
             key={col.id}
             column={col}
-            cards={sessionsFor(visible(assignedTo(board, col.id)))}
-              metaOf={(id) => cardMeta(board, id)}
-            labelsOf={(id) => labelsForCard(board, id)}
-            onRename={(t) => commit(renameColumn(board, col.id, t))}
-            onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
-            onDelete={() => commit(deleteColumn(board, col.id))}
+            cards={columnCards.byColumn.get(col.id) ?? NO_CARDS}
+            metaOf={metaOf}
+            labelsOf={labelsOf}
+            onRename={handleRenameColumn}
+            onRecolor={handleRecolorColumn}
+            onDelete={handleDeleteColumn}
             onOpenCard={setModalNodeId}
             createOptions={createOptions}
-            onCreate={(choice) => onCreateNode(choice, col.id)}
-            onCardDragStart={(id) => (dragRef.current = { kind: 'card', id })}
-            onColumnDragStart={() => (dragRef.current = { kind: 'column', id: col.id })}
-            onDragEnd={() => (dragRef.current = null)}
-            onDropOnColumn={() => dropOnColumn(col.id)}
-            onDropAtCard={(id, side) => dropAtCard(col.id, id, side)}
-            onCardContext={(id, x, y) => setCardMenu({ nodeId: id, x, y })}
+            onCreate={onCreateNode}
+            onCardDragStart={handleCardDragStart}
+            onColumnDragStart={handleColumnDragStart}
+            onDragEnd={handleDragEnd}
+            onDropOnColumn={dropOnColumn}
+            onDropAtCard={dropAtCard}
+            onCardContext={handleCardContext}
           />
         ))}
         <button
@@ -313,4 +391,4 @@ export function KanbanView({
       )}
     </div>
   )
-}
+})

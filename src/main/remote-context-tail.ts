@@ -61,16 +61,19 @@ export function createRemoteContextTail(
   const scan = (sessionId: string, t: Tracked, read: string): void => {
     const buf = Buffer.from(read)
     const combined = t.carry?.length ? Buffer.concat([t.carry, buf]) : buf
-    const { text: complete, carry } = splitCompleteLines(combined)
-    t.carry = carry
-    const latest = parseLatestUsage(combined.toString('utf-8'))
+    t.carry = splitCompleteLines(combined).carry
+    // ONE split shared by all three scanners (mirrors the local tail): the last element is the
+    // torn tail past the final newline, so dropping it yields the complete lines.
+    const lines = combined.toString('utf-8').split('\n')
+    const completeLines = lines.slice(0, -1)
+    const latest = parseLatestUsage(lines)
     if (latest) {
       t.used = latest.used
       t.model = latest.model ?? t.model
     }
-    if (opts?.onToolResult && hasToolResult(complete)) opts.onToolResult(sessionId)
+    if (opts?.onToolResult && hasToolResult(completeLines)) opts.onToolResult(sessionId)
     if (opts?.onTaskNotification) {
-      for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
+      for (const n of parseTaskNotifications(completeLines)) opts.onTaskNotification(sessionId, n)
     }
   }
 

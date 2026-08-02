@@ -1,8 +1,9 @@
-import { execFile, execFileSync, spawn } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import { promisify } from 'util'
 import type { GitResult, Settings } from '../shared/types'
+import { findInPathString, shellPathNow } from './exec-path'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 
 const run = promisify(execFile)
@@ -30,19 +31,12 @@ function resolveBinary(name: string): string | null {
       // ignore
     }
   }
-  // Resolve via PATH without a shell. `name` comes from a user setting (custom commit agent),
-  // so never interpolate it into a shell string — pass it as a plain argv to `command -v`.
-  // Reject anything that isn't a bare binary name to keep it well out of injection territory.
+  // Resolve via PATH without a shell OR a subprocess: walk the cached login-shell PATH from
+  // exec-path.ts (the inherited GUI PATH misses user-installed bins). `name` comes from a user
+  // setting (custom commit agent) — reject anything that isn't a bare binary name to keep it
+  // well out of injection territory.
   if (!/^[A-Za-z0-9._-]+$/.test(name)) return null
-  try {
-    const out = execFileSync('/usr/bin/env', ['sh', '-c', 'command -v "$1"', 'sh', name], {
-      encoding: 'utf-8'
-    }).trim()
-    if (out) return out
-  } catch {
-    // ignore
-  }
-  return null
+  return findInPathString(name, shellPathNow() ?? process.env.PATH)
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

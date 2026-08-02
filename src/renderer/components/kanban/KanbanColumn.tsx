@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import type { KanbanColumn as KanbanColumnT } from '@shared/types'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
@@ -9,30 +9,34 @@ interface KanbanColumnProps {
   /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
   column: KanbanColumnT | null
   cards: KanbanSession[]
-  onRename?: (title: string) => void
-  onRecolor?: (color: string) => void
-  onDelete?: () => void
+  // Column-scoped callbacks carry the column id (and card-scoped ones the node id) so KanbanView
+  // can hand every column the SAME function references — that identity stability is what lets
+  // memo() skip columns/cards untouched by a render.
+  onRename?: (columnId: string, title: string) => void
+  onRecolor?: (columnId: string, color: string) => void
+  onDelete?: (columnId: string) => void
   /** Open a card's modal (↗ / double-click on the card). */
   onOpenCard: (nodeId: string) => void
   /** Card metadata lookup (assignees/due) for the chips on each card. */
   metaOf: (nodeId: string) => KanbanCardMeta | undefined
   /** Resolved board labels for a card (the colored label chips). */
   labelsOf: (nodeId: string) => KanbanLabel[]
-  /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked. */
+  /** "+ New" menu entries (agents, terminal, sticky) and what to do when one is picked
+   *  (columnId null = Ungrouped: no assignment). */
   createOptions: KanbanCreateOption[]
-  onCreate: (choice: KanbanCreateChoice) => void
+  onCreate: (choice: KanbanCreateChoice, columnId: string | null) => void
   // Drag plumbing — the single drag source of truth lives in KanbanView.
   onCardDragStart: (nodeId: string) => void
-  onColumnDragStart?: () => void
+  onColumnDragStart?: (columnId: string) => void
   onDragEnd: () => void
   /** Drop on the column body: a card lands at the END of this column; a column lands BEFORE it. */
-  onDropOnColumn: () => void
-  onDropAtCard: (nodeId: string, side: 'before' | 'after') => void
+  onDropOnColumn: (columnId: string | null) => void
+  onDropAtCard: (columnId: string | null, nodeId: string, side: 'before' | 'after') => void
   /** Right-click on a card — bubbles the cursor position + node id up to the board menu. */
   onCardContext: (nodeId: string, x: number, y: number) => void
 }
 
-export function KanbanColumn({
+export const KanbanColumn = memo(function KanbanColumn({
   column, cards, metaOf, labelsOf, onRename, onRecolor, onDelete, onOpenCard, onCardContext,
   createOptions, onCreate, onCardDragStart, onColumnDragStart, onDragEnd, onDropOnColumn,
   onDropAtCard
@@ -44,9 +48,16 @@ export function KanbanColumn({
   // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
   const [dragOverCount, setDragOverCount] = useState(0)
 
+  const colId = column?.id ?? null
+  // Binds this column's id onto the shared card-drop handler; stable while the parent's is.
+  const dropAtCard = useCallback(
+    (nodeId: string, side: 'before' | 'after') => onDropAtCard(colId, nodeId, side),
+    [onDropAtCard, colId]
+  )
+
   const commitTitle = () => {
     const t = title.trim()
-    if (column && t && t !== column.title) onRename?.(t)
+    if (column && t && t !== column.title) onRename?.(column.id, t)
     setEditingTitle(false)
   }
 
@@ -59,7 +70,7 @@ export function KanbanColumn({
       onDrop={(e) => {
         e.preventDefault()
         setDragOverCount(0)
-        onDropOnColumn()
+        onDropOnColumn(colId)
       }}
     >
       <div
@@ -68,7 +79,7 @@ export function KanbanColumn({
         onDragStart={(e) => {
           if (!column) return
           e.dataTransfer.effectAllowed = 'move'
-          onColumnDragStart?.()
+          onColumnDragStart?.(column.id)
         }}
         onDragEnd={onDragEnd}
       >
@@ -108,7 +119,11 @@ export function KanbanColumn({
         )}
         <span className="kanban-col__count">{cards.length}</span>
         {column && (
-          <button className="kanban-col__close" title="Delete column (cards return to Ungrouped)" onClick={onDelete}>
+          <button
+            className="kanban-col__close"
+            title="Delete column (cards return to Ungrouped)"
+            onClick={() => onDelete?.(column.id)}
+          >
             ✕
           </button>
         )}
@@ -121,7 +136,7 @@ export function KanbanColumn({
               className="kanban-col__swatch"
               style={{ background: c }}
               onClick={() => {
-                onRecolor?.(c)
+                if (column) onRecolor?.(column.id, c)
                 setSwatchesOpen(false)
               }}
             />
@@ -135,11 +150,11 @@ export function KanbanColumn({
             session={s}
             meta={metaOf(s.id)}
             labels={labelsOf(s.id)}
-            onOpen={() => onOpenCard(s.id)}
-            onContext={(x, y) => onCardContext(s.id, x, y)}
-            onDragStart={() => onCardDragStart(s.id)}
+            onOpen={onOpenCard}
+            onContext={onCardContext}
+            onDragStart={onCardDragStart}
             onDragEnd={onDragEnd}
-            onDropAt={(side) => onDropAtCard(s.id, side)}
+            onDropAt={dropAtCard}
           />
         ))}
       </div>
@@ -151,7 +166,7 @@ export function KanbanColumn({
                 key={o.key}
                 onClick={() => {
                   setNewMenuOpen(false)
-                  onCreate(o.choice)
+                  onCreate(o.choice, colId)
                 }}
               >
                 <span className="kanban-col__newicon">{o.icon}</span>
@@ -166,4 +181,4 @@ export function KanbanColumn({
       </div>
     </div>
   )
-}
+})

@@ -14,14 +14,30 @@ const POLL_MS = 1000
 // line is dropped naturally by the JSON.parse guard.
 const INITIAL_READ_CAP = 1024 * 1024 // 1 MB
 
-/** Scan transcript text for the LATEST assistant message's token usage + model. Pure. */
-export function parseLatestUsage(text: string): { used: number; model: string | null } | null {
+/** The scanners accept a pre-split line array so one read can split its chunk ONCE and share
+ *  it — three scanners each running their own `split('\n')` tripled the allocation per tick. */
+const toLines = (text: string | string[]): string[] =>
+  Array.isArray(text) ? text : text.split('\n')
+
+/**
+ * Scan transcript text for the LATEST assistant message's token usage + model. Pure.
+ *
+ * Scans BACKWARDS and stops at the first line that settles both values: only the latest usage
+ * matters, and a forward scan JSON.parsed every line of the chunk — a single tool-result line
+ * can be 100 KB+ of JSON, fully parsed (at 1 Hz per tracked session, on the main thread) just
+ * to learn it isn't an assistant message. The includes() pre-filters skip those without a parse:
+ * a JSON-encoded assistant/usage line always contains both quoted keys.
+ */
+export function parseLatestUsage(
+  text: string | string[]
+): { used: number; model: string | null } | null {
+  const lines = toLines(text)
   let found = false
   let usedTokens = 0
   let model: string | null = null
-  for (const line of text.split('\n')) {
-    const s = line.trim()
-    if (!s) continue
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = lines[i].trim()
+    if (!s || !s.includes('"usage"') || !s.includes('"assistant"')) continue
     let o: { type?: string; message?: { model?: string; usage?: Record<string, number> } }
     try {
       o = JSON.parse(s)
@@ -33,9 +49,14 @@ export function parseLatestUsage(text: string): { used: number; model: string | 
     const used =
       (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
     if (used <= 0) continue
-    found = true
-    usedTokens = used
-    model = o.message.model ?? model // carry the prior model forward when this line omits it
+    if (!found) {
+      found = true
+      usedTokens = used // the LATEST usage — earlier lines are visited only to resolve the model
+    }
+    // Same rule as the old forward scan's "carry the prior model forward": the effective model
+    // is the nearest usage line AT OR BEFORE the latest one that names it.
+    model = o.message.model ?? null
+    if (model !== null) break
   }
   return found ? { used: usedTokens, model } : null
 }
@@ -58,9 +79,9 @@ const tag = (content: string, name: string): string | undefined => {
 }
 
 /** Scan transcript lines for queued <task-notification>s. Pure. */
-export function parseTaskNotifications(text: string): TaskNotification[] {
+export function parseTaskNotifications(text: string | string[]): TaskNotification[] {
   const out: TaskNotification[] = []
-  for (const line of text.split('\n')) {
+  for (const line of toLines(text)) {
     const s = line.trim()
     // Cheap pre-filter; the attachment echo of the same notification is skipped by the
     // type check below so each completion fires exactly once.
@@ -99,8 +120,8 @@ export function parseTaskNotifications(text: string): TaskNotification[] {
  * answer was. The caller only acts on it while the node is still in needs-you, so a normal turn's
  * constant stream of results costs nothing.
  */
-export function hasToolResult(text: string): boolean {
-  for (const line of text.split('\n')) {
+export function hasToolResult(text: string | string[]): boolean {
+  for (const line of toLines(text)) {
     const s = line.trim()
     // Cheap pre-filter before the parse — this runs over every transcript chunk.
     if (!s || !s.includes('tool_result')) continue
@@ -212,18 +233,22 @@ export function createContextTail(
           // latest value wins, so it must not wait for a newline. Notifications scan
           // COMPLETE lines only, with the torn tail carried into the next read, so a torn
           // <task-notification> is completed later instead of being lost.
+          // ONE split serves all three scanners: the last element is exactly the torn tail
+          // (everything past the final newline), so dropping it yields the complete lines.
           const combined = t.carry?.length ? Buffer.concat([t.carry, buf]) : buf
-          const { text: complete, carry } = splitCompleteLines(combined)
-          t.carry = carry
-          const latest = parseLatestUsage(combined.toString('utf-8'))
+          t.carry = splitCompleteLines(combined).carry
+          const lines = combined.toString('utf-8').split('\n')
+          const completeLines = lines.slice(0, -1)
+          const latest = parseLatestUsage(lines)
           if (latest) {
             t.used = latest.used
             t.model = latest.model ?? t.model
           }
           if (opts?.onTaskNotification) {
-            for (const n of parseTaskNotifications(complete)) opts.onTaskNotification(sessionId, n)
+            for (const n of parseTaskNotifications(completeLines))
+              opts.onTaskNotification(sessionId, n)
           }
-          if (opts?.onToolResult && hasToolResult(complete)) opts.onToolResult(sessionId)
+          if (opts?.onToolResult && hasToolResult(completeLines)) opts.onToolResult(sessionId)
         }
       }
 
