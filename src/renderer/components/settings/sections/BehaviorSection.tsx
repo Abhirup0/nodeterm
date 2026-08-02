@@ -8,6 +8,10 @@ import { Select } from '@renderer/ui/Select'
 import { hintLabel } from '@shared/platform-utils'
 
 const ROWS = {
+  defaultView: {
+    title: 'Default view',
+    keywords: ['default', 'view', 'kanban', 'board', 'canvas', 'project']
+  },
   gridSize: { title: 'Grid size', keywords: ['grid', 'size', 'snap'] },
   nodeSize: {
     title: 'Default node size',
@@ -33,6 +37,22 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
   const update = useSettings((s) => s.update)
   return (
     <SettingsSection id="behavior" title="Behavior" isActive={isActive} searchEntries={ENTRIES}>
+      <SearchableRow {...ROWS.defaultView}>
+        <FieldRow
+          label="Default view"
+          description="How a project opens when you haven't switched it. Projects you toggle keep their own choice."
+          control={
+            <Select
+              aria-label="Default view"
+              value={settings.defaultProjectView === 'kanban' ? 'kanban' : 'canvas'}
+              onChange={(e) => update({ defaultProjectView: e.target.value as 'canvas' | 'kanban' })}
+            >
+              <option value="canvas">Canvas</option>
+              <option value="kanban">Kanban board</option>
+            </Select>
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.gridSize}>
         <FieldRow
           label="Grid size"

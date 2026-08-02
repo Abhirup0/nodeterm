@@ -5,8 +5,10 @@ import {
   cardMeta, columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn,
   setCardDue, setCardPriority, toggleAssignee, unassigned,
   boardLabels, cardMatchesLabelFilter, createLabel, deleteLabel, labelColor, labelsForCard,
-  recolorLabel, renameLabel, reorderLabels, toggleCardLabel
+  recolorLabel, renameLabel, reorderLabels, toggleCardLabel,
+  autoLabelColor, migrateProjectTags, migrateTagsToLabels, setCardLabels
 } from './kanban'
+import type { Project } from '@shared/types'
 
 const board = (): ProjectKanban => ({
   columns: [
@@ -249,5 +251,78 @@ describe('board labels', () => {
     expect(cardMeta(k, 'n1')).toMatchObject({ dueAt: 123, labels: [a] })
     k = toggleAssignee(k, 'n1', { name: 'enes', color: '#fff' })
     expect(cardMeta(k, 'n1')?.labels).toEqual([a])
+  })
+})
+
+describe('tag → label migration', () => {
+  const proj = (nodes: Array<Partial<Project['nodes'][number]> & { id: string }>, kanban?: Project['kanban']): Project => ({
+    id: 'p', name: 'P', color: '#888', viewport: { x: 0, y: 0, zoom: 1 },
+    nodes: nodes.map((n) => ({
+      kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 },
+      title: n.id, color: '#888', group: null, ...n
+    })) as Project['nodes'],
+    ...(kanban ? { kanban } : {})
+  })
+
+  it('setCardLabels sets the exact list; empty drops the entry', () => {
+    let k = createLabel(board(), 'A', 'blue').k
+    const a = boardLabels(k)[0].id
+    k = setCardLabels(k, 'n1', [a, a]) // dedup
+    expect(cardMeta(k, 'n1')?.labels).toEqual([a])
+    expect(cardMeta(setCardLabels(k, 'n1', []), 'n1')).toBeUndefined()
+  })
+
+  it('autoLabelColor rotates the palette skipping default', () => {
+    let k = board()
+    expect(autoLabelColor(k)).toBe('gray')
+    k = createLabel(k, 'A', 'gray').k
+    expect(autoLabelColor(k)).toBe('brown')
+  })
+
+  it('migrateTagsToLabels creates a label per unique tag, reuses by name (case-insensitive)', () => {
+    let k = migrateTagsToLabels(board(), [{ nodeId: 'n1', tags: ['bug', 'bug', 'ui'] }])
+    expect(boardLabels(k).map((l) => l.name)).toEqual(['bug', 'ui'])
+    expect(labelsForCard(k, 'n1').map((l) => l.name)).toEqual(['bug', 'ui'])
+    // a second node with the SAME tag name (different case) reuses the label
+    k = migrateTagsToLabels(k, [{ nodeId: 'n2', tags: ['BUG'] }])
+    expect(boardLabels(k)).toHaveLength(2) // no dup created
+    expect(labelsForCard(k, 'n2').map((l) => l.name)).toEqual(['bug'])
+  })
+
+  it('migrateProjectTags: tags → labels, node.tags cleared, unchanged when no tags', () => {
+    const p = proj([{ id: 'n1', tags: ['bug', 'backend'] }, { id: 'n2' }])
+    const m = migrateProjectTags(p)
+    expect(boardLabels(m.kanban!).map((l) => l.name)).toEqual(['bug', 'backend'])
+    expect(labelsForCard(m.kanban!, 'n1').map((l) => l.name)).toEqual(['bug', 'backend'])
+    expect((m.nodes[0] as { tags?: unknown }).tags).toBeUndefined() // cleared
+    // a project with NO tagged nodes is returned by identity (idempotent no-op)
+    const clean = proj([{ id: 'n1' }])
+    expect(migrateProjectTags(clean)).toBe(clean)
+    // running twice is a no-op (the second run finds no tags)
+    expect(migrateProjectTags(m)).toBe(m)
+  })
+
+  it("migrateProjectTags honors the legacy ['claude'] marker: agentId set, NOT a label", () => {
+    const p = proj([{ id: 'n1', tags: ['claude'] }, { id: 'n2', tags: ['claude', 'wip'] }])
+    const m = migrateProjectTags(p)
+    // 'claude' becomes agentId, never a label
+    expect(m.nodes.find((n) => n.id === 'n1')!.agentId).toBe('claude')
+    expect(boardLabels(m.kanban!).map((l) => l.name)).toEqual(['wip']) // only the non-claude tag
+    expect(labelsForCard(m.kanban!, 'n1')).toEqual([]) // claude-only node gets no label
+    expect(labelsForCard(m.kanban!, 'n2').map((l) => l.name)).toEqual(['wip'])
+    // a node that ALREADY has agentId is not overwritten
+    const withAgent = proj([{ id: 'n1', tags: ['claude'], agentId: 'codex' }])
+    expect(migrateProjectTags(withAgent).nodes[0].agentId).toBe('codex')
+  })
+
+  it('migrateProjectTags reuses an existing board label and seeds a default board when absent', () => {
+    // no kanban → a default board (3 columns) is seeded so the board is never column-less
+    const m = migrateProjectTags(proj([{ id: 'n1', tags: ['x'] }]))
+    expect(m.kanban!.columns).toHaveLength(3)
+    // an existing label of the same name is reused, not duplicated
+    const existing = createLabel(defaultKanban(), 'x', 'red').k
+    const m2 = migrateProjectTags(proj([{ id: 'n1', tags: ['x'] }], existing))
+    expect(boardLabels(m2.kanban!)).toHaveLength(1)
+    expect(labelsForCard(m2.kanban!, 'n1')[0]).toMatchObject({ name: 'x', color: 'red' })
   })
 })
