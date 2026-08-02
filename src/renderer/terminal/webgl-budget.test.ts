@@ -6,7 +6,10 @@ import {
   loseWebglContexts,
   setWebglBudget,
   setWebglEnabled,
+  setWebglZoom,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
+  WEBGL_RESUME_AT_ZOOM,
+  WEBGL_SUSPEND_BELOW_ZOOM,
   WEBGL_BUDGET,
   WEBGL_LOSS_STREAK_MAX,
   WEBGL_REACQUIRE_AFTER_LOSS_MS,
@@ -309,6 +312,72 @@ describe('webgl-budget coordinator', () => {
     expect(getWebglBudget()).toBe(20)
     __resetWebglBudgetForTests()
     expect(getWebglBudget()).toBe(WEBGL_BUDGET)
+  })
+
+  describe('zoom gate', () => {
+    it('crossing below the suspend threshold reclaims every held context immediately', () => {
+      const a = fakeClient('a')
+      const b = fakeClient('b')
+      grant(a)
+      grant(b)
+      expect(a.rec.held).toBe(true)
+      expect(b.rec.held).toBe(true)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      expect(a.rec.held).toBe(false)
+      expect(b.rec.held).toBe(false)
+    })
+
+    it('blocks grants while suspended, re-grants visible clients on resume', () => {
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      const a = fakeClient('a')
+      grant(a)
+      expect(a.rec.held).toBe(false)
+      // Below the resume threshold nothing changes (hysteresis).
+      setWebglZoom(WEBGL_RESUME_AT_ZOOM - 0.01)
+      vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS * 2)
+      expect(a.rec.held).toBe(false)
+      setWebglZoom(WEBGL_RESUME_AT_ZOOM)
+      expect(a.rec.held).toBe(true)
+    })
+
+    it('hysteresis: hovering between the two thresholds never churns contexts', () => {
+      const a = fakeClient('a')
+      grant(a)
+      const before = a.rec.releases
+      // Not suspended: dipping to just above the SUSPEND threshold does nothing…
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM + 0.01)
+      setWebglZoom(WEBGL_RESUME_AT_ZOOM - 0.01)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM + 0.01)
+      expect(a.rec.releases).toBe(before)
+      expect(a.rec.held).toBe(true)
+      // …and once suspended, wobbling below the RESUME threshold does not re-grant.
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      expect(a.rec.held).toBe(false)
+      const acquires = a.rec.acquires
+      setWebglZoom(WEBGL_RESUME_AT_ZOOM - 0.01)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS * 2)
+      expect(a.rec.acquires).toBe(acquires)
+    })
+
+    it('resume respects the master switch: disabled stays DOM-only', () => {
+      const a = fakeClient('a')
+      grant(a)
+      setWebglEnabled(false)
+      expect(a.rec.held).toBe(false)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      setWebglZoom(WEBGL_RESUME_AT_ZOOM)
+      vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS * 2)
+      expect(a.rec.held).toBe(false)
+    })
+
+    it('ignores non-finite zoom values', () => {
+      const a = fakeClient('a')
+      grant(a)
+      setWebglZoom(NaN)
+      setWebglZoom(Infinity)
+      expect(a.rec.held).toBe(true)
+    })
   })
 })
 

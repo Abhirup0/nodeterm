@@ -99,6 +99,44 @@ export function getWebglBudget(): number {
 }
 
 /**
+ * Below this canvas zoom the coordinator holds NO contexts at all. At such scale terminal text
+ * is unreadable anyway, and a zoom-out is exactly the moment a BURST of newly-visible clients
+ * would be granted fresh contexts — which is the observed macOS-compositor failure (terminals
+ * compositing black with zero JS-visible errors; see WEBGL_BUDGET_DESKTOP_MAC). The DOM renderer
+ * carries the thumbnails; zooming back in re-grants within the budget as usual.
+ */
+export const WEBGL_SUSPEND_BELOW_ZOOM = 0.4
+/** Resume threshold, ABOVE the suspend threshold on purpose (hysteresis): a pinch hovering at
+ *  one boundary must not thrash dispose/create cycles — context churn is itself the hazard. */
+export const WEBGL_RESUME_AT_ZOOM = 0.45
+
+/** True while the canvas is zoomed below the suspend threshold — grants are blocked. */
+let zoomSuspended = false
+
+/**
+ * Report the canvas zoom (React Flow viewport scale). Cheap and idempotent — call it from the
+ * zoom/pan handler; state only changes when a hysteresis boundary is crossed. Crossing DOWN
+ * reclaims every held context immediately (each client falls back to the DOM renderer, which
+ * repaints via its release heal); crossing UP re-attempts a budget-gated grant for every
+ * visible client, exactly like the master toggle's ON path.
+ */
+export function setWebglZoom(zoom: number): void {
+  if (!Number.isFinite(zoom)) return
+  const next = zoomSuspended ? zoom < WEBGL_RESUME_AT_ZOOM : zoom < WEBGL_SUSPEND_BELOW_ZOOM
+  if (next === zoomSuspended) return
+  zoomSuspended = next
+  if (zoomSuspended) {
+    for (const c of clients.values()) {
+      cancelAcquire(c)
+      reclaim(c)
+    }
+    return
+  }
+  if (!enabled) return
+  for (const c of clients.values()) if (c.visible) tryGrant(c)
+}
+
+/**
  * Explicitly lose the WebGL context of every canvas under `root` (a terminal's element), via
  * `WEBGL_lose_context`. Chromium counts a context against its per-page cap until it is GC'd OR
  * explicitly lost — and `@xterm/addon-webgl`'s dispose() does neither (verified on 0.18.0: zero
@@ -254,6 +292,8 @@ function tryGrant(c: Client): void {
   if (!clients.has(c.id) || !c.visible || c.granted) return
   // Master switch off → never grant; every terminal stays on the DOM renderer.
   if (!enabled) return
+  // Zoomed below the suspend threshold → never grant (see setWebglZoom).
+  if (zoomSuspended) return
   if (grantCount() < budget) {
     doGrant(c)
     return
@@ -393,4 +433,5 @@ export function __resetWebglBudgetForTests(): void {
   visibilityClock = 0
   budget = WEBGL_BUDGET
   enabled = true
+  zoomSuspended = false
 }
