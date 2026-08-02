@@ -1,5 +1,5 @@
 import { join, resolve, posix } from 'path'
-import { startSessionNameSweep } from '../core/session-name-sweep'
+import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readSessionName as readSessionNameForSweep } from '../core/transcript-reader'
 import { canRename, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
@@ -58,7 +58,8 @@ import {
   type MirrorSettings,
   setNodeSessionName,
   sessionNameSweepEntries,
-  nodeState
+  nodeState,
+  nodeSessionName
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -807,6 +808,17 @@ app.whenReady().then(async () => {
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
 
+  /** The one display-title rule for everything the HOST sends out (push alerts, Live Activity
+   *  updates, the notch capsule): the live session name unless the node was hand-renamed. */
+  const displayTitleFor = (nodeId: string): string | undefined =>
+    displayNodeTitle(nodeId, {
+      sessionName: nodeSessionName,
+      node: (id) => {
+        const n = workspaceStore.getNode(id)
+        return n ? { title: n.title, titleAuto: n.titleAuto } : undefined
+      }
+    })
+
   // Keep every agent node's session name fresh in the mirror — including nodes no canvas has
   // mounted (the phone lists them all; see core/session-name-sweep.ts).
   startSessionNameSweep({
@@ -832,7 +844,7 @@ app.whenReady().then(async () => {
     return { enabled: s.notchHud, notchWidth: s.notchWidth, hoverExpand: s.notchHoverExpand }
   }
   const startNotchHud = (): void =>
-    initNotchHud({ getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId) }, notchTunables())
+    initNotchHud({ getNodeTitle: displayTitleFor }, notchTunables())
   if (win.isVisible()) startNotchHud()
   else win.once('show', startNotchHud)
   settingsStore.onChange(() => applyNotchHudSettings(notchTunables()))
@@ -953,7 +965,7 @@ app.whenReady().then(async () => {
     isPackaged: () => app.isPackaged,
     // The node's canvas/sidebar display title, so the phone can title the alert
     // "<Needs you|Completed> — <nodeTitle>" (see workspace-store.getNodeTitle for the freshness note).
-    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId),
+    getNodeTitle: displayTitleFor,
     // Presence-aware deferral wiring (alerts only).
     isUserPresent,
     subscribePresence: (cb) => {
@@ -986,7 +998,7 @@ app.whenReady().then(async () => {
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false,
     isPackaged: () => app.isPackaged,
-    getNodeTitle: (nodeId) => workspaceStore.getNodeTitle(nodeId)
+    getNodeTitle: displayTitleFor
   })
   // And push each connected SSH project's slice of it onto its host
   // (`~/.nodeterm/agent-status-<projectId>.json`): hook events tunnel from the host to THIS
