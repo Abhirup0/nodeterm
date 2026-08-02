@@ -151,6 +151,22 @@ body,
   text-decoration: line-through;
 }
 
+/* Marks a project whose terminals run on another machine. Deliberately a text chip rather than
+   an icon: the only remote-ish glyph in icons.tsx (IconRemote) already means "web view" on this
+   canvas, and reusing it would conflate a browser node with an SSH host. */
+.tab__ssh {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
 .tab__dot {
   width: 9px;
   height: 9px;

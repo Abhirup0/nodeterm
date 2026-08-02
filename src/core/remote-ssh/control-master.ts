@@ -33,6 +33,23 @@ function portArgs(conn: SshConnection): string[] {
   return ['-p', String(conn.port ?? 22)]
 }
 
+/**
+ * `IdentitiesOnly=yes` + `-i` when the connection names a key, nothing otherwise. The pairing
+ * exists because of `AddKeysToAgent` (masterArgs): an agent accumulates keys, and without
+ * IdentitiesOnly ssh offers EVERY agent key before the configured one. Each rejected offer spends
+ * one of the server's `MaxAuthTries` (default 6), so a well-stocked agent ended the connection
+ * with "Too many authentication failures" before the configured key was ever offered (measured
+ * against a real sshd: 8 junk agent keys plus `-i` = disconnected; the same with IdentitiesOnly
+ * connects). IdentitiesOnly does NOT bypass the agent for the named key: ssh still has the agent
+ * sign it, so the no-reprompt behavior survives (measured: askpass removed entirely, agent
+ * holding the key, zero prompts). With NO configured key this must stay empty, because
+ * IdentitiesOnly would then disable agent keys outright and break the very reconnect path
+ * AddKeysToAgent provides.
+ */
+function identityArgs(conn: SshConnection): string[] {
+  return conn.identityFile ? ['-o', 'IdentitiesOnly=yes', '-i', conn.identityFile] : []
+}
+
 /** Args for the backgrounded multiplexing master (the one auth happens here). */
 export function masterArgs(conn: SshConnection, controlPath: string): string[] {
   const args = [
@@ -61,9 +78,50 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
     'ServerAliveInterval=15',
     '-o',
     'ServerAliveCountMax=4',
-    ...portArgs(conn)
+    // Bound the TCP-connect phase. connect() waits on the master PROCESS for keyed connections
+    // (a passphrase prompt can take minutes), so a black-holed TCP connect must fail through ssh
+    // itself rather than ride that long window for the kernel's ~75s of SYN retries. Auth,
+    // including the passphrase prompt, is not covered by ConnectTimeout, so no slow human is
+    // ever cut off by this.
+    '-o',
+    'ConnectTimeout=15',
+    // The master has no tty, so it can never complete password or keyboard-interactive auth: the
+    // best it can do is submit an EMPTY credential, which OpenSSH does silently, once per allowed
+    // prompt. Every connect against a password-auth host therefore produced several FAILED logins,
+    // and because the app retries on its own timers (reconnector backoff, 45s watchdog, resume,
+    // tab switches) a single evening was enough to trip the host's own fail2ban and lock the user
+    // out with "Connection closed by <host>". Refusing both methods up front means the master
+    // fails honestly on publickey alone and never spends a login attempt it cannot win.
+    //
+    // Do NOT express this as `NumberOfPasswordPrompts=0`: that counter also bounds the KEY
+    // PASSPHRASE retry loop in OpenSSH's load_identity_file, so zero means an encrypted key is
+    // tried once with an empty passphrase and then abandoned WITHOUT ever invoking SSH_ASKPASS.
+    // It silently disables passphrase prompting altogether, which an end-to-end test against a
+    // real sshd caught and no unit test could.
+    '-o',
+    'PasswordAuthentication=no',
+    '-o',
+    'KbdInteractiveAuthentication=no',
+    // Load a successfully unlocked key into the agent named by SSH_AUTH_SOCK. An AGENT, not this
+    // app, is the passphrase cache: the next master (reconnect, watchdog respawn) authenticates
+    // through it and never re-prompts (measured against a real sshd: second connect, fresh master,
+    // zero askpass invocations, even with SSH_ASKPASS removed), and the decrypted key sits in a
+    // purpose-built process instead of a plaintext string in Electron main memory — which is why
+    // the old in-app passphrase cache was deleted in its favor.
+    //
+    // WHICH agent is the app's choice, and it is not the user's: main points SSH_AUTH_SOCK at an
+    // app-private agent it spawns and kills (src/main/remote-ssh/ssh-agent.ts), so the unlock is
+    // scoped to one app run instead of living in the login agent until logout. Read that file
+    // before assuming a key unlocked here survives a quit.
+    //
+    // Harmless when no agent is reachable at all: ssh skips the add silently (measured: not one
+    // stderr line, so nothing for lastSshErrorLine to mistake for a failure cause) and simply
+    // prompts again next time.
+    '-o',
+    'AddKeysToAgent=yes',
+    ...portArgs(conn),
+    ...identityArgs(conn)
   ]
-  if (conn.identityFile) args.push('-i', conn.identityFile)
   args.push(target(conn))
   return args
 }
@@ -106,7 +164,10 @@ export function childArgs(conn: SshConnection, controlPath: string, remote?: str
   ]
   // The key matters exactly when mux is NOT available (fallback / becoming master) — the case
   // the old childArgs ignored: with a non-default identityFile every fallback exec failed auth.
-  if (conn.identityFile) args.push('-i', conn.identityFile)
+  // identityArgs also pins the offer (IdentitiesOnly) so that same fallback cannot burn the
+  // server's MaxAuthTries on unrelated agent keys; the agent still signs the pinned key, which
+  // is the only way a tty-less child can use an ENCRYPTED key at all (it has no askpass wiring).
+  args.push(...identityArgs(conn))
   args.push(target(conn))
   if (remote !== undefined) args.push(remote)
   return args
@@ -209,7 +270,7 @@ export function mkDirArgs(conn: SshConnection, controlPath: string, path: string
  *  basenamed by the caller, and the path is absolute). scp uses `-P` (uppercase) for the port. */
 export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
-  if (conn.identityFile) args.push('-i', conn.identityFile)
+  args.push(...identityArgs(conn))
   args.push(localPath, `${conn.user}@${conn.host}:${remotePath}`)
   return args
 }
@@ -242,7 +303,7 @@ export function scpDownArgs(
   recursive = false
 ): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
-  if (conn.identityFile) args.push('-i', conn.identityFile)
+  args.push(...identityArgs(conn))
   if (recursive) args.push('-r')
   args.push(`${conn.user}@${conn.host}:${remoteScpPath(remotePath)}`, localPath)
   return args

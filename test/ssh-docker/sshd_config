@@ -1,0 +1,35 @@
+# sshd_config for the nodeterm SSH test harness. Deliberately minimal: three auth scenarios,
+# nothing else. Never used outside a container bound to 127.0.0.1 (see run.sh).
+
+Port 22
+Protocol 2
+
+HostKey /etc/ssh/host_keys/ssh_host_ed25519_key
+
+# Only the three test users may log in.
+AllowUsers keyuser passuser pwuser
+
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+PasswordAuthentication no
+
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+
+PermitRootLogin no
+X11Forwarding no
+PrintMotd no
+PrintLastLog no
+StrictModes yes
+
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# Password auth is off by default (above) and turned on ONLY for pwuser (scenario c).
+# keyuser/passuser have no password set (useradd leaves the account locked), so this is the only
+# way either of them could ever be asked for one, and they never will be. A Match block's scope
+# runs to end-of-file regardless of indentation, and only a limited directive set is legal inside
+# one (no UsePAM/Subsystem/etc.) - it must be the last thing in the file.
+Match User pwuser
+    PasswordAuthentication yes

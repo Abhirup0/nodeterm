@@ -119,6 +119,7 @@ import {
 } from '../lib/nodeFocus'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
+import { SshPassphrasePrompt } from '../components/SshPassphrasePrompt'
 import { transport } from '../terminal/local-transport'
 import { sshFs } from '../terminal/ssh-fs'
 import {
@@ -207,7 +208,14 @@ import { useSystemAccount } from '../state/systemAccount'
 import { useEntitlement } from '../state/entitlement'
 import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
-import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
+import type {
+  CanvasNodeState,
+  Project,
+  ProjectKanban,
+  SshPassphraseRequest,
+  SshProjectStatus,
+  TranscriptHit
+} from '@shared/types'
 import { KanbanView, type KanbanCreateChoice, type KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, defaultKanban, labelsForCard, migrateProjectTags } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
@@ -648,6 +656,17 @@ export function Canvas() {
   const [cloneDialogOpen, setCloneDialogOpen] = useState(false)
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
   const [sshStatus, setSshStatus] = useState<Record<string, SshProjectStatus>>({})
+  // The cause that came with an `error` status. Kept beside the status because the banner used to
+  // render a bare "SSH connection error", throwing away the one line ssh gave us (permission
+  // denied, host unreachable, host key mismatch) that tells the user what to actually fix.
+  const [sshError, setSshError] = useState<Record<string, string | undefined>>({})
+  // Pending SSH_ASKPASS passphrase prompts (see ssh-askpass.ts). A QUEUE rather than one slot:
+  // main serializes dialogs today, so this normally holds at most one, but a single slot would
+  // SILENTLY DROP a second request if that ever changed, and the dropped requestId has no other
+  // path to an answer, so its ssh master would stall until the prompt expiry fires minutes later.
+  // Queueing keeps every request answerable; the head is the one on screen.
+  const [sshPassphraseQueue, setSshPassphraseQueue] = useState<SshPassphraseRequest[]>([])
+  const sshPassphraseRequest = sshPassphraseQueue[0] ?? null
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
   const [pendingPeer, setPendingPeerState] = useState<PendingPeerState | null>(null)
   const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
@@ -6546,6 +6565,9 @@ export function Canvas() {
   useEffect(() => {
     return window.nodeTerminal.sshProject.onStatus((e) => {
       setSshStatus((prev) => ({ ...prev, [e.projectId]: e.status }))
+      // Keep the cause for the banner. Cleared on any non-error status so a stale reason can
+      // never be shown next to a healthy connection.
+      setSshError((prev) => ({ ...prev, [e.projectId]: e.status === 'error' ? e.error : undefined }))
       // Feed the auto-reconnect coordinator: ANY successful connect (its own loop, the
       // active-project effect on a tab switch) respawns that project's dropped terminals.
       if (e.status === 'connected') sshReconnectorRef.current?.onConnected(e.projectId)
@@ -6564,6 +6586,22 @@ export function Canvas() {
       if (e.status === 'disconnected' || e.status === 'reconnecting') {
         useSshConn.getState().invalidateAutoPermissionMode(e.projectId)
       }
+    })
+  }, [])
+
+  // Passphrase prompt for a ControlMaster's encrypted identity file. It can fire well after the
+  // connect dialog closed (watchdog re-establish, powerMonitor resume), so it's a standalone
+  // overlay rather than a step inside SshProjectDialog. Main serializes prompts (one at a time),
+  // so a single state slot cannot drop a concurrent request. The dismiss event closes a dialog
+  // whose request expired main-side, so a late answer cannot land in a dead request.
+  useEffect(() => {
+    return window.nodeTerminal.sshProject.onPassphraseRequest((e) =>
+      setSshPassphraseQueue((prev) => (prev.some((r) => r.requestId === e.requestId) ? prev : [...prev, e]))
+    )
+  }, [])
+  useEffect(() => {
+    return window.nodeTerminal.sshProject.onPassphraseDismiss((e) => {
+      setSshPassphraseQueue((prev) => prev.filter((r) => r.requestId !== e.requestId))
     })
   }, [])
 
@@ -7114,6 +7152,9 @@ export function Canvas() {
           (() => {
             const st = sshStatus[activeProjectId]
             const isError = st === 'error' || st === 'disconnected'
+            // The reason ssh gave, already trimmed to one line by lastSshErrorLine in main. Shown
+            // inline: a bare "SSH connection error" leaves the user with nothing to act on.
+            const cause = sshError[activeProjectId]
             const text =
               st === 'connecting'
                 ? `Connecting to ${activeSshServer.label}…`
@@ -7121,7 +7162,9 @@ export function Canvas() {
                   ? `Reconnecting to ${activeSshServer.label}…`
                   : st === 'disconnected'
                     ? `Disconnected from ${activeSshServer.label}`
-                    : `SSH connection error — ${activeSshServer.label}`
+                    : cause
+                      ? `${activeSshServer.label}: ${cause}`
+                      : `SSH connection error: ${activeSshServer.label}`
             return (
               <div
                 title={`${activeSshServer.user}@${activeSshServer.host}`}
@@ -7137,14 +7180,21 @@ export function Canvas() {
                   borderRadius: 8
                 }}
               >
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    background: isError ? '#ff6b6b' : '#e0b341'
-                  }}
-                />
+                {isError ? (
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: '#ff6b6b'
+                    }}
+                  />
+                ) : (
+                  // connecting/reconnecting: the shared spinner instead of a static dot, so a
+                  // wait that can legitimately sit for minutes (passphrase prompt, slow host)
+                  // reads as in-progress rather than hung.
+                  <span className="ui-spinner" aria-hidden />
+                )}
                 {text}
               </div>
             )
@@ -7400,6 +7450,23 @@ export function Canvas() {
             setSettingsOpen(true)
           }}
           onClose={() => setSshDialogOpen(false)}
+        />
+      )}
+
+      {sshPassphraseRequest && (
+        <SshPassphrasePrompt
+          key={sshPassphraseRequest.requestId}
+          identityFile={sshPassphraseRequest.identityFile}
+          retry={sshPassphraseRequest.retry}
+          target={sshPassphraseRequest.target}
+          onSubmit={(value) => {
+            void window.nodeTerminal.sshProject.submitPassphrase(sshPassphraseRequest.requestId, value)
+            setSshPassphraseQueue((prev) => prev.filter((r) => r.requestId !== sshPassphraseRequest.requestId))
+          }}
+          onCancel={() => {
+            void window.nodeTerminal.sshProject.submitPassphrase(sshPassphraseRequest.requestId, null)
+            setSshPassphraseQueue((prev) => prev.filter((r) => r.requestId !== sshPassphraseRequest.requestId))
+          }}
         />
       )}
 

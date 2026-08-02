@@ -22,6 +22,8 @@ import { generateCommitMessage, generateGroupName, generateTerminalName } from '
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
+import { askpassServer, ensureAskpassScript } from './remote-ssh/ssh-askpass'
+import { appSshAgent } from './remote-ssh/ssh-agent'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -152,6 +154,15 @@ if (NT_MULTI && process.env.NT_USER_DATA) app.setPath('userData', process.env.NT
 // (main.tsx → setWebglBudget); see src/shared/webgl.ts for the invariant. Must be appended
 // before app 'ready' or the switch is silently ignored.
 app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXT_CAP_DESKTOP))
+
+// A throwaway NT_MULTI sandbox must not touch the real Keychain. The "node-terminal Safe Storage"
+// entry is keyed by the app NAME, which a dev instance shares with the installed app, so every
+// launch prompted for the login password and logged a scary os_crypt error when dismissed. The
+// mock keychain keeps safeStorage available in-process (no prompt, no error) while storing
+// nothing in the OS; the only consumer is the relay identity keypair, which already has a
+// documented plaintext fallback. Never set this for a real build: it would silently downgrade
+// at-rest encryption of that key.
+if (NT_MULTI && process.platform === 'darwin') app.commandLine.appendSwitch('use-mock-keychain')
 
 // First thing in bootstrap: install the Electron CorePlatform so anything in src/core
 // (wired in later tasks) can resolve platform() at boot. Placed after the NT_MULTI
@@ -331,7 +342,9 @@ function createWindow(): BrowserWindow {
     height: 900,
     show: false,
     backgroundColor: '#1e1e1e',
-    title: 'node-terminal',
+    // NT_MULTI instances are throwaway dev sandboxes: label the window so a second instance is
+    // never mistaken for the real one (the dock already shows the Electron icon in dev).
+    title: NT_MULTI ? 'node-terminal (test instance)' : 'node-terminal',
     icon: linuxIcon,
     // Integrate the macOS traffic lights into our top bar (modern Mac app look).
     titleBarStyle: 'hiddenInset',
@@ -777,7 +790,23 @@ app.whenReady().then(async () => {
   // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
+  // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
+  // passphrase-protected identity file's prompt back through the app instead of failing auth.
+  // MUST NOT be fatal: binding a unix socket under ~/.nodeterm can fail for filesystem reasons
+  // (bad ownership, a $HOME that cannot bind AF_UNIX), and this await sits in the boot chain
+  // before createWindow with no catch above it. A failed relay costs passphrase prompts (envFor
+  // then hands out no askpass env, the pre-feature behavior); it must never cost the window.
+  await askpassServer.start().catch((e) => console.error('[ssh-askpass] relay disabled:', e))
+  const askpassScriptPath = await ensureAskpassScript(app.getPath('userData')).catch((e) => {
+    console.error('[ssh-askpass] script generation failed, relay disabled:', e)
+    return undefined
+  })
   const win = createWindow()
+  // NT_MULTI instances are throwaway dev sandboxes. The dock badge is the one marker that is
+  // always visible on macOS (the window title is hidden by titleBarStyle: 'hiddenInset', and the
+  // dev dock icon/name are Electron's own), so a test instance can never be mistaken for the
+  // real app.
+  if (NT_MULTI && process.platform === 'darwin') app.dock?.setBadge('TEST')
   // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
   initUpdater(() => {
@@ -1715,14 +1744,24 @@ app.whenReady().then(async () => {
       relayClients.delete(id)
     })
   }
-  sshProjectManager = initSshProject(win, (projectId) => {
-    // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
-    // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
-    // silent replace / conflict bar). null means our cache was pushed up instead — nothing to send.
-    void workspaceStore.refreshSshProject(projectId).then((adopted) => {
-      if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
-    })
-  })
+  sshProjectManager = initSshProject(
+    (projectId) => {
+      // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
+      // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
+      // silent replace / conflict bar). null means our cache was pushed up instead, so nothing to send.
+      // The .catch is load-bearing: this fires on every successful SSH connect, sendToMain THROWS
+      // when the render frame is disposed (reload, crash, quit, see ssh-project.ts), and an
+      // unhandled rejection is a hard main-process crash, not a log line. Right after the user
+      // answers a passphrase prompt is exactly when the renderer can be mid-churn.
+      void workspaceStore
+        .refreshSshProject(projectId)
+        .then((adopted) => {
+          if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
+        })
+        .catch(() => {})
+    },
+    askpassScriptPath
+  )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
   // no scroll). The small delay lets the network interface come back up first; connect() is
@@ -1789,7 +1828,13 @@ app.on('window-all-closed', () => {
     void ptyManager.killAll()
     // Land any pending throttled .nodeterm mirror write BEFORE the masters die — killing a
     // master mid-write used to leave a truncated project.json on the server.
-    void remoteWorkspaceIO.flush().finally(() => sshProjectManager?.disconnectAll())
+    void remoteWorkspaceIO.flush().finally(() => {
+      sshProjectManager?.disconnectAll()
+      // Every master is gone, so nothing can use the unlocked key; scheduled (not stop()) so a
+      // quick window-reopen + reconnect inside the grace re-uses the agent instead of re-prompting.
+      // Without this, a destroyed window left the key alive for the agent's full 12h backstop.
+      appSshAgent.scheduleStop()
+    })
   }
 })
 
@@ -1803,6 +1848,21 @@ app.on('before-quit', (e) => {
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
     sshProjectManager?.disconnectAll()
+    // Then the app-private ssh-agent, which is the whole point of it existing: quitting nodeterm
+    // forgets the unlocked key. AFTER disconnectAll so a throw here can never skip the master
+    // teardown, and in this pass rather than the first, where the flush is still writing over
+    // those masters. `.finally(app.quit())` above guarantees this pass runs.
+    appSshAgent.stop()
+    // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
+    // does not), and a lingering file is one more thing the next start() has to clear.
+    askpassServer.stop()
+    // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
+    // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
+    // termination the first pass preventDefault'ed: both passes run, but will-quit never
+    // fires and the process lingers as a windowless shell. Everything that must land has
+    // landed by this point, so give Electron a moment to finish on its own, then force the
+    // exit. A normal Cmd+Q exits well inside the fuse and never reaches it.
+    setTimeout(() => app.exit(0), 1500)
     return
   }
   quitFlushed = true

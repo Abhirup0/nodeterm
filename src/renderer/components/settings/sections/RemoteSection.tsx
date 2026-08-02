@@ -165,7 +165,13 @@ export function RemoteSection({
             }
           />
           <Button disabled={connecting || !clientCode.trim()} onClick={() => void connectToHost()}>
-            {connecting ? 'Connecting…' : 'Connect'}
+            {connecting ? (
+              <>
+                <span className="ui-spinner" aria-hidden /> Connecting…
+              </>
+            ) : (
+              'Connect'
+            )}
           </Button>
           {remoteError ? (
             <p className="text-sm" style={{ color: '#ff9f0a' }}>

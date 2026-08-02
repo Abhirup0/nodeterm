@@ -932,6 +932,19 @@ export interface SshProjectStatusEvent {
   remoteClaudeVersion?: string | null
 }
 
+/** main → renderer: this SSH identity file needs its passphrase (the ssh-agent doesn't hold the
+ *  key, or the last answer was wrong). `retry` distinguishes "that passphrase didn't work" from
+ *  a first ask. */
+export interface SshPassphraseRequest {
+  requestId: string
+  identityFile: string
+  retry: boolean
+  /** `user@host` the unlock is for, when main could attribute the prompt to a connection. One key
+   *  can serve several servers, and the prompt can fire from the watchdog long after any connect
+   *  dialog closed. Absent when the asking master could not be identified (adopted orphan). */
+  target?: string
+}
+
 export interface SshProjectApi {
   /** Open (or reuse) the ControlMaster for an SSH project; resolves once connected. */
   connect(
@@ -976,6 +989,11 @@ export interface SshProjectApi {
    */
   downloadFile(projectId: string, remotePath: string, destDir?: string): Promise<DownloadResult>
   onStatus(cb: (e: SshProjectStatusEvent) => void): () => void
+  /** The user's answer to a passphrase prompt (null on cancel). */
+  submitPassphrase(requestId: string, value: string | null): Promise<void>
+  onPassphraseRequest(cb: (e: SshPassphraseRequest) => void): () => void
+  /** Main expired a pending passphrase request; close its dialog if it is still showing. */
+  onPassphraseDismiss(cb: (e: { requestId: string }) => void): () => void
 }
 
 /** Outcome of a file download (SSH pull). `localPath` is the absolute path actually written —

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { useSshServers } from '../state/sshServers'
+import { Button } from '@renderer/ui/Button'
+import { Input } from '@renderer/ui/Input'
 import type { SshServer } from '@shared/ssh'
 
 interface SshProjectDialogProps {
@@ -67,12 +69,12 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
   const [mkdirErr, setMkdirErr] = useState('')
   // Stable id for the temporary browse master, generated once.
   const browseIdRef = useRef(`ssh-browse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
-  const connectedRef = useRef(false)
+  const connectBegunRef = useRef(false)
 
   // Tear down the temporary browse master (best-effort) once it's no longer needed.
   const disconnectBrowse = useCallback(() => {
-    if (connectedRef.current) {
-      connectedRef.current = false
+    if (connectBegunRef.current) {
+      connectBegunRef.current = false
       void window.nodeTerminal.sshProject.disconnect(browseIdRef.current)
     }
   }, [])
@@ -124,8 +126,13 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
       setError('')
       setStep('connecting')
       try {
+        // Mark BEFORE the await: from the moment connect() is issued there is a master (or an
+        // in-flight attempt) that close/unmount must tear down. Marking only on success meant
+        // cancelling during 'connecting' skipped disconnectBrowse entirely, and once the attempt
+        // later landed (a slow host, or parked on the passphrase prompt) the browse master
+        // outlived the dialog for the rest of the app run.
+        connectBegunRef.current = true
         await window.nodeTerminal.sshProject.connect(browseIdRef.current, srv)
-        connectedRef.current = true
         await list('~')
         setStep('browse')
       } catch (err) {
@@ -185,18 +192,16 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
             )}
           </div>
           <div className="confirm__actions">
-            <button className="confirm__btn" onClick={close}>
-              Cancel
-            </button>
-            <button
-              className="confirm__btn primary"
+            <Button onClick={close}>Cancel</Button>
+            <Button
+              variant="primary"
               onClick={() => {
                 onManage()
                 close()
               }}
             >
               Add server…
-            </button>
+            </Button>
           </div>
         </>
       )
@@ -204,16 +209,20 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
     if (step === 'connecting') {
       return (
         <>
-          <p className="confirm__msg" style={{ fontWeight: 600 }}>
+          {/* The spinner is the app's shared `.ui-spinner`, the same one the Accounts section
+              uses for a mid-setup button, so a connecting SSH project reads like every other
+              "working" state rather than a one-off. This step can sit here for a while: if the
+              key needs a passphrase the prompt arrives as a separate dialog on top, and a human
+              can take a minute to answer, so a static line looked hung. */}
+          <p className="confirm__msg" style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="ui-spinner" aria-hidden />
             Connecting to {server?.label}…
           </p>
           <p className="confirm__msg" style={{ opacity: 0.7 }}>
-            Establishing the SSH connection.
+            {server ? `Establishing the SSH connection to ${server.user}@${server.host}.` : 'Establishing the SSH connection.'}
           </p>
           <div className="confirm__actions">
-            <button className="confirm__btn" onClick={close}>
-              Cancel
-            </button>
+            <Button onClick={close}>Cancel</Button>
           </div>
         </>
       )
@@ -228,15 +237,10 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
             {error}
           </p>
           <div className="confirm__actions">
-            <button className="confirm__btn" onClick={close}>
-              Close
-            </button>
-            <button
-              className="confirm__btn primary"
-              onClick={() => server && void connect(server)}
-            >
+            <Button onClick={close}>Close</Button>
+            <Button variant="primary" onClick={() => server && void connect(server)}>
               Retry
-            </button>
+            </Button>
           </div>
         </>
       )
@@ -258,17 +262,11 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
             color: 'var(--muted)'
           }}
         >
-          <button
-            className="confirm__btn"
-            style={{ padding: '3px 9px' }}
-            disabled={atRoot}
-            onClick={() => void list(parentDir(path))}
-          >
+          <Button className="px-2.5 py-0.5" disabled={atRoot} onClick={() => void list(parentDir(path))}>
             ↑ Up
-          </button>
-          <button
-            className="confirm__btn"
-            style={{ padding: '3px 9px' }}
+          </Button>
+          <Button
+            className="px-2.5 py-0.5"
             onClick={() => {
               setMkdirErr('')
               setNewName('')
@@ -276,7 +274,7 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
             }}
           >
             ＋ New folder
-          </button>
+          </Button>
           <span
             title={path}
             style={{
@@ -292,7 +290,7 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
         </div>
         {creating && (
           <div style={{ display: 'flex', gap: 8, margin: '0 0 8px' }}>
-            <input
+            <Input
               autoFocus
               value={newName}
               placeholder="Folder name"
@@ -305,14 +303,13 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
                   setMkdirErr('')
                 }
               }}
-              style={{ flex: 1, minWidth: 0 }}
+              className="min-w-0 flex-1"
             />
-            <button className="confirm__btn primary" style={{ padding: '3px 9px' }} onClick={() => void createFolder()}>
+            <Button variant="primary" className="px-2.5 py-0.5" onClick={() => void createFolder()}>
               Create
-            </button>
-            <button
-              className="confirm__btn"
-              style={{ padding: '3px 9px' }}
+            </Button>
+            <Button
+              className="px-2.5 py-0.5"
               onClick={() => {
                 setCreating(false)
                 setNewName('')
@@ -320,7 +317,7 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
               }}
             >
               Cancel
-            </button>
+            </Button>
           </div>
         )}
         {mkdirErr && (
@@ -354,12 +351,10 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
           )}
         </div>
         <div className="confirm__actions">
-          <button className="confirm__btn" onClick={close}>
-            Cancel
-          </button>
-          <button className="confirm__btn primary" onClick={useThisFolder}>
+          <Button onClick={close}>Cancel</Button>
+          <Button variant="primary" onClick={useThisFolder}>
             Use this folder
-          </button>
+          </Button>
         </div>
       </>
     )

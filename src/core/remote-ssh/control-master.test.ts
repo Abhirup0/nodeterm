@@ -26,7 +26,8 @@ const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: 
 
 /** The option prefix every child ssh shares: self-healing mux (auto + persist, so the first
  *  child after a cleanly-gone master rebuilds it), keepalives for when the child owns the
- *  transport, and the identity key (auth matters exactly when mux is unavailable). */
+ *  transport, and the identity key (auth matters exactly when mux is unavailable), pinned with
+ *  IdentitiesOnly so a fallback connect can't burn MaxAuthTries on unrelated agent keys. */
 const childPrefix = [
   '-o', 'ControlMaster=auto',
   '-o', 'ControlPath=/s.sock',
@@ -35,6 +36,7 @@ const childPrefix = [
   '-o', 'ServerAliveInterval=15',
   '-o', 'ServerAliveCountMax=4',
   '-p', '2222',
+  '-o', 'IdentitiesOnly=yes',
   '-i', '/k/id'
 ]
 
@@ -72,10 +74,36 @@ describe('masterArgs', () => {
       '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ServerAliveInterval=15',
       '-o', 'ServerAliveCountMax=4',
+      '-o', 'ConnectTimeout=15',
+      '-o', 'PasswordAuthentication=no',
+      '-o', 'KbdInteractiveAuthentication=no',
+      '-o', 'AddKeysToAgent=yes',
       '-p', '2222',
+      '-o', 'IdentitiesOnly=yes',
       '-i', '/k/id',
       'deploy@h.example.com'
     ])
+  })
+  it('loads unlocked keys into the agent: the agent, not the app, is the passphrase cache', () => {
+    // Measured against a real sshd: with this option the second connect (fresh master, fresh
+    // pid) authenticates through the agent with ZERO askpass invocations; without it every
+    // single connect re-prompted. Deleting ssh-passphrase-cache.ts rides on this line.
+    expect(masterArgs(conn, '/s.sock')).toContain('AddKeysToAgent=yes')
+  })
+  it('pins the offer to the configured key (IdentitiesOnly) so agent keys cannot burn MaxAuthTries', () => {
+    // Measured: 8 junk agent keys + `-i` ended the connection with "Too many authentication
+    // failures" (server default MaxAuthTries=6) before the configured key was ever offered.
+    // The agent still SIGNS the pinned key, so prompt-free reconnects are unaffected.
+    const args = masterArgs(conn, '/s.sock').join(' ')
+    expect(args).toContain('-o IdentitiesOnly=yes -i /k/id')
+  })
+  it('omits IdentitiesOnly (not just -i) when no identityFile is configured: agent keys must stay usable', () => {
+    // IdentitiesOnly with NO -i would stop ssh from offering agent keys at all, which would
+    // break the very reconnect path AddKeysToAgent provides. It must ride with -i or not at all.
+    const bare = { host: 'h.example.com', user: 'deploy', port: 2222 }
+    const args = masterArgs(bare, '/s.sock')
+    expect(args).not.toContain('-i')
+    expect(args.join(' ')).not.toContain('IdentitiesOnly')
   })
 })
 
@@ -83,10 +111,11 @@ describe('childArgs', () => {
   it('muxes over the master socket, self-healing (auto + persist), and appends a remote command', () => {
     expect(childArgs(conn, '/s.sock', 'tmux ls')).toEqual([...childPrefix, 'deploy@h.example.com', 'tmux ls'])
   })
-  it('omits -i when the connection has no identityFile', () => {
+  it('omits -i AND IdentitiesOnly when the connection has no identityFile', () => {
     const bare = { host: 'h.example.com', user: 'deploy', port: 2222 }
     const args = childArgs(bare, '/s.sock', 'tmux ls')
     expect(args).not.toContain('-i')
+    expect(args.join(' ')).not.toContain('IdentitiesOnly') // would disable agent keys outright
     expect(args.at(-2)).toBe('deploy@h.example.com')
   })
   it('regression: never ControlMaster=no — a dead master made every child a silent fresh direct connection', () => {

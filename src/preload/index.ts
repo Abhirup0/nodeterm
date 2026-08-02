@@ -177,6 +177,18 @@ const api: NodeTerminalApi = {
       const h = (_e: unknown, e: unknown) => cb(e as never)
       ipcRenderer.on(IPC.sshProjectStatus, h)
       return () => ipcRenderer.removeListener(IPC.sshProjectStatus, h)
+    },
+    submitPassphrase: (requestId, value) =>
+      ipcRenderer.invoke(IPC.sshPassphraseSubmit, requestId, value),
+    onPassphraseRequest: (cb) => {
+      const h = (_e: unknown, e: unknown) => cb(e as never)
+      ipcRenderer.on(IPC.sshPassphraseRequest, h)
+      return () => ipcRenderer.removeListener(IPC.sshPassphraseRequest, h)
+    },
+    onPassphraseDismiss: (cb) => {
+      const h = (_e: unknown, e: unknown) => cb(e as never)
+      ipcRenderer.on(IPC.sshPassphraseDismiss, h)
+      return () => ipcRenderer.removeListener(IPC.sshPassphraseDismiss, h)
     }
   },
   sshFs: {

@@ -202,6 +202,17 @@ export const IPC = {
   sshFsMkdir: 'sshFs:mkdir',
   sshFsExists: 'sshFs:exists',
   sshProjectStatus: 'ssh-project:status',
+  /** main → renderer: an SSH project's identity file is passphrase-protected and the ssh-agent
+   *  does not hold the key (or the last answer was wrong), so show a prompt.
+   *  Payload: SshPassphraseRequest. */
+  sshPassphraseRequest: 'ssh-project:passphrase-request',
+  /** renderer → main: the user's answer to an sshPassphraseRequest. Args: (requestId, value),
+   *  value null on cancel. */
+  sshPassphraseSubmit: 'ssh-project:passphrase-submit',
+  /** main → renderer: a passphrase request expired main-side (abandoned prompt timeout). The
+   *  renderer closes the matching dialog so a late answer cannot land in a dead request.
+   *  Payload: { requestId }. */
+  sshPassphraseDismiss: 'ssh-project:passphrase-dismiss',
   gitStatus: 'git:status',
   gitInit: 'git:init',
   gitClone: 'git:clone',

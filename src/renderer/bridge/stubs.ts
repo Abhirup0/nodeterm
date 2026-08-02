@@ -139,7 +139,10 @@ export function buildStubApi(): Omit<
       mkdir: U('sshProject.mkdir'),
       uploadFile: U('sshProject.uploadFile'),
       downloadFile: U('sshProject.downloadFile'),
-      onStatus: noopUnsub
+      onStatus: noopUnsub,
+      submitPassphrase: U('sshProject.submitPassphrase'),
+      onPassphraseRequest: noopUnsub,
+      onPassphraseDismiss: noopUnsub
     },
     sshFs: {
       list: U('sshFs.list'),
