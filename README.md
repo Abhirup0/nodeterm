@@ -24,11 +24,11 @@ hidden tabs.
 ---
 
 <div align="center">
-  <a href="docs/assets/kanban-launch.mp4">
-    <img src="docs/assets/kanban-launch.gif" alt="Trello for Claude Code — nodeterm's kanban board of live agent sessions" width="900" />
+  <a href="docs/assets/hero-tour.mp4">
+    <img src="docs/assets/hero-tour.gif" alt="nodeterm in 30 seconds — canvas, agents, kanban board, three surfaces" width="900" />
   </a>
   <br/>
-  <sub>▶ <a href="docs/assets/kanban-launch.mp4">Watch the launch video with sound</a></sub>
+  <sub>▶ <a href="docs/assets/hero-tour.mp4">Watch the 30-second tour with sound</a></sub>
 </div>
 
 ## Why nodeterm
@@ -50,66 +50,74 @@ started, concepts, agents, remote access, troubleshooting.
 <tr>
 <td width="42%" valign="middle">
 
-### One project, two views
-
-Every project is a canvas — **and also a kanban board**. Cards *are* your live
-sessions: drag them across columns while the agent keeps running, see pulsing
-**RUNNING** / **NEEDS YOU** badges and each agent's context meter at a glance, and
-add columns to match your flow. Toggle with `⌘⇧B`.
-
-</td>
-<td><img src="docs/assets/kanban-board.png" alt="The kanban board — live session cards with RUNNING and NEEDS YOU badges" /></td>
-</tr>
-<tr>
-<td width="42%" valign="middle">
-
-### Every card is a live Claude Code session
-
-Click a card and the **real session opens in a Trello-style card modal** — the same
-tmux-backed terminal, live. Answer a permission prompt right there, search the
-scrollback, dictate into it, and keep per-card **comments & activity** alongside
-members, due date, and priority.
-
-</td>
-<td><img src="docs/assets/card-modal.png" alt="The card modal — a live Claude Code session with permission prompt, members, due date and activity feed" /></td>
-</tr>
-<tr>
-<td width="42%" valign="middle">
-
-### Built for teams of humans *and* agents
-
-Assign teammates to cards, set due dates and priorities, and comment — the board's
-activity feed is a git-shareable file in your repo, so everyone (and every agent)
-sees the same board. Agents can organize the canvas too: spawn a team, wire
-dependencies, and read each other's transcripts.
-
-</td>
-<td><img src="docs/assets/card-assign.png" alt="Assigning a member from the card's picker, zoomed" /></td>
-</tr>
-</table>
-
 ### Everything is a node
 
-Right-click the canvas to open a terminal — or an AI agent. Each one runs in its own
-persistent tmux session, on one pan/zoom canvas:
+Right-click the canvas to open a **terminal** — or an AI **agent**. Each runs in its own
+persistent tmux session, next to **sticky notes** (link one to feed an agent context),
+**Monaco editors**, **diff views**, and **web/video** nodes — arranged spatially, like a
+map. Quit the app, even **restart the machine** — every session comes back.
 
-- 🖥 **Terminal** — xterm + tmux, click-to-rename, color, tags, AI naming.
-- 🤖 **Agent** — a terminal preset that launches an agent CLI: **Claude Code**, **Codex**,
-  **Gemini**, **opencode**, or your own custom command.
-- 📝 **Sticky note** — free-text colored notes; link one to an agent to feed it context.
-- 🗂 **Group** — frame and move related nodes together; bind a group to a **git worktree**
-  for an agent-per-branch layout.
-- ✏️ **Editor** — Monaco code editor for a file (⌘S to save, markdown/image preview).
-- 🔀 **Diff** — Monaco diff editor for staged/unstaged changes.
-- 🌐 **Web / Video** — render a page or a video right on the canvas.
+</td>
+<td><img src="docs/assets/canvas-tour.gif" alt="The canvas — terminals, agents, notes, editors and diffs as nodes; sessions survive a full restart" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
 
 ### Know when an agent needs you
 
-Hook-driven agent status — no output scraping: pulsing **RUNNING / NEEDS YOU** badges,
-**subagent** cards with live transcripts, a **context-window meter**, unread dots, and
-OS notifications when an agent finishes (or gets stuck on an approval) while you're
-somewhere else. On a MacBook, the **notch** grows into a tiny status capsule: a walking
-mascot per working agent, a red dot when one needs you.
+Hook-driven status — no output scraping: pulsing **RUNNING / NEEDS YOU** badges,
+**subagent** cards with live transcripts, a per-node **context meter**, and OS
+notifications. Click the ping, answer the permission prompt right in the node, and get
+told the moment the turn is **done**. On a MacBook, agents live in the **notch** too.
+
+</td>
+<td><img src="docs/assets/agents-tour.gif" alt="Agent status — NEEDS YOU flip, notification, answering a permission prompt, subagent fan-out" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
+
+### One project, two views
+
+Every project is a canvas — **and also a kanban board**. Cards *are* your live
+sessions: drag them across columns while the agent keeps running, open a card into a
+**live card modal** (the real session + members, due date, priority, comments), and
+assign teammates. Toggle with `⌘⇧B`.
+<br/><sub>▶ <a href="docs/assets/kanban-launch.mp4">Watch the board video with sound</a></sub>
+
+</td>
+<td><img src="docs/assets/kanban-launch.gif" alt="The kanban board — live session cards, drag between columns, the card modal with a live Claude Code session" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
+
+### Your sessions, anywhere
+
+**Pair your phone** with one QR — *scan with the nodeterm iOS app* — and the **same
+live session continues in your pocket**, E2E encrypted **over the relay, not just your
+LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
+
+</td>
+<td><img src="docs/assets/remote-tour.gif" alt="Pair your phone — scan the QR, the same live session continues on the iPhone" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
+
+### Talk to your terminal
+
+Hold `⌘⇧D` and say it. On-device **Whisper** transcribes locally — review the text,
+then **Send** (nothing auto-submits). Your voice never leaves the machine.
+
+</td>
+<td><img src="docs/assets/dictation-tour.gif" alt="Dictation — hold cmd-shift-D, speak, review, send into the terminal" /></td>
+</tr>
+</table>
+
+### Node kinds
+
+🖥 **Terminal** (xterm + tmux, AI naming) · 🤖 **Agent** (Claude Code / Codex / Gemini /
+opencode / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
+(bind to a **git worktree** for agent-per-branch) · ✏️ **Editor** (Monaco, ⌘S) ·
+🔀 **Diff** · 🌐 **Web / Video**
 
 ### More
 
