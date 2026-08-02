@@ -7853,11 +7853,23 @@ body,
 .kanban-card__metarow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 6px 8px;
+  flex-wrap: wrap;
   margin-top: 7px;
 }
-.kanban-card__avatars {
+/* Labels take the left of the shared row and wrap; the priority/due/avatars hug the right. */
+.kanban-card__metalabels {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.kanban-card__metaright {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.kanban-card__avatars {
   display: inline-flex;
   gap: 4px;
 }
