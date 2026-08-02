@@ -248,6 +248,71 @@ describe('shouldPublish (the solo gate)', () => {
   })
 })
 
+// The gate above only skips the DIFF; serializing the canvas to hand it over is the other half of
+// the cost, and it happens in a React effect keyed on the nodes array — once per drag frame. A
+// thunk snapshot moves that cost behind the gate too.
+describe('lazy snapshots', () => {
+  it('never resolves the snapshot while solo — not even to keep the baseline', () => {
+    const c = collect()
+    const snapshot = vi.fn(() => [node('a')])
+    const p = createCanvasPublisher(c.send, { shouldPublish: () => false })
+    p.publish(snapshot)
+    p.publish(snapshot, { throttle: true })
+    p.adopt(snapshot)
+    vi.advanceTimersByTime(PUBLISH_INTERVAL_MS * 4)
+    expect(snapshot).not.toHaveBeenCalled()
+    expect(c.sent).toEqual([])
+  })
+
+  it('resolves a deferred baseline once when a peer arrives, and diffs against it', () => {
+    const c = collect()
+    let peers = false
+    const p = createCanvasPublisher(c.send, { shouldPublish: () => peers })
+    const solo = vi.fn(() => [node('a'), node('b')])
+    p.publish(solo)
+    expect(solo).not.toHaveBeenCalled()
+
+    peers = true
+    p.publish(() => [node('a'), node('b', 3)])
+    // The deferred baseline was resolved exactly once, and only the changed node was cast — the
+    // same result the eager path produced.
+    expect(solo).toHaveBeenCalledTimes(1)
+    expect(c.sent).toEqual([{ op: 'upsert', node: node('b', 3) }])
+
+    // …and it is not resolved again on the next edit (the baseline is now the resolved snapshot).
+    p.publish(() => [node('a'), node('b', 3)])
+    expect(solo).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves a coalesced drag frame once, at the trailing edge', () => {
+    const c = collect()
+    const p = createCanvasPublisher(c.send)
+    p.publish([node('a')])
+    const frames = [1, 2, 3].map((x) => vi.fn(() => [node('a', x)]))
+    for (const f of frames) p.publish(f, { throttle: true })
+    // Leading edge took the first frame; the other two coalesced into one trailing send, so the
+    // frame in the middle is never serialized at all.
+    expect(frames[0]).toHaveBeenCalledTimes(1)
+    expect(frames[1]).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(PUBLISH_INTERVAL_MS)
+    expect(frames[1]).not.toHaveBeenCalled()
+    expect(frames[2]).toHaveBeenCalledTimes(1)
+    expect(c.sent).toEqual([
+      { op: 'upsert', node: node('a') }, // the initial publish, before the drag
+      { op: 'upsert', node: node('a', 1) },
+      { op: 'upsert', node: node('a', 3) }
+    ])
+  })
+
+  it('an adopted thunk is a real baseline: the next identical snapshot diffs to nothing', () => {
+    const c = collect()
+    const p = createCanvasPublisher(c.send)
+    p.adopt(() => [node('a'), node('b')]) // a peer's mutation applied locally
+    p.publish(() => [node('a'), node('b')])
+    expect(c.sent).toEqual([])
+  })
+})
+
 describe('ephemeral nodes are never published', () => {
   it('isEphemeralNodeId matches subagent cards (by id set) and loop cards (by prefix)', () => {
     const eph = new Set(['sub-123'])

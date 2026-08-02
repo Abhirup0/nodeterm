@@ -6,6 +6,7 @@
 import http from 'http'
 import fs from 'fs'
 import path from 'path'
+import zlib from 'zlib'
 import type { Auth } from './auth'
 import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
 import { handleDownload } from './download'
@@ -29,6 +30,16 @@ const CONTENT_TYPES: Record<string, string> = {
 
 // CSP served with the inline login/setup pages (no app assets, no connections).
 const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
+
+/** Types worth compressing. Everything else (png, woff2) is already compressed — running it
+ *  through gzip only burns CPU and usually grows the payload. */
+const COMPRESSIBLE = new Set(['.html', '.js', '.mjs', '.css', '.map', '.json', '.svg'])
+/** Below this, a compressed frame plus its headers is not worth the round of CPU. */
+const COMPRESS_MIN_BYTES = 1024
+/** Total bytes of compressed payloads held in memory. The renderer dir is ~100 files whose gzip
+ *  total is a couple of MB, so this is headroom, not a working limit — when it is exceeded the
+ *  whole cache is dropped (simplest correct eviction for a set this small). */
+const COMPRESS_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 export interface HttpHandlerOpts {
   auth: Auth
@@ -181,12 +192,107 @@ function resolveStaticPath(rendererDir: string, urlPath: string): string | null 
   return candidate
 }
 
-function serveStatic(
+/**
+ * Pick a content encoding the client accepts. Brotli first (roughly 15% smaller than gzip on
+ * our bundles), gzip as the universal fallback. A `;q=0` on a token is a refusal, so it is
+ * honoured — everything else about the q-value ordering is ignored deliberately: we have two
+ * candidates and a fixed preference between them.
+ */
+export function negotiateEncoding(header: string | undefined): 'br' | 'gzip' | null {
+  if (!header) return null
+  const accepted = new Set<string>()
+  for (const part of header.split(',')) {
+    const [tokenRaw, ...params] = part.split(';')
+    const token = tokenRaw.trim().toLowerCase()
+    if (!token) continue
+    const refused = params.some((p) => /^\s*q\s*=\s*0(\.0+)?\s*$/i.test(p))
+    if (!refused) accepted.add(token)
+  }
+  if (accepted.has('br')) return 'br'
+  if (accepted.has('gzip')) return 'gzip'
+  return null
+}
+
+/** `<encoding> <path>` → the compressed body for one exact file revision (`sig`). The promise is
+ *  cached, not just its result, so N concurrent first-hits compress once. */
+const compressCache = new Map<string, { sig: string; body: Promise<Buffer | null> }>()
+let compressCacheBytes = 0
+
+function compress(buf: Buffer, enc: 'br' | 'gzip'): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const done = (err: Error | null, out: Buffer): void => resolve(err ? null : out)
+    if (enc === 'br') {
+      zlib.brotliCompress(
+        buf,
+        // Quality 5 is the knee of the curve for JS/CSS: within a few percent of the default 11
+        // at a small fraction of its CPU — and the answer is cached, so this runs once per build.
+        { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5, [zlib.constants.BROTLI_PARAM_SIZE_HINT]: buf.length } },
+        done
+      )
+    } else {
+      zlib.gzip(buf, { level: 6 }, done)
+    }
+  })
+}
+
+/** The compressed body for a file revision, or null when compression failed (→ serve identity). */
+function compressedBody(
+  key: string,
+  sig: string,
+  enc: 'br' | 'gzip',
+  identity: () => Promise<Buffer>
+): Promise<Buffer | null> {
+  const hit = compressCache.get(key)
+  if (hit && hit.sig === sig) return hit.body
+  const body = identity()
+    .then((buf) => compress(buf, enc))
+    .then((out) => {
+      if (!out) {
+        compressCache.delete(key)
+        return null
+      }
+      compressCacheBytes += out.length
+      if (compressCacheBytes > COMPRESS_CACHE_MAX_BYTES) {
+        compressCache.clear()
+        compressCacheBytes = 0
+      }
+      return out
+    })
+    .catch(() => {
+      compressCache.delete(key)
+      return null
+    })
+  compressCache.set(key, { sig, body })
+  return body
+}
+
+/** Test seam: drop the compressed-payload cache. */
+export function _resetStaticCacheForTest(): void {
+  compressCache.clear()
+  compressCacheBytes = 0
+}
+
+/**
+ * Serve one built renderer file.
+ *
+ * Three things beyond reading the bytes, all of which matter because the browser client is the
+ * whole point of the Server Edition and it is usually NOT on the same LAN:
+ *  - **Compression.** The entry bundle is ~2.1 MB raw / ~0.46 MB gzipped, and the lazy Monaco
+ *    chunk 6.2 MB / 1.1 MB. Compressed payloads are cached per file revision, so the CPU is paid
+ *    once per build, not per request.
+ *  - **Caching.** Vite content-hashes everything under /assets, so those can be `immutable`;
+ *    index.html revalidates by ETag (a 304 costs one small round trip instead of the bundle).
+ *    `private` rather than `public`: the app sits behind auth and a shared proxy has no business
+ *    holding it.
+ *  - **Async reads.** This handler shares its event loop with every terminal's WS frames, so a
+ *    `readFileSync` of a multi-MB chunk stalls output for every attached session.
+ */
+async function serveStatic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   rendererDir: string,
   urlPath: string
-): void {
+): Promise<void> {
   const filePath = resolveStaticPath(rendererDir, urlPath)
   if (!filePath) {
     sendJson(res, 400, { error: 'bad_path' })
@@ -194,7 +300,7 @@ function serveStatic(
   }
   let stat: fs.Stats
   try {
-    stat = fs.statSync(filePath)
+    stat = await fs.promises.stat(filePath)
   } catch {
     sendJson(res, 404, { error: 'not_found' })
     return
@@ -204,24 +310,63 @@ function serveStatic(
     return
   }
   const ext = path.extname(filePath).toLowerCase()
-  const contentType = CONTENT_TYPES[ext] || 'application/octet-stream'
-  let body: Buffer = fs.readFileSync(filePath)
-  // CSP rewrite ONLY on index.html: relax connect-src so the WS client can connect.
-  if (path.basename(filePath) === 'index.html') {
-    const html = body.toString('utf8')
+  const isIndex = path.basename(filePath) === 'index.html'
+  const sig = `${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}`
+  // Weak: index.html's body is rewritten below, so the tag describes the response, not the file.
+  const etag = `W/"${sig}"`
+  const headers: http.OutgoingHttpHeaders = {
+    'Content-Type': CONTENT_TYPES[ext] || 'application/octet-stream',
+    ETag: etag,
+    Vary: 'Accept-Encoding',
+    'Cache-Control': urlPath.startsWith('/assets/')
+      ? 'private, max-age=31536000, immutable'
+      : 'private, no-cache'
+  }
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, headers)
+    res.end()
+    return
+  }
+
+  const identity = async (): Promise<Buffer> => {
+    const raw = await fs.promises.readFile(filePath)
+    // CSP rewrite ONLY on index.html: relax connect-src so the WS client can connect.
+    if (!isIndex) return raw
+    const html = raw.toString('utf8')
     const marker = "default-src 'self';"
-    if (html.includes(marker)) {
-      body = Buffer.from(html.replace(marker, "default-src 'self'; connect-src 'self' ws: wss:;"))
-    } else {
+    if (!html.includes(marker)) {
       // A silent no-op here would leave the desktop CSP intact and the browser
       // would block the ws:/wss: WebSocket with no visible error — make sure an
       // operator sees this in the server logs.
       console.warn(
         "[nodeterm-server] index.html CSP did not contain the expected `default-src 'self';` marker — the ws: connect-src rewrite did not apply; the browser will block the WebSocket. Rebuild the renderer or update the rewrite."
       )
+      return raw
     }
+    return Buffer.from(html.replace(marker, "default-src 'self'; connect-src 'self' ws: wss:;"))
   }
-  res.writeHead(200, { 'Content-Type': contentType })
+
+  const enc =
+    COMPRESSIBLE.has(ext) && stat.size >= COMPRESS_MIN_BYTES
+      ? negotiateEncoding(req.headers['accept-encoding'] as string | undefined)
+      : null
+  if (enc) {
+    const packed = await compressedBody(`${enc} ${filePath}`, sig, enc, identity)
+    if (packed) {
+      res.writeHead(200, { ...headers, 'Content-Encoding': enc, 'Content-Length': packed.length })
+      res.end(packed)
+      return
+    }
+    // Compression failed (OOM, corrupt read): fall through and serve the bytes as they are.
+  }
+  let body: Buffer
+  try {
+    body = await identity()
+  } catch {
+    sendJson(res, 404, { error: 'not_found' })
+    return
+  }
+  res.writeHead(200, { ...headers, 'Content-Length': body.length })
   res.end(body)
 }
 
@@ -350,6 +495,6 @@ export function createHttpHandler(
     if (downloadTickets && (await handleDownload(req, res, url, downloadTickets))) return
 
     // Authenticated: serve static renderer files (index.html fallback for '/').
-    serveStatic(req, res, rendererDir, pathname)
+    await serveStatic(req, res, rendererDir, pathname)
   }
 }

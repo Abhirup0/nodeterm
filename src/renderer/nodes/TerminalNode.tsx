@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Handle,
   NodeResizer,
@@ -11,8 +11,11 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { renderMarkdown } from '../lib/markdown'
-import { ChatPanel } from './ChatPanel'
+// ChatPanel (the ⌘M transcript view) is code-split with the markdown renderer it uses: neither is
+// on the path to painting a terminal, and both were in the startup chunk purely by being imported
+// here. `lazy` + a null fallback — the panel replaces the terminal body on a keypress, and a
+// one-frame spinner in that slot reads as a glitch.
+const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
 import { droppedPaths, pastedFiles } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
@@ -1691,7 +1694,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   useEffect(() => {
     if (data.mdMode && !useChat) {
       // Full scrollback (not just the visible viewport) so the whole session renders.
-      void api.pty.capture(id, true).then((t) => setMdHtml(renderMarkdown(t)))
+      // `marked` + DOMPurify are imported HERE rather than at module scope: this node is on the
+      // startup path (it is what the canvas is made of), the markdown renderer is not — it runs
+      // only after someone presses ⌘M. The capture is already a round trip to main, so the extra
+      // chunk fetch is not even on a path the user can perceive.
+      void Promise.all([api.pty.capture(id, true), import('../lib/markdown')]).then(
+        ([text, md]) => setMdHtml(md.renderMarkdown(text))
+      )
     }
   }, [data.mdMode, id, useChat])
 
@@ -2087,12 +2096,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         )}
         {mdMode &&
           (useChat ? (
-            <ChatPanel
-              nodeId={id}
-              sessionId={status?.sessionId}
-              cwd={data.cwd as string | undefined}
-              accountId={data.accountId}
-            />
+            <Suspense fallback={null}>
+              <ChatPanel
+                nodeId={id}
+                sessionId={status?.sessionId}
+                cwd={data.cwd as string | undefined}
+                accountId={data.accountId}
+              />
+            </Suspense>
           ) : (
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">

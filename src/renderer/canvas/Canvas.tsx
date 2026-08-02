@@ -73,25 +73,29 @@ import {
   IconUngroup,
   IconUnlock
 } from '../components/icons'
-import { SettingsPage } from '../components/settings/SettingsPage'
 import type { SettingsSectionId } from '../components/settings/nav'
-import { SourceControlPanel } from '../components/SourceControlPanel'
+// Overlay surfaces (settings, source control, explorer, kanban, onboarding, dictation, …) are
+// code-split: they render behind a flag and must not sit in the startup chunk. See lazyPanels.
+import {
+  SettingsPage,
+  SourceControlPanel,
+  ExplorerPanel,
+  ShortcutsPanel,
+  OnboardingFlow,
+  DictationOverlay,
+  BugReportDialog,
+  PhonePairPopover,
+  MobileLaunchCard,
+  KanbanView
+} from '../components/lazyPanels'
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
-import { ShortcutsPanel } from '../components/ShortcutsPanel'
-import { OnboardingFlow } from '../components/onboarding/OnboardingFlow'
-import {
-  MobileLaunchCard,
-  markMobileLaunchSeen,
-  shouldShowMobileLaunch
-} from '../components/MobileLaunchCard'
-import { DictationOverlay, type DictationTarget } from '../components/DictationOverlay'
-import { BugReportDialog } from '../components/BugReportDialog'
+import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunch'
+import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
-import { PhonePairPopover } from '../components/PhonePairPopover'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
@@ -101,7 +105,6 @@ import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
 import { WorktreeDialog } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
-import { ExplorerPanel } from '../components/ExplorerPanel'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
@@ -216,7 +219,7 @@ import type {
   SshProjectStatus,
   TranscriptHit
 } from '@shared/types'
-import { KanbanView, type KanbanCreateChoice, type KanbanSession } from '../components/kanban/KanbanView'
+import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, defaultKanban, labelsForCard, migrateProjectTags } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { isHidden } from '../lib/ui-visibility'
@@ -421,6 +424,57 @@ const minimapNodeColor = (n: Node): string =>
  *  reads as `not-resumable`. */
 const restartAgentIdOf = (n: Node | undefined): string | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
+
+/** One canvas node as a board card, or null when this kind is not a card at all (a group frame, an
+ *  editor, a diff). The board derives its cards from the canvas live, so this is the single
+ *  definition of that mapping — the card list and the board-log's `cardTitle` lookup must agree on
+ *  what a node is called, or a title change would log as a card appearing and disappearing. */
+function toKanbanSession(n: CanvasNode): KanbanSession | null {
+  if (n.type === 'browser') {
+    return {
+      id: n.id,
+      title: (n.data.title as string) || 'Browser',
+      color: (n.data.color as string) ?? NODE_COLORS[0],
+      kind: 'browser',
+      url: n.data.url as string | undefined,
+      spawn: {}
+    }
+  }
+  if (n.type === 'sticky') {
+    const text = ((n.data.text as string) ?? '').trim()
+    return {
+      id: n.id,
+      // A note has no title of its own — its first line is the card label.
+      title: text.split('\n')[0].slice(0, 80) || 'Note',
+      color: (n.data.color as string) ?? NODE_COLORS[2],
+      kind: 'sticky',
+      text,
+      // Sticky cards never open a live terminal — the modal reads no spawn info.
+      spawn: {}
+    }
+  }
+  if (n.type !== 'terminal') return null
+  return {
+    id: n.id,
+    title: (n.data.title as string) ?? '',
+    color: (n.data.color as string) ?? NODE_COLORS[0],
+    kind: 'terminal',
+    agentId: n.data.agentId as string | undefined,
+    // What the card modal's co-attach terminal needs to join THIS node's session the same way the
+    // canvas TerminalNode does.
+    spawn: {
+      shell: n.data.shell as string | undefined,
+      cwd: n.data.cwd as string | undefined,
+      agentId: n.data.agentId as string | undefined,
+      accountId: n.data.accountId as string | undefined,
+      ssh: n.data.ssh as SshConnection | undefined,
+      sshRemoteTmux: !!n.data.sshRemoteTmux
+    }
+  }
+}
+
+/** Stable empty card list, so the closed board's memo never churns array identity. */
+const NO_KANBAN_SESSIONS: KanbanSession[] = []
 
 /** Drop the separators a hidden row leaves dangling: the menu's rules are written between blocks,
  *  so hiding every row of a block would otherwise emit two rules in a row (or one hanging at the
@@ -769,10 +823,6 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
-  // Live mirror of the derived board cards (defined far below), so the board-log emission funnel
-  // in onKanbanChange — declared above kanbanSessions — can resolve a node's card title without a
-  // dep cycle. Assigned right after that useMemo, same render-mirror idiom as nodesRef.
-  const kanbanSessionsRef = useRef<KanbanSession[]>([])
   // focusNodeById, for callbacks declared ABOVE its definition (openFile's dedupe focuses the
   // already-open node). Assigned right after the definition, same render-mirror idiom as nodesRef.
   const focusNodeRef = useRef<(nodeId: string) => void>(() => {})
@@ -1139,6 +1189,44 @@ export function Canvas() {
         .join('|'),
     [nodes]
   )
+  // Dep edges (`--after`) are DERIVED from node data, so the obvious thing is to build them inside
+  // displayEdges off `nodes` — which is what this used to do, and it made `nodes` a dependency of
+  // the edge list. `nodes` gets a fresh identity on every drag FRAME, so dragging one node rebuilt
+  // every context link, rope and dep edge on the canvas ~60×/s (new object identities, so React
+  // Flow re-rendered all of them too). Same discipline as `stickySig`/`loopSig`: reduce the part
+  // that comes from `nodes` to a SIGNATURE, and hang the styled objects off that.
+  //
+  // The pairs themselves stay in `dependencyEdges` (the tested producer of both the id format and
+  // the liveness rule); the ref carries them from the cheap per-frame pass to the styled memo,
+  // which only re-runs when the signature — i.e. the actual set of pending dependencies — changes.
+  const depPairsRef = useRef<ReturnType<typeof dependencyEdges>>([])
+  const depEdgeSig = useMemo(() => {
+    // Fast path: no armed node → no Set allocation, no pairs, and the signature stays ''.
+    if (!nodes.some((n) => n.data.pendingLaunch)) {
+      depPairsRef.current = []
+      return ''
+    }
+    const pairs = dependencyEdges(nodes as unknown as ArmedNode[], new Set(nodes.map((n) => n.id)))
+    depPairsRef.current = pairs
+    return pairs.map((e) => e.id).join('|')
+  }, [nodes])
+  const depEdges = useMemo(
+    () =>
+      depPairsRef.current.map((e) => ({
+        ...e,
+        type: 'default' as const,
+        animated: true,
+        label: '⏳ waits for',
+        labelStyle: { fill: '#8e8e93', fontSize: 11, fontWeight: 600 },
+        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+        labelBgPadding: [6, 3] as [number, number],
+        labelBgBorderRadius: 5,
+        style: { stroke: '#8e8e93', strokeWidth: 1.5, strokeDasharray: '6 4' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#8e8e93', width: 14, height: 14 }
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
+    [depEdgeSig]
+  )
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
     // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
@@ -1192,29 +1280,16 @@ export function Canvas() {
         : e
     )
     // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
-    // wait is on. Derived from node data every time rather than persisted — a pending dependency
-    // is a STATE that ends when the launch fires, unlike the context bridge `--after` also draws,
-    // which is a durable relation and stays.
-    const deps = dependencyEdges(nodes as unknown as ArmedNode[], new Set(nodes.map((n) => n.id))).map(
-      (e) => ({
-        ...e,
-        type: 'default' as const,
-        animated: true,
-        label: '⏳ waits for',
-        labelStyle: { fill: '#8e8e93', fontSize: 11, fontWeight: 600 },
-        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 5,
-        style: { stroke: '#8e8e93', strokeWidth: 1.5, strokeDasharray: '6 4' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#8e8e93', width: 14, height: 14 }
-      })
-    )
+    // wait is on. Derived from node data rather than persisted — a pending dependency is a STATE
+    // that ends when the launch fires, unlike the context bridge `--after` also draws, which is a
+    // durable relation and stays. Built above (depEdges), keyed on the dependency signature so a
+    // drag frame does not rebuild it.
     const extra =
-      ephemeralEdges.length || ropes.length || deps.length
-        ? [...ephemeralEdges, ...ropes, ...deps]
+      ephemeralEdges.length || ropes.length || depEdges.length
+        ? [...ephemeralEdges, ...ropes, ...depEdges]
         : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, nodes])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -1521,11 +1596,13 @@ export function Canvas() {
       markDirty() // rides the existing debounced persist (commitActiveToStore + workspace.save)
       // cardTitle must return '' for — and ONLY for — nodes that no longer exist (the diff reads
       // '' as "pruned removal, not a move"). A LIVE node with an empty title maps to 'Untitled',
-      // never '' (see boardLogEvents' JSDoc).
-      const sessions = kanbanSessionsRef.current
+      // never '' (see boardLogEvents' JSDoc). Resolved from the live nodes through the same
+      // `toKanbanSession` the card list uses, so the two can't disagree about a node's name — and
+      // so this does not depend on the derived list, which only exists while the board is open.
       const cardTitle = (nodeId: string): string => {
-        const s = sessions.find((x) => x.id === nodeId)
-        return s ? s.title || 'Untitled' : ''
+        const n = nodesRef.current.find((x) => x.id === nodeId)
+        const card = n ? toKanbanSession(n) : null
+        return card ? card.title || 'Untitled' : ''
       }
       for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
         useBoardLog.getState().append(api, id, { kind: 'event', nodeId, event })
@@ -1536,9 +1613,15 @@ export function Canvas() {
 
   // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
   // (subagent / loop), which every client derives for itself from the agent:status stream.
-  const publishableNow = useCallback((flow: CanvasNode[]): CanvasNodeState[] => {
+  //
+  // Returns a THUNK, and the publisher decides whether to call it (see CanvasSnapshot). The
+  // serialize is the expensive half of publishing and this runs from an effect keyed on `nodes` —
+  // once per drag FRAME — so handing over an array meant a solo user paid the whole cost of a
+  // feature the publisher's own solo gate then declined to use. What must NOT be deferred is the
+  // ephemeral-id set: it is read from a live store, so it is captured here, as of this call.
+  const publishableLater = useCallback((flow: CanvasNode[]): (() => CanvasNodeState[]) => {
     const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
-    return publishableStates(flowToNodeStates(flow), ephIds)
+    return () => publishableStates(flowToNodeStates(flow), ephIds)
   }, [])
 
   // ---- persistence helpers ----
@@ -1799,13 +1882,13 @@ export function Canvas() {
   useEffect(() => {
     const pub = publisherRef.current
     if (!pub) return
-    const states = publishableNow(nodes)
+    const states = publishableLater(nodes)
     if (loadingRef.current) {
       pub.adopt(states)
       return
     }
     pub.publish(states, { throttle: draggingRef.current })
-  }, [nodes, publishableNow])
+  }, [nodes, publishableLater])
 
   // Receiving side: apply an incoming mutation. Deliberately separate from the relay
   // `remoteHost.onApplyMutation` effect above — that one is host↔client, this one is peer↔peer.
@@ -1860,7 +1943,7 @@ export function Canvas() {
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
       nodesRef.current = flow
-      publisherRef.current?.adopt(publishableNow(flow))
+      publisherRef.current?.adopt(publishableLater(flow))
       // Undo stays LOCAL — but it must not EAT a local entry either. REBASE the committed baseline
       // by applying the peer's mutation to it, rather than replacing it with the current nodes:
       // replacing it made `nodes === committedRef.current`, so a local edit still inside the 300 ms
@@ -1871,7 +1954,7 @@ export function Canvas() {
       setNodes(flow)
       markDirty()
     })
-  }, [activeSession.api, setNodes, markDirty, publishableNow])
+  }, [activeSession.api, setNodes, markDirty, publishableLater])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
@@ -2108,6 +2191,9 @@ export function Canvas() {
 
   // Prune ropes whose endpoints were deleted (mirrors the context-link pruning below).
   useEffect(() => {
+    // Nothing to prune → don't build the id set. This effect runs on every drag FRAME (`nodes`
+    // identity), and most canvases have no ropes at all.
+    if (!controlEdgesRef.current.length) return
     const ids = new Set(nodes.map((n) => n.id))
     setControlEdges((es) => {
       const valid = es.filter((e) => ids.has(e.source) && ids.has(e.target))
@@ -4920,55 +5006,18 @@ export function Canvas() {
   focusNodeRef.current = focusNodeById
 
   // Session board cards are derived LIVE from the canvas nodes; the board stores only assignments.
+  // Only while the board is OPEN: `nodes` gets a fresh identity on every drag frame, so a closed
+  // board was rebuilding a card object per node ~60×/s for a surface that is not mounted. The
+  // board's own consumer is rendered under the same `kanbanOpen` flag, and the board-log's
+  // `cardTitle` reads the nodes directly (see onKanbanChange), so nothing else depends on this
+  // list existing while the canvas is what you are looking at.
   const kanbanSessions = useMemo(
     () =>
-      nodes
-        .filter((n) => n.type === 'terminal' || n.type === 'sticky' || n.type === 'browser')
-        .map((n) => {
-          if (n.type === 'browser') {
-            return {
-              id: n.id,
-              title: (n.data.title as string) || 'Browser',
-              color: (n.data.color as string) ?? NODE_COLORS[0],
-              kind: 'browser' as const,
-              url: n.data.url as string | undefined,
-              spawn: {}
-            }
-          }
-          if (n.type === 'sticky') {
-            const text = ((n.data.text as string) ?? '').trim()
-            return {
-              id: n.id,
-              // A note has no title of its own — its first line is the card label.
-              title: text.split('\n')[0].slice(0, 80) || 'Note',
-              color: (n.data.color as string) ?? NODE_COLORS[2],
-              kind: 'sticky' as const,
-              text,
-              // Sticky cards never open a live terminal — the modal reads no spawn info.
-              spawn: {}
-            }
-          }
-          return {
-            id: n.id,
-            title: (n.data.title as string) ?? '',
-            color: (n.data.color as string) ?? NODE_COLORS[0],
-            kind: 'terminal' as const,
-            agentId: n.data.agentId as string | undefined,
-            // What the card modal's co-attach terminal needs to join THIS node's session the same
-            // way the canvas TerminalNode does.
-            spawn: {
-              shell: n.data.shell as string | undefined,
-              cwd: n.data.cwd as string | undefined,
-              agentId: n.data.agentId as string | undefined,
-              accountId: n.data.accountId as string | undefined,
-              ssh: n.data.ssh as SshConnection | undefined,
-              sshRemoteTmux: !!n.data.sshRemoteTmux
-            }
-          }
-        }),
-    [nodes]
+      kanbanOpen
+        ? nodes.map(toKanbanSession).filter((s): s is KanbanSession => s !== null)
+        : NO_KANBAN_SESSIONS,
+    [nodes, kanbanOpen]
   )
-  kanbanSessionsRef.current = kanbanSessions
 
   // Create a node from the board's per-column "+ New" menu: it lands on the canvas (view
   // center) and, for a real column, is assigned there. The assignment is written directly —

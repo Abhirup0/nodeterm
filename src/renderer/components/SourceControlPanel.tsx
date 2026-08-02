@@ -18,7 +18,7 @@ import { PublishDialog } from './PublishDialog'
 import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
 import { hintLabel } from '@shared/platform-utils'
 
-interface SourceControlPanelProps {
+export interface SourceControlPanelProps {
   onClose: () => void
   // Every callback that opens something takes the ACTIVE SCOPE's cwd: the paths this panel hands
   // out are relative to the checkout it is showing, so the caller must root them there instead of

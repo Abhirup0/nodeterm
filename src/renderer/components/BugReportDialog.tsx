@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { BODY_BUDGET, buildBugReportUrl, envBlock, type BugReportEnv } from '../lib/bugReport'
 
-interface BugReportDialogProps {
+export interface BugReportDialogProps {
   env: BugReportEnv
   /** Receives the composed issues/new URL; the caller opens it (shell.openExternal). */
   onOpen: (url: string) => void

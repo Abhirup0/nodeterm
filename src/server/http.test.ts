@@ -3,8 +3,15 @@ import http from 'http'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import zlib from 'zlib'
 import { Auth } from './auth'
-import { createHttpHandler, sessionTokenFromCookie, SESSION_COOKIE } from './http'
+import {
+  createHttpHandler,
+  sessionTokenFromCookie,
+  negotiateEncoding,
+  _resetStaticCacheForTest,
+  SESSION_COOKIE
+} from './http'
 import { parseTrustedNets } from './proxy-trust'
 
 let dir: string, rendererDir: string, server: http.Server, base: string, auth: Auth
@@ -117,6 +124,131 @@ describe('http layer', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+
+  // The browser client is the whole point of the Server Edition and it is usually not on this
+  // LAN, so how the bundle goes over the wire is a feature, not a detail: the entry chunk is
+  // ~2.1 MB raw against ~0.46 MB gzipped, and a reload that revalidates costs a 304 instead of
+  // the whole thing.
+  describe('static delivery', () => {
+    /** Raw request: `fetch` negotiates and transparently decodes, which is exactly what these
+     *  assertions need to see. */
+    function rawGet(
+      pathname: string,
+      headers: Record<string, string>
+    ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+      return new Promise((resolve, reject) => {
+        const req = http.get(`${base}${pathname}`, { headers }, (res) => {
+          const chunks: Buffer[] = []
+          res.on('data', (c: Buffer) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) })
+          )
+        })
+        req.on('error', reject)
+      })
+    }
+
+    /** A hashed asset big enough to be worth compressing (see COMPRESS_MIN_BYTES). */
+    function writeAsset(name: string, body: string): string {
+      fs.mkdirSync(path.join(rendererDir, 'assets'), { recursive: true })
+      fs.writeFileSync(path.join(rendererDir, 'assets', name), body)
+      return body
+    }
+
+    afterEach(() => _resetStaticCacheForTest())
+
+    it('negotiateEncoding prefers brotli, falls back to gzip, honours q=0', () => {
+      expect(negotiateEncoding('gzip, deflate, br')).toBe('br')
+      expect(negotiateEncoding('gzip, deflate')).toBe('gzip')
+      expect(negotiateEncoding('br;q=0, gzip')).toBe('gzip')
+      expect(negotiateEncoding('gzip;q=0')).toBeNull()
+      expect(negotiateEncoding('identity')).toBeNull()
+      expect(negotiateEncoding(undefined)).toBeNull()
+    })
+
+    it('compresses a large asset and serves the exact bytes back', async () => {
+      const cookie = await setupAndLogin()
+      const source = writeAsset('big-abc123.js', `export const x = "${'y'.repeat(4000)}"\n`)
+      const gz = await rawGet('/assets/big-abc123.js', { cookie, 'accept-encoding': 'gzip' })
+      expect(gz.headers['content-encoding']).toBe('gzip')
+      expect(gz.headers['vary']).toBe('Accept-Encoding')
+      expect(zlib.gunzipSync(gz.body).toString('utf8')).toBe(source)
+      // Smaller on the wire is the entire point — assert it, so a future "simplification" that
+      // quietly stops compressing fails here instead of only showing up as a slow load.
+      expect(gz.body.length).toBeLessThan(source.length / 2)
+
+      const br = await rawGet('/assets/big-abc123.js', { cookie, 'accept-encoding': 'br' })
+      expect(br.headers['content-encoding']).toBe('br')
+      expect(zlib.brotliDecompressSync(br.body).toString('utf8')).toBe(source)
+    })
+
+    it('serves identity when the client accepts no encoding, and never compresses tiny files', async () => {
+      const cookie = await setupAndLogin()
+      writeAsset('big-abc123.js', 'x'.repeat(4000))
+      const identity = await rawGet('/assets/big-abc123.js', { cookie })
+      expect(identity.headers['content-encoding']).toBeUndefined()
+      expect(identity.body.length).toBe(4000)
+      // app.js is 14 bytes: a compressed frame plus its headers would be bigger than the file.
+      const tiny = await rawGet('/app.js', { cookie, 'accept-encoding': 'gzip, br' })
+      expect(tiny.headers['content-encoding']).toBeUndefined()
+      expect(tiny.body.toString('utf8')).toBe('console.log(1)')
+    })
+
+    it('revalidates by ETag (304) and marks hashed assets immutable', async () => {
+      const cookie = await setupAndLogin()
+      writeAsset('big-abc123.js', 'x'.repeat(4000))
+      const first = await rawGet('/assets/big-abc123.js', { cookie, 'accept-encoding': 'gzip' })
+      expect(first.status).toBe(200)
+      expect(first.headers['cache-control']).toBe('private, max-age=31536000, immutable')
+      const etag = first.headers['etag'] as string
+      expect(etag).toBeTruthy()
+
+      const again = await rawGet('/assets/big-abc123.js', {
+        cookie,
+        'accept-encoding': 'gzip',
+        'if-none-match': etag
+      })
+      expect(again.status).toBe(304)
+      expect(again.body.length).toBe(0)
+
+      // index.html carries the app's entry point: it must revalidate, never be held for a year.
+      const index = await rawGet('/', { cookie })
+      expect(index.headers['cache-control']).toBe('private, no-cache')
+      const indexAgain = await rawGet('/', {
+        cookie,
+        'if-none-match': index.headers['etag'] as string
+      })
+      expect(indexAgain.status).toBe(304)
+    })
+
+    it('keeps the index.html CSP rewrite through compression', async () => {
+      const cookie = await setupAndLogin()
+      // Pad past COMPRESS_MIN_BYTES so this actually exercises the compressed path — the rewrite
+      // happens before compression, and a regression there would be invisible on a small file.
+      fs.writeFileSync(
+        path.join(rendererDir, 'index.html'),
+        `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" /><div id="root"></div><!--${'p'.repeat(4000)}-->`
+      )
+      const res = await rawGet('/', { cookie, 'accept-encoding': 'gzip' })
+      expect(res.headers['content-encoding']).toBe('gzip')
+      expect(zlib.gunzipSync(res.body).toString('utf8')).toContain(`connect-src 'self' ws: wss:`)
+    })
+
+    it('re-compresses after the file changes on disk (a rebuild must not serve stale bytes)', async () => {
+      const cookie = await setupAndLogin()
+      writeAsset('big-abc123.js', 'a'.repeat(4000))
+      const before = await rawGet('/assets/big-abc123.js', { cookie, 'accept-encoding': 'gzip' })
+      expect(zlib.gunzipSync(before.body).toString('utf8')).toBe('a'.repeat(4000))
+      // A rebuild normally changes the hashed name too; same name + new bytes is the harder case.
+      const later = new Date(Date.now() + 5000)
+      const file = path.join(rendererDir, 'assets', 'big-abc123.js')
+      fs.writeFileSync(file, 'b'.repeat(4000))
+      fs.utimesSync(file, later, later)
+      const after = await rawGet('/assets/big-abc123.js', { cookie, 'accept-encoding': 'gzip' })
+      expect(zlib.gunzipSync(after.body).toString('utf8')).toBe('b'.repeat(4000))
+      expect(after.headers['etag']).not.toBe(before.headers['etag'])
+    })
   })
 
   it('sessionTokenFromCookie parses the session out of a multi-cookie header', () => {

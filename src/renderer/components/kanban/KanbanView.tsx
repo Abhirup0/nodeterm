@@ -49,7 +49,7 @@ export interface KanbanCreateOption {
   icon: JSX.Element
 }
 
-interface KanbanViewProps {
+export interface KanbanViewProps {
   board: ProjectKanban
   sessions: KanbanSession[]
   onChange: (next: ProjectKanban) => void
@@ -110,7 +110,6 @@ export function KanbanView({
     setModalNodeId(requestedCardNodeId)
     useViewMode.getState().clearCardRequest()
   }, [requestedCardNodeId])
-  const statusById = useAgentStatus((s) => s.byId)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
@@ -248,7 +247,6 @@ export function KanbanView({
         <KanbanColumn
           column={null}
           cards={sessionsFor(visible(unassigned(board, sessions.map((s) => s.id))))}
-          statusById={statusById}
           metaOf={(id) => cardMeta(board, id)}
           labelsOf={(id) => labelsForCard(board, id)}
           onOpenCard={setModalNodeId}
@@ -265,8 +263,7 @@ export function KanbanView({
             key={col.id}
             column={col}
             cards={sessionsFor(visible(assignedTo(board, col.id)))}
-            statusById={statusById}
-            metaOf={(id) => cardMeta(board, id)}
+              metaOf={(id) => cardMeta(board, id)}
             labelsOf={(id) => labelsForCard(board, id)}
             onRename={(t) => commit(renameColumn(board, col.id, t))}
             onRecolor={(c) => commit(recolorColumn(board, col.id, c))}
