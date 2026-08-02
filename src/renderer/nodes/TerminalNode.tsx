@@ -637,6 +637,27 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // "lost context" placeholder). The callbacks stay dumb and idempotent.
     let webgl: WebglAddon | null = null
     let webglHandle: WebglClientHandle | null = null
+    // One guaranteed full-viewport repaint, deferred a frame. Heals a class of silently LOST
+    // full refreshes: xterm's own "refresh everything" (renderer swap via setRenderer, the
+    // deferred unpause refresh, the webgl addon's context-restore redraw) can be swallowed when
+    // it lands while the element is detached/paused/mid-swap — the webgl renderer's renderRows()
+    // returns without painting AND without remembering the range while !_isAttached, and the
+    // addon's webglcontextrestored handler re-inits with no error handling. After a swallowed
+    // refresh only newly-dirty rows paint: live output over an otherwise blank screen, stuck
+    // until something re-dirties every row (which is why only the manual refresh action's tmux
+    // redraw used to fix it). A refresh issued at a moment the element is attached and visible
+    // cannot be swallowed; on a healthy terminal it is one debounced repaint, and it composes
+    // with xterm's pause machinery (while hidden it just re-arms _needsFullRefresh).
+    const fullRepaint = (): void => {
+      requestAnimationFrame(() => {
+        if (disposed) return
+        try {
+          term.refresh(0, term.rows - 1)
+        } catch {
+          // a heal, never worth throwing for
+        }
+      })
+    }
     const acquireWebgl = (): boolean => {
       if (webgl) return true
       try {
@@ -658,6 +679,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         })
         term.loadAddon(addon)
         webgl = addon
+        // A force-evicted context the browser later RESTORES (GPU memory pressure, sleep/wake)
+        // goes through the addon's webglcontextrestored handler — re-init + redraw with no error
+        // handling, and the redraw is swallowable (see fullRepaint). The addon exposes no
+        // onContextRestored and the event does not bubble, so listen on its canvas directly and
+        // repaint a beat after its handler ran. The listener dies with the addon's canvas.
+        term.element
+          ?.querySelector<HTMLCanvasElement>('.xterm-screen canvas')
+          ?.addEventListener('webglcontextrestored', fullRepaint)
+        // A fresh addon starts from an EMPTY model; the swap's own refresh is the exact one
+        // that gets swallowed when this grant races a park/pause. Repaint unconditionally.
+        fullRepaint()
         return true
       } catch {
         // WebGL2 unavailable — DOM renderer remains active. Returning false tells the coordinator
@@ -681,6 +713,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
       webgl = null
       loseWebglContexts(canvases)
+      // The DOM renderer that replaced the addon starts from an EMPTY row container, and this
+      // release almost always runs while the node is HIDDEN — the swap's own refresh defers
+      // behind xterm's pause flag, which is exactly where it can be lost. Re-arm it explicitly.
+      fullRepaint()
     }
 
     let sessionId: string | null = parked ? parked.sessionId : null
@@ -1320,6 +1356,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // visibility on mount/adopt — this replaces the old unconditional `loadWebgl()` calls in both
     // the parked and fresh paths above; the DOM renderer covers the gap until a grant lands.
     webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+    let wasVisible = false
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
         // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),
@@ -1328,6 +1365,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         if (disposed) return
         const visible = entries[entries.length - 1]?.isIntersecting ?? false
         webglHandle?.setVisible(visible)
+        // Hidden → visible: issue the one full repaint that cannot be swallowed (the element is
+        // attached and intersecting RIGHT NOW). This is the master heal for every "stuck blank /
+        // partial until manual refresh" strand accumulated while off-screen — whichever renderer
+        // is active, and whatever xterm's own deferred-refresh bookkeeping lost in the meantime.
+        // One-shot per transition (not per frame), so a zoom-out burst costs one repaint per node.
+        if (visible && !wasVisible) fullRepaint()
+        wasVisible = visible
       },
       { rootMargin: '256px' }
     )
