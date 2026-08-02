@@ -60,9 +60,7 @@ import {
 } from '../terminal/agent-restart'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
-import { NodeTags } from '../components/NodeTags'
-import { LabelChips } from '../components/kanban/LabelChips'
-import { labelsForCard } from '../lib/kanban'
+import { NodeLabels } from '../components/kanban/NodeLabels'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
@@ -74,7 +72,7 @@ import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useProjects } from '../state/projects'
-import { useViewMode } from '../state/viewMode'
+import { useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
@@ -387,7 +385,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // exactly like a park, and the visible modal drives the shared grid. A node only ever lives in the
   // ACTIVE project's React Flow, so the active project's view is the one that matters.
   const boardOpen = useViewMode(
-    (s) => s.viewByProject[useProjects.getState().activeProjectId ?? ''] === 'kanban'
+    (s) => viewFor(s, useProjects.getState().activeProjectId ?? '') === 'kanban'
   )
   const boardOpenRef = useRef(boardOpen)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -422,17 +420,6 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const skipBlurRef = useRef(false)
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
-  const tags = (data.tags as string[]) ?? []
-  // Kanban labels applied to this card, resolved from the ACTIVE project's board palette (a node
-  // only ever lives in the active project). Read the kanban ref reactively; resolve in a memo so a
-  // fresh array doesn't churn the selector.
-  const projectKanbanForLabels = useProjects(
-    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban
-  )
-  const kanbanLabels = useMemo(
-    () => (projectKanbanForLabels ? labelsForCard(projectKanbanForLabels, id) : []),
-    [projectKanbanForLabels, id]
-  )
   // Derive the node's agent once, through the shared helper — the canvas menu decides whether to
   // offer this node's in-place restart from the SAME derivation, and a second copy drifting from
   // this one yields a row whose closure refuses every click.
@@ -2055,13 +2042,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         />
       )}
 
-      {kanbanLabels.length > 0 && (
-        <LabelChips labels={kanbanLabels} size="sm" className="term-node__labels nodrag" />
-      )}
-
-      {!collapsed && (
-        <NodeTags tags={tags} onChange={(t) => updateNodeData(id, { tags: t })} />
-      )}
+      {!collapsed && <NodeLabels nodeId={id} />}
 
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
       <div

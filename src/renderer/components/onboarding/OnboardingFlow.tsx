@@ -315,6 +315,23 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                     </>
                   )}
                 </div>
+                <div className="onb-defaultview">
+                  <span className="onb-defaultview__label">Open new projects as</span>
+                  <div className="onb-seg" role="group" aria-label="Default view">
+                    <button
+                      className={`onb-seg__btn${settings.defaultProjectView !== 'kanban' ? ' is-on' : ''}`}
+                      onClick={() => update({ defaultProjectView: 'canvas' })}
+                    >
+                      Canvas
+                    </button>
+                    <button
+                      className={`onb-seg__btn${settings.defaultProjectView === 'kanban' ? ' is-on' : ''}`}
+                      onClick={() => update({ defaultProjectView: 'kanban' })}
+                    >
+                      Kanban
+                    </button>
+                  </div>
+                </div>
               </>
             )}
 

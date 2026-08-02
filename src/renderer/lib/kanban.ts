@@ -1,4 +1,4 @@
-import type { BoardLogAuthor, KanbanAssignment, KanbanCardMeta, KanbanColumn, KanbanLabel, KanbanLabelColor, KanbanPriority, ProjectKanban } from '@shared/types'
+import type { BoardLogAuthor, CanvasNodeState, KanbanAssignment, KanbanCardMeta, KanbanColumn, KanbanLabel, KanbanLabelColor, KanbanPriority, Project, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
@@ -323,4 +323,75 @@ export function cardMatchesLabelFilter(
   if (!filterIds.length) return true
   const on = new Set(cardMeta(k, nodeId)?.labels ?? [])
   return filterIds.some((id) => on.has(id))
+}
+
+/** Set a card's exact label list (dedup; empty drops the field/entry). */
+export function setCardLabels(k: ProjectKanban, nodeId: string, ids: string[]): ProjectKanban {
+  const cur = cardMeta(k, nodeId)
+  const labels = [...new Set(ids)]
+  return withCardMeta(k, nodeId, {
+    assignees: cur?.assignees,
+    dueAt: cur?.dueAt,
+    priority: cur?.priority,
+    ...(labels.length ? { labels } : {})
+  })
+}
+
+/** Auto-color for a created label: rotate the palette skipping 'default' (Notion-style). */
+export function autoLabelColor(k: ProjectKanban): KanbanLabelColor {
+  const colors = KANBAN_LABEL_COLORS.filter((c) => c !== 'default')
+  return colors[boardLabels(k).length % colors.length]
+}
+
+// ── Unification: legacy free-text node tags → board labels ────────────────────────────────────
+
+/** Fold each node's free-text tags into board labels: reuse an existing label by name (case-
+ *  insensitive) or create one (auto-colored), then apply its id to that card. Pure; the caller
+ *  clears the nodes' `tags`. Idempotent by construction (an empty tag list contributes nothing). */
+export function migrateTagsToLabels(
+  k: ProjectKanban,
+  nodeTags: Array<{ nodeId: string; tags: string[] }>
+): ProjectKanban {
+  let board = k
+  for (const { nodeId, tags } of nodeTags) {
+    const names = [...new Set(tags.map((t) => t.trim()).filter(Boolean))]
+    if (!names.length) continue
+    const ids: string[] = []
+    for (const name of names) {
+      const existing = boardLabels(board).find((l) => l.name.toLowerCase() === name.toLowerCase())
+      if (existing) ids.push(existing.id)
+      else {
+        const res = createLabel(board, name, autoLabelColor(board))
+        board = res.k
+        ids.push(res.id)
+      }
+    }
+    const cur = cardMeta(board, nodeId)?.labels ?? []
+    board = setCardLabels(board, nodeId, [...cur, ...ids])
+  }
+  return board
+}
+
+/**
+ * One-time per-project unification, run at workspace hydrate (idempotent — a project whose nodes
+ * carry no `tags` is returned UNCHANGED, by identity). For every node with `tags`:
+ *  - the legacy `['claude']` MARKER is honored (agentId ← 'claude' when unset) — it was never a
+ *    user tag, so it is NOT turned into a label (mirrors nodeStatesToFlow's own claude migration);
+ *  - every other tag becomes a board label (reused/created) applied to that card;
+ *  - the node's `tags` field is dropped (so the next hydrate is a no-op).
+ */
+export function migrateProjectTags(project: Project): Project {
+  const tagged = project.nodes.filter((n) => Array.isArray(n.tags) && n.tags.length > 0)
+  if (!tagged.length) return project
+  const nodeTags = tagged
+    .map((n) => ({ nodeId: n.id, tags: (n.tags as string[]).filter((t) => t !== 'claude') }))
+    .filter((x) => x.tags.length > 0)
+  const kanban = migrateTagsToLabels(project.kanban ?? defaultKanban(), nodeTags)
+  const nodes: CanvasNodeState[] = project.nodes.map((n) => {
+    if (!Array.isArray(n.tags) || !n.tags.length) return n
+    const hadClaude = n.tags.includes('claude')
+    const { tags: _t, ...rest } = n
+    return !n.agentId && hadClaude ? { ...rest, agentId: 'claude' } : rest
+  })
+  return { ...project, nodes, kanban }
 }
