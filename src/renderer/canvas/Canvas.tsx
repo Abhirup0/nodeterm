@@ -7154,14 +7154,21 @@ export function Canvas() {
                   borderRadius: 8
                 }}
               >
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    background: isError ? '#ff6b6b' : '#e0b341'
-                  }}
-                />
+                {isError ? (
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: '#ff6b6b'
+                    }}
+                  />
+                ) : (
+                  // connecting/reconnecting: the shared spinner instead of a static dot, so a
+                  // wait that can legitimately sit for minutes (passphrase prompt, slow host)
+                  // reads as in-progress rather than hung.
+                  <span className="ui-spinner" aria-hidden />
+                )}
                 {text}
               </div>
             )
