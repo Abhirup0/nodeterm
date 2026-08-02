@@ -208,11 +208,12 @@ import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type { CanvasNodeState, Project, ProjectKanban, SshProjectStatus, TranscriptHit } from '@shared/types'
 import { KanbanView, type KanbanCreateChoice, type KanbanSession } from '../components/kanban/KanbanView'
-import { assignNode, defaultKanban } from '../lib/kanban'
+import { assignNode, defaultKanban, labelsForCard, migrateProjectTags } from '../lib/kanban'
+import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
-import { isKanbanOpen, useViewMode } from '../state/viewMode'
+import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
 import {
   createCanvasPublisher,
   isEphemeralNodeId,
@@ -1346,7 +1347,11 @@ export function Canvas() {
       })
     api.workspace.load().then((ws) => {
       if (cancelled) return
-      useProjects.getState().hydrate(ws)
+      // One-time unification: fold legacy free-text node `tags` into board labels (idempotent —
+      // a project with no tagged nodes is returned unchanged). The unconditional save below then
+      // persists the conversion, so the next load is a no-op.
+      const projects = ws.projects.map(migrateProjectTags)
+      useProjects.getState().hydrate({ ...ws, projects })
       // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away.
       void api.workspace.save(useProjects.getState().toWorkspace())
     })
@@ -1472,8 +1477,11 @@ export function Canvas() {
   const markDirty = useCallback(() => {
     if (!loadingRef.current) setDirty(true)
   }, [])
+  // Expose markDirty to surfaces outside Canvas (a canvas node editing its kanban labels), so they
+  // ride the same debounced whole-file save.
+  useEffect(() => registerWorkspaceDirty(markDirty), [markDirty])
 
-  const kanbanOpen = useViewMode((s) => !!activeProjectId && !!s.viewByProject[activeProjectId])
+  const kanbanOpen = useViewMode((s) => !!activeProjectId && viewFor(s, activeProjectId) === 'kanban')
   const projectKanban = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban)
   // Fresh default per project — ids must not be shared across projects; NOT persisted
   // until the first edit writes it (spec lazy-default rule).
@@ -6890,12 +6898,13 @@ export function Canvas() {
         })
       )
     const cs = useAgentStatus.getState()
+    // Labels replaced free-text tags — search matches label NAMES now (unified system).
+    const searchKanban = useProjects.getState().getProject(useProjects.getState().activeProjectId)?.kanban
     nodesRef.current
       .filter((n) => n.type !== 'group')
       .forEach((n) => {
-        const tags = (n.data.tags as string[]) ?? []
-        const a =
-          (n.data.agentId as AgentId | undefined) ?? (tags.includes('claude') ? 'claude' : undefined)
+        const labelNames = searchKanban ? labelsForCard(searchKanban, n.id).map((l) => l.name) : []
+        const a = (n.data.agentId as AgentId | undefined) ?? undefined
         const isAgent = !!a && hasHooks(a)
         const session = isAgent ? cs.byId[n.id]?.session : undefined
         // Show the running agent's icon (claude/codex/gemini/custom) when the node is an agent,
@@ -6913,7 +6922,7 @@ export function Canvas() {
           id: `node-${n.id}`,
           label: `Go to ${n.data.title}`,
           section: 'Opened terminals',
-          hint: [tags.join(' '), session, isAgent ? `nt-${n.id}` : '']
+          hint: [labelNames.join(' '), session, isAgent ? `nt-${n.id}` : '']
             .filter(Boolean)
             .join(' '),
           icon,

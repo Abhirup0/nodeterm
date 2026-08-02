@@ -2,24 +2,29 @@ import { create } from 'zustand'
 
 // Which view each project shows (canvas or kanban) — PERSONAL, per machine: persisted in
 // localStorage, deliberately never in the git-shared .nodeterm/project.json (spec rule).
-// Only 'kanban' entries are stored; an absent project id means canvas (the default).
+//
+// A project with an EXPLICIT entry uses it; a project with NONE follows `defaultView` (the
+// Settings → "Default view" choice, synced in from settings). So changing the default flips every
+// project the user hasn't explicitly toggled, while their explicit choices stick.
 
 export const PROJECT_VIEW_KEY = 'nodeterm.projectView'
 
-/** Parses the persisted map, keeping only valid 'kanban' entries. Exported for tests. */
-export function parseViewMap(raw: string | null): Record<string, 'kanban'> {
+export type ProjectView = 'canvas' | 'kanban'
+
+/** Parses the persisted map, keeping only valid canvas/kanban entries. Exported for tests. */
+export function parseViewMap(raw: string | null): Record<string, ProjectView> {
   try {
     const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    const out: Record<string, 'kanban'> = {}
-    for (const [id, v] of Object.entries(parsed)) if (v === 'kanban') out[id] = 'kanban'
+    const out: Record<string, ProjectView> = {}
+    for (const [id, v] of Object.entries(parsed)) if (v === 'kanban' || v === 'canvas') out[id] = v
     return out
   } catch {
     return {}
   }
 }
 
-function save(v: Record<string, 'kanban'>): void {
+function save(v: Record<string, ProjectView>): void {
   try {
     localStorage.setItem(PROJECT_VIEW_KEY, JSON.stringify(v))
   } catch {
@@ -28,7 +33,10 @@ function save(v: Record<string, 'kanban'>): void {
 }
 
 interface ViewModeState {
-  viewByProject: Record<string, 'kanban'>
+  viewByProject: Record<string, ProjectView>
+  /** The fallback view for projects with no explicit entry (Settings → Default view). */
+  defaultView: ProjectView
+  setDefaultView(v: ProjectView): void
   toggle(projectId: string): void
   /**
    * A node whose CARD should be opened on the board, set by anything that "goes to" a node while
@@ -44,19 +52,29 @@ interface ViewModeState {
   clearCardRequest(): void
 }
 
+/** The resolved view for a project: its explicit entry, or the default. */
+export function viewFor(s: Pick<ViewModeState, 'viewByProject' | 'defaultView'>, projectId: string): ProjectView {
+  return s.viewByProject[projectId] ?? s.defaultView
+}
+
 export const useViewMode = create<ViewModeState>((set) => ({
   // localStorage guard: this module is also imported by node-environment vitest suites.
   viewByProject: parseViewMap(
     typeof localStorage === 'undefined' ? null : localStorage.getItem(PROJECT_VIEW_KEY)
   ),
+  defaultView: 'canvas',
+  setDefaultView: (v) => set((s) => (s.defaultView === v ? s : { defaultView: v })),
   requestedCardNodeId: null,
   requestCard: (nodeId) => set({ requestedCardNodeId: nodeId }),
   clearCardRequest: () => set({ requestedCardNodeId: null }),
   toggle: (projectId) =>
     set((s) => {
-      const next = { ...s.viewByProject }
-      if (next[projectId]) delete next[projectId]
-      else next[projectId] = 'kanban'
+      // Flip the RESOLVED view and store it EXPLICITLY, so this choice now overrides the default.
+      const cur = s.viewByProject[projectId] ?? s.defaultView
+      const next: Record<string, ProjectView> = {
+        ...s.viewByProject,
+        [projectId]: cur === 'kanban' ? 'canvas' : 'kanban'
+      }
       if (typeof localStorage !== 'undefined') save(next)
       // Leaving the board (or entering it) drops any unconsumed request — it belonged to the view
       // the user just left, and firing it later would pop a card out of nowhere.
@@ -67,5 +85,5 @@ export const useViewMode = create<ViewModeState>((set) => ({
 /** True when the given project currently shows the kanban board (read outside React —
  *  keydown handlers use this so they need no store subscription/deps). */
 export function isKanbanOpen(projectId: string): boolean {
-  return !!projectId && !!useViewMode.getState().viewByProject[projectId]
+  return !!projectId && viewFor(useViewMode.getState(), projectId) === 'kanban'
 }
