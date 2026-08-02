@@ -22,6 +22,8 @@ import { generateCommitMessage, generateGroupName, generateTerminalName } from '
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
 import { hookServer } from '../core/agents/hook-server'
+import { askpassServer, ensureAskpassScript } from './remote-ssh/ssh-askpass'
+import { appSshAgent } from './remote-ssh/ssh-agent'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -339,7 +341,9 @@ function createWindow(): BrowserWindow {
     height: 900,
     show: false,
     backgroundColor: '#1e1e1e',
-    title: 'node-terminal',
+    // NT_MULTI instances are throwaway dev sandboxes: label the window so a second instance is
+    // never mistaken for the real one (the dock already shows the Electron icon in dev).
+    title: NT_MULTI ? 'node-terminal (test instance)' : 'node-terminal',
     icon: linuxIcon,
     // Integrate the macOS traffic lights into our top bar (modern Mac app look).
     titleBarStyle: 'hiddenInset',
@@ -785,6 +789,10 @@ app.whenReady().then(async () => {
   // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
+  // Loopback SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
+  // passphrase-protected identity file's prompt back through the app instead of failing auth.
+  await askpassServer.start()
+  const askpassScriptPath = await ensureAskpassScript(app.getPath('userData'))
   const win = createWindow()
   // NT_MULTI instances are throwaway dev sandboxes. The dock badge is the one marker that is
   // always visible on macOS (the window title is hidden by titleBarStyle: 'hiddenInset', and the
@@ -1717,14 +1725,24 @@ app.whenReady().then(async () => {
       relayClients.delete(id)
     })
   }
-  sshProjectManager = initSshProject(win, (projectId) => {
-    // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
-    // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
-    // silent replace / conflict bar). null means our cache was pushed up instead — nothing to send.
-    void workspaceStore.refreshSshProject(projectId).then((adopted) => {
-      if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
-    })
-  })
+  sshProjectManager = initSshProject(
+    (projectId) => {
+      // On (re)connect, reconcile the server's .nodeterm/project.json with our offline cache by rev.
+      // A non-null result means the remote won → adopt it in the renderer (Task 7's listener does the
+      // silent replace / conflict bar). null means our cache was pushed up instead, so nothing to send.
+      // The .catch is load-bearing: this fires on every successful SSH connect, sendToMain THROWS
+      // when the render frame is disposed (reload, crash, quit, see ssh-project.ts), and an
+      // unhandled rejection is a hard main-process crash, not a log line. Right after the user
+      // answers a passphrase prompt is exactly when the renderer can be mid-churn.
+      void workspaceStore
+        .refreshSshProject(projectId)
+        .then((adopted) => {
+          if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
+        })
+        .catch(() => {})
+    },
+    askpassScriptPath
+  )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
   // no scroll). The small delay lets the network interface come back up first; connect() is
@@ -1791,7 +1809,13 @@ app.on('window-all-closed', () => {
     void ptyManager.killAll()
     // Land any pending throttled .nodeterm mirror write BEFORE the masters die — killing a
     // master mid-write used to leave a truncated project.json on the server.
-    void remoteWorkspaceIO.flush().finally(() => sshProjectManager?.disconnectAll())
+    void remoteWorkspaceIO.flush().finally(() => {
+      sshProjectManager?.disconnectAll()
+      // Every master is gone, so nothing can use the unlocked key; scheduled (not stop()) so a
+      // quick window-reopen + reconnect inside the grace re-uses the agent instead of re-prompting.
+      // Without this, a destroyed window left the key alive for the agent's full 12h backstop.
+      appSshAgent.scheduleStop()
+    })
   }
 })
 
@@ -1805,6 +1829,11 @@ app.on('before-quit', (e) => {
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
     sshProjectManager?.disconnectAll()
+    // Then the app-private ssh-agent, which is the whole point of it existing: quitting nodeterm
+    // forgets the unlocked key. AFTER disconnectAll so a throw here can never skip the master
+    // teardown, and in this pass rather than the first, where the flush is still writing over
+    // those masters. `.finally(app.quit())` above guarantees this pass runs.
+    appSshAgent.stop()
     return
   }
   quitFlushed = true

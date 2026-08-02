@@ -61,7 +61,13 @@ export async function runRemoteGit(
   const ssh = findSsh()
   if (!ssh) return { ok: false, out: '', err: 'ssh not found' }
   try {
-    const { stdout } = await run(ssh, remoteGitArgs(ref.conn, ref.controlPath, cwd, args), { maxBuffer })
+    // With the master down, `ControlMaster=auto` makes this child authenticate for real; point it
+    // at the app-private ssh-agent (published via env by main's ssh-agent.ts, which core cannot
+    // import) so the unlocked key is found there and never sought in the user's login agent.
+    const env = process.env.NODETERM_APP_AGENT_SOCK
+      ? { ...process.env, SSH_AUTH_SOCK: process.env.NODETERM_APP_AGENT_SOCK }
+      : process.env
+    const { stdout } = await run(ssh, remoteGitArgs(ref.conn, ref.controlPath, cwd, args), { maxBuffer, env })
     return { ok: true, out: stdout.replace(/\n$/, ''), err: '' }
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string; message?: string }

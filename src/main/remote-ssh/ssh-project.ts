@@ -1,10 +1,11 @@
 import { promises as fs } from 'fs'
 import path from 'path'
 import { spawn, execFile, execFileSync } from 'child_process'
-import { app, ipcMain, type BrowserWindow } from 'electron'
+import { app, ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
+import { getMainWindow, sendToMain } from '../main-window'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
-import type { DownloadResult, SshProjectStatusEvent } from '../../shared/types'
+import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
 import { allowMediaPath } from '../media-protocol'
@@ -26,17 +27,30 @@ import {
 import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../../core/agents/hook-server'
+import { askpassServer } from './ssh-askpass'
+import { appSshAgent } from './ssh-agent'
 import { sessionName } from '../../core/tmux-naming'
 
 interface Runners {
   userDataDir: string
   /** Spawn the long-lived master; returns a handle we can kill. `stderr()` (when the spawner wires
    *  it) returns the master's captured stderr so a failed connect can surface the REAL ssh error
-   *  (auth denied, host unreachable, host-key mismatch) instead of a generic timeout. */
-  spawnMaster: (args: string[]) => {
+   *  (auth denied, host unreachable, host-key mismatch) instead of a generic timeout. `env` (when
+   *  given) carries the SSH_ASKPASS wiring for a passphrase-protected identity file. `exited()`
+   *  (when wired) reports whether the spawned process has ended; connect() uses it to fail fast
+   *  on a definitive auth error and to keep waiting while a passphrase prompt is up. */
+  spawnMaster: (
+    args: string[],
+    env?: Record<string, string>
+  ) => {
     kill: () => void
     on: (ev: string, cb: (...a: unknown[]) => void) => void
     stderr?: () => string
+    exited?: () => boolean
+    /** The spawned ssh's pid. The askpass helper reports this same value as its `$PPID`
+     *  (verified against a real sshd), so a cancelled prompt can be attributed to this exact
+     *  master rather than guessed from a global timestamp. */
+    pid?: () => number | undefined
   }
   /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
@@ -48,29 +62,81 @@ interface Runners {
   /** Delays between claude-probe retries after a FAILED attempt (claude not found). Injected so
    *  tests don't wait on real backoff; production uses PROBE_RETRY_DELAYS_MS. */
   probeRetryDelaysMs?: number[]
+  /** Env for anything that may AUTHENTICATE: the askpass wiring that routes a passphrase-protected
+   *  identity file's prompt to the UI, plus `SSH_AUTH_SOCK` for the app-private ssh-agent that
+   *  holds the unlocked key for this app run (ssh-agent.ts). Applied to the master spawn and to
+   *  `run`/`runScp` in production, because `childArgs` uses `ControlMaster=auto`: with the master
+   *  down, a child ssh re-authenticates for real and would otherwise miss the key entirely. All of
+   *  these hooks are optional (benign defaults) so test fakes need no updating. */
+  masterEnvFor?: (identityFile?: string) => Record<string, string>
+  /** Bring the app-private ssh-agent up before a master is spawned. Awaited (and never allowed to
+   *  reject) at each spawn site rather than at the top of `connect()`, which must stay synchronous
+   *  through `inFlight.set` or concurrent connects stop coalescing. */
+  ensureAgent?: () => Promise<void>
+  /** The last SSH connection just went away through a user-facing disconnect. Production schedules
+   *  the app-private agent's shutdown, which is what "forget the key" actually means. */
+  onIdle?: () => void
+  /** Synchronous one-shot ssh, for `disconnectAll()` only: `before-quit` is sync, so an awaited
+   *  `-O exit` never lands and the daemonized ControlPersist master survives the app. */
+  runSync?: (args: string[]) => void
+  /** Did the user decline the passphrase prompt raised by THIS master? Distinguishes "needs its
+   *  passphrase" from a genuine auth failure in the error message. Takes the master's pid because
+   *  the identity file is not a usable key here: a server with none only learns which key ssh
+   *  wanted from the prompt itself, by which time the attempt has already failed. */
+  askpassWasCancelled?: (masterPid?: number) => boolean
+  /** Is any passphrase prompt shown or queued right now? Fallback wait signal ONLY for spawners
+   *  that cannot report process exit AND could be prompting (test fakes). Adopted orphans also
+   *  lack an exit signal but positively cannot prompt (already authenticated), so connect()
+   *  never consults this for them. */
+  askpassIsPrompting?: () => boolean
+  /** Did THIS master ever raise a passphrase prompt? A publickey denial with no ask means no key
+   *  FILE was in play, which is the signature of a credential held only in the user's own agent,
+   *  and selects the hint that names the fix (see connectOnce's failure tail). */
+  askpassAsked?: (masterPid?: number) => boolean
 }
 
 /** Backoff after a FAILED remote claude probe (no markers = claude not found on that attempt).
  *  A transient login-shell hiccup (nvm cache warm-up, NFS home, corp wrapper) shouldn't disable
- *  `--permission-mode auto` for the whole connection. A DEFINITE version answer never retries —
+ *  `--permission-mode auto` for the whole connection. A DEFINITE version answer never retries ,
  *  a CLI doesn't change under a live connection; the next connect re-probes anyway. */
 const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 
 /** How many `name (n)` variants a download tries before falling back to a stamped name. */
 const DOWNLOAD_NAME_ATTEMPTS = 50
 
-/** Cap on how much master stderr we retain (a misconfigured host can spew) — enough for the error. */
+/** Cap on how much master stderr we retain (a misconfigured host can spew), enough for the error. */
 const MASTER_STDERR_CAP = 8 * 1024
 
 /** Master watchdog cadence (see `startWatchdog`). Healthy cost per tick: ONE mux'd `-O check`
- *  per connected project — no new TCP/auth — so this can afford to be brisk; 45s bounds how
+ *  per connected project, no new TCP/auth, so this can afford to be brisk; 45s bounds how
  *  long exec polls can churn direct-fallback connections after an unnoticed master death. */
 const MASTER_WATCHDOG_MS = 45_000
+
+/** How long connect() waits for `-O check` to answer when nothing is blocking on a human.
+ *
+ *  These are WALL-CLOCK budgets, not attempt counts, and that distinction is load bearing: each
+ *  check is a real `ssh -O check` process whose cost is not fixed. Normally it fails instantly
+ *  (the control socket is not bound until after auth, so the connect is an immediate ENOENT), but
+ *  against a bound-yet-unresponsive master it blocks until `run`'s own 15s execFile timeout. A
+ *  3000-attempt ceiling therefore meant anywhere from 5 minutes to 12 hours depending on how the
+ *  checks happened to behave, with the user watching "connecting" the whole time. A deadline
+ *  bounds the wait regardless of per-check cost. */
+const BASE_WAIT_MS = 5_000
+/** Budget while the master process is still alive: mid-handshake, or waiting on the askpass
+ *  passphrase prompt a human can take minutes to answer. Mirrors the askpass script's own curl
+ *  --max-time 300 and the main-side prompt expiry, so all three give up around the same point.
+ *  A dead master short-circuits this long before the deadline (see the connect loop). */
+const PROMPT_WAIT_MS = 300_000
+/** Extra checks granted after the master process exits before declaring failure. With
+ *  ControlPersist the foreground ssh daemonizes and EXITS on success; OpenSSH binds the control
+ *  socket before that fork, so the first post-exit check normally succeeds. The grace only
+ *  papers over scheduling between our poll and that exit. */
+const MASTER_EXIT_GRACE_CHECKS = 5
 
 /**
  * Pick the most informative line from an ssh master's stderr for the error banner. `-v` isn't
  * passed, so ordinary stderr has no `debug` noise, but we still skip `debug*`/`Warning:` lines and
- * take the LAST real line — ssh prints the actionable cause last ("Permission denied (publickey).",
+ * take the LAST real line, ssh prints the actionable cause last ("Permission denied (publickey).",
  * "ssh: Could not resolve hostname …", "Host key verification failed."). Falls back to the last
  * non-empty line. Truncated so a runaway banner can't blow up the UI.
  */
@@ -83,6 +149,31 @@ export function lastSshErrorLine(stderr: string): string | undefined {
   const meaningful = lines.filter((l) => !/^(debug\d*:|warning:)/i.test(l))
   const pick = (meaningful.length ? meaningful : lines).at(-1) ?? lines.at(-1)!
   return pick.length > 200 ? `${pick.slice(0, 200)}…` : pick
+}
+
+/**
+ * Do two conns name the same master? Compares exactly the fields `masterArgs` binds with (host,
+ * user, port, identity file); `label` and the rest are display/child-level concerns, and flagging
+ * them would tear down a healthy master over a rename. Used both by the reuse branch and the
+ * in-flight coalescing: without it, editing a server's endpoint while an attempt (or a live
+ * master) for the OLD endpoint existed handed the caller a connection to the wrong host.
+ */
+function sameEndpoint(a: SshConnection, b: SshConnection): boolean {
+  return (
+    a.host === b.host &&
+    a.user === b.user &&
+    (a.port ?? 22) === (b.port ?? 22) &&
+    (a.identityFile ?? '') === (b.identityFile ?? '')
+  )
+}
+
+export interface ConnectResult {
+  controlPath: string
+  hookEndpointPath?: string
+  tmuxConfPath?: string
+  remoteHome?: string
+  claudeAutoPermissionMode?: boolean
+  remoteClaudeVersion?: string | null
 }
 
 interface Conn {
@@ -103,7 +194,7 @@ interface Conn {
   /** Does the REMOTE host's claude CLI accept `--permission-mode auto` (>= 2.1.71)? Probed at
    * connect (with bounded retries when claude wasn't found): the remote CLI can be older than the
    * local one, and the local answer must never be applied to a remote launch. Undefined/false ⇒
-   * the renderer omits the flag for this project's Claude nodes (bare command — today's
+   * the renderer omits the flag for this project's Claude nodes (bare command, today's
    * behavior), never a failed launch. */
   claudeAutoPermissionMode?: boolean
   /** The probed remote `claude --version` output. `null` = the probe ran and found no claude
@@ -172,12 +263,14 @@ export class SshProjectManager {
   private remoteHooks: RemoteHooks
   /** Per-manager counter mixed into each upload token so concurrent drops never collide. */
   private uploadSeq = 0
-  /** Projects whose agent-status mirror was actually pushed — gates the disconnect cleanup so a
+  /** Projects whose agent-status mirror was actually pushed, gates the disconnect cleanup so a
    *  transient folder-picker browse (never pushed) doesn't pay an extra rm round-trip. */
   private statusPushed = new Set<string>()
+  /** One in-flight connect attempt per project, so concurrent callers share it (see connect).
+   *  The conn the attempt was started with rides along so a joiner with an EDITED endpoint can
+   *  be detected instead of silently receiving a connection to the old server. */
+  private inFlight = new Map<string, { conn: SshConnection; attempt: Promise<ConnectResult> }>()
   private watchdog?: ReturnType<typeof setInterval>
-  /** Re-entrancy guard: a tick mid-reconnect (slow host) must not stack a second revalidation. */
-  private revalidating = false
   constructor(private r: Runners) {
     this.remoteHooks = new RemoteHooks({ run: r.run })
   }
@@ -186,12 +279,12 @@ export class SshProjectManager {
    * Master watchdog. Nothing subscribes to the master process's death, and it can't: with
    * `ControlPersist` the real master daemonizes away from the child we spawned, and a network
    * change (no sleep event, so no powerMonitor 'resume' → `revalidateAll`) kills it with no
-   * signal to us. Every child ssh then silently falls back to a direct connection — sessions
+   * signal to us. Every child ssh then silently falls back to a direct connection, sessions
    * keep "working", so the dead master goes unnoticed while each 5s poll opens a fresh
    * TCP+auth connection (the ~72k-logins/day field report). The mux'd pty clients' exit-255
    * does fire the renderer's SshReconnector, but ptys respawned before the master is back up
    * land on direct fallback connections and never migrate. So: periodically re-run the
-   * idempotent `connect()` per cached entry (via `revalidateAll`) — a live master costs one
+   * idempotent `connect()` per cached entry (via `revalidateAll`), a live master costs one
    * mux'd `-O check`; a dead one gets the full re-establish (stale socket unlinked, master
    * respawned, 'reconnecting' status so the renderer flow engages). Interval is unref'd so it
    * never holds the process open; an empty conns map makes a tick a no-op.
@@ -199,11 +292,14 @@ export class SshProjectManager {
   startWatchdog(intervalMs = MASTER_WATCHDOG_MS): void {
     if (this.watchdog) return
     this.watchdog = setInterval(() => {
-      if (this.revalidating || this.conns.size === 0) return
-      this.revalidating = true
-      void this.revalidateAll().finally(() => {
-        this.revalidating = false
-      })
+      if (this.conns.size === 0) return
+      // No global re-entrancy latch here anymore: it held for the WHOLE pass, and one project
+      // parked on a passphrase prompt (PROMPT_WAIT_MS, minutes) froze every other project's
+      // revalidation for that window - the direct-fallback churn this watchdog exists to stop.
+      // Re-entrancy is instead handled where it belongs: connect() coalesces per project, so a
+      // tick that overlaps a still-running pass joins the in-flight attempts instead of stacking
+      // new masters, and healthy projects keep getting their cheap `-O check` every tick.
+      void this.revalidateAll()
     }, intervalMs)
     this.watchdog.unref?.()
   }
@@ -213,21 +309,83 @@ export class SshProjectManager {
     this.watchdog = undefined
   }
 
-  async connect(
+  /**
+   * Open (or reuse) the project's ControlMaster.
+   *
+   * Concurrent callers for the SAME project share one attempt. Four independent callers can fire
+   * at once (the 45s watchdog's revalidateAll, powerMonitor resume, the renderer's SshReconnector
+   * backoff, and a tab switch or the connect dialog), and without this they raced through the
+   * `existing` branch below and killed each other's in-flight master. The loser then reported an
+   * empty-stderr "Could not establish the SSH connection." while the winner's master was torn
+   * down under it. Waiting on a passphrase prompt widens that window to minutes, which turns the
+   * race from unlikely into routine, so the coalescing has to live here rather than in callers.
+   */
+  connect(projectId: string, conn: SshConnection, remoteCwd?: string): Promise<ConnectResult> {
+    const inFlight = this.inFlight.get(projectId)
+    if (inFlight) {
+      if (sameEndpoint(inFlight.conn, conn)) {
+        // Adopt the joiner's remoteCwd once the shared attempt lands, mirroring the `existing`
+        // reuse branch in connectOnce: dropping it left refForRemoteCwd unable to route remote
+        // git ops for the joiner's folder until the next reconnect.
+        if (remoteCwd) {
+          void inFlight.attempt.then(
+            () => {
+              const e = this.conns.get(projectId)
+              if (e) e.remoteCwd = remoteCwd
+            },
+            () => {}
+          )
+        }
+        return inFlight.attempt
+      }
+      // The endpoint was EDITED while an attempt to the old one is still in flight (connect
+      // dialog racing the watchdog). Sharing would hand this caller a connection to the WRONG
+      // server, and killing the in-flight master mid-attempt is the exact race coalescing
+      // exists to prevent. So wait the old attempt out (its outcome does not matter), then
+      // connect on the new endpoint; connectOnce tears down whatever old-endpoint master the
+      // settled attempt left behind.
+      const after = (): Promise<ConnectResult> => this.connect(projectId, conn, remoteCwd)
+      return inFlight.attempt.then(after, after)
+    }
+    const attempt = this.connectOnce(projectId, conn, remoteCwd).finally(() => {
+      if (this.inFlight.get(projectId)?.attempt === attempt) this.inFlight.delete(projectId)
+    })
+    this.inFlight.set(projectId, { conn, attempt })
+    return attempt
+  }
+
+  private async connectOnce(
     projectId: string,
     conn: SshConnection,
     remoteCwd?: string
-  ): Promise<{
-    controlPath: string
-    hookEndpointPath?: string
-    tmuxConfPath?: string
-    remoteHome?: string
-    claudeAutoPermissionMode?: boolean
-    remoteClaudeVersion?: string | null
-  }> {
+  ): Promise<ConnectResult> {
     const existing = this.conns.get(projectId)
-    if (existing) {
-      // Verify the cached master is still alive before reusing it — a dropped/timed-out master
+    if (existing && !sameEndpoint(existing.conn, conn)) {
+      // The project now points at a DIFFERENT endpoint/identity. `-O check` below would happily
+      // confirm the OLD master alive and the reuse branch would leave the project silently
+      // connected to the previous server. A bare kill() is not enough either: the daemonized
+      // ControlPersist master outlives our child, and the leftover-socket probe further down
+      // would re-adopt it as a live orphan (the control path is keyed by projectId alone). Only
+      // disconnect()'s `-O exit` over the socket tears the daemonized master and its socket
+      // down for real; the transient 'disconnected' status it emits is immediately followed by
+      // 'connecting' below, and the renderer treats both as "connection gone" anyway.
+      // `keepInFlight`: this teardown is INTERNAL to a connect that is still running, and its own
+      // `inFlight` entry is what makes the rest of this attempt (which can park for minutes on a
+      // passphrase prompt) coalesce concurrent connects. Letting the public disconnect drop it
+      // sent the next same-project connect down the reuse branch instead, where a `-O check`
+      // against the not-yet-bound socket fails and it KILLS the prompting master and spawns a
+      // second one for the same control path.
+      await this.disconnect(projectId, { keepInFlight: true })
+      // `disconnect()` FIRES its `-O exit` but does not await it (`void this.r.run(...)`), and
+      // `kill()` is a no-op for a master that already daemonized. So the old master is usually
+      // still alive right here, and the leftover-socket probe below would `-O check` it, find it
+      // answering, and adopt it as a live orphan: the project ends up back on the OLD endpoint,
+      // which is the exact failure this branch exists to prevent. Await an exit of our own (a
+      // no-op if the first one already landed) and unlink the socket so the probe cannot see it.
+      await this.r.run(exitMasterArgs(existing.conn, existing.controlPath)).catch(() => {})
+      await fs.rm(existing.controlPath, { force: true }).catch(() => {})
+    } else if (existing) {
+      // Verify the cached master is still alive before reusing it, a dropped/timed-out master
       // would otherwise leave us reusing a dead socket. If `-O check` fails, surface
       // `reconnecting`, drop the stale entry, and fall through to re-establish.
       const { code } = await this.r.run(checkMasterArgs(existing.conn, existing.controlPath))
@@ -245,6 +403,12 @@ export class SshProjectManager {
         }
       }
       this.r.onStatus({ projectId, status: 'reconnecting' })
+      // `-O exit` first, kill() second: kill() is a no-op against a master that already daemonized
+      // (ControlPersist), and the leftover-socket unlink below would otherwise pull the socket out
+      // from under a still-live daemon that keeps its TCP session and remote reverse forward for
+      // up to 300s - the "two fds on one sshd" condition the orphan-rebuild path exists to cure.
+      // Best-effort: a genuinely dead master makes this a fast failed round-trip.
+      await this.r.run(exitMasterArgs(existing.conn, existing.controlPath)).catch(() => {})
       existing.master.kill()
       this.conns.delete(projectId)
     }
@@ -254,16 +418,16 @@ export class SshProjectManager {
     try {
       await fs.mkdir(path.dirname(controlPath), { recursive: true, mode: 0o700 })
     } catch {
-      // ignore — keeps the manager unit-testable
+      // ignore, keeps the manager unit-testable
     }
     this.r.onStatus({ projectId, status: 'connecting' })
-    // A master socket FILE can outlive its process (app crash, `kill -9`, host sleep/resume — a
+    // A master socket FILE can outlive its process (app crash, `kill -9`, host sleep/resume, a
     // plain `kill()` on quit doesn't always let ssh unlink it). ssh's `ControlMaster=auto` REFUSES
     // to bind over an existing socket file ("ControlSocket … already exists, disabling
     // multiplexing"), so a leftover DEAD socket makes every `-O check` below fail and connect()
-    // time out with a generic error — the "SSH connection error" a user sees with no cause. Only a
+    // time out with a generic error, the "SSH connection error" a user sees with no cause. Only a
     // FRESH connect reaches here (an existing entry returned above), so any socket on disk is a
-    // leftover: probe it once — a still-answering master is a live orphan (its `ControlPersist`
+    // leftover: probe it once, a still-answering master is a live orphan (its `ControlPersist`
     // outlived us) → adopt it; a dead one gets unlinked so the fresh master can bind. The common
     // case (no leftover) skips straight to spawn with no extra round-trip.
     let master: Conn['master']
@@ -290,16 +454,32 @@ export class SshProjectManager {
       }
     } else {
       if (leftover) await fs.rm(controlPath, { force: true }).catch(() => {})
-      master = this.r.spawnMaster(masterArgs(conn, controlPath))
+      // The app-private agent has to be listening BEFORE ssh authenticates, or `AddKeysToAgent`
+      // stores the unlocked key nowhere and every connect this run prompts again. Never fatal.
+      await this.r.ensureAgent?.().catch(() => {})
+      master = this.r.spawnMaster(masterArgs(conn, controlPath), this.r.masterEnvFor?.(conn.identityFile) ?? {})
     }
     this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
-    // Wait until the master answers `-O check`, retrying briefly.
-    for (let i = 0; i < 50; i++) {
+    // Wait until the master answers `-O check`. The bound is the master PROCESS, not a fixed
+    // attempt count: while the spawned ssh is alive it is connecting, authenticating, or waiting
+    // on the askpass passphrase prompt, which a human can take minutes to answer, so it gets the
+    // long ceiling. The moment it exits without the socket answering, a few grace checks run (the
+    // ControlPersist daemonize handoff) and then the loop fails WITH the master's stderr, so a
+    // definitive auth error surfaces in about a second instead of after a blind timeout.
+    // `ConnectTimeout` in masterArgs keeps a black-holed TCP connect from riding the long ceiling.
+    // This deliberately does NOT depend on `conn.identityFile`: a saved server usually has none
+    // (ssh then offers the default identities, which are just as likely to be encrypted), and
+    // gating the wait on it meant the very connections that need a prompt got the 5s budget.
+    // Spawners with no exit signal fall back to the prompting signal, EXCEPT adopted orphans,
+    // which cannot prompt at all (see the loop body).
+    let exitGrace = MASTER_EXIT_GRACE_CHECKS
+    let waitStartedAt = Date.now()
+    for (;;) {
       const { code } = await this.r.run(checkMasterArgs(conn, controlPath))
       if (code === 0) {
         // Master is up. Best-effort remote hook setup (reverse tunnel + endpoint + install);
-        // fail-open — a null result just means the remote agents run without hooks.
-        let res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
+        // fail-open, a null result just means the remote agents run without hooks.
+        const res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
         // Fresh-launch-straight-to-SSH failure mode (field report: no RUNNING badges from remote
         // sessions until a reconnect): an ADOPTED live-orphan master carries the previous app run's
         // `-R <sock>:127.0.0.1:<oldPort>` reverse-hook forward. Its target port died with that run,
@@ -308,20 +488,29 @@ export class SshProjectManager {
         // remote endpoint file is never written → every remote hook POST vanishes → dead status for
         // the whole session. A client-side forward-cancel can't reliably displace the leaked listener;
         // the certain cure is a FRESH master, whose predecessor's forwards sshd tears down on `-O exit`.
-        // Rebuild once and retry — ONLY on the orphan+failure path, so a clean connect is untouched.
-        if (!res && reusedOrphan) {
+        // Rebuild once and retry, ONLY on the orphan+failure path, so a clean connect is untouched.
+        // Ownership check first: `setup()` is several round-trips, and if a disconnect + reconnect
+        // landed inside that window this attempt no longer owns the control path. Rebuilding then
+        // `-O exit`s and UNLINKS the live attempt's master and socket, and overwrites its map entry
+        // with a third master, while the renderer has already been handed the second one.
+        if (!res && reusedOrphan && this.conns.get(projectId)?.master === master) {
           await this.r.run(exitMasterArgs(conn, controlPath)).catch(() => {}) // drop the orphan + its forwards
           await fs.rm(controlPath, { force: true }).catch(() => {})
           reusedOrphan = false
-          master = this.r.spawnMaster(masterArgs(conn, controlPath))
+          await this.r.ensureAgent?.().catch(() => {}) // as on the fresh-spawn path
+          master = this.r.spawnMaster(masterArgs(conn, controlPath), this.r.masterEnvFor?.(conn.identityFile) ?? {})
           this.conns.set(projectId, { conn, controlPath, master, remoteCwd })
-          for (let j = 0; j < 50 && !res; j++) {
-            if ((await this.r.run(checkMasterArgs(conn, controlPath))).code === 0) {
-              res = await this.remoteHooks.setup(projectId, conn, controlPath, this.r.getHook())
-              break
-            }
-            await new Promise((r) => setTimeout(r, 100))
-          }
+          // Re-enter the wait loop on the SAME terms as a fresh spawn: the exit-aware,
+          // wall-clock-bounded wait above, with the budget restarted (the orphan adopt + failed
+          // setup already burned real time). A fixed few-second inner loop here reported
+          // `connected` while the rebuilt master was still waiting on its askpass passphrase
+          // prompt (agent cold): no socket was bound, every later child ssh hit a nonexistent
+          // socket, and the just-recovered hookEndpointPath was lost again. Falling through to
+          // the loop also means a rebuilt master that never comes up fails properly, with ITS
+          // stderr and pid-attributed cancel, instead of being declared connected.
+          exitGrace = MASTER_EXIT_GRACE_CHECKS
+          waitStartedAt = Date.now()
+          continue
         }
         const hookEndpointPath = res?.endpointPath
         // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
@@ -361,7 +550,7 @@ export class SshProjectManager {
         }
         // Canvas control for remote agent nodes. Gated on BOTH the resolved home (every remote
         // path must be absolute) and a verified tunnel (`hookEndpointPath` is only set once
-        // setup() proved the reverse forward reaches this app run) — installing a skill whose
+        // setup() proved the reverse forward reaches this app run), installing a skill whose
         // endpoint answers nothing would have the agent retry a dead socket instead of reporting
         // canvas control as unavailable. Not awaited: it is several remote round-trips of pure
         // best-effort setup, and holding the connect on them would delay every terminal.
@@ -369,14 +558,21 @@ export class SshProjectManager {
           void this.remoteHooks.installCanvasControl(conn, controlPath, remoteHome)
           void this.remoteHooks.installContextLink(conn, controlPath, remoteHome)
         }
-        const entry = this.conns.get(projectId)
+        // Same ownership check the failure path makes below, and for the same reason: the setup
+        // above is several remote round-trips, and a disconnect + reconnect inside that window
+        // leaves a DIFFERENT attempt's master in the map. Writing this attempt's results onto it
+        // clobbered the live connection's `hookEndpointPath` with `undefined` (the "no RUNNING
+        // badges from remote sessions" failure), emitted a second `connected`, and started a
+        // second claude probe against the same entry. A stale attempt reports its own result and
+        // touches nothing.
+        const entry = this.conns.get(projectId)?.master === master ? this.conns.get(projectId) : undefined
         if (entry) {
           entry.hookEndpointPath = hookEndpointPath
           entry.remoteHome = remoteHome
           entry.tmuxConfPath = tmuxConfPath
+          this.r.onStatus({ projectId, status: 'connected' })
         }
-        this.r.onStatus({ projectId, status: 'connected' })
-        // Probe the REMOTE claude CLI once per connect — `--permission-mode auto` only exists in
+        // Probe the REMOTE claude CLI once per connect, `--permission-mode auto` only exists in
         // >= 2.1.71 and the host's CLI may be older than the local one. NOT awaited: the answer is
         // only ever an optional flag, and the probe's login shell must not delay the connect (and
         // with it every terminal in the project). It pushes itself into the conn + renderer when
@@ -384,7 +580,7 @@ export class SshProjectManager {
         // Swallow any rejection: this is a best-effort optional probe, and an unhandled rejection
         // in the main process is a hard crash (Node's default --unhandled-rejections=throw), not a
         // log line. Internals are already try/catch-guarded, but `this.r.onStatus` (IPC send) can
-        // still throw if the window is torn down mid-probe — that must never surface here.
+        // still throw if the window is torn down mid-probe, that must never surface here.
         if (entry) void this.probeClaudeAutoPermissionMode(projectId, entry).catch(() => {})
         return {
           controlPath,
@@ -395,17 +591,59 @@ export class SshProjectManager {
           remoteClaudeVersion: entry?.remoteClaudeVersion
         }
       }
+      const alive = master.exited ? !master.exited() : undefined
+      if (alive === false) {
+        // Master ended and the socket still is not answering: either a real failure, or the
+        // daemonize handoff raced our poll. A few more checks settle which, then give up.
+        if (--exitGrace <= 0) break
+      } else {
+        // An adopted orphan positively CANNOT be prompting: it authenticated in a previous app
+        // run and is never re-authed by reuse. Consulting the global prompting signal for it
+        // could only pick up a DIFFERENT project's dialog and stretch this dead orphan's
+        // failure from 5s to the 300s prompt ceiling. The prompting fallback is thus only for
+        // spawners that truly cannot report exit (test fakes).
+        const extended = alive ?? (reusedOrphan ? false : (this.r.askpassIsPrompting?.() ?? false))
+        if (Date.now() - waitStartedAt >= (extended ? PROMPT_WAIT_MS : BASE_WAIT_MS)) break
+      }
       await new Promise((res) => setTimeout(res, 100))
     }
-    // Capture the master's real ssh error BEFORE disconnect tears it down — that stderr
+    // Capture the master's real ssh error BEFORE disconnect tears it down, that stderr
     // ("Permission denied (publickey)", "Could not resolve hostname", "Host key verification
     // failed", …) is the actual cause, and is otherwise thrown away by the master's ignored stdio.
     const stderr = master.stderr?.().trim()
-    await this.disconnect(projectId)
+    // Same "cannot have prompted" fact as above: an adopted orphan has no pid to attribute by,
+    // and letting wasCancelledBy(undefined) fall back to the 60s global clock relabelled an
+    // orphan's genuine failure as "cancelled" whenever any unrelated prompt was declined in
+    // that window. No prompt ever existed for it, so the answer is a hard false.
+    const cancelled = reusedOrphan ? false : (this.r.askpassWasCancelled?.(master.pid?.()) ?? false)
+    // Tear down OUR master, not whatever happens to be in the map. A concurrent attempt may have
+    // replaced the entry while we were waiting, and calling disconnect() blindly would kill the
+    // healthy replacement and delete its entry, leaving a project that reports connected while
+    // owning nothing.
+    if (this.conns.get(projectId)?.master === master) await this.disconnect(projectId)
+    else master.kill()
     const detail = stderr ? lastSshErrorLine(stderr) : undefined
-    const message = detail
-      ? `Could not establish the SSH connection: ${detail}`
-      : 'Could not establish the SSH connection.'
+    // A publickey denial where askpass was NEVER invoked means ssh had no key file to unlock at
+    // all, which is what a credential held only in an agent looks like (a smartcard, 1Password or
+    // Secretive without an `IdentityAgent` line). Masters authenticate against the app-private
+    // agent (ssh-agent.ts), so the user's own agent is not consulted and no prompt can rescue it.
+    // This is a HINT, not a retry: retrying on the ambient agent would spend a second failed login
+    // on every ordinary auth failure (launchd exports SSH_AUTH_SOCK on every Mac, empty or not),
+    // and it would carry `AddKeysToAgent=yes` into the user's agent, which is the exact leak this
+    // design closes. `IdentityAgent` in ~/.ssh/config overrides SSH_AUTH_SOCK and is the documented
+    // setup for those tools, so the fix belongs in the user's config, not in a blind second attempt.
+    const agentOnlyHint =
+      !reusedOrphan &&
+      !cancelled &&
+      /permission denied/i.test(stderr ?? '') &&
+      !(this.r.askpassAsked?.(master.pid?.()) ?? false)
+        ? ' nodeterm authenticates through its own ssh-agent, so a key held only in your system agent is not offered — set IdentityAgent in ~/.ssh/config, or give this server an identity file.'
+        : ''
+    const message = cancelled
+      ? 'SSH connection cancelled: this key needs its passphrase.'
+      : detail
+        ? `Could not establish the SSH connection: ${detail}${agentOnlyHint}`
+        : `Could not establish the SSH connection.${agentOnlyHint}`
     this.r.onStatus({ projectId, status: 'error', error: message })
     throw new Error(message)
   }
@@ -431,7 +669,7 @@ export class SshProjectManager {
     if (!c) return null
     // `localPath` is a renderer string passed straight to scp as a positional arg. A value starting
     // with `-` (e.g. `-oProxyCommand=…`) would be parsed by scp as an OPTION (argv flag smuggling →
-    // RCE), not a file. A real OS file drop is always an absolute path, so require one here — this
+    // RCE), not a file. A real OS file drop is always an absolute path, so require one here, this
     // rejects `-`-prefixed, relative, and empty paths and fully closes the flag-smuggling vector.
     if (!localPath.startsWith('/')) return null
     try {
@@ -447,7 +685,7 @@ export class SshProjectManager {
       if (mk.code !== 0) return null
       // `fileName` is a renderer string: posixQuote blocks shell injection but NOT filesystem
       // traversal (e.g. `../../../.bashrc` would escape the token dir and overwrite a remote file).
-      // Basename it in main before building the write path — never trust it for a write target.
+      // Basename it in main before building the write path, never trust it for a write target.
       const safe = path.posix.basename(fileName)
       if (!safe || safe === '.' || safe === '..') return null
       const remotePath = `${dir}/${safe}`
@@ -459,7 +697,7 @@ export class SshProjectManager {
   }
 
   /**
-   * Pull a remote file (or directory tree) down to `destDir` over the project's ControlMaster —
+   * Pull a remote file (or directory tree) down to `destDir` over the project's ControlMaster ,
    * the mirror of `uploadFile`, and what the Explorer's Download action runs on an SSH project.
    *
    * Three things carry the safety here:
@@ -469,7 +707,7 @@ export class SshProjectManager {
    *    renderer string can steer the write, and `..` can never appear as a component.
    *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate.
    *  - **A failed transfer leaves no half-file under the real name.** scp writes to `<name>.part`
-   *    (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit 0 — the same
+   *    (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit 0, the same
    *    write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks the remains.
    */
   async downloadFile(projectId: string, remotePath: string, destDir: string): Promise<DownloadResult> {
@@ -479,7 +717,7 @@ export class SshProjectManager {
     if (!name) return { ok: false, error: 'That path cannot be downloaded.' }
     try {
       // Ask the REMOTE whether this is a directory rather than trusting the renderer's tree state:
-      // it decides `-r`, and the tree can be stale. A failed probe is not evidence of "file" —
+      // it decides `-r`, and the tree can be stale. A failed probe is not evidence of "file" ,
       // but `test -d` failing on a live master overwhelmingly means "not a directory", and the
       // worst case of guessing wrong is a plain scp error, so this stays fail-open.
       const probe = await this.r.run(childArgs(c.conn, c.controlPath, `test -d ${quoteRemotePath(remotePath)}`))
@@ -516,10 +754,10 @@ export class SshProjectManager {
 
   /**
    * Pull a remote FILE into the local media cache (for nt-media:// playback) and resolve its
-   * cached absolute path. The entry is keyed by (host, remote path) — see remoteMediaCacheName —
+   * cached absolute path. The entry is keyed by (host, remote path), see remoteMediaCacheName ,
    * so re-opening an unchanged file reuses the cached copy: reuse is gated on the remote size
    * still matching (`wc -c` is portable where `stat -c/-f` is not). A FAILED size probe is not
-   * evidence of anything (a hiccup ≠ a changed file) — it falls through to a fresh transfer,
+   * evidence of anything (a hiccup ≠ a changed file), it falls through to a fresh transfer,
    * whose own failure is the real error. Directories are refused: a player node plays one file.
    */
   async cacheMediaFile(
@@ -550,7 +788,7 @@ export class SshProjectManager {
       }
       await fs.mkdir(cacheDir, { recursive: true })
       // Same write-then-rename discipline as downloadFile: never leave a half-copied file
-      // under the final name — nt-media would happily serve a truncated video.
+      // under the final name, nt-media would happily serve a truncated video.
       const partPath = `${dest}.part`
       await fs.rm(partPath, { force: true }).catch(() => {})
       const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false))
@@ -567,7 +805,7 @@ export class SshProjectManager {
   }
 
   /** Best-effort, bounded cache: keep the newest MEDIA_CACHE_KEEP entries. An evicted entry that
-   *  is still playing in an open node stops being seekable — acceptable for a 20-deep cache of a
+   *  is still playing in an open node stops being seekable, acceptable for a 20-deep cache of a
    *  convenience copy; the node re-fetches on next open. */
   private async pruneMediaCache(cacheDir: string, except: string): Promise<void> {
     try {
@@ -579,7 +817,7 @@ export class SshProjectManager {
         await fs.rm(path.join(cacheDir, n), { force: true }).catch(() => {})
       }
     } catch {
-      // pruning is best-effort — a fat cache is a nuisance, not a fault
+      // pruning is best-effort, a fat cache is a nuisance, not a fault
     }
   }
 
@@ -588,7 +826,7 @@ export class SshProjectManager {
    * Called on project delete BEFORE disconnect, so the remote `nt-<id>` sessions are killed
    * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
    * are raw node ids; we map each to its `nt-<id>` session name (the same name `spawnSession` /
-   * `remoteTmuxHasSessionArgs` use). Best-effort per id — a missing session is ignored.
+   * `remoteTmuxHasSessionArgs` use). Best-effort per id, a missing session is ignored.
    */
   async killSessions(projectId: string, nodeIds: string[]): Promise<void> {
     const c = this.conns.get(projectId)
@@ -636,6 +874,23 @@ export class SshProjectManager {
     return undefined
   }
 
+  /**
+   * `user@host` of the connection whose ControlMaster has this pid, for the passphrase dialog.
+   * The askpass helper reports the asking ssh process as its `$PPID` (see ssh-askpass.ts), which
+   * is exactly the master this manager spawned, so a prompt can be attributed to a server without
+   * threading a project id through the askpass protocol. Undefined when nothing matches: an
+   * adopted orphan master has no pid, and orphans never prompt anyway. The dialog just falls back
+   * to naming the key alone.
+   */
+  targetForMasterPid(pid: string): string | undefined {
+    if (!pid) return undefined
+    for (const c of this.conns.values()) {
+      const p = c.master.pid?.()
+      if (p !== undefined && String(p) === pid) return `${c.conn.user}@${c.conn.host}`
+    }
+    return undefined
+  }
+
   /** The resolved remote `$HOME` for a connected project, if known. */
   remoteHomeFor(projectId: string): string | undefined {
     return this.conns.get(projectId)?.remoteHome
@@ -643,22 +898,36 @@ export class SshProjectManager {
 
   /**
    * Proactively re-validate every cached master (powerMonitor 'resume'). Sleep kills the TCP
-   * under the masters, but ServerAlive only notices ~60s AFTER wake — until then every terminal
+   * under the masters, but ServerAlive only notices ~60s AFTER wake, until then every terminal
    * looks alive and is dead (keys echo nothing, scroll does nothing). `connect()` is idempotent:
-   * a live master returns immediately; a dead one is killed — which tears down its mux'd
+   * a live master returns immediately; a dead one is killed, which tears down its mux'd
    * per-terminal ssh clients too, so their exit-255 drops fire the renderer's SshReconnector
-   * NOW instead of a minute later — and re-established, after which the reconnector's
+   * NOW instead of a minute later, and re-established, after which the reconnector's
    * 'connected' flush respawns the dead nodes. Failures just leave the normal status-event
    * error path in charge (connect reports it before throwing).
    */
   async revalidateAll(): Promise<void> {
-    for (const [projectId, e] of [...this.conns]) {
-      try {
-        await this.connect(projectId, e.conn, e.remoteCwd)
-      } catch {
-        // connect() already reported an error status for this project; keep checking the rest.
-      }
-    }
+    // Per project CONCURRENTLY, not serially: a re-establish can park on the askpass passphrase
+    // prompt for up to PROMPT_WAIT_MS (5 min), and a serial pass wedged EVERY other project's
+    // check behind it for that whole window - the direct-fallback churn the watchdog exists to
+    // stop, reintroduced by the watchdog itself. connect() coalesces per project, so concurrent
+    // passes cannot double-spawn; a live master's check is one mux'd `-O check`, so the fan-out
+    // costs nothing in the healthy case.
+    await Promise.all(
+      [...this.conns.keys()].map(async (projectId) => {
+        // Re-read the entry at fire time instead of using a snapshot of it: the user may repoint
+        // a server while other projects are still checking. Passing a stale `conn` would send
+        // connect() down the endpoint-mismatch branch and tear down the master that was just
+        // established for the NEW endpoint, silently reverting the project to the old host.
+        const e = this.conns.get(projectId)
+        if (!e) return // disconnected while the pass was being set up
+        try {
+          await this.connect(projectId, e.conn, e.remoteCwd)
+        } catch {
+          // connect() already reported an error status for this project; the rest still ran.
+        }
+      })
+    )
   }
 
   /** The connection's cached remote `--permission-mode auto` capability (undefined = not
@@ -671,7 +940,7 @@ export class SshProjectManager {
    * Every LIVE connection as `{ projectId, hostKey }`. Feeds the remote-usage target list, which
    * needs both halves: the host key to match accounts against, and a project whose ControlMaster
    * can carry the read. Hosts shared by several projects are deduped by the caller
-   * (`remoteUsageTargets`), not here — this is the raw map.
+   * (`remoteUsageTargets`), not here, this is the raw map.
    */
   connectedHosts(): { projectId: string; hostKey: string }[] {
     return [...this.conns.entries()].map(([projectId, c]) => ({
@@ -687,7 +956,7 @@ export class SshProjectManager {
   }
 
   /** Remote path of this project's pushed agent-status mirror (`~`-relative when the remote
-   *  home never resolved — the shell expands it in the commands below). */
+   *  home never resolved, the shell expands it in the commands below). */
   private statusFilePath(projectId: string, c: Conn): string {
     const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm` : '~/.nodeterm'
     return `${dir}/agent-status-${projectId}.json`
@@ -696,8 +965,8 @@ export class SshProjectManager {
   /**
    * Mirror this project's slice of the agent-status doc onto its host as
    * `~/.nodeterm/agent-status-<projectId>.json` (atomic tmp+mv, 0600 via umask). This is the
-   * ONLY status source that exists on an SSH host — hook events tunnel from the host to the
-   * desktop's loopback hook server — so it's what the mobile companion reads when it browses
+   * ONLY status source that exists on an SSH host, hook events tunnel from the host to the
+   * desktop's loopback hook server, so it's what the mobile companion reads when it browses
    * the host directly. No-ops when the project isn't connected; best-effort otherwise (a failed
    * write only means stale/absent badges on the phone).
    */
@@ -723,10 +992,10 @@ export class SshProjectManager {
   /**
    * Sweep phone read-acks on the connected hosts (spec: cross-surface read sync). The phone drops
    * `~/.nodeterm/acks/<nodeId>.seen` on the host it can reach; for a Mac→SSH node that host is the
-   * REMOTE one, so the desktop must consume them over the ControlMaster — the local-fs sweep never
+   * REMOTE one, so the desktop must consume them over the ControlMaster, the local-fs sweep never
    * sees them. One command per connected HOST (deduped by host key, since projects sharing a host
    * share `$HOME/.nodeterm/acks`) atomically lists + deletes each `.seen` and prints its nodeId; the
-   * returned ids are fed the SAME `ackDone` + unread-clear path a local ack takes. Best-effort — a
+   * returned ids are fed the SAME `ackDone` + unread-clear path a local ack takes. Best-effort, a
    * disconnected/failed project simply contributes nothing. The command is fully literal (no
    * interpolation), and the returned nodeIds are used only as in-memory map keys (never a path), so
    * a compromised host can at worst clear an unread badge / resolve a done card it can guess.
@@ -754,7 +1023,7 @@ export class SshProjectManager {
           }
         }
       } catch {
-        // best-effort per host — a failed sweep just leaves the acks for the next tick
+        // best-effort per host, a failed sweep just leaves the acks for the next tick
       }
     }
     return out
@@ -866,11 +1135,11 @@ export class SshProjectManager {
    * Best-effort `claude --version` ON THE REMOTE HOST. Null when it can't be determined.
    *
    * An ssh EXEC channel gets a non-interactive, non-login shell, whose rc file usually bails out
-   * early — so a claude installed via nvm/asdf/homebrew-on-PATH may be invisible to a plain
+   * early, so a claude installed via nvm/asdf/homebrew-on-PATH may be invisible to a plain
    * `claude --version`. The remote tmux session that actually RUNS the node uses a login shell, so
    * the probe tries that first and only then the bare command. A login shell also sources the
    * user's profile, whose STDOUT noise (banners, neofetch, …) would otherwise be parsed as the
-   * version — hence the marker-delimited value (see `claude-version-probe.ts`).
+   * version, hence the marker-delimited value (see `claude-version-probe.ts`).
    */
   private async remoteClaudeVersion(conn: SshConnection, controlPath: string): Promise<string | null> {
     try {
@@ -887,21 +1156,21 @@ export class SshProjectManager {
    * the answer into the live conn + the renderer (a `connected` status event carrying it).
    *
    * Deliberately OFF the connect critical path: it runs `$SHELL -lc`, which sources nvm/conda/rbenv
-   * inits — routinely hundreds of ms, sometimes seconds — and every remote terminal in the project
+   * inits, routinely hundreds of ms, sometimes seconds, and every remote terminal in the project
    * waits on connect. A node launched in the gap just omits the flag (the designed fail-open
    * fallback); the next launch, once the answer lands, gets `auto`.
    *
-   * A FAILED attempt (no claude found) retries on a bounded backoff — a transient hiccup must not
+   * A FAILED attempt (no claude found) retries on a bounded backoff, a transient hiccup must not
    * disable `auto` until the next reconnect. EVERY attempt pushes its answer immediately (the
    * fail-open `false` first, a later success upgrading it): launch paths that wait on the first
    * answer (`ensureActivePermissionMode`) must never be held hostage by the retry tail. A definite
-   * version — old or new — stops the retries: a CLI doesn't change under a live connection.
+   * version, old or new, stops the retries: a CLI doesn't change under a live connection.
    */
   private async probeClaudeAutoPermissionMode(projectId: string, entry: Conn): Promise<void> {
     const delays = this.r.probeRetryDelaysMs ?? PROBE_RETRY_DELAYS_MS
     for (let attempt = 0; ; attempt++) {
       // One remote `claude --version` feeds BOTH version gates (permission-mode auto >= 2.1.71 and
-      // fullscreen tui >= 2.1.89) — no second probe.
+      // fullscreen tui >= 2.1.89), no second probe.
       const version = await this.remoteClaudeVersion(entry.conn, entry.controlPath)
       // Disconnected / reconnected (new Conn) while we probed → the answer belongs to a dead
       // connection; drop it rather than write it onto the new one.
@@ -930,7 +1199,14 @@ export class SshProjectManager {
     }
   }
 
-  async disconnect(projectId: string): Promise<void> {
+  /**
+   * Tear a project's master down. `keepInFlight` marks an INTERNAL teardown inside a live connect
+   * (see connectOnce's endpoint-change branch); `final` marks a USER-facing disconnect (the IPC
+   * handler, i.e. a deleted project), which is the only kind allowed to report the manager idle —
+   * internal teardowns, the watchdog's stale-master drop and a failed connect all empty `conns`
+   * routinely and must not be read as "the user is done with SSH".
+   */
+  async disconnect(projectId: string, opts?: { keepInFlight?: boolean; final?: boolean }): Promise<void> {
     const c = this.conns.get(projectId)
     if (!c) return
     // Remove the pushed agent-status mirror while the master is still alive: a file left behind
@@ -947,7 +1223,20 @@ export class SshProjectManager {
     void this.r.run(exitMasterArgs(c.conn, c.controlPath))
     c.master.kill()
     this.conns.delete(projectId)
+    // Drop any in-flight connect attempt for this project. Without this, a connect() issued after
+    // a disconnect coalesces onto the stale attempt (see connect): the user tears a project down,
+    // re-opens it, and the fresh connect returns the DOOMED attempt's promise instead of
+    // establishing a master for the live server. The running attempt is not awaited/cancelled
+    // here (it may be blocked on a passphrase prompt), but once settled its .finally sees no
+    // matching inFlight entry and does not resurrect anything. `keepInFlight` is the internal
+    // caller's opt-out: a teardown INSIDE a live attempt must not discard that attempt's own
+    // coalescing entry (see connectOnce's endpoint-change branch).
+    if (!opts?.keepInFlight) this.inFlight.delete(projectId)
     this.r.onStatus({ projectId, status: 'disconnected' })
+    // Nothing left to keep an unlocked key alive for. Production schedules (not performs) the
+    // agent shutdown: the connect dialog's throwaway browse master disconnects a few hundred ms
+    // before the real project connects, and forgetting in that gap costs a second prompt.
+    if (opts?.final && this.conns.size === 0) this.r.onIdle?.()
   }
 
   /**
@@ -957,53 +1246,211 @@ export class SshProjectManager {
    * master, so on a hard quit `c.master.kill()` would never run → orphaned `-N` master (~5 min
    * ControlPersist). Here we kill the master immediately and skip the graceful `-O cancel`: the
    * reverse hook forward dies with the master, so cancelling it is unnecessary on quit.
+   *
+   * `kill()` alone is not enough to make quit mean quit, though: a successful master DAEMONIZES
+   * (ControlPersist=300), so the child we kill has usually already exited and the real master
+   * lives on for five minutes — long enough for a relaunch to adopt it through the leftover-socket
+   * probe and connect with no passphrase, even though the app-private agent (and with it the
+   * unlocked key) died at quit. The synchronous `-O exit` below is what closes that: it tears the
+   * daemon down over its own socket. Bounded per connection by the runner, since this blocks quit.
+   * Remote tmux sessions are server-side and unaffected; only the transport goes.
    */
   disconnectAll(): void {
     this.stopWatchdog()
     for (const projectId of [...this.conns.keys()]) {
       const c = this.conns.get(projectId)
       if (!c) continue
+      this.r.runSync?.(exitMasterArgs(c.conn, c.controlPath))
       c.master.kill()
       this.conns.delete(projectId)
       this.r.onStatus({ projectId, status: 'disconnected' })
     }
+    // Drop every in-flight connect attempt (see disconnect: a stale attempt must not coalesce a
+    // later connect onto a master that was just killed for a now-orphaned attempt).
+    this.inFlight.clear()
   }
 }
 
+/**
+ * Pending renderer answers to sshPassphraseRequest, keyed by requestId. One `ipcMain.handle` for
+ * sshPassphraseSubmit resolves whichever entry the user answered.
+ */
+const pendingPassphrasePrompts = new Map<string, (value: string | null) => void>()
+
+/**
+ * Push to the renderer without ever letting the UI's health become load-bearing. `isDestroyed()`
+ * on the window is NOT enough: `webContents.send` throws "Render frame was disposed" when the
+ * frame is gone but the window object is not (a renderer crash, Cmd+R, navigation, quit). Left
+ * unguarded that throw either abandoned an in-flight passphrase prompt (answered as empty, so ssh
+ * dropped the key and the connect died with a bare Permission denied) or, from the expiry timer
+ * below, escaped as an UNCAUGHT exception in the main process. Returns false when nothing could
+ * be delivered.
+ *
+ * The explicit getMainWindow() probe is the other half: sendToMain's optional chain silently
+ * NO-OPS when there is no window at all (macOS close-to-dock, or before the first window exists),
+ * so without the probe this returned true for a send nobody received. That false "delivered" kept
+ * promptForPassphrase's no-UI branch dead exactly when it was needed: with the window closed and
+ * the watchdog respawning a master after a network drop, the prompt was "sent" to nothing and the
+ * askpass curl held the ssh master for the full 5-minute expiry, repeating every watchdog cycle
+ * until the window was reopened.
+ *
+ * ACCEPTED gap: `true` still only means "the webContents took the send". During a Cmd+R reload
+ * the frame is alive before React has re-attached onPassphraseRequest, so a prompt raised in
+ * that window is dropped and its connect rides the prompt expiry, after which the watchdog's
+ * next reconnect prompts again into the now-attached listener. Closing it needs a renderer ack
+ * handshake per prompt; a one-in-a-reload race that self-heals within one expiry does not buy
+ * that machinery.
+ */
+function pushToRenderer(channel: string, payload: unknown): boolean {
+  if (!getMainWindow()) return false
+  try {
+    sendToMain(channel, payload)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** `null` means the user actively declined; `undefined` means nobody ever answered (the prompt
+ *  expired or there was no UI to ask). Only a real decline should be reported as a cancellation. */
+type PromptOutcome = string | null | undefined
+
+/** Exported for tests: the whole main-side prompt path (deliver, expire, dismiss, no-UI) runs
+ *  without Electron, with the window faked through main-window's setMainWindow. */
+export function promptForPassphrase(req: {
+  identityFile: string
+  retry: boolean
+  /** `user@host` this unlock is for, when the asking master could be identified. One key can
+   *  serve several servers and this prompt can fire from the watchdog long after any connect
+   *  dialog closed, so without it the dialog names a key and no destination. */
+  target?: string
+}): Promise<PromptOutcome> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    // Auto-resolve an abandoned prompt (user walked away, never answered or hit Cancel) instead
+    // of leaking the map entry and the askpass curl's HTTP request forever. Same bound as
+    // PROMPT_WAIT_MS, so the connect() wait loop, this timeout, and the askpass script's own
+    // curl --max-time all give up around the same point. The dismiss event closes the
+    // renderer's dialog too, so a late answer cannot land in a request that no longer exists.
+    const timer = setTimeout(() => {
+      pendingPassphrasePrompts.delete(requestId)
+      pushToRenderer(IPC.sshPassphraseDismiss, { requestId })
+      resolve(undefined) // expired, not declined
+    }, PROMPT_WAIT_MS)
+    pendingPassphrasePrompts.set(requestId, (value) => {
+      clearTimeout(timer)
+      resolve(value)
+    })
+    const payload: SshPassphraseRequest = {
+      requestId,
+      identityFile: req.identityFile,
+      retry: req.retry,
+      target: req.target
+    }
+    if (!pushToRenderer(IPC.sshPassphraseRequest, payload)) {
+      // No UI could receive it, so no answer is ever coming. Fail now rather than hold ssh (and
+      // the connect) for the full expiry window.
+      clearTimeout(timer)
+      pendingPassphrasePrompts.delete(requestId)
+      resolve(undefined)
+    }
+  })
+}
+
+/** The main-side half of the sshPassphraseSubmit IPC: resolve the pending prompt for
+ *  `requestId` with the user's answer (null = declined). A stale/unknown requestId (already
+ *  expired, double submit) is a silent no-op. Exported so the (requestId, value) contract is
+ *  unit-testable; initSshProject's ipcMain.handle is a one-line delegate to this. */
+export function resolvePassphrasePrompt(requestId: string, value: string | null): void {
+  pendingPassphrasePrompts.get(requestId)?.(value)
+  pendingPassphrasePrompts.delete(requestId)
+}
+
 export function initSshProject(
-  win: BrowserWindow,
-  onConnected?: (projectId: string) => void
+  onConnected?: (projectId: string) => void,
+  askpassScriptPath?: string
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
+  // No window reference is threaded through here on purpose: every renderer push resolves the
+  // live window AT SEND TIME (getMainWindow/sendToMain), because a captured BrowserWindow goes
+  // stale across a macOS close/reopen cycle (see main-window.ts).
+  ipcMain.handle(IPC.sshPassphraseSubmit, (_e, requestId: string, value: string | null) =>
+    resolvePassphrasePrompt(requestId, value)
+  )
   const mgr = new SshProjectManager({
     userDataDir: app.getPath('userData'),
-    spawnMaster: (args) => {
+    spawnMaster: (args, env) => {
       // Capture the master's stderr (stdin/stdout stay ignored) so a failed connect can report the
       // real ssh error instead of a generic timeout. Buffer is capped so a chatty host can't grow it
       // unbounded; the master is long-lived and mostly silent, so this holds only the connect-time
       // diagnostics we actually want.
-      const child = spawn(ssh, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+      const child = spawn(ssh, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: env && Object.keys(env).length ? { ...process.env, ...env } : process.env
+      })
       let stderr = ''
+      let exited = false
       child.stderr?.on('data', (chunk: Buffer) => {
         if (stderr.length < MASTER_STDERR_CAP) stderr += chunk.toString('utf-8')
       })
-      // A spawn failure (ssh binary missing/unexecutable) surfaces on 'error' — fold it into the
+      // A spawn failure (ssh binary missing/unexecutable) surfaces on 'error', fold it into the
       // same stderr channel so the connect error still has a cause. Prevents an unhandled 'error'.
       child.on('error', (e: Error) => {
+        exited = true
         if (stderr.length < MASTER_STDERR_CAP) stderr += `${e.message}\n`
       })
-      return { kill: () => child.kill(), on: (ev, cb) => child.on(ev, cb), stderr: () => stderr }
+      // Exit is a meaningful signal both ways: with ControlPersist a SUCCESSFUL master
+      // daemonizes and exits (socket already bound), and a failed one exits with the cause on
+      // stderr. connect()'s wait loop reads it through the exited() probe.
+      child.on('exit', () => {
+        exited = true
+      })
+      return {
+        kill: () => child.kill(),
+        on: (ev, cb) => child.on(ev, cb),
+        stderr: () => stderr,
+        exited: () => exited,
+        pid: () => child.pid
+      }
+    },
+    masterEnvFor: (identityFile) => ({
+      ...(askpassScriptPath ? askpassServer.envFor(identityFile, askpassScriptPath) : {}),
+      ...appSshAgent.env()
+    }),
+    ensureAgent: () => appSshAgent.start(),
+    // The last SSH project was disconnected by the user: forget the unlocked key (after a grace,
+    // see scheduleStop — the connect dialog's throwaway browse master disconnects right before the
+    // real project connects).
+    onIdle: () => appSshAgent.scheduleStop(),
+    askpassWasCancelled: (masterPid) => askpassServer.wasCancelledBy(masterPid),
+    askpassIsPrompting: () => askpassServer.isPromptingAny(),
+    askpassAsked: (masterPid) => askpassServer.askedBy(masterPid),
+    runSync: (args) => {
+      // Quit path only (disconnectAll). Bounded hard: `before-quit` is blocked while this runs, and
+      // an unreachable host must not add seconds to every quit.
+      try {
+        execFileSync(ssh, args, { timeout: 400, stdio: 'ignore' })
+      } catch {
+        // The master may already be gone, the host unreachable, or the timeout hit. Best effort.
+      }
     },
     run: (args, stdin) =>
       new Promise((resolve) => {
         // 16 MB ceiling: remote transcript reads pull up to REMOTE_TRANSCRIPT_CAP (5 MB) via
         // RemoteFile; the default 1 MB maxBuffer would kill the child and silently break the
         // remote context meter / subagent transcript / content search for large transcripts.
-        // (cf. pty-manager tmux capture 50 MB, git-service 20–50 MB.) Just a ceiling — safe for
+        // (cf. pty-manager tmux capture 50 MB, git-service 20–50 MB.) Just a ceiling, safe for
         // the small Phase-1/2a control commands too.
-        const child = execFile(ssh, args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
-          resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
+        // The agent env rides along here too: `childArgs` uses `ControlMaster=auto`, so with the
+        // master down the first child ssh authenticates for real, and the only place the unlocked
+        // key lives is the app-private agent.
+        const child = execFile(
+          ssh,
+          args,
+          { timeout: 15000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } },
+          (err, stdout) =>
+            resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
         )
         if (stdin !== undefined) {
           child.stdin?.end(stdin)
@@ -1011,13 +1458,32 @@ export function initSshProject(
       }),
     runScp: (args) =>
       new Promise((resolve) => {
-        execFile(scp, args, { maxBuffer: 1024 * 1024 }, (err) => resolve({ code: err ? 1 : 0 }))
+        // Same reason as `run`: scp re-authenticates when the master socket is gone.
+        execFile(scp, args, { maxBuffer: 1024 * 1024, env: { ...process.env, ...appSshAgent.env() } }, (err) =>
+          resolve({ code: err ? 1 : 0 })
+        )
       }),
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
     onStatus: (e) => {
-      if (!win.isDestroyed()) win.webContents.send(IPC.sshProjectStatus, e)
+      // sendToMain resolves the window AT SEND TIME (see main-window.ts): the `win` captured here
+      // is destroyed and recreated by a macOS close/reopen, and sending to the stale reference is
+      // silently dropped. The try/catch is the other half: webContents.send THROWS when the render
+      // frame is disposed even though isDestroyed() is false (renderer crash, reload, quit), and a
+      // status push must never be load-bearing. It used to abort connect() mid-flight, which left
+      // a dead entry in the map, discarded the real ssh error, and on the disconnectAll path
+      // orphaned every remaining master.
+      try {
+        sendToMain(IPC.sshProjectStatus, e)
+      } catch {
+        // a UI that cannot hear us changes nothing about the connection itself
+      }
     }
   })
+  // Registered after `mgr` exists so the dialog can name the server: the askpass request carries
+  // the asking master's pid, and only the manager can map it back to a connection.
+  askpassServer.setPromptHandler((req) =>
+    promptForPassphrase({ ...req, target: mgr.targetForMasterPid(req.caller) })
+  )
   mgr.startWatchdog()
   ipcMain.handle(IPC.sshConnectProject, async (_e, projectId: string, conn: SshConnection, remoteCwd?: string) => {
     const res = await mgr.connect(projectId, conn, remoteCwd)
@@ -1026,7 +1492,12 @@ export function initSshProject(
     onConnected?.(projectId)
     return res
   })
-  ipcMain.handle(IPC.sshDisconnectProject, (_e, projectId: string) => mgr.disconnect(projectId))
+  // `final`: the only USER-facing disconnect there is (a deleted project, or the connect dialog
+  // dropping its browse master). Internal teardowns never reach here, which is what makes "no
+  // connections left" a trustworthy signal to forget the key.
+  ipcMain.handle(IPC.sshDisconnectProject, (_e, projectId: string) =>
+    mgr.disconnect(projectId, { final: true })
+  )
   ipcMain.handle(IPC.sshKillSessions, (_e, projectId: string, nodeIds: string[]) =>
     mgr.killSessions(projectId, nodeIds)
   )

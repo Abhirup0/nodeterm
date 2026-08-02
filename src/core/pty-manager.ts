@@ -1180,6 +1180,14 @@ export class PtyManager {
     const remoteSsh = options.sshRemote && options.persistKey ? findSsh() : null
     if (options.sshRemote && options.persistKey && remoteSsh) {
       file = remoteSsh
+      // Route this ssh child's agent lookups at the APP-PRIVATE ssh-agent when main is running one
+      // (published via env because core cannot import main's ssh-agent.ts). Matters when the
+      // ControlMaster is down: `childArgs` uses `ControlMaster=auto`, so this child authenticates
+      // for real, and inheriting the ambient SSH_AUTH_SOCK would prompt in the pane and - for a
+      // user with `AddKeysToAgent yes` in their own ~/.ssh/config - load the key into their LOGIN
+      // agent permanently, the leak the app agent exists to close. Scoped to the remote branch:
+      // local terminals keep the user's own agent.
+      if (process.env.NODETERM_APP_AGENT_SOCK) env.SSH_AUTH_SOCK = process.env.NODETERM_APP_AGENT_SOCK
       // When the project's reverse tunnel + remote endpoint file are set up (Task 2), inject the
       // remote hook env into the remote tmux session so the installed hook script POSTs state back
       // over the unix-socket tunnel. Fail-open: no hookEndpointPath → no hook env (Phase-1 status).
