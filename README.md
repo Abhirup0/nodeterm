@@ -4,11 +4,12 @@
 
 # nodeterm
 
-**A node-based terminal manager — your terminals on an infinite canvas.**
+**A node-based terminal manager — your terminals and agents on an infinite canvas.**
 
-Multiple real terminals live as draggable nodes on a single pan/zoom canvas.
-Built for people with ADHD and scattered workflows: a spatial layout instead of
-a stack of hidden tabs.
+Multiple real terminals live as draggable nodes on a single pan/zoom canvas, and every
+project doubles as a **Trello-style board of live Claude Code sessions**. Built for
+people with ADHD and scattered workflows: a spatial layout instead of a stack of
+hidden tabs.
 
 [![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)%20·%20Linux%20(x64)-black)](https://nodeterm.dev)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
@@ -23,9 +24,11 @@ a stack of hidden tabs.
 ---
 
 <div align="center">
-  <img src="docs/assets/hero.png" alt="nodeterm canvas — terminals, a Claude Code node, a sticky note, and an editor on one pan/zoom canvas" width="900" />
+  <a href="docs/assets/kanban-launch.mp4">
+    <img src="docs/assets/kanban-launch.gif" alt="Trello for Claude Code — nodeterm's kanban board of live agent sessions" width="900" />
+  </a>
   <br/>
-  <sub><i>Illustration of the canvas — swap in a real screenshot/GIF when ready.</i></sub>
+  <sub>▶ <a href="docs/assets/kanban-launch.mp4">Watch the launch video with sound</a></sub>
 </div>
 
 ## Why nodeterm
@@ -33,66 +36,119 @@ a stack of hidden tabs.
 Stacked terminal tabs hide context — you lose track of what's running where. nodeterm
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
 into. Sessions are spatial and persistent, so your mental model stays intact across
-restarts. And because the app is built around a clean service seam, the same canvas now
-runs three ways — as the **desktop app for macOS and Linux**, as a **self-hosted browser
-app** you reach from anywhere (Server Edition), and (in progress) an **iOS companion**.
+restarts. And because the app is built around a clean service seam, the same canvas runs
+three ways — as the **desktop app for macOS and Linux**, as a **self-hosted browser app**
+you reach from anywhere (Server Edition), and an **iOS companion** that attaches to the
+same live sessions.
 
 📚 **Full documentation lives at [nodeterm.dev/docs](https://nodeterm.dev/docs)** — get
 started, concepts, agents, remote access, troubleshooting.
 
 ## ✨ Features
 
-- **Real terminals as nodes** — each node runs its own shell (PTY) via `node-pty`; drag,
-  resize, pan, and zoom freely on a React Flow canvas.
+<table>
+<tr>
+<td width="42%" valign="middle">
+
+### One project, two views
+
+Every project is a canvas — **and also a kanban board**. Cards *are* your live
+sessions: drag them across columns while the agent keeps running, see pulsing
+**RUNNING** / **NEEDS YOU** badges and each agent's context meter at a glance, and
+add columns to match your flow. Toggle with `⌘⇧B`.
+
+</td>
+<td><img src="docs/assets/kanban-board.png" alt="The kanban board — live session cards with RUNNING and NEEDS YOU badges" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
+
+### Every card is a live Claude Code session
+
+Click a card and the **real session opens in a Trello-style card modal** — the same
+tmux-backed terminal, live. Answer a permission prompt right there, search the
+scrollback, dictate into it, and keep per-card **comments & activity** alongside
+members, due date, and priority.
+
+</td>
+<td><img src="docs/assets/card-modal.png" alt="The card modal — a live Claude Code session with permission prompt, members, due date and activity feed" /></td>
+</tr>
+<tr>
+<td width="42%" valign="middle">
+
+### Built for teams of humans *and* agents
+
+Assign teammates to cards, set due dates and priorities, and comment — the board's
+activity feed is a git-shareable file in your repo, so everyone (and every agent)
+sees the same board. Agents can organize the canvas too: spawn a team, wire
+dependencies, and read each other's transcripts.
+
+</td>
+<td><img src="docs/assets/card-assign.png" alt="Assigning a member from the card's picker, zoomed" /></td>
+</tr>
+</table>
+
+### Everything is a node
+
+Right-click the canvas to open a terminal — or an AI agent. Each one runs in its own
+persistent tmux session, on one pan/zoom canvas:
+
+- 🖥 **Terminal** — xterm + tmux, click-to-rename, color, tags, AI naming.
+- 🤖 **Agent** — a terminal preset that launches an agent CLI: **Claude Code**, **Codex**,
+  **Gemini**, **opencode**, or your own custom command.
+- 📝 **Sticky note** — free-text colored notes; link one to an agent to feed it context.
+- 🗂 **Group** — frame and move related nodes together; bind a group to a **git worktree**
+  for an agent-per-branch layout.
+- ✏️ **Editor** — Monaco code editor for a file (⌘S to save, markdown/image preview).
+- 🔀 **Diff** — Monaco diff editor for staged/unstaged changes.
+- 🌐 **Web / Video** — render a page or a video right on the canvas.
+
+### Know when an agent needs you
+
+Hook-driven agent status — no output scraping: pulsing **RUNNING / NEEDS YOU** badges,
+**subagent** cards with live transcripts, a **context-window meter**, unread dots, and
+OS notifications when an agent finishes (or gets stuck on an approval) while you're
+somewhere else. On a MacBook, the **notch** grows into a tiny status capsule: a walking
+mascot per working agent, a red dot when one needs you.
+
+### More
+
 - **Session continuity (tmux)** — terminals keep running across node remounts *and* full
-  app restarts, including live processes. Close a node's × to truly end its session.
-- **Projects / tabs** — each project is its own canvas with its own working directory;
-  switch between them without losing any running terminal.
-- **Many node kinds**, all on the same canvas:
-  - 🖥 **Terminal** — xterm + tmux, click-to-rename, color, tags, AI naming.
-  - 🤖 **Agent** — a terminal preset that launches an agent CLI: **Claude Code**, **Codex**,
-    **Gemini**, **opencode**, or your own custom command.
-  - 💬 **Chat** — an SDK-driven Claude chat node (streaming, in-chat permission prompts,
-    image paste, cost meter) — not a PTY.
-  - 📝 **Sticky note** — free-text colored notes; link one to an agent to feed it context.
-  - 🗂 **Group** — frame and move related nodes together.
-  - ✏️ **Editor** — Monaco code editor for a file (⌘S to save, markdown/image preview).
-  - 🔀 **Diff** — Monaco diff editor for staged/unstaged changes.
-  - 🌐 **Web / Video** — render a page or a video right on the canvas.
-- **Live agent status** — hook-driven **RUNNING / NEEDS YOU** badges, **subagent** cards
-  with a live transcript, a **context-window meter**, and unread dots + completion
-  notifications — for all four built-in agents, no output-scraping.
-- **Agent superpowers** — **context links** so two agent nodes (any mix of the four
-  built-ins) can read each other's transcript on demand, plus Claude-only **branch a
-  conversation** into a new node and **managed accounts** to run several logged-in Claude
-  identities side by side.
+  app restarts, including live processes; machine reboots restore scrollback and resume
+  agent sessions (`claude --resume`).
+- **Talk to your terminal** — on-device Whisper dictation (⌘⇧D): speak, review, send.
+- **Agent superpowers** — **context links** so agent nodes read each other's transcripts
+  on demand; Claude-only **branch a conversation** and **managed accounts** for several
+  logged-in Claude identities side by side; agents can drive the canvas (open nodes,
+  spawn teams, verify each other's work) via the built-in canvas-control CLI.
 - **Remote / SSH projects** — open a project on a remote host over SSH; terminals, files,
-  and git run there while the canvas stays local.
-- **Source control** — VS Code-style file-level stage/unstage, discard, branch
-  switch/create, commit, push/sync/publish, worktrees, and `gh` sign-in — backed by
-  system `git`.
-- **AI commit messages & terminal names** — bring-your-own local agent CLI
-  (claude / codex / custom) run read-only on the staged diff or captured output.
+  git, and even the board run there while the canvas stays local.
+- **Source control** — VS Code-style stage/unstage, discard, branch switch/create,
+  commit, push/sync/publish, **worktrees**, and `gh` sign-in — backed by system `git`.
+- **AI commit messages & terminal names** — bring-your-own local agent CLI run read-only
+  on the staged diff or captured output.
+- **Your sessions, in your pocket** — **nodeterm mobile** (iOS) attaches to the same live
+  tmux sessions: watch an agent work, answer a "needs you", or type into any terminal
+  from your phone — plus push notifications and a mobile board view.
 - **Command palette** (⌘K), **file explorer** (⌘⇧E), **markdown view** (⌘M),
-  **undo/redo** (⌘Z / ⌘⇧Z), and a native macOS dark UI.
+  **undo/redo**, and a native macOS dark UI.
 - **Auto-update & in-app announcements** — the app checks a self-hosted feed and
   surfaces a "Restart to update" banner and product news.
 
 ### 🌍 Server Edition — nodeterm in your browser
 
 The same canvas runs headless on a Linux (or macOS) host and is used from any browser —
-so your terminals, editors, source control, and agents live on a server you reach from
-anywhere. Single-user auth (password + secure cookie), a WebSocket bridge, and the exact
-same renderer as the desktop app.
+so your terminals, editors, source control, board, and agents live on a server you reach
+from anywhere. Single-user auth (password + secure cookie), a WebSocket bridge, and the
+exact same renderer as the desktop app.
 
 ```bash
 npm run server:dev     # build + serve; open http://127.0.0.1:8443 and set a password
 ```
 
-Terminals, files/editor/diff, the full git panel, and agent-status badges all work in the
-browser today; the SDK chat node is the one piece still desktop-only. See
-[`docs/SERVER.md`](./docs/SERVER.md) for the quickstart, security model, and current
-limitations.
+Terminals, files/editor/diff, the full git panel, the kanban board, and agent-status
+badges all work in the browser today. See [`docs/SERVER.md`](./docs/SERVER.md) for the
+quickstart, security model, and current limitations.
 
 #### 🔔 Get push notifications from any SSH host
 
@@ -118,6 +174,7 @@ detects your platform. Everything is also listed at
 - **macOS** — `.dmg` for Apple Silicon and Intel (auto-updates).
 - **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
+- **iOS** — **nodeterm mobile** on the [App Store](https://nodeterm.dev/mobile).
 
 > Until the macOS build is signed & notarized, Gatekeeper may warn on first launch —
 > right-click the app → **Open** to bypass it once.
@@ -139,18 +196,17 @@ npm run dist:linux # AppImage + .deb into dist/ (on a Linux host)
 npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```
 
-`npm run dist` builds an unsigned `.dmg` for local testing; `npm run server:dev` runs the
-headless browser edition.
-
 ## ⌨️ Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
 | `⌘K` | Command palette |
 | `⌘T` / `⌘⇧C` | New terminal / New Claude Code |
+| `⌘⇧B` | Toggle the kanban board |
 | `⌘W` | Close the selected node |
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘M` | Toggle markdown view (terminal / editor) |
+| `⌘⇧D` | Dictate into the focused terminal |
 | `⌘⇧E` | File explorer |
 | `⌘,` | Settings · `⌘/` Shortcuts |
 | `Right-click` | Actions menu (empty space or node) |
@@ -170,7 +226,7 @@ headless browser edition.
   to a remote agent over SSH — so remote projects drop in without touching the canvas UI.
 - **React Flow is the single source of truth** for live nodes; projects persist serialized
   nodes to disk, and tmux keeps sessions alive across restarts.
-- **Three surfaces** — the desktop app, the browser **Server Edition**, and an in-progress
+- **Three surfaces** — the desktop app, the browser **Server Edition**, and the
   **mobile companion** (a separate SwiftUI repo) all ride the same core + transport seams.
 
 See [`docs/SERVER.md`](./docs/SERVER.md) for the Server Edition, and the design docs
@@ -200,5 +256,5 @@ years after it is published. See [`LICENSE`](./LICENSE) for the full terms and
 [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) for the bundled open-source
 components. For a commercial license beyond the grant, contact eneskirca@gmail.com.
 
-> "Claude" and "Claude Code" are trademarks of Anthropic; nodeterm is not affiliated with
-> or endorsed by Anthropic.
+> "Claude" and "Claude Code" are trademarks of Anthropic, and "Trello" is a trademark of
+> Atlassian; nodeterm is not affiliated with or endorsed by either.
