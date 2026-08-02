@@ -658,27 +658,99 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         }
       })
     }
+    // --- renderer-swap safety net ---------------------------------------------------------
+    // xterm treats a renderer swap as atomic; it is not. On macOS under GPU/canvas memory
+    // pressure, canvas allocation THROWS mid-swap (`throwIfFalsy(getContext('2d'))` in the
+    // addon's atlas/layers), and both directions strand the terminal BLACK with zero
+    // JS-visible events — which is why neither the repaint heals nor the zoom gate closed the
+    // field report alone:
+    //  - activate: the render service is pointed at the webgl renderer BEFORE the parts that
+    //    can throw, so a mid-activate throw leaves a half-built renderer with the DOM renderer
+    //    already disposed (our catch used to just return false and believe we were on DOM);
+    //  - dispose: the addon's canvas is removed INSIDE `setRenderer(createDomRenderer())`, so a
+    //    throw there leaves the canvas attached — and our own loseWebglContexts then turns that
+    //    stray into a permanently-black plate sitting OVER the freshly-painted DOM rows.
+    /** Put a fresh DOM renderer in place — exactly what the addon's own dispose closure does.
+     *  Internal API, fully guarded; false = couldn't (fall through to the refresh heal). */
+    const restoreDomRenderer = (): boolean => {
+      try {
+        const core = (
+          term as unknown as {
+            _core?: {
+              _renderService?: { setRenderer(r: unknown): void; handleResize(c: number, r: number): void }
+              _createRenderer?: () => unknown
+            }
+          }
+        )._core
+        if (!core?._renderService || !core._createRenderer) return false
+        core._renderService.setRenderer(core._createRenderer())
+        core._renderService.handleResize(term.cols, term.rows)
+        return true
+      } catch {
+        return false
+      }
+    }
+    /** One automatic refresh (fresh xterm + reattach; tmux repaints) per mount, ever — the
+     *  manual fix users discovered by hand, automated but capped so sustained GPU pressure
+     *  can't respawn-loop a node. */
+    let swapHealRespawned = false
+    /**
+     * Invariant check for every moment we believe NO webgl addon is active: the screen must
+     * hold ZERO canvases. A leftover one is the black-terminal signature above. Sweep strays,
+     * restore a DOM renderer, repaint; refresh the node as a last resort. The console.warn is
+     * deliberate — it is the field-diagnosable trace of which strand actually fired.
+     */
+    const verifyCleanDomState = (context: string): void => {
+      if (disposed || webgl) return
+      const strays = term.element
+        ? Array.from(term.element.querySelectorAll('.xterm-screen canvas'))
+        : []
+      if (!strays.length) return
+      for (const c of strays) {
+        try {
+          c.remove()
+        } catch {
+          // detached mid-sweep — fine
+        }
+      }
+      const restored = restoreDomRenderer()
+      console.warn(
+        `[nodeterm] healed a broken webgl swap (${context}): removed ${strays.length} stray canvas(es), ` +
+          (restored ? 'DOM renderer restored' : 'DOM restore failed → refreshing the node')
+      )
+      if (restored) {
+        fullRepaint()
+        return
+      }
+      if (swapHealRespawned) return
+      swapHealRespawned = true
+      updateNodeData(id, (n) => ({
+        respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+      }))
+    }
     const acquireWebgl = (): boolean => {
       if (webgl) return true
+      let addon: WebglAddon | null = null
       try {
-        const addon = new WebglAddon()
+        const a = new WebglAddon()
+        addon = a
         // The browser lost this context out from under us. Dispose + null the reference so the DOM
         // renderer takes over, and tell the coordinator so its accounting drops this grant. The
         // NODE never re-acquires from here (a per-node loop is the "Too many active WebGL
         // contexts" storm this feature exists to stop) — the COORDINATOR schedules one delayed,
         // budget-gated re-grant for a still-visible client (sleep/wake loses every context at
         // once with no visibility change; see webgl-budget.ts contextLost).
-        addon.onContextLoss(() => {
+        a.onContextLoss(() => {
           try {
-            addon.dispose()
+            a.dispose()
           } catch {
             // already disposed
           }
-          if (webgl === addon) webgl = null
+          if (webgl === a) webgl = null
           webglHandle?.contextLost()
         })
-        term.loadAddon(addon)
-        webgl = addon
+        term.loadAddon(a)
+        webgl = a
         // A force-evicted context the browser later RESTORES (GPU memory pressure, sleep/wake)
         // goes through the addon's webglcontextrestored handler — re-init + redraw with no error
         // handling, and the redraw is swallowable (see fullRepaint). The addon exposes no
@@ -692,8 +764,17 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         fullRepaint()
         return true
       } catch {
-        // WebGL2 unavailable — DOM renderer remains active. Returning false tells the coordinator
-        // not to count this as a held context (it must not burn a budget slot).
+        // WebGL2 unavailable — or activate DIED MIDWAY (see the safety-net note above). The
+        // back-to-DOM disposable is registered in the same breath as activate's setRenderer, so
+        // for exactly the throws that got that far, a best-effort dispose restores the DOM
+        // renderer; the invariant check sweeps whatever a shallower throw left behind. Returning
+        // false tells the coordinator not to count this as a held context (no budget slot).
+        try {
+          addon?.dispose()
+        } catch {
+          // half-built beyond dispose — the verify below recovers
+        }
+        verifyCleanDomState('acquire-failed')
         return false
       }
     }
@@ -713,6 +794,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
       webgl = null
       loseWebglContexts(canvases)
+      // A dispose that died midway leaves its (now context-lost, permanently BLACK) canvas
+      // attached OVER the DOM rows — sweep it before the repaint (see the safety-net note).
+      verifyCleanDomState('release')
       // The DOM renderer that replaced the addon starts from an EMPTY row container, and this
       // release almost always runs while the node is HIDDEN — the swap's own refresh defers
       // behind xterm's pause flag, which is exactly where it can be lost. Re-arm it explicitly.
@@ -1370,7 +1454,12 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // partial until manual refresh" strand accumulated while off-screen — whichever renderer
         // is active, and whatever xterm's own deferred-refresh bookkeeping lost in the meantime.
         // One-shot per transition (not per frame), so a zoom-out burst costs one repaint per node.
-        if (visible && !wasVisible) fullRepaint()
+        // The invariant check first: a stray black canvas left by a broken swap while hidden
+        // would otherwise cover everything the repaint draws (no-op when a webgl grant is live).
+        if (visible && !wasVisible) {
+          verifyCleanDomState('visible')
+          fullRepaint()
+        }
         wasVisible = visible
       },
       { rootMargin: '256px' }
