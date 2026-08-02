@@ -26,11 +26,11 @@ interface TabBarProps {
   /** Reorder a project to sit before another (null = to the end). Shared with the sessions
    *  sidebar: both surfaces render the projects array, so one drag updates both. */
   onReorder: (draggedId: string, beforeId: string | null) => void
-  /** Open the start screen (New project / Open folder / Clone repo) — what "+" now shows. */
+  /** Open the start screen (New project / Open folder / Clone repo), what "+" now shows. */
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
-  /** Close (hide) the project without destroying it — reopenable from the start screen. */
+  /** Close (hide) the project without destroying it, reopenable from the start screen. */
   onCloseProject: (id: string) => void
   /** Open the Remote access dialog (host/share + connect). Shown for every project. */
   onRemoteAccess: () => void
@@ -42,7 +42,7 @@ interface TabBarProps {
 
 /**
  * The runtime session dimension of a tab (which core the project lives on). Rendered ONLY when
- * more than one session exists — `sessionCount()` is 1 for a solo user today, so this never
+ * more than one session exists, `sessionCount()` is 1 for a solo user today, so this never
  * mounts and the solo tab bar is pixel-identical. Its own component because
  * `useProjectSession` is a hook and the tabs render in a `.map()`. Nothing here is persisted:
  * the project → session binding is resolved at runtime by `sessionForProject`.
@@ -57,7 +57,7 @@ function TabSessionLabel({ projectId }: { projectId: string }) {
 }
 
 /**
- * Top tab bar — one tab per project. Click to switch, "+" to add. The active tab
+ * Top tab bar, one tab per project. Click to switch, "+" to add. The active tab
  * exposes a caret menu (Rename / Set folder / Delete). The menu is rendered in a body
  * portal with fixed positioning so it is never clipped by the tab strip's overflow nor
  * hidden behind the canvas.
@@ -74,14 +74,14 @@ export function TabBar({
   onSetDefaultAccount,
   onSetDefaultPermissionMode
 }: TabBarProps) {
-  // Select the raw array and filter in a memo — a `.filter()` inside the selector returns a
+  // Select the raw array and filter in a memo, a `.filter()` inside the selector returns a
   // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
   const allProjects = useProjects((s) => s.projects)
   // Closed projects are hidden here (reopen them from the start screen's "Recently closed").
   const projects = useMemo(() => allProjects.filter((p) => !p.closed), [allProjects])
   const activeId = useProjects((s) => s.activeProjectId)
   const kanbanActive = useViewMode((s) => !!activeId && !!s.viewByProject[activeId])
-  // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
+  // Unread dots need only the unread id set, subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
   const unreadIds = useAgentStatus((s) => {
     let ids = ''
@@ -105,7 +105,7 @@ export function TabBar({
   // Whether the caret menu's "Default permission mode" group is expanded (same idiom as acctOpen).
   const [modeOpen, setModeOpen] = useState(false)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
-  // The mode a project without an override falls back to — shown in the "Use global (…)" entry.
+  // The mode a project without an override falls back to, shown in the "Use global (…)" entry.
   const globalMode = useSettings((s) => s.settings.claudePermissionMode)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
@@ -113,7 +113,7 @@ export function TabBar({
 
   // Session labels appear only once a second session exists (4c: remote tabs). For a solo user
   // this is always false, so the tab strip renders exactly as before. Plain call, not a
-  // subscription: sessions are registered at boot (and, in 4c, on connect — which re-renders
+  // subscription: sessions are registered at boot (and, in 4c, on connect, which re-renders
   // through its own state), so no store is needed here.
   const multiSession = sessionCount() > 1
 
@@ -154,7 +154,7 @@ export function TabBar({
     setMenuPos({ top: r.bottom + 4, left: r.left, flipBase: r.top - 4 })
   }
 
-  // Viewport-edge flip for the caret menu — same behavior as the right-click ContextMenu. The
+  // Viewport-edge flip for the caret menu, same behavior as the right-click ContextMenu. The
   // hook runs unconditionally (menuPos may be null while closed; the ref is simply unattached
   // then) and re-measures on size changes, so EXPANDING the account/permission sub-lists near
   // the bottom edge lifts the menu instead of growing it off-screen.
@@ -289,14 +289,24 @@ export function TabBar({
                   p.unavailable
                     ? sessionForProject(p.id).source === 'local'
                       ? `${p.cwd ?? 'project'} is unavailable (folder missing or unreachable)`
-                      : `${p.name} disconnected — click to reconnect`
-                    : p.cwd || undefined
+                      : `${p.name} disconnected, click to reconnect`
+                    : p.ssh
+                      ? `${p.ssh.server.user}@${p.ssh.server.host}:${p.ssh.remoteCwd}`
+                      : p.cwd || undefined
                 }
               >
                 <span
                   className="tab__dot"
                   style={active ? { background: p.color } : undefined}
                 />
+                {/* An SSH project looks identical to a local one once it is named, and the
+                    difference matters: its terminals, git and file ops all run on another
+                    machine. The chip says so at a glance; the tab title carries user@host. */}
+                {p.ssh && (
+                  <span className="tab__ssh" title={`${p.ssh.server.user}@${p.ssh.server.host}`}>
+                    SSH
+                  </span>
+                )}
                 {editingId === p.id ? (
                   <input
                     className="tab__edit"
@@ -328,7 +338,7 @@ export function TabBar({
                     className="tab__board-toggle"
                     title={kanbanActive ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)'}
                     onClick={(e) => {
-                      e.stopPropagation() // a tab click switches projects — this only flips the view
+                      e.stopPropagation() // a tab click switches projects, this only flips the view
                       useViewMode.getState().toggle(p.id)
                     }}
                   >
@@ -442,7 +452,7 @@ export function TabBar({
               <div className="tab-menu__sub">
                 <button
                   // On an SSH project the global Auto only applies once the REMOTE CLI is
-                  // confirmed — surface why it may currently do nothing (see menuAutoHint).
+                  // confirmed, surface why it may currently do nothing (see menuAutoHint).
                   title={globalMode === 'auto' ? (menuAutoHint ?? undefined) : undefined}
                   onClick={() => {
                     onSetDefaultPermissionMode(menuProject.id, undefined)
@@ -459,10 +469,10 @@ export function TabBar({
                   <button
                     key={m}
                     // A project override is written to <cwd>/.nodeterm/project.json, which is
-                    // git-shared and mirrored to SSH servers — spell out for "Bypass all" that
+                    // git-shared and mirrored to SSH servers, spell out for "Bypass all" that
                     // the choice travels to everyone who clones the repo. The Auto row instead
                     // explains when it will NOT apply on this SSH project's host (remote CLI too
-                    // old / not found / not probed yet) — still selectable: the setting is kept
+                    // old / not found / not probed yet), still selectable: the setting is kept
                     // and applies the moment the host's CLI qualifies.
                     title={
                       m === 'bypassPermissions'
