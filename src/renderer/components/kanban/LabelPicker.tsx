@@ -152,8 +152,9 @@ export function LabelPicker({
             </div>
           )
         })}
-        {canCreate && (
-          <div className="label-picker__createrow">
+      </div>
+      {canCreate && (
+        <div className="label-picker__createrow">
             <button
               className="label-picker__createcolor"
               title="Pick color"
@@ -190,9 +191,8 @@ export function LabelPicker({
                 ))}
               </div>
             )}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }
