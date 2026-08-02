@@ -25,7 +25,7 @@ hidden tabs.
 
 <div align="center">
   <a href="docs/assets/hero-tour.mp4">
-    <img src="docs/assets/hero-tour.gif" alt="nodeterm in 30 seconds — canvas, agents, kanban board, three surfaces" width="900" />
+    <img src="docs/assets/hero-tour.webp" alt="nodeterm in 30 seconds — canvas, agents, kanban board, three surfaces" width="900" />
   </a>
   <br/>
   <sub>▶ <a href="docs/assets/hero-tour.mp4">Watch the 30-second tour with sound</a></sub>
@@ -58,7 +58,7 @@ persistent tmux session, next to **sticky notes** (link one to feed an agent con
 map. Quit the app, even **restart the machine** — every session comes back.
 
 </td>
-<td><img src="docs/assets/canvas-tour.gif" alt="The canvas — terminals, agents, notes, editors and diffs as nodes; sessions survive a full restart" /></td>
+<td><img src="docs/assets/canvas-tour.webp" alt="The canvas — terminals, agents, notes, editors and diffs as nodes; sessions survive a full restart" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -71,7 +71,7 @@ notifications. Click the ping, answer the permission prompt right in the node, a
 told the moment the turn is **done**. On a MacBook, agents live in the **notch** too.
 
 </td>
-<td><img src="docs/assets/agents-tour.gif" alt="Agent status — NEEDS YOU flip, notification, answering a permission prompt, subagent fan-out" /></td>
+<td><img src="docs/assets/agents-tour.webp" alt="Agent status — NEEDS YOU flip, notification, answering a permission prompt, subagent fan-out" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -85,7 +85,7 @@ assign teammates. Toggle with `⌘⇧B`.
 <br/><sub>▶ <a href="docs/assets/kanban-launch.mp4">Watch the board video with sound</a></sub>
 
 </td>
-<td><img src="docs/assets/kanban-launch.gif" alt="The kanban board — live session cards, drag between columns, the card modal with a live Claude Code session" /></td>
+<td><img src="docs/assets/kanban-launch.webp" alt="The kanban board — live session cards, drag between columns, the card modal with a live Claude Code session" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -97,7 +97,7 @@ live session continues in your pocket**, E2E encrypted **over the relay, not jus
 LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
 
 </td>
-<td><img src="docs/assets/remote-tour.gif" alt="Pair your phone — scan the QR, the same live session continues on the iPhone" /></td>
+<td><img src="docs/assets/remote-tour.webp" alt="Pair your phone — scan the QR, the same live session continues on the iPhone" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -108,7 +108,7 @@ Hold `⌘⇧D` and say it. On-device **Whisper** transcribes locally — review 
 then **Send** (nothing auto-submits). Your voice never leaves the machine.
 
 </td>
-<td><img src="docs/assets/dictation-tour.gif" alt="Dictation — hold cmd-shift-D, speak, review, send into the terminal" /></td>
+<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold cmd-shift-D, speak, review, send into the terminal" /></td>
 </tr>
 </table>
 
