@@ -195,6 +195,7 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
@@ -2279,6 +2280,31 @@ export function Canvas() {
     return screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
   }, [screenToFlowPosition])
 
+  /**
+   * A non-overlapping drop point for a NODE created without a cursor (dock / palette / kanban
+   * board) — otherwise every one lands on the view center and piles into a stack you only discover
+   * when you switch back to the canvas. Returns undefined only if the view isn't measured yet.
+   */
+  const emptyNodePos = useCallback((): { x: number; y: number } | undefined => {
+    const preferred = viewCenter()
+    if (!preferred) return undefined
+    const s = useSettings.getState().settings
+    const w = s.defaultNodeWidth || 640
+    const h = s.defaultNodeHeight || 440
+    // Real, laid-out nodes only (skip ephemeral subagent/loop cards, which aren't persisted and
+    // vanish on their own — see useAgentNodes).
+    const ephemeral = new Set(Object.keys(useAgentNodes.getState().byId))
+    const boxes = nodesRef.current
+      .filter((n) => !ephemeral.has(n.id))
+      .map((n) => ({
+        x: n.position.x,
+        y: n.position.y,
+        w: (n.measured?.width as number | undefined) ?? (n.width as number | undefined) ?? w,
+        h: (n.measured?.height as number | undefined) ?? (n.height as number | undefined) ?? h
+      }))
+    return freeSpot(boxes, preferred, { w, h })
+  }, [viewCenter])
+
   /** The checkout a Source Control action refers to. The panel hands its ACTIVE SCOPE's cwd
    *  (main checkout or a bound worktree) with every relative path, so the diff/agent node it opens
    *  is rooted in the same checkout the panel is showing — reconstructing the project's own cwd here
@@ -2400,12 +2426,12 @@ export function Canvas() {
       setNodes((ns) => {
         // In an SSH project the node is stamped remote (runs over the project's master); the
         // factory takes the project's ssh and roots the terminal at its remoteCwd.
-        const node = createTerminalNode(ns.length, cwd, center ?? viewCenter(), initialCommand, project?.ssh)
+        const node = createTerminalNode(ns.length, cwd, center ?? emptyNodePos(), initialCommand, project?.ssh)
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
+    [setNodes, markDirty, activeProjectId, emptyNodePos, cwdForNewNodeIn, parentInto]
   )
 
   /** Open a new terminal that runs a command on start (e.g. gh auth login). `cwd` lets a caller
@@ -2775,12 +2801,12 @@ export function Canvas() {
   const addSticky = useCallback(
     (center?: { x: number; y: number }, groupId?: string) => {
       setNodes((ns) => {
-        const node = createStickyNode(ns.length, center ?? viewCenter())
+        const node = createStickyNode(ns.length, center ?? emptyNodePos())
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
     },
-    [setNodes, markDirty, viewCenter, parentInto]
+    [setNodes, markDirty, emptyNodePos, parentInto]
   )
 
   const addDino = useCallback(
@@ -2805,10 +2831,10 @@ export function Canvas() {
       const input = await promptDialog({ message: 'Open web view — enter a URL:' })
       const url = input?.trim()
       if (!url) return
-      setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? viewCenter())])
+      setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? emptyNodePos())])
       markDirty()
     },
-    [setNodes, markDirty, viewCenter]
+    [setNodes, markDirty, emptyNodePos]
   )
 
   const addBrowser = useCallback(
@@ -2816,10 +2842,10 @@ export function Canvas() {
       // Open a blank browser node — the user types the URL in the node's own address bar (like a
       // browser's new tab). We deliberately don't use window.prompt: Electron doesn't support it
       // (it throws "prompt() is and will not be supported"), and a browser node doesn't need it.
-      setNodes((ns) => [...ns, createBrowserNode(ns.length, '', center ?? viewCenter())])
+      setNodes((ns) => [...ns, createBrowserNode(ns.length, '', center ?? emptyNodePos())])
       markDirty()
     },
-    [setNodes, markDirty, viewCenter]
+    [setNodes, markDirty, emptyNodePos]
   )
 
   // Task 6: the Settings → Accounts "Add account" flow dispatches 'nodeterm:add-account-login'
@@ -2882,7 +2908,7 @@ export function Canvas() {
           agentId,
           ns.length,
           cwd,
-          center ?? viewCenter(),
+          center ?? emptyNodePos(),
           undefined,
           project?.ssh,
           account,
@@ -2892,7 +2918,7 @@ export function Canvas() {
       })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, viewCenter, cwdForNewNodeIn, parentInto]
+    [setNodes, markDirty, activeProjectId, emptyNodePos, cwdForNewNodeIn, parentInto]
   )
 
   // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
@@ -2900,14 +2926,14 @@ export function Canvas() {
   // selected (and others deselected) so it's the active focus right away.
   const addSshTerminal = useCallback(
     (server: SshServer, screenPos?: { x: number; y: number }) => {
-      const at = screenPos ? screenToFlowPosition(screenPos) : viewCenter()
+      const at = screenPos ? screenToFlowPosition(screenPos) : emptyNodePos()
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
         { ...createSshTerminalNode(server, ns.length, at), selected: true }
       ])
       markDirty()
     },
-    [setNodes, markDirty, screenToFlowPosition, viewCenter]
+    [setNodes, markDirty, screenToFlowPosition, emptyNodePos]
   )
 
   // Open the SSH server picker. Remote SSH terminals are free (Core).
@@ -4952,7 +4978,7 @@ export function Canvas() {
     (choice: KanbanCreateChoice, columnId: string | null) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const index = nodesRef.current.length
-      const at = viewCenter()
+      const at = emptyNodePos() // board has no cursor — drop it in free canvas space, not on a pile
       const node =
         choice.kind === 'terminal'
           ? createTerminalNode(index, project?.cwd, at, undefined, project?.ssh)
@@ -5003,7 +5029,7 @@ export function Canvas() {
         event: { type: 'card-created', to: toName, title }
       })
     },
-    [activeProjectId, viewCenter, setNodes, markDirty, seedBoard, api]
+    [activeProjectId, emptyNodePos, setNodes, markDirty, seedBoard, api]
   )
 
   // Delete a session from the board — same confirm + teardown as the canvas Delete key.
