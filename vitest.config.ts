@@ -8,7 +8,8 @@ export default defineConfig({
       'src/shared/**/*.test.ts',
       'src/main/**/*.test.ts',
       'src/preload/**/*.test.ts',
-      'src/renderer/**/*.test.ts',
+      // .tsx too: component tests (jsdom via a per-file pragma; everything else stays node).
+      'src/renderer/**/*.test.{ts,tsx}',
       'src/server/**/*.test.ts',
       'test/server/**/*.test.ts',
       'test/remote/**/*.test.ts',
