@@ -85,3 +85,26 @@ export function startSessionNameSweep(
     clearTimeout(first)
   }
 }
+
+/**
+ * The name to SHOW for a node, host-side: the agent's live session name when the node still
+ * auto-tracks it, else the persisted node title. The same rule the canvas applies (`titleAuto`)
+ * and the phone applies to its lists — used here so push alerts and Live Activities carry the
+ * CURRENT name instead of the title the workspace file happens to hold (which only refreshes
+ * while that node is mounted in an open project).
+ */
+export function displayNodeTitle(
+  nodeId: string,
+  deps: {
+    sessionName: (nodeId: string) => string | undefined
+    node: (nodeId: string) => { title?: string; titleAuto?: boolean } | undefined
+  }
+): string | undefined {
+  const node = deps.node(nodeId)
+  if (node?.titleAuto !== false) {
+    const live = deps.sessionName(nodeId)?.trim()
+    if (live) return live
+  }
+  const title = node?.title?.trim()
+  return title || undefined
+}
