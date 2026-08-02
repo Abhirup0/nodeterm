@@ -1834,6 +1834,13 @@ app.on('before-quit', (e) => {
     // teardown, and in this pass rather than the first, where the flush is still writing over
     // those masters. `.finally(app.quit())` above guarantees this pass runs.
     appSshAgent.stop()
+    // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
+    // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
+    // termination the first pass preventDefault'ed: both passes run, but will-quit never
+    // fires and the process lingers as a windowless shell. Everything that must land has
+    // landed by this point, so give Electron a moment to finish on its own, then force the
+    // exit. A normal Cmd+Q exits well inside the fuse and never reaches it.
+    setTimeout(() => app.exit(0), 1500)
     return
   }
   quitFlushed = true
