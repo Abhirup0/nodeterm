@@ -93,30 +93,35 @@ export function SessionCard({ session, status, meta, labels = [], onOpen, onDrag
         {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
-      <LabelChips labels={labels} size="sm" className="kanban-card__labels" />
-      {(assignees.length > 0 || due !== undefined || priority !== undefined) && (
+      {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
-          {priority !== undefined && PRIO_COLOR[priority] && (
-            <span
-              className="kanban-due kanban-prio-chip"
-              style={{ background: `${PRIO_COLOR[priority]}26`, color: PRIO_COLOR[priority] }}
-            >
-              {priority.toUpperCase()}
-            </span>
-          )}
-          {due !== undefined && (
-            <span className={`kanban-due${overdue ? ' kanban-due--overdue' : ''}`}>
-              {new Date(due).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
-            </span>
-          )}
-          <span className="kanban-card__avatars">
-            {assignees.slice(0, 3).map((a) => (
-              <span key={a.name} className="kanban-avatar kanban-avatar--sm" style={{ background: a.color }} title={a.name}>
-                {(a.name.trim()[0] ?? '?').toUpperCase()}
+          {/* Labels share the priority/due/avatars row (left); the meta chips hug the right. */}
+          <LabelChips labels={labels} size="sm" className="kanban-card__metalabels" />
+          <div className="kanban-card__metaright">
+            {priority !== undefined && PRIO_COLOR[priority] && (
+              <span
+                className="kanban-due kanban-prio-chip"
+                style={{ background: `${PRIO_COLOR[priority]}26`, color: PRIO_COLOR[priority] }}
+              >
+                {priority.toUpperCase()}
               </span>
-            ))}
-            {assignees.length > 3 && <span className="kanban-avatar kanban-avatar--sm kanban-avatar--more">+{assignees.length - 3}</span>}
-          </span>
+            )}
+            {due !== undefined && (
+              <span className={`kanban-due${overdue ? ' kanban-due--overdue' : ''}`}>
+                {new Date(due).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+              </span>
+            )}
+            {assignees.length > 0 && (
+              <span className="kanban-card__avatars">
+                {assignees.slice(0, 3).map((a) => (
+                  <span key={a.name} className="kanban-avatar kanban-avatar--sm" style={{ background: a.color }} title={a.name}>
+                    {(a.name.trim()[0] ?? '?').toUpperCase()}
+                  </span>
+                ))}
+                {assignees.length > 3 && <span className="kanban-avatar kanban-avatar--sm kanban-avatar--more">+{assignees.length - 3}</span>}
+              </span>
+            )}
+          </div>
         </div>
       )}
       {/* Detail line is ALWAYS visible when the card has something to say (no expand step):
