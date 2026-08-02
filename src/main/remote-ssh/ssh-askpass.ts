@@ -97,18 +97,23 @@ export function classifyPrompt(prompt: string): { passphrase: boolean; keyPath?:
  * this app's agent hooks, so this introduces nothing new. Values are env-expanded by sh and the
  * results are never re-parsed, so hostile characters in a path cannot inject.
  */
-/** Per-instance socket path, sharing the app agent's short dir and hashing (a unix socket path
- *  is capped near 104 bytes, which userData eats). OS file permissions are the primary access
- *  control: the dir is 0700 and the socket is chmod'd 0600 right after bind, so only this user
- *  can connect at all. The bearer token stays as a second factor. */
+/** Per-instance socket path, sharing the app agent's short home and hashing (a unix socket path
+ *  is capped near 104 bytes, which userData eats). The socket gets its OWN subdir rather than
+ *  sitting in ~/.nodeterm directly: that root is created 0755 by the hook installer and mkdir's
+ *  `mode` never fixes up an existing dir, so only a dir this feature owns can be forced to 0700
+ *  (start() chmods it explicitly, the pairing-service pattern). With the dir owner-only BEFORE
+ *  the socket exists, the bind-then-chmod-0600 window is actually closed, not just narrated.
+ *  The bearer token stays as a second factor. */
 function askpassSockPath(): string {
-  return path.join(os.homedir(), '.nodeterm', `askpass-${instanceSockId()}.sock`)
+  return path.join(os.homedir(), '.nodeterm', 'askpass', `${instanceSockId()}.sock`)
 }
 
 export function buildAskpassScript(): string {
   return [
     '#!/bin/sh',
-    'answer=$(curl -sS --max-time 300 --unix-socket "${NODETERM_ASKPASS_SOCK}" -X POST "http://localhost/prompt" \\',
+    // -f: an HTTP error (403 from a stale token after another instance rebound the socket) must
+    // exit non-zero and hit the breadcrumb below, not read as "empty answer" and die silently.
+    'answer=$(curl -sSf --max-time 300 --unix-socket "${NODETERM_ASKPASS_SOCK}" -X POST "http://localhost/prompt" \\',
     '  -H "X-Nodeterm-Askpass-Token: ${NODETERM_ASKPASS_TOKEN}" \\',
     '  --data-urlencode "identity=${NODETERM_ASKPASS_IDENTITY}" \\',
     '  --data-urlencode "caller=$PPID" \\',
@@ -195,12 +200,19 @@ export class AskpassServer {
     this.promptHandler = cb
   }
 
-  async start(sockPath: string = askpassSockPath()): Promise<void> {
+  async start(sockPath?: string): Promise<void> {
     if (this.server) return
+    // Only the production default dir is chmod-hardened: a test's tmpdir socket must never have
+    // its PARENT (the shared OS tmpdir) forced to 0700.
+    const isDefaultDir = !sockPath
+    sockPath = sockPath ?? askpassSockPath()
     this.token = randomUUID()
     this.sockPath = sockPath
-    // The dir gates the pre-chmod window below; a stale socket file from a crash would EADDRINUSE.
+    // mkdir's mode only applies to dirs it creates; chmod covers the pre-existing case (see
+    // askpassSockPath). The dir being owner-only BEFORE the bind is what gates the socket's own
+    // pre-chmod window. A stale socket file from a crash would EADDRINUSE, hence the rm.
     await fs.mkdir(path.dirname(sockPath), { recursive: true, mode: 0o700 })
+    if (isDefaultDir) await fs.chmod(path.dirname(sockPath), 0o700).catch(() => {})
     await fs.rm(sockPath, { force: true })
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
@@ -381,6 +393,10 @@ export class AskpassServer {
    * authoritative key is the one named by the prompt (see `classifyPrompt`).
    */
   envFor(identityFile: string | undefined, scriptPath: string): Record<string, string> {
+    // A failed/never-run start() means there is nothing to point ssh at: hand back no askpass env
+    // at all, so the connect degrades to the pre-feature behavior (fail with ssh's real error)
+    // instead of a helper curling a blank socket path on every prompt.
+    if (!this.sockPath) return {}
     return {
       SSH_ASKPASS: scriptPath,
       // Modern OpenSSH (8.4+) forces askpass with this even though the master has no tty. Older

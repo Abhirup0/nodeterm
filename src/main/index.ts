@@ -790,10 +790,17 @@ app.whenReady().then(async () => {
   // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
-  // Loopback SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
+  // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
   // passphrase-protected identity file's prompt back through the app instead of failing auth.
-  await askpassServer.start()
-  const askpassScriptPath = await ensureAskpassScript(app.getPath('userData'))
+  // MUST NOT be fatal: binding a unix socket under ~/.nodeterm can fail for filesystem reasons
+  // (bad ownership, a $HOME that cannot bind AF_UNIX), and this await sits in the boot chain
+  // before createWindow with no catch above it. A failed relay costs passphrase prompts (envFor
+  // then hands out no askpass env, the pre-feature behavior); it must never cost the window.
+  await askpassServer.start().catch((e) => console.error('[ssh-askpass] relay disabled:', e))
+  const askpassScriptPath = await ensureAskpassScript(app.getPath('userData')).catch((e) => {
+    console.error('[ssh-askpass] script generation failed, relay disabled:', e)
+    return undefined
+  })
   const win = createWindow()
   // NT_MULTI instances are throwaway dev sandboxes. The dock badge is the one marker that is
   // always visible on macOS (the window title is hidden by titleBarStyle: 'hiddenInset', and the
@@ -1846,6 +1853,9 @@ app.on('before-quit', (e) => {
     // teardown, and in this pass rather than the first, where the flush is still writing over
     // those masters. `.finally(app.quit())` above guarantees this pass runs.
     appSshAgent.stop()
+    // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
+    // does not), and a lingering file is one more thing the next start() has to clear.
+    askpassServer.stop()
     // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
     // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
     // termination the first pass preventDefault'ed: both passes run, but will-quit never

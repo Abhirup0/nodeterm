@@ -295,11 +295,11 @@ describe('AskpassServer', () => {
     expect(flags).toEqual([false, false, true])
   })
 
-  it('sets SSH_ASKPASS even when the server has NO configured identity file', () => {
+  it('sets SSH_ASKPASS even when the server has NO configured identity file', async () => {
     // The regression this guards: saved servers usually have identityFile null (ssh then offers
     // the default identities, which are exactly the ones likely to be encrypted). Returning {}
     // here meant the tty-less master had no way to prompt and the whole feature was dead code.
-    const s = new AskpassServer()
+    const s = await makeServer()
     const env = s.envFor(undefined, '/ud/ssh-askpass.sh')
     expect(env.SSH_ASKPASS).toBe('/ud/ssh-askpass.sh')
     expect(env.SSH_ASKPASS_REQUIRE).toBe('force')
@@ -378,10 +378,18 @@ describe('AskpassServer', () => {
   })
 
   it('envFor passes the configured identity file through as a hint', async () => {
-    const s = new AskpassServer()
+    const s = await makeServer()
     const env = s.envFor('/home/u/.ssh/id_ed25519', '/ud/ssh-askpass.sh')
     expect(env.SSH_ASKPASS).toBe('/ud/ssh-askpass.sh')
     expect(env.SSH_ASKPASS_REQUIRE).toBe('force')
     expect(env.NODETERM_ASKPASS_IDENTITY).toBe('/home/u/.ssh/id_ed25519')
+  })
+
+  it('envFor is EMPTY when the server never started: a failed relay must degrade, not misconfigure', () => {
+    // Boot survives a failed start() now (index.ts catches it); handing out askpass env pointing
+    // at a socket that never bound would make every prompt a silent curl error instead of the
+    // pre-feature behavior (ssh fails with its real error, no prompt).
+    const s = new AskpassServer()
+    expect(s.envFor('/home/u/.ssh/id_ed25519', '/ud/ssh-askpass.sh')).toEqual({})
   })
 })
