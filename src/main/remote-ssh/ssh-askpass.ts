@@ -1,8 +1,8 @@
 // SSH_ASKPASS support for the project ControlMaster (ssh-project.ts), which spawns ssh with no
 // tty (stdio ignored), so OpenSSH has nowhere to prompt for an encrypted identity file's
-// passphrase. This gives it somewhere: a generated askpass script that curls a loopback server
+// passphrase. This gives it somewhere: a generated askpass script that curls a unix socket served
 // here, which in turn asks the renderer (via an injected prompt handler). No electron import,
-// unit-testable like hook-server.ts's HookServer, against a real ephemeral port.
+// unit-testable like hook-server.ts's HookServer, against a real socket in a tmpdir.
 //
 // This server deliberately holds NO passphrase state. masterArgs sets `AddKeysToAgent=yes`, so a
 // successful unlock loads the key into an ssh-agent and every later connect (reconnect, watchdog
@@ -36,8 +36,10 @@
 // askpass existed.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { randomUUID, timingSafeEqual } from 'crypto'
-import { promises as fs } from 'fs'
+import { promises as fs, rmSync } from 'fs'
+import os from 'os'
 import path from 'path'
+import { instanceSockId } from './ssh-agent'
 
 const ASKPASS_SCRIPT_NAME = 'ssh-askpass.sh'
 /** A passphrase prompt body is a few bytes; cap generously against a misbehaving caller. */
@@ -88,17 +90,25 @@ export function classifyPrompt(prompt: string): { passphrase: boolean; keyPath?:
 
 /**
  * The SSH_ASKPASS helper ssh invokes when it needs a passphrase and has no tty to prompt into.
- * One curl POST to our loopback server, printing whatever it returns (the passphrase, or nothing
+ * One curl POST to our 0600 unix socket, printing whatever it returns (the passphrase, or nothing
  * on cancel) to stdout, which is exactly SSH_ASKPASS's contract. Generated at runtime into
  * userData rather than bundled via electron-builder, so packaging needs no changes (mirrors how
  * hook-server.ts writes hook-endpoint.env there); curl is already a hard runtime dependency of
  * this app's agent hooks, so this introduces nothing new. Values are env-expanded by sh and the
  * results are never re-parsed, so hostile characters in a path cannot inject.
  */
+/** Per-instance socket path, sharing the app agent's short dir and hashing (a unix socket path
+ *  is capped near 104 bytes, which userData eats). OS file permissions are the primary access
+ *  control: the dir is 0700 and the socket is chmod'd 0600 right after bind, so only this user
+ *  can connect at all. The bearer token stays as a second factor. */
+export function askpassSockPath(): string {
+  return path.join(os.homedir(), '.nodeterm', `askpass-${instanceSockId()}.sock`)
+}
+
 export function buildAskpassScript(): string {
   return [
     '#!/bin/sh',
-    'answer=$(curl -sS --max-time 300 -X POST "http://127.0.0.1:${NODETERM_ASKPASS_PORT}/prompt" \\',
+    'answer=$(curl -sS --max-time 300 --unix-socket "${NODETERM_ASKPASS_SOCK}" -X POST "http://localhost/prompt" \\',
     '  -H "X-Nodeterm-Askpass-Token: ${NODETERM_ASKPASS_TOKEN}" \\',
     '  --data-urlencode "identity=${NODETERM_ASKPASS_IDENTITY}" \\',
     '  --data-urlencode "caller=$PPID" \\',
@@ -107,7 +117,7 @@ export function buildAskpassScript(): string {
     // the key, and the connect dies with a bare "Permission denied (publickey)" that says nothing
     // about the helper. (Exactly how a container with no curl looked.) The breadcrumb goes to
     // stderr, which is the master's captured stderr, so it reaches the app's log.
-    '[ $? -eq 0 ] || { echo "nodeterm-askpass: no answer from the app on 127.0.0.1:${NODETERM_ASKPASS_PORT} (curl missing or the app is gone)" >&2; exit 1; }',
+    '[ $? -eq 0 ] || { echo "nodeterm-askpass: no answer from the app on ${NODETERM_ASKPASS_SOCK} (curl missing or the app is gone)" >&2; exit 1; }',
     "printf '%s' \"$answer\"",
     ''
   ].join('\n')
@@ -140,7 +150,7 @@ type PromptHandler = (req: AskpassPromptRequest) => Promise<string | null | unde
 
 export class AskpassServer {
   private server: Server | null = null
-  private port = 0
+  private sockPath = ''
   private token = ''
   private promptHandler: PromptHandler | null = null
   /** Caller pids (the ssh process the askpass helper reported as its $PPID) whose prompt the user
@@ -174,8 +184,8 @@ export class AskpassServer {
    *  report the generic connection error instead of the "needs its passphrase" one. */
   private inflight = new Map<string, { done: Promise<string | null>; callers: Set<string> }>()
 
-  getPort(): number {
-    return this.port
+  getSockPath(): string {
+    return this.sockPath
   }
   getToken(): string {
     return this.token
@@ -185,9 +195,13 @@ export class AskpassServer {
     this.promptHandler = cb
   }
 
-  async start(): Promise<void> {
+  async start(sockPath: string = askpassSockPath()): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
+    this.sockPath = sockPath
+    // The dir gates the pre-chmod window below; a stale socket file from a crash would EADDRINUSE.
+    await fs.mkdir(path.dirname(sockPath), { recursive: true, mode: 0o700 })
+    await fs.rm(sockPath, { force: true })
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
         if (req.method !== 'POST' || !(req.url ?? '').startsWith('/prompt')) {
@@ -227,20 +241,28 @@ export class AskpassServer {
       const onOk = (): void => {
         this.server?.off('error', onErr)
         this.server?.on('error', (e) => console.error('[ssh-askpass] server error', e))
-        const addr = this.server!.address()
-        if (addr && typeof addr === 'object') this.port = addr.port
         resolve()
       }
       this.server!.once('error', onErr)
-      this.server!.listen(0, '127.0.0.1', onOk)
+      this.server!.listen(sockPath, onOk)
     })
+    // listen() binds with umask permissions; tighten to owner-only. The 0700 dir above closes
+    // the window between bind and this chmod.
+    await fs.chmod(sockPath, 0o600)
   }
 
   stop(): void {
     this.server?.close()
     this.server = null
-    this.port = 0
     this.token = ''
+    if (this.sockPath) {
+      try {
+        rmSync(this.sockPath, { force: true })
+      } catch {
+        // best effort: a leftover socket file is unlinked by the next start()
+      }
+      this.sockPath = ''
+    }
   }
 
   private async resolvePassphrase(
@@ -365,7 +387,7 @@ export class AskpassServer {
       // OpenSSH instead gates askpass on DISPLAY being set (with no tty); set both for portability.
       SSH_ASKPASS_REQUIRE: 'force',
       DISPLAY: process.env.DISPLAY || ':0',
-      NODETERM_ASKPASS_PORT: String(this.port),
+      NODETERM_ASKPASS_SOCK: this.sockPath,
       NODETERM_ASKPASS_TOKEN: this.token,
       // Only a hint, and often absent: a saved server usually has no configured identity file.
       // The prompt names the key ssh actually wants, and that is what the latch/counting key by.

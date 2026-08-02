@@ -1,8 +1,38 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { request as httpRequest } from 'http'
+import { promises as fsp } from 'fs'
+import os from 'os'
+import path from 'path'
 import { AskpassServer, buildAskpassScript, classifyPrompt, type AskpassPromptRequest } from './ssh-askpass'
 
 /** ssh's real passphrase prompt (sshconnect2.c), byte-identical on every retry. */
 const passphrasePrompt = (key: string) => `Enter passphrase for key '${key}': `
+
+let sockSeq = 0
+/** A unique tmpdir socket per server: the production default under ~/.nodeterm must not be
+ *  touched by tests, and unix sockets cannot be double-bound like port 0 could. */
+const tmpSock = (): string => path.join(os.tmpdir(), `nt-ap-${process.pid}-${sockSeq++}.sock`)
+
+/** fetch() cannot speak unix sockets; this is the minimal http.request equivalent. */
+function sockReq(
+  sock: string,
+  urlPath: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: string } = {}
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { socketPath: sock, path: urlPath, method: opts.method ?? 'POST', headers: opts.headers },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => (data += String(c)))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+      }
+    )
+    req.on('error', reject)
+    if (opts.body) req.write(opts.body)
+    req.end()
+  })
+}
 
 describe('classifyPrompt', () => {
   it('recognizes the key-passphrase prompt and extracts the key ssh actually wants', () => {
@@ -27,12 +57,12 @@ describe('classifyPrompt', () => {
 })
 
 describe('buildAskpassScript', () => {
-  it('is a POSIX-sh script that curls the loopback server with the expected fields', () => {
+  it('is a POSIX-sh script that curls the unix socket with the expected fields', () => {
     const script = buildAskpassScript()
     expect(script.startsWith('#!/bin/sh')).toBe(true)
-    expect(script).toContain('curl')
+    expect(script).toContain('--unix-socket')
     expect(script).toContain('/prompt')
-    expect(script).toContain('NODETERM_ASKPASS_PORT')
+    expect(script).toContain('NODETERM_ASKPASS_SOCK')
     expect(script).toContain('NODETERM_ASKPASS_TOKEN')
     expect(script).toContain('NODETERM_ASKPASS_IDENTITY')
     // The invoking ssh pid: a SECOND ask from the same pid selects the "didn't work" dialog copy
@@ -53,7 +83,7 @@ describe('AskpassServer', () => {
   async function makeServer(handler?: (req: AskpassPromptRequest) => Promise<string | null>) {
     const s = new AskpassServer()
     if (handler) s.setPromptHandler(handler)
-    await s.start()
+    await s.start(tmpSock())
     server = s
     return s
   }
@@ -64,15 +94,13 @@ describe('AskpassServer', () => {
     caller: string,
     prompt = passphrasePrompt(identity)
   ): Promise<{ status: number; body: string }> {
-    const res = await fetch(`http://127.0.0.1:${s.getPort()}/prompt`, {
-      method: 'POST',
+    return sockReq(s.getSockPath(), '/prompt', {
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
         'x-nodeterm-askpass-token': s.getToken()
       },
       body: new URLSearchParams({ identity, caller, prompt }).toString()
     })
-    return { status: res.status, body: await res.text() }
   }
 
   it('answers a throwing prompt handler with an empty 200, and a wrong route with a clean 404', async () => {
@@ -86,18 +114,28 @@ describe('AskpassServer', () => {
     const res = await post(s, '/home/u/.ssh/id_ed25519', '111')
     expect(res.status).toBe(200)
     expect(res.body).toBe('')
-    const wrongRoute = await fetch(`http://127.0.0.1:${s.getPort()}/nope`, { method: 'GET' })
+    const wrongRoute = await sockReq(s.getSockPath(), '/nope', { method: 'GET' })
     expect(wrongRoute.status).toBe(404)
-    expect(await wrongRoute.text()).toBe('')
+    expect(wrongRoute.body).toBe('')
   })
 
   it('rejects a bad token with 403', async () => {
     const s = await makeServer()
-    const res = await fetch(`http://127.0.0.1:${s.getPort()}/prompt`, {
-      method: 'POST',
+    const res = await sockReq(s.getSockPath(), '/prompt', {
       headers: { 'x-nodeterm-askpass-token': 'wrong' }
     })
     expect(res.status).toBe(403)
+  })
+
+  it('binds the socket owner-only (0600) and unlinks it on stop', async () => {
+    // The socket's file mode IS the access control now: any other user must be refused by the
+    // kernel, not by guessing wrong at the token.
+    const s = await makeServer()
+    const sock = s.getSockPath()
+    expect(((await fsp.stat(sock)).mode & 0o777).toString(8)).toBe('600')
+    s.stop()
+    server = undefined
+    await expect(fsp.stat(sock)).rejects.toThrow()
   })
 
   it('holds no passphrase state: every NEW ssh process prompts (prompt-free reconnects are the agent, not us)', async () => {
@@ -312,8 +350,7 @@ describe('AskpassServer', () => {
   it('drops an oversized body without wedging the server', async () => {
     const s = await makeServer(async () => 'never-asked')
     const big = 'x'.repeat(80_000)
-    await fetch(`http://127.0.0.1:${s.getPort()}/prompt`, {
-      method: 'POST',
+    await sockReq(s.getSockPath(), '/prompt', {
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
         'x-nodeterm-askpass-token': s.getToken()

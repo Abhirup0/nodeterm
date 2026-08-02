@@ -1,4 +1,5 @@
 import { promises as fs, writeFileSync } from 'fs'
+import { request as httpRequest } from 'http'
 import os from 'os'
 import path from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1596,21 +1597,35 @@ describe('SshProjectManager', () => {
       // Real timers: the exit-grace loop is only ~5 checks x 100ms per connect.
       const s = new AskpassServer()
       s.setPromptHandler(async () => null) // the user hits Cancel
-      await s.start()
+      await s.start(path.join(os.tmpdir(), `nt-ap-proj-${process.pid}.sock`))
       try {
         // Drive the decline the way the real helper does: a POST whose caller field is the $PPID
-        // the askpass script reports, which is the pid of the master the app spawned.
-        await fetch(`http://127.0.0.1:${s.getPort()}/prompt`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-            'x-nodeterm-askpass-token': s.getToken()
-          },
-          body: new URLSearchParams({
-            identity: '/home/u/.ssh/id_ed25519',
-            caller: '4242',
-            prompt: "Enter passphrase for key '/home/u/.ssh/id_ed25519': "
-          }).toString()
+        // the askpass script reports, which is the pid of the master the app spawned. fetch()
+        // cannot speak unix sockets, so this is the raw http.request equivalent.
+        await new Promise<void>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              socketPath: s.getSockPath(),
+              path: '/prompt',
+              method: 'POST',
+              headers: {
+                'content-type': 'application/x-www-form-urlencoded',
+                'x-nodeterm-askpass-token': s.getToken()
+              }
+            },
+            (res) => {
+              res.resume()
+              res.on('end', () => resolve())
+            }
+          )
+          req.on('error', reject)
+          req.end(
+            new URLSearchParams({
+              identity: '/home/u/.ssh/id_ed25519',
+              caller: '4242',
+              prompt: "Enter passphrase for key '/home/u/.ssh/id_ed25519': "
+            }).toString()
+          )
         })
         const mgrWithMasterPid = (pid: number) =>
           new SshProjectManager({

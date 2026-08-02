@@ -90,8 +90,13 @@ function defaultDataDirKey(): string {
  *  (`NT_MULTI=1`, ./dev-test.sh, a dev build next to the installed app) binds its own socket
  *  instead of unlinking the first one's and silently leaving that app agentless when it quits. */
 export function agentSockPath(dataDirKey = defaultDataDirKey()): string {
-  const id = createHash('sha256').update(dataDirKey).digest('hex').slice(0, 8)
-  return path.join(os.homedir(), '.nodeterm', `agent-${id}.sock`)
+  return path.join(os.homedir(), '.nodeterm', `agent-${instanceSockId(dataDirKey)}.sock`)
+}
+
+/** The per-instance hash shared by every socket this app run binds under ~/.nodeterm (the agent
+ *  above, the askpass relay), so NT_MULTI instances never unlink each other's sockets. */
+export function instanceSockId(dataDirKey = defaultDataDirKey()): string {
+  return createHash('sha256').update(dataDirKey).digest('hex').slice(0, 8)
 }
 
 export class AppSshAgent {
