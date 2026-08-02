@@ -1375,6 +1375,11 @@ export function setNodeSessionName(nodeId: string, name: string): boolean {
   return true
 }
 
+/** A node's published session name (see MirrorEntry.name), or undefined. */
+export function nodeSessionName(nodeId: string): string | undefined {
+  return state.get(nodeId)?.name
+}
+
 /** A node's current main state, or undefined when unknown. Read-only peek for the shells. */
 export function nodeState(nodeId: string): AgentState | undefined {
   return state.get(nodeId)?.state

@@ -1,6 +1,6 @@
 import fs from 'fs'
 import { readSessionName } from '../core/transcript-reader'
-import { startSessionNameSweep } from '../core/session-name-sweep'
+import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { canRename, type AgentId } from '@shared/agents/config'
 import path from 'path'
 import http from 'http'
@@ -41,7 +41,8 @@ import {
   type MirrorSettings,
   type MirrorServer,
   setNodeSessionName,
-  sessionNameSweepEntries
+  sessionNameSweepEntries,
+  nodeSessionName
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -340,7 +341,15 @@ export async function startServer(
     markGrantDead: (grant: string) => pushGrants.markDead(grant),
     hostLabel: () => os.hostname(),
     isPackaged: () => true,
-    getNodeTitle: (nodeId: string) => workspaceStore.getNodeTitle(nodeId)
+    // Same host-side display rule as the desktop: the live session name unless hand-renamed.
+    getNodeTitle: (nodeId: string) =>
+      displayNodeTitle(nodeId, {
+        sessionName: nodeSessionName,
+        node: (id) => {
+          const n = workspaceStore.getNode(id)
+          return n ? { title: n.title, titleAuto: n.titleAuto } : undefined
+        }
+      })
   }
   createPushNotify({
     subscribe: onInboxActionable,
