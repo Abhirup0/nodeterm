@@ -15,6 +15,14 @@ import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
 function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   const merged = { ...DEFAULT_SETTINGS, ...saved }
   merged.speech = { ...DEFAULT_SETTINGS.speech, ...saved?.speech }
+  // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
+  // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
+  // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch
+  // choice and stays 'off'. See the field's doc in shared/types.ts.
+  const gpu = (saved as { terminalGpuRendering?: unknown } | null | undefined)
+    ?.terminalGpuRendering
+  if (gpu === false) merged.terminalGpuRendering = 'off'
+  else if (gpu !== 'on' && gpu !== 'off' && gpu !== 'auto') merged.terminalGpuRendering = 'auto'
   return merged
 }
 

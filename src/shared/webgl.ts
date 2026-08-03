@@ -33,3 +33,20 @@ export const WEBGL_BUDGET_DESKTOP = 24
  * compositing handles reliably.
  */
 export const WEBGL_BUDGET_DESKTOP_MAC = 10
+
+/**
+ * Resolve the `terminalGpuRendering` setting to an effective on/off. 'auto' (the default) is on
+ * everywhere EXCEPT macOS: the compositor-level failures above have only ever been observed
+ * there, the DOM renderer is the one field-proven-clean configuration on those machines, and a
+ * public default must be the proven one — WebGL on a Mac is a deliberate 'on'. Renderer-side
+ * only (platform detection is navigator-based). Legacy booleans still resolve sanely if one
+ * slips past the settings-store migration.
+ */
+export function resolveGpuRendering(
+  value: 'auto' | 'on' | 'off' | boolean | undefined,
+  isMac: boolean
+): boolean {
+  if (value === 'on' || value === true) return true
+  if (value === 'off' || value === false) return false
+  return !isMac
+}

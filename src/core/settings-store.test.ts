@@ -63,9 +63,40 @@ describe('SettingsStore nested-default merge', () => {
     expect(store.get().speech).toEqual(DEFAULT_SETTINGS.speech)
   })
 
-  it('defaults everything when settings.json does not exist', () => {
+  it("defaults everything when settings.json does not exist", () => {
     const store = new SettingsStore()
     store.init()
     expect(store.get()).toEqual(DEFAULT_SETTINGS)
+  })
+
+  describe('legacy terminalGpuRendering boolean migration', () => {
+    const load = (value: unknown): SettingsStore => {
+      writeFileSync(
+        path.join(dir, 'settings.json'),
+        JSON.stringify({ terminalGpuRendering: value }),
+        'utf-8'
+      )
+      const store = new SettingsStore()
+      store.init()
+      return store
+    }
+
+    it("migrates an explicit legacy false (escape-hatch choice) to 'off'", () => {
+      expect(load(false).get().terminalGpuRendering).toBe('off')
+    })
+
+    it("migrates a legacy true (indistinguishable from the old merged default) to 'auto'", () => {
+      expect(load(true).get().terminalGpuRendering).toBe('auto')
+    })
+
+    it('keeps modern string values as-is', () => {
+      expect(load('on').get().terminalGpuRendering).toBe('on')
+      expect(load('off').get().terminalGpuRendering).toBe('off')
+      expect(load('auto').get().terminalGpuRendering).toBe('auto')
+    })
+
+    it("normalizes garbage to 'auto'", () => {
+      expect(load('warp-speed').get().terminalGpuRendering).toBe('auto')
+    })
   })
 })
