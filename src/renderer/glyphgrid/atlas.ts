@@ -16,8 +16,22 @@ export class GlyphAtlas {
 
   constructor(
     private rasterizer: GlyphRasterizer,
-    private sizePx = 1024
+    private pageSizePx = 1024
   ) {}
+
+  /** The three metrics `GlyphGL.uploadAtlas` needs to map a slot index to texels. They are
+   *  passthroughs on purpose: the page size is the atlas's own, the cell size belongs to the
+   *  rasterizer that filled it, and the engine must never have to know a second source for
+   *  either — a mismatch here shifts every glyph by a fraction of a cell. */
+  get sizePx(): number {
+    return this.pageSizePx
+  }
+  get cellW(): number {
+    return this.rasterizer.cellW
+  }
+  get cellH(): number {
+    return this.rasterizer.cellH
+  }
 
   get capacity(): number {
     const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
