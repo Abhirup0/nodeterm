@@ -18,6 +18,9 @@ export interface GridSpec {
   originY: number
   z: number
   bgColor: number
+  /** Padding around the grid rect, in world units, that the opaque plate also covers — the node
+   *  body's inset. See gl.ts's GridDrawParams. */
+  padPx: number
 }
 
 export interface GridHandle {
@@ -43,9 +46,21 @@ export interface GridHandle {
 
 interface Grid extends GridSpec {
   /** Row-major: the cell at (row, col) starts at lane `(row * cols + col) * CELL_STRIDE`.
-   *  This is the layout the instanced shader binds — see gl.ts / gl-webgl2.ts. */
+   *  This is the layout the instanced shader binds — see gl.ts / gl-webgl2.ts.
+   *
+   *  Kept CPU-side even though the GPU now owns a copy: it is the culling-independent source a
+   *  HIDDEN grid's deferred upload replays from, and the only place a partial row write can be
+   *  merged before it becomes a range. */
   cells: Uint32Array
   seq: number // registration order — the z tie-break
+  /** Inclusive contiguous damage range; `-1/-1` = clean.
+   *
+   *  CONTIGUOUS BY POLICY: two touched rows widen ONE span that swallows the untouched rows
+   *  between them. A terminal's damage is overwhelmingly a single run (a scrolled region, an
+   *  edited line), and one slightly-too-wide bufferSubData is cheaper than N calls plus the
+   *  bookkeeping to track disjoint runs. */
+  dirtyFrom: number
+  dirtyTo: number
 }
 
 /**
@@ -86,9 +101,14 @@ export class GlyphGridEngine {
     const grid: Grid = {
       ...spec,
       cells: new Uint32Array(spec.cols * spec.rows * CELL_STRIDE),
-      seq: this.seq++
+      seq: this.seq++,
+      // A brand-new grid owes the GPU every row: createGrid only ZEROES the buffer, and the
+      // owner's first writes may land before the first frame.
+      dirtyFrom: 0,
+      dirtyTo: spec.rows - 1
     }
     this.grids.set(spec.id, grid)
+    this.gl.createGrid(spec.id, spec.cols, spec.rows)
     this.dirty = true
     const engine = this
     // Per-handle, not per-grid: once THIS handle is disposed every mutator below is a silent
@@ -105,6 +125,10 @@ export class GlyphGridEngine {
         if (cells.length !== grid.cols * CELL_STRIDE)
           throw new Error(`glyphgrid: row length ${cells.length} != ${grid.cols * CELL_STRIDE}`)
         grid.cells.set(cells, row * grid.cols * CELL_STRIDE)
+        // Widen the contiguous range. `dirtyTo` is -1 when clean, so Math.max picks up `row`
+        // on its own; `dirtyFrom` needs the explicit clean check (-1 would win a Math.min).
+        grid.dirtyFrom = grid.dirtyFrom < 0 ? row : Math.min(grid.dirtyFrom, row)
+        grid.dirtyTo = Math.max(grid.dirtyTo, row)
         engine.dirty = true
       },
       setOrigin(x, y) {
@@ -131,6 +155,11 @@ export class GlyphGridEngine {
         grid.cols = cols
         grid.rows = rows
         grid.cells = new Uint32Array(cols * rows * CELL_STRIDE)
+        // The GPU buffer is sized in cells, so a reshape must REALLOCATE it — bufferSubData
+        // against the old size would either overrun or leave a tail of the previous shape.
+        engine.gl.createGrid(grid.id, cols, rows)
+        grid.dirtyFrom = 0
+        grid.dirtyTo = rows - 1
         engine.dirty = true
       },
       dispose() {
@@ -138,9 +167,11 @@ export class GlyphGridEngine {
         // holds whether or not the map still points at this grid.
         disposed = true
         // Identity-checked: only drop the map entry if it is still THIS grid, so a stale
-        // handle can never evict a grid that re-registered under the same id.
+        // handle can never evict a grid that re-registered under the same id — nor free the GPU
+        // buffer that grid is now drawing from.
         if (engine.grids.get(grid.id) !== grid) return
         engine.grids.delete(grid.id)
+        engine.gl.disposeGrid(grid.id)
         engine.dirty = true
       }
     }
@@ -190,7 +221,22 @@ export class GlyphGridEngine {
     return !!this.atlas.source && (this.atlas.dirty || !this.atlasUploaded)
   }
 
-  /** Draw ONE frame if anything is dirty; returns whether it drew. */
+  /**
+   * Draw ONE frame if anything is dirty; returns whether it drew.
+   *
+   * The engine-wide `dirty` flag is the frame GATE (does anything need drawing at all); the
+   * per-grid ranges decide UPLOAD granularity (how much of each grid reaches the GPU).
+   *
+   * **Damage-restore policy on a throw.** Two kinds of damage are in play and both must survive
+   * a GL call that throws mid-frame (context lost, driver error):
+   * - the frame-wide `dirty` flag, cleared up front and restored by the catch below;
+   * - each grid's row range, which is cleared ONLY AFTER its `uploadRows` has RETURNED. That
+   *   ordering is the whole policy: a grid whose upload threw still owes those rows, and a grid
+   *   whose upload succeeded before the throw does not (its GPU buffer is current, and the
+   *   redraw the restored `dirty` flag schedules will draw from it). Clearing ranges up front —
+   *   or in one sweep after the loop — would either lose rows that never reached the GPU or
+   *   re-upload rows that did.
+   */
   frame(): boolean {
     const uploadAtlas = this.atlasUploadPending()
     if (!this.dirty && !uploadAtlas) return false
@@ -212,19 +258,43 @@ export class GlyphGridEngine {
         this.atlas.clearDirty()
         this.atlasUploaded = true
       }
+      // Computed ONCE and reused by both passes: it allocates, filters and sorts, and the two
+      // passes must agree on exactly which grids are visible this frame.
+      const order = this.drawOrder()
+      // Upload pass. Only VISIBLE grids upload: a hidden grid's range persists un-uploaded until
+      // it scrolls back into view, which is what keeps a canvas of fifty terminals from paying
+      // for the forty-five nobody can see. Their CPU-side cells stay authoritative, so the
+      // deferred upload replays everything owed in one call, not one per skipped frame.
+      for (const id of order) {
+        const g = this.grids.get(id)
+        if (!g || g.dirtyFrom < 0 || g.dirtyTo < g.dirtyFrom) continue
+        const rowLanes = g.cols * CELL_STRIDE
+        this.gl.uploadRows(
+          g.id,
+          g.dirtyFrom,
+          g.dirtyTo - g.dirtyFrom + 1,
+          g.cols,
+          // A VIEW, not a copy — the GL layer hands it straight to bufferSubData.
+          g.cells.subarray(g.dirtyFrom * rowLanes, (g.dirtyTo + 1) * rowLanes)
+        )
+        // Cleared only now that the upload has returned — see the damage-restore policy above.
+        g.dirtyFrom = -1
+        g.dirtyTo = -1
+      }
       this.gl.beginFrame(this.camera)
-      for (const id of this.drawOrder()) {
+      for (const id of order) {
         const g = this.grids.get(id)
         if (!g) continue
         this.gl.drawGrid({
-          cells: g.cells,
+          id: g.id,
           cols: g.cols,
           rows: g.rows,
           cellW: g.cellW,
           cellH: g.cellH,
           originX: g.originX,
           originY: g.originY,
-          bgColor: g.bgColor
+          bgColor: g.bgColor,
+          padPx: g.padPx
         })
       }
       this.gl.endFrame()

@@ -22,6 +22,9 @@ const GRIDS = 40
 const CELL_W = 9
 const CELL_H = 18
 const ATLAS_PX = 1024
+/** World-unit padding the occlusion plate adds around each grid — a stand-in for the terminal
+ *  node body's inset. Well under the 40/60 layout pitch, so plates stay separated. */
+const PAD_PX = 8
 
 // --- Layout. Derived, not duplicated: register() below places grids from these same constants,
 // so the initial camera and the meter can never drift from where the grids actually are. ---
@@ -103,7 +106,10 @@ export function GlyphGridHarness() {
           originX: (i % PER_ROW) * PITCH_X,
           originY: Math.floor(i / PER_ROW) * PITCH_Y,
           z: i,
-          bgColor: packColor(20, 20, 24, 255)
+          bgColor: packColor(20, 20, 24, 255),
+          // Non-zero so the occlusion plate is actually VISIBLE in the harness: it extends the
+          // opaque body past the character matrix, the way a terminal node's padding does.
+          padPx: PAD_PX
         })
       )
     }
