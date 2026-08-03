@@ -52,9 +52,16 @@ describe('GlyphAtlas', () => {
   })
 
   it('slotRect agrees with the shader uv derivation for every interesting slot', () => {
-    // gl-webgl2's shader computes: cols = floor(sizePx/cellW); cellUv = [cellW/sizePx, cellH/sizePx];
-    // origin = (slot % cols, floor(slot / cols)) * cellUv. This test IS the tie between the two
-    // copies of the layout math — if either side changes (atlas padding, page metrics), it fails.
+    // What this pins, exactly: `slotRect` against a HAND-TRANSCRIBED copy of gl-webgl2's vertex
+    // shader formula as of Phase 0 — cols = floor(sizePx/cellW), cellUv = [cellW/sizePx,
+    // cellH/sizePx], slotOrigin = (slot % cols, floor(slot / cols)) * cellUv (see `uAtlasCols` /
+    // `uAtlasCell` in VERT). So it catches a change to the CPU side (atlas padding, page metrics,
+    // slot ordering) — and nothing else.
+    //
+    // It is NOT a tie to the live GLSL: the shader side below is this test's own copy, so editing
+    // the real shader leaves this green, and `slotRect` currently has no production caller at all
+    // (the shader derives its uvs itself from the two uniforms). The actual tie — a visual pass,
+    // or pinning the GLSL against a generated line — is owed to Phase 1b.
     const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100)
     const cols = Math.floor(100 / 10)
     const cellUv = [10 / 100, 20 / 100]
