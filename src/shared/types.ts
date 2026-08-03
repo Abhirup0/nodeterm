@@ -1460,17 +1460,31 @@ export interface ChatToolSummary {
   removed?: number
 }
 
+/**
+ * Result of a chat transcript read. `found` is the whole point of the wrapper: an empty
+ * `messages` means two very different things — the session exists and nobody has said anything
+ * yet (`found: true`), or no transcript could be resolved at all (`found: false`, e.g. Claude's
+ * 30-day cleanup removed it, or the id belongs to another machine). The ⌘M panel rendered both
+ * as "No conversation yet.", which is what made a resolution failure look like an empty session.
+ */
+export interface ChatTranscriptResult {
+  messages: ChatMessage[]
+  found: boolean
+}
+
 export interface ChatApi {
   /**
-   * Reads a Claude session transcript as structured chat messages ([] if unavailable).
+   * Reads a Claude session transcript as structured chat messages.
    * Resolves the transcript like `ClaudeApi.readTranscript` (sessionId → cwd), then
-   * reconstructs ordered bubbles + tool calls.
+   * reconstructs ordered bubbles + tool calls. `nodeId` lets an SSH-project node be resolved
+   * on its HOST even when no hook event has registered its transcript in this app run.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
-    accountId?: string
-  ): Promise<ChatMessage[]>
+    accountId?: string,
+    nodeId?: string
+  ): Promise<ChatTranscriptResult>
 }
 
 /** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
@@ -1535,11 +1549,14 @@ export interface ClaudeApi {
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
    * the newest transcript under that project dir, no live hook event required).
    * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
+   * `nodeId` (optional) lets an SSH-project node's transcript be located on its HOST when no hook
+   * event has registered it in this app run — without it the search silently reads nothing there.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
-    accountId?: string
+    accountId?: string,
+    nodeId?: string
   ): Promise<TranscriptLine[]>
 }
 

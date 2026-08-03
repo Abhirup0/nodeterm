@@ -4,6 +4,7 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useSession } from '../session/session'
 import type { ChatMessage } from '@shared/types'
 import { hintLabel } from '@shared/platform-utils'
+import { E_UNSUPPORTED } from '@shared/rpc'
 
 // Memoized bubble: marked+DOMPurify re-ran for EVERY message on each ChatPanel render (each
 // turn-finish reload, each keystroke re-render). Text is stable per message, so cache per text.
@@ -21,6 +22,35 @@ interface ChatPanelProps {
 }
 
 /**
+ * Why the transcript isn't on screen. Every one of these used to render as "No conversation
+ * yet.": a rejected read (this surface has no transcript reader at all) left `messages` at its
+ * initial `[]` because nothing caught the rejection, and a failed resolution was indistinguishable
+ * from a session nobody has spoken to. They need different words — and two of them are retryable.
+ */
+type LoadState = 'loading' | 'ok' | 'missing' | 'unsupported' | 'error'
+
+const isUnsupported = (e: unknown): boolean =>
+  !!e && typeof e === 'object' && (e as { code?: string }).code === E_UNSUPPORTED
+
+/** One line each, in the user's terms: what is on screen and whether waiting will fix it.
+ *  `missing` names the two causes that actually produce it — a transcript Claude has cleaned up
+ *  (30 days by default), and a remote session whose host hasn't been reached yet — because the
+ *  second one heals by itself the moment the session speaks, and the first one never will. */
+const EMPTY_TEXT: Record<LoadState, { title: string; detail?: string }> = {
+  loading: { title: 'Loading conversation…' },
+  ok: { title: 'No conversation yet.' },
+  missing: {
+    title: 'No transcript found for this session.',
+    detail: "It may have been cleaned up, or the agent's host isn't reachable yet."
+  },
+  unsupported: {
+    title: "Transcripts can't be read on this surface.",
+    detail: 'Open this session on the desktop app to read its conversation.'
+  },
+  error: { title: "Couldn't read the transcript." }
+}
+
+/**
  * Chat view for a chat-capable agent node (Cmd+M). Renders the session transcript as
  * markdown bubbles with collapsible tool calls, and sends new prompts into the running tmux
  * session via pty.sendText. Phase 1 reloads the transcript whenever a turn finishes
@@ -31,6 +61,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
   // both live on the core this panel's project belongs to).
   const { api } = useSession()
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [loadState, setLoadState] = useState<LoadState>('loading')
   const [input, setInput] = useState('')
   const [readonly, setReadonly] = useState(false)
   const state = useAgentStatus((s) => s.byId[nodeId]?.state)
@@ -38,8 +69,18 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
   const prevState = useRef(state)
 
   const load = useCallback(() => {
-    void api.chat.readTranscript(sessionId, cwd, accountId).then(setMessages)
-  }, [api, sessionId, cwd, accountId])
+    setLoadState((s) => (s === 'ok' ? s : 'loading')) // a reload never blanks a rendered thread
+    // `nodeId` is what lets an SSH-project node resolve on its host; the rejection branch is what
+    // keeps a surface that cannot read transcripts (Server Edition, relay tab) from silently
+    // presenting itself as an empty conversation.
+    void api.chat.readTranscript(sessionId, cwd, accountId, nodeId).then(
+      (res) => {
+        setMessages(res.messages)
+        setLoadState(res.found ? 'ok' : 'missing')
+      },
+      (e: unknown) => setLoadState(isUnsupported(e) ? 'unsupported' : 'error')
+    )
+  }, [api, sessionId, cwd, accountId, nodeId])
 
   // Initial load.
   useEffect(() => {
@@ -87,7 +128,19 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
         <span className="term-chat__hint">{hintLabel('⌘M to exit')}</span>
       </div>
       <div className="term-chat__msgs" ref={msgsRef}>
-        {messages.length === 0 && <div className="term-chat__empty">No conversation yet.</div>}
+        {messages.length === 0 && loadState !== 'loading' && (
+          <div className="term-chat__empty">
+            <div>{EMPTY_TEXT[loadState].title}</div>
+            {EMPTY_TEXT[loadState].detail && (
+              <div className="term-chat__empty-detail">{EMPTY_TEXT[loadState].detail}</div>
+            )}
+            {loadState !== 'unsupported' && loadState !== 'ok' && (
+              <button className="term-chat__retry" onClick={load}>
+                Retry
+              </button>
+            )}
+          </div>
+        )}
         {messages.map((m, i) => (
           <div key={i} className={`term-chat__msg term-chat__msg--${m.role}`}>
             {m.parts.map((p, j) =>

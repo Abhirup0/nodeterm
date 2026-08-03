@@ -332,13 +332,20 @@ export async function readSessionName(
 // reattaching to a session this app instance didn't spawn. (Encoding leaves no '/', so it
 // can't traverse.) Limitation: multiple Claude nodes in the SAME cwd resolve to the same
 // newest transcript — the sessionId path above is preferred when known for that reason.
+
+/** The per-cwd directory name Claude uses under a transcript root. Exported because the REMOTE
+ *  locator (remote-transcript-locate.ts) must encode a host path the identical way — a second
+ *  copy that drifted would make the exact-path probe silently never hit. */
+export function encodeTranscriptDir(cwd: string): string {
+  return cwd.replace(/[/.]/g, '-')
+}
+
 export async function transcriptPathForCwd(
   cwd: string,
   accountId?: string
 ): Promise<string | undefined> {
   if (!cwd) return undefined
-  const encoded = cwd.replace(/[/.]/g, '-')
-  const dir = path.join(transcriptRoot(accountId), encoded)
+  const dir = path.join(transcriptRoot(accountId), encodeTranscriptDir(cwd))
   let entries: string[]
   try {
     entries = await fs.promises.readdir(dir)
