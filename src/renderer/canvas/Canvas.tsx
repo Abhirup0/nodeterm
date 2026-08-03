@@ -30,7 +30,7 @@ import {
 import { solveFitPadding } from './fit-view'
 import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
-import { setWebglZoom } from '../terminal/webgl-budget'
+import { setWebglGesture, setWebglZoom, WEBGL_GESTURE_SETTLE_MS } from '../terminal/webgl-budget'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -4951,10 +4951,22 @@ export function Canvas() {
   }, [nodes, markDirty])
 
   const zoomRafRef = useRef<number | null>(null)
+  const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onMove = useCallback(
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
       markDirty()
+      // Latch the WebGL gesture flag for the whole pan/zoom, releasing it a beat after the last
+      // viewport event: renderer swaps (heavyweight, non-atomic) may only run at rest — a swap
+      // executed mid-gesture is both the jank and the black-terminal window (see webgl-budget's
+      // gesture latch). Latched HERE, not in the rAF, so no swap can slip in before the first
+      // coalesced frame.
+      setWebglGesture(true)
+      if (gestureSettleRef.current) clearTimeout(gestureSettleRef.current)
+      gestureSettleRef.current = setTimeout(() => {
+        gestureSettleRef.current = null
+        setWebglGesture(false)
+      }, WEBGL_GESTURE_SETTLE_MS)
       // Coalesce the zoom-% readout to one update per frame so a zoom gesture doesn't
       // re-render the whole Canvas on every intermediate viewport event.
       if (zoomRafRef.current == null) {

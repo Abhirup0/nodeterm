@@ -6,10 +6,13 @@ import {
   loseWebglContexts,
   setWebglBudget,
   setWebglEnabled,
+  setWebglGesture,
   setWebglZoom,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
+  WEBGL_DRAIN_MS,
   WEBGL_RESUME_AT_ZOOM,
   WEBGL_SUSPEND_BELOW_ZOOM,
+  WEBGL_SWAPS_PER_DRAIN,
   WEBGL_BUDGET,
   WEBGL_LOSS_STREAK_MAX,
   WEBGL_REACQUIRE_AFTER_LOSS_MS,
@@ -377,6 +380,79 @@ describe('webgl-budget coordinator', () => {
       setWebglZoom(NaN)
       setWebglZoom(Infinity)
       expect(a.rec.held).toBe(true)
+    })
+  })
+
+  describe('gesture latch (no swaps mid-gesture, staggered drain at rest)', () => {
+    it('defers grants while a gesture runs and executes them at rest', () => {
+      setWebglGesture(true)
+      const a = fakeClient('a')
+      a.handle.setVisible(true)
+      vi.advanceTimersByTime(WEBGL_ACQUIRE_DEBOUNCE_MS * 3)
+      expect(a.rec.acquires).toBe(0) // parked, not granted mid-gesture
+      setWebglGesture(false)
+      expect(a.rec.held).toBe(true) // drained at rest
+    })
+
+    it('defers the hidden-release while a gesture runs; a re-visible client keeps its context', () => {
+      const a = fakeClient('a')
+      grant(a)
+      a.handle.setVisible(false)
+      setWebglGesture(true)
+      vi.advanceTimersByTime(WEBGL_RELEASE_DELAY_MS + 1)
+      expect(a.rec.held).toBe(true) // release parked, not executed mid-gesture
+      // Pans back before the gesture ends: the owed release is forgiven, context stays warm.
+      a.handle.setVisible(true)
+      setWebglGesture(false)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 3)
+      expect(a.rec.held).toBe(true)
+      expect(a.rec.releases).toBe(0)
+    })
+
+    it('executes a deferred release at rest when the client stayed hidden', () => {
+      const a = fakeClient('a')
+      grant(a)
+      a.handle.setVisible(false)
+      setWebglGesture(true)
+      vi.advanceTimersByTime(WEBGL_RELEASE_DELAY_MS + 1)
+      expect(a.rec.held).toBe(true)
+      setWebglGesture(false)
+      expect(a.rec.held).toBe(false)
+    })
+
+    it('drains a mass release as a trickle, WEBGL_SWAPS_PER_DRAIN per tick', () => {
+      const clients = ['a', 'b', 'c', 'd', 'e'].map((id) => fakeClient(id))
+      clients.forEach(grant)
+      expect(clients.every((c) => c.rec.held)).toBe(true)
+      // Zoom-out below the threshold mid-gesture: nothing releases until rest…
+      setWebglGesture(true)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      expect(clients.every((c) => c.rec.held)).toBe(true)
+      // …then the drain releases them a batch per tick, never all in one frame.
+      setWebglGesture(false)
+      const heldAfterFirstBatch = clients.filter((c) => c.rec.held).length
+      expect(heldAfterFirstBatch).toBe(clients.length - WEBGL_SWAPS_PER_DRAIN)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS)
+      expect(clients.filter((c) => c.rec.held).length).toBe(
+        Math.max(0, clients.length - 2 * WEBGL_SWAPS_PER_DRAIN)
+      )
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 3)
+      expect(clients.every((c) => !c.rec.held)).toBe(true)
+    })
+
+    it('a gesture starting mid-drain pauses the trickle until the next rest', () => {
+      const clients = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => fakeClient(id))
+      clients.forEach(grant)
+      setWebglGesture(true)
+      setWebglZoom(WEBGL_SUSPEND_BELOW_ZOOM - 0.01)
+      setWebglGesture(false) // first batch drains
+      const afterFirst = clients.filter((c) => c.rec.held).length
+      setWebglGesture(true) // user grabs the canvas again
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+      expect(clients.filter((c) => c.rec.held).length).toBe(afterFirst) // paused
+      setWebglGesture(false)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+      expect(clients.every((c) => !c.rec.held)).toBe(true)
     })
   })
 })

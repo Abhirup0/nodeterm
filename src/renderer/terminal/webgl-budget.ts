@@ -116,9 +116,10 @@ let zoomSuspended = false
 /**
  * Report the canvas zoom (React Flow viewport scale). Cheap and idempotent — call it from the
  * zoom/pan handler; state only changes when a hysteresis boundary is crossed. Crossing DOWN
- * reclaims every held context immediately (each client falls back to the DOM renderer, which
- * repaints via its release heal); crossing UP re-attempts a budget-gated grant for every
- * visible client, exactly like the master toggle's ON path.
+ * marks every held context release-OWED and drains (rest-time, staggered — see the gesture
+ * latch below; a zoom crossing happens mid-gesture by definition, and a one-frame mass release
+ * was itself a swap storm); crossing UP forgives owed releases still held (kept warm through
+ * the dip) and re-attempts budget-gated grants for visible clients.
  */
 export function setWebglZoom(zoom: number): void {
   if (!Number.isFinite(zoom)) return
@@ -128,12 +129,89 @@ export function setWebglZoom(zoom: number): void {
   if (zoomSuspended) {
     for (const c of clients.values()) {
       cancelAcquire(c)
-      reclaim(c)
+      cancelRelease(c)
+      if (c.granted) {
+        c.releaseOwed = true
+        owed.add(c)
+      }
     }
+    drain()
     return
   }
   if (!enabled) return
-  for (const c of clients.values()) if (c.visible) tryGrant(c)
+  for (const c of clients.values()) {
+    // A dip below the threshold that came back before the drain got to this client: keep the
+    // context — releasing and re-granting it back-to-back is the churn this design forbids.
+    if (c.granted && c.releaseOwed) c.releaseOwed = false
+    if (c.visible && !c.granted) tryGrant(c) // defers itself while a gesture is running
+  }
+}
+
+/**
+ * THE GESTURE LATCH — the load-bearing rule of this coordinator: renderer swaps NEVER run
+ * while the user is panning/zooming.
+ *
+ * A WebGL grant/release is a heavyweight, NON-ATOMIC renderer swap (shader compile + atlas
+ * build + full repaint on grant; renderer teardown/rebuild on release). The old design executed
+ * them the moment visibility flipped — which is precisely MID-GESTURE, in bursts (a zoom-out
+ * makes dozens of nodes visible in one frame; the zoom threshold used to mass-release in one
+ * frame). Those bursts both janked the gesture (main thread stalls while compositing is already
+ * under load) and created the GPU-pressure window in which swaps die midway and strand
+ * terminals black (see TerminalNode's swap safety net).
+ *
+ * While the latch is on, every would-be swap is parked in `owed`; when the canvas comes to
+ * REST the drain executes them a few per tick (`WEBGL_SWAPS_PER_DRAIN` / `WEBGL_DRAIN_MS`), so
+ * even a huge rebalance is a calm trickle. Contexts a gesture would have taken away keep
+ * painting until rest — nothing visible is ever swapped out from under the user mid-motion.
+ */
+let gestureActive = false
+
+/** Deferred swap work: clients whose grant attempt or owed release waits for rest. */
+const owed = new Set<Client>()
+let drainTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Max renderer swaps executed per drain tick — a rebalance is a trickle, never a burst. */
+export const WEBGL_SWAPS_PER_DRAIN = 2
+/** Gap between drain ticks while deferred work remains. */
+export const WEBGL_DRAIN_MS = 100
+/** How long after the last pan/zoom event the canvas counts as at rest (caller-side). */
+export const WEBGL_GESTURE_SETTLE_MS = 250
+
+/** Report whether a pan/zoom gesture is in progress. Idempotent; rest triggers the drain. */
+export function setWebglGesture(active: boolean): void {
+  if (gestureActive === active) return
+  gestureActive = active
+  if (!active) drain()
+}
+
+/** Execute deferred swaps, a few per tick, self-rescheduling while work remains. */
+function drain(): void {
+  if (drainTimer) {
+    clearTimeout(drainTimer)
+    drainTimer = null
+  }
+  if (gestureActive) return
+  let ops = 0
+  for (const c of Array.from(owed)) {
+    if (ops >= WEBGL_SWAPS_PER_DRAIN) break
+    owed.delete(c)
+    if (!clients.has(c.id)) continue
+    if (c.releaseOwed) {
+      c.releaseOwed = false
+      // Only release if the reason still holds — a client that came back (visible again, zoom
+      // resumed) keeps its warm context instead of paying a release+re-grant round trip.
+      if (c.granted && (zoomSuspended || !c.visible || !enabled)) {
+        reclaim(c)
+        ops++
+      }
+      continue
+    }
+    if (!c.granted && c.visible) {
+      tryGrant(c)
+      if (c.granted) ops++
+    }
+  }
+  if (owed.size && !drainTimer) drainTimer = setTimeout(drain, WEBGL_DRAIN_MS)
 }
 
 /**
@@ -224,6 +302,9 @@ interface Client {
   hiddenAt: number
   /** Consecutive EXTERNAL context losses without a visibility transition (see contextLost). */
   lossStreak: number
+  /** A release is owed but deferred (gesture in progress / staggered drain). Cancelled if the
+   *  reason lapses before the drain reaches it — the context is then simply kept warm. */
+  releaseOwed: boolean
 }
 
 const clients = new Map<string, Client>()
@@ -294,6 +375,12 @@ function tryGrant(c: Client): void {
   if (!enabled) return
   // Zoomed below the suspend threshold → never grant (see setWebglZoom).
   if (zoomSuspended) return
+  // Mid-gesture → park the attempt; the rest-time drain re-runs it (see the gesture latch).
+  if (gestureActive) {
+    c.releaseOwed = false
+    owed.add(c)
+    return
+  }
   if (grantCount() < budget) {
     doGrant(c)
     return
@@ -316,8 +403,10 @@ function setVisible(c: Client, visible: boolean): void {
   // external losses lasts only until the user pans away and back (the pre-existing recovery).
   c.lossStreak = 0
   if (visible) {
-    // Re-visible before the release fired: keep the warm context, cancel the pending release.
+    // Re-visible before the release fired: keep the warm context, cancel the pending release —
+    // including one already parked in the deferred-drain queue (releaseOwed).
     cancelRelease(c)
+    c.releaseOwed = false
     if (c.granted) return
     // Debounce the acquire so a fast pan-through never grabs a context for a two-frame flash.
     if (!c.acquireTimer) {
@@ -334,14 +423,19 @@ function setVisible(c: Client, visible: boolean): void {
   if (c.granted && !c.releaseTimer) {
     c.releaseTimer = setTimeout(() => {
       c.releaseTimer = null
-      if (c.granted) {
-        try {
-          c.release()
-        } catch {
-          // best-effort
-        }
-        c.granted = false
+      if (!c.granted) return
+      // Mid-gesture → park the release; a swap must never run while the user pans/zooms.
+      if (gestureActive) {
+        c.releaseOwed = true
+        owed.add(c)
+        return
       }
+      try {
+        c.release()
+      } catch {
+        // best-effort
+      }
+      c.granted = false
     }, WEBGL_RELEASE_DELAY_MS)
   }
 }
@@ -378,7 +472,8 @@ export function registerWebglClient(id: string, callbacks: WebglClientCallbacks)
     acquireTimer: null,
     releaseTimer: null,
     hiddenAt: 0,
-    lossStreak: 0
+    lossStreak: 0,
+    releaseOwed: false
   }
   clients.set(id, client)
 
@@ -410,6 +505,7 @@ export function registerWebglClient(id: string, callbacks: WebglClientCallbacks)
       if (c !== client) return
       cancelAcquire(c)
       cancelRelease(c)
+      owed.delete(c)
       if (c.granted) {
         try {
           c.release()
@@ -434,4 +530,10 @@ export function __resetWebglBudgetForTests(): void {
   budget = WEBGL_BUDGET
   enabled = true
   zoomSuspended = false
+  gestureActive = false
+  owed.clear()
+  if (drainTimer) {
+    clearTimeout(drainTimer)
+    drainTimer = null
+  }
 }

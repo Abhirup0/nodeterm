@@ -728,8 +728,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
       }))
     }
+    // Has this terminal EVER gone through a renderer swap? Every stuck-blank strand needs one —
+    // a node that has only ever run the DOM renderer is covered by xterm's own pause/unpause
+    // bookkeeping, so the transition heals below skip it (a full DOM repaint per node entering
+    // the viewport during a pan is real jank, paid for nothing on a never-swapped node).
+    let everSwapped = false
     const acquireWebgl = (): boolean => {
       if (webgl) return true
+      everSwapped = true
       let addon: WebglAddon | null = null
       try {
         const a = new WebglAddon()
@@ -1456,7 +1462,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         // One-shot per transition (not per frame), so a zoom-out burst costs one repaint per node.
         // The invariant check first: a stray black canvas left by a broken swap while hidden
         // would otherwise cover everything the repaint draws (no-op when a webgl grant is live).
-        if (visible && !wasVisible) {
+        // Gated on everSwapped: a node that never swapped renderers has nothing to heal, and
+        // paying a full repaint per node entering the viewport is what made panning janky.
+        if (visible && !wasVisible && everSwapped) {
           verifyCleanDomState('visible')
           fullRepaint()
         }
