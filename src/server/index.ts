@@ -53,6 +53,7 @@ import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
+import { registerTranscriptIpc } from '../core/transcript-ipc'
 import { IPC } from '@shared/ipc'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
@@ -273,7 +274,12 @@ export async function startServer(
   // missing/corrupt file simply yields no block.
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
-  wireAgentStatus(platform)
+  const { contextTail } = wireAgentStatus(platform)
+  // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
+  // of the handlers because the hook-fed path authority is the tail created just above. No remote
+  // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
+  // the complete answer (an SSH-project node is a desktop-only concept here).
+  registerTranscriptIpc({ pathFor: (sessionId) => contextTail.pathFor(sessionId) })
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the browser canvas answers a
   // held Claude permission hook here. The Server Edition runs ON the host, so a local project's
   // answer file is written right there (under os.homedir(), which the hook uses as $HOME). SSH

@@ -74,17 +74,17 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import {
-  readTranscriptLines,
-  readChatMessages,
   readSessionName,
   setRemoteTranscriptReader,
   TITLE_TAIL_BYTES,
-  resolveTranscriptPath,
-  transcriptPathForCwd,
-  parseTranscriptLines,
-  parseChatMessages,
   SESSION_ID_RE
 } from '../core/transcript-reader'
+import {
+  locateRemoteTranscriptCommand,
+  parseLocatedTranscript,
+  remoteTranscriptRoots
+} from '../core/remote-transcript-locate'
+import { registerTranscriptIpc, resolveTranscript } from '../core/transcript-ipc'
 import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
@@ -1122,6 +1122,10 @@ app.whenReady().then(async () => {
   // search/chat read handlers (which receive only sessionId + cwd) read remotely without a
   // nodeId. Only remote sessions are ever inserted, so local reads stay on the local reader.
   const remoteTranscriptBySession = new Map<string, RemoteFileRef>()
+  // Subset of the above that WE located by asking the host (no hook event ever fed it). Tracked
+  // separately so a stale entry can be dropped on a failed read without touching the hook-fed
+  // ones — see `readRemoteTranscript`.
+  const locatedTranscriptSessions = new Set<string>()
   // Route the session-name read (the node-title poll) through the same remote ref. An SSH
   // project's agent runs on the remote host, so its transcript is NOT under the local
   // `~/.claude/projects` — without this, `/rename` never reached the node title on remote nodes
@@ -1164,59 +1168,94 @@ app.whenReady().then(async () => {
     }
     return undefined
   }
-  // Resolve a session's transcript path: prefer the exact session path when a (valid)
-  // sessionId is known; otherwise fall back to the node's cwd, which is durable and doesn't
-  // need a live hook event.
-  const resolveTranscript = async (
-    sessionId: string | undefined,
-    cwd: string | undefined,
-    accountId?: string
-  ): Promise<string | undefined> => {
-    let p: string | undefined
-    if (sessionId && SESSION_ID_RE.test(sessionId)) {
-      p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
-    }
-    if (!p && cwd) p = await transcriptPathForCwd(cwd)
-    return p
-  }
-
   // Read at most the last 5 MB of a transcript (mirrors transcript-reader's READ_CAP_BYTES) —
   // the remote read fetches the tail over ssh, then reuses the SAME pure parsers as local, so
   // the returned shape is byte-identical to the local reader.
   const REMOTE_TRANSCRIPT_CAP = 5 * 1024 * 1024
-  corePlatform.handle(
-    IPC.claudeReadTranscript,
-    async (
-      sessionId: string | undefined,
-      cwd: string | undefined,
-      accountId: string | undefined
-    ) => {
-      const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
-      if (ref) {
-        const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
-        return parseTranscriptLines(text)
-      }
-      const p = await resolveTranscript(sessionId, cwd, accountId)
-      return p ? readTranscriptLines(p) : []
-    }
-  )
 
-  corePlatform.handle(
-    IPC.chatReadTranscript,
-    async (
-      sessionId: string | undefined,
-      cwd: string | undefined,
-      accountId: string | undefined
-    ) => {
-      const ref = sessionId ? remoteTranscriptBySession.get(sessionId) : undefined
-      if (ref) {
-        const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
-        return parseChatMessages(text.split('\n'))
+  /**
+   * The remote ref for a session, resolving it on the HOST when no hook event has registered one.
+   *
+   * `remoteTranscriptBySession` is fed only by hook POSTs, and a tmux session outlives the app —
+   * so after an app restart an IDLE remote agent node has no ref, and the local resolvers below
+   * would search this machine's disk for a session that exists only on the host (finding nothing,
+   * or another local session that happens to share the cwd). Asking the host directly is what the
+   * node id buys us; a hit is cached under the sessionId so the title poll and the next read get
+   * it for free. Fail-open at every step: no node id / not an SSH session / no resolved home /
+   * a failed ssh call all mean "not remote", which is the pre-existing local path.
+   */
+  const remoteTranscriptRefFor = async (
+    sessionId: string | undefined,
+    cwd: string | undefined,
+    accountId: string | undefined,
+    nodeId: string | undefined
+  ): Promise<RemoteFileRef | undefined> => {
+    if (!sessionId) return undefined
+    const cached = remoteTranscriptBySession.get(sessionId)
+    if (cached) return cached
+    if (!nodeId) return undefined
+    const rt = ptyManager.sshRemoteForNode(nodeId)
+    if (!rt || !sshProjectManager) return undefined
+    const remoteHome = sshProjectManager.remoteHomeForControlPath(rt.controlPath)
+    if (!remoteHome) return undefined
+    let accountDir: string | undefined
+    if (accountId) {
+      // A hand-edited project.json can carry any string; the helper validates and throws.
+      try {
+        accountDir = remoteAccountConfigDirAbs(remoteHome, accountId)
+      } catch {
+        accountDir = undefined
       }
-      const p = await resolveTranscript(sessionId, cwd, accountId)
-      return p ? readChatMessages(p) : []
     }
-  )
+    const cmd = locateRemoteTranscriptCommand(
+      remoteTranscriptRoots(remoteHome, accountDir),
+      cwd,
+      sessionId
+    )
+    if (!cmd) return undefined
+    let located: string | undefined
+    try {
+      const { code, stdout } = await sshProjectManager.sshRun(
+        childArgs(rt.conn, rt.controlPath, cmd)
+      )
+      located = code === 0 ? parseLocatedTranscript(stdout) : undefined
+    } catch {
+      return undefined
+    }
+    // Jailed exactly like a hook-supplied path: the command only ever emits paths under our own
+    // roots, but the answer still crosses a machine boundary before we read it.
+    if (!located || !isSafeRemoteTranscriptPath(located, remoteHome)) return undefined
+    const ref: RemoteFileRef = { conn: rt.conn, controlPath: rt.controlPath, path: located }
+    remoteTranscriptBySession.set(sessionId, ref)
+    locatedTranscriptSessions.add(sessionId)
+    return ref
+  }
+
+  /**
+   * Read a remote transcript through a ref, forgetting refs WE located once they stop reading.
+   * Without this the panel's Retry replays a dead path forever (the transcript was deleted, or the
+   * session moved) because the cache lookup comes first. A hook-fed ref is deliberately left in
+   * place on an empty read — that is usually a transient master hiccup, and dropping it would send
+   * the next read down the LOCAL resolver, i.e. to the wrong machine.
+   */
+  const readRemoteTranscript = async (sessionId: string, ref: RemoteFileRef): Promise<string> => {
+    const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
+    if (!text && locatedTranscriptSessions.delete(sessionId)) {
+      remoteTranscriptBySession.delete(sessionId)
+    }
+    return text
+  }
+
+  // Both read channels now live in core (the Server Edition serves the very same handlers); the
+  // ONE thing this shell adds is the remote leg, which needs a ControlMaster. `null` means "not a
+  // remote session", which is the signal for core to take its local path.
+  registerTranscriptIpc({
+    pathFor: (sessionId) => contextTail.pathFor(sessionId),
+    readRemote: async ({ sessionId, cwd, accountId, nodeId }) => {
+      const ref = await remoteTranscriptRefFor(sessionId, cwd, accountId, nodeId)
+      return ref ? await readRemoteTranscript(sessionId!, ref) : null
+    }
+  })
 
   initTranscriptIndex(() => settingsStore.get().claudeAccounts ?? [])
   corePlatform.handle(IPC.transcriptSearch, (query: string) => searchTranscripts(query))
@@ -1224,10 +1263,12 @@ app.whenReady().then(async () => {
   // (the continuing session may be idle after a restart). Track under the sessionId (the key
   // the meter looks up); cwd is only a path fallback. contextTail.track reads immediately and
   // the 1s interval keeps it fresh while tracked.
+  // Shares core's `resolveTranscript` with the read channels — including its `accountId`-scoped
+  // cwd fallback. This copy dropped the account, so a managed-account node could track (and then
+  // meter, and then SERVE as the chat's first-choice path) an unrelated session's transcript.
   corePlatform.on(IPC.contextEnsure, async (sessionId?: string, cwd?: string, accountId?: string) => {
     if (!sessionId || !SESSION_ID_RE.test(sessionId)) return
-    let p = contextTail.pathFor(sessionId) ?? (await resolveTranscriptPath(sessionId, accountId))
-    if (!p && cwd) p = await transcriptPathForCwd(cwd)
+    const p = await resolveTranscript({ sessionId, cwd, accountId }, (s) => contextTail.pathFor(s))
     if (p) contextTail.track(sessionId, p)
   })
   // The remote half of a handoff. Same three-line shape as the context-link deps above and for
@@ -1440,6 +1481,7 @@ app.whenReady().then(async () => {
       if (p.hook_event_name === 'SessionEnd' && p.session_id) {
         remoteContextTail.untrack(p.session_id)
         remoteTranscriptBySession.delete(p.session_id)
+        locatedTranscriptSessions.delete(p.session_id)
       }
       if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name) && transcriptPath) {
         const toolUseId = p.tool_use_id
@@ -1524,6 +1566,7 @@ app.whenReady().then(async () => {
       contextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
+      locatedTranscriptSessions.delete(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)

@@ -18,6 +18,7 @@ import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   type BoardLogApi,
   type BoardLogReadResult,
+  type ChatTranscriptResult,
   type ClaudeApi,
   type ClaudeCliCaps,
   type ContextApi,
@@ -38,6 +39,7 @@ import {
   type SpeechApi,
   type SpeechModelInfo,
   type TmuxStatus,
+  type TranscriptLine,
   type Workspace,
   type WorkspaceApi
 } from '../../shared/types'
@@ -557,7 +559,12 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
  * `--permission-mode auto` version gate as desktop instead of silently no-opping into "auto
  * unsupported" — which would strip the flag from every Claude launch in the Server Edition.
  * A failed request degrades to the fail-open caps (bare command), never a rejection: the launch
- * path awaits this. `readTranscript` has no server handler yet, so it keeps the stub's reject.
+ * path awaits this.
+ *
+ * `readTranscript` stays STUBBED here on purpose. This builder is shared with the relay
+ * (`relay-api.ts`), where the transcripts that matter live on the HOST while this namespace's
+ * only real member is a capability probe — the Server Edition gets the real reader from
+ * `buildTranscriptApi` below instead, which the relay does not use.
  */
 export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
   return {
@@ -566,6 +573,40 @@ export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
       (client.request(IPC.claudeCliCaps) as Promise<ClaudeCliCaps>).catch(
         () => UNKNOWN_CLAUDE_CLI_CAPS
       )
+  }
+}
+
+/**
+ * The two transcript READ channels, now that `registerTranscriptIpc` serves them in the server
+ * shell too. Before this the browser had no handler at all: the stub rejected, the ⌘M panel never
+ * caught it, and every Server Edition session read as an empty conversation.
+ *
+ * Server Edition ONLY (see buildClaudeApi's note): the server runs on the machine whose
+ * transcripts these are, so no `nodeId` remote leg is needed — the argument still rides along
+ * because the channel is shared with desktop.
+ */
+export function buildTranscriptApi(
+  client: RpcClient
+): Pick<NodeTerminalApi, 'chat'> & { claudeReadTranscript: ClaudeApi['readTranscript'] } {
+  return {
+    chat: {
+      readTranscript: (sessionId, cwd, accountId, nodeId) =>
+        client.request(
+          IPC.chatReadTranscript,
+          sessionId,
+          cwd,
+          accountId,
+          nodeId
+        ) as Promise<ChatTranscriptResult>
+    },
+    claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>
+      client.request(
+        IPC.claudeReadTranscript,
+        sessionId,
+        cwd,
+        accountId,
+        nodeId
+      ) as Promise<TranscriptLine[]>
   }
 }
 
@@ -683,8 +724,15 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildPresenceApi(client),
     ...buildSpeechApi(client),
     ...buildUsageApi(client),
-    // Only `cliCaps` is real here — the rest of the namespace stays stubbed (see buildClaudeApi).
-    claude: buildClaudeApi(client, stubApi.claude),
+    // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
+    // transcript reader from the Server-Edition-only one (which also supplies `chat`).
+    ...(() => {
+      const t = buildTranscriptApi(client)
+      return {
+        chat: t.chat,
+        claude: { ...buildClaudeApi(client, stubApi.claude), readTranscript: t.claudeReadTranscript }
+      }
+    })(),
     // Web replacement for the Electron native dialog: an in-app server-directory browser over
     // fs.list (the stub's E_UNSUPPORTED reject is dropped in favor of this real picker).
     dialog: (() => {

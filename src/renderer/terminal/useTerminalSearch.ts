@@ -71,10 +71,14 @@ export function useTerminalSearch({
       // else by cwd (durable) — so it works even when no live hook event set the sessionId.
       if (searchTranscript) {
         try {
+          // `nodeId` is what lets an SSH-project node's transcript be located on its HOST when no
+          // hook event has registered it in this app run — otherwise the search silently indexes
+          // the terminal buffer alone there, which reads as "the transcript isn't searchable".
           const tr: TranscriptLine[] = await window.nodeTerminal.claude.readTranscript(
             sessionId,
             cwd,
-            accountId
+            accountId,
+            nodeId
           )
           for (const l of tr) {
             for (const t of l.text.split('\n')) lines.push({ source: 'claude', role: l.role, text: t })

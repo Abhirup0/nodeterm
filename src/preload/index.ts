@@ -380,12 +380,12 @@ const api: NodeTerminalApi = {
   },
   claude: {
     cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
-    readTranscript: (sessionId, cwd, accountId) =>
-      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId)
+    readTranscript: (sessionId, cwd, accountId, nodeId) =>
+      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId)
   },
   chat: {
-    readTranscript: (sessionId, cwd, accountId) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId)
+    readTranscript: (sessionId, cwd, accountId, nodeId) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId)
   },
   claudeAccounts: {
     add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
