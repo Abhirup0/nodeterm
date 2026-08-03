@@ -20,3 +20,33 @@ export const WEBGL_CONTEXT_CAP_DESKTOP = 32
 /** Renderer budget on desktop — comfortably under `WEBGL_CONTEXT_CAP_DESKTOP`, same margin
  *  philosophy as the default 12-under-16. */
 export const WEBGL_BUDGET_DESKTOP = 24
+
+/**
+ * Renderer budget on MAC desktop, deliberately much lower. Two field reports on macOS point at
+ * the OS compositor mishandling many simultaneous WebGL canvases: whole-window flicker (the
+ * reason the GPU-rendering master toggle exists), and terminals compositing BLACK after a
+ * zoom-out grants a burst of contexts — with zero JS-visible errors in either case (no context
+ * loss event, so nothing our repaint heals can reach: `term.refresh` re-draws, the compositor
+ * still doesn't present it). Staying under the browser CAP is not enough there — the pressure
+ * the macOS compositor tolerates is lower than what Chromium allows. ~10 keeps GPU rendering
+ * for the terminals the user is actually looking at while staying inside what macOS
+ * compositing handles reliably.
+ */
+export const WEBGL_BUDGET_DESKTOP_MAC = 10
+
+/**
+ * Resolve the `terminalGpuRendering` setting to an effective on/off. 'auto' (the default) is on
+ * everywhere EXCEPT macOS: the compositor-level failures above have only ever been observed
+ * there, the DOM renderer is the one field-proven-clean configuration on those machines, and a
+ * public default must be the proven one — WebGL on a Mac is a deliberate 'on'. Renderer-side
+ * only (platform detection is navigator-based). Legacy booleans still resolve sanely if one
+ * slips past the settings-store migration.
+ */
+export function resolveGpuRendering(
+  value: 'auto' | 'on' | 'off' | boolean | undefined,
+  isMac: boolean
+): boolean {
+  if (value === 'on' || value === true) return true
+  if (value === 'off' || value === false) return false
+  return !isMac
+}

@@ -30,6 +30,7 @@ import {
 import { solveFitPadding } from './fit-view'
 import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
+import { setWebglGesture, setWebglZoom, WEBGL_GESTURE_SETTLE_MS } from '../terminal/webgl-budget'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -1534,6 +1535,9 @@ export function Canvas() {
       setViewport(project.viewport)
       setZoomPct(Math.round(project.viewport.zoom * 100))
       setGroupLabelBoost(project.viewport.zoom)
+      // A project can load already zoomed way out (saved viewport) — seed the WebGL zoom gate
+      // before the mount-time IntersectionObserver reports make every node request a context.
+      setWebglZoom(project.viewport.zoom)
     }
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
@@ -4947,10 +4951,22 @@ export function Canvas() {
   }, [nodes, markDirty])
 
   const zoomRafRef = useRef<number | null>(null)
+  const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onMove = useCallback(
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
       markDirty()
+      // Latch the WebGL gesture flag for the whole pan/zoom, releasing it a beat after the last
+      // viewport event: renderer swaps (heavyweight, non-atomic) may only run at rest — a swap
+      // executed mid-gesture is both the jank and the black-terminal window (see webgl-budget's
+      // gesture latch). Latched HERE, not in the rAF, so no swap can slip in before the first
+      // coalesced frame.
+      setWebglGesture(true)
+      if (gestureSettleRef.current) clearTimeout(gestureSettleRef.current)
+      gestureSettleRef.current = setTimeout(() => {
+        gestureSettleRef.current = null
+        setWebglGesture(false)
+      }, WEBGL_GESTURE_SETTLE_MS)
       // Coalesce the zoom-% readout to one update per frame so a zoom gesture doesn't
       // re-render the whole Canvas on every intermediate viewport event.
       if (zoomRafRef.current == null) {
@@ -4958,6 +4974,9 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
+          // Feed the WebGL budget's zoom gate (suspend GPU rendering when zoomed way out).
+          // Idempotent + hysteresis inside; per-frame call cost is a float compare.
+          setWebglZoom(viewportRef.current.zoom)
         })
       }
     },

@@ -5,6 +5,8 @@ import { FieldRow } from '../FieldRow'
 import { Input } from '@renderer/ui/Input'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
+import { resolveGpuRendering } from '@shared/webgl'
+import { isMacPlatform } from '@shared/platform-utils'
 
 const ROWS = {
   fontSize: { title: 'Font size', keywords: ['font', 'size', 'text'] },
@@ -62,11 +64,15 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.gpu}>
         <FieldRow
           label="GPU terminal rendering"
-          description="Turn off if the window flickers. Terminals then use the DOM renderer (no WebGL)."
+          description={
+            isMacPlatform()
+              ? 'Off by default on macOS (WebGL terminals can flicker or composite black there). Turning it on is an explicit opt-in.'
+              : 'Turn off if the window flickers. Terminals then use the DOM renderer (no WebGL).'
+          }
           control={
             <Switch
-              checked={settings.terminalGpuRendering !== false}
-              onChange={(v) => update({ terminalGpuRendering: v })}
+              checked={resolveGpuRendering(settings.terminalGpuRendering, isMacPlatform())}
+              onChange={(v) => update({ terminalGpuRendering: v ? 'on' : 'off' })}
               ariaLabel="GPU terminal rendering"
             />
           }

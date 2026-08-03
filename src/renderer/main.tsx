@@ -15,12 +15,17 @@ async function bootstrap(): Promise<void> {
   } else {
     // Electron desktop: main raised Chromium's WebGL context cap (--max-active-webgl-contexts),
     // so the terminal GPU-renderer budget can rise to match. A browser tab (Server Edition)
-    // cannot raise its cap and stays on the default budget. See src/shared/webgl.ts.
-    const [{ setWebglBudget }, { WEBGL_BUDGET_DESKTOP }] = await Promise.all([
-      import('./terminal/webgl-budget'),
-      import('../shared/webgl')
-    ])
-    setWebglBudget(WEBGL_BUDGET_DESKTOP)
+    // cannot raise its cap and stays on the default budget. On MAC desktop the budget goes the
+    // other way — DOWN: the macOS compositor mishandles many live WebGL canvases (black
+    // terminals after a zoom-out grant burst, whole-window flicker) with no JS-visible error,
+    // so the binding limit there is the compositor, not Chromium's cap. See src/shared/webgl.ts.
+    const [{ setWebglBudget }, { WEBGL_BUDGET_DESKTOP, WEBGL_BUDGET_DESKTOP_MAC }, { isMacPlatform }] =
+      await Promise.all([
+        import('./terminal/webgl-budget'),
+        import('../shared/webgl'),
+        import('../shared/platform-utils')
+      ])
+    setWebglBudget(isMacPlatform() ? WEBGL_BUDGET_DESKTOP_MAC : WEBGL_BUDGET_DESKTOP)
   }
   await import('./boot')
 }
