@@ -193,9 +193,17 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       GPU glyphs). Note whether you can see that difference and how objectionable it is — that is
       the round-5 question. Also: move the nodes apart again and confirm the upper one goes BACK to
       the shared canvas (its text sharpens up) once they no longer overlap.
-- [ ] **3.10 Group-parented terminal.** A terminal inside a group frame: its text sits exactly in
-      its body (offset chain resolves through the parent), and its paint order relative to
-      ungrouped terminals is sane (known limitation L7).
+- [ ] **3.10 Group-parented terminal, and terminals ON a frame (L7 is now modelled — round 5).** A
+      terminal inside a group frame: its text sits exactly in its body (the offset chain resolves
+      through the parent). Then the two stacking cases the z model exists for:
+      (a) **drag an UNGROUPED terminal over a populated group frame.** It paints on top of the frame
+      (a frame is z 0, tied with ungrouped nodes, and frames sort first), so it must go opaque —
+      **no part of the frame's dashed border, and no part of its label pill, may be visible inside
+      that terminal's body.** This is the case a wrong z model leaves transparent, and it looks
+      exactly like the frame-ghost round 5 deleted, so report it precisely.
+      (b) **overlap a grouped terminal with an ungrouped one.** The grouped one is above (child z 1
+      vs 0) regardless of which was created first: it must hide the ungrouped one completely, and
+      clicking either must still bring it to the front.
 - [ ] **3.11 Letterboxed / oddly-sized node.** Resize a node so the fit leaves slack, and open a
       co-attached node that a smaller peer is letterboxing: the text stays inside the body, aligned
       with the mouse, **and the letterbox bands are terminal background, not canvas**. Reasoning to
@@ -325,18 +333,22 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L6 — Adopting a parked terminal after a font change may keep a stale cell size.** The grid is
   registered from the cell xterm reports at adopt time; a font change applied in the same commit
   can land after it. Refreshing the node re-registers at the correct size.
-- **L7 — Group-parented z: MODELLED in round 5, with one transient residual.** This used to read "an
-  approximation": the order was array order plus selection, while React Flow additionally bumps a
-  root frame into a band (`ROOT_PARENT_Z_INCREMENT`, 10 per frame in first-child order) and gives
-  each child `parentZ >= childZ ? parentZ + 1 : childZ`. That is why an unselected GROUPED terminal
-  sits above every ungrouped one wherever it is in the array, and why a selected FRAME carries its
-  children above a selected ungrouped node — both of which the old model got backwards.
-  `nodeStackZ` now reproduces the whole rule (`adoptUserNodes` → `calculateZ` / `calculateChildXYZ`
-  in `@xyflow/system`) and BOTH consumers read it — the grids' z and the opaque set — so they cannot
-  disagree about who is on top. **Residual:** React Flow reuses a node's internal object, and its z,
-  when the user node object is identical (`checkEquality`), so in a commit where only some nodes
-  were rebuilt a live z can lag this model by a pass. It converges on the next full adopt, and the
-  bands themselves are stable across the partial ones. Verify by item **3.10**.
+- **L7 — Group-parented z: MODELLED in round 5, and no longer a limitation.** This used to read "an
+  approximation": the order was array order plus selection, ignoring that React Flow gives a frame's
+  child `parentZ >= childZ ? parentZ + 1 : childZ`. `nodeStackZ` now reproduces the rule for this
+  app's configuration — no explicit `zIndex`, `elevateNodesOnSelect` on, and **`zIndexMode` at its
+  default `'basic'`** (nothing in `src/` passes the prop) — and BOTH consumers read it, the grids' z
+  and the opaque set, so they cannot disagree about who is on top. In `'basic'` the whole rule is:
+  every node is `selected ? 1000 : 0`, and a child is one above its frame. So a group FRAME is z 0,
+  **tied** with every ungrouped node — frames merely sort first in the array, which is why an
+  ungrouped terminal overlapping a populated frame paints ON TOP of it — while that frame's children
+  sit at 1, above both, and a selected frame carries its children to 1001. Nothing order-dependent
+  is left in the model, so it is exact rather than approximate, and it is pinned by a differential
+  test that runs the real `adoptUserNodes` over eleven canvas shapes. (The trap worth recording:
+  `@xyflow/system` also has an `'auto'` branch that bands root frames by `ROOT_PARENT_Z_INCREMENT`,
+  putting a populated frame at 10. Transcribing THAT branch is a way to conclude that a terminal
+  lying on a frame is underneath it and leave it transparent — with the frame's dashed border and
+  label pill showing through, the exact ghost round 5 removes.) Verify by item **3.10**.
 - **L8 — The kanban card modal stays on xterm's DOM renderer, by design in v1.** The modal is a
   second, co-attached view of the same tmux session living outside the canvas' coordinate space;
   it has no grid, no camera and no z in the shared canvas. Board parity here is a Phase-2 question.

@@ -1,3 +1,4 @@
+import { adoptUserNodes } from '@xyflow/system'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   failSharedGlyph,
@@ -21,7 +22,8 @@ import {
   subscribeNodeZOrder,
   subscribeOpaqueSet,
   useSharedGlyph,
-  type StackedNode
+  type StackedNode,
+  type StackOrderNode
 } from './SharedGlyphLayer'
 
 // Only the PURE parts are unit-testable here: there is no WebGL2, no OffscreenCanvas and no
@@ -113,9 +115,9 @@ describe('nodeOrderSig', () => {
   })
 
   it('puts a GROUPED terminal above an ungrouped one that follows it in the array', () => {
-    // React Flow gives a child `parentZ + 1`, and a root frame with children is itself bumped into
-    // a band — so a grouped node outranks every ungrouped one regardless of array position. The
-    // first cut of round 5 modelled selection only and got this backwards.
+    // A child gets `parentZ + 1` = 1 while every ungrouped node is 0, so the grouped terminal is on
+    // top regardless of array position. (The FRAME itself is 0 — tied with the ungrouped node, not
+    // above it; that is the part the 'auto'-branch model got wrong.)
     const sig = nodeOrderSig([
       { id: 'g', type: 'group' },
       { id: 'inside', type: 'terminal', parentId: 'g' },
@@ -304,43 +306,67 @@ describe('setNodeZOrder', () => {
 })
 
 describe('nodeStackZ (React Flow z, reproduced)', () => {
+  // Every number below was READ OFF the real `adoptUserNodes` from @xyflow/system, called with what
+  // @xyflow/react's store passes it: `{ elevateNodesOnSelect: true, zIndexMode: 'basic' }`. 'basic'
+  // is the default in BOTH `getInitialState` and the <ReactFlow> component, and nothing in src/
+  // passes the prop. That detail decides the load-bearing case: the 'auto' branch adds a
+  // ROOT_PARENT_Z_INCREMENT band that would put a populated frame at 10 instead of 0, reversing
+  // frame-vs-ungrouped — and a previous cut of this file shipped exactly that mistake.
+
   it('is 0 for a plain node and 1000 for a selected one', () => {
     const z = nodeStackZ([{ id: 'a' }, { id: 'b', selected: true }])
     expect(z.get('a')).toBe(0)
     expect(z.get('b')).toBe(1000)
   })
 
-  it('bumps a root frame into a band and lifts its child one above it', () => {
-    // calculateChildXYZ: parentZ >= childZ ? parentZ + 1 : childZ, with the parent bumped by
-    // ROOT_PARENT_Z_INCREMENT (10) when its first child is processed.
-    const z = nodeStackZ([{ id: 'g' }, { id: 'c', parentId: 'g' }])
-    expect(z.get('g')).toBe(10)
-    expect(z.get('c')).toBe(11)
+  it('leaves a group FRAME at 0 — tied with every ungrouped node — and lifts its child to 1', () => {
+    // A frame does NOT outrank ungrouped nodes. Frames merely sort first in the array, so an
+    // ungrouped node overlapping one paints ON TOP of it (and must therefore go opaque).
+    const z = nodeStackZ([{ id: 'g' }, { id: 'inside', parentId: 'g' }, { id: 'outside' }])
+    expect(z.get('g')).toBe(0)
+    expect(z.get('inside')).toBe(1)
+    expect(z.get('outside')).toBe(0)
   })
 
-  it('gives each root frame its own band, in first-child order', () => {
+  it('does not band root frames — two frames tie, and so do their children', () => {
     const z = nodeStackZ([
       { id: 'g1' },
       { id: 'g2' },
       { id: 'c1', parentId: 'g1' },
       { id: 'c2', parentId: 'g2' }
     ])
-    expect(z.get('g1')).toBe(10)
-    expect(z.get('c1')).toBe(11)
-    expect(z.get('g2')).toBe(20)
-    expect(z.get('c2')).toBe(21)
+    expect(z.get('g1')).toBe(0)
+    expect(z.get('g2')).toBe(0)
+    expect(z.get('c1')).toBe(1)
+    expect(z.get('c2')).toBe(1)
   })
 
-  it('a selected frame carries its children above 1000', () => {
-    const z = nodeStackZ([{ id: 'g', selected: true }, { id: 'c', parentId: 'g' }])
-    expect(z.get('g')).toBe(1010)
-    expect(z.get('c')).toBe(1011)
+  it('a selected frame carries its children to 1001, above a selected ungrouped node', () => {
+    const z = nodeStackZ([
+      { id: 'g', selected: true },
+      { id: 'c', parentId: 'g' },
+      { id: 'outside', selected: true }
+    ])
+    expect(z.get('g')).toBe(1000)
+    expect(z.get('c')).toBe(1001)
+    expect(z.get('outside')).toBe(1000)
   })
 
   it('a selected CHILD of an unselected frame wins on its own z', () => {
-    // childZ 1000 > parentZ 10, so the child keeps 1000 rather than parentZ + 1.
+    // childZ 1000 > parentZ 0, so the child keeps 1000 rather than parentZ + 1.
     const z = nodeStackZ([{ id: 'g' }, { id: 'c', parentId: 'g', selected: true }])
     expect(z.get('c')).toBe(1000)
+  })
+
+  it('nested frames stack one per level', () => {
+    const z = nodeStackZ([
+      { id: 'outer' },
+      { id: 'inner', parentId: 'outer' },
+      { id: 't', parentId: 'inner' }
+    ])
+    expect(z.get('outer')).toBe(0)
+    expect(z.get('inner')).toBe(1)
+    expect(z.get('t')).toBe(2)
   })
 
   it('ignores a child whose parent is missing or comes later (React Flow warns and gives up)', () => {
@@ -350,6 +376,91 @@ describe('nodeStackZ (React Flow z, reproduced)', () => {
 
   it('survives a parentId cycle', () => {
     expect(() => nodeStackZ([{ id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }])).not.toThrow()
+  })
+
+  // The cases above are readable; THIS is the one that keeps them honest. `nodeStackZ` is
+  // transcribed from someone else's algorithm, and transcription is how the last two bugs got in —
+  // the first modelled selection only, the second modelled the `'auto'` branch of a library that
+  // defaults to `'basic'`. Reading the source more carefully is not a fix for that class of
+  // mistake; RUNNING it is. So every shape below goes through the real `adoptUserNodes`, called
+  // exactly as `@xyflow/react`'s store calls it, and the answers must be identical. It needs no
+  // DOM, which is why it can live in this suite at all.
+  //
+  // If this ever fails after a React Flow bump, the LIBRARY moved: re-derive `nodeStackZ` from the
+  // new behaviour rather than pinning the old numbers.
+  describe('agrees with the real adoptUserNodes', () => {
+    const rf = (nodes: readonly StackOrderNode[]): Record<string, number> => {
+      const lookup = new Map<string, { internals: { z: number } }>()
+      adoptUserNodes(
+        nodes.map((n) => ({
+          ...n,
+          position: { x: 0, y: 0 },
+          data: {},
+          measured: { width: 10, height: 10 }
+        })) as never,
+        lookup as never,
+        new Map(),
+        // The store's own options (index.mjs `setNodes`): everything else is left at its default,
+        // which is where `zIndexMode: 'basic'` comes from.
+        { elevateNodesOnSelect: true, checkEquality: true } as never
+      )
+      const out: Record<string, number> = {}
+      for (const [id, n] of lookup) out[id] = n.internals.z
+      return out
+    }
+    const ours = (nodes: readonly StackOrderNode[]): Record<string, number> =>
+      Object.fromEntries(nodeStackZ(nodes))
+
+    const shapes: Record<string, StackOrderNode[]> = {
+      'flat canvas': [{ id: 'a' }, { id: 'b' }],
+      'one selected': [{ id: 'a' }, { id: 'b', selected: true }],
+      'frame, child, ungrouped': [{ id: 'g' }, { id: 'inside', parentId: 'g' }, { id: 'outside' }],
+      'ungrouped before the frame': [
+        { id: 'outside' },
+        { id: 'g' },
+        { id: 'inside', parentId: 'g' }
+      ],
+      'two frames': [
+        { id: 'g1' },
+        { id: 'g2' },
+        { id: 'c1', parentId: 'g1' },
+        { id: 'c2', parentId: 'g2' }
+      ],
+      'two frames, children interleaved': [
+        { id: 'g1' },
+        { id: 'g2' },
+        { id: 'c2', parentId: 'g2' },
+        { id: 'c1', parentId: 'g1' }
+      ],
+      'selected frame': [
+        { id: 'g', selected: true },
+        { id: 'c', parentId: 'g' },
+        { id: 'outside', selected: true }
+      ],
+      'selected child': [{ id: 'g' }, { id: 'c', parentId: 'g', selected: true }],
+      'nested frames': [
+        { id: 'outer' },
+        { id: 'inner', parentId: 'outer' },
+        { id: 't', parentId: 'inner' }
+      ],
+      'nested frames, outer selected': [
+        { id: 'outer', selected: true },
+        { id: 'inner', parentId: 'outer' },
+        { id: 't', parentId: 'inner' }
+      ],
+      'several children of one frame': [
+        { id: 'g' },
+        { id: 'c1', parentId: 'g' },
+        { id: 'c2', parentId: 'g' },
+        { id: 'c3', parentId: 'g' }
+      ]
+    }
+
+    for (const [name, nodes] of Object.entries(shapes)) {
+      it(name, () => {
+        expect(ours(nodes)).toEqual(rf(nodes))
+      })
+    }
   })
 })
 
@@ -490,10 +601,28 @@ describe('opaqueNodeIds', () => {
     expect(opaqueNodeIds([at('a', 0, 0), at('b', 20, 20), at('c', 40, 40)])).toEqual(['b', 'c'])
   })
 
-  it('marks the GROUPED terminal, not the ungrouped one that follows it in the array', () => {
-    // The grouped terminal is above by React Flow's z (parentZ + 1) even though it comes FIRST.
-    // Reading array order alone marked the wrong node — the ungrouped one would have gone opaque
-    // while the grouped one stayed transparent ON TOP of it.
+  it('marks a terminal lying on a POPULATED group frame — the frame is not above it', () => {
+    // The case both wrong z models broke, from opposite sides. A frame is z 0, tied with every
+    // ungrouped node, and frames sort FIRST in the array — so `outside` paints on top of the frame
+    // and must be opaque, or the frame's dashed border and its label pill (DOM, above any canvas
+    // plate) show straight through the terminal's transparent body. The banded 'auto' model gave
+    // the frame z 10, concluded the terminal was underneath it, and left it transparent.
+    // `inside` is placed clear of `outside` so this asserts only the frame relationship.
+    const group: StackedNode = {
+      id: 'g',
+      type: 'group',
+      position: { x: 0, y: 0 },
+      measured: { width: 400, height: 400 }
+    }
+    const inside = at('inside', 300, 300, { parentId: 'g' })
+    const outside = at('outside', 10, 10)
+    expect(opaqueNodeIds([group, inside, outside])).toEqual(['outside'])
+  })
+
+  it('marks BOTH when a grouped and an ungrouped terminal overlap each other on a frame', () => {
+    // z: frame 0, outside 0 (later in the array ⇒ above the frame), inside 1 (above both). So
+    // `outside` is opaque for lying on the frame, and `inside` for lying on `outside`; the frame
+    // is skipped for `inside` because it is its ancestor.
     const group: StackedNode = {
       id: 'g',
       type: 'group',
@@ -502,7 +631,7 @@ describe('opaqueNodeIds', () => {
     }
     const inside = at('inside', 20, 20, { parentId: 'g' })
     const outside = at('outside', 60, 60)
-    expect(opaqueNodeIds([group, inside, outside])).toEqual(['inside'])
+    expect(opaqueNodeIds([group, inside, outside])).toEqual(['outside', 'inside'])
   })
 })
 

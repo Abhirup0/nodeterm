@@ -181,11 +181,9 @@ let zOrder = new Map<string, number>()
 let zOrderSig = ''
 const zListeners = new Set<() => void>()
 
-/** React Flow's own stacking constants (`@xyflow/system`, `SELECTED_NODE_Z` /
- *  `ROOT_PARENT_Z_INCREMENT`). Copied rather than imported because they are not exported; pinned
- *  by `nodeStackZ`'s tests, which state the rule they came from. */
+/** React Flow's selection elevation (`@xyflow/system`'s `SELECTED_NODE_Z`). Copied rather than
+ *  imported because it is not exported; pinned by `nodeStackZ`'s tests. */
 const SELECTED_NODE_Z = 1000
-const ROOT_PARENT_Z_INCREMENT = 10
 
 /** The node fields the stacking model reads. */
 export interface StackOrderNode {
@@ -196,36 +194,40 @@ export interface StackOrderNode {
 
 /**
  * REPRODUCTION of the z React Flow assigns each node, for this app's configuration: no explicit
- * `zIndex` anywhere, default `zIndexMode` ('auto'), and `elevateNodesOnSelect` at its default
- * (on). The algorithm is `adoptUserNodes` → `calculateZ` / `updateChildNode` / `calculateChildXYZ`
- * in `@xyflow/system`, transcribed:
+ * `zIndex` anywhere, `elevateNodesOnSelect` at its default (on), and — the detail that decides
+ * everything below — **`zIndexMode` at its default, which is `'basic'`, not `'auto'`**. Nothing in
+ * `src/` passes the prop, and `@xyflow/react` 12.11 defaults it to `'basic'` in both
+ * `getInitialState` and the `<ReactFlow>` component. The whole rule is then two lines of
+ * `calculateZ` / `calculateChildXYZ`:
  *
- *  - Every node starts at `selected ? 1000 : 0`.
- *  - The FIRST time a ROOT parent (a frame with no parent of its own) has a child processed, that
- *    parent's z is bumped by `++counter * 10`. Root frames are therefore separated into bands in
- *    the order their first child appears.
- *  - A child's z is `parentZ >= childZ ? parentZ + 1 : childZ` — so an unselected node inside a
- *    frame outranks EVERY ungrouped unselected node, wherever it sits in the array, and a SELECTED
- *    FRAME carries its children up with it (parentZ 1000+ ⇒ children 1001+, above a selected
- *    ungrouped node at 1000).
- *  - Returning to an already-indexed parent resets the running counter to that parent's index,
- *    which is why the counter is not monotonic. Reproduced, because it decides the bands.
+ *  - Every node is `selected ? 1000 : 0`.
+ *  - A CHILD is then `parentZ >= childZ ? parentZ + 1 : childZ`, its parent resolved first (React
+ *    Flow requires parents before children in the array, which `nodeStatesToFlow` guarantees).
  *
- * That last group of rules is the part round 5's first cut got wrong: it modelled selection only,
- * which said a grouped terminal was BELOW an ungrouped one it is in fact above — and the opaque
- * rule reads this order to decide who may stay transparent.
+ * What that means on this canvas: a group FRAME is z 0, tied with every ungrouped node — so array
+ * order decides between them, and since frames sort FIRST, an ungrouped terminal overlapping a
+ * populated frame paints ON TOP of it. A frame's child is 1, above both. A selected frame is 1000
+ * and carries its children to 1001, above a selected ungrouped node at 1000. Nested frames stack
+ * 0 / 1 / 2.
  *
- * Known residual, and why it is small: React Flow reuses a node's internal object (and its z) when
- * the user node object is identical (`checkEquality`), so in a transient where only some nodes were
- * rebuilt a live z can lag this model by a commit. It converges on the next full adopt, and the
- * bands themselves (which frame is above which) are stable across those partial passes.
+ * **Two wrong models have been shipped here; both are worth naming.** Round 5's first cut modelled
+ * selection only, which put a grouped terminal BELOW an ungrouped one it is in fact above. Its
+ * replacement transcribed the `'auto'` branch, complete with the `ROOT_PARENT_Z_INCREMENT` banding
+ * that gives a populated frame z 10 — which is gated on `zIndexMode === 'auto'` and therefore never
+ * runs here. That one said an ungrouped terminal sitting on a frame was BELOW the frame, so the
+ * terminal stayed transparent and the frame's border and label pill showed through it: exactly the
+ * ghost this round exists to delete. The lesson is in the verification, not the reading — the model
+ * is now checked against the real `adoptUserNodes`, and the tests state the numbers it returns.
+ *
+ * With the banding gone the model carries no order-dependent state, which also removes the
+ * `checkEquality` caveat this comment used to carry: z depends only on `selected` and the parent
+ * chain, React Flow recomputes every CHILD on each adopt regardless of reuse, and a reused ROOT's
+ * z was computed from an identical node object. The model is exact, not approximate.
  */
 export function nodeStackZ(nodes: readonly StackOrderNode[]): Map<string, number> {
   const z = new Map<string, number>()
   const byId = new Map<string, StackOrderNode>()
   for (const n of nodes) byId.set(n.id, n)
-  const rootParentIndex = new Map<string, number>()
-  let counter = 0
   for (const node of nodes) {
     const ownZ = node.selected ? SELECTED_NODE_Z : 0
     z.set(node.id, ownZ)
@@ -234,13 +236,6 @@ export function nodeStackZ(nodes: readonly StackOrderNode[]): Map<string, number
     // React Flow warns and gives up on a child whose parent is missing or comes LATER in the
     // array; `nodeStatesToFlow` sorts parents first precisely so this cannot happen.
     if (!parent || !z.has(parent.id)) continue
-    if (!parent.parentId && !rootParentIndex.has(parent.id)) {
-      counter += 1
-      rootParentIndex.set(parent.id, counter)
-      z.set(parent.id, (z.get(parent.id) ?? 0) + counter * ROOT_PARENT_Z_INCREMENT)
-    }
-    const known = rootParentIndex.get(parent.id)
-    if (known !== undefined) counter = known
     const parentZ = z.get(parent.id) ?? 0
     z.set(node.id, parentZ >= ownZ ? parentZ + 1 : ownZ)
   }
@@ -266,8 +261,11 @@ export function effectiveStackOrder<T extends StackOrderNode>(nodes: readonly T[
       break
     }
   }
-  // A flat, unselected canvas — the overwhelmingly common case — is already in paint order; return
-  // the input array itself rather than an identical copy.
+  // Every z is 0 — no selection and no group frame with children anywhere — so the array is already
+  // in paint order and the input is returned rather than an identical copy. Worth having (a canvas
+  // with no groups and nothing selected is a real state, and this runs on every nodes change) but
+  // NOT the common case it was once described as: one populated group frame gives its children z 1
+  // and puts every nodes change through the sort.
   if (!ordered) return nodes
   return nodes
     .map((n, i) => ({ n, i, z: z.get(n.id) ?? 0 }))
@@ -283,9 +281,9 @@ export function effectiveStackOrder<T extends StackOrderNode>(nodes: readonly T[
  * Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
  * churn the signature on every sticky edit.
  *
- * **The rule is `effectiveStackOrder`** — React Flow's own z (selection elevation AND group-frame
- * banding; see `nodeStackZ`), ties broken by array order. The canvas z among the glyph grids
- * mirrors the DOM's, so both worlds tell the same story about who is on top.
+ * **The rule is `effectiveStackOrder`** — React Flow's own z (selection elevation and the
+ * frame-child lift; see `nodeStackZ`), ties broken by array order. The canvas z among the glyph
+ * grids mirrors the DOM's, so both worlds tell the same story about who is on top.
  *
  * Round 4 removed the mirroring and turned the PROP off instead. That was the wrong end of the
  * problem: it did make the two orders agree, but at the cost of "click/drag brings a node to the
@@ -370,9 +368,12 @@ export function subscribeNodeZOrder(fn: () => void): () => void {
  *
  *  a) its rect intersects the rect of ANY node — of any kind — that is BELOW it in the effective
  *     paint order (`effectiveStackOrder`), or
- *  b) it is being DRAGGED (TerminalNode reads React Flow's own `dragging` prop for this, not this
- *     set — a drag is about to put the node above things, and the flag flips synchronously so the
- *     visuals are right for the whole gesture rather than one recompute late).
+ *  b) it is in a GESTURE: it, or a group frame containing it, is being dragged or resized. A
+ *     gesture is "about to be above things", and holding the node opaque for its whole duration is
+ *     also what lets the rect sweep be frozen while `nodes` churns per frame. This set carries the
+ *     answer (`gestureTerminalIds`, which is the only thing that can see the children of a dragged
+ *     FRAME); TerminalNode additionally reads its own `dragging` prop, which flips synchronously
+ *     and needs nobody — two sources for one state, deliberately, and documented at both.
  *
  * A terminal that is only UNDERNEATH others stays on the canvas: the opaque node above it hides it
  * natively, which is the case this whole design leans on. The cost is that a stacked terminal is
