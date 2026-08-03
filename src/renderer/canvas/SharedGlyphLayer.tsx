@@ -61,8 +61,10 @@ interface SharedGlyphState {
   /** Resolved renderer mode is 'shared'. Set by App.tsx (T6); false for every user today, which
    *  is what keeps this whole module inert. */
   enabled: boolean
-  /** Bumped whenever every registered grid must be re-registered: the context was rebuilt (font
-   *  change) or the session failed. TerminalNode subscribes to exactly this number. */
+  /** Bumped whenever every registered grid must let go and re-evaluate: the context was rebuilt
+   *  (font change), the mode was turned off, or the session failed. TerminalNode subscribes to
+   *  exactly this number — the context it then asks for answers what to do next (a new engine, or
+   *  null = back to the DOM renderer). */
   generation: number
   /** Session-level "the shared renderer is off for good" — set by the rAF catch or a lost
    *  context. Deliberately NOT auto-cleared: a GPU that just threw at us gets one chance per app
@@ -80,24 +82,27 @@ export const useSharedGlyph = create<SharedGlyphState>((set, get) => ({
   setEnabled(on) {
     if (get().enabled === on) return
     set({ enabled: on })
+    if (on) return
     // Turning the mode OFF hands the GPU context back. The whole point of the shared renderer is
     // that contexts are scarce (see terminal/webgl-budget.ts), so leaving one — plus a 16 MB
     // atlas — parked for a mode the user just left would be the exact cost this feature exists to
     // remove. Turning it ON creates nothing: the first terminal that asks does that, lazily.
-    if (!on) disposeContext()
+    disposeContext()
+    // ...and the disposal MUST be announced. Every registered grid is now holding an inert handle;
+    // without the bump a terminal that subscribes to `generation` alone would keep writing rows
+    // into nothing and stay blank until it remounted. Same one-signal contract the failure path
+    // honors — never dispose the context without bumping.
+    set({ generation: get().generation + 1 })
   },
   bumpGeneration() {
     set({ generation: get().generation + 1 })
   },
   markFailed() {
-    // Idempotent: a lost context typically arrives as BOTH a throwing frame and a
-    // `webglcontextlost` event, and a second state write would ask every terminal to re-register
-    // into a context that is already gone.
-    if (get().failed) return
-    // The generation rides along so a node that only subscribes to `generation` still wakes up —
-    // it will ask for the context, get null, and stay on the DOM renderer. One signal, one
-    // subscription.
-    set({ failed: true, generation: get().generation + 1 })
+    // Delegates so that "the session failed" has exactly ONE implementation: warn once, drop the
+    // context, then flip the flag. A store action that only flipped the flag would be a reachable
+    // half-failure — the flag set, the GPU context still held — and it is the shape a caller
+    // naturally reaches for.
+    failSharedGlyph('marked failed')
   }
 }))
 
@@ -124,19 +129,35 @@ let zOrder = new Map<string, number>()
 let zOrderSig = ''
 const zListeners = new Set<() => void>()
 
-/** The paint order of the TERMINAL nodes, as one string. Canvas recomputes it per nodes change
- *  and only pushes when it differs — a string compare instead of an array diff, the same trick
- *  the data-signature effect next to it uses.
+/**
+ * The paint order of the TERMINAL nodes, as one string. Canvas recomputes it per nodes change and
+ * only pushes when it differs — a string compare instead of an array diff, the same trick the
+ * data-signature effect next to it uses.
  *
- *  Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
- *  churn the signature on every sticky edit. */
-export function nodeOrderSig(nodes: readonly { id: string; type?: string }[]): string {
-  let sig = ''
+ * Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
+ * churn the signature on every sticky edit.
+ *
+ * **The rule is array order, with SELECTED nodes elevated above unselected ones** (stable within
+ * each group) — not array order alone. React Flow's `elevateNodesOnSelect` defaults to true, so
+ * selecting a node lifts its DOM z-index to 1000 regardless of where it sits in the array. With a
+ * grid z that only followed the array, clicking a terminal that overlaps another would raise its
+ * chrome while its TEXT stayed underneath the other grid's opaque plate — the node visibly on top
+ * with a hole punched through its glyphs. Mirroring the elevation here is what keeps the canvas and
+ * the DOM telling the same story.
+ */
+export function nodeOrderSig(
+  nodes: readonly { id: string; type?: string; selected?: boolean }[]
+): string {
+  let base = ''
+  let elevated = ''
   for (const n of nodes) {
     if (n.type !== 'terminal') continue
-    sig = sig === '' ? n.id : sig + ORDER_SEP + n.id
+    if (n.selected) elevated = elevated === '' ? n.id : elevated + ORDER_SEP + n.id
+    else base = base === '' ? n.id : base + ORDER_SEP + n.id
   }
-  return sig
+  if (base === '') return elevated
+  if (elevated === '') return base
+  return base + ORDER_SEP + elevated
 }
 
 export function idsFromOrderSig(sig: string): string[] {
@@ -187,6 +208,12 @@ interface LiveContext extends SharedGlyphContext {
   gl: GlyphGL
   /** Font settings this context was rasterized for — a change tears it down. */
   fontKey: string
+  /** Set by `disposeContext`, read by the rAF driver, which holds this object across a frame.
+   *  Teardown is SYNCHRONOUS (a settings change, the mode being switched off) and can land
+   *  between a scheduled tick and its callback — a frame submitted after `gl.dispose()` would
+   *  throw against deleted GPU objects, and the driver's catch would read that as a GPU failure
+   *  and burn the whole session. A font-size change must not be able to disable the renderer. */
+  disposed: boolean
 }
 
 let live: LiveContext | null = null
@@ -275,7 +302,7 @@ function createContext(): LiveContext | null {
   const atlas = new GlyphAtlas(raster, ATLAS_PAGE_PX)
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
-  return { engine, atlas, canvas, gl, fontKey: fontKeyOf(fontFamily, fontSize) }
+  return { engine, atlas, canvas, gl, fontKey: fontKeyOf(fontFamily, fontSize), disposed: false }
 }
 
 /** Tear the context down and free the GPU objects. Every registered grid is left holding an
@@ -286,6 +313,9 @@ function disposeContext(): void {
   live = null
   creationAttempted = false
   if (!ctx) return
+  // BEFORE any GL call: a rAF tick already scheduled with this context must skip its frame rather
+  // than submit against deleted objects (see `LiveContext.disposed`).
+  ctx.disposed = true
   try {
     ctx.engine.disposeAll()
     ctx.gl.dispose()
@@ -301,14 +331,20 @@ function disposeContext(): void {
   ctx.canvas.remove()
 }
 
-/** Warn, drop the context, and put the session on the DOM renderer. The ONE failure funnel. */
+/** Warn, drop the context, and put the session on the DOM renderer. The ONE failure funnel — the
+ *  store's `markFailed()` delegates here, and this writes the flag DIRECTLY (calling back into the
+ *  action would recurse). */
 export function failSharedGlyph(reason: string, err?: unknown): void {
   // Checked before the warn so a lost context that arrives twice (throwing frame + event) logs
-  // once.
-  if (useSharedGlyph.getState().failed) return
+  // once, and so a second failure never re-notifies the registrants.
+  const store = useSharedGlyph.getState()
+  if (store.failed) return
   console.warn(`[glyphgrid] shared renderer disabled for this session (${reason})`, err)
   disposeContext()
-  useSharedGlyph.getState().markFailed()
+  // The generation rides along so a node that only subscribes to `generation` still wakes up —
+  // it will ask for the context, get null, and stay on the DOM renderer. One signal, one
+  // subscription.
+  useSharedGlyph.setState({ failed: true, generation: useSharedGlyph.getState().generation + 1 })
 }
 
 /** Rebuild on a terminal font change: the atlas is rasterized for one font, so a new one means a
@@ -407,6 +443,11 @@ export function SharedGlyphLayer(): JSX.Element {
 
     let raf = 0
     const tick = (): void => {
+      // The context can be torn down synchronously between the schedule and this callback (font
+      // change, mode switched off). Skipping the frame — and NOT rescheduling — leaves the loop to
+      // the effect run that the accompanying generation bump triggers; the cleanup below cancels
+      // this handle either way.
+      if (ctx.disposed) return
       try {
         ctx.engine.frame()
       } catch (err) {

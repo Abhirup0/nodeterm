@@ -4967,9 +4967,12 @@ export function Canvas() {
   // false for every user today, the signature memo short-circuits on it, and setSharedGlyphCamera
   // is a field write plus a null check when no engine exists.
   const glyphLayerActive = useSharedGlyphActive()
-  // The terminal nodes' paint order IS the grids' z order (array order = React Flow's own DOM
-  // paint order). One string so the effect below fires on a real reorder only — a drag, an edit
-  // or a selection rebuilds `nodes` many times per second with the order untouched.
+  // The terminal nodes' paint order IS the grids' z order — array order, with SELECTED nodes
+  // elevated above unselected ones, mirroring React Flow's own `elevateNodesOnSelect` (on by
+  // default). `nodeOrderSig` owns that rule; its comment explains why a grid z that ignored
+  // selection punches a hole through the selected node's text. One string so the effect below
+  // fires on a real order change only — a drag or an edit rebuilds `nodes` many times per second
+  // with the order untouched.
   const glyphOrderSig = useMemo(
     () => (glyphLayerActive ? nodeOrderSig(nodes) : ''),
     [glyphLayerActive, nodes]

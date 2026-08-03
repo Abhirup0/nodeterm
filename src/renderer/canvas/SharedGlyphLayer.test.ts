@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  failSharedGlyph,
   getSharedGlyphContext,
   idsFromOrderSig,
   nodeOrderSig,
@@ -56,6 +57,34 @@ describe('nodeOrderSig', () => {
     expect(a).not.toBe(b)
   })
 
+  it('elevates a SELECTED terminal above the unselected ones, wherever it sits in the array', () => {
+    // React Flow's elevateNodesOnSelect (default on) lifts the selected node's DOM to z 1000; a
+    // grid z that followed the array alone would leave its text under the other grid's plate.
+    const sig = nodeOrderSig([
+      { id: 'a', type: 'terminal' },
+      { id: 'b', type: 'terminal', selected: true },
+      { id: 'c', type: 'terminal' }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'c', 'b'])
+  })
+
+  it('keeps selected nodes in their own relative order (a multi-select is stable)', () => {
+    const sig = nodeOrderSig([
+      { id: 'a', type: 'terminal', selected: true },
+      { id: 'b', type: 'terminal' },
+      { id: 'c', type: 'terminal', selected: true }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('an all-selected canvas keeps plain array order', () => {
+    const sig = nodeOrderSig([
+      { id: 'a', type: 'terminal', selected: true },
+      { id: 'b', type: 'terminal', selected: true }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'b'])
+  })
+
   it('an untyped node is not a terminal (React Flow defaults type to "default")', () => {
     expect(nodeOrderSig([{ id: 'a' }])).toBe('')
   })
@@ -68,6 +97,15 @@ describe('nodeOrderSig', () => {
 })
 
 describe('useSharedGlyph store', () => {
+  // The failure funnel warns by design; silence it here and assert the once-ness explicitly.
+  let warn: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
   it('starts off, ungenerated and unfailed — the default-mode user must see nothing', () => {
     expect(useSharedGlyph.getState()).toMatchObject({ enabled: false, generation: 0, failed: false })
     expect(sharedGlyphActive()).toBe(false)
@@ -85,9 +123,31 @@ describe('useSharedGlyph store', () => {
     expect(useSharedGlyph.getState().generation).toBe(1)
   })
 
-  it('markFailed is idempotent — a second failure must not re-notify', () => {
+  it('markFailed is idempotent — a second failure must not re-notify or re-log', () => {
     useSharedGlyph.getState().markFailed()
     useSharedGlyph.getState().markFailed()
+    expect(useSharedGlyph.getState().generation).toBe(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('markFailed goes through the SAME funnel as failSharedGlyph (no half-failed state)', () => {
+    // The store action must not be a shortcut that flips the flag while the GPU context stays
+    // held: it delegates, so the two entries are interchangeable and the second one is a no-op.
+    failSharedGlyph('test')
+    useSharedGlyph.getState().markFailed()
+    expect(useSharedGlyph.getState()).toMatchObject({ failed: true, generation: 1 })
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('disabling the mode bumps the generation — a disposed context must be announced', () => {
+    // setEnabled(false) drops the context; every registered grid is now holding an inert handle
+    // and would stay blank until it remounted without this signal.
+    useSharedGlyph.getState().setEnabled(true)
+    expect(useSharedGlyph.getState().generation).toBe(0)
+    useSharedGlyph.getState().setEnabled(false)
+    expect(useSharedGlyph.getState().generation).toBe(1)
+    // Change-gated: a repeated disable disposes nothing, so it announces nothing.
+    useSharedGlyph.getState().setEnabled(false)
     expect(useSharedGlyph.getState().generation).toBe(1)
   })
 
@@ -167,6 +227,14 @@ describe('setNodeZOrder', () => {
 })
 
 describe('graceful degrade without a GPU', () => {
+  let warn: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
   it('getSharedGlyphContext returns null while the shared mode is off — no context is acquired', () => {
     expect(getSharedGlyphContext()).toBeNull()
   })
