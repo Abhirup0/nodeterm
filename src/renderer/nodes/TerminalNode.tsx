@@ -54,6 +54,23 @@ import {
   type SessionLife
 } from '../terminal/terminal-config'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
+import type { GridHandle } from '../glyphgrid/engine'
+import {
+  getSharedGlyphContext,
+  nodeZFor,
+  sharedGlyphActive,
+  subscribeNodeZOrder,
+  useSharedGlyph
+} from '../canvas/SharedGlyphLayer'
+import {
+  bodyWorldRect,
+  packThemeBg,
+  platePadPx,
+  validCellSize,
+  type Insets,
+  type Vec2
+} from '../lib/glyphGridNode'
 import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
 import {
   guardConcurrentRestart,
@@ -260,6 +277,98 @@ function resizeTerm(term: Terminal, cols: number, rows: number): void {
   term.resize(cols, rows)
 }
 
+// ---------------------------------------------------------------------------------------------
+// glyphgrid (experimental shared renderer) — the DOM reads that feed `lib/glyphGridNode`'s pure
+// helpers. Nothing below runs for the default renderer modes: every caller sits behind
+// `sharedGlyphActive()`.
+// ---------------------------------------------------------------------------------------------
+
+/** One `[glyphgrid]` line per distinct (node, reason). A generation bump re-runs the setup, and a
+ *  machine that cannot register a grid cannot register it the second time either — the warning is
+ *  a diagnostic, not a heartbeat. Never `failSharedGlyph`: one node's mismatch must not take the
+ *  shared renderer away from every other terminal on the canvas. */
+const glyphWarned = new Set<string>()
+function glyphWarn(key: string, message: string): void {
+  if (glyphWarned.has(key)) return
+  glyphWarned.add(key)
+  console.warn(`[glyphgrid] ${message}`)
+}
+
+/**
+ * How far the terminal SCREEN sits inside its React Flow node, in layout px.
+ *
+ * Walks the `offsetParent` chain — each `offsetLeft/Top` is relative to the next positioned
+ * ancestor, so the running sum is the offset within the node — and stops at React Flow's own node
+ * element. LAYOUT coordinates deliberately: the canvas transform scales rendered pixels but never
+ * changes an offset, so this measurement is identical at every zoom, while a
+ * `getBoundingClientRect` would have to be un-zoomed and un-scrolled by hand.
+ *
+ * `.xterm-screen` is measured when present, so the host's asymmetric padding
+ * (`.term-node__xterm` is `4px 2px 2px 6px`) is already inside the chain and the caller never adds
+ * it. Null — "leave the grid where it is" rather than "move it somewhere guessed" — when the chain
+ * never reaches a `.react-flow__node` (a parked, detached element).
+ */
+function screenOffsetInNode(term: Terminal): Vec2 | null {
+  const el = (term.element?.querySelector('.xterm-screen') as HTMLElement | null) ?? term.element
+  if (!el) return null
+  let x = 0
+  let y = 0
+  let cur: HTMLElement | null = el
+  // Bounded: a layout tree cannot cycle, but an unexpected DOM shape must not spin inside a
+  // ResizeObserver tick. The real chain is screen → .xterm → host → body → node (4 hops).
+  for (let depth = 0; cur && depth < 12; depth++) {
+    if (cur.classList.contains('react-flow__node')) return { x, y }
+    x += cur.offsetLeft
+    y += cur.offsetTop
+    cur = cur.offsetParent as HTMLElement | null
+  }
+  return null
+}
+
+/** The terminal host's CSS padding, which the plate covers. Unparseable sides come back NaN and
+ *  `platePadPx` collapses them to 0 — the engine never sees one. */
+function hostPadding(el: HTMLElement): Insets {
+  const cs = getComputedStyle(el)
+  return {
+    top: parseFloat(cs.paddingTop),
+    right: parseFloat(cs.paddingRight),
+    bottom: parseFloat(cs.paddingBottom),
+    left: parseFloat(cs.paddingLeft)
+  }
+}
+
+/**
+ * xterm's CSS cell size, read off whatever renderer the render service currently holds.
+ *
+ * This — not `_charSizeService` — is the number a grid must be registered with: `css.cell` is
+ * derived from the DEVICE metrics (char size × dpr, ceil'd, then `letterSpacing`/`lineHeight`
+ * applied) and equals the raw char size ONLY at `lineHeight: 1, letterSpacing: 0`. It is also the
+ * value xterm maps mouse coordinates through, so registering anything else would drift selection
+ * away from the glyphs the shared canvas paints.
+ *
+ * Private API, fully guarded: null simply means "don't register", i.e. this terminal keeps the
+ * renderer it already has.
+ */
+function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
+  try {
+    const cell = (
+      term as unknown as {
+        _core?: {
+          _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } }
+        }
+      }
+    )._core?._renderService?.dimensions?.css?.cell
+    if (!cell) return null
+    return validCellSize(cell.width, cell.height)
+  } catch {
+    return null
+  }
+}
+
+/** Sub-pixel slack when comparing the cell size we registered with against the addon's own. Below
+ *  this a difference cannot move a glyph by a visible amount even across a 200-column row. */
+const CELL_SIZE_EPS = 0.01
+
 /**
  * Co-attach UI state per node — kept OUTSIDE React on purpose.
  *
@@ -334,7 +443,17 @@ function setCo(key: string, patch: Partial<CoState>): void {
  * toggles a markdown view of the terminal's output. Files dropped from Finder are pasted
  * as their (escaped) paths, like a native terminal — so Claude can read dropped images.
  */
-export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasNode>) {
+export function TerminalNode({
+  id,
+  data,
+  selected,
+  parentId,
+  // React Flow's own absolute position (a group parent's chain already resolved), updated per
+  // frame during a drag. Read only by the glyphgrid origin sync below; for every other renderer
+  // mode these two are destructured and never looked at again.
+  positionAbsoluteX,
+  positionAbsoluteY
+}: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes, getNode } = useReactFlow()
   // This node's core api (a context read — stable for the session's lifetime, so using it
   // inside the once-mounted lifecycle effect is safe and never re-runs that effect). Core-bound
@@ -411,6 +530,19 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // spawn fresh) from a plain unmount (nonce unchanged → park for quick re-adoption).
   const respawnNonceRef = useRef(data.respawnNonce)
   respawnNonceRef.current = data.respawnNonce
+  // --- glyphgrid (experimental shared renderer) ---
+  // This node's registered grid, published by the lifecycle effect so the position effect can push
+  // an origin without re-running (and therefore respawning) the terminal. Null for every terminal
+  // in the default renderer modes, which is what makes the effects below a single null check.
+  const glyphGridRef = useRef<GridHandle | null>(null)
+  const glyphBodyOffsetRef = useRef<Vec2>({ x: 0, y: 0 })
+  // Mutated (never reassigned) so the lifecycle effect's closures read the CURRENT position without
+  // re-running; a drag rewrites these two numbers per frame.
+  const nodePosRef = useRef<Vec2>({ x: positionAbsoluteX, y: positionAbsoluteY })
+  nodePosRef.current.x = positionAbsoluteX
+  nodePosRef.current.y = positionAbsoluteY
+  // Re-evaluate this node's participation in the shared canvas (set by the lifecycle effect).
+  const glyphSyncRef = useRef<((on: boolean) => void) | null>(null)
   // Live mirrors for the once-mounted onTitleChange listener (its `[]`-deps closure can't see
   // fresh props/state): whether the title still auto-tracks the session, whether the rename box
   // is open (don't clobber mid-edit), and the current title (skip no-op updates).
@@ -423,6 +555,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const skipBlurRef = useRef(false)
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
+  // "This node's terminal is not on screen right now": collapsed hides the body outright
+  // (`display: none`), the ⌘M view covers it with an opaque panel. A glyph grid left registered
+  // through either would keep painting its last frame on the shared canvas at the node's world
+  // rect, with nothing of ours in front of it. Mirrored into a ref for the lifecycle effect's
+  // closures (which cannot see fresh props).
+  const glyphHiddenRef = useRef(collapsed || mdMode)
+  glyphHiddenRef.current = collapsed || mdMode
   // Derive the node's agent once, through the shared helper — the canvas menu decides whether to
   // offer this node's in-place restart from the SAME derivation, and a second copy drifting from
   // this one yields a row whose closure refuses every click.
@@ -637,6 +776,14 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // "lost context" placeholder). The callbacks stay dumb and idempotent.
     let webgl: WebglAddon | null = null
     let webglHandle: WebglClientHandle | null = null
+    // --- glyphgrid (experimental shared renderer) -----------------------------------------
+    // Live only while this terminal paints into the shared canvas instead of its own renderer.
+    // All four stay null for the default modes: `setupGlyph()` returns on its first gate without
+    // touching a store, a seam or the DOM.
+    let glyphGrid: GridHandle | null = null
+    let glyphAttach: GlyphGridAttachment | null = null
+    let glyphZUnsub: (() => void) | null = null
+    let glyphGenUnsub: (() => void) | null = null
     // One guaranteed full-viewport repaint, deferred a frame. Heals a class of silently LOST
     // full refreshes: xterm's own "refresh everything" (renderer swap via setRenderer, the
     // deferred unpause refresh, the webgl addon's context-restore redraw) can be swallowed when
@@ -694,14 +841,31 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
      *  manual fix users discovered by hand, automated but capped so sustained GPU pressure
      *  can't respawn-loop a node. */
     let swapHealRespawned = false
+    /** The last-resort heal: refresh this node (fresh xterm + reattach; tmux repaints). Shared by
+     *  the webgl swap-heal and the glyphgrid detach path — one latch, so a node under sustained
+     *  renderer trouble still refreshes at most once per mount. Silent unless a reason is given
+     *  (the swap-heal warns with more context of its own). */
+    const escalateRespawn = (why?: string): void => {
+      if (swapHealRespawned) return
+      swapHealRespawned = true
+      if (why) console.warn(`[nodeterm] ${why} — refreshing the node`)
+      updateNodeData(id, (n) => ({
+        respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+      }))
+    }
     /**
      * Invariant check for every moment we believe NO webgl addon is active: the screen must
      * hold ZERO canvases. A leftover one is the black-terminal signature above. Sweep strays,
      * restore a DOM renderer, repaint; refresh the node as a last resort. The console.warn is
      * deliberate — it is the field-diagnosable trace of which strand actually fired.
+     *
+     * SKIPPED while a glyphgrid attachment is live. This heal's cure is `setRenderer`, which
+     * silently DISPOSES whatever renderer it replaces — here that would be the glyph addon, and
+     * the node would go blank while its grid stayed registered and inert. A glyph-attached
+     * terminal also owns no canvas inside `.xterm-screen`, so there is nothing here to heal.
      */
     const verifyCleanDomState = (context: string): void => {
-      if (disposed || webgl) return
+      if (disposed || webgl || glyphAttach) return
       const strays = term.element
         ? Array.from(term.element.querySelectorAll('.xterm-screen canvas'))
         : []
@@ -722,11 +886,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         fullRepaint()
         return
       }
-      if (swapHealRespawned) return
-      swapHealRespawned = true
-      updateNodeData(id, (n) => ({
-        respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
-      }))
+      escalateRespawn()
     }
     // Has this terminal EVER gone through a renderer swap? Every stuck-blank strand needs one —
     // a node that has only ever run the DOM renderer is covered by xterm's own pause/unpause
@@ -874,6 +1034,162 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       }
     }
     applyFitRef.current = applyFit
+
+    // --- glyphgrid (experimental shared renderer) -------------------------------------------
+    //
+    // Lives INSIDE the lifecycle effect, not in an effect of its own, for one reason: React runs
+    // cleanups in declaration order, so a later effect's cleanup would fire AFTER this one has
+    // already disposed (or parked) the terminal — and `attachment.dispose()` would then try to put
+    // a dead xterm back on its own renderer, report the failure it manufactured, and escalate a
+    // respawn for it. Teardown ordering is only correct while the grid's lifetime is nested inside
+    // the terminal's.
+
+    /** Push the grid to where the terminal screen actually is, re-measuring the screen's offset
+     *  inside the node. One null check when this terminal holds no grid. */
+    const syncGridOrigin = (): void => {
+      const grid = glyphGrid
+      if (!grid) return
+      const offset = screenOffsetInNode(term)
+      if (!offset) return
+      glyphBodyOffsetRef.current = offset
+      const origin = bodyWorldRect(nodePosRef.current, offset)
+      grid.setOrigin(origin.x, origin.y)
+    }
+
+    /**
+     * Hand the shared canvas back. Order is fixed: the ATTACHMENT first — it is the only thing
+     * that can still write into the grid, and disposing it is what puts xterm back on its own DOM
+     * renderer — then the grid itself.
+     *
+     * Returns whether xterm is back on a working renderer. FALSE means it is holding a disposed
+     * one and would paint nothing at all, which no caller may ignore: mid-life callers escalate a
+     * respawn, and the unmount path refuses to PARK the terminal (a parked-blank xterm would be
+     * adopted broken five minutes later).
+     */
+    const teardownGlyph = (): boolean => {
+      glyphZUnsub?.()
+      glyphZUnsub = null
+      const attach = glyphAttach
+      const grid = glyphGrid
+      glyphAttach = null
+      glyphGrid = null
+      if (glyphGridRef.current === grid) glyphGridRef.current = null
+      if (!attach && !grid) return true
+      term.element?.classList.remove('glyphgrid-mode')
+      const restored = attach ? attach.dispose() : true
+      grid?.dispose()
+      return restored
+    }
+
+    /**
+     * Register this terminal's grid on the shared canvas and point xterm's render service at it.
+     *
+     * EVERY failure path is the same one: warn once and leave the terminal on the renderer it
+     * already has. Never `failSharedGlyph()` — that is the session-wide kill switch, and one
+     * node's unrecognised internals must not take the shared renderer away from every other
+     * terminal on the canvas (only the layer's own rAF/context-loss may do that).
+     *
+     * `forcedCell` is the one-shot cell-size correction; see the verification at the end.
+     */
+    const setupGlyph = (forcedCell?: { cellW: number; cellH: number }): void => {
+      if (disposed || glyphAttach || glyphGrid) return
+      if (glyphHiddenRef.current) return
+      // The gate, re-evaluated on every call (mount, generation bump, expand): mode on, session not
+      // failed, and a context that actually exists — no WebGL2/OffscreenCanvas returns null here
+      // and this terminal simply stays where it is.
+      if (!sharedGlyphActive()) return
+      const ctx = getSharedGlyphContext()
+      if (!ctx) return
+      const host = term.element
+      const cell = forcedCell ?? cssCellOf(term)
+      const offset = host ? screenOffsetInNode(term) : null
+      if (!host || !cell || !offset) {
+        glyphWarn(
+          `${id}:geometry`,
+          `no grid for node ${id}: ${!host ? 'no xterm element' : !cell ? 'cell size unavailable' : 'terminal is not laid out inside a node'}`
+        )
+        return
+      }
+      glyphBodyOffsetRef.current = offset
+      const origin = bodyWorldRect(nodePosRef.current, offset)
+      let handle: GridHandle
+      try {
+        handle = ctx.engine.register({
+          // The SESSION-scoped key, not the bare node id: a relay tab adopts the host's project
+          // keeping node ids, and `register` throws on a duplicate. `nodeZFor` still takes the bare
+          // id — that is the canvas's own paint order, which is per-project, not per-session.
+          id: termKey,
+          cols: term.cols,
+          rows: term.rows,
+          cellW: cell.cellW,
+          cellH: cell.cellH,
+          originX: origin.x,
+          originY: origin.y,
+          z: nodeZFor(id),
+          // The theme background this xterm was built with — the colour the plate clears to, so a
+          // grid's own background matches the terminal it belongs to.
+          bgColor: packThemeBg(term.options.theme?.background),
+          // The host's CSS padding (`.term-node__xterm`, `4px 2px 2px 6px`) reduced to the one
+          // scalar the engine takes; see `platePadPx` for why it is the MINIMUM side.
+          padPx: platePadPx(hostPadding(container))
+        })
+      } catch (err) {
+        glyphWarn(`${id}:register`, `could not register a grid for node ${id}: ${String(err)}`)
+        return
+      }
+      const attached = attachGlyphGrid(term, handle, ctx.atlas)
+      if (!attached) {
+        // Nothing was touched (the attach contract) — drop the grid we just made and stay put.
+        handle.dispose()
+        glyphWarn(`${id}:attach`, `node ${id} stays on the DOM renderer: xterm internals not recognised`)
+        return
+      }
+      glyphGrid = handle
+      glyphAttach = attached
+      glyphGridRef.current = handle
+      host.classList.add('glyphgrid-mode')
+      // Paint order. The engine change-gates `setZ`, so a reorder that does not move this node
+      // costs one comparison.
+      glyphZUnsub = subscribeNodeZOrder(() => handle.setZ(nodeZFor(id)))
+
+      // Cell-size verification, and the reason `forcedCell` exists. A grid's cell size is FIXED at
+      // registration (the shared context is torn down and everyone re-registers when it changes),
+      // but the authoritative number only exists once the addon is installed: `dimensions.css.cell`
+      // is now the ADDON's, and xterm maps mouse coordinates through it. Registration therefore
+      // uses the value from the renderer xterm was on — the DOM renderer, which runs the identical
+      // device-metric chain — and corrects itself here if the two ever disagree (an xterm bump
+      // changing that chain is exactly the drift this catches). Once, and never from a corrected
+      // pass, so a persistent disagreement cannot loop.
+      if (forcedCell) return
+      const actual = cssCellOf(term)
+      if (!actual) return
+      if (
+        Math.abs(actual.cellW - cell.cellW) <= CELL_SIZE_EPS &&
+        Math.abs(actual.cellH - cell.cellH) <= CELL_SIZE_EPS
+      )
+        return
+      glyphWarn(
+        `${id}:cell`,
+        `re-registering node ${id}'s grid at the addon's cell size ` +
+          `(${actual.cellW}×${actual.cellH}, registered ${cell.cellW}×${cell.cellH})`
+      )
+      if (!teardownGlyph()) {
+        escalateRespawn('glyphgrid could not restore the DOM renderer')
+        return
+      }
+      setupGlyph(actual)
+    }
+
+    /** Re-evaluate participation: `on` is false while the node has no terminal on screen
+     *  (collapsed, or the ⌘M view). Also the generation-bump path's re-entry point. */
+    const syncGlyph = (on: boolean): void => {
+      if (on) {
+        setupGlyph()
+        return
+      }
+      if (!teardownGlyph()) escalateRespawn('glyphgrid could not restore the DOM renderer')
+    }
+    glyphSyncRef.current = syncGlyph
 
     if (parked) {
       // Reattach the parked xterm's DOM element: the PTY never detached, so the screen is
@@ -1432,7 +1748,13 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const observer = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(applyFit, 80)
+      resizeTimer = setTimeout(() => {
+        applyFit()
+        // The node's chrome can change height without the node moving (tag chips appear, the find
+        // bar opens), which slides the terminal screen inside it. Re-measured on the same settled
+        // tick as the fit — a single null check when this terminal holds no grid.
+        syncGridOrigin()
+      }, 80)
     })
     observer.observe(container)
 
@@ -1445,7 +1767,39 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // view. The observer's initial callback (queued shortly after `observe()`) is what reports
     // visibility on mount/adopt — this replaces the old unconditional `loadWebgl()` calls in both
     // the parked and fresh paths above; the DOM renderer covers the gap until a grant lands.
-    webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+    //
+    // …unless this terminal paints into the SHARED canvas. Then xterm never draws its pixels, so
+    // there is no per-terminal context to budget, nothing to acquire on approach and no DOM-strand
+    // heal to run — the whole webgl client is skipped rather than registered and left idle.
+    //
+    // The decision is made ONCE per mount, on the mode and the context — NOT on whether the grid
+    // registration then succeeded. A node that is collapsed right now registers nothing yet but
+    // will on expand, and a terminal cannot be allowed to end up holding both renderers: the
+    // glyph addon's `setRenderer` silently disposes the webgl one, leaving the budget coordinator
+    // accounting for a context nobody paints with and `releaseWebgl` sweeping canvases out from
+    // under a live attachment. Failing the registration (unrecognised internals) leaves this
+    // terminal on xterm's own DOM renderer — correct, just unbudgeted, and warned once.
+    const glyphMode = sharedGlyphActive() && getSharedGlyphContext() !== null
+    if (!glyphMode) {
+      webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+    } else {
+      setupGlyph()
+      // Only the ACTIVE path subscribes, and only once: a session that never turned the shared
+      // renderer on holds no store subscription at all. `generation` is bumped for every context
+      // disposal — font change, mode off, session failure — and re-running the setup is how each
+      // of those resolves: a new context re-registers, a null one leaves the terminal on the DOM
+      // renderer (unbudgeted, which is xterm's own default and always correct).
+      let lastGen = useSharedGlyph.getState().generation
+      glyphGenUnsub = useSharedGlyph.subscribe((s) => {
+        if (disposed || s.generation === lastGen) return
+        lastGen = s.generation
+        if (!teardownGlyph()) {
+          escalateRespawn('glyphgrid could not restore the DOM renderer')
+          return
+        }
+        setupGlyph()
+      })
+    }
     let wasVisible = false
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
@@ -1504,6 +1858,16 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       // keep releasing it as it always has (contexts are capped ~16, and a parked terminal is
       // off-screen); a remount re-registers a fresh handle and the observer re-reports visibility.
       webglHandle?.dispose()
+      // Give the shared canvas back on the same terms: a parked terminal is off-canvas, so there is
+      // nothing for its grid to draw, and the adopting mount re-registers. Ordering inside is the
+      // attachment's contract (xterm back on its own renderer, THEN the grid). A restore that
+      // FAILED must not be parked — that xterm paints nothing and would be adopted broken — so it
+      // joins the no-park set the decision below reads. `glyphSyncRef` is cleared only if it is
+      // still ours: a respawn's new effect has already published its own.
+      glyphGenUnsub?.()
+      glyphGenUnsub = null
+      if (glyphSyncRef.current === syncGlyph) glyphSyncRef.current = null
+      if (!teardownGlyph()) noParkIds.add(termKey)
       // A respawn (worktree move: the ref was bumped before this cleanup ran) needs a FRESH
       // session in the new cwd — never park it. A plain unmount with a live session parks:
       // the xterm (element detached) and its PTY stay alive so a remount re-adopts them. A session
@@ -1550,6 +1914,32 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
+
+  // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
+  // dragged; `setOrigin` is change-gated inside the engine, and a drag is exactly the gesture the
+  // shared camera already handles at that rate, so there is deliberately no extra throttling here.
+  // Declared AFTER the lifecycle effect so the mount order is register-then-push (that first push
+  // is a no-op — the grid was registered at this same origin). For every terminal in the default
+  // renderer modes this whole effect is one null check per position change.
+  useEffect(() => {
+    const grid = glyphGridRef.current
+    if (!grid) return
+    const origin = bodyWorldRect(
+      { x: positionAbsoluteX, y: positionAbsoluteY },
+      glyphBodyOffsetRef.current
+    )
+    grid.setOrigin(origin.x, origin.y)
+  }, [positionAbsoluteX, positionAbsoluteY])
+
+  // The two states in which this node's terminal is NOT on screen even though it is mounted:
+  // collapsed (the body is `display: none`) and the ⌘M markdown/chat view (an opaque panel over
+  // the body). Both drop the grid — and re-register on the way back — for the same reason a parked
+  // terminal drops its WebGL context: there is nothing to draw, and a grid left registered keeps
+  // painting its last frame at the node's world rect with nothing of ours in front of it. No-op
+  // unless this node participates in the shared canvas.
+  useEffect(() => {
+    glyphSyncRef.current?.(!collapsed && !mdMode)
+  }, [collapsed, mdMode])
 
   // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
   // reaches the terminals already on the canvas instead of only the next fresh one.

@@ -1613,6 +1613,25 @@ body,
   height: 100%;
 }
 
+/* Shared glyph renderer (experimental, `glyphgrid`): this terminal's text is painted by the one
+   GPU canvas in the React Flow pane, so xterm's own text layers must not paint on top of it. The
+   class is added to the `.xterm` element only while a glyph grid is actually attached, and removed
+   the moment it detaches — no default renderer mode ever matches this rule.
+
+   `visibility: hidden`, NOT `display: none`: these elements still have to be LAID OUT. xterm
+   measures selection geometry and the scroll area off them, and taking them out of the layout
+   would change the very cell metrics the grid was registered with. Hidden here:
+     - `.xterm-rows` — the DOM renderer's glyph spans, which carry the cursor span with them;
+     - `.xterm-selection` — its selection rectangles.
+   Both are drawn by the glyph feed instead. NOT hidden, deliberately: `.xterm-helpers` (the helper
+   textarea and the composition view — hiding those breaks IME composition, which renders in place
+   while the user types), `.xterm-accessibility` (the screen-reader tree) and
+   `.xterm-decoration-container` (decorations the glyph renderer does not draw). */
+.term-node__xterm .xterm.glyphgrid-mode .xterm-rows,
+.term-node__xterm .xterm.glyphgrid-mode .xterm-selection {
+  visibility: hidden;
+}
+
 /* FitAddon subtracts the viewport's measured scrollbar width from the grid when scrollback > 0
    (FitAddon.ts availableWidth math), leaving a dead ~14px band on the RIGHT of every terminal —
    "the terminal isn't centered" field report. tmux owns the wheel, so the emulator scrollbar is
