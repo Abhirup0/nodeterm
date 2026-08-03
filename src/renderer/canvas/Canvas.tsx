@@ -28,6 +28,14 @@ import {
   disposeParkedTerminal
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
+import {
+  SharedGlyphLayer,
+  idsFromOrderSig,
+  nodeOrderSig,
+  setNodeZOrder,
+  setSharedGlyphCamera,
+  useSharedGlyphActive
+} from './SharedGlyphLayer'
 import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
 import { setWebglGesture, setWebglZoom, WEBGL_GESTURE_SETTLE_MS } from '../terminal/webgl-budget'
@@ -1538,6 +1546,10 @@ export function Canvas() {
       // A project can load already zoomed way out (saved viewport) — seed the WebGL zoom gate
       // before the mount-time IntersectionObserver reports make every node request a context.
       setWebglZoom(project.viewport.zoom)
+      // Seed the shared glyph camera from the same viewport: `onMove` only fires once the user
+      // actually pans, so without this a project that loads scrolled away would draw its grids
+      // against the previous project's camera until the first gesture.
+      setSharedGlyphCamera(project.viewport)
     }
     // Let load-induced changes settle before we start tracking edits as dirty.
     const t = setTimeout(() => {
@@ -4950,6 +4962,22 @@ export function Canvas() {
     }
   }, [nodes, markDirty])
 
+  // ---- glyphgrid (experimental shared renderer) ----
+  // Both feeds below are INERT unless the resolved renderer mode is 'shared': the hook returns
+  // false for every user today, the signature memo short-circuits on it, and setSharedGlyphCamera
+  // is a field write plus a null check when no engine exists.
+  const glyphLayerActive = useSharedGlyphActive()
+  // The terminal nodes' paint order IS the grids' z order (array order = React Flow's own DOM
+  // paint order). One string so the effect below fires on a real reorder only — a drag, an edit
+  // or a selection rebuilds `nodes` many times per second with the order untouched.
+  const glyphOrderSig = useMemo(
+    () => (glyphLayerActive ? nodeOrderSig(nodes) : ''),
+    [glyphLayerActive, nodes]
+  )
+  useEffect(() => {
+    setNodeZOrder(idsFromOrderSig(glyphOrderSig))
+  }, [glyphOrderSig])
+
   const zoomRafRef = useRef<number | null>(null)
   const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onMove = useCallback(
@@ -4977,6 +5005,9 @@ export function Canvas() {
           // Feed the WebGL budget's zoom gate (suspend GPU rendering when zoomed way out).
           // Idempotent + hysteresis inside; per-frame call cost is a float compare.
           setWebglZoom(viewportRef.current.zoom)
+          // Same coalesced frame feeds the shared glyph canvas: its camera and the DOM nodes'
+          // transform must move together, or the text lags the node bodies by a frame.
+          setSharedGlyphCamera(viewportRef.current)
         })
       }
     },
@@ -7458,6 +7489,11 @@ export function Canvas() {
             size={2.5}
             color="#4a4a4a"
           />
+          {/* The shared glyph canvas: a <ReactFlow> child (so it is a sibling of the background
+              and of the node renderer) at z-index 0 — above the dot grid, below every node. Only
+              mounted in the experimental 'shared' renderer mode; nothing about it exists for the
+              default modes. */}
+          {glyphLayerActive && <SharedGlyphLayer />}
           <Controls showInteractive={false} position="bottom-left" onFitView={fitAll}>
             <ControlButton
               className={`canvas-lock-btn${canvasLocked ? ' locked' : ''}`}
