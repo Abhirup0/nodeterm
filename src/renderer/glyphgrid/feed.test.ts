@@ -31,6 +31,8 @@ type Attr = 'default' | ['palette', number] | ['rgb', number]
 
 function makeCell(
   o: {
+    /** Defaults to '' so the existing tests keep exercising the getCode() fallback path. */
+    chars?: string
     code?: number
     width?: number
     bold?: boolean
@@ -47,6 +49,7 @@ function makeCell(
   const is = (a: Attr, mode: string): boolean => (a === 'default' ? mode === 'default' : a[0] === mode)
   const val = (a: Attr): number => (a === 'default' ? 0 : a[1])
   return {
+    getChars: () => o.chars ?? '',
     getCode: () => o.code ?? 0x41,
     getWidth: () => o.width ?? 1,
     isBold: () => (o.bold ? 1 : 0),
@@ -221,6 +224,48 @@ describe('packViewportRow — code point validation', () => {
     expect(readCell(out, 0).glyph).toBe(0)
     expect(readCell(out, 1).glyph).toBe(901)
     expect(atlas.calls).toEqual([[0x21, false, false]])
+  })
+})
+
+describe('packViewportRow — glyph code derivation from getChars()', () => {
+  it('a precomposed char renders its own code point', () => {
+    const { out, atlas } = pack([makeCell({ chars: 'é', code: 0x00e9 })]) // 'é', precomposed
+    expect(atlas.calls).toEqual([[0x00e9, false, false]])
+    expect(readCell(out, 0).glyph).toBe(901)
+  })
+
+  it('a DECOMPOSED combining sequence renders its BASE character, not the bare mark', () => {
+    // xterm keeps the whole sequence in the cell string and getCode() reports its LAST code
+    // point — here U+0301, the naked accent. Rendering that would drop the 'e' off the screen.
+    const { out, atlas } = pack([makeCell({ chars: 'é', code: 0x0301 })])
+    expect(atlas.calls).toEqual([[0x65, false, false]]) // 'e', asked for exactly once
+    expect(readCell(out, 0).glyph).toBe(901)
+  })
+
+  it('an astral char (surrogate pair) resolves to its full code point, not the lead surrogate', () => {
+    const { out, atlas } = pack([makeCell({ chars: '\u{1f44d}' })]) // 👍
+    expect(atlas.calls).toEqual([[0x1f44d, false, false]])
+    expect(readCell(out, 0).glyph).toBe(901)
+  })
+
+  it('an empty chars string falls back to getCode()', () => {
+    const { out, atlas } = pack([makeCell({ chars: '', code: 0x5a })])
+    expect(atlas.calls).toEqual([[0x5a, false, false]])
+    expect(readCell(out, 0).glyph).toBe(901)
+  })
+
+  it('a chars string starting with a LONE SURROGATE is blank and never reaches the atlas', () => {
+    // A string can carry a broken surrogate just as easily as getCode() can return one; the
+    // rasterizer's String.fromCodePoint must see neither.
+    const { out, atlas } = pack([makeCell({ chars: '\ud800', code: 0x41 })])
+    expect(readCell(out, 0).glyph).toBe(0)
+    expect(atlas.calls).toEqual([])
+  })
+
+  it('a chars string of a control char is blank and never reaches the atlas', () => {
+    const { out, atlas } = pack([makeCell({ chars: '\u0007', code: 0x41 })])
+    expect(readCell(out, 0).glyph).toBe(0)
+    expect(atlas.calls).toEqual([])
   })
 })
 

@@ -20,6 +20,10 @@ import {
 /** Narrow view of one buffer cell — the subset of xterm's IBufferCell the feed reads. The shell
  *  passes real cells; tests pass literals. */
 export interface CellView {
+  /** The cell's full string. A combining sequence lives HERE as one string ("e" + U+0301) —
+   *  which is exactly what `getCode()` cannot express, since it reports only the LAST code point
+   *  of a combined string. See `glyphCode`. */
+  getChars(): string
   getCode(): number
   getWidth(): number
   isBold(): number
@@ -78,6 +82,25 @@ function isRenderableCode(code: number): boolean {
     code <= MAX_CODE_POINT &&
     !(code >= 0xd800 && code <= 0xdfff)
   )
+}
+
+/** Which code point this cell should draw.
+ *
+ *  `getCode()` alone is WRONG for a combining sequence: xterm stores the whole sequence in the
+ *  cell's string and `getCode()` returns its LAST code point, so "e" + U+0301 would rasterize as
+ *  the bare accent — the base letter would vanish off the screen. Taking the string's FIRST code
+ *  point instead draws the base character.
+ *
+ *  TRADEOFF, stated plainly: this renders "é" (decomposed) as "e", dropping the mark. That is the
+ *  correct v1 degradation — readable, and never a phantom glyph — but it is a degradation.
+ *  Rendering the full grapheme needs the atlas keyed by STRING rather than by code point (so the
+ *  rasterizer can draw the whole cluster into one slot), which is Phase 2 atlas work.
+ *
+ *  `getCode()` remains the fallback for an empty string: a cell can report no chars (a fresh or
+ *  reset cell), and its code is then the only thing there is to go on. */
+function glyphCode(cell: CellView): number {
+  const chars = cell.getChars()
+  return chars.length > 0 ? (chars.codePointAt(0) as number) : cell.getCode()
 }
 
 /** 0xRRGGBB (xterm's RGB encoding) → an opaque packed lane. */
@@ -188,7 +211,9 @@ export function packViewportRow(
       } else {
         const bold = cell.isBold() !== 0
         const italic = cell.isItalic() !== 0
-        const code = cell.getCode()
+        // The guard runs on the DERIVED code: a string can start with a lone surrogate just as
+        // easily as getCode() can return one, and the rasterizer must never see either.
+        const code = glyphCode(cell)
         if (isRenderableCode(code)) glyph = atlas.glyphFor(code, bold, italic)
         if (bold) flags |= FLAG_BOLD
         if (italic) flags |= FLAG_ITALIC
