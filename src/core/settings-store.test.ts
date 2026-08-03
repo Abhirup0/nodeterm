@@ -95,8 +95,17 @@ describe('SettingsStore nested-default merge', () => {
       expect(load('auto').get().terminalGpuRendering).toBe('auto')
     })
 
+    it("round-trips the experimental 'shared' mode", () => {
+      // The shared-canvas renderer is a real stored choice, not garbage: normalizing it away would
+      // silently put the user back on the per-terminal renderer at every launch.
+      expect(load('shared').get().terminalGpuRendering).toBe('shared')
+    })
+
     it("normalizes garbage to 'auto'", () => {
       expect(load('warp-speed').get().terminalGpuRendering).toBe('auto')
+      expect(load(42).get().terminalGpuRendering).toBe('auto')
+      expect(load(null).get().terminalGpuRendering).toBe('auto')
+      expect(load({ mode: 'shared' }).get().terminalGpuRendering).toBe('auto')
     })
   })
 })

@@ -34,19 +34,38 @@ export const WEBGL_BUDGET_DESKTOP = 24
  */
 export const WEBGL_BUDGET_DESKTOP_MAC = 10
 
+/** How a terminal actually paints: xterm's own DOM renderer, one budgeted WebGL context per
+ *  terminal (the coordinator described above), or the experimental glyphgrid — ONE context for
+ *  the whole canvas, into which every terminal paints. */
+export type TerminalRenderer = 'dom' | 'webgl' | 'shared'
+
 /**
- * Resolve the `terminalGpuRendering` setting to an effective on/off. 'auto' (the default) is on
- * everywhere EXCEPT macOS: the compositor-level failures above have only ever been observed
- * there, the DOM renderer is the one field-proven-clean configuration on those machines, and a
- * public default must be the proven one — WebGL on a Mac is a deliberate 'on'. Renderer-side
- * only (platform detection is navigator-based). Legacy booleans still resolve sanely if one
- * slips past the settings-store migration.
+ * Resolve the `terminalGpuRendering` setting to the renderer the terminals should use. THE single
+ * resolver: there is deliberately no second "is GPU rendering on?" boolean helper, because
+ * 'shared' is a GPU mode whose PER-TERMINAL budget must be off, so a boolean answer is wrong for
+ * one of its two callers no matter which way it goes. (The former `resolveGpuRendering` returned
+ * `true` for every value it did not recognise on non-mac — which for 'shared' would have left the
+ * budget handing out contexts to terminals that no longer paint their own pixels.)
+ *
+ * 'auto' (the default) is per-terminal WebGL everywhere EXCEPT macOS: the compositor-level
+ * failures documented above have only ever been observed there, the DOM renderer is the one
+ * field-proven-clean configuration on those machines, and a public default must be the proven
+ * one — WebGL on a Mac is a deliberate 'on'. Renderer-side only (platform detection is
+ * navigator-based).
+ *
+ * 'shared' is platform-independent: the per-terminal context pressure that makes 'auto' avoid
+ * macOS is precisely what a single canvas-wide context does not create.
+ *
+ * Legacy booleans and anything unrecognised resolve exactly like 'auto' — the settings-store
+ * migration normalizes the file, and a value that slipped past it must land on the DEFAULT, never
+ * on an experimental mode.
  */
-export function resolveGpuRendering(
-  value: 'auto' | 'on' | 'off' | boolean | undefined,
+export function resolveTerminalRenderer(
+  value: 'auto' | 'on' | 'off' | 'shared' | boolean | undefined,
   isMac: boolean
-): boolean {
-  if (value === 'on' || value === true) return true
-  if (value === 'off' || value === false) return false
-  return !isMac
+): TerminalRenderer {
+  if (value === 'shared') return 'shared'
+  if (value === 'on' || value === true) return 'webgl'
+  if (value === 'off' || value === false) return 'dom'
+  return isMac ? 'dom' : 'webgl'
 }

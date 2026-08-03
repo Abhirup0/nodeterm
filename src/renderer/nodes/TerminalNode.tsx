@@ -1796,43 +1796,67 @@ export function TerminalNode({
     // there is no per-terminal context to budget, nothing to acquire on approach and no DOM-strand
     // heal to run — the whole webgl client is skipped rather than registered and left idle.
     //
-    // The decision is made ONCE per mount, on the mode and the context — NOT on whether the grid
-    // registration then succeeded. A node that is collapsed right now registers nothing yet but
-    // will on expand, and a terminal cannot be allowed to end up holding both renderers: the
-    // glyph addon's `setRenderer` silently disposes the webgl one, leaving the budget coordinator
-    // accounting for a context nobody paints with and `releaseWebgl` sweeping canvases out from
-    // under a live attachment. Failing the registration (unrecognised internals) leaves this
-    // terminal on xterm's own DOM renderer — correct, just unbudgeted, and warned once.
+    // The decision is made on the MODE and the context — NOT on whether the grid registration then
+    // succeeded. A node that is collapsed right now registers nothing yet but will on expand, and
+    // a terminal cannot be allowed to end up holding both renderers: the glyph addon's
+    // `setRenderer` silently disposes the webgl one, leaving the budget coordinator accounting for
+    // a context nobody paints with and `releaseWebgl` sweeping canvases out from under a live
+    // attachment. Failing the registration (unrecognised internals) leaves this terminal on
+    // xterm's own DOM renderer — correct, just unbudgeted, and warned once. The mode itself is
+    // re-read on every generation bump (the subscription below), never only at mount.
     const glyphMode = sharedGlyphActive() && getSharedGlyphContext() !== null
-    if (!glyphMode) {
-      webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
-    } else {
-      setupGlyph()
-      // Only the ACTIVE path subscribes, and only once: a session that never turned the shared
-      // renderer on holds no store subscription at all. `generation` is bumped for every context
-      // disposal — font change, mode off, session failure.
-      //
-      // This handler TEARS DOWN ONLY. The re-setup is deferred to the participation effect via
-      // `glyphEpoch`, and the reason is the font-change case: this notification is SYNCHRONOUS
-      // inside `useSettings.setState` (settings change → the layer's settings subscription disposes
-      // the context and bumps the generation → we run), which is BEFORE React has committed the
-      // render that applies `term.options.fontSize` to xterm. Re-registering here would read a
-      // stale `dimensions.css.cell` and pin the grid to the OLD cell size while the rebuilt atlas
-      // rasterizes at the new one — and a grid's cell size cannot be changed afterwards, so the
-      // drift would be permanent until the node remounted. Tearing down early is always safe: the
-      // context these handles belong to is already gone.
-      let lastGen = useSharedGlyph.getState().generation
-      glyphGenUnsub = useSharedGlyph.subscribe((s) => {
-        if (disposed || s.generation === lastGen) return
-        lastGen = s.generation
-        if (!teardownGlyph()) {
-          escalateRespawn('glyphgrid could not restore the DOM renderer')
-          return
-        }
-        setGlyphEpoch((n) => n + 1)
-      })
-    }
+    if (glyphMode) setupGlyph()
+    else webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+
+    // The IntersectionObserver's last verdict, read by the subscription below when it hands a
+    // fresh budget client this terminal's visibility. Declared here (not with the observer) so it
+    // exists before anything can close over it.
     let wasVisible = false
+
+    // ...but the mode can also change UNDER a mounted terminal — the user flips the Settings row
+    // with a canvas full of live sessions — so the subscription below is UNCONDITIONAL, not part
+    // of the glyph branch. `generation` is bumped for every event that invalidates the decision
+    // above: the mode turned on, a context disposal (font change, mode off), a session failure.
+    // A node that never held a grid pays one store subscription and a comparison per bump, which
+    // for a default-mode user is zero bumps.
+    //
+    // This handler TEARS DOWN ONLY. The re-setup is deferred to the participation effect via
+    // `glyphEpoch`, and the reason is the font-change case: this notification is SYNCHRONOUS
+    // inside `useSettings.setState` (settings change → the layer's settings subscription disposes
+    // the context and bumps the generation → we run), which is BEFORE React has committed the
+    // render that applies `term.options.fontSize` to xterm. Re-registering here would read a
+    // stale `dimensions.css.cell` and pin the grid to the OLD cell size while the rebuilt atlas
+    // rasterizes at the new one — and a grid's cell size cannot be changed afterwards, so the
+    // drift would be permanent until the node remounted. Tearing down early is always safe: the
+    // context these handles belong to is already gone.
+    let lastGen = useSharedGlyph.getState().generation
+    glyphGenUnsub = useSharedGlyph.subscribe((s) => {
+      if (disposed || s.generation === lastGen) return
+      lastGen = s.generation
+      if (!teardownGlyph()) {
+        escalateRespawn('glyphgrid could not restore the DOM renderer')
+        return
+      }
+      // The budget client follows the mode, so this terminal never holds both renderers (the
+      // hazard spelled out above). Order matters in both directions and is already right: xterm
+      // is back on its own renderer by the line above before a budget client may grant it a
+      // context, and the grid is only (re-)registered by the participation effect the epoch bump
+      // below schedules — after this. `setVisible` re-states what the IntersectionObserver last
+      // reported, because it will not fire again until visibility actually changes and a fresh
+      // client starts out believing it is hidden.
+      // The SAME test the mount above makes — mode AND a context that exists — so a machine
+      // without WebGL2 (where `getSharedGlyphContext()` is null however the setting reads) keeps
+      // its budget client instead of ending up with neither renderer coordinated.
+      const shared = sharedGlyphActive() && getSharedGlyphContext() !== null
+      if (shared && webglHandle) {
+        webglHandle.dispose()
+        webglHandle = null
+      } else if (!shared && !webglHandle) {
+        webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+        webglHandle.setVisible(wasVisible)
+      }
+      setGlyphEpoch((n) => n + 1)
+    })
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
         // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),

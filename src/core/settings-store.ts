@@ -19,10 +19,15 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch
   // choice and stays 'off'. See the field's doc in shared/types.ts.
+  //
+  // Every value that is not one of the four known modes ('auto' | 'on' | 'off' | 'shared')
+  // normalizes to the DEFAULT: settings.json is hand-editable, and an unrecognised mode must not
+  // be handed to the renderer's resolver to interpret.
   const gpu = (saved as { terminalGpuRendering?: unknown } | null | undefined)
     ?.terminalGpuRendering
   if (gpu === false) merged.terminalGpuRendering = 'off'
-  else if (gpu !== 'on' && gpu !== 'off' && gpu !== 'auto') merged.terminalGpuRendering = 'auto'
+  else if (gpu !== 'on' && gpu !== 'off' && gpu !== 'auto' && gpu !== 'shared')
+    merged.terminalGpuRendering = 'auto'
   return merged
 }
 

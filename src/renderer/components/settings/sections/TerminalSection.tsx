@@ -4,17 +4,29 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Input } from '@renderer/ui/Input'
 import { Switch } from '@renderer/ui/Switch'
+import { Select } from '@renderer/ui/Select'
 import { NumberField } from '@renderer/ui/NumberField'
-import { resolveGpuRendering } from '@shared/webgl'
 import { isMacPlatform } from '@shared/platform-utils'
+import type { Settings } from '@shared/types'
 
 const ROWS = {
   fontSize: { title: 'Font size', keywords: ['font', 'size', 'text'] },
   fontFamily: { title: 'Font family', keywords: ['font', 'family', 'typeface', 'monospace'] },
   cursorBlink: { title: 'Cursor blink', keywords: ['cursor', 'blink'] },
   gpu: {
-    title: 'GPU terminal rendering',
-    keywords: ['gpu', 'webgl', 'renderer', 'flicker', 'performance', 'graphics', 'acceleration']
+    title: 'Terminal rendering',
+    keywords: [
+      'gpu',
+      'webgl',
+      'renderer',
+      'rendering',
+      'flicker',
+      'performance',
+      'graphics',
+      'acceleration',
+      'shared',
+      'experimental'
+    ]
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -63,18 +75,30 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
       </SearchableRow>
       <SearchableRow {...ROWS.gpu}>
         <FieldRow
-          label="GPU terminal rendering"
+          label="Terminal rendering"
           description={
-            isMacPlatform()
-              ? 'Off by default on macOS (WebGL terminals can flicker or composite black there). Turning it on is an explicit opt-in.'
-              : 'Turn off if the window flickers. Terminals then use the DOM renderer (no WebGL).'
+            (isMacPlatform()
+              ? 'Auto uses the DOM renderer on macOS (WebGL terminals can flicker or composite black there), so GPU per terminal is an explicit opt-in. '
+              : 'Auto uses one GPU context per terminal; switch to Off if the window flickers. ') +
+            'Shared GPU is experimental — every terminal paints into a single canvas-wide context, ' +
+            'which lifts the per-terminal context limit but may render incorrectly; it falls back ' +
+            'to DOM on failure.'
           }
           control={
-            <Switch
-              checked={resolveGpuRendering(settings.terminalGpuRendering, isMacPlatform())}
-              onChange={(v) => update({ terminalGpuRendering: v ? 'on' : 'off' })}
-              ariaLabel="GPU terminal rendering"
-            />
+            <Select
+              aria-label="Terminal rendering"
+              value={settings.terminalGpuRendering}
+              onChange={(e) =>
+                update({
+                  terminalGpuRendering: e.target.value as Settings['terminalGpuRendering']
+                })
+              }
+            >
+              <option value="auto">Auto (default)</option>
+              <option value="on">GPU per terminal</option>
+              <option value="shared">Shared GPU (experimental)</option>
+              <option value="off">Off (DOM renderer)</option>
+            </Select>
           }
         />
       </SearchableRow>

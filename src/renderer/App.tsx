@@ -7,18 +7,25 @@ import { localSession } from './session/localSession'
 import { useSettings } from './state/settings'
 import { useViewMode } from './state/viewMode'
 import { setWebglEnabled } from './terminal/webgl-budget'
-import { resolveGpuRendering } from '../shared/webgl'
+import { applyRendererMode } from './terminal/renderer-mode'
+import { useSharedGlyph } from './canvas/SharedGlyphLayer'
+import { resolveTerminalRenderer } from '../shared/webgl'
 import { isMacPlatform } from '../shared/platform-utils'
 
 export default function App() {
-  // Apply the GPU-terminal-rendering setting to the WebGL budget coordinator, live. 'auto'
-  // resolves per platform (macOS → DOM renderer: the compositor-level black/flicker failures
-  // have only ever been observed there, and a public default must be the field-proven-clean
-  // configuration; WebGL on a Mac is a deliberate 'on'). Off reclaims every context.
+  // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' resolves per
+  // platform (macOS → DOM renderer: the compositor-level black/flicker failures have only ever
+  // been observed there, and a public default must be the field-proven-clean configuration; WebGL
+  // on a Mac is a deliberate 'on'). 'off' reclaims every context; the experimental 'shared' takes
+  // the per-terminal budget down entirely and brings up the one canvas-wide glyph context
+  // instead. `applyRendererMode` owns the ordering contract between the two (and its test).
   // Subscribed at the root so it holds whatever view is showing.
   const gpu = useSettings((s) => s.settings.terminalGpuRendering)
   useEffect(() => {
-    setWebglEnabled(resolveGpuRendering(gpu, isMacPlatform()))
+    applyRendererMode(resolveTerminalRenderer(gpu, isMacPlatform()), {
+      setWebglEnabled,
+      setSharedEnabled: (on) => useSharedGlyph.getState().setEnabled(on)
+    })
   }, [gpu])
 
   // Keep the view-mode store's default in sync with the Settings choice, so projects the user

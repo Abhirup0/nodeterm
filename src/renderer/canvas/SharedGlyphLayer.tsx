@@ -58,13 +58,14 @@ const MAX_CELL_PX = 256
 // ---------------------------------------------------------------------------------------------
 
 interface SharedGlyphState {
-  /** Resolved renderer mode is 'shared'. Set by App.tsx (T6); false for every user today, which
-   *  is what keeps this whole module inert. */
+  /** Resolved renderer mode is 'shared'. Written only by `applyRendererMode` (App.tsx), and false
+   *  unless the user opted into the experimental mode — which is what keeps this whole module
+   *  inert for everyone else. */
   enabled: boolean
-  /** Bumped whenever every registered grid must let go and re-evaluate: the context was rebuilt
-   *  (font change), the mode was turned off, or the session failed. TerminalNode subscribes to
-   *  exactly this number — the context it then asks for answers what to do next (a new engine, or
-   *  null = back to the DOM renderer). */
+  /** Bumped whenever every mounted terminal must re-evaluate its participation: the mode was
+   *  turned ON, the context was rebuilt (font change), the mode was turned off, or the session
+   *  failed. TerminalNode subscribes to exactly this number — the context it then asks for
+   *  answers what to do next (a new engine, or null = back to the DOM renderer). */
   generation: number
   /** Session-level "the shared renderer is off for good" — set by the rAF catch or a lost
    *  context. Deliberately NOT auto-cleared: a GPU that just threw at us gets one chance per app
@@ -81,12 +82,23 @@ export const useSharedGlyph = create<SharedGlyphState>((set, get) => ({
   failed: false,
   setEnabled(on) {
     if (get().enabled === on) return
+    if (on) {
+      // Turning the mode ON creates nothing — the first terminal that asks builds the context,
+      // lazily — but it must still be ANNOUNCED, in the same single set() so the notification
+      // carries the new `enabled` alongside the bump. Every mounted terminal re-evaluates its
+      // participation on a generation change; without the bump here, flipping the setting with a
+      // canvas full of live terminals would do nothing visible until each of them remounted (a
+      // project switch), and the setting would look broken. Safe for a node that has never
+      // registered a grid: its teardown is a no-op and its re-setup is the same gated
+      // `setupGlyph()` a fresh mount runs.
+      set({ enabled: true, generation: get().generation + 1 })
+      return
+    }
     set({ enabled: on })
-    if (on) return
     // Turning the mode OFF hands the GPU context back. The whole point of the shared renderer is
     // that contexts are scarce (see terminal/webgl-budget.ts), so leaving one — plus a 16 MB
     // atlas — parked for a mode the user just left would be the exact cost this feature exists to
-    // remove. Turning it ON creates nothing: the first terminal that asks does that, lazily.
+    // remove.
     disposeContext()
     // ...and the disposal MUST be announced. Every registered grid is now holding an inert handle;
     // without the bump a terminal that subscribes to `generation` alone would keep writing rows

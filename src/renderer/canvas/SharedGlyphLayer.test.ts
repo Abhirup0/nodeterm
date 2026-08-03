@@ -143,11 +143,40 @@ describe('useSharedGlyph store', () => {
     // setEnabled(false) drops the context; every registered grid is now holding an inert handle
     // and would stay blank until it remounted without this signal.
     useSharedGlyph.getState().setEnabled(true)
-    expect(useSharedGlyph.getState().generation).toBe(0)
     useSharedGlyph.getState().setEnabled(false)
-    expect(useSharedGlyph.getState().generation).toBe(1)
+    expect(useSharedGlyph.getState().generation).toBe(2)
     // Change-gated: a repeated disable disposes nothing, so it announces nothing.
     useSharedGlyph.getState().setEnabled(false)
+    expect(useSharedGlyph.getState().generation).toBe(2)
+  })
+
+  it('ENABLING the mode bumps the generation too — already-mounted terminals must join', () => {
+    // The user flips the setting to Shared with a canvas full of live terminals. Each of them
+    // subscribes to `generation` and re-evaluates its participation on a bump; without one here
+    // they would keep painting through xterm's own renderer until they remounted (a project
+    // switch), and the setting would look like it did nothing. The bump is the ONE signal in this
+    // seam, so enabling rides it exactly like disposal does.
+    expect(useSharedGlyph.getState().generation).toBe(0)
+    useSharedGlyph.getState().setEnabled(true)
+    expect(useSharedGlyph.getState()).toMatchObject({ enabled: true, generation: 1 })
+  })
+
+  it('an enable bump carries the NEW enabled flag in the SAME notification', () => {
+    // A subscriber's first move is to ask `sharedGlyphActive()`. If `enabled` were written in a
+    // separate set() from the generation, one of the two notifications would carry a state that
+    // disagrees with the other and a node would decide on the stale half.
+    const seen: { enabled: boolean; generation: number }[] = []
+    const unsub = useSharedGlyph.subscribe((s) =>
+      seen.push({ enabled: s.enabled, generation: s.generation })
+    )
+    useSharedGlyph.getState().setEnabled(true)
+    unsub()
+    expect(seen).toEqual([{ enabled: true, generation: 1 }])
+  })
+
+  it('a repeated enable is change-gated — no bump, no re-registration storm', () => {
+    useSharedGlyph.getState().setEnabled(true)
+    useSharedGlyph.getState().setEnabled(true)
     expect(useSharedGlyph.getState().generation).toBe(1)
   })
 

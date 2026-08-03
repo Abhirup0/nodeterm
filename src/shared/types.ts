@@ -714,8 +714,13 @@ export interface Settings {
    *  configuration on those machines is the DOM renderer, so macOS gets it by default and WebGL
    *  stays a deliberate opt-in ('on'). Legacy boolean values are migrated on load: `false` (an
    *  explicit escape-hatch choice) → 'off'; `true` (indistinguishable from the old merged-in
-   *  default) → 'auto'. */
-  terminalGpuRendering: 'auto' | 'on' | 'off'
+   *  default) → 'auto'.
+   *
+   *  'shared' is the EXPERIMENTAL glyphgrid renderer: instead of one WebGL context per terminal
+   *  (which is what the ~16-context cap and the whole budget coordinator exist to ration), every
+   *  terminal on the canvas paints into ONE canvas-wide context. Opt-in only, it may render
+   *  incorrectly, and any failure drops the session back to xterm's DOM renderer. */
+  terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
