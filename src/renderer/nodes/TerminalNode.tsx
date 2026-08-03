@@ -54,6 +54,7 @@ import {
   CO_ATTACH_MOUSE_SEQ,
   type SessionLife
 } from '../terminal/terminal-config'
+import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
 import {
@@ -365,15 +366,8 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // Scoped selectors (not the whole settings object) so this node only re-renders when a
   // field it actually uses changes — not on every unrelated settings edit.
   const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)
-  const fontSize = useSettings((s) => s.settings.fontSize)
-  const fontFamily = useSettings((s) => s.settings.fontFamily)
-  const cursorBlink = useSettings((s) => s.settings.cursorBlink)
-  const cursorStyle = useSettings((s) => s.settings.cursorStyle)
-  const cursorInactiveStyle = useSettings((s) => s.settings.cursorInactiveStyle)
-  const terminalLineHeightSetting = useSettings((s) => s.settings.terminalLineHeight)
-  const terminalLetterSpacingSetting = useSettings((s) => s.settings.terminalLetterSpacing)
-  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
-  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
+  // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
+  const visual = useXtermVisualSettings()
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
@@ -1567,30 +1561,10 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    const { metricsChanged, themeChanged } = applyLiveOptions(term, {
-      fontFamily,
-      fontSize,
-      cursorBlink,
-      cursorStyle,
-      cursorInactiveStyle,
-      terminalLineHeight: terminalLineHeightSetting,
-      terminalLetterSpacing: terminalLetterSpacingSetting,
-      terminalTheme,
-      tmuxScrollback
-    })
+    const { metricsChanged, themeChanged } = applyLiveOptions(term, visual)
     if (metricsChanged) applyFitRef.current?.()
     if (themeChanged) fullRepaintRef.current?.()
-  }, [
-    fontSize,
-    fontFamily,
-    cursorBlink,
-    cursorStyle,
-    cursorInactiveStyle,
-    terminalLineHeightSetting,
-    terminalLetterSpacingSetting,
-    terminalTheme,
-    tmuxScrollback
-  ])
+  }, [visual])
 
   // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
   // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen

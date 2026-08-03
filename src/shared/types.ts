@@ -688,6 +688,19 @@ export interface Settings {
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
   terminalTheme: string
+  /** Weight for normal text. xterm's own default is `normal` (400). */
+  fontWeight: number
+  /** Weight for BOLD text. xterm's own default is `bold` (700). Lowering it is how you keep bold
+   *  legible in a thin font that renders 700 as a smear. */
+  fontWeightBold: number
+  /** Render bold text in the palette's BRIGHT colours (xterm's default, and the historical
+   *  terminal convention). Off keeps bold purely a weight, so colour still means what the program
+   *  said it meant. */
+  drawBoldTextInBrightColors: boolean
+  /** Minimum foreground/background contrast ratio, 1–21. 1 (xterm's default) disables the
+   *  adjustment entirely; 4.5 is WCAG AA, 7 is AAA, 21 forces black or white. Costs per-cell work
+   *  in the renderer, so it stays off unless asked for. */
+  terminalMinContrast: number
   /** Cursor shape. */
   cursorStyle: TerminalCursorStyle
   /** Cursor shape while the terminal does NOT have focus. `outline` (xterm's own default) is what
@@ -844,6 +857,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
   // defaults. Picking a theme is opt-in — an update must not repaint anybody's terminals.
   terminalTheme: 'nodeterm-dark',
+  fontWeight: 400,
+  fontWeightBold: 700,
+  drawBoldTextInBrightColors: true,
+  terminalMinContrast: 1,
   cursorStyle: 'block',
   cursorInactiveStyle: 'outline',
   terminalLineHeight: 1,

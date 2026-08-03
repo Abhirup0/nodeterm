@@ -1,4 +1,4 @@
-import type { ITheme } from '@xterm/xterm'
+import type { FontWeight, ITheme } from '@xterm/xterm'
 import type { ClientId } from '@shared/presence'
 import type { Settings, TerminalCursorInactiveStyle, TerminalCursorStyle } from '@shared/types'
 import { resolveTerminalTheme } from './themes'
@@ -193,12 +193,32 @@ export function terminalLetterSpacing(value: number): number {
   return clamp(value, TERMINAL_LETTER_SPACING_MIN, TERMINAL_LETTER_SPACING_MAX, 0)
 }
 
+/** CSS numeric font weights. */
+export const TERMINAL_FONT_WEIGHT_MIN = 100
+export const TERMINAL_FONT_WEIGHT_MAX = 900
+
+export function terminalFontWeight(value: number, fallback: number): number {
+  return clamp(value, TERMINAL_FONT_WEIGHT_MIN, TERMINAL_FONT_WEIGHT_MAX, fallback)
+}
+
+/** xterm's contrast bounds: 1 disables the adjustment, 21 is black-on-white. */
+export const TERMINAL_MIN_CONTRAST_MIN = 1
+export const TERMINAL_MIN_CONTRAST_MAX = 21
+
+export function terminalMinContrast(value: number): number {
+  return clamp(value, TERMINAL_MIN_CONTRAST_MIN, TERMINAL_MIN_CONTRAST_MAX, 1)
+}
+
 /** The slice of `Settings` that decides how a terminal LOOKS. Narrowed to a structural type so
  *  the helpers below are callable from a test with a plain object literal. */
 export type XtermVisualSettings = Pick<
   Settings,
   | 'fontFamily'
   | 'fontSize'
+  | 'fontWeight'
+  | 'fontWeightBold'
+  | 'drawBoldTextInBrightColors'
+  | 'terminalMinContrast'
   | 'cursorBlink'
   | 'cursorStyle'
   | 'cursorInactiveStyle'
@@ -208,10 +228,35 @@ export type XtermVisualSettings = Pick<
   | 'tmuxScrollback'
 >
 
+/** The keys `XtermVisualSettings` is made of — the single list the settings hook selects by, so a
+ *  new appearance option cannot be added to the type and then forgotten in the subscription. */
+export const XTERM_VISUAL_KEYS = [
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'fontWeightBold',
+  'drawBoldTextInBrightColors',
+  'terminalMinContrast',
+  'cursorBlink',
+  'cursorStyle',
+  'cursorInactiveStyle',
+  'terminalLineHeight',
+  'terminalLetterSpacing',
+  'terminalTheme',
+  'tmuxScrollback'
+] as const satisfies readonly (keyof XtermVisualSettings)[]
+
 /** The appearance-derived options, resolved and clamped. */
 export interface XtermVisualOptions {
   fontFamily: string
   fontSize: number
+  // xterm widens these to `FontWeight` ('normal' | 'bold' | '100'… | number). We only ever WRITE
+  // numbers, but the type has to match what `term.options` exposes or the live target can't be
+  // compared against a real terminal.
+  fontWeight: FontWeight
+  fontWeightBold: FontWeight
+  drawBoldTextInBrightColors: boolean
+  minimumContrastRatio: number
   cursorBlink: boolean
   cursorStyle: TerminalCursorStyle
   cursorInactiveStyle: TerminalCursorInactiveStyle
@@ -234,6 +279,10 @@ export function xtermOptionsFromSettings(
   return {
     fontFamily: s.fontFamily,
     fontSize: s.fontSize,
+    fontWeight: terminalFontWeight(s.fontWeight, 400),
+    fontWeightBold: terminalFontWeight(s.fontWeightBold, 700),
+    drawBoldTextInBrightColors: s.drawBoldTextInBrightColors,
+    minimumContrastRatio: terminalMinContrast(s.terminalMinContrast),
     cursorBlink: s.cursorBlink,
     cursorStyle: s.cursorStyle,
     cursorInactiveStyle: s.cursorInactiveStyle,
@@ -288,6 +337,9 @@ export function applyLiveOptions(
 ): LiveOptionEffects {
   const next = xtermOptionsFromSettings(s)
   const o = term.options
+  // Deliberately NOT including the font WEIGHTS. xterm derives its cell size from
+  // `CharSizeService`, which re-measures only on `fontFamily`/`fontSize` — a weight change never
+  // moves the grid, so re-fitting on one would report a resize to the shared pty for nothing.
   const metricsChanged =
     o.fontFamily !== next.fontFamily ||
     o.fontSize !== next.fontSize ||
@@ -301,6 +353,14 @@ export function applyLiveOptions(
   if (o.fontSize !== next.fontSize) o.fontSize = next.fontSize
   if (o.lineHeight !== next.lineHeight) o.lineHeight = next.lineHeight
   if (o.letterSpacing !== next.letterSpacing) o.letterSpacing = next.letterSpacing
+  if (o.fontWeight !== next.fontWeight) o.fontWeight = next.fontWeight
+  if (o.fontWeightBold !== next.fontWeightBold) o.fontWeightBold = next.fontWeightBold
+  if (o.drawBoldTextInBrightColors !== next.drawBoldTextInBrightColors) {
+    o.drawBoldTextInBrightColors = next.drawBoldTextInBrightColors
+  }
+  if (o.minimumContrastRatio !== next.minimumContrastRatio) {
+    o.minimumContrastRatio = next.minimumContrastRatio
+  }
   if (o.cursorBlink !== next.cursorBlink) o.cursorBlink = next.cursorBlink
   if (o.cursorStyle !== next.cursorStyle) o.cursorStyle = next.cursorStyle
   if (o.cursorInactiveStyle !== next.cursorInactiveStyle) {

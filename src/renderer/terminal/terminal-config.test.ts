@@ -651,6 +651,10 @@ describe('repaintResync', () => {
 const visual = (p: Partial<XtermVisualSettings> = {}): XtermVisualSettings => ({
   fontFamily: 'Menlo',
   fontSize: 13,
+  fontWeight: 400,
+  fontWeightBold: 700,
+  drawBoldTextInBrightColors: true,
+  terminalMinContrast: 1,
   cursorBlink: true,
   cursorStyle: 'block',
   cursorInactiveStyle: 'outline',
@@ -786,6 +790,39 @@ describe('applyLiveOptions', () => {
     expect(applyLiveOptions(term, visual(patch as Partial<XtermVisualSettings>)).metricsChanged).toBe(
       false
     )
+  })
+
+  // The font WEIGHTS are the interesting case: xterm's CharSizeService re-measures the cell only
+  // on fontFamily/fontSize, so a weight change repaints but never moves the grid. Reporting it as
+  // a metrics change would push a pointless resize at the shared pty on every weight tweak.
+  it.each([
+    ['fontWeight', { fontWeight: 300 }],
+    ['fontWeightBold', { fontWeightBold: 600 }],
+    ['drawBoldTextInBrightColors', { drawBoldTextInBrightColors: false }],
+    ['terminalMinContrast', { terminalMinContrast: 4.5 }]
+  ] as const)('applies %s without reporting a cell-geometry change', (_name, patch) => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(term, visual(patch as Partial<XtermVisualSettings>))
+    expect(r).toEqual({ metricsChanged: false, themeChanged: false })
+    expect(term.writes).toHaveLength(1)
+  })
+
+  it('clamps a hand-edited weight and contrast rather than passing them to xterm', () => {
+    const o = xtermOptionsFromSettings(
+      visual({ fontWeight: 5000, fontWeightBold: 0, terminalMinContrast: 99 })
+    )
+    expect(o.fontWeight).toBe(900)
+    expect(o.fontWeightBold).toBe(100)
+    expect(o.minimumContrastRatio).toBe(21)
+  })
+
+  it('falls back for a NaN weight or contrast', () => {
+    const o = xtermOptionsFromSettings(
+      visual({ fontWeight: NaN, fontWeightBold: NaN, terminalMinContrast: NaN })
+    )
+    expect(o.fontWeight).toBe(400)
+    expect(o.fontWeightBold).toBe(700)
+    expect(o.minimumContrastRatio).toBe(1)
   })
 
   it('applies a theme change and reports themeChanged', () => {

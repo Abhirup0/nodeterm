@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { useSettings } from '../../state/settings'
 import { applyLiveOptions, xtermOptionsFromSettings } from '../../terminal/terminal-config'
+import { useXtermVisualSettings } from '../../terminal/useXtermVisualSettings'
 
 /** Fixed grid — the preview is a sample, not a fitted terminal, so there is no FitAddon and no
  *  ResizeObserver to keep in sync. Wide enough for the sample lines below without wrapping. */
@@ -45,15 +46,7 @@ export function TerminalPreview(): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
 
-  const fontSize = useSettings((s) => s.settings.fontSize)
-  const fontFamily = useSettings((s) => s.settings.fontFamily)
-  const cursorBlink = useSettings((s) => s.settings.cursorBlink)
-  const cursorStyle = useSettings((s) => s.settings.cursorStyle)
-  const cursorInactiveStyle = useSettings((s) => s.settings.cursorInactiveStyle)
-  const terminalLineHeight = useSettings((s) => s.settings.terminalLineHeight)
-  const terminalLetterSpacing = useSettings((s) => s.settings.terminalLetterSpacing)
-  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
-  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
+  const visual = useXtermVisualSettings()
 
   useEffect(() => {
     const s = useSettings.getState().settings
@@ -77,28 +70,8 @@ export function TerminalPreview(): React.JSX.Element {
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    applyLiveOptions(term, {
-      fontFamily,
-      fontSize,
-      cursorBlink,
-      cursorStyle,
-      cursorInactiveStyle,
-      terminalLineHeight,
-      terminalLetterSpacing,
-      terminalTheme,
-      tmuxScrollback
-    })
-  }, [
-    fontSize,
-    fontFamily,
-    cursorBlink,
-    cursorStyle,
-    cursorInactiveStyle,
-    terminalLineHeight,
-    terminalLetterSpacing,
-    terminalTheme,
-    tmuxScrollback
-  ])
+    applyLiveOptions(term, visual)
+  }, [visual])
 
   return (
     <div className="settings-term-preview">

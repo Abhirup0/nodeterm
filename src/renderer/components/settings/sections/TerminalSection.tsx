@@ -3,7 +3,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { TerminalPreview } from '../TerminalPreview'
-import { Input } from '@renderer/ui/Input'
+import { FontPicker } from '../FontPicker'
 import { Switch } from '@renderer/ui/Switch'
 import { Select } from '@renderer/ui/Select'
 import { NumberField } from '@renderer/ui/NumberField'
@@ -47,6 +47,27 @@ const ROWS = {
       'light'
     ]
   },
+  fontWeight: {
+    title: 'Font weight',
+    keywords: ['font', 'weight', 'bold', 'thin', 'light', 'heavy']
+  },
+  boldBright: {
+    title: 'Bold text uses bright colours',
+    keywords: ['bold', 'bright', 'color', 'colour', 'intense']
+  },
+  minContrast: {
+    title: 'Minimum contrast',
+    keywords: [
+      'contrast',
+      'readable',
+      'legible',
+      'accessibility',
+      'a11y',
+      'wcag',
+      'dim',
+      'unreadable'
+    ]
+  },
   cursorStyle: {
     title: 'Cursor style',
     keywords: ['cursor', 'style', 'block', 'bar', 'beam', 'underline']
@@ -70,6 +91,28 @@ const ROWS = {
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+const FONT_WEIGHTS: { value: number; label: string }[] = [
+  { value: 100, label: 'Thin' },
+  { value: 200, label: 'Extra light' },
+  { value: 300, label: 'Light' },
+  { value: 400, label: 'Regular' },
+  { value: 500, label: 'Medium' },
+  { value: 600, label: 'Semibold' },
+  { value: 700, label: 'Bold' },
+  { value: 800, label: 'Extra bold' },
+  { value: 900, label: 'Black' }
+]
+
+// xterm reads 1 as "no adjustment"; the named steps are the WCAG ratios, and 21 is the maximum
+// possible (black on white), i.e. force every foreground to one or the other.
+const MIN_CONTRAST_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: 'Off' },
+  { value: 3, label: 'Low (3:1)' },
+  { value: 4.5, label: 'WCAG AA (4.5:1)' },
+  { value: 7, label: 'WCAG AAA (7:1)' },
+  { value: 21, label: 'Maximum' }
+]
 
 const CURSOR_STYLES: { value: TerminalCursorStyle; label: string }[] = [
   { value: 'block', label: 'Block' },
@@ -140,12 +183,58 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.fontFamily}>
         <FieldRow
           label="Font family"
-          description="A CSS font stack. Names that aren't installed are skipped, so keep a generic monospace last."
+          description="Only fonts installed on this machine are listed. The field below is the full CSS stack — keep a generic monospace last, so the setting still works on a machine without your font."
           control={
-            <Input
-              className="w-64"
+            <FontPicker
               value={settings.fontFamily}
-              onChange={(e) => update({ fontFamily: e.target.value })}
+              onChange={(stack) => update({ fontFamily: stack })}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.fontWeight}>
+        <FieldRow
+          label="Font weight"
+          control={
+            <span className="flex items-center gap-2">
+              <Select
+                className="w-32"
+                value={String(settings.fontWeight)}
+                onChange={(e) => update({ fontWeight: Number(e.target.value) })}
+                aria-label="Font weight"
+              >
+                {FONT_WEIGHTS.map((w) => (
+                  <option key={w.value} value={w.value}>
+                    {w.label}
+                  </option>
+                ))}
+              </Select>
+              <span className="text-[13px] text-muted">bold</span>
+              <Select
+                className="w-32"
+                value={String(settings.fontWeightBold)}
+                onChange={(e) => update({ fontWeightBold: Number(e.target.value) })}
+                aria-label="Bold font weight"
+              >
+                {FONT_WEIGHTS.map((w) => (
+                  <option key={w.value} value={w.value}>
+                    {w.label}
+                  </option>
+                ))}
+              </Select>
+            </span>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.boldBright}>
+        <FieldRow
+          label="Bold text uses bright colours"
+          description="The historical terminal convention, and xterm's default. Turn it off to keep bold purely a weight, so a program's colour choice survives."
+          control={
+            <Switch
+              checked={settings.drawBoldTextInBrightColors}
+              onChange={(v) => update({ drawBoldTextInBrightColors: v })}
+              ariaLabel="Bold text uses bright colours"
             />
           }
         />
@@ -188,6 +277,26 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
           />
           <TerminalPreview />
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.minContrast}>
+        <FieldRow
+          label="Minimum contrast"
+          description="Lightens or darkens foreground colours that fall below the ratio against their background — the fix for a theme whose dark blue is unreadable. Costs per-cell work in the renderer, so it is off by default."
+          control={
+            <Select
+              className="w-44"
+              value={String(settings.terminalMinContrast)}
+              onChange={(e) => update({ terminalMinContrast: Number(e.target.value) })}
+              aria-label="Minimum contrast"
+            >
+              {MIN_CONTRAST_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          }
+        />
       </SearchableRow>
 
       <SearchableRow {...ROWS.cursorStyle}>
