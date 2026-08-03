@@ -52,9 +52,12 @@ interface Grid extends GridSpec {
  * - **Idle frames cost nothing.** `frame()` draws only when something actually changed and
  *   reports whether it drew, so the rAF driver (and the tests) can prove an untouched canvas
  *   issues zero GL calls.
- * - **The atlas is uploaded before the first `drawGrid` of a frame.** A draw that samples a
- *   texture the glyphs have not been uploaded into paints solid blocks; the engine is the only
- *   place that sees both, so it is the enforcer.
+ * - **The atlas is uploaded before `beginFrame`** — not merely before the first `drawGrid`.
+ *   `beginFrame` pushes the uAtlasCols/uAtlasCell uniforms from the values `uploadAtlas`
+ *   stored, so an upload squeezed between `beginFrame` and `drawGrid` would leave frame 1
+ *   sampling slot 0 everywhere and the uniforms permanently one upload stale. A draw that
+ *   samples a texture the glyphs have not been uploaded into paints solid blocks; the engine
+ *   is the only place that sees both, so it is the enforcer.
  */
 export class GlyphGridEngine {
   private grids = new Map<string, Grid>()
@@ -168,7 +171,8 @@ export class GlyphGridEngine {
     if (!this.dirty && !uploadAtlas) return false
     this.dirty = false
     if (uploadAtlas && this.atlas.source) {
-      // BEFORE any drawGrid, always: see the class contract.
+      // BEFORE beginFrame, always (it reads back the atlas metrics as uniforms): see the
+      // class contract.
       this.gl.uploadAtlas(this.atlas.source, this.atlas.sizePx, this.atlas.cellW, this.atlas.cellH)
       this.atlas.clearDirty()
       this.atlasUploaded = true

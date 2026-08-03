@@ -203,7 +203,17 @@ export function GlyphGridHarness() {
         ref={canvasRef}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
       />
-      <div style={{ position: 'absolute', top: 8, left: 8, color: '#8f8', font: '12px monospace' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 8,
+          left: 8,
+          color: '#8f8',
+          font: '12px monospace',
+          // Overlay is read-only: never swallow a mousedown/wheel meant for the canvas below.
+          pointerEvents: 'none'
+        }}
+      >
         {stats}
       </div>
     </div>

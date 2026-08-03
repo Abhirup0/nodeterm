@@ -9,8 +9,9 @@ function fakeGL(): GlyphGL & { drawn: string[] } {
   return {
     drawn,
     resize: vi.fn(),
-    // Recorded in `drawn` too: the atlas upload MUST land before any drawGrid of the same
-    // frame, or the shader samples an incomplete texture (solid blocks).
+    // Recorded in `drawn` too: the atlas upload MUST land before beginFrame (which pushes the
+    // atlas uniforms), let alone before any drawGrid of the same frame — otherwise the shader
+    // samples an incomplete texture (solid blocks) with stale metrics.
     uploadAtlas: vi.fn(() => {
       drawn.push('ATLAS')
     }),
@@ -184,7 +185,7 @@ describe('GlyphGridEngine', () => {
     expect(() => e.register(spec('a', 10))).toThrow(/already registered/)
   })
 
-  it('uploads the atlas with the rasterizer metrics before any drawGrid', () => {
+  it('uploads the atlas with the rasterizer metrics before beginFrame', () => {
     const gl = fakeGL()
     const { atlas: a, source } = loadedAtlas(512, 7, 15)
     const e = new GlyphGridEngine(gl, a)
@@ -194,6 +195,10 @@ describe('GlyphGridEngine', () => {
     a.glyphFor(0x41, false, false) // dirties the atlas
     expect(e.frame()).toBe(true)
     expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 7, 15)
+    // Stronger than "before the first drawGrid": beginFrame pushes uAtlasCols/uAtlasCell from
+    // the values uploadAtlas stored, so an upload landing after it would leave frame 1 sampling
+    // slot 0 everywhere and the uniforms permanently one upload stale.
+    expect(gl.drawn.indexOf('ATLAS')).toBeLessThan(gl.drawn.indexOf('BEGIN'))
     expect(gl.drawn.indexOf('ATLAS')).toBeLessThan(gl.drawn.indexOf('grid@0,0'))
     expect(a.dirty).toBe(false)
   })

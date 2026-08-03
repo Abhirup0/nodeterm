@@ -31,7 +31,8 @@ export interface GlyphGL {
   uploadAtlas(source: TexImageSource, sizePx: number, cellW: number, cellH: number): void
   /** Clears the frame and sets the camera uniforms. */
   beginFrame(camera: Camera): void
-  /** Draws the background quad then the instanced cells, in call order. */
+  /** Draws the instanced cells in call order. Phase 0 paints each cell's own bg lane; the
+   *  separate bgColor plate lands in Phase 1 — see gl-webgl2.ts drawGrid. */
   drawGrid(g: GridDraw): void
   endFrame(): void
   dispose(): void
