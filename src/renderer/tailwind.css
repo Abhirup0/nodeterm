@@ -16,6 +16,14 @@
   --color-muted: var(--muted);
   --color-muted-2: var(--muted-2);
   --color-border: var(--border);
+  /* Surface overlays and status hues, so components stop writing `bg-white/10` or
+     `text-[#ff9f0a]` — both of which break the moment the surface under them turns light. */
+  --color-fill: rgba(var(--tint-rgb), 0.15);
+  --color-fill-weak: rgba(var(--tint-rgb), 0.1);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-caution: var(--caution);
+  --color-success: var(--success);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius);
   --radius-lg: var(--radius-lg);

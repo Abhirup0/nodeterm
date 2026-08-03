@@ -71,7 +71,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
           }
         />
         {osBlocked && (
-          <div className="mt-2 flex items-center gap-3 text-[13px] text-[#ffd60a]">
+          <div className="mt-2 flex items-center gap-3 text-[13px] text-[color:var(--caution)]">
             macOS is blocking notifications for this app.
             <Button onClick={() => void window.nodeTerminal.openNotificationSettings()}>
               Open System Settings
@@ -98,7 +98,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
         />
         <div
           className={
-            'mt-3 space-y-3 border-l border-white/10 pl-4' +
+            'mt-3 space-y-3 border-l border-border pl-4' +
             (soundEffects ? '' : ' pointer-events-none opacity-40')
           }
           aria-disabled={!soundEffects}
@@ -118,7 +118,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
                   onMouseUp={() => playSfx('done', soundVolume)}
                   className="w-40 accent-[var(--accent)]"
                 />
-                <span className="w-9 text-right text-[12px] text-white/50 tabular-nums">
+                <span className="w-9 text-right text-[12px] text-muted tabular-nums">
                   {Math.round(soundVolume * 100)}%
                 </span>
               </div>
@@ -150,7 +150,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
         {/* Per-kind sub-gates. Inert (dimmed, non-interactive) while the master toggle is off. */}
         <div
           className={
-            'mt-3 space-y-3 border-l border-white/10 pl-4' +
+            'mt-3 space-y-3 border-l border-border pl-4' +
             (mobilePushEnabled ? '' : ' pointer-events-none opacity-40')
           }
           aria-disabled={!mobilePushEnabled}

@@ -4,6 +4,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
+import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import {
   HIDEABLE_HEADER_BUTTONS,
   HIDEABLE_MENU_ITEMS,
@@ -11,8 +12,14 @@ import {
   type HideableRow
 } from '@renderer/lib/ui-visibility'
 import { cn } from '@renderer/ui/cn'
+import { SectionReset } from '../SectionReset'
+import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
 const ROWS = {
+  appTheme: {
+    title: 'Appearance',
+    keywords: ['appearance', 'theme', 'light', 'dark', 'mode', 'colour', 'color', 'chrome']
+  },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
   menuItems: {
     title: 'Node menu items',
@@ -21,6 +28,10 @@ const ROWS = {
   headerButtons: {
     title: 'Terminal header buttons',
     keywords: ['terminal', 'header', 'buttons', 'icons', 'hide']
+  },
+  reset: {
+    title: 'Reset appearance',
+    keywords: ['reset', 'default', 'defaults', 'factory', 'restore', 'revert', 'undo']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -48,7 +59,7 @@ function VisibilityToggles({
   onChange: (next: string[]) => void
 }): React.JSX.Element {
   return (
-    <div className="mt-3 space-y-3 border-l border-white/10 pl-4">
+    <div className="mt-3 space-y-3 border-l border-border pl-4">
       {rows.map((row) => (
         <FieldRow
           key={row.id}
@@ -67,6 +78,7 @@ function VisibilityToggles({
 }
 
 export function AppearanceSection({ isActive }: { isActive: boolean }): React.JSX.Element {
+  const appTheme = useSettings((s) => s.settings.appTheme)
   const accent = useSettings((s) => s.settings.accent)
   const hiddenNodeMenuItems = useSettings((s) => s.settings.hiddenNodeMenuItems)
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
@@ -78,6 +90,24 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
       isActive={isActive}
       searchEntries={ENTRIES}
     >
+      <SearchableRow {...ROWS.appTheme}>
+        <FieldRow
+          label="Appearance"
+          description="Follow terminal theme uses the colour theme you picked in Settings → Terminal, so a light terminal isn't framed by a dark window."
+          control={
+            <SegmentedPill
+              value={appTheme}
+              options={[
+                { value: 'auto', label: 'Follow terminal' },
+                { value: 'dark', label: 'Dark' },
+                { value: 'light', label: 'Light' }
+              ]}
+              onChange={(v) => update({ appTheme: v })}
+              ariaLabel="Appearance"
+            />
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.accent}>
         <div className="flex items-center justify-between gap-4 py-2.5">
           <span className="text-[13px] text-text">Accent</span>
@@ -131,6 +161,13 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             onChange={(next) => update({ hiddenHeaderButtons: next })}
           />
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.reset}>
+        <SectionReset
+          keys={APPEARANCE_RESET_KEYS}
+          label="Reset appearance"
+          what="the appearance settings"
+        />
       </SearchableRow>
     </SettingsSection>
   )
