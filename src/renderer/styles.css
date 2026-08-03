@@ -1629,16 +1629,33 @@ body,
    `.term-node__find` #2a2a2a, and the body's own overlays). The selection ring and the unread glow
    are border-color + box-shadow, both independent of the background.
 
-   TWO accepted degradations, both plate GEOMETRY, both Phase 2's call (a rounded / stencilled
-   plate) and both judged on the device checklist:
+   Accepted degradations, all plate GEOMETRY, all Phase 2's call (a rounded / stencilled plate, or
+   a plate sized to the BODY rect instead of the grid rect) and all judged on the device checklist.
+   `padPx` is ONE symmetric scalar taken from the LARGEST side of the host's `4px 2px 2px 6px`
+   padding (= 6; see `lib/glyphGridNode.ts` `platePadPx`), which covers the left and top insets
+   completely — over-covering them is free, since the node's own opaque chrome paints above the
+   canvas. What is left:
      1. the plate is a square rect while the node has border-radius 10px, so the body's corners read
-        square in shared mode;
-     2. the plate covers the grid plus padPx, and a fit leaves up to one cell of slack at the right
-        and bottom of the body — that slack shows the canvas behind the node rather than the
-        terminal background. */
+        square in shared mode (the node's `overflow: hidden` clips DOM children, and the canvas is
+        not one);
+     2. the right/bottom edges do not land exactly: a fit leaves up to one cell of slack there, so
+        when the slack EXCEEDS 6px a strip of that slack shows the canvas behind the node instead of
+        the terminal background, and when it is under 6px the plate reaches up to ~4px past the
+        node's outer edge — visible only against the canvas, since a neighbouring node's DOM paints
+        over it. */
 .term-node--glyphgrid,
 .term-node--glyphgrid .term-node__body {
   background: transparent;
+}
+
+/* xterm paints its own opaque background on the SCROLL VIEWPORT — `.xterm-viewport` in its
+   stylesheet, and `Viewport._handleThemeChange` re-asserts it as an INLINE
+   `style.backgroundColor = theme.background.css` on every theme change. Inline beats any selector,
+   which is the only reason `!important` appears here: a stylesheet rule cannot otherwise win, and
+   without it the viewport covers the whole transparent body and the shared canvas is invisible
+   again — the exact failure this whole Option-B change exists to fix. */
+.term-node__xterm .xterm.glyphgrid-mode .xterm-viewport {
+  background-color: transparent !important;
 }
 
 /* …and xterm's own text layers must not paint over the canvas now showing through. This class is

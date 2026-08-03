@@ -46,22 +46,27 @@ export function bodyWorldRect(nodePos: Vec2, bodyOffset: Vec2): Vec2 {
  * resolved from the terminal host's CSS padding, which is NOT symmetric (`.term-node__xterm` is
  * `4px 2px 2px 6px`).
  *
- * The MINIMUM is the only safe reduction. The plate is an opaque scissored clear: too small and
- * the node's own opaque body background covers the difference (invisible), too large and it
- * paints over whatever sits beside the node — chrome, a neighbour, the canvas background — which
- * is a visible artefact nothing else corrects. Under-covering is free; over-covering is a bug.
+ * The MAXIMUM is the safe reduction, and WHICH end is safe is decided by the node's background. A
+ * glyph-attached terminal is a transparent WINDOW onto the shared canvas (`.term-node--glyphgrid`
+ * drops the background from the node root and its body), so the plate IS the terminal's
+ * background: ground the plate does not cover shows raw canvas, while ground it over-covers is
+ * hidden under the node's own opaque DOM chrome, which paints above the canvas. Under-covering is
+ * the visible failure; over-covering is free.
+ *
+ * This was the MINIMUM while the plan still called for an opaque node body — the reasoning
+ * inverted with it. Do not restore the minimum without restoring that opaque body too.
  *
  * Negative/NaN inputs (a computed style that failed to parse) collapse to 0 rather than
  * propagating into the engine's rect math.
  */
 export function platePadPx(pad: Insets): number {
   const sides = [pad.top, pad.right, pad.bottom, pad.left]
-  let min = Infinity
+  let max = 0
   for (const v of sides) {
     if (!Number.isFinite(v)) return 0
-    if (v < min) min = v
+    if (v > max) max = v
   }
-  return min > 0 ? min : 0
+  return max
 }
 
 /** Fallback background — the colour `TerminalNode` builds every xterm with. Used when the theme

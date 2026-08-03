@@ -528,6 +528,10 @@ export function TerminalNode({
   // `selected`/`unread`/`working`/… on many renders and React rewrites the whole attribute when it
   // changes, so a class added behind React's back would be wiped by the next selection change.
   const [glyphMounted, setGlyphMounted] = useState(false)
+  // Bumped whenever the shared context was dropped and this node owes a re-registration. It exists
+  // to move the RE-SETUP out of the (synchronous) generation notification and into an effect that
+  // runs after the font options have reached xterm — see the participation effect below.
+  const [glyphEpoch, setGlyphEpoch] = useState(0)
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
@@ -1081,9 +1085,13 @@ export function TerminalNode({
       glyphGrid = null
       if (glyphGridRef.current === grid) glyphGridRef.current = null
       if (!attach && !grid) return true
-      // The node goes opaque again in the same commit the rows come back — skipped on the unmount
-      // path, where there is no component left to render it.
-      if (!disposed) setGlyphMounted(false)
+      // INVARIANT: `glyphMounted` is true exactly while a grid is attached — teardown always clears
+      // it, `setupGlyph` sets it on success, and nothing else writes it. UNCONDITIONAL, never gated
+      // on `disposed`: that flag is also set for a RESPAWN, where the component SURVIVES and only
+      // this effect run ends. Gating left a respawned node whose fresh setup then failed showing
+      // its DOM text over a transparent body — i.e. over the canvas dot grid. On a real unmount
+      // this is a no-op (React 18 drops a setState on an unmounted component silently).
+      setGlyphMounted(false)
       term.element?.classList.remove('glyphgrid-mode')
       const restored = attach ? attach.dispose() : true
       grid?.dispose()
@@ -1172,6 +1180,10 @@ export function TerminalNode({
       // device-metric chain — and corrects itself here if the two ever disagree (an xterm bump
       // changing that chain is exactly the drift this catches). Once, and never from a corrected
       // pass, so a persistent disagreement cannot loop.
+      //
+      // This does NOT cover a FONT CHANGE: there both renderers agree, they are simply both still
+      // reporting the pre-change cell. That case is handled by WHEN this function is called — see
+      // the participation effect's ordering note — not by the check below.
       if (forcedCell) return
       const actual = cssCellOf(term)
       if (!actual) return
@@ -1798,9 +1810,17 @@ export function TerminalNode({
       setupGlyph()
       // Only the ACTIVE path subscribes, and only once: a session that never turned the shared
       // renderer on holds no store subscription at all. `generation` is bumped for every context
-      // disposal — font change, mode off, session failure — and re-running the setup is how each
-      // of those resolves: a new context re-registers, a null one leaves the terminal on the DOM
-      // renderer (unbudgeted, which is xterm's own default and always correct).
+      // disposal — font change, mode off, session failure.
+      //
+      // This handler TEARS DOWN ONLY. The re-setup is deferred to the participation effect via
+      // `glyphEpoch`, and the reason is the font-change case: this notification is SYNCHRONOUS
+      // inside `useSettings.setState` (settings change → the layer's settings subscription disposes
+      // the context and bumps the generation → we run), which is BEFORE React has committed the
+      // render that applies `term.options.fontSize` to xterm. Re-registering here would read a
+      // stale `dimensions.css.cell` and pin the grid to the OLD cell size while the rebuilt atlas
+      // rasterizes at the new one — and a grid's cell size cannot be changed afterwards, so the
+      // drift would be permanent until the node remounted. Tearing down early is always safe: the
+      // context these handles belong to is already gone.
       let lastGen = useSharedGlyph.getState().generation
       glyphGenUnsub = useSharedGlyph.subscribe((s) => {
         if (disposed || s.generation === lastGen) return
@@ -1809,7 +1829,7 @@ export function TerminalNode({
           escalateRespawn('glyphgrid could not restore the DOM renderer')
           return
         }
-        setupGlyph()
+        setGlyphEpoch((n) => n + 1)
       })
     }
     let wasVisible = false
@@ -1943,16 +1963,6 @@ export function TerminalNode({
     grid.setOrigin(origin.x, origin.y)
   }, [positionAbsoluteX, positionAbsoluteY])
 
-  // The two states in which this node's terminal is NOT on screen even though it is mounted:
-  // collapsed (the body is `display: none`) and the ⌘M markdown/chat view (an opaque panel over
-  // the body). Both drop the grid — and re-register on the way back — for the same reason a parked
-  // terminal drops its WebGL context: there is nothing to draw, and a grid left registered keeps
-  // painting its last frame at the node's world rect with nothing of ours in front of it. No-op
-  // unless this node participates in the shared canvas.
-  useEffect(() => {
-    glyphSyncRef.current?.(!collapsed && !mdMode)
-  }, [collapsed, mdMode])
-
   // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
   // reaches the terminals already on the canvas instead of only the next fresh one.
   //
@@ -1970,6 +1980,29 @@ export function TerminalNode({
     term.options.scrollback = xtermScrollback(tmuxScrollback)
     applyFitRef.current?.()
   }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
+
+  // glyphgrid participation — whether this node should hold a grid RIGHT NOW.
+  //
+  // ORDERING IS THE POINT, and it is why this effect is declared HERE, immediately after the one
+  // that writes `term.options.fontFamily/fontSize`. React runs a commit's effects in declaration
+  // order, so by the time this runs xterm has already re-measured its character cell and its
+  // renderer's `dimensions.css.cell` — the number `setupGlyph` registers the grid with — is the
+  // NEW one. A font change reaches us as a `glyphEpoch` bump raised synchronously from the
+  // generation notification, i.e. BEFORE that commit; re-registering there would pin the grid to
+  // the old cell size forever (a grid's cell size cannot be changed after `register`). The font
+  // settings are in the deps as well as the epoch, so the re-setup still lands after the options
+  // even if the two ever arrive in separate renders. Do not move this effect above the one above.
+  //
+  // It also owns the two states in which the terminal is NOT on screen although it is mounted:
+  // collapsed (the body is `display: none`) and the ⌘M markdown/chat view (an opaque panel over
+  // the body). Both drop the grid — and re-register on the way back — for the same reason a parked
+  // terminal drops its WebGL context: there is nothing to draw, and a grid left registered keeps
+  // painting its last frame at the node's world rect with nothing of ours in front of it.
+  //
+  // No-op (one ref null check) unless this node participates in the shared canvas.
+  useEffect(() => {
+    glyphSyncRef.current?.(!collapsed && !mdMode)
+  }, [collapsed, mdMode, glyphEpoch, fontSize, fontFamily])
 
   // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
   // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen

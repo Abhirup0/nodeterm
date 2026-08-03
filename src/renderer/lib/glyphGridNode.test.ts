@@ -23,17 +23,23 @@ describe('bodyWorldRect', () => {
 })
 
 describe('platePadPx', () => {
-  it('takes the MINIMUM side, so the plate can never spill past the body box', () => {
-    // .term-node__xterm's real padding: 4px 2px 2px 6px.
-    expect(platePadPx({ top: 4, right: 2, bottom: 2, left: 6 })).toBe(2)
+  it('takes the MAXIMUM side, so no padded strip is left uncovered', () => {
+    // .term-node__xterm's real padding: 4px 2px 2px 6px. The node body is transparent under
+    // `.term-node--glyphgrid`, so a strip the plate misses shows raw canvas while one it
+    // over-covers hides under the node's own opaque chrome — the max leaves nothing bare.
+    expect(platePadPx({ top: 4, right: 2, bottom: 2, left: 6 })).toBe(6)
   })
 
   it('passes a symmetric padding through', () => {
     expect(platePadPx({ top: 8, right: 8, bottom: 8, left: 8 })).toBe(8)
   })
 
-  it('collapses a negative side to 0 rather than shrinking the rect', () => {
-    expect(platePadPx({ top: 4, right: -2, bottom: 2, left: 6 })).toBe(0)
+  it('is 0 for a zero padding — the plate is then exactly the grid rect', () => {
+    expect(platePadPx({ top: 0, right: 0, bottom: 0, left: 0 })).toBe(0)
+  })
+
+  it('collapses negative sides to 0 rather than growing the rect off a bad parse', () => {
+    expect(platePadPx({ top: -4, right: -2, bottom: -2, left: -6 })).toBe(0)
   })
 
   it('collapses an unparseable (NaN) side to 0', () => {
