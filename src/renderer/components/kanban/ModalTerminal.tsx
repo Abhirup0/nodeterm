@@ -18,7 +18,8 @@ import {
   stripTrailingNewline,
   terminalKeyAction,
   toXtermText,
-  xtermScrollback,
+  applyLiveOptions,
+  xtermOptionsFromSettings,
   SHIFT_ENTER_SEQ,
   CO_ATTACH_MOUSE_SEQ
 } from '../../terminal/terminal-config'
@@ -61,7 +62,24 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
+  // The live pty session + its fit addon, reachable from OUTSIDE the lifecycle effect's closure —
+  // the appearance effect below has to re-fit and re-REPORT this viewer's grid, and under co-attach
+  // a report that never happens leaves the shared pty clamped to the pre-change size.
+  const sessionIdRef = useRef<string | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+  const transportRef = useRef<LocalTransport | null>(null)
   const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
+  // Scoped selectors (not the whole settings object), same discipline as TerminalNode: a modal
+  // holding a live terminal must not re-render on every unrelated settings edit.
+  const fontSize = useSettings((s) => s.settings.fontSize)
+  const fontFamily = useSettings((s) => s.settings.fontFamily)
+  const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const cursorStyle = useSettings((s) => s.settings.cursorStyle)
+  const cursorInactiveStyle = useSettings((s) => s.settings.cursorInactiveStyle)
+  const terminalLineHeightSetting = useSettings((s) => s.settings.terminalLineHeight)
+  const terminalLetterSpacingSetting = useSettings((s) => s.settings.terminalLetterSpacing)
+  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
+  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
   const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
 
@@ -108,21 +126,18 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     const viewerId = `modal-${nodeId}-${Math.random().toString(36).slice(2, 8)}`
     const transport = new LocalTransport(api, viewerId)
     const s = useSettings.getState().settings
-    const term = new Terminal({
-      fontFamily: s.fontFamily,
-      fontSize: s.fontSize,
-      cursorBlink: s.cursorBlink,
-      theme: { background: '#161618', foreground: '#e6e6e6' },
-      allowProposedApi: true,
-      scrollback: xtermScrollback(s.tmuxScrollback),
-      macOptionClickForcesSelection: true
-    })
+    // Appearance comes from the SAME source as the canvas node's terminal — this modal is a second
+    // view of one session, and a card that renders it in different colours reads as a different
+    // terminal. (It used to hardcode its own background, which is exactly what happened.)
+    const term = new Terminal(xtermOptionsFromSettings(s))
     const fit = new FitAddon()
     term.loadAddon(fit)
     const searchAddon = new SearchAddon()
     term.loadAddon(searchAddon)
     termRef.current = term
     searchAddonRef.current = searchAddon
+    fitRef.current = fit
+    transportRef.current = transport
     term.open(hostRef.current!)
     fit.fit()
 
@@ -188,6 +203,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
         return
       }
       sessionId = res.sessionId
+      sessionIdRef.current = res.sessionId
       cleanups.push(transport.onData(res.sessionId, (d) => term.write(d)))
       cleanups.push(
         transport.onExit(res.sessionId, () =>
@@ -252,9 +268,50 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       // on until its last view goes.
       if (sessionId) transport.kill(sessionId)
       term.dispose()
+      sessionIdRef.current = null
+      fitRef.current = null
+      transportRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId])
+
+  // Live-apply the appearance settings, mirroring the canvas node's effect (see TerminalNode) —
+  // without this the modal kept whatever it was built with, so changing the font or the theme with
+  // a card open changed the canvas terminal and left its own second view of the SAME session
+  // looking different until the modal was reopened.
+  //
+  // Re-fitting here is not cosmetic: this viewer is a co-attach subscriber, and the pty runs at the
+  // smallest subscriber's grid. A viewer that changes its cell geometry without re-reporting keeps
+  // clamping the shared pty to its pre-change size — i.e. shrinks the canvas terminal too.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const { metricsChanged } = applyLiveOptions(term, {
+      fontFamily,
+      fontSize,
+      cursorBlink,
+      cursorStyle,
+      cursorInactiveStyle,
+      terminalLineHeight: terminalLineHeightSetting,
+      terminalLetterSpacing: terminalLetterSpacingSetting,
+      terminalTheme,
+      tmuxScrollback
+    })
+    if (!metricsChanged) return
+    fitRef.current?.fit()
+    const sid = sessionIdRef.current
+    if (sid) transportRef.current?.resize(sid, term.cols, term.rows)
+  }, [
+    fontSize,
+    fontFamily,
+    cursorBlink,
+    cursorStyle,
+    cursorInactiveStyle,
+    terminalLineHeightSetting,
+    terminalLetterSpacingSetting,
+    terminalTheme,
+    tmuxScrollback
+  ])
 
   // File drop → paste the path(s) into the co-attached session, just like the canvas node.
   const onDragOver = (e: React.DragEvent) => {

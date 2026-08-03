@@ -48,9 +48,10 @@ import {
   terminalKey,
   terminalKeyAction,
   toXtermText,
+  applyLiveOptions,
+  xtermOptionsFromSettings,
   SHIFT_ENTER_SEQ,
   CO_ATTACH_MOUSE_SEQ,
-  xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
@@ -367,6 +368,11 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   const fontSize = useSettings((s) => s.settings.fontSize)
   const fontFamily = useSettings((s) => s.settings.fontFamily)
   const cursorBlink = useSettings((s) => s.settings.cursorBlink)
+  const cursorStyle = useSettings((s) => s.settings.cursorStyle)
+  const cursorInactiveStyle = useSettings((s) => s.settings.cursorInactiveStyle)
+  const terminalLineHeightSetting = useSettings((s) => s.settings.terminalLineHeight)
+  const terminalLetterSpacingSetting = useSettings((s) => s.settings.terminalLetterSpacing)
+  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
   const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
@@ -381,6 +387,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
   // effect), so effects outside that closure (font/cursor changes) resize through the same path.
   const applyFitRef = useRef<(() => void) | null>(null)
+  // The lifecycle effect's guaranteed full-viewport repaint, reachable from the appearance effect
+  // outside that closure (a theme swap must not be left to a refresh that can be swallowed).
+  const fullRepaintRef = useRef<(() => void) | null>(null)
   // This project shows the KANBAN board (an opaque overlay over the canvas). While it does, this
   // canvas terminal is not visible — but it is still a co-attach subscriber, and its (often
   // zoomed-small) grid would clamp a CARD-MODAL viewer of the same session to a tiny size, pushing
@@ -605,22 +614,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     }
 
     const s = useSettings.getState().settings
-    const term =
-      parked?.term ??
-      new Terminal({
-        fontFamily: s.fontFamily,
-        fontSize: s.fontSize,
-        cursorBlink: s.cursorBlink,
-        theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
-        allowProposedApi: true,
-        // NOT what the user scrolls in a tmux session — tmux's mouse is ON and the wheel scrolls
-        // tmux's own history (see pty-manager's tmuxConf). This buffer backs the plain-shell
-        // fallback (tmux unavailable) and the cold-snapshot replay. Capped: per node, many nodes.
-        scrollback: xtermScrollback(s.tmuxScrollback),
-        // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
-        // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
-        macOptionClickForcesSelection: true
-      })
+    // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
+    // session (`ModalTerminal`) — see `xtermOptionsFromSettings`.
+    const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s))
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
     termRef.current = term
@@ -658,6 +654,9 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
         }
       })
     }
+    // A palette swap repaints through exactly the path described above, so it is exposed to the
+    // same swallowed-refresh cases — and half a palette is the most visible way for one to fail.
+    fullRepaintRef.current = fullRepaint
     // --- renderer-swap safety net ---------------------------------------------------------
     // xterm treats a renderer swap as atomic; it is not. On macOS under GPU/canvas memory
     // pressure, canvas allocation THROWS mid-swap (`throwIfFalsy(getContext('2d'))` in the
@@ -1499,6 +1498,7 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
       fitRef.current = null
       searchAddonRef.current = null
       if (applyFitRef.current === applyFit) applyFitRef.current = null
+      if (fullRepaintRef.current === fullRepaint) fullRepaintRef.current = null
       // Free the GPU context on unmount (park or teardown) either way, and unregister from the
       // budget coordinator (which releases any held grant + cancels its timers). The park path must
       // keep releasing it as it always has (contexts are capped ~16, and a parked terminal is
@@ -1551,23 +1551,46 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.respawnNonce])
 
-  // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
-  // reaches the terminals already on the canvas instead of only the next fresh one.
+  // Live-apply the appearance settings to the running terminal, so a Settings change reaches the
+  // terminals already on the canvas instead of only the next fresh one.
   //
-  // A new font size means new cell geometry, i.e. a different grid — route it through applyFit
-  // (not a bare fit.fit()) so the pty is told the new size like any other resize, instead of
-  // running at a grid nobody renders. Under co-attach applyFit is also what REPORTS our size, so
-  // a font change must go through it or this client would silently keep clamping the shared pty
-  // to its pre-change grid.
+  // This must stay ONE effect that also runs on mount: a terminal ADOPTED from the park cache
+  // carries the options it was built with, and this pass is what brings it up to date. Splitting
+  // the new options into a second effect would work by accident today and break the moment one of
+  // them skips the mount run.
+  //
+  // A cell-geometry change (font, line height, letter spacing) means a different grid — route it
+  // through applyFit (not a bare fit.fit()) so the pty is told the new size like any other resize,
+  // instead of running at a grid nobody renders. Under co-attach applyFit is also what REPORTS our
+  // size, so it must go through it or this client would silently keep clamping the shared pty to
+  // its pre-change grid. A palette change costs no resize — just a repaint we force ourselves.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.fontSize = fontSize
-    term.options.fontFamily = fontFamily
-    term.options.cursorBlink = cursorBlink
-    term.options.scrollback = xtermScrollback(tmuxScrollback)
-    applyFitRef.current?.()
-  }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
+    const { metricsChanged, themeChanged } = applyLiveOptions(term, {
+      fontFamily,
+      fontSize,
+      cursorBlink,
+      cursorStyle,
+      cursorInactiveStyle,
+      terminalLineHeight: terminalLineHeightSetting,
+      terminalLetterSpacing: terminalLetterSpacingSetting,
+      terminalTheme,
+      tmuxScrollback
+    })
+    if (metricsChanged) applyFitRef.current?.()
+    if (themeChanged) fullRepaintRef.current?.()
+  }, [
+    fontSize,
+    fontFamily,
+    cursorBlink,
+    cursorStyle,
+    cursorInactiveStyle,
+    terminalLineHeightSetting,
+    terminalLetterSpacingSetting,
+    terminalTheme,
+    tmuxScrollback
+  ])
 
   // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
   // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen

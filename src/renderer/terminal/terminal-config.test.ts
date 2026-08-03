@@ -22,12 +22,23 @@ import {
   terminalKeyAction,
   toXtermText,
   xtermScrollback,
+  applyLiveOptions,
+  terminalLetterSpacing,
+  terminalLineHeight,
+  xtermOptionsFromSettings,
   RESYNC_NOTICE,
   SHIFT_ENTER_SEQ,
+  TERMINAL_LETTER_SPACING_MAX,
+  TERMINAL_LETTER_SPACING_MIN,
+  TERMINAL_LINE_HEIGHT_MAX,
+  TERMINAL_LINE_HEIGHT_MIN,
   XTERM_SCROLLBACK_MAX,
   XTERM_SCROLLBACK_MIN,
-  type CopyShortcutEvent
+  type CopyShortcutEvent,
+  type LiveOptionTarget,
+  type XtermVisualSettings
 } from './terminal-config'
+import { resolveTerminalTheme } from './themes'
 import type { ClientId } from '@shared/presence'
 
 const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
@@ -634,5 +645,171 @@ describe('repaintResync', () => {
     expect(term.ops.filter((o) => o === 'reset')).toHaveLength(2)
     expect(term.ops).toContain('write:ONE')
     expect(term.ops).toContain('write:TWO')
+  })
+})
+
+const visual = (p: Partial<XtermVisualSettings> = {}): XtermVisualSettings => ({
+  fontFamily: 'Menlo',
+  fontSize: 13,
+  cursorBlink: true,
+  cursorStyle: 'block',
+  cursorInactiveStyle: 'outline',
+  terminalLineHeight: 1,
+  terminalLetterSpacing: 0,
+  terminalTheme: 'nodeterm-dark',
+  tmuxScrollback: 50000,
+  ...p
+})
+
+describe('terminalLineHeight / terminalLetterSpacing (clamps)', () => {
+  it('passes through in-range values', () => {
+    expect(terminalLineHeight(1.4)).toBe(1.4)
+    expect(terminalLetterSpacing(1.5)).toBe(1.5)
+  })
+
+  it('clamps out-of-range values to the bounds', () => {
+    expect(terminalLineHeight(0.2)).toBe(TERMINAL_LINE_HEIGHT_MIN)
+    expect(terminalLineHeight(9)).toBe(TERMINAL_LINE_HEIGHT_MAX)
+    expect(terminalLetterSpacing(-40)).toBe(TERMINAL_LETTER_SPACING_MIN)
+    expect(terminalLetterSpacing(40)).toBe(TERMINAL_LETTER_SPACING_MAX)
+  })
+
+  // A hand-edited settings.json can carry anything. NaN would sail through a bare Math.min/max
+  // and reach xterm, which renders a zero-height grid from it.
+  it('falls back to the default for a non-number / NaN', () => {
+    expect(terminalLineHeight(NaN)).toBe(1)
+    expect(terminalLetterSpacing(NaN)).toBe(0)
+    expect(terminalLineHeight(undefined as unknown as number)).toBe(1)
+    expect(terminalLetterSpacing('3' as unknown as number)).toBe(0)
+  })
+})
+
+describe('xtermOptionsFromSettings', () => {
+  it('maps settings onto xterm option names', () => {
+    const o = xtermOptionsFromSettings(
+      visual({
+        fontFamily: 'JetBrains Mono',
+        fontSize: 15,
+        cursorBlink: false,
+        cursorStyle: 'bar',
+        cursorInactiveStyle: 'none',
+        terminalLineHeight: 1.3,
+        terminalLetterSpacing: 0.5
+      })
+    )
+    expect(o.fontFamily).toBe('JetBrains Mono')
+    expect(o.fontSize).toBe(15)
+    expect(o.cursorBlink).toBe(false)
+    expect(o.cursorStyle).toBe('bar')
+    expect(o.cursorInactiveStyle).toBe('none')
+    expect(o.lineHeight).toBe(1.3)
+    expect(o.letterSpacing).toBe(0.5)
+  })
+
+  it('clamps the metrics and the scrollback', () => {
+    const o = xtermOptionsFromSettings(
+      visual({ terminalLineHeight: 99, terminalLetterSpacing: 99, tmuxScrollback: 10 ** 9 })
+    )
+    expect(o.lineHeight).toBe(TERMINAL_LINE_HEIGHT_MAX)
+    expect(o.letterSpacing).toBe(TERMINAL_LETTER_SPACING_MAX)
+    expect(o.scrollback).toBe(XTERM_SCROLLBACK_MAX)
+  })
+
+  it('resolves the theme, tolerating an unknown id', () => {
+    expect(xtermOptionsFromSettings(visual({ terminalTheme: 'nord' })).theme).toBe(
+      resolveTerminalTheme('nord').theme
+    )
+    expect(xtermOptionsFromSettings(visual({ terminalTheme: 'bogus' })).theme).toBe(
+      resolveTerminalTheme('nodeterm-dark').theme
+    )
+  })
+
+  it('carries the non-appearance options both call sites need', () => {
+    const o = xtermOptionsFromSettings(visual())
+    expect(o.allowProposedApi).toBe(true)
+    expect(o.macOptionClickForcesSelection).toBe(true)
+  })
+})
+
+describe('applyLiveOptions', () => {
+  /** An xterm stand-in that records every WRITE to `options` — the guard is the point. */
+  function fakeTerm(s: XtermVisualSettings): LiveOptionTarget & { writes: string[] } {
+    const writes: string[] = []
+    const backing = xtermOptionsFromSettings(s) as unknown as Record<string, unknown>
+    const options = new Proxy(backing, {
+      set(t, k, v) {
+        writes.push(String(k))
+        t[String(k)] = v
+        return true
+      }
+    }) as LiveOptionTarget['options']
+    return { options, writes }
+  }
+
+  it('reports no change and writes nothing when settings are unchanged', () => {
+    const s = visual()
+    const term = fakeTerm(s)
+    expect(applyLiveOptions(term, s)).toEqual({ metricsChanged: false, themeChanged: false })
+    // xterm's `options` is a setter proxy: an unchanged write still fires its change handling,
+    // and terminals are re-optioned on every settings keystroke.
+    expect(term.writes).toEqual([])
+  })
+
+  it('applies a font size change and reports metricsChanged', () => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(term, visual({ fontSize: 16 }))
+    expect(r.metricsChanged).toBe(true)
+    expect(r.themeChanged).toBe(false)
+    expect(term.options.fontSize).toBe(16)
+    expect(term.writes).toEqual(['fontSize'])
+  })
+
+  it.each([
+    ['fontFamily', { fontFamily: 'Iosevka' }],
+    ['lineHeight', { terminalLineHeight: 1.5 }],
+    ['letterSpacing', { terminalLetterSpacing: 2 }]
+  ] as const)('treats %s as a cell-geometry change', (_name, patch) => {
+    const term = fakeTerm(visual())
+    expect(applyLiveOptions(term, visual(patch)).metricsChanged).toBe(true)
+  })
+
+  // The distinction is what decides whether the caller re-fits (and, under co-attach, re-reports
+  // its grid to a SHARED pty). A palette swap must not drag every terminal through a resize.
+  it.each([
+    ['cursorStyle', { cursorStyle: 'bar' }],
+    ['cursorInactiveStyle', { cursorInactiveStyle: 'none' }],
+    ['cursorBlink', { cursorBlink: false }],
+    ['scrollback', { tmuxScrollback: 20000 }],
+    ['theme', { terminalTheme: 'dracula' }]
+  ] as const)('does NOT treat %s as a cell-geometry change', (_name, patch) => {
+    const term = fakeTerm(visual())
+    expect(applyLiveOptions(term, visual(patch as Partial<XtermVisualSettings>)).metricsChanged).toBe(
+      false
+    )
+  })
+
+  it('applies a theme change and reports themeChanged', () => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(term, visual({ terminalTheme: 'tokyo-night' }))
+    expect(r.themeChanged).toBe(true)
+    expect(term.options.theme).toBe(resolveTerminalTheme('tokyo-night').theme)
+    expect(term.writes).toEqual(['theme'])
+  })
+
+  it('an unknown theme id resolves to the default, so it is not a change', () => {
+    const term = fakeTerm(visual())
+    expect(applyLiveOptions(term, visual({ terminalTheme: 'bogus' })).themeChanged).toBe(false)
+  })
+
+  it('applies several changes in one pass', () => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(
+      term,
+      visual({ fontSize: 18, terminalTheme: 'nord', cursorStyle: 'underline' })
+    )
+    expect(r).toEqual({ metricsChanged: true, themeChanged: true })
+    expect(term.options.fontSize).toBe(18)
+    expect(term.options.cursorStyle).toBe('underline')
+    expect(term.options.theme).toBe(resolveTerminalTheme('nord').theme)
   })
 })

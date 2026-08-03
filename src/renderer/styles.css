@@ -1552,7 +1552,12 @@ body,
   position: relative;
   flex: 1;
   min-height: 0;
-  background: var(--bg);
+  /* The TERMINAL's background, not the app's: `.term-node__xterm` insets the xterm by a few px and
+   * a co-attach letterbox leaves unpainted space around it, so both bands show THIS rather than the
+   * theme — a mismatched frame around every terminal the moment a non-default theme is picked. Set
+   * from the active theme in App.tsx; the fallback is the app background, which is exactly what the
+   * default theme carries anyway. */
+  background: var(--term-bg, var(--bg));
 }
 
 /* Upload progress while dropped files scp to an SSH host (and a brief failure flash). */
@@ -7338,6 +7343,9 @@ body,
   display: flex;
   flex-direction: column;
   padding: 8px; /* the terminal's inset — off the FitAddon-measured host (see .kanban-modal__term) */
+  /* Same reason as `.term-node__body`: this 8px inset would otherwise frame the terminal in the
+   * modal's own colour. The fallback is the modal surface, i.e. the pre-themes look. */
+  background: var(--term-bg, #161618);
 }
 .kanban-modal__action[aria-pressed='true'] {
   background: var(--accent);
@@ -9136,4 +9144,27 @@ body,
   display: flex;
   justify-content: center;
   gap: 10px;
+}
+
+/* ---- Settings → Terminal: the live appearance preview ---- */
+/* A real (non-interactive) xterm at a fixed 46x9 grid. It sizes itself from the font metrics, so
+   the frame just wraps it — no fit addon is involved and nothing here may set a width the terminal
+   would then be measured against. */
+.settings-term-preview {
+  display: inline-block;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--term-bg, var(--bg));
+  overflow: hidden;
+}
+
+/* The preview never scrolls (one screen, no scrollback in view) — hide the reserved bar the same
+   way the canvas terminals do, so it can't draw a dead band down the right-hand side. */
+.settings-term-preview .xterm-viewport {
+  scrollbar-width: none;
+}
+.settings-term-preview .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }

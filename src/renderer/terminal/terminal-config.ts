@@ -1,4 +1,7 @@
+import type { ITheme } from '@xterm/xterm'
 import type { ClientId } from '@shared/presence'
+import type { Settings, TerminalCursorInactiveStyle, TerminalCursorStyle } from '@shared/types'
+import { resolveTerminalTheme } from './themes'
 
 /**
  * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be tested
@@ -154,6 +157,159 @@ export const XTERM_SCROLLBACK_MIN = 1000
  */
 export function xtermScrollback(tmuxScrollback: number): number {
   return Math.min(Math.max(XTERM_SCROLLBACK_MIN, tmuxScrollback), XTERM_SCROLLBACK_MAX)
+}
+
+/* ------------------------------------------------------------------------------------------- *
+ * Terminal appearance — ONE source for both xterm call sites.
+ *
+ * `TerminalNode` (the canvas) and `ModalTerminal` (the kanban card modal) each build an xterm for
+ * the same session, and they had drifted apart: two different hardcoded backgrounds, and only the
+ * canvas one applied setting changes to a live terminal. Every appearance option now flows through
+ * `xtermOptionsFromSettings` (mount) and `applyLiveOptions` (change), so a new option cannot land
+ * on one surface only.
+ * ------------------------------------------------------------------------------------------- */
+
+/** Line height as a multiple of the font size. Below 1 xterm clips glyph descenders; above 2 the
+ *  grid is mostly air and a full-screen TUI stops fitting anything useful. */
+export const TERMINAL_LINE_HEIGHT_MIN = 1
+export const TERMINAL_LINE_HEIGHT_MAX = 2
+/** Extra px between cells. Negative tightens; past these bounds box-drawing characters (which
+ *  agent CLIs draw their frames with) stop meeting and the output looks torn. */
+export const TERMINAL_LETTER_SPACING_MIN = -2
+export const TERMINAL_LETTER_SPACING_MAX = 4
+
+function clamp(value: number, min: number, max: number, fallback: number): number {
+  // settings.json is hand-editable: a missing/NaN value must land on the default, not on NaN —
+  // which xterm would happily accept and then render a zero-height grid from.
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(Math.max(min, value), max)
+}
+
+export function terminalLineHeight(value: number): number {
+  return clamp(value, TERMINAL_LINE_HEIGHT_MIN, TERMINAL_LINE_HEIGHT_MAX, 1)
+}
+
+export function terminalLetterSpacing(value: number): number {
+  return clamp(value, TERMINAL_LETTER_SPACING_MIN, TERMINAL_LETTER_SPACING_MAX, 0)
+}
+
+/** The slice of `Settings` that decides how a terminal LOOKS. Narrowed to a structural type so
+ *  the helpers below are callable from a test with a plain object literal. */
+export type XtermVisualSettings = Pick<
+  Settings,
+  | 'fontFamily'
+  | 'fontSize'
+  | 'cursorBlink'
+  | 'cursorStyle'
+  | 'cursorInactiveStyle'
+  | 'terminalLineHeight'
+  | 'terminalLetterSpacing'
+  | 'terminalTheme'
+  | 'tmuxScrollback'
+>
+
+/** The appearance-derived options, resolved and clamped. */
+export interface XtermVisualOptions {
+  fontFamily: string
+  fontSize: number
+  cursorBlink: boolean
+  cursorStyle: TerminalCursorStyle
+  cursorInactiveStyle: TerminalCursorInactiveStyle
+  lineHeight: number
+  letterSpacing: number
+  scrollback: number
+  theme: ITheme
+}
+
+/**
+ * Every appearance option for a `new Terminal({...})`, from settings.
+ *
+ * The non-appearance options both call sites also need (`allowProposedApi`,
+ * `macOptionClickForcesSelection`) are included so a call site is a spread of this and nothing
+ * else — the point is that there is no per-site options literal left to drift.
+ */
+export function xtermOptionsFromSettings(
+  s: XtermVisualSettings
+): XtermVisualOptions & { allowProposedApi: true; macOptionClickForcesSelection: true } {
+  return {
+    fontFamily: s.fontFamily,
+    fontSize: s.fontSize,
+    cursorBlink: s.cursorBlink,
+    cursorStyle: s.cursorStyle,
+    cursorInactiveStyle: s.cursorInactiveStyle,
+    lineHeight: terminalLineHeight(s.terminalLineHeight),
+    letterSpacing: terminalLetterSpacing(s.terminalLetterSpacing),
+    // NOT what the user scrolls in a tmux session — tmux's mouse is ON and the wheel scrolls
+    // tmux's own history (see pty-manager's tmuxConf). This buffer backs the plain-shell
+    // fallback (tmux unavailable) and the cold-snapshot replay. Capped: per node, many nodes.
+    scrollback: xtermScrollback(s.tmuxScrollback),
+    theme: resolveTerminalTheme(s.terminalTheme).theme,
+    allowProposedApi: true,
+    // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
+    // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
+    macOptionClickForcesSelection: true
+  }
+}
+
+/** Just enough of an xterm instance to re-option it — keeps this file testable without a DOM. */
+export interface LiveOptionTarget {
+  options: Partial<XtermVisualOptions>
+}
+
+/** What the caller still owes after a live re-option. */
+export interface LiveOptionEffects {
+  /**
+   * The CELL GEOMETRY changed, so this terminal now fits a different grid and the caller MUST
+   * re-fit — routing the change through the same path a container resize takes, so the pty is
+   * told the new size. Skipping it leaves the pty running at a grid nobody renders, and under
+   * co-attach (one pty, N subscribers) it is worse than cosmetic: this client keeps clamping the
+   * SHARED pty to its pre-change size, so a font tweak here shrinks somebody else's terminal.
+   */
+  metricsChanged: boolean
+  /**
+   * The palette changed. xterm repaints on its own, but the renderer swap / detached-element
+   * cases can swallow a full refresh (see `TerminalNode`'s `fullRepaint`), and a half-repainted
+   * palette is the most visible possible failure — so the caller forces one repaint.
+   */
+  themeChanged: boolean
+}
+
+/**
+ * Apply appearance settings to a LIVE terminal, reporting what the caller still owes.
+ *
+ * Assignment is per-option and guarded by a comparison, because xterm's `options` is a setter
+ * proxy: writing an unchanged value still fires its change handling (and, for `theme`, a full
+ * palette rebuild). Terminals are re-optioned on every settings keystroke, so the guard is what
+ * keeps a slider drag from thrashing every terminal on the canvas.
+ */
+export function applyLiveOptions(
+  term: LiveOptionTarget,
+  s: XtermVisualSettings
+): LiveOptionEffects {
+  const next = xtermOptionsFromSettings(s)
+  const o = term.options
+  const metricsChanged =
+    o.fontFamily !== next.fontFamily ||
+    o.fontSize !== next.fontSize ||
+    o.lineHeight !== next.lineHeight ||
+    o.letterSpacing !== next.letterSpacing
+  // Identity, not deep equality: themes are frozen module constants, so the same id always yields
+  // the same object and a changed id never does.
+  const themeChanged = o.theme !== next.theme
+
+  if (o.fontFamily !== next.fontFamily) o.fontFamily = next.fontFamily
+  if (o.fontSize !== next.fontSize) o.fontSize = next.fontSize
+  if (o.lineHeight !== next.lineHeight) o.lineHeight = next.lineHeight
+  if (o.letterSpacing !== next.letterSpacing) o.letterSpacing = next.letterSpacing
+  if (o.cursorBlink !== next.cursorBlink) o.cursorBlink = next.cursorBlink
+  if (o.cursorStyle !== next.cursorStyle) o.cursorStyle = next.cursorStyle
+  if (o.cursorInactiveStyle !== next.cursorInactiveStyle) {
+    o.cursorInactiveStyle = next.cursorInactiveStyle
+  }
+  if (o.scrollback !== next.scrollback) o.scrollback = next.scrollback
+  if (themeChanged) o.theme = next.theme
+
+  return { metricsChanged, themeChanged }
 }
 
 /**
