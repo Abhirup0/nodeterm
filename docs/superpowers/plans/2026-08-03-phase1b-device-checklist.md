@@ -65,7 +65,11 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       character — the accent may be missing, but never a lone accent mark on a blank cell.
 - [ ] **2.7 Atlas fidelity at dpr 1 and 2.** On the retina display and on an external 1x display,
       with a non-default font family and size (e.g. Menlo 11, JetBrains Mono 16): text is crisp,
-      not soft or doubled.
+      not soft or doubled. **If any softness remains at zoom 1, report it** — the atlas is now
+      rasterized at xterm's exact device cell, which puts the sampler on a float tie: `MIN_FILTER`
+      selection sits on the λ=0 mag/min boundary, and a driver resolving that to minification uses
+      LINEAR (soft) instead of MAG NEAREST (crisp). The deterministic fallback is NEAREST min at
+      zoom ≥ 1.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
@@ -260,6 +264,18 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   the left column and the right half of the glyph stays uncovered. Cosmetic and position-correct
   (the cursor is on the right cell); Phase 2, with the same wide-cell geometry work as the rest of
   the plate/rect family.
+- **L14 — The atlas cell and the baseline latch to the FIRST terminal's usable measurement.** The
+  atlas is rasterized into xterm's own `dimensions.device.cell`, handed over by whichever terminal
+  builds the shared context first, and the baseline is derived from that same font at that moment.
+  Two consequences. A **webfont that resolves later** leaves the atlas on the fallback face's
+  metrics for the life of the context — the text is measured and placed correctly, just against the
+  wrong face's cell — until something disposes the context (a font-family/size change in Settings;
+  L10's dpr change does not). And a terminal whose device cell **diverges** from the atlas's (a dpr
+  change under a live context, a per-terminal letterSpacing) has its glyphs resampled against the
+  quad they are drawn onto, i.e. slightly soft — never misplaced. Both are announced:
+  `warnOnCellDrift` logs one `[glyphgrid] atlas cell … does not match …` line per context lifetime,
+  so a soft terminal can be told apart from a soft display. Phase 2 (re-rasterize on
+  `document.fonts.ready` / per-cell atlas pages).
 
 ---
 
