@@ -26,7 +26,7 @@
  * same one `terminal/glyphgrid-attach.ts` makes for xterm's internals.
  */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { create } from 'zustand'
 import { GlyphAtlas } from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
@@ -37,21 +37,36 @@ import { createCanvasRasterizer } from '../glyphgrid/raster'
 import { useSettings } from '../state/settings'
 
 /** Atlas page edge, in DEVICE pixels. 2048 (not Phase 0's 1024) because the atlas cells are
- *  device-sized: at dpr 2 a 13px terminal font is roughly a 16x38 device cell, so a 1024 page
- *  holds ~1600 glyphs — enough for ASCII plus a little, and nothing like enough for a session
+ *  device-sized: at dpr 2 a 13px terminal font is roughly a 16x32 device cell, so a 1024 page
+ *  holds ~2000 glyphs — enough for ASCII plus a little, and nothing like enough for a session
  *  that also shows box drawing, powerline glyphs and CJK. A full page degrades to the blank slot
  *  (GlyphAtlas never throws), i.e. missing text, so the page is sized for the pathological
  *  session rather than the average one. 2048² RGBA = 16 MB of VRAM, once, for the whole canvas. */
 const ATLAS_PAGE_PX = 2048
 
-/** Fallback cell metrics as a fraction of the font size, used only when the 2D context cannot
- *  measure (no OffscreenCanvas → we bail before this, or a font that reports nothing). Roughly a
- *  monospace advance and line box. */
-const FALLBACK_ADVANCE_RATIO = 0.6
-const FALLBACK_LINE_RATIO = 1.2
-/** A cell larger than this would make the atlas page hold almost nothing; clamped rather than
- *  trusted, since the ratio comes from a user-typed font family. */
+/** A cell larger than this would make the atlas page hold almost nothing. The number now comes
+ *  from xterm rather than from a measurement of a user-typed font family, so this is a sanity
+ *  clamp on a pathological font size rather than a guard against a bad guess. */
 const MAX_CELL_PX = 256
+
+/**
+ * The cell the atlas rasterizes into, in DEVICE pixels.
+ *
+ * **The invariant: the atlas texel grid IS xterm's device cell grid, always.** The engine draws a
+ * cell as `css.cell × zoom` onto a dpr-scaled buffer, i.e. `device.cell` device pixels at zoom 1,
+ * and the atlas slot is stretched over exactly that quad. Any disagreement between the two is a
+ * per-glyph resample — the "text is rougher than the DOM renderer" report. So the atlas does not
+ * measure anything itself: the first terminal to build the context hands over xterm's own
+ * `dimensions.device.cell`, which already carries xterm's rounding chain (charSize × dpr, ceil on
+ * the char height, letterSpacing, lineHeight).
+ *
+ * One cell for the whole canvas is correct because the font settings are GLOBAL — every terminal
+ * computes the same device cell from the same font family/size and the same dpr.
+ */
+export interface DeviceCell {
+  cellW: number
+  cellH: number
+}
 
 // ---------------------------------------------------------------------------------------------
 // Store — the reactive half of the seam
@@ -243,47 +258,18 @@ function fontKeyOf(fontFamily: string, fontSize: number): string {
   return `${fontFamily}|${fontSize}`
 }
 
-/**
- * The atlas cell, in DEVICE pixels.
- *
- * Deliberately NOT xterm's measurement. xterm measures the advance of 'W' in a live DOM span per
- * terminal (`_charSizeService`), and the addon feeds those exact numbers to the ENGINE as the
- * grid's cell size — so cell GEOMETRY on screen is always xterm's own, and mouse coordinates
- * stay aligned. The number computed here decides only how many texels a glyph is rasterized
- * into; a fraction of a pixel of disagreement rescales the bitmap slightly, it can never move a
- * cell. Measuring here through the DOM instead would mean creating and laying out a probe
- * element from a module singleton before any terminal exists, for a strictly cosmetic gain.
- *
- * Rounded UP because every draw is clipped to its slot rect (see raster.ts): a slot a hair too
- * small clips the glyph, a slot a hair too big wastes atlas area.
- */
-function measureCellDevicePx(family: string, sizePx: number): { cellW: number; cellH: number } {
-  const fallback = {
-    cellW: Math.max(1, Math.ceil(sizePx * FALLBACK_ADVANCE_RATIO)),
-    cellH: Math.max(1, Math.ceil(sizePx * FALLBACK_LINE_RATIO))
-  }
-  try {
-    const ctx = new OffscreenCanvas(8, 8).getContext('2d')
-    if (!ctx) return fallback
-    ctx.font = `${sizePx}px ${family}`
-    const m = ctx.measureText('W')
-    // `fontBoundingBox*` is the FONT's line box, not this glyph's ink box — the right metric for
-    // a cell, and the one that keeps descenders inside their slot. Guarded because it is
-    // optional in the spec (and undefined in some engines).
-    const ascent = m.fontBoundingBoxAscent
-    const descent = m.fontBoundingBoxDescent
-    const w = Math.ceil(m.width)
-    const h = Number.isFinite(ascent) && Number.isFinite(descent) ? Math.ceil(ascent + descent) : 0
-    return {
-      cellW: w > 0 ? Math.min(w, MAX_CELL_PX) : fallback.cellW,
-      cellH: h > 0 ? Math.min(h, MAX_CELL_PX) : fallback.cellH
-    }
-  } catch {
-    return fallback
-  }
+/** Sanity-check the cell a caller supplies before it becomes the atlas's fixed geometry. Null =
+ *  "do not build a context from this" — the caller stays on the DOM renderer, which is always a
+ *  correct outcome. */
+function usableCell(cell: DeviceCell | undefined): DeviceCell | null {
+  if (!cell) return null
+  const { cellW, cellH } = cell
+  if (!Number.isFinite(cellW) || !Number.isFinite(cellH)) return null
+  if (cellW <= 0 || cellH <= 0) return null
+  return { cellW: Math.min(cellW, MAX_CELL_PX), cellH: Math.min(cellH, MAX_CELL_PX) }
 }
 
-function createContext(): LiveContext | null {
+function createContext(cell: DeviceCell): LiveContext | null {
   if (typeof document === 'undefined' || typeof OffscreenCanvas === 'undefined') return null
   const { fontFamily, fontSize } = useSettings.getState().settings
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
@@ -295,7 +281,7 @@ function createContext(): LiveContext | null {
   // grid on the canvas for a cosmetic gain. The drawing BUFFER does follow the dpr, on every
   // resize (see the component's `pushViewport`), so geometry is never wrong.
   const devicePx = Math.max(1, fontSize * dpr)
-  const { cellW, cellH } = measureCellDevicePx(fontFamily, devicePx)
+  const { cellW, cellH } = cell
   // Rasterizer FIRST: it needs no GPU, so a missing OffscreenCanvas bails out before a WebGL
   // context has been created (the harness learned this the expensive way — a context acquired
   // and then dropped unreferenced is exactly the leak this whole layer exists to avoid).
@@ -324,6 +310,7 @@ function disposeContext(): void {
   const ctx = live
   live = null
   creationAttempted = false
+  cellMismatchWarned = false
   if (!ctx) return
   // BEFORE any GL call: a rAF tick already scheduled with this context must skip its frame rather
   // than submit against deleted objects (see `LiveContext.disposed`).
@@ -375,11 +362,54 @@ function ensureSettingsSubscription(): void {
   })
 }
 
-/** The singleton, created on first use. Internal because it also exposes the canvas + GL, which
- *  only this file's component may touch. */
-function ensureLiveContext(): LiveContext | null {
+/** Fires when a context has just been BUILT. The component listens so it can mount the fresh
+ *  canvas: creation is now driven by the first terminal that offers a device cell, which can
+ *  happen after the layer's own effect has already run and found nothing. Deliberately NOT a
+ *  generation bump — that notification is a re-evaluate-your-participation signal to every
+ *  registered terminal, and raising it from INSIDE the call one of them is making would re-enter
+ *  `setupGlyph` before it has registered its grid. */
+const contextListeners = new Set<() => void>()
+
+export function subscribeSharedGlyphContext(fn: () => void): () => void {
+  contextListeners.add(fn)
+  return () => {
+    contextListeners.delete(fn)
+  }
+}
+
+/** One line per context lifetime: every terminal supplies its own device cell and they are all
+ *  supposed to agree (the font settings are global). A disagreement is a real defect — a dpr
+ *  change under a live context, a per-terminal letterSpacing — and the symptom is soft text, so
+ *  say so rather than silently rescaling. */
+let cellMismatchWarned = false
+function warnOnCellDrift(ctx: LiveContext, cell: DeviceCell | null): void {
+  if (!cell || cellMismatchWarned) return
+  if (Math.abs(ctx.atlas.cellW - cell.cellW) < 0.01 && Math.abs(ctx.atlas.cellH - cell.cellH) < 0.01)
+    return
+  cellMismatchWarned = true
+  console.warn(
+    `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} does not match this terminal's ` +
+      `device cell ${cell.cellW}×${cell.cellH} — its glyphs will be resampled`
+  )
+}
+
+/**
+ * The singleton, created on first use. Internal because it also exposes the canvas + GL, which
+ * only this file's component may touch.
+ *
+ * Creation needs `cell` — xterm's device cell (see `DeviceCell`) — so a caller that has no
+ * terminal to ask (the component itself) gets the EXISTING context or null, and never builds one
+ * with guessed metrics. The first caller that does have one fixes the atlas geometry for the life
+ * of the context; a font change tears it down and the next caller rebuilds it with the new cell.
+ */
+function ensureLiveContext(cell?: DeviceCell): LiveContext | null {
   if (!sharedGlyphActive()) return null
-  if (live) return live
+  if (live) {
+    warnOnCellDrift(live, usableCell(cell))
+    return live
+  }
+  const seed = usableCell(cell)
+  if (!seed) return null
   if (creationAttempted) return null
   creationAttempted = true
   ensureSettingsSubscription()
@@ -392,20 +422,28 @@ function ensureLiveContext(): LiveContext | null {
   // null paths treat as "not available here". `creationAttempted` is already true, so the throw
   // is never retried in a loop.
   try {
-    live = createContext()
+    live = createContext(seed)
   } catch (err) {
     console.warn('[glyphgrid] shared context construction threw; staying on the DOM renderer', err)
     live = null
   }
+  // Announced only on success, and AFTER `live` is set, so a listener that immediately asks for
+  // the context finds it.
+  if (live) for (const fn of contextListeners) fn()
   return live
 }
 
 /**
  * The shared engine + atlas, created on first use. Null means "stay on the DOM renderer": the
- * mode is off, the session has failed, or this machine has no WebGL2/OffscreenCanvas.
+ * mode is off, the session has failed, this machine has no WebGL2/OffscreenCanvas — or no context
+ * exists yet and the caller passed no `deviceCell` to build one from.
+ *
+ * `deviceCell` is xterm's `dimensions.device.cell` for the asking terminal. It is what the atlas
+ * rasterizes into, and the invariant it exists for is on `DeviceCell`: **the atlas texel grid is
+ * xterm's device cell grid, always.**
  */
-export function getSharedGlyphContext(): SharedGlyphContext | null {
-  return ensureLiveContext()
+export function getSharedGlyphContext(deviceCell?: DeviceCell): SharedGlyphContext | null {
+  return ensureLiveContext(deviceCell)
 }
 
 /** Camera feed. Always records (so a context created later opens at the right place) and only
@@ -438,10 +476,18 @@ export function SharedGlyphLayer(): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const generation = useSharedGlyph((s) => s.generation)
   const failed = useSharedGlyph((s) => s.failed)
+  /** Bumped when a terminal BUILDS the context. The layer cannot build one itself — the atlas
+   *  geometry comes from a live terminal's device cell (see `DeviceCell`) — so whichever of the
+   *  two runs first, the canvas still gets mounted: if this effect ran first it found nothing and
+   *  this tick brings it back. Declared BEFORE the mounting effect so the subscription is live by
+   *  the time a terminal in the same commit can create one. */
+  const [contextTick, setContextTick] = useState(0)
+  useEffect(() => subscribeSharedGlyphContext(() => setContextTick((n) => n + 1)), [])
 
   useEffect(() => {
     const host = hostRef.current
     if (!host || failed) return
+    // No cell argument: the component never CREATES a context, it only adopts one.
     const ctx = ensureLiveContext()
     if (!ctx) return
     const canvas = ctx.canvas
@@ -500,7 +546,7 @@ export function SharedGlyphLayer(): JSX.Element {
       // (a project switch must not cost a context rebuild). Only `failSharedGlyph` and a font
       // change dispose it.
     }
-  }, [generation, failed])
+  }, [generation, failed, contextTick])
 
   return (
     <div

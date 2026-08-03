@@ -271,7 +271,9 @@ describe('GlyphGridEngine', () => {
     e.register(spec('a', 0))
     a.glyphFor(0x41, false, false) // dirties the atlas
     expect(e.frame()).toBe(true)
-    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 7, 15)
+    // …including the slot PITCH beside the sampled extent: the shader needs both, and handing it
+    // the extent as the pitch would overlap every slot with its neighbour.
+    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 7, 15, 7, 15)
     // Stronger than "before the first drawGrid": beginFrame pushes uAtlasCols/uAtlasCell from
     // the values uploadAtlas stored, so an upload landing after it would leave frame 1 sampling
     // slot 0 everywhere and the uniforms permanently one upload stale.

@@ -338,7 +338,9 @@ export class GlyphGridEngine {
           this.atlas.source,
           this.atlas.sizePx,
           this.atlas.cellW,
-          this.atlas.cellH
+          this.atlas.cellH,
+          this.atlas.strideX,
+          this.atlas.strideY
         )
         this.atlas.clearDirty()
         this.atlasUploaded = true

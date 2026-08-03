@@ -37,7 +37,17 @@ export interface GridDrawParams {
 export interface GlyphGL {
   /** w/h in CSS px, dpr the device pixel ratio — sizes the backing store and the viewport. */
   resize(w: number, h: number, dpr: number): void
-  uploadAtlas(source: TexImageSource, sizePx: number, cellW: number, cellH: number): void
+  /** `cellW/cellH` are the SAMPLED extent of a slot (the exact device cell, fractional in
+   *  general); `strideX/strideY` are the whole-texel slot pitch the atlas laid the page out on.
+   *  They differ by under a texel and must not be conflated — see `GlyphAtlas.strideX`. */
+  uploadAtlas(
+    source: TexImageSource,
+    sizePx: number,
+    cellW: number,
+    cellH: number,
+    strideX: number,
+    strideY: number
+  ): void
   /** Allocate the grid's GPU-side cell buffer (cols*rows*CELL_STRIDE uint32s, zeroed).
    *  Re-calling with the same id REALLOCATES — that is the resize path. */
   createGrid(id: string, cols: number, rows: number): void

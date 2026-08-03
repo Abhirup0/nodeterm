@@ -24,13 +24,16 @@ export class GlyphAtlas {
     private pageSizePx = 1024
   ) {}
 
-  /** The three metrics `GlyphGL.uploadAtlas` needs to map a slot index to texels. They are
+  /** The metrics `GlyphGL.uploadAtlas` needs to map a slot index to texels. They are
    *  passthroughs on purpose: the page size is the atlas's own, the cell size belongs to the
    *  rasterizer that filled it, and the engine must never have to know a second source for
    *  either — a mismatch here shifts every glyph by a fraction of a cell. */
   get sizePx(): number {
     return this.pageSizePx
   }
+  /** The SAMPLED extent of a slot, in texels: exactly the device cell the grids draw with, which
+   *  is fractional in general (xterm's `device.cell.width` is `charWidth * dpr`). Keeping it
+   *  exact is what makes the texel:pixel mapping 1:1 at zoom 1 — see `strideX`. */
   get cellW(): number {
     return this.rasterizer.cellW
   }
@@ -38,9 +41,31 @@ export class GlyphAtlas {
     return this.rasterizer.cellH
   }
 
+  /**
+   * The slot PITCH, in whole texels — the cell rounded UP, so consecutive slots never share a
+   * texel.
+   *
+   * Pitch and extent are separate for one reason. Rounding the CELL to whole texels (what this
+   * atlas used to do) means a glyph rasterized into N texels is drawn onto a quad of N±0.5
+   * device pixels: the GPU resamples every glyph by a couple of percent, which is precisely the
+   * "rougher than the DOM renderer" report. Rounding only the PITCH keeps the extent exact —
+   * texel:pixel 1:1 — while still starting every slot on a texel boundary, which matters because
+   * a fractional origin would put two neighbouring glyphs' anti-aliasing in the SAME boundary
+   * texel, and a full-block glyph would then bleed a dim column into an unrelated slot.
+   *
+   * The `max(1, …)` is not decoration: a pitch of 0 makes `capacity` infinite and `cellXY`'s
+   * modulo NaN.
+   */
+  get strideX(): number {
+    return Math.max(1, Math.ceil(this.rasterizer.cellW))
+  }
+  get strideY(): number {
+    return Math.max(1, Math.ceil(this.rasterizer.cellH))
+  }
+
   get capacity(): number {
-    const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
-    const rows = Math.floor(this.sizePx / this.rasterizer.cellH)
+    const cols = Math.floor(this.sizePx / this.strideX)
+    const rows = Math.floor(this.sizePx / this.strideY)
     return cols * rows
   }
 
@@ -51,15 +76,15 @@ export class GlyphAtlas {
    *  either the page metrics or the padding changed, and the symptom is every glyph rendering
    *  a fraction of a cell off — not a crash, just permanently wrong text.
    *
-   *  On a DEGENERATE page (`sizePx < cellW`, so `cols === 0`) `slot % 0` is NaN, which would
+   *  On a DEGENERATE page (`sizePx < strideX`, so `cols === 0`) `slot % 0` is NaN, which would
    *  propagate silently into the uv rect. Capacity is 0 there, so no slot is ever allocated and
    *  the origin is simply (0,0) — the blank slot. */
   private cellXY(slot: number): { x: number; y: number } {
-    const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
+    const cols = Math.floor(this.sizePx / this.strideX)
     if (cols <= 0) return { x: 0, y: 0 }
     return {
-      x: (slot % cols) * this.rasterizer.cellW,
-      y: Math.floor(slot / cols) * this.rasterizer.cellH
+      x: (slot % cols) * this.strideX,
+      y: Math.floor(slot / cols) * this.strideY
     }
   }
 
@@ -79,6 +104,9 @@ export class GlyphAtlas {
     return slot
   }
 
+  /** The uv rect of a slot: the ORIGIN follows the whole-texel pitch, the SIZE is the exact
+   *  cell — the two are not the same number (see `strideX`), and the shader derives its uv the
+   *  same way (`uAtlasStride` for the origin, `uAtlasCell` for the extent). */
   slotRect(slot: number): { u0: number; v0: number; u1: number; v1: number } {
     // A degenerate page has no sampleable area at all: return the ZERO rect rather than let the
     // division produce NaN, which the shader would turn into undefined texture reads.

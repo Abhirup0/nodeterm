@@ -4987,6 +4987,16 @@ export function Canvas() {
     (_e: unknown, vp: Viewport) => {
       viewportRef.current = vp
       markDirty()
+      // SYNCHRONOUS, and deliberately OUTSIDE the coalescing rAF below. React Flow applies the
+      // viewport's CSS transform inside the d3-zoom event that raised this callback, so the node
+      // chrome has already moved by the time we return; the shared glyph canvas is redrawn by the
+      // layer's own persistent rAF, which must therefore be able to read this frame's camera
+      // BEFORE it runs. Fed from the coalescing rAF instead, the camera arrived one tick late and
+      // the canvas painted the PREVIOUS pan every frame — the drawn text lagging the node bodies
+      // by a frame or two, which reads as the text wobbling loose behind its own node while the
+      // DOM moves rigidly. Cost is three field writes plus a change-gated `engine.setCamera`, so
+      // there is nothing here worth coalescing.
+      setSharedGlyphCamera(vp)
       // Latch the WebGL gesture flag for the whole pan/zoom, releasing it a beat after the last
       // viewport event: renderer swaps (heavyweight, non-atomic) may only run at rest — a swap
       // executed mid-gesture is both the jank and the black-terminal window (see webgl-budget's
@@ -5008,9 +5018,6 @@ export function Canvas() {
           // Feed the WebGL budget's zoom gate (suspend GPU rendering when zoomed way out).
           // Idempotent + hysteresis inside; per-frame call cost is a float compare.
           setWebglZoom(viewportRef.current.zoom)
-          // Same coalesced frame feeds the shared glyph canvas: its camera and the DOM nodes'
-          // transform must move together, or the text lags the node bodies by a frame.
-          setSharedGlyphCamera(viewportRef.current)
         })
       }
     },

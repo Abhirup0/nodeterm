@@ -350,14 +350,39 @@ function hostPadding(el: HTMLElement): Insets {
  * renderer it already has.
  */
 function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
+  return cellOf(term, 'css')
+}
+
+/**
+ * xterm's DEVICE cell — the number of physical pixels one cell occupies at zoom 1, which is what
+ * the shared ATLAS must rasterize into.
+ *
+ * The engine draws a cell as `css.cell × zoom` onto a dpr-scaled buffer, so at zoom 1 the quad is
+ * exactly this many device pixels; an atlas slot measured any other way is stretched over it and
+ * every glyph is resampled (see `DeviceCell` in the shared layer). Fractional by nature
+ * (`charWidth * dpr`) and deliberately handed over UNROUNDED — the atlas rounds only its slot
+ * PITCH, never the sampled extent.
+ */
+function deviceCellOf(term: Terminal): { cellW: number; cellH: number } | null {
+  return cellOf(term, 'device')
+}
+
+/** The guarded read behind both cell accessors. Private API, fully guarded: null simply means
+ *  "don't register", i.e. this terminal keeps the renderer it already has. */
+function cellOf(term: Terminal, space: 'css' | 'device'): { cellW: number; cellH: number } | null {
   try {
-    const cell = (
+    const dims = (
       term as unknown as {
         _core?: {
-          _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } }
+          _renderService?: {
+            dimensions?: Partial<
+              Record<'css' | 'device', { cell?: { width: number; height: number } }>
+            >
+          }
         }
       }
-    )._core?._renderService?.dimensions?.css?.cell
+    )._core?._renderService?.dimensions
+    const cell = dims?.[space]?.cell
     if (!cell) return null
     return validCellSize(cell.width, cell.height)
   } catch {
@@ -1115,7 +1140,13 @@ export function TerminalNode({
       // failed, and a context that actually exists — no WebGL2/OffscreenCanvas returns null here
       // and this terminal simply stays where it is.
       if (!sharedGlyphActive()) return
-      const ctx = getSharedGlyphContext()
+      // The shared atlas rasterizes at xterm's DEVICE cell, and this is where that number enters
+      // the layer: the FIRST terminal to ask builds the context and fixes the atlas geometry for
+      // its lifetime (font settings are global, so every terminal computes the same cell). Passing
+      // it is not optional — with no live context and no cell there is nothing to build an atlas
+      // from, and `getSharedGlyphContext` answers null rather than guess metrics that would leave
+      // every glyph rescaled against the quad it is drawn onto.
+      const ctx = getSharedGlyphContext(deviceCellOf(term) ?? undefined)
       if (!ctx) return
       const host = term.element
       const cell = forcedCell ?? cssCellOf(term)

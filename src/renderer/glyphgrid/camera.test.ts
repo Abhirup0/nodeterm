@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   rectsIntersect,
   screenToWorld,
+  snapPanToDevicePx,
   visibleWorldRect,
   worldToScreen,
   type Camera
@@ -32,5 +33,53 @@ describe('glyphgrid camera', () => {
     expect(rectsIntersect(a, { x: 5, y: 5, w: 10, h: 10 })).toBe(true)
     expect(rectsIntersect(a, { x: 10, y: 0, w: 5, h: 5 })).toBe(false) // edge-touch = not visible
     expect(rectsIntersect(a, { x: 20, y: 20, w: 1, h: 1 })).toBe(false)
+  })
+})
+
+describe('snapPanToDevicePx', () => {
+  it('rounds the pan to whole device pixels, in CSS units', () => {
+    // dpr 2: the CSS-px pan lands on halves, which is where a device pixel actually is.
+    expect(snapPanToDevicePx({ x: 10.3, y: -4.4, zoom: 1 }, 2)).toEqual({
+      x: 10.5,
+      y: -4.5,
+      zoom: 1
+    })
+    expect(snapPanToDevicePx({ x: 10.3, y: -4.4, zoom: 1 }, 1)).toEqual({ x: 10, y: -4, zoom: 1 })
+  })
+
+  it('never moves the world by as much as a device pixel', () => {
+    for (const dpr of [1, 1.5, 2, 3]) {
+      for (const x of [0, 0.1, 12.49, -12.49, 1234.567, -0.5]) {
+        const snapped = snapPanToDevicePx({ x, y: x, zoom: 1 }, dpr)
+        expect(Math.abs(snapped.x - x) * dpr).toBeLessThanOrEqual(0.5 + 1e-9)
+      }
+    }
+  })
+
+  it('leaves the ZOOM alone — quantizing a scale would step visibly and fix nothing', () => {
+    expect(snapPanToDevicePx({ x: 0, y: 0, zoom: 1.234567 }, 2).zoom).toBe(1.234567)
+  })
+
+  it('is idempotent, so a still camera cannot drift frame to frame', () => {
+    const once = snapPanToDevicePx({ x: 10.3, y: -4.4, zoom: 1 }, 2)
+    expect(snapPanToDevicePx(once, 2)).toEqual(once)
+  })
+
+  it('passes through when the dpr is unknown rather than rounding to NaN', () => {
+    for (const dpr of [0, -1, NaN, Infinity]) {
+      expect(snapPanToDevicePx({ x: 10.3, y: -4.4, zoom: 1 }, dpr)).toEqual({
+        x: 10.3,
+        y: -4.4,
+        zoom: 1
+      })
+    }
+  })
+
+  it('returns a COPY — the GL layer holds it for the whole frame', () => {
+    const cam: Camera = { x: 1, y: 2, zoom: 1 }
+    const snapped = snapPanToDevicePx(cam, 2)
+    expect(snapped).not.toBe(cam)
+    cam.x = 999
+    expect(snapped.x).toBe(1)
   })
 })

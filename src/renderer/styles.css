@@ -1624,10 +1624,12 @@ body,
    The class is on the root only while a grid is ACTUALLY attached, so collapse, the ⌘M view, a
    failed attach and every default renderer mode leave the node opaque exactly as today.
 
-   Nothing else needs restoring: every child that covers ground outside the plate already paints its
-   own background (`.term-node__header` var(--panel-header), `.node-tags` var(--panel),
-   `.term-node__find` #2a2a2a, and the body's own overlays). The selection ring and the unread glow
-   are border-color + box-shadow, both independent of the background.
+   Every child that covers ground outside the plate must therefore paint its OWN background:
+   `.term-node__header` var(--panel-header), `.term-node__labelrow` var(--panel),
+   `.term-node__find` #2a2a2a, plus the body's own overlays. That list is a contract, not an
+   observation — the label row was missing from it (it replaced the old `.node-tags`, which had a
+   background) and the strip under the header showed the raw canvas through the node. The selection
+   ring and the unread glow are border-color + box-shadow, both independent of the background.
 
    Accepted degradations, all plate GEOMETRY, all Phase 2's call (a rounded / stencilled plate, or
    a plate sized to the BODY rect instead of the grid rect) and all judged on the device checklist.
@@ -7493,6 +7495,17 @@ body,
   align-items: center;
   gap: 4px;
   padding: 2px 8px 5px;
+  /* Its OWN background, not one inherited from the node root. Visually identical to what it had
+     before (the root is var(--panel) too) — but the shared glyph renderer makes that root
+     TRANSPARENT so the GPU canvas can show through the body (`.term-node--glyphgrid`), while this
+     row sits ABOVE the grid's opaque plate, which only starts at the terminal screen. Without a
+     background of its own the whole strip between the header and the terminal became a window onto
+     the canvas: the reported "gap under the header, in the label row", which also made the
+     terminal's text look like it began well below where the DOM renderer put it. Every other child
+     of the node paints its own background for exactly this reason (`.term-node__header`,
+     `.term-node__find`); this one was missed because it replaced the old `.node-tags` row, which
+     had one. */
+  background: var(--panel);
 }
 .term-node__labeladd {
   background: rgba(255, 255, 255, 0.06);

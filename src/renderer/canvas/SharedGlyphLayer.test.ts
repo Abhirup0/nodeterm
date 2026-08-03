@@ -256,6 +256,8 @@ describe('setNodeZOrder', () => {
 })
 
 describe('graceful degrade without a GPU', () => {
+  /** A plausible xterm device cell (13px font at dpr 2): fractional width, integer height. */
+  const CELL = { cellW: 15.66, cellH: 31 }
   let warn: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
     warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -265,18 +267,58 @@ describe('graceful degrade without a GPU', () => {
   })
 
   it('getSharedGlyphContext returns null while the shared mode is off — no context is acquired', () => {
-    expect(getSharedGlyphContext()).toBeNull()
+    expect(getSharedGlyphContext(CELL)).toBeNull()
   })
 
   it('returns null (rather than throwing) when WebGL2/OffscreenCanvas are unavailable', () => {
     useSharedGlyph.getState().setEnabled(true)
-    expect(getSharedGlyphContext()).toBeNull()
+    expect(getSharedGlyphContext(CELL)).toBeNull()
   })
 
   it('returns null once the session has failed', () => {
     useSharedGlyph.getState().setEnabled(true)
     useSharedGlyph.getState().markFailed()
-    expect(getSharedGlyphContext()).toBeNull()
+    expect(getSharedGlyphContext(CELL)).toBeNull()
+  })
+
+  // The atlas rasterizes into xterm's DEVICE cell, and only a live terminal knows it. A caller
+  // with no cell to offer (the layer component itself) must therefore adopt an existing context or
+  // get null — never build one from guessed metrics, which is the mismatch that made every glyph
+  // resample against the quad it is drawn onto.
+  it('does not CREATE a context for a caller that supplies no device cell', () => {
+    useSharedGlyph.getState().setEnabled(true)
+    const g = globalThis as unknown as Record<string, unknown>
+    const hadDocument = 'document' in g
+    const hadOffscreen = 'OffscreenCanvas' in g
+    const prevDocument = g.document
+    const prevOffscreen = g.OffscreenCanvas
+    try {
+      let constructed = 0
+      g.document = { createElement: () => ({ style: {}, className: '' }) }
+      g.OffscreenCanvas = class {
+        constructor() {
+          constructed++
+        }
+        getContext(): null {
+          return null
+        }
+      }
+      expect(getSharedGlyphContext()).toBeNull()
+      expect(constructed).toBe(0)
+      // …and an unusable cell is the same as no cell: it must not latch the one creation attempt.
+      expect(getSharedGlyphContext({ cellW: 0, cellH: NaN })).toBeNull()
+      expect(constructed).toBe(0)
+      // A usable one does reach construction.
+      expect(getSharedGlyphContext(CELL)).toBeNull() // no 2d context in this environment
+      expect(constructed).toBe(1)
+    } finally {
+      if (hadDocument) g.document = prevDocument
+      else delete g.document
+      if (hadOffscreen) g.OffscreenCanvas = prevOffscreen
+      else delete g.OffscreenCanvas
+      useSharedGlyph.getState().markFailed()
+      useSharedGlyph.setState({ enabled: false, failed: false })
+    }
   })
 
   it('setSharedGlyphCamera is inert without a context', () => {
@@ -310,7 +352,7 @@ describe('graceful degrade without a GPU', () => {
         }
       }
 
-      expect(getSharedGlyphContext()).toBeNull()
+      expect(getSharedGlyphContext(CELL)).toBeNull()
       expect(warn).toHaveBeenCalled()
       expect(String(warn.mock.calls[0]?.[0])).toContain('[glyphgrid]')
       // A construction throw is "not available here", NOT a session failure: flipping `failed`

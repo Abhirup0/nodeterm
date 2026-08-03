@@ -63,13 +63,52 @@ describe('GlyphAtlas', () => {
     // (the shader derives its uvs itself from the two uniforms). The actual tie — a visual pass,
     // or pinning the GLSL against a generated line — is owed to Phase 1b.
     const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100)
-    const cols = Math.floor(100 / 10)
+    const cols = Math.floor(100 / atlas.strideX)
     const cellUv = [10 / 100, 20 / 100]
+    const strideUv = [atlas.strideX / 100, atlas.strideY / 100]
     for (const slot of [0, 1, cols - 1, cols, cols + 1, atlas.capacity - 1]) {
-      const u0 = (slot % cols) * cellUv[0]
-      const v0 = Math.floor(slot / cols) * cellUv[1]
+      const u0 = (slot % cols) * strideUv[0]
+      const v0 = Math.floor(slot / cols) * strideUv[1]
       expect(atlas.slotRect(slot)).toEqual({ u0, v0, u1: u0 + cellUv[0], v1: v0 + cellUv[1] })
     }
+  })
+
+  // The defect this split exists for: the atlas used to be built from its OWN `measureText`
+  // metrics, rounded up to whole texels, while the grid draws each cell at xterm's exact device
+  // cell — so every glyph was stretched over a quad a couple of percent smaller than its bitmap
+  // and resampled ("rougher than the DOM renderer"). Now the sampled EXTENT is the exact
+  // (fractional) cell and only the slot PITCH rounds.
+  describe('fractional device cells (xterm reports charWidth * dpr, which is not an integer)', () => {
+    it('keeps the sampled extent exact and rounds only the slot pitch', () => {
+      const atlas = new GlyphAtlas(fakeRasterizer(15.66, 31), 2048)
+      expect(atlas.cellW).toBe(15.66) // extent: unrounded, so texel:pixel is 1:1 at zoom 1
+      expect(atlas.strideX).toBe(16) // pitch: whole texels
+      expect(atlas.cellH).toBe(31)
+      expect(atlas.strideY).toBe(31)
+      const rect = atlas.slotRect(1)
+      expect(rect.u1 - rect.u0).toBeCloseTo(15.66 / 2048, 12)
+      expect(rect.u0).toBeCloseTo(16 / 2048, 12) // …starting on a texel boundary
+    })
+
+    it('lays slots out on the pitch, so no two glyphs share a boundary texel', () => {
+      const r = fakeRasterizer(15.66, 31)
+      const atlas = new GlyphAtlas(r, 2048)
+      atlas.glyphFor(0x41, false, false) // slot 1
+      atlas.glyphFor(0x42, false, false) // slot 2
+      expect(r.calls[0]).toBe(`${0x41}|@16,0`)
+      expect(r.calls[1]).toBe(`${0x42}|@32,0`)
+    })
+
+    it('counts capacity in whole pitches — the gutter is not usable area', () => {
+      // floor(100/16) = 6 cols, floor(100/31) = 3 rows.
+      expect(new GlyphAtlas(fakeRasterizer(15.66, 31), 100).capacity).toBe(18)
+    })
+
+    it('a sub-texel cell still yields a finite pitch rather than an infinite capacity', () => {
+      const atlas = new GlyphAtlas(fakeRasterizer(0.4, 0.4), 100)
+      expect(atlas.strideX).toBe(1)
+      expect(atlas.capacity).toBe(10000)
+    })
   })
 
   it('a degenerate page (sizePx < cellW) yields blank slots and a zero rect, never NaN', () => {

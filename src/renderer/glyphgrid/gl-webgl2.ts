@@ -1,4 +1,4 @@
-import type { Camera } from './camera'
+import { snapPanToDevicePx, type Camera } from './camera'
 import { CELL_STRIDE, unpackColor } from './cells'
 import type { GlyphGL, GridDrawParams } from './gl'
 import { plateRectDevice } from './plate'
@@ -11,7 +11,8 @@ uniform vec2 uView;       // viewport size (screen px)
 uniform vec2 uGridOrigin; // grid top-left (world px)
 uniform vec2 uCell;       // cell size (world px)
 uniform float uCols;
-uniform vec2 uAtlasCell;  // glyph uv size (u1-u0, v1-v0)
+uniform vec2 uAtlasCell;   // glyph uv EXTENT (u1-u0, v1-v0) — the exact device cell
+uniform vec2 uAtlasStride; // glyph uv PITCH — the whole-texel slot spacing (>= uAtlasCell)
 uniform float uAtlasCols;
 in uvec4 aCell;           // [glyph, fg, bg, flags] — CELL_STRIDE lanes
 out vec2 vUv;
@@ -27,7 +28,7 @@ void main() {
   vec2 ndc = vec2(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
   float slot = float(aCell.x);
-  vec2 slotOrigin = vec2(mod(slot, uAtlasCols), floor(slot / uAtlasCols)) * uAtlasCell;
+  vec2 slotOrigin = vec2(mod(slot, uAtlasCols), floor(slot / uAtlasCols)) * uAtlasStride;
   vUv = slotOrigin + unit * uAtlasCell;
   vCell = aCell;
 }`
@@ -73,6 +74,7 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   const atlasTex = gl.createTexture()
   let atlasCols = 1
   let atlasCellUv: [number, number] = [0, 0]
+  let atlasStrideUv: [number, number] = [0, 0]
   let view: [number, number] = [1, 1]
   /** Stored at resize because the plate's scissor rect is in DEVICE pixels and needs the
    *  drawing buffer's height to flip Y — neither is derivable from the CSS-px viewport alone. */
@@ -126,13 +128,16 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       deviceH = canvas.height
       gl.viewport(0, 0, canvas.width, canvas.height)
     },
-    uploadAtlas(source, sizePx, cellW, cellH) {
+    uploadAtlas(source, sizePx, cellW, cellH, strideX, strideY) {
       gl.bindTexture(gl.TEXTURE_2D, atlasTex)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-      atlasCols = Math.floor(sizePx / cellW)
+      // Columns follow the PITCH (that is how the atlas laid the page out), while the sampled
+      // extent stays the exact cell — mixing the two shifts every glyph by a fraction of a cell.
+      atlasCols = Math.floor(sizePx / strideX)
       atlasCellUv = [cellW / sizePx, cellH / sizePx]
+      atlasStrideUv = [strideX / sizePx, strideY / sizePx]
     },
     createGrid(id, cols, rows) {
       // Re-creating under a live id is the RESIZE path: drop the old buffer first, or every
@@ -169,17 +174,22 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       gl.bufferSubData(gl.ARRAY_BUFFER, firstRow * cols * CELL_STRIDE * 4, cells)
     },
     beginFrame(camera: Camera) {
-      // COPIED, not aliased: the plate math reads this during the drawGrid calls that follow,
-      // and a caller mutating its own camera object mid-frame would move grids apart.
-      cam = { ...camera }
+      // COPIED, not aliased (the plate math reads this during the drawGrid calls that follow, and
+      // a caller mutating its own camera object mid-frame would move grids apart) — and SNAPPED:
+      // a sub-device-pixel pan makes the NEAREST-sampled atlas resample every glyph differently
+      // each frame, which is the shimmer that made panned text look like it was rippling behind
+      // its node. See `snapPanToDevicePx`; the plate reads the same snapped camera, so plate and
+      // cells can never drift a pixel apart.
+      cam = snapPanToDevicePx(camera, dpr)
       gl.clearColor(0, 0, 0, 0)
       gl.clear(gl.COLOR_BUFFER_BIT)
       gl.useProgram(program)
-      gl.uniform2f(u('uPan'), camera.x, camera.y)
-      gl.uniform1f(u('uZoom'), camera.zoom)
+      gl.uniform2f(u('uPan'), cam.x, cam.y)
+      gl.uniform1f(u('uZoom'), cam.zoom)
       gl.uniform2f(u('uView'), view[0], view[1])
       gl.uniform1f(u('uAtlasCols'), atlasCols)
       gl.uniform2f(u('uAtlasCell'), atlasCellUv[0], atlasCellUv[1])
+      gl.uniform2f(u('uAtlasStride'), atlasStrideUv[0], atlasStrideUv[1])
       gl.uniform1i(u('uAtlas'), 0)
     },
     drawGrid(g: GridDrawParams) {
