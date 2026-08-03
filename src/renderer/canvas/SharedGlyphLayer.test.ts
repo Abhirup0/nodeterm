@@ -282,4 +282,49 @@ describe('graceful degrade without a GPU', () => {
   it('setSharedGlyphCamera is inert without a context', () => {
     expect(() => setSharedGlyphCamera({ x: 10, y: 20, zoom: 2 })).not.toThrow()
   })
+
+  // The absence paths above are the easy half: every guard inside `createContext` RETURNS null.
+  // A constructor that THROWS instead (a wedged/lost GPU process, a hardened environment that
+  // raises on canvas construction) took a different route out of `ensureLiveContext` — up through
+  // whichever node happened to ask for the context first. It must degrade identically.
+  it('returns null (not a throw) when the OffscreenCanvas constructor THROWS rather than being absent', () => {
+    const g = globalThis as unknown as Record<string, unknown>
+    const hadDocument = 'document' in g
+    const hadOffscreen = 'OffscreenCanvas' in g
+    const prevDocument = g.document
+    const prevOffscreen = g.OffscreenCanvas
+    try {
+      // `creationAttempted` latches after the first attempt so a machine without a GPU is never
+      // asked twice; the teardown `markFailed()` runs is the only thing that clears it, and it is
+      // the supported way to get a fresh attempt out of this module singleton.
+      useSharedGlyph.getState().setEnabled(true)
+      useSharedGlyph.getState().markFailed()
+      useSharedGlyph.setState({ enabled: true, failed: false })
+      warn.mockClear()
+
+      // Past the `typeof document === 'undefined'` guard, so construction is actually attempted.
+      g.document = { createElement: () => ({ style: {}, className: '' }) }
+      g.OffscreenCanvas = class {
+        constructor() {
+          throw new Error('canvas construction refused')
+        }
+      }
+
+      expect(getSharedGlyphContext()).toBeNull()
+      expect(warn).toHaveBeenCalled()
+      expect(String(warn.mock.calls[0]?.[0])).toContain('[glyphgrid]')
+      // A construction throw is "not available here", NOT a session failure: flipping `failed`
+      // would bump the generation and re-notify every registrant from inside the very call one of
+      // them is making, and would additionally kill the mode for the rest of the app run.
+      expect(useSharedGlyph.getState().failed).toBe(false)
+    } finally {
+      if (hadDocument) g.document = prevDocument
+      else delete g.document
+      if (hadOffscreen) g.OffscreenCanvas = prevOffscreen
+      else delete g.OffscreenCanvas
+      // Leave the latch clear so a later test is not silently short-circuited by this one.
+      useSharedGlyph.getState().markFailed()
+      useSharedGlyph.setState({ enabled: false, failed: false })
+    }
+  })
 })

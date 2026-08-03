@@ -13,6 +13,14 @@ engine is caught before the integration is judged.
 Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal rendering**
 (`Auto (default)` / `GPU per terminal` / `Shared GPU (experimental)` / `Off (DOM renderer)`).
 
+**Before you start — the setting is one-way against older builds.** `"shared"` is a value only this
+branch knows: running an OLDER build against the same data dir (the released desktop app, or a
+Server Edition still on `main` pointed at that `settings.json`) validates the unknown value away and
+**permanently rewrites `"terminalGpuRendering": "shared"` back to `"auto"`** on its next settings
+save. This is safe — it degrades to the default renderer, nothing is lost but the choice itself —
+but it is silent and not undone by relaunching this branch, so if a checklist item suddenly reads
+Auto after you switched builds, that is why: re-select Shared and carry on.
+
 ---
 
 ## 1. Setup and baseline
@@ -75,6 +83,10 @@ Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal r
       how visible these are at normal zoom, and whether any padding seam shows on the left/top.
 - [ ] **2.14 Scroll area after a font change.** Change the font size while shared is on, then look
       at the scrollbar/scroll area geometry: the thumb matches the content, no phantom region.
+- [ ] **2.15 Cursor on a wide glyph.** Put the cursor ON a double-width character (type `日本語`
+      and walk the cursor back over it, or `vim` with the cursor on an emoji): KNOWN — the block
+      covers only the LEFT half-cell of the glyph instead of both columns (L13). Confirm that is
+      what you see, and judge how visible it is at normal zoom.
 
 ## 3. Interactions
 
@@ -109,6 +121,10 @@ Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal r
       text lands with the node — no frame where glyphs sit at the old position or at the origin.
 - [ ] **3.13 Stacking.** The canvas is ABOVE the dot grid and BELOW node chrome; the bottom-left
       Controls, the minimap and the drawers are all still clickable over a terminal's body.
+- [ ] **3.14 ⌘F in a busy terminal.** Open the find bar and search for a word well up in the
+      scrollback: matches are found and scrolled to, and the counter (`n of m`) is right;
+      KNOWN — the match HIGHLIGHTS are not visible (L12). Navigating next/previous still moves the
+      viewport to each hit, so judge whether searching is usable without the highlight.
 
 ## 4. Lifecycle
 
@@ -171,6 +187,13 @@ Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal r
       assumptions broke on this xterm version.
 - [ ] **5.5 No console noise.** Over a full session in shared mode, the console shows no repeated
       glyphgrid warnings (each warn is once-per-node-per-reason by design).
+- [ ] **5.6 Soak — the macOS compositor.** Run shared mode **≥30 minutes** on the Mac with several
+      busy terminals: watch for whole-window flicker or black-composited nodes (the exact macOS
+      compositor failure class that motivated `WEBGL_BUDGET_DESKTOP_MAC=10` and the `'auto'`→DOM
+      rule — this run is what tests the branch's central platform hypothesis that ONE context
+      avoids it). Any occurrence = **do not promote beyond experimental**. Note the elapsed time,
+      the terminal count, and whether the machine was on an external display, since the earlier
+      reports had no console error to correlate against.
 
 ## 6. Regressions (the modes everyone else is on)
 
@@ -199,9 +222,14 @@ Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal r
 - **L4 — Square plate corners.** The grid's plate is a rectangle; the node has `border-radius: 10px`
   and cannot clip the canvas (it is not a DOM child), so the body's corners read square in shared
   mode. Phase 2: rounded/stencilled plate.
-- **L5 — Fit slack at the right/bottom edge.** The plate covers the grid plus the host padding; a
-  fit can leave up to one cell of slack, which shows the canvas instead of the terminal background.
-  Same Phase-2 fix as L4 (plate sized to the body rect rather than the grid rect).
+- **L5 — The plate is sized to the GRID, so any band wider than the padding shows canvas.** The
+  plate covers the grid plus one scalar of host padding (`padPx`, the 6px max of
+  `.term-node__xterm`'s asymmetric CSS padding), so every band of body that the cell fit does not
+  fill shows the canvas/dot grid through the transparent node body instead of the terminal
+  background. Two shapes of the same defect: (a) up to one cell of **fit slack** at the right/bottom
+  edge; (b) the **letterbox** bands of a node whose aspect leaves more than 6px unfilled — most
+  visible on co-attach/letterboxed nodes, where the band can be tens of pixels. Same Phase-2 fix as
+  L4: size the plate to the BODY rect rather than the grid rect.
 - **L6 — Adopting a parked terminal after a font change may keep a stale cell size.** The grid is
   registered from the cell xterm reports at adopt time; a font change applied in the same commit
   can land after it. Refreshing the node re-registers at the correct size.
@@ -221,6 +249,17 @@ Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal r
 - **L11 — Grids keep drawing while the kanban board covers the canvas.** The board overlay is
   opaque, so nothing is visible; it is wasted work, measured by item 4.16 and closed in Phase 2 if
   it shows up.
+- **L12 — Terminal search (⌘F) finds, counts and scrolls, but the match HIGHLIGHTS are invisible.**
+  xterm's search addon marks hits as *decorations*, which are painted by the active renderer at
+  cell level; the shared feed carries cells and theme lanes only, with no decoration input, so the
+  engine has nothing to draw. Search itself is unaffected — the addon still walks the buffer, the
+  `n of m` counter is correct, and each hit is scrolled into view — you simply cannot see which
+  cells matched. Phase 2 (a decoration lane in the feed).
+- **L13 — The block cursor on a double-width glyph paints only the left half-cell.** The cursor rect
+  is emitted at one cell's width, while a CJK/emoji cell occupies two columns, so the block covers
+  the left column and the right half of the glyph stays uncovered. Cosmetic and position-correct
+  (the cursor is on the right cell); Phase 2, with the same wide-cell geometry work as the rest of
+  the plate/rect family.
 
 ---
 

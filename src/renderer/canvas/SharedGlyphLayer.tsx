@@ -383,7 +383,20 @@ function ensureLiveContext(): LiveContext | null {
   if (creationAttempted) return null
   creationAttempted = true
   ensureSettingsSubscription()
-  live = createContext()
+  // Construction is guarded, and deliberately does NOT go through `failSharedGlyph`: a THROW here
+  // (an OffscreenCanvas/2d-context/WebGL constructor that raises instead of returning null on a
+  // hostile or exhausted GPU stack) must degrade EXACTLY like the null-returning paths inside
+  // `createContext` — return null, the caller stays on the DOM renderer. Setting `failed` would
+  // additionally bump the generation and re-notify every registrant from inside a call one of
+  // them is already making, and it would mark the whole session dead for a condition the
+  // null paths treat as "not available here". `creationAttempted` is already true, so the throw
+  // is never retried in a loop.
+  try {
+    live = createContext()
+  } catch (err) {
+    console.warn('[glyphgrid] shared context construction threw; staying on the DOM renderer', err)
+    live = null
+  }
   return live
 }
 

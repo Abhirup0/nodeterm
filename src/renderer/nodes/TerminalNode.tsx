@@ -1147,7 +1147,7 @@ export function TerminalNode({
           // grid's own background matches the terminal it belongs to.
           bgColor: packThemeBg(term.options.theme?.background),
           // The host's CSS padding (`.term-node__xterm`, `4px 2px 2px 6px`) reduced to the one
-          // scalar the engine takes; see `platePadPx` for why it is the MINIMUM side.
+          // scalar the engine takes; see `platePadPx` for why it is the MAXIMUM side.
           padPx: platePadPx(hostPadding(container))
         })
       } catch (err) {
@@ -1833,29 +1833,40 @@ export function TerminalNode({
     glyphGenUnsub = useSharedGlyph.subscribe((s) => {
       if (disposed || s.generation === lastGen) return
       lastGen = s.generation
-      if (!teardownGlyph()) {
-        escalateRespawn('glyphgrid could not restore the DOM renderer')
-        return
+      // EVERY node on the canvas subscribes to this one store, and zustand notifies its listeners
+      // by iterating a Set — a listener that THROWS aborts that loop, so every node registered
+      // after the thrower never hears the bump at all and is stranded holding handles into a
+      // context that has just been disposed. One node's bad luck must not become the canvas's.
+      // Hence: contain the failure here, warn, and let the fan-out continue. This node then sits
+      // on whatever renderer the failed teardown left it with (a manual Refresh recovers it),
+      // which is strictly better than silently poisoning its neighbours.
+      try {
+        if (!teardownGlyph()) {
+          escalateRespawn('glyphgrid could not restore the DOM renderer')
+          return
+        }
+        // The budget client follows the mode, so this terminal never holds both renderers (the
+        // hazard spelled out above). Order matters in both directions and is already right: xterm
+        // is back on its own renderer by the line above before a budget client may grant it a
+        // context, and the grid is only (re-)registered by the participation effect the epoch bump
+        // below schedules — after this. `setVisible` re-states what the IntersectionObserver last
+        // reported, because it will not fire again until visibility actually changes and a fresh
+        // client starts out believing it is hidden.
+        // The SAME test the mount above makes — mode AND a context that exists — so a machine
+        // without WebGL2 (where `getSharedGlyphContext()` is null however the setting reads) keeps
+        // its budget client instead of ending up with neither renderer coordinated.
+        const shared = sharedGlyphActive() && getSharedGlyphContext() !== null
+        if (shared && webglHandle) {
+          webglHandle.dispose()
+          webglHandle = null
+        } else if (!shared && !webglHandle) {
+          webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+          webglHandle.setVisible(wasVisible)
+        }
+        setGlyphEpoch((n) => n + 1)
+      } catch (err) {
+        console.warn(`[glyphgrid] generation handler failed for ${id} (continuing)`, err)
       }
-      // The budget client follows the mode, so this terminal never holds both renderers (the
-      // hazard spelled out above). Order matters in both directions and is already right: xterm
-      // is back on its own renderer by the line above before a budget client may grant it a
-      // context, and the grid is only (re-)registered by the participation effect the epoch bump
-      // below schedules — after this. `setVisible` re-states what the IntersectionObserver last
-      // reported, because it will not fire again until visibility actually changes and a fresh
-      // client starts out believing it is hidden.
-      // The SAME test the mount above makes — mode AND a context that exists — so a machine
-      // without WebGL2 (where `getSharedGlyphContext()` is null however the setting reads) keeps
-      // its budget client instead of ending up with neither renderer coordinated.
-      const shared = sharedGlyphActive() && getSharedGlyphContext() !== null
-      if (shared && webglHandle) {
-        webglHandle.dispose()
-        webglHandle = null
-      } else if (!shared && !webglHandle) {
-        webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
-        webglHandle.setVisible(wasVisible)
-      }
-      setGlyphEpoch((n) => n + 1)
     })
     const visibilityObserver = new IntersectionObserver(
       (entries) => {
