@@ -181,35 +181,98 @@ let zOrder = new Map<string, number>()
 let zOrderSig = ''
 const zListeners = new Set<() => void>()
 
+/** React Flow's own stacking constants (`@xyflow/system`, `SELECTED_NODE_Z` /
+ *  `ROOT_PARENT_Z_INCREMENT`). Copied rather than imported because they are not exported; pinned
+ *  by `nodeStackZ`'s tests, which state the rule they came from. */
+const SELECTED_NODE_Z = 1000
+const ROOT_PARENT_Z_INCREMENT = 10
+
+/** The node fields the stacking model reads. */
+export interface StackOrderNode {
+  id: string
+  parentId?: string
+  selected?: boolean
+}
+
 /**
- * The order React Flow actually PAINTS the nodes in: array order, with selected nodes moved to
- * the end (stable within each of the two groups). That is `elevateNodesOnSelect` — on by default,
- * and the only DOM stacking rule this app uses that diverges from array order.
+ * REPRODUCTION of the z React Flow assigns each node, for this app's configuration: no explicit
+ * `zIndex` anywhere, default `zIndexMode` ('auto'), and `elevateNodesOnSelect` at its default
+ * (on). The algorithm is `adoptUserNodes` → `calculateZ` / `updateChildNode` / `calculateChildXYZ`
+ * in `@xyflow/system`, transcribed:
+ *
+ *  - Every node starts at `selected ? 1000 : 0`.
+ *  - The FIRST time a ROOT parent (a frame with no parent of its own) has a child processed, that
+ *    parent's z is bumped by `++counter * 10`. Root frames are therefore separated into bands in
+ *    the order their first child appears.
+ *  - A child's z is `parentZ >= childZ ? parentZ + 1 : childZ` — so an unselected node inside a
+ *    frame outranks EVERY ungrouped unselected node, wherever it sits in the array, and a SELECTED
+ *    FRAME carries its children up with it (parentZ 1000+ ⇒ children 1001+, above a selected
+ *    ungrouped node at 1000).
+ *  - Returning to an already-indexed parent resets the running counter to that parent's index,
+ *    which is why the counter is not monotonic. Reproduced, because it decides the bands.
+ *
+ * That last group of rules is the part round 5's first cut got wrong: it modelled selection only,
+ * which said a grouped terminal was BELOW an ungrouped one it is in fact above — and the opaque
+ * rule reads this order to decide who may stay transparent.
+ *
+ * Known residual, and why it is small: React Flow reuses a node's internal object (and its z) when
+ * the user node object is identical (`checkEquality`), so in a transient where only some nodes were
+ * rebuilt a live z can lag this model by a commit. It converges on the next full adopt, and the
+ * bands themselves (which frame is above which) are stable across those partial passes.
+ */
+export function nodeStackZ(nodes: readonly StackOrderNode[]): Map<string, number> {
+  const z = new Map<string, number>()
+  const byId = new Map<string, StackOrderNode>()
+  for (const n of nodes) byId.set(n.id, n)
+  const rootParentIndex = new Map<string, number>()
+  let counter = 0
+  for (const node of nodes) {
+    const ownZ = node.selected ? SELECTED_NODE_Z : 0
+    z.set(node.id, ownZ)
+    if (!node.parentId) continue
+    const parent = byId.get(node.parentId)
+    // React Flow warns and gives up on a child whose parent is missing or comes LATER in the
+    // array; `nodeStatesToFlow` sorts parents first precisely so this cannot happen.
+    if (!parent || !z.has(parent.id)) continue
+    if (!parent.parentId && !rootParentIndex.has(parent.id)) {
+      counter += 1
+      rootParentIndex.set(parent.id, counter)
+      z.set(parent.id, (z.get(parent.id) ?? 0) + counter * ROOT_PARENT_Z_INCREMENT)
+    }
+    const known = rootParentIndex.get(parent.id)
+    if (known !== undefined) counter = known
+    const parentZ = z.get(parent.id) ?? 0
+    z.set(node.id, parentZ >= ownZ ? parentZ + 1 : ownZ)
+  }
+  return z
+}
+
+/**
+ * The order React Flow actually PAINTS the nodes in: ascending `nodeStackZ`, ties broken by array
+ * order (a stable sort). Later in this list = nearer the viewer.
  *
  * ONE function, because two consumers must never disagree about it: `nodeOrderSig` (the grids' z)
  * and `opaqueNodeIds` (which terminals may stay on the shared canvas at all). If the opaque set
  * were derived from a different order than the z, a terminal could be told it is in the clear by
- * one rule and painted underneath by the other — the mixed-order soup of round 4, reintroduced
- * one level down.
- *
- * Approximation, deliberately: React Flow also gives a group frame's children a z above the frame
- * itself, and honours an explicit `zIndex`, neither of which we set. `opaqueNodeIds` is written so
- * that being wrong here costs a terminal a trip to the DOM renderer, never a bleed-through.
+ * one rule and painted underneath by the other — the mixed-order soup of round 4, reintroduced one
+ * level down.
  */
-export function effectiveStackOrder<T extends { selected?: boolean }>(
-  nodes: readonly T[]
-): readonly T[] {
-  let elevated: T[] | null = null
+export function effectiveStackOrder<T extends StackOrderNode>(nodes: readonly T[]): readonly T[] {
+  const z = nodeStackZ(nodes)
+  let ordered = false
   for (const n of nodes) {
-    if (!n.selected) continue
-    if (!elevated) elevated = []
-    elevated.push(n)
+    if (z.get(n.id) !== 0) {
+      ordered = true
+      break
+    }
   }
-  // Nothing selected — the overwhelmingly common case — is the input array itself, no copy.
-  if (!elevated) return nodes
-  const base: T[] = []
-  for (const n of nodes) if (!n.selected) base.push(n)
-  return base.concat(elevated)
+  // A flat, unselected canvas — the overwhelmingly common case — is already in paint order; return
+  // the input array itself rather than an identical copy.
+  if (!ordered) return nodes
+  return nodes
+    .map((n, i) => ({ n, i, z: z.get(n.id) ?? 0 }))
+    .sort((a, b) => a.z - b.z || a.i - b.i)
+    .map((e) => e.n)
 }
 
 /**
@@ -220,10 +283,9 @@ export function effectiveStackOrder<T extends { selected?: boolean }>(
  * Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
  * churn the signature on every sticky edit.
  *
- * **The rule is `effectiveStackOrder` — array order, with SELECTED nodes last** — because that is
- * what the DOM does: React Flow's `elevateNodesOnSelect` is on by default and lifts a selected
- * node's z-index to 1000 wherever it sits in the array. The canvas z among the glyph grids mirrors
- * the DOM elevation, so both worlds tell the same story about who is on top.
+ * **The rule is `effectiveStackOrder`** — React Flow's own z (selection elevation AND group-frame
+ * banding; see `nodeStackZ`), ties broken by array order. The canvas z among the glyph grids
+ * mirrors the DOM's, so both worlds tell the same story about who is on top.
  *
  * Round 4 removed the mirroring and turned the PROP off instead. That was the wrong end of the
  * problem: it did make the two orders agree, but at the cost of "click/drag brings a node to the
@@ -239,7 +301,7 @@ export function effectiveStackOrder<T extends { selected?: boolean }>(
  * which a wrong z is visible, which is why the mirroring is worth its handful of lines.
  */
 export function nodeOrderSig(
-  nodes: readonly { id: string; type?: string; selected?: boolean }[]
+  nodes: readonly (StackOrderNode & { type?: string })[]
 ): string {
   let sig = ''
   for (const n of effectiveStackOrder(nodes)) {
@@ -325,22 +387,32 @@ export function subscribeNodeZOrder(fn: () => void): () => void {
  *    React Flow has measured a fresh node). They contribute nothing in either direction, and the
  *    measurement lands as an ordinary nodes change that recomputes the set.
  *
- * Known gap, small and stated rather than papered over: the EPHEMERAL subagent/loop cards are
- * merged into React Flow at the `<ReactFlow>` prop and are not in Canvas's `nodes` array, so they
- * are invisible to this rule. They are display-only cards that live for the length of one turn.
+ * TWO KNOWN GAPS, stated rather than papered over — a device tester must not file either as a bug:
+ *  - The EPHEMERAL subagent/loop cards are merged into React Flow at the `<ReactFlow>` prop and are
+ *    not in Canvas's `nodes` array, so they are invisible to this rule. A card can therefore sit
+ *    over a glyph terminal and be visible through its body. They are display-only, they live for
+ *    the length of one turn, and putting them in the rule means putting them in the nodes array,
+ *    which is precisely what keeps them out of persistence and undo.
+ *  - The rule compares NODE RECTS, and two node-attached surfaces deliberately escape their node's
+ *    rect: the 💬 comments flyout (`.term-node__comments`) and the kanban `ColumnPill`, both
+ *    siblings of the overflow:hidden node root. A NEIGHBOUR's flyout or pill overhanging a glyph
+ *    terminal is not seen here, so it can show through that terminal's body. Fixing it means
+ *    feeding real chrome geometry into the rule — a Phase-2 question, and the same one L15's other
+ *    Phase-2 answer (chrome on the canvas) settles for free.
  */
 
 /** Node shape this derivation reads. Loose on purpose: it must accept a live measured node and a
  *  freshly deserialized one (`width`/`height`, no `measured`) alike. */
-export interface StackedNode {
-  id: string
+export interface StackedNode extends StackOrderNode {
   type?: string
-  selected?: boolean
   position: { x: number; y: number }
-  parentId?: string
   width?: number | null
   height?: number | null
   measured?: { width?: number | null; height?: number | null }
+  /** React Flow's own gesture flags: `dragging` during a node drag, `resizing` while a
+   *  `NodeResizer` handle is held. */
+  dragging?: boolean
+  resizing?: boolean
   data?: { collapsed?: unknown; mdMode?: unknown }
 }
 
@@ -430,25 +502,102 @@ export function opaqueNodeIds(nodes: readonly StackedNode[]): string[] {
   return out
 }
 
+/**
+ * Is a node GESTURE (drag or `NodeResizer` resize) in progress anywhere on the canvas? While one
+ * is, the O(n²) rect sweep above is skipped: `nodes` is rebuilt every frame of a gesture, and
+ * recomputing there would flip a terminal's neighbours between the two renderers at 60 Hz — each
+ * flip is a real xterm renderer swap. The frozen set is topped up with `gestureTerminalIds`.
+ */
+export function hasActiveGesture(nodes: readonly StackedNode[]): boolean {
+  for (const n of nodes) if (n.dragging || n.resizing) return true
+  return false
+}
+
+/**
+ * The terminals that must be opaque BECAUSE OF a gesture: their own node is being dragged/resized,
+ * or an ANCESTOR is.
+ *
+ * The ancestor half is not a nicety. React Flow's `getDragItems` excludes the children of a dragged
+ * parent (the frame moves, the children ride along on `positionAbsolute`), so dragging a GROUP
+ * never sets `dragging` on the terminals inside it. Without this walk those terminals stayed
+ * transparent for the whole gesture while the frame swept them across the canvas — the worst case
+ * of the bug this design exists to fix, and the one case the per-node `dragging` prop cannot see.
+ *
+ * The dragged node itself is included even though TerminalNode also reads its own `dragging` prop:
+ * one answer, from one place, for a state two consumers act on.
+ */
+export function gestureTerminalIds(nodes: readonly StackedNode[]): string[] {
+  const byId = new Map<string, StackedNode>()
+  for (const n of nodes) byId.set(n.id, n)
+  const out: string[] = []
+  for (const node of nodes) {
+    if (node.type !== 'terminal') continue
+    let cur: StackedNode | undefined = node
+    const seen = new Set<string>()
+    for (let depth = 0; cur && depth <= MAX_PARENT_DEPTH; depth++) {
+      if (cur.dragging || cur.resizing) {
+        out.push(node.id)
+        break
+      }
+      if (seen.has(cur.id)) break
+      seen.add(cur.id)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+  }
+  return out
+}
+
 let opaqueIds = new Set<string>()
 let opaqueSig = ''
+let opaquePending = false
 const opaqueListeners = new Set<() => void>()
 
 /**
- * Publish the opaque set. Change-gated on a SORTED signature — this is a set, not a sequence, so
- * the same membership arriving in a different order (a node reorder that changes nothing about who
- * overlaps whom) must not wake every terminal on the canvas.
+ * Store the opaque set WITHOUT notifying, returning the signature. Change-gated on a SORTED
+ * signature — this is a set, not a sequence, so the same membership arriving in a different order
+ * (a node reorder that changes nothing about who overlaps whom) must not wake every terminal.
+ *
+ * **The split from `flushOpaqueNodeIds` is the ordering fix, and it is the point of this seam.**
+ * Canvas computes the set DURING ITS RENDER, because React renders a parent before its children:
+ * that is the only moment at which a TerminalNode can read the answer for the same `nodes` array
+ * it is itself rendering with. Computing it in an effect cannot work — effects run CHILD FIRST, so
+ * on the commit that ends a drag the node's participation effect re-attached a glyph against the
+ * PREVIOUS set, and the parent's effect then told it to tear the glyph down again: one frame of a
+ * transparent node sitting over the thing it had just been dropped on, plus a wasted attach/detach
+ * pair. The same window opened on create-into-overlap and on project-load-with-overlaps.
+ *
+ * Notifying cannot happen there, though: a listener's `setState` during another component's render
+ * is exactly what React refuses. So the write and the notification are separated — the write is
+ * safe during render, and `flushOpaqueNodeIds` (an effect) delivers the notification afterwards,
+ * for the one case a render-time read cannot cover: a node whose own object did not change and
+ * which therefore did not re-render at all (something slid UNDER it).
  */
-export function setOpaqueNodeIds(ids: readonly string[]): void {
+export function primeOpaqueNodeIds(ids: readonly string[]): string {
   const sig = [...ids].sort().join(ORDER_SEP)
-  if (sig === opaqueSig) return
+  if (sig === opaqueSig) return sig
   opaqueSig = sig
   opaqueIds = new Set(ids)
+  opaquePending = true
+  return sig
+}
+
+/** Deliver the notification for a primed change. Idempotent — a second call with nothing pending
+ *  is free, which is what lets Canvas call it from an effect keyed on the signature. */
+export function flushOpaqueNodeIds(): void {
+  if (!opaquePending) return
+  opaquePending = false
   for (const fn of opaqueListeners) fn()
 }
 
+/** Prime + flush in one call. The imperative form, for callers that are NOT inside a render. */
+export function setOpaqueNodeIds(ids: readonly string[]): void {
+  primeOpaqueNodeIds(ids)
+  flushOpaqueNodeIds()
+}
+
 /** Must this node paint its own pixels right now? Always false while nothing has been pushed,
- *  which is every default-mode session. */
+ *  which is every default-mode session. Read at RENDER time by TerminalNode (see above) — never
+ *  mirrored into state, which is what would make it stale. */
 export function nodeIsOpaque(id: string): boolean {
   return opaqueIds.has(id)
 }

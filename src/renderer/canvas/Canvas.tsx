@@ -30,11 +30,14 @@ import {
 import { solveFitPadding } from './fit-view'
 import {
   SharedGlyphLayer,
+  flushOpaqueNodeIds,
+  gestureTerminalIds,
+  hasActiveGesture,
   idsFromOrderSig,
   nodeOrderSig,
   opaqueNodeIds,
+  primeOpaqueNodeIds,
   setNodeZOrder,
-  setOpaqueNodeIds,
   setSharedGlyphCamera,
   useSharedGlyphActive
 } from './SharedGlyphLayer'
@@ -290,6 +293,10 @@ import {
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 const GRID = 24
+
+/** The empty opaque set (glyphgrid), shared so the render-time compute allocates nothing on the
+ *  overwhelmingly common "nothing overlaps / layer off" path. */
+const EMPTY_OPAQUE: string[] = []
 
 /** Diagonal offset for a copy made without a cursor position (⌘K, agent CLI) — the classic
  *  "duplicate appears slightly off the original" nudge. */
@@ -4986,23 +4993,45 @@ export function Canvas() {
   // now, because their transparent body would otherwise reveal a node stacked beneath them. The
   // rule, and why it is the rule, is documented at `opaqueNodeIds`.
   //
-  // WHEN it runs is this effect's job, and there is exactly one subtlety: it is FROZEN while any
-  // node is being dragged. `nodes` is rebuilt every frame of a drag, and recomputing there would
-  // flip the dragged node's neighbours between the two renderers at 60 Hz — each flip is a real
-  // xterm renderer swap, which is both jank and a chance to land blank. Nothing is lost by
-  // waiting: the DRAGGED node needs nothing from this set (TerminalNode reads React Flow's own
-  // `dragging` prop and goes DOM for the whole gesture, so it occludes correctly the entire time),
-  // and the drag's settle is itself a nodes change, so the set is recomputed exactly once, at rest.
-  // Same cadence as the order signature above — this effect adds one `some()` per nodes change and
-  // an O(n²) rect sweep per SETTLED change, over a node count that is tens.
-  useEffect(() => {
+  // COMPUTED IN RENDER, DELIBERATELY. React renders a parent before its children, so this is the
+  // one moment at which a TerminalNode can read the answer for the same `nodes` array it is itself
+  // rendering with. An effect cannot: effects run CHILD FIRST, so on the commit that ends a drag
+  // the node's participation effect re-attached its glyph against the PREVIOUS set and the parent's
+  // effect then told it to tear the glyph down again — one frame of a transparent node sitting over
+  // the thing it had just been dropped on, plus a wasted attach/detach pair, and the same window on
+  // create-into-overlap and on project-load-with-overlaps. The store write is therefore PRIMED here
+  // and the NOTIFICATION is delivered by the effect below (a listener's setState during another
+  // component's render is what React refuses); `primeOpaqueNodeIds` carries the full argument.
+  //
+  // GESTURE FREEZE: while any node is dragging or resizing the O(n²) rect sweep is skipped —
+  // `nodes` is rebuilt every frame there, and each renderer swap is real work — and the last
+  // SETTLED answer is topped up with `gestureTerminalIds` (the gesture's own terminals AND the
+  // children of a dragged group frame, which React Flow never marks `dragging` themselves). That
+  // union is stable for the whole gesture, so the signature gate makes the per-frame calls free,
+  // and the batch that ENDS the gesture recomputes properly.
+  const glyphSettledOpaqueRef = useRef<string[]>(EMPTY_OPAQUE)
+  const glyphOpaqueSig = useMemo(() => {
     if (!glyphLayerActive) {
-      setOpaqueNodeIds([])
-      return
+      glyphSettledOpaqueRef.current = EMPTY_OPAQUE
+      return primeOpaqueNodeIds(EMPTY_OPAQUE)
     }
-    if (nodes.some((n) => n.dragging)) return
-    setOpaqueNodeIds(opaqueNodeIds(nodes))
+    if (hasActiveGesture(nodes)) {
+      const settled = glyphSettledOpaqueRef.current
+      const gesture = gestureTerminalIds(nodes)
+      return primeOpaqueNodeIds(
+        gesture.length === 0 ? settled : [...new Set([...settled, ...gesture])]
+      )
+    }
+    const next = opaqueNodeIds(nodes)
+    glyphSettledOpaqueRef.current = next
+    return primeOpaqueNodeIds(next)
   }, [glyphLayerActive, nodes])
+  // The notification the render above could not send. It reaches the ONE case a render-time read
+  // cannot: a terminal whose own node object did not change (so it never re-rendered) but which
+  // something else slid underneath. Keyed on the signature, so it fires only on a real change.
+  useEffect(() => {
+    flushOpaqueNodeIds()
+  }, [glyphOpaqueSig])
 
   const zoomRafRef = useRef<number | null>(null)
   const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)

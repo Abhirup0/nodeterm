@@ -152,13 +152,36 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       click the partially-covered terminal → it comes to the FRONT, chrome and contents together,
       and nothing of the node it now covers is visible through it. Click the other one → they swap,
       cleanly, with no intermediate frame in which both are legible in the same rectangle. Drag one
-      over the other and back: the same, throughout the gesture and after it settles.
+      over the other and back: the same, throughout the gesture and after it settles. **Watch the
+      DROP specifically** — the frame at which the mouse is released is where the previous build
+      flashed the dropped node transparent over what it had landed on (the set is now computed
+      during Canvas's render, so the node learns it must stay opaque in the very render that ends
+      the drag). Also create a NEW terminal on top of an existing one, and reload a project whose
+      nodes already overlap: neither may flash transparent on arrival.
+- [ ] **3.9e Group drag and node resize (round 5).** Two gestures that are not a plain node drag:
+      (a) drag a GROUP FRAME containing terminals across other nodes — the terminals inside must be
+      opaque for the whole sweep (React Flow never marks a dragged frame's children `dragging`, so
+      this is covered by an ancestor walk, and it was the worst case: a frame sweeping transparent
+      terminals across the canvas); (b) grab a terminal's resize handle and drag it over a
+      neighbour — same expectation, and on release it must settle to the correct answer for its new
+      size. In both, the canvas must not visibly churn (terminals flickering between crisp and soft)
+      during the gesture: the set is frozen for its duration and recomputed once on the settle.
 - [ ] **3.9c Node-attached UI that escapes the node box (round 5: the round-4 trade is GONE).** The
       💬 comments flyout (`.term-node__comments`) and the kanban column half-pill (`ColumnPill`) are
       positioned OUTSIDE their node's rect. With selection elevation restored they are lifted with
       their node again, so: open a flyout on a terminal that another terminal overlaps, click the
       node — the flyout must come to the front with it and be fully readable and clickable. Same
       for a session node's column pill. Anything covered here is a defect now, not a known trade.
+      **The one case that is NOT covered and must not be filed:** the opposite direction — a
+      NEIGHBOUR's flyout or pill overhanging a *glyph* terminal. The rule compares node RECTS, and
+      these two surfaces are deliberately outside their node's rect, so a neighbour's overhang can
+      show through a transparent body. Known, stated in L15, Phase 2.
+- [ ] **3.9d Ephemeral cards over a glyph terminal (NOT a defect — confirm and move on).** With a
+      Claude node running subagents (or a /loop card up), drag the parent terminal so a subagent
+      card lands over ANOTHER terminal's body. The card may be visible through that terminal: the
+      ephemeral cards live outside Canvas's `nodes` array by design, so the opaque rule cannot see
+      them (L15). Note whether it looks broken enough to matter — that judgement is the point of the
+      item, not the artifact itself.
 - [ ] **3.9b Overlap, the whole of it (round 5).** With two terminals overlapping, look at the
       covered region closely. Expected: the upper node hides the lower one **completely** — no text,
       no cursor, no selection band, **and no frame hairline**. Round 4's L15 ghost (the lower node's
@@ -302,14 +325,18 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L6 — Adopting a parked terminal after a font change may keep a stale cell size.** The grid is
   registered from the cell xterm reports at adopt time; a font change applied in the same commit
   can land after it. Refreshing the node re-registers at the correct size.
-- **L7 — Group-parented z is an approximation.** The paint order is the node array order with
-  selected nodes elevated (mirroring React Flow's `elevateNodesOnSelect`); React Flow additionally
-  gives a grouped node `parentZ + 1`, which `effectiveStackOrder` does not model. Overlaps that mix
-  grouped and ungrouped terminals can therefore order differently from the DOM. Round 5 shrinks the
-  blast radius rather than fixing it: a terminal that overlaps anything below it is off the shared
-  canvas entirely (L15), so a mis-ordered pair of GRIDS needs both terminals to believe they are in
-  the clear — and being wrong about the order there costs a trip to the DOM renderer, never a
-  bleed-through, because the two rules read the same `effectiveStackOrder`.
+- **L7 — Group-parented z: MODELLED in round 5, with one transient residual.** This used to read "an
+  approximation": the order was array order plus selection, while React Flow additionally bumps a
+  root frame into a band (`ROOT_PARENT_Z_INCREMENT`, 10 per frame in first-child order) and gives
+  each child `parentZ >= childZ ? parentZ + 1 : childZ`. That is why an unselected GROUPED terminal
+  sits above every ungrouped one wherever it is in the array, and why a selected FRAME carries its
+  children above a selected ungrouped node — both of which the old model got backwards.
+  `nodeStackZ` now reproduces the whole rule (`adoptUserNodes` → `calculateZ` / `calculateChildXYZ`
+  in `@xyflow/system`) and BOTH consumers read it — the grids' z and the opaque set — so they cannot
+  disagree about who is on top. **Residual:** React Flow reuses a node's internal object, and its z,
+  when the user node object is identical (`checkEquality`), so in a commit where only some nodes
+  were rebuilt a live z can lag this model by a pass. It converges on the next full adopt, and the
+  bands themselves are stable across the partial ones. Verify by item **3.10**.
 - **L8 — The kanban card modal stays on xterm's DOM renderer, by design in v1.** The modal is a
   second, co-attached view of the same tmux session living outside the canvas' coordinate space;
   it has no grid, no camera and no z in the shared canvas. Board parity here is a Phase-2 question.
@@ -363,18 +390,31 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   canvas. The moment it could reveal a node beneath it, it hands the grid back and renders on
   xterm's own DOM renderer — opaque body, native stacking, total occlusion. The rule is
   `opaqueNodeIds` (`canvas/SharedGlyphLayer.tsx`): OPAQUE when the node's rect intersects the rect
-  of any node BELOW it in the effective paint order, or while it is being dragged. A terminal that
-  is only UNDERNEATH others stays on the canvas — the opaque node above hides it natively.
-  Selection elevation is back on everywhere, and the frame ghost is gone with the transparency that
-  caused it.
+  of any node BELOW it in the effective paint order, or while it (or a group frame containing it) is
+  in a drag or resize gesture. A terminal that is only UNDERNEATH others stays on the canvas — the
+  opaque node above hides it natively. Selection elevation is back on everywhere, and the frame
+  ghost is gone with the transparency that caused it.
 
   **What remains, and what to watch for on device:** a stacked terminal is on the DOM renderer for
   as long as it is stacked, so its text is very slightly softer than its neighbours' at zoom ≠ 1
   (checklist 3.9b). The switch itself is the existing teardown/setup machinery that collapse and ⌘M
-  already use, so it also costs one renderer swap per transition; the opaque set is frozen while
-  anything is dragging so a neighbour cannot be swapped twice a frame. Phase 2's answer if the DOM
+  already use, so it also costs one renderer swap per transition; the opaque set is frozen for the
+  length of a gesture so a neighbour cannot be swapped twice a frame. Phase 2's answer if the DOM
   fallback turns out to be frequent enough to matter is a SECOND canvas above the node layer for an
   elevated tier — the two-tier design this envelope deliberately defers.
+
+  **TWO THINGS THE RULE DOES NOT SEE — do not file either as a defect:**
+  1. **Ephemeral subagent / loop cards.** They are merged into React Flow at the `<ReactFlow>` prop
+     and are not in Canvas's `nodes` array (which is what keeps them out of persistence and undo),
+     so the rule cannot see them. A card sitting over a glyph terminal can therefore be visible
+     through that terminal's body. Display-only, and alive for the length of one turn.
+  2. **A NEIGHBOUR's node-attached overhang.** The rule compares NODE RECTS, and two surfaces
+     deliberately escape their node's rect: the 💬 comments flyout (`.term-node__comments`) and the
+     kanban `ColumnPill`, both siblings of the overflow:hidden node root. Another node's flyout or
+     pill overhanging a glyph terminal is outside every rect this rule compares, so it can show
+     through. (The node's OWN flyout/pill is fine — selection elevation lifts them with it, which is
+     what 3.9c tests.) Fixing this means feeding real chrome geometry into the rule — Phase 2, and
+     the same question the "chrome on the canvas" answer settles for free.
 
 ---
 

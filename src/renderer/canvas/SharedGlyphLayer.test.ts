@@ -2,11 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   failSharedGlyph,
   getSharedGlyphContext,
+  effectiveStackOrder,
+  flushOpaqueNodeIds,
+  gestureTerminalIds,
+  hasActiveGesture,
   idsFromOrderSig,
   nodeIsOpaque,
   nodeOrderSig,
+  nodeStackZ,
   nodeZFor,
   opaqueNodeIds,
+  primeOpaqueNodeIds,
   setNodeZOrder,
   setOpaqueNodeIds,
   setSharedGlyphCamera,
@@ -104,6 +110,27 @@ describe('nodeOrderSig', () => {
       { id: 't2', type: 'terminal' }
     ])
     expect(idsFromOrderSig(sig)).toEqual(['t1', 't2'])
+  })
+
+  it('puts a GROUPED terminal above an ungrouped one that follows it in the array', () => {
+    // React Flow gives a child `parentZ + 1`, and a root frame with children is itself bumped into
+    // a band — so a grouped node outranks every ungrouped one regardless of array position. The
+    // first cut of round 5 modelled selection only and got this backwards.
+    const sig = nodeOrderSig([
+      { id: 'g', type: 'group' },
+      { id: 'inside', type: 'terminal', parentId: 'g' },
+      { id: 'outside', type: 'terminal' }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['outside', 'inside'])
+  })
+
+  it('a SELECTED frame carries its children above a selected ungrouped terminal', () => {
+    const sig = nodeOrderSig([
+      { id: 'g', type: 'group', selected: true },
+      { id: 'inside', type: 'terminal', parentId: 'g' },
+      { id: 'outside', type: 'terminal', selected: true }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['outside', 'inside'])
   })
 
   it('an untyped node is not a terminal (React Flow defaults type to "default")', () => {
@@ -276,6 +303,73 @@ describe('setNodeZOrder', () => {
   })
 })
 
+describe('nodeStackZ (React Flow z, reproduced)', () => {
+  it('is 0 for a plain node and 1000 for a selected one', () => {
+    const z = nodeStackZ([{ id: 'a' }, { id: 'b', selected: true }])
+    expect(z.get('a')).toBe(0)
+    expect(z.get('b')).toBe(1000)
+  })
+
+  it('bumps a root frame into a band and lifts its child one above it', () => {
+    // calculateChildXYZ: parentZ >= childZ ? parentZ + 1 : childZ, with the parent bumped by
+    // ROOT_PARENT_Z_INCREMENT (10) when its first child is processed.
+    const z = nodeStackZ([{ id: 'g' }, { id: 'c', parentId: 'g' }])
+    expect(z.get('g')).toBe(10)
+    expect(z.get('c')).toBe(11)
+  })
+
+  it('gives each root frame its own band, in first-child order', () => {
+    const z = nodeStackZ([
+      { id: 'g1' },
+      { id: 'g2' },
+      { id: 'c1', parentId: 'g1' },
+      { id: 'c2', parentId: 'g2' }
+    ])
+    expect(z.get('g1')).toBe(10)
+    expect(z.get('c1')).toBe(11)
+    expect(z.get('g2')).toBe(20)
+    expect(z.get('c2')).toBe(21)
+  })
+
+  it('a selected frame carries its children above 1000', () => {
+    const z = nodeStackZ([{ id: 'g', selected: true }, { id: 'c', parentId: 'g' }])
+    expect(z.get('g')).toBe(1010)
+    expect(z.get('c')).toBe(1011)
+  })
+
+  it('a selected CHILD of an unselected frame wins on its own z', () => {
+    // childZ 1000 > parentZ 10, so the child keeps 1000 rather than parentZ + 1.
+    const z = nodeStackZ([{ id: 'g' }, { id: 'c', parentId: 'g', selected: true }])
+    expect(z.get('c')).toBe(1000)
+  })
+
+  it('ignores a child whose parent is missing or comes later (React Flow warns and gives up)', () => {
+    const z = nodeStackZ([{ id: 'c', parentId: 'g' }, { id: 'g' }])
+    expect(z.get('c')).toBe(0)
+  })
+
+  it('survives a parentId cycle', () => {
+    expect(() => nodeStackZ([{ id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }])).not.toThrow()
+  })
+})
+
+describe('effectiveStackOrder', () => {
+  it('returns the input array itself when every z is 0 (no copy on the common canvas)', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }]
+    expect(effectiveStackOrder(nodes)).toBe(nodes)
+  })
+
+  it('breaks z ties by array order (a stable sort)', () => {
+    const order = effectiveStackOrder([
+      { id: 'a' },
+      { id: 'b' },
+      { id: 'c', selected: true },
+      { id: 'd' }
+    ])
+    expect(order.map((n) => n.id)).toEqual(['a', 'b', 'd', 'c'])
+  })
+})
+
 describe('opaqueNodeIds', () => {
   /** A 100×100 node at (x, y). Sizes come through `measured` (a live canvas) unless overridden. */
   const at = (
@@ -395,6 +489,72 @@ describe('opaqueNodeIds', () => {
   it('reports every stacked terminal on a pile, not just the top one', () => {
     expect(opaqueNodeIds([at('a', 0, 0), at('b', 20, 20), at('c', 40, 40)])).toEqual(['b', 'c'])
   })
+
+  it('marks the GROUPED terminal, not the ungrouped one that follows it in the array', () => {
+    // The grouped terminal is above by React Flow's z (parentZ + 1) even though it comes FIRST.
+    // Reading array order alone marked the wrong node — the ungrouped one would have gone opaque
+    // while the grouped one stayed transparent ON TOP of it.
+    const group: StackedNode = {
+      id: 'g',
+      type: 'group',
+      position: { x: 0, y: 0 },
+      measured: { width: 400, height: 400 }
+    }
+    const inside = at('inside', 20, 20, { parentId: 'g' })
+    const outside = at('outside', 60, 60)
+    expect(opaqueNodeIds([group, inside, outside])).toEqual(['inside'])
+  })
+})
+
+describe('hasActiveGesture / gestureTerminalIds', () => {
+  const node = (id: string, extra: Partial<StackedNode> = {}): StackedNode => ({
+    id,
+    type: 'terminal',
+    position: { x: 0, y: 0 },
+    measured: { width: 100, height: 100 },
+    ...extra
+  })
+
+  it('sees a drag and a RESIZE alike', () => {
+    expect(hasActiveGesture([node('a')])).toBe(false)
+    expect(hasActiveGesture([node('a', { dragging: true })])).toBe(true)
+    expect(hasActiveGesture([node('a', { resizing: true })])).toBe(true)
+  })
+
+  it('a gesture on a NON-terminal still freezes (it changes who overlaps whom)', () => {
+    expect(hasActiveGesture([node('s', { type: 'sticky', dragging: true })])).toBe(true)
+    expect(gestureTerminalIds([node('s', { type: 'sticky', dragging: true })])).toEqual([])
+  })
+
+  it('names the dragged terminal itself', () => {
+    expect(gestureTerminalIds([node('a', { dragging: true }), node('b')])).toEqual(['a'])
+  })
+
+  it('names the CHILDREN of a dragged group frame', () => {
+    // React Flow's getDragItems excludes children of a dragged parent, so they never carry
+    // `dragging` themselves — without the ancestor walk they stayed transparent all gesture.
+    const nodes: StackedNode[] = [
+      node('g', { type: 'group', dragging: true }),
+      node('c1', { parentId: 'g' }),
+      node('c2', { parentId: 'g' }),
+      node('far')
+    ]
+    expect(gestureTerminalIds(nodes)).toEqual(['c1', 'c2'])
+  })
+
+  it('walks more than one level of frame', () => {
+    const nodes: StackedNode[] = [
+      node('outer', { type: 'group', resizing: true }),
+      node('inner', { type: 'group', parentId: 'outer' }),
+      node('t', { parentId: 'inner' })
+    ]
+    expect(gestureTerminalIds(nodes)).toEqual(['t'])
+  })
+
+  it('survives a parentId cycle', () => {
+    const nodes: StackedNode[] = [node('a', { parentId: 'b' }), node('b', { parentId: 'a' })]
+    expect(() => gestureTerminalIds(nodes)).not.toThrow()
+  })
 })
 
 describe('setOpaqueNodeIds', () => {
@@ -448,6 +608,50 @@ describe('setOpaqueNodeIds', () => {
     subscribeOpaqueSet(seen)()
     setOpaqueNodeIds(['z'])
     expect(seen).not.toHaveBeenCalled()
+  })
+})
+
+describe('primeOpaqueNodeIds / flushOpaqueNodeIds', () => {
+  it('primes the ANSWER immediately and the NOTIFICATION only on flush', () => {
+    // This is the ordering fix: Canvas primes during its own render (a listener's setState there is
+    // what React refuses), so a child reads the current answer while rendering, and the
+    // notification — needed only by nodes that did not re-render — follows from an effect.
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    primeOpaqueNodeIds(['a'])
+    expect(nodeIsOpaque('a')).toBe(true)
+    expect(seen).not.toHaveBeenCalled()
+    flushOpaqueNodeIds()
+    expect(seen).toHaveBeenCalledTimes(1)
+    unsub()
+  })
+
+  it('returns the signature, so the caller can key an effect on it', () => {
+    expect(primeOpaqueNodeIds(['b', 'a'])).toBe(primeOpaqueNodeIds(['a', 'b']))
+  })
+
+  it('a flush with nothing pending is free', () => {
+    primeOpaqueNodeIds(['a'])
+    flushOpaqueNodeIds()
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    flushOpaqueNodeIds()
+    flushOpaqueNodeIds()
+    expect(seen).not.toHaveBeenCalled()
+    unsub()
+  })
+
+  it('coalesces several primes into ONE notification', () => {
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    primeOpaqueNodeIds(['a'])
+    primeOpaqueNodeIds(['a', 'b'])
+    primeOpaqueNodeIds(['c'])
+    flushOpaqueNodeIds()
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(nodeIsOpaque('c')).toBe(true)
+    expect(nodeIsOpaque('a')).toBe(false)
+    unsub()
   })
 })
 

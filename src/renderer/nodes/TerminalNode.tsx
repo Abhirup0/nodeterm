@@ -566,15 +566,35 @@ export function TerminalNode({
   // runs after the font options have reached xterm — see the participation effect below.
   const [glyphEpoch, setGlyphEpoch] = useState(0)
   // Is this node in the shared layer's OPAQUE SET — i.e. does its body currently sit over another
-  // node, so that a transparent glyph window would let that node show through? Pushed by Canvas
-  // and read back here; see the stacking rule at `opaqueNodeIds`. Always false while the shared
-  // layer is off (nothing is ever pushed), so the subscription below costs a default-mode session
-  // one Set insert per terminal and no renders at all.
-  const [glyphOpaque, setGlyphOpaque] = useState(() => nodeIsOpaque(id))
+  // node, so that a transparent glyph window would let that node show through? See the stacking
+  // rule at `opaqueNodeIds`.
+  //
+  // READ AT RENDER TIME, never mirrored into state, and that is the whole ordering fix. Canvas
+  // computes and stores the set during ITS render, and React renders a parent before its children —
+  // so this read always sees the answer for the same `nodes` array that produced the `dragging`
+  // prop and the position we are rendering with. Held in state instead, it lagged by a commit, and
+  // the lag was visible: on the commit that ended a drag this node re-attached a glyph against the
+  // stale set and tore it down again one pass later, flashing transparent over the node it had just
+  // been dropped on. Same window on create-into-overlap and project-load-with-overlaps.
+  //
+  // The subscription exists for the ONE case a render-time read cannot cover: this node's own
+  // object did not change (so it did not re-render) and something else slid underneath it. It
+  // forces a re-render, and only when OUR membership actually flipped — a set change elsewhere on
+  // the canvas must not re-render every terminal. `glyphOpaqueRef` is the last value we rendered
+  // with, written below on every render so the two paths cannot disagree.
+  const [, bumpGlyphOpaque] = useState(0)
+  const glyphOpaque = nodeIsOpaque(id)
+  const glyphOpaqueRef = useRef(glyphOpaque)
+  glyphOpaqueRef.current = glyphOpaque
   useEffect(() => {
-    const read = (): void => setGlyphOpaque(nodeIsOpaque(id))
-    // Read once on (re-)subscribe: the set can have been pushed between this node's render and
-    // this effect, and nothing would notify us about a change we were not yet listening for.
+    const read = (): void => {
+      const now = nodeIsOpaque(id)
+      if (now === glyphOpaqueRef.current) return
+      glyphOpaqueRef.current = now
+      bumpGlyphOpaque((n) => n + 1)
+    }
+    // Once on (re-)subscribe: the set can have been pushed between this node's render and this
+    // effect, and nothing would notify us about a change we were not yet listening for.
     read()
     return subscribeOpaqueSet(read)
   }, [id])
@@ -1267,10 +1287,22 @@ export function TerminalNode({
       if (glyphOffRef.current) {
         // Held OFF the shared canvas — and which half of `glyphOff` it is decides the budget
         // client. Covered up (collapsed / ⌘M): nothing to draw, so no client, exactly as before.
-        // Held OPAQUE (stacked over another node, or being dragged): this terminal is fully
-        // visible and painting its own pixels, so it is a WebGL client like any default-mode
-        // terminal — without this it would end up with NEITHER renderer coordinated and quietly
-        // run on xterm's DOM renderer for as long as the overlap lasts.
+        // Held OPAQUE (stacked over another node, or in a gesture): this terminal is fully visible
+        // and painting its own pixels, so it is a WebGL client like any default-mode terminal.
+        //
+        // BE HONEST ABOUT WHAT THIS IS. Today it is BOOKKEEPING, not a behaviour change: in shared
+        // mode `sharedGlyphAvailable()` is true, so the mount path never registered a budget client
+        // for this node in the first place and an opaque terminal simply runs on xterm's DOM
+        // renderer — visibly fine, just unaccelerated. This line makes the accounting say what is
+        // actually true, which is what a future "shared mode with a live per-node WebGL budget"
+        // needs, and it is NOT yet invariant-complete: the paths that can still leave an opaque
+        // terminal without a client are the generation-bump handler (it tears down and defers to
+        // the participation effect, which lands here and now arms the client — covered), and the
+        // expand / ⌘M-exit transitions of a node that is ALSO opaque (collapsed→expanded while
+        // stacked: `glyphHiddenRef` has already flipped by the time we run, so this arms it —
+        // also covered), against the reverse order in a single commit where both flip at once,
+        // which is not. Finishing it means moving the budget decision out of these two gates and
+        // into one derivation; that is Phase 2's job, with the live budget.
         if (!glyphHiddenRef.current) ensureWebglClient()
         return
       }
@@ -2238,10 +2270,16 @@ export function TerminalNode({
   // the node root) and removes `glyphgrid-mode` from the xterm element, which is exactly what makes
   // the body opaque and the DOM rows visible again. Nothing here is a special case for stacking.
   //
-  // `dragging` flips synchronously at gesture start, so a drag goes DOM before the node has moved a
-  // pixel and stays there until it settles — no mid-gesture flip back, and the drop position's
-  // overlap answer arrives with the settle. HYSTERESIS is otherwise Canvas's job: it freezes the
-  // opaque set while anything is dragging, so a neighbour cannot be swapped renderer twice a frame.
+  // ORDERING, the second time: `glyphOff` is built from a RENDER-TIME read of the opaque set, which
+  // Canvas stores during its own render — i.e. before this component rendered at all. So on the
+  // commit that ends a drag, `dragging: false` and the post-drop overlap answer arrive TOGETHER,
+  // and this effect makes one decision instead of attaching a glyph and tearing it down again a
+  // pass later. Do not "simplify" that read into state; state is exactly what lagged.
+  //
+  // `dragging` (this node's own prop) is kept alongside because it flips synchronously at gesture
+  // start and needs nobody else. Children of a dragged GROUP frame never get it — React Flow's
+  // `getDragItems` excludes them — which is why the set carries `gestureTerminalIds` too, and why
+  // one gesture answer coming from two places is deliberate rather than redundant.
   //
   // No-op (one ref null check) unless this node participates in the shared canvas.
   useEffect(() => {
