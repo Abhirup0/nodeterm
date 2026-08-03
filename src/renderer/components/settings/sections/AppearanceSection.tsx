@@ -12,6 +12,8 @@ import {
   type HideableRow
 } from '@renderer/lib/ui-visibility'
 import { cn } from '@renderer/ui/cn'
+import { SectionReset } from '../SectionReset'
+import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
 const ROWS = {
   appTheme: {
@@ -26,6 +28,10 @@ const ROWS = {
   headerButtons: {
     title: 'Terminal header buttons',
     keywords: ['terminal', 'header', 'buttons', 'icons', 'hide']
+  },
+  reset: {
+    title: 'Reset appearance',
+    keywords: ['reset', 'default', 'defaults', 'factory', 'restore', 'revert', 'undo']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -155,6 +161,13 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             onChange={(next) => update({ hiddenHeaderButtons: next })}
           />
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.reset}>
+        <SectionReset
+          keys={APPEARANCE_RESET_KEYS}
+          label="Reset appearance"
+          what="the appearance settings"
+        />
       </SearchableRow>
     </SettingsSection>
   )
