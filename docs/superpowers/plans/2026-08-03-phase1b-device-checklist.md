@@ -58,18 +58,24 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       256-color/truecolor ramps match the DOM rendering. Reverse-video cells (selected row in
       `htop`, `vim` visual mode) are inverted, not blank.
 - [ ] **2.4 Plate is the body background.** The terminal body's background is the theme background,
-      not the canvas dot grid — including the strip under the last row and around the padding.
+      not the canvas dot grid — **edge to edge**: under the last row, past the last column, and
+      around the host padding on all four sides. The plate is the BODY rect now, so there is no
+      band left to except (see 2.13).
 - [ ] **2.5 Wide chars.** CJK (`日本語`) and emoji occupy two columns each, with the following text
       still on the same column grid as the DOM rendering. A wide glyph is not clipped in half.
 - [ ] **2.6 Combining sequences.** A decomposed grapheme (e.g. `e` + U+0301) renders the BASE
       character — the accent may be missing, but never a lone accent mark on a blank cell.
 - [ ] **2.7 Atlas fidelity at dpr 1 and 2.** On the retina display and on an external 1x display,
       with a non-default font family and size (e.g. Menlo 11, JetBrains Mono 16): text is crisp,
-      not soft or doubled. **If any softness remains at zoom 1, report it** — the atlas is now
-      rasterized at xterm's exact device cell, which puts the sampler on a float tie: `MIN_FILTER`
-      selection sits on the λ=0 mag/min boundary, and a driver resolving that to minification uses
-      LINEAR (soft) instead of MAG NEAREST (crisp). The deterministic fallback is NEAREST min at
-      zoom ≥ 1.
+      not soft or doubled. The float tie this item used to warn about is **closed**: the atlas is
+      rasterized at xterm's exact device cell (1:1 texels) *and* the filter no longer depends on
+      which side of the λ=0 mag/min boundary a driver resolves to — `MIN_FILTER` is set from the
+      camera (**NEAREST at zoom ≥ 1**, where the snapped pan makes it bit-exact; **LINEAR below 1**,
+      so a zoomed-out thumbnail stays readable), and MAG stays NEAREST. **Report any softness that
+      remains AFTER this**: with the sampler made deterministic, what is left points at the atlas
+      RASTER itself (the canvas rasterizer's antialiasing / baseline rounding, or L14's
+      first-terminal cell latch), not at the sampler. Also zoom OUT past 1 and confirm the text
+      degrades smoothly rather than speckling.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
@@ -82,9 +88,13 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       hollow outline — known limitation L2), and the selection stays visible in the same color as
       when focused (known limitation L3). Judge whether either is acceptable to ship.
 - [ ] **2.13 Plate geometry.** Look at the four corners and the right/bottom edges of a terminal
-      body: the plate is a SQUARE rect under a node with rounded corners (L4), and up to one cell
-      of fit slack at the right/bottom may show canvas rather than terminal background (L5). Judge
-      how visible these are at normal zoom, and whether any padding seam shows on the left/top.
+      body. Expected: **no bands anywhere** — the plate is the body rect, so the fit slack at the
+      right/bottom and the padding seams on the left/top are all inside it (the round-2 fix; the
+      previous grid-sized plate is what put them there). The one artifact that REMAINS is L4: the
+      plate is a SQUARE rect under a node with `border-radius: 10px`, so the body's four corners
+      read square. Judge how visible that is at normal zoom, and report any band you still see —
+      a band now means the plate rect is not tracking the body, not that it is undersized by
+      design.
 - [ ] **2.14 Scroll area after a font change.** Change the font size while shared is on, then look
       at the scrollbar/scroll area geometry: the thumb matches the content, no phantom region.
 - [ ] **2.15 Cursor on a wide glyph.** Put the cursor ON a double-width character (type `日本語`
@@ -119,8 +129,14 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **3.10 Group-parented terminal.** A terminal inside a group frame: its text sits exactly in
       its body (offset chain resolves through the parent), and its paint order relative to
       ungrouped terminals is sane (known limitation L7).
-- [ ] **3.11 Letterboxed / oddly-sized node.** Resize a node so the fit leaves slack: the text
-      stays inside the body, aligned with the mouse.
+- [ ] **3.11 Letterboxed / oddly-sized node.** Resize a node so the fit leaves slack, and open a
+      co-attached node that a smaller peer is letterboxing: the text stays inside the body, aligned
+      with the mouse, **and the letterbox bands are terminal background, not canvas**. Reasoning to
+      verify by eye rather than assume: `.term-node__xterm.letterboxed` centers a SMALLER `.xterm`
+      inside the body, so the leftover space sits on all four sides — the plate is the body rect,
+      which contains the centred screen whichever way the slack falls, so it covers every band.
+      This was L5's worst case (tens of pixels of dot grid); it is the sharpest test that the plate
+      really is body-sized.
 - [ ] **3.12 Programmatic camera.** ⌘K jump to a node, a notification click, and a fitView: the
       text lands with the node — no frame where glyphs sit at the old position or at the origin.
 - [ ] **3.13 Stacking.** The canvas is ABOVE the dot grid and BELOW node chrome; the bottom-left
@@ -226,14 +242,19 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L4 — Square plate corners.** The grid's plate is a rectangle; the node has `border-radius: 10px`
   and cannot clip the canvas (it is not a DOM child), so the body's corners read square in shared
   mode. Phase 2: rounded/stencilled plate.
-- **L5 — The plate is sized to the GRID, so any band wider than the padding shows canvas.** The
-  plate covers the grid plus one scalar of host padding (`padPx`, the 6px max of
-  `.term-node__xterm`'s asymmetric CSS padding), so every band of body that the cell fit does not
-  fill shows the canvas/dot grid through the transparent node body instead of the terminal
-  background. Two shapes of the same defect: (a) up to one cell of **fit slack** at the right/bottom
-  edge; (b) the **letterbox** bands of a node whose aspect leaves more than 6px unfilled — most
-  visible on co-attach/letterboxed nodes, where the band can be tens of pixels. Same Phase-2 fix as
-  L4: size the plate to the BODY rect rather than the grid rect.
+- **L5 — FIXED in round 2 (bands at the bottom/right).** Kept here as the record, because it is the
+  one item on this list whose expected observation INVERTED. It used to read: the plate covers the
+  grid plus one scalar of host padding (`padPx`, the 6px max of `.term-node__xterm`'s asymmetric
+  padding), so every band of body the cell fit does not fill shows the canvas dot grid through the
+  transparent node — as (a) up to one cell of **fit slack** at the right/bottom, and (b) the
+  **letterbox** bands of a co-attached node, tens of pixels wide. Both were reported from the
+  device. The plate is now an INDEPENDENT world rect set to the node **body** (`GridSpec.plateX/Y/
+  W/H` ← `bodyPlateRect`, pushed on the ResizeObserver's settled tick and carried by the position
+  effect during a drag), so it covers the padding, the fit slack and the letterbox bands alike —
+  they all lie inside the body box. Verify by items **2.4**, **2.13** and **3.11**: a band now means
+  the plate is not TRACKING the body (a bug), not that it is undersized by design.
+  **L4 is unaffected and remains** — the plate's square corners are a separate Phase-2 question
+  (a rounded / stencilled plate), and no rect size fixes them.
 - **L6 — Adopting a parked terminal after a font change may keep a stale cell size.** The grid is
   registered from the cell xterm reports at adopt time; a font change applied in the same commit
   can land after it. Refreshing the node re-registers at the correct size.

@@ -75,6 +75,9 @@ function loadedAtlas(sizePx = 512, cellW = 7, cellH = 15) {
   }
 }
 
+/** A 2×1 grid of 10×20 cells → a 20×20 cell rect at (x, 0). The plate DEFAULTS to exactly that
+ *  rect, so a test that says nothing about the plate reads as if the two coincided; the tests that
+ *  care about the two being different rects pass their own `plate*`. */
 const spec = (id: string, x: number, z = 0, over: Partial<GridSpec> = {}): GridSpec => ({
   id,
   cols: 2,
@@ -85,7 +88,10 @@ const spec = (id: string, x: number, z = 0, over: Partial<GridSpec> = {}): GridS
   originY: 0,
   z,
   bgColor: 0,
-  padPx: 0,
+  plateX: x,
+  plateY: 0,
+  plateW: 20,
+  plateH: 20,
   ...over
 })
 
@@ -134,17 +140,79 @@ describe('GlyphGridEngine', () => {
     expect(e.drawOrder()).toEqual(['in'])
   })
 
-  it('culls against the PADDED rect: a grid whose plate still overlaps the viewport is drawn', () => {
+  it('culls against the plate rect: a grid whose plate alone overlaps the viewport is drawn', () => {
     const e = new GlyphGridEngine(fakeGL(), atlas())
     e.setViewport(100, 100, 1)
     e.setCamera({ x: 0, y: 0, zoom: 1 })
     // Cells start exactly at the right viewport edge (x=100, visible world rect is 0..100), so
     // the character matrix alone is off-screen — but the plate is the node's opaque BODY and
-    // extends padPx further left, into view. Culling on the cell rect would leave a visible strip
-    // of the node body unpainted at every viewport edge.
-    e.register(spec('padded', 100, 0, { padPx: 8 }))
-    e.register(spec('bare', 100, 0, { padPx: 0 }))
-    expect(e.drawOrder()).toEqual(['padded'])
+    // reaches further left, into view. Culling on the cell rect would leave a visible strip of
+    // node body unpainted at every viewport edge, and would skip the plate that occludes whatever
+    // sits underneath it.
+    e.register(spec('plated', 100, 0, { plateX: 92, plateW: 36 }))
+    e.register(spec('bare', 100, 0))
+    expect(e.drawOrder()).toEqual(['plated'])
+  })
+
+  it('culls against the CELL rect too: a grid whose cells alone overlap the viewport is drawn', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    // The other half of the union, and the reason it is a union rather than "the plate contains
+    // the grid, so test the plate". Nothing structurally guarantees containment — the two rects
+    // are pushed by different observers (`setOrigin` follows .xterm-screen, `setPlateRect` the
+    // body box), so mid-resize a stale plate can sit off-screen while the cells are in plain
+    // view. Culling on the plate alone would blank a visible terminal.
+    e.register(spec('cells-only', 90, 0, { plateX: 500, plateY: 500 }))
+    expect(e.drawOrder()).toEqual(['cells-only'])
+  })
+
+  it('culls a grid whose plate AND cells are both off-screen', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    // The union must not be a BOUNDING BOX of the two rects: the box spanning (500,0)-(520,20)
+    // and (0,500)-(20,520) covers the origin, so a bounding-box union would keep drawing a grid
+    // that paints no pixel at all.
+    e.register(spec('gone', 500, 0, { plateX: 0, plateY: 500 }))
+    expect(e.drawOrder()).toEqual([])
+  })
+
+  it('setPlateRect moves the plate, change-gated like every other mutator', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame()
+    // Same rect → nothing changed on screen. The caller is a ResizeObserver firing on every
+    // layout tick, so an unconditional dirty here would keep the shared canvas redrawing forever.
+    h.setPlateRect(0, 0, 20, 20)
+    expect(e.frame()).toBe(false)
+    h.setPlateRect(-6, -4, 40, 44)
+    expect(e.frame()).toBe(true)
+  })
+
+  it('setPlateRect on a disposed handle is inert — it must not un-idle the canvas', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    h.dispose()
+    e.frame()
+    h.setPlateRect(-6, -4, 40, 44)
+    expect(e.frame()).toBe(false)
+  })
+
+  it('a plate change reaches drawGrid', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame()
+    h.setPlateRect(-6, -4, 40, 44)
+    e.frame()
+    expect(gl.params.at(-1)).toMatchObject({ plateX: -6, plateY: -4, plateW: 40, plateH: 44 })
   })
 
   it('draws in z order ascending, ties by registration order', () => {
@@ -579,13 +647,15 @@ describe('per-grid buffers + row-range damage', () => {
     expect(e.frame()).toBe(false)
   })
 
-  it('drawGrid receives the plate params (bgColor, padPx) with the grid geometry', () => {
+  it('drawGrid receives the plate params (bgColor + plate rect) with the grid geometry', () => {
     const gl = fakeGL()
     const e = new GlyphGridEngine(gl, atlas())
     e.setViewport(800, 600, 1)
     e.setCamera({ x: 0, y: 0, zoom: 1 })
     const bg = packColor(20, 20, 24, 255)
-    e.register(spec('a', 0, 0, { bgColor: bg, padPx: 8 }))
+    // A plate that is NOT the cell rect — the body overhangs the matrix by 6 left/top and leaves
+    // fit slack right/bottom, which is the shape every real terminal has.
+    e.register(spec('a', 0, 0, { bgColor: bg, plateX: -6, plateY: -4, plateW: 40, plateH: 44 }))
     e.frame()
     // Exact object: cell DATA must NOT travel here any more — it lives in the grid's own GPU
     // buffer, and re-sending it per draw is the ~90 MB/s this task exists to remove.
@@ -599,7 +669,10 @@ describe('per-grid buffers + row-range damage', () => {
         originX: 0,
         originY: 0,
         bgColor: bg,
-        padPx: 8
+        plateX: -6,
+        plateY: -4,
+        plateW: 40,
+        plateH: 44
       }
     ])
   })

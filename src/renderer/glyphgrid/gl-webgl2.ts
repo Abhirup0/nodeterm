@@ -86,13 +86,47 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   /** The camera of the frame in flight — the plate rect is computed on the CPU (world → screen),
    *  so drawGrid needs it. */
   let cam: Camera = { x: 0, y: 0, zoom: 1 }
+  /** Last value pushed to `TEXTURE_MIN_FILTER`, so the per-frame call below costs one comparison
+   *  instead of a driver round trip. 0 is not a valid enum — it means "never set", which is what
+   *  makes the first frame always reach the texture. */
+  let atlasMinFilter = 0
+
+  /**
+   * Pick the atlas's MINIFICATION filter from the camera zoom — the fix for "text is nearly, but
+   * not quite, crisp at 100%".
+   *
+   * The atlas is rasterized at xterm's exact DEVICE cell, so at zoom 1 a glyph's quad is exactly
+   * as many device pixels as the slot has texels: a 1:1 mapping, which puts the sampler's
+   * level-of-detail on the **λ = 0 tie** between magnification and minification. Which side a
+   * driver resolves that tie to is not specified, and a driver that lands on MINIFICATION used
+   * `MIN_FILTER = LINEAR` — a four-texel average of an exact 1:1 sample, i.e. the residual
+   * softness reported from the device after the atlas was already made 1:1.
+   *
+   * So make the answer deterministic instead of hoping both sides agree:
+   *  - **zoom >= 1 → NEAREST.** The pan is snapped to whole device pixels (`snapPanToDevicePx`)
+   *    and the texels are 1:1, so NEAREST is bit-exact — whichever side of the tie the driver
+   *    picks, it now samples the same texel MAG would have.
+   *  - **zoom < 1 → LINEAR.** Genuine minification: several texels really do fall into one pixel,
+   *    and NEAREST there aliases a zoomed-out canvas into unreadable speckle. Thumbnails stay
+   *    readable.
+   *
+   * MAG stays NEAREST unconditionally — it was never the ambiguous half.
+   */
+  const applyAtlasMinFilter = (zoom: number): void => {
+    const want = zoom >= 1 ? gl.NEAREST : gl.LINEAR
+    if (want === atlasMinFilter) return
+    atlasMinFilter = want
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, want)
+  }
 
   gl.useProgram(program)
   gl.enable(gl.BLEND)
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
   /**
-   * The occlusion plate: a scissored `clear` of the grid rect expanded by `padPx` world units.
+   * The occlusion plate: a scissored `clear` of the grid's PLATE rect — the node body's full
+   * world rect, not the character matrix (see `GridDrawParams.plateX`).
    *
    * A clear, not a blended quad, on purpose — it WRITES the colour (blending is bypassed), which
    * is what makes it occlude rather than tint whatever was drawn beneath. Callers therefore pass
@@ -106,7 +140,13 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   // narrowing, so `gl` would be `WebGL2RenderingContext | null` inside the body.
   const drawPlate = (g: GridDrawParams): void => {
     // Null = the plate covers no pixel of the drawing buffer; skip it entirely.
-    const r = plateRectDevice(g, cam, dpr, deviceW, deviceH)
+    const r = plateRectDevice(
+      { x: g.plateX, y: g.plateY, w: g.plateW, h: g.plateH },
+      cam,
+      dpr,
+      deviceW,
+      deviceH
+    )
     if (!r) return
     const c = unpackColor(g.bgColor)
     gl.enable(gl.SCISSOR_TEST)
@@ -131,8 +171,12 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     uploadAtlas(source, sizePx, cellW, cellH, strideX, strideY) {
       gl.bindTexture(gl.TEXTURE_2D, atlasTex)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+      // MIN belongs to the camera now (see applyAtlasMinFilter), but it is asserted HERE too, and
+      // not only in beginFrame: GL's default min filter is NEAREST_MIPMAP_LINEAR, which makes a
+      // texture with no mip chain INCOMPLETE (it samples black). Filter params live on the texture
+      // object and survive texImage2D, so this is a one-time cost the change gate absorbs.
+      applyAtlasMinFilter(cam.zoom)
       // Columns follow the PITCH (that is how the atlas laid the page out), while the sampled
       // extent stays the exact cell — mixing the two shifts every glyph by a fraction of a cell.
       atlasCols = Math.floor(sizePx / strideX)
@@ -181,6 +225,9 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       // its node. See `snapPanToDevicePx`; the plate reads the same snapped camera, so plate and
       // cells can never drift a pixel apart.
       cam = snapPanToDevicePx(camera, dpr)
+      // Resolve the mag/min tie for THIS frame's zoom before anything samples the atlas. Change-
+      // gated, so a still camera costs one comparison per frame and zero GL calls.
+      applyAtlasMinFilter(cam.zoom)
       gl.clearColor(0, 0, 0, 0)
       gl.clear(gl.COLOR_BUFFER_BIT)
       gl.useProgram(program)
@@ -198,7 +245,7 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       // buffer happened to be bound from the previous grid.
       if (!grid) return
 
-      // --- (1) the plate: an opaque scissored clear of the grid rect expanded by padPx. It is
+      // --- (1) the plate: an opaque scissored clear of the node BODY's world rect. It is
       // drawn BEFORE this grid's cells and AFTER everything below it in z, so painter's order
       // gives total occlusion of overlapping terminals with no depth buffer.
       drawPlate(g)

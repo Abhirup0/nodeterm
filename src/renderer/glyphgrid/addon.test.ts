@@ -69,6 +69,9 @@ function recordingHandle(): GridHandle & {
       rows.push({ row, cells: cells.slice(), buf: cells })
     },
     setOrigin() {},
+    // The addon owns CELLS, never geometry — the plate is the node's business. A stub, present
+    // only to satisfy the handle contract.
+    setPlateRect() {},
     setZ() {},
     resize(cols, r) {
       log.push(`resize:${cols}x${r}`)

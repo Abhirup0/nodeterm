@@ -18,9 +18,13 @@ export interface GridSpec {
   originY: number
   z: number
   bgColor: number
-  /** Padding around the grid rect, in world units, that the opaque plate also covers — the node
-   *  body's inset. See gl.ts's GridDrawParams. */
-  padPx: number
+  /** The opaque plate's own world rect — the node BODY, which is generally larger than the
+   *  character matrix. Independent of the grid geometry on purpose; see gl.ts's
+   *  `GridDrawParams.plateX`. */
+  plateX: number
+  plateY: number
+  plateW: number
+  plateH: number
 }
 
 export interface GridHandle {
@@ -41,6 +45,14 @@ export interface GridHandle {
    */
   updateRow(row: number, cells: Uint32Array): void
   setOrigin(x: number, y: number): void
+  /**
+   * Move/resize the opaque plate — the node BODY rect in world units. Separate from `setOrigin`
+   * because the two move for different reasons and at different times: the grid follows the
+   * terminal SCREEN inside the node, the plate follows the body box. A resize changes the body
+   * on every layout tick while the screen offset may not move at all, so the owner (a
+   * ResizeObserver) calls both and each change-gates itself.
+   */
+  setPlateRect(x: number, y: number, w: number, h: number): void
   setZ(z: number): void
   resize(cols: number, rows: number): void
   /** Drops the grid. After this the handle is INERT — every mutator above becomes a silent
@@ -175,6 +187,19 @@ export class GlyphGridEngine {
         grid.originY = y
         engine.dirty = true
       },
+      setPlateRect(x, y, w, h) {
+        if (grid.dead) return
+        // Change-gated like every other mutator, and for the usual reason: the caller is a
+        // ResizeObserver / origin sync that fires on every layout tick, and an unconditional
+        // dirty there would keep the shared canvas redrawing forever.
+        if (grid.plateX === x && grid.plateY === y && grid.plateW === w && grid.plateH === h)
+          return
+        grid.plateX = x
+        grid.plateY = y
+        grid.plateW = w
+        grid.plateH = h
+        engine.dirty = true
+      },
       setZ(z) {
         if (grid.dead) return
         if (grid.z === z) return
@@ -274,23 +299,31 @@ export class GlyphGridEngine {
    *  band (a stats read-out, a test) can only write the same answer the next frame would, and
    *  every input that could change it dirties the engine.
    *
-   *  Culled against the PADDED rect, not the character matrix: a grid draws its opaque plate
-   *  (the node body, `padPx` world units wider on every side) before its cells, so a grid whose
-   *  cells have just left the viewport may still owe it a visible strip of body. Culling on the
-   *  cell rect alone would pop that strip away at every viewport edge — and, worse, would skip
-   *  the plate that occludes whatever sits underneath it. */
+   *  Culled against the UNION of the plate rect and the cell rect, never one alone. A grid draws
+   *  its opaque plate — the node BODY, an independent rect that is normally larger than the
+   *  character matrix but is NOT guaranteed to contain it — before its cells, and either part can
+   *  be the only one on screen:
+   *   - cells offscreen, plate visible: a grid scrolled just past the edge still owes a strip of
+   *     body, and skipping it would also skip the plate that occludes whatever sits underneath;
+   *   - plate offscreen, cells visible: nothing structurally forbids a grid drawn outside its own
+   *     body (a stale plate rect mid-resize), and culling it would blank a terminal that is in
+   *     plain view.
+   *  Two intersection tests, not one bounding-box union: the bounding box of two disjoint rects
+   *  covers ground neither of them does, so it would keep grids alive that draw no pixel. */
   drawOrder(): string[] {
     const visible: Rect = visibleWorldRect(this.camera, this.viewW, this.viewH)
     return [...this.grids.values()]
       .filter((g) => {
         // Written for EVERY grid, not just the survivors — a grid that has just left the
         // viewport has to learn it is hidden, and only the filter's own answer can tell it.
-        g.lastVisible = rectsIntersect(visible, {
-          x: g.originX - g.padPx,
-          y: g.originY - g.padPx,
-          w: g.cols * g.cellW + 2 * g.padPx,
-          h: g.rows * g.cellH + 2 * g.padPx
-        })
+        g.lastVisible =
+          rectsIntersect(visible, { x: g.plateX, y: g.plateY, w: g.plateW, h: g.plateH }) ||
+          rectsIntersect(visible, {
+            x: g.originX,
+            y: g.originY,
+            w: g.cols * g.cellW,
+            h: g.rows * g.cellH
+          })
         return g.lastVisible
       })
       .sort((a, b) => a.z - b.z || a.seq - b.seq)
@@ -381,7 +414,10 @@ export class GlyphGridEngine {
           originX: g.originX,
           originY: g.originY,
           bgColor: g.bgColor,
-          padPx: g.padPx
+          plateX: g.plateX,
+          plateY: g.plateY,
+          plateW: g.plateW,
+          plateH: g.plateH
         })
       }
       this.gl.endFrame()

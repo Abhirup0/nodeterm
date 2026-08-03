@@ -16,14 +16,6 @@ export interface Vec2 {
   y: number
 }
 
-/** CSS insets, in world units (canvas CSS px at zoom 1). */
-export interface Insets {
-  top: number
-  right: number
-  bottom: number
-  left: number
-}
-
 /**
  * World position of the grid's TOP-LEFT CELL.
  *
@@ -41,32 +33,47 @@ export function bodyWorldRect(nodePos: Vec2, bodyOffset: Vec2): Vec2 {
   return { x: nodePos.x + bodyOffset.x, y: nodePos.y + bodyOffset.y }
 }
 
+/** A world-space rectangle, top-left origin — the engine's plate rect (`GridSpec.plateX/Y/W/H`). */
+export interface WorldRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 /**
- * The engine's plate padding — ONE scalar, expanded on all four sides (see `GridSpec.padPx`) —
- * resolved from the terminal host's CSS padding, which is NOT symmetric (`.term-node__xterm` is
- * `4px 2px 2px 6px`).
+ * The opaque plate's world rect: the terminal BODY's full area.
  *
- * The MAXIMUM is the safe reduction, and WHICH end is safe is decided by the node's background. A
- * glyph-attached terminal is a transparent WINDOW onto the shared canvas (`.term-node--glyphgrid`
- * drops the background from the node root and its body), so the plate IS the terminal's
- * background: ground the plate does not cover shows raw canvas, while ground it over-covers is
- * hidden under the node's own opaque DOM chrome, which paints above the canvas. Under-covering is
- * the visible failure; over-covering is free.
+ * A glyph-attached terminal is a transparent WINDOW onto the shared canvas
+ * (`.term-node--glyphgrid` drops the background from the node root and its body), so the plate IS
+ * the terminal's background — every square of body the plate does not cover shows raw canvas
+ * through the node. The GRID cannot supply that rect: a body's width/height are not exact cell
+ * multiples, so xterm letterboxes the remainder, and the plate is therefore sized to the BODY
+ * (`bodyEl.clientWidth/clientHeight`) rather than derived from cols×cellW.
  *
- * This was the MINIMUM while the plan still called for an opaque node body — the reasoning
- * inverted with it. Do not restore the minimum without restoring that opaque body too.
+ * This replaced a `padPx` scalar taken from the host's asymmetric CSS padding (`4px 2px 2px 6px`,
+ * reduced to its 6px maximum). That covered the left/top insets and nothing else, which is exactly
+ * why bands showed at the BOTTOM and RIGHT — the fit slack there routinely exceeds 6px, and a
+ * letterboxed node's bands are tens of pixels. The padding does not need reading at all now: it
+ * lies INSIDE the body box, so a body-sized plate covers it on all four sides.
  *
- * Negative/NaN inputs (a computed style that failed to parse) collapse to 0 rather than
- * propagating into the engine's rect math.
+ * `nodePos` + `bodyOffset` is the same LAYOUT sum `bodyWorldRect` does (zoom-independent — the
+ * canvas transform scales pixels, not offsets). Non-finite or negative extents (an element that
+ * is not laid out yet) collapse to 0 rather than propagating a NaN into the engine's rect math and
+ * from there into a GL scissor.
  */
-export function platePadPx(pad: Insets): number {
-  const sides = [pad.top, pad.right, pad.bottom, pad.left]
-  let max = 0
-  for (const v of sides) {
-    if (!Number.isFinite(v)) return 0
-    if (v > max) max = v
-  }
-  return max
+export function bodyPlateRect(
+  nodePos: Vec2,
+  bodyOffset: Vec2,
+  bodyW: number,
+  bodyH: number
+): WorldRect {
+  const origin = bodyWorldRect(nodePos, bodyOffset)
+  return { x: origin.x, y: origin.y, w: extent(bodyW), h: extent(bodyH) }
+}
+
+function extent(v: number): number {
+  return Number.isFinite(v) && v > 0 ? v : 0
 }
 
 /** Fallback background — the colour `TerminalNode` builds every xterm with. Used when the theme

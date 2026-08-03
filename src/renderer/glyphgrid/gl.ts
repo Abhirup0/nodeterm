@@ -20,14 +20,25 @@ export interface GridDrawParams {
   /** world position of the grid's top-left corner */
   originX: number
   originY: number
-  /** packColor() — the opaque plate drawn BEFORE this grid's cells, covering the grid rect
-   *  expanded by `padPx` on every side. This is the Phase-1 occlusion story: painter's order
-   *  makes it cover anything drawn beneath it (overlapping terminals), and it fills the node
-   *  body's padding around the character matrix. */
+  /** packColor() — the colour the plate is cleared to. This is the Phase-1 occlusion story:
+   *  painter's order makes the plate cover anything drawn beneath it (overlapping terminals). */
   bgColor: number
-  /** Plate padding around the grid rect, in WORLD units (scaled by the camera zoom like any
-   *  other world length). */
-  padPx: number
+  /**
+   * The PLATE rect in WORLD units (top-left origin, like `originX/originY`): the opaque ground
+   * this terminal paints under itself — the transparent DOM window's FULL area, i.e. the node
+   * body rect, not the character matrix.
+   *
+   * The grid may be (and normally is) SMALLER than this: a body's height/width are not exact
+   * cell multiples, so xterm letterboxes the remainder, and in shared mode nothing else paints
+   * that remainder — the node body is transparent. A plate sized to the grid therefore left a
+   * band of raw canvas at the bottom and right of every terminal. The plate is an INDEPENDENT
+   * rect for exactly that reason; painter's order still applies to it unchanged (plate first,
+   * then this grid's cells, then whatever is drawn above).
+   */
+  plateX: number
+  plateY: number
+  plateW: number
+  plateH: number
 }
 
 /** Everything engine.ts is allowed to know about the GPU. Draw order is the painter's
@@ -65,7 +76,7 @@ export interface GlyphGL {
   ): void
   /** Clears the frame and sets the camera uniforms. */
   beginFrame(camera: Camera): void
-  /** Draws the plate (a scissored clear of the padded grid rect) and then the instanced cells
+  /** Draws the plate (a scissored clear of the grid's PLATE rect) and then the instanced cells
    *  from the grid's OWN buffer, in call order (painter's algorithm). */
   drawGrid(g: GridDrawParams): void
   endFrame(): void

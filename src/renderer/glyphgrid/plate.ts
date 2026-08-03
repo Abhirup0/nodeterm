@@ -1,5 +1,4 @@
-import type { Camera } from './camera'
-import type { GridDrawParams } from './gl'
+import type { Camera, Rect } from './camera'
 
 /** A rectangle in DEVICE pixels with a BOTTOM-LEFT origin — GL's scissor convention, not the
  *  browser's. Deliberately not camera.ts's `Rect`: that one is world-space and top-left, and
@@ -12,10 +11,15 @@ export interface DeviceRect {
 }
 
 /**
- * The occlusion plate's scissor rect: the grid's world rect expanded by `padPx`, projected
- * through the camera and clamped to the drawing buffer. Pure, so the four coordinate hops below
- * are testable without a GL context — which is the point of the extraction, since a Y-flip or a
+ * The occlusion plate's scissor rect: the plate's WORLD rect (`GridDrawParams.plateX/Y/W/H` — the
+ * node body's full area, which is generally LARGER than the character matrix), projected through
+ * the camera and clamped to the drawing buffer. Pure, so the four coordinate hops below are
+ * testable without a GL context — which is the point of the extraction, since a Y-flip or a
  * missing `* dpr` is invisible in a code review and obvious in a unit test.
+ *
+ * Takes the rect itself rather than the whole `GridDrawParams`: the plate stopped being derived
+ * from the grid geometry (it was `grid rect + padPx`, which is what left bands of raw canvas at
+ * the bottom and right of every terminal), so there is nothing here that needs cols/rows/cellW.
  *
  * Returns null when the rect covers no pixel of the drawing buffer: the caller must SKIP the
  * clear entirely. A clamped-empty rect is not merely wasteful — a NEGATIVE scissor extent is a
@@ -31,17 +35,17 @@ export interface DeviceRect {
  *  4. Clamp to [0, deviceW] × [0, deviceH].
  */
 export function plateRectDevice(
-  g: GridDrawParams,
+  plate: Rect,
   cam: Camera,
   dpr: number,
   deviceW: number,
   deviceH: number
 ): DeviceRect | null {
   // (1) world → screen (CSS px).
-  const leftCss = (g.originX - g.padPx) * cam.zoom + cam.x
-  const topCss = (g.originY - g.padPx) * cam.zoom + cam.y
-  const wCss = (g.cols * g.cellW + 2 * g.padPx) * cam.zoom
-  const hCss = (g.rows * g.cellH + 2 * g.padPx) * cam.zoom
+  const leftCss = plate.x * cam.zoom + cam.x
+  const topCss = plate.y * cam.zoom + cam.y
+  const wCss = plate.w * cam.zoom
+  const hCss = plate.h * cam.zoom
   // (2) CSS px → DEVICE px.
   const left = Math.round(leftCss * dpr)
   const top = Math.round(topCss * dpr)

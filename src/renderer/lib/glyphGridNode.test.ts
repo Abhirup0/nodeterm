@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { unpackColor } from '../glyphgrid/cells'
 import {
   DEFAULT_TERMINAL_BG,
+  bodyPlateRect,
   bodyWorldRect,
   packThemeBg,
-  platePadPx,
   validCellSize
 } from './glyphGridNode'
 
@@ -22,28 +22,57 @@ describe('bodyWorldRect', () => {
   })
 })
 
-describe('platePadPx', () => {
-  it('takes the MAXIMUM side, so no padded strip is left uncovered', () => {
-    // .term-node__xterm's real padding: 4px 2px 2px 6px. The node body is transparent under
-    // `.term-node--glyphgrid`, so a strip the plate misses shows raw canvas while one it
-    // over-covers hides under the node's own opaque chrome — the max leaves nothing bare.
-    expect(platePadPx({ top: 4, right: 2, bottom: 2, left: 6 })).toBe(6)
+describe('bodyPlateRect', () => {
+  it('is the body box in world space: node position + body offset, at the body client size', () => {
+    expect(bodyPlateRect({ x: 100, y: 200 }, { x: 0, y: 28 }, 480, 300)).toEqual({
+      x: 100,
+      y: 228,
+      w: 480,
+      h: 300
+    })
   })
 
-  it('passes a symmetric padding through', () => {
-    expect(platePadPx({ top: 8, right: 8, bottom: 8, left: 8 })).toBe(8)
+  it('CONTAINS a grid the cell fit could not fill — the whole point of the rect', () => {
+    // The reported defect, in numbers. A 300px-tall body at a 20px cell fits 15 rows exactly, but
+    // a 310px one fits 15 and letterboxes 10px; the host's padding (4px top, 2px bottom) does not
+    // reach that. The plate is the BODY, so the band is inside it whatever the fit leaves over.
+    const plate = bodyPlateRect({ x: 0, y: 0 }, { x: 0, y: 0 }, 500, 310)
+    const gridBottom = 4 + 15 * 20 // body padding-top + the rows that fit
+    expect(plate.h).toBeGreaterThan(gridBottom)
+    expect(plate.y + plate.h).toBe(310)
   })
 
-  it('is 0 for a zero padding — the plate is then exactly the grid rect', () => {
-    expect(platePadPx({ top: 0, right: 0, bottom: 0, left: 0 })).toBe(0)
+  it('handles negative world positions (the canvas has no origin quadrant)', () => {
+    expect(bodyPlateRect({ x: -1200.5, y: -40 }, { x: 6, y: 34 }, 200, 100)).toEqual({
+      x: -1194.5,
+      y: -6,
+      w: 200,
+      h: 100
+    })
   })
 
-  it('collapses negative sides to 0 rather than growing the rect off a bad parse', () => {
-    expect(platePadPx({ top: -4, right: -2, bottom: -2, left: -6 })).toBe(0)
+  it('collapses a non-finite extent to 0 rather than propagating NaN into a GL scissor', () => {
+    // An element that is not laid out yet reports a garbage/zero client box. 0 is a rect the
+    // plate math answers `null` for (skip the clear); NaN would reach glScissor.
+    expect(bodyPlateRect({ x: 0, y: 0 }, { x: 0, y: 0 }, NaN, 100)).toEqual({
+      x: 0,
+      y: 0,
+      w: 0,
+      h: 100
+    })
+    expect(bodyPlateRect({ x: 0, y: 0 }, { x: 0, y: 0 }, 100, Infinity)).toMatchObject({ h: 0 })
   })
 
-  it('collapses an unparseable (NaN) side to 0', () => {
-    expect(platePadPx({ top: NaN, right: 2, bottom: 2, left: 6 })).toBe(0)
+  it('collapses a negative extent to 0', () => {
+    expect(bodyPlateRect({ x: 0, y: 0 }, { x: 0, y: 0 }, -20, -1)).toMatchObject({ w: 0, h: 0 })
+  })
+
+  it('shares its origin with bodyWorldRect — one sum, two callers', () => {
+    const pos = { x: 12.5, y: -3 }
+    const off = { x: 6, y: 34 }
+    const origin = bodyWorldRect(pos, off)
+    const plate = bodyPlateRect(pos, off, 10, 10)
+    expect({ x: plate.x, y: plate.y }).toEqual(origin)
   })
 })
 

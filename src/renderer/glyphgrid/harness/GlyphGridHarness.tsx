@@ -36,9 +36,21 @@ const TOTAL_GRIDS = GRIDS + OVERLAP_GRIDS
 const CELL_W = 9
 const CELL_H = 18
 const ATLAS_PX = 1024
-/** World-unit padding the occlusion plate adds around each grid — a stand-in for the terminal
- *  node body's inset. Well under the 40/60 layout pitch, so plates stay separated. */
-const PAD_PX = 8
+/**
+ * How far each synthetic grid's PLATE overhangs its character matrix, in world units.
+ *
+ * The plate is an INDEPENDENT rect now (the node BODY, which is larger than the matrix — see
+ * `GridDrawParams.plateX`), so the harness has to keep supplying one that is genuinely bigger than
+ * the grid or it would exercise a case the app never runs: a plate-sized-to-grid draws no band, and
+ * the overlap trio's occlusion would be judged on the matrices alone. Asymmetric on purpose — 8
+ * left/top, 8 + SLACK right/bottom — because the defect this replaced (`padPx`, one symmetric
+ * scalar) was invisible precisely at the right and bottom, where a real terminal's fit slack lives.
+ *
+ * Well under the 40/60 layout pitch, so the 40 disjoint plates still stay separated.
+ */
+const PLATE_PAD = 8
+/** The extra right/bottom overhang, standing in for the fit slack a real body leaves. */
+const PLATE_SLACK = 10
 
 // --- Layout. Derived, not duplicated: register() below places grids from these same constants,
 // so the initial camera and the meter can never drift from where the grids actually are. ---
@@ -72,6 +84,18 @@ const BASE_BG = packColor(20, 20, 24, 255)
 const FIT_MARGIN = 0.92
 const ZOOM_MIN = 0.05
 const ZOOM_MAX = 4
+
+/** The plate rect for a grid whose matrix starts at (x, y): the matrix plus PLATE_PAD on every
+ *  side and PLATE_SLACK more on the right and bottom. One helper so the two register loops below
+ *  cannot drift apart. */
+function plateFor(x: number, y: number): { plateX: number; plateY: number; plateW: number; plateH: number } {
+  return {
+    plateX: x - PLATE_PAD,
+    plateY: y - PLATE_PAD,
+    plateW: COLS * CELL_W + 2 * PLATE_PAD + PLATE_SLACK,
+    plateH: ROWS * CELL_H + 2 * PLATE_PAD + PLATE_SLACK
+  }
+}
 
 /**
  * The camera the harness OPENS on: the whole layout framed in a `w x h` window.
@@ -150,6 +174,8 @@ export function GlyphGridHarness() {
     const tints: number[] = []
     for (let i = 0; i < GRIDS; i++) {
       tints.push(BASE_BG)
+      const x = (i % PER_ROW) * PITCH_X
+      const y = Math.floor(i / PER_ROW) * PITCH_Y
       handles.push(
         engine.register({
           id: `t${i}`,
@@ -157,13 +183,13 @@ export function GlyphGridHarness() {
           rows: ROWS,
           cellW: CELL_W,
           cellH: CELL_H,
-          originX: (i % PER_ROW) * PITCH_X,
-          originY: Math.floor(i / PER_ROW) * PITCH_Y,
+          originX: x,
+          originY: y,
           z: i,
           bgColor: BASE_BG,
-          // Non-zero so the occlusion plate is actually VISIBLE in the harness: it extends the
-          // opaque body past the character matrix, the way a terminal node's padding does.
-          padPx: PAD_PX
+          // Larger than the matrix so the occlusion plate is actually VISIBLE in the harness: it
+          // is the opaque BODY the terminal paints under itself, the way a node's body is.
+          ...plateFor(x, y)
         })
       )
     }
@@ -173,6 +199,8 @@ export function GlyphGridHarness() {
     // to occlude is a defect you can point at rather than argue about.
     for (let i = 0; i < OVERLAP_GRIDS; i++) {
       tints.push(OVERLAP_BG[i])
+      const x = OVERLAP_X0 + i * OVERLAP_STEP_X
+      const y = OVERLAP_Y0 + i * OVERLAP_STEP_Y
       handles.push(
         engine.register({
           id: `ov${i}`,
@@ -180,11 +208,13 @@ export function GlyphGridHarness() {
           rows: ROWS,
           cellW: CELL_W,
           cellH: CELL_H,
-          originX: OVERLAP_X0 + i * OVERLAP_STEP_X,
-          originY: OVERLAP_Y0 + i * OVERLAP_STEP_Y,
+          originX: x,
+          originY: y,
           z: 100 + i,
           bgColor: OVERLAP_BG[i],
-          padPx: PAD_PX
+          // Same oversized plate as the disjoint grids — and here it is what the trio is FOR: a
+          // higher-z member's plate must bury the band of the member below it, not just its cells.
+          ...plateFor(x, y)
         })
       )
     }

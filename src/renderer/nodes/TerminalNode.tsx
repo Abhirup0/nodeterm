@@ -65,11 +65,10 @@ import {
   useSharedGlyph
 } from '../canvas/SharedGlyphLayer'
 import {
+  bodyPlateRect,
   bodyWorldRect,
   packThemeBg,
-  platePadPx,
   validCellSize,
-  type Insets,
   type Vec2
 } from '../lib/glyphGridNode'
 import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
@@ -310,7 +309,20 @@ function glyphWarn(key: string, message: string): void {
  * never reaches a `.react-flow__node` (a parked, detached element).
  */
 function screenOffsetInNode(term: Terminal): Vec2 | null {
-  const el = (term.element?.querySelector('.xterm-screen') as HTMLElement | null) ?? term.element
+  return offsetInNode(
+    (term.element?.querySelector('.xterm-screen') as HTMLElement | null) ?? term.element ?? null
+  )
+}
+
+/**
+ * The `offsetParent` walk itself — see `screenOffsetInNode` for the coordinate contract.
+ *
+ * Called with two different elements, which is why it is not folded back into that one. The
+ * terminal SCREEN places the grid; the terminal BODY (`.term-node__body`) places the opaque PLATE.
+ * The body is the node's transparent window onto the shared canvas, so its offset + client size IS
+ * the ground the plate owes — and `.term-node__xterm`'s padding lies inside it, covered for free.
+ */
+function offsetInNode(el: HTMLElement | null): Vec2 | null {
   if (!el) return null
   let x = 0
   let y = 0
@@ -324,18 +336,6 @@ function screenOffsetInNode(term: Terminal): Vec2 | null {
     cur = cur.offsetParent as HTMLElement | null
   }
   return null
-}
-
-/** The terminal host's CSS padding, which the plate covers. Unparseable sides come back NaN and
- *  `platePadPx` collapses them to 0 — the engine never sees one. */
-function hostPadding(el: HTMLElement): Insets {
-  const cs = getComputedStyle(el)
-  return {
-    top: parseFloat(cs.paddingTop),
-    right: parseFloat(cs.paddingRight),
-    bottom: parseFloat(cs.paddingBottom),
-    left: parseFloat(cs.paddingLeft)
-  }
 }
 
 /**
@@ -572,6 +572,11 @@ export function TerminalNode({
   // in the default renderer modes, which is what makes the effects below a single null check.
   const glyphGridRef = useRef<GridHandle | null>(null)
   const glyphBodyOffsetRef = useRef<Vec2>({ x: 0, y: 0 })
+  /** The PLATE's box in NODE-relative layout coordinates — the body's offset inside the node plus
+   *  its client size. Kept apart from `glyphBodyOffsetRef` (which tracks `.xterm-screen`) because
+   *  plate and grid are independent rects; the position effect below re-derives the plate's world
+   *  origin from this while the node is dragged, without re-measuring the DOM per frame. */
+  const glyphPlateBoxRef = useRef<{ offset: Vec2; w: number; h: number } | null>(null)
   // Mutated (never reassigned) so the lifecycle effect's closures read the CURRENT position without
   // re-running; a drag rewrites these two numbers per frame.
   const nodePosRef = useRef<Vec2>({ x: positionAbsoluteX, y: positionAbsoluteY })
@@ -1119,16 +1124,41 @@ export function TerminalNode({
     // respawn for it. Teardown ordering is only correct while the grid's lifetime is nested inside
     // the terminal's.
 
-    /** Push the grid to where the terminal screen actually is, re-measuring the screen's offset
-     *  inside the node. One null check when this terminal holds no grid. */
+    /**
+     * Push the grid to where the terminal screen actually is, and the PLATE to where the body is,
+     * re-measuring both offsets inside the node. One null check when this terminal holds no grid.
+     *
+     * Two independent rects on purpose (see `GridSpec.plateX`): the grid follows `.xterm-screen`
+     * and the plate follows `.term-node__body`, which is larger — the character matrix rarely
+     * divides the body exactly, and the leftover bands at the bottom/right are transparent node,
+     * i.e. raw canvas, unless the plate covers them. Both mutators change-gate themselves, so a
+     * settle tick that moved neither costs two comparisons.
+     */
     const syncGridOrigin = (): void => {
       const grid = glyphGrid
       if (!grid) return
       const offset = screenOffsetInNode(term)
-      if (!offset) return
-      glyphBodyOffsetRef.current = offset
-      const origin = bodyWorldRect(nodePosRef.current, offset)
-      grid.setOrigin(origin.x, origin.y)
+      if (offset) {
+        glyphBodyOffsetRef.current = offset
+        const origin = bodyWorldRect(nodePosRef.current, offset)
+        grid.setOrigin(origin.x, origin.y)
+      }
+      const plate = measurePlateRect()
+      if (plate) grid.setPlateRect(plate.x, plate.y, plate.w, plate.h)
+    }
+
+    /** The body's world rect — the plate. Null when the body is not laid out inside a React Flow
+     *  node (a parked, detached element): leave the plate where it is rather than collapse it. */
+    const measurePlateRect = (): { x: number; y: number; w: number; h: number } | null => {
+      const offset = offsetInNode(container)
+      if (!offset) return null
+      // `clientWidth/Height` at the RO tick, the same measurement that positions the grid: LAYOUT
+      // px, so it is zoom-independent and already in world units (the canvas transform scales
+      // rendered pixels, never offsets or client boxes).
+      const w = container.clientWidth
+      const h = container.clientHeight
+      glyphPlateBoxRef.current = { offset, w, h }
+      return bodyPlateRect(nodePosRef.current, offset, w, h)
     }
 
     /**
@@ -1215,6 +1245,16 @@ export function TerminalNode({
       }
       glyphBodyOffsetRef.current = offset
       const origin = bodyWorldRect(nodePosRef.current, offset)
+      // The plate is the BODY rect, measured here so the grid is never registered with a
+      // zero/absent plate that a later RO tick has to repair — a frame of un-plated terminal is a
+      // frame of dot grid showing through the node. Falls back to the CELL rect (the pre-fix
+      // behaviour, minus the padding) if the body cannot be measured; the RO tick corrects it.
+      const plate = measurePlateRect() ?? {
+        x: origin.x,
+        y: origin.y,
+        w: term.cols * cell.cellW,
+        h: term.rows * cell.cellH
+      }
       let handle: GridHandle
       try {
         handle = ctx.engine.register({
@@ -1232,9 +1272,12 @@ export function TerminalNode({
           // The theme background this xterm was built with — the colour the plate clears to, so a
           // grid's own background matches the terminal it belongs to.
           bgColor: packThemeBg(term.options.theme?.background),
-          // The host's CSS padding (`.term-node__xterm`, `4px 2px 2px 6px`) reduced to the one
-          // scalar the engine takes; see `platePadPx` for why it is the MAXIMUM side.
-          padPx: platePadPx(hostPadding(container))
+          // The opaque ground this terminal paints under itself: the BODY rect, not the character
+          // matrix. See `bodyPlateRect` for why the host's CSS padding no longer appears here.
+          plateX: plate.x,
+          plateY: plate.y,
+          plateW: plate.w,
+          plateH: plate.h
         })
       } catch (err) {
         glyphWarn(`${id}:register`, `could not register a grid for node ${id}: ${String(err)}`)
@@ -2083,11 +2126,17 @@ export function TerminalNode({
   useEffect(() => {
     const grid = glyphGridRef.current
     if (!grid) return
-    const origin = bodyWorldRect(
-      { x: positionAbsoluteX, y: positionAbsoluteY },
-      glyphBodyOffsetRef.current
-    )
+    const nodePos = { x: positionAbsoluteX, y: positionAbsoluteY }
+    const origin = bodyWorldRect(nodePos, glyphBodyOffsetRef.current)
     grid.setOrigin(origin.x, origin.y)
+    // The PLATE travels with the node too, and from the SAME cached box — a drag moves the node,
+    // never the body's offset or size inside it, so this is arithmetic rather than a DOM
+    // measurement sixty times a second. Skipped until the body has been measured once (the
+    // register path does that), so a drag can never collapse the plate to a zero rect.
+    const box = glyphPlateBoxRef.current
+    if (!box) return
+    const plate = bodyPlateRect(nodePos, box.offset, box.w, box.h)
+    grid.setPlateRect(plate.x, plate.y, plate.w, plate.h)
   }, [positionAbsoluteX, positionAbsoluteY])
 
   // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
