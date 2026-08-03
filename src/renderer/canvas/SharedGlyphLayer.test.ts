@@ -3,14 +3,19 @@ import {
   failSharedGlyph,
   getSharedGlyphContext,
   idsFromOrderSig,
+  nodeIsOpaque,
   nodeOrderSig,
   nodeZFor,
+  opaqueNodeIds,
   setNodeZOrder,
+  setOpaqueNodeIds,
   setSharedGlyphCamera,
   sharedGlyphActive,
   sharedGlyphAvailable,
   subscribeNodeZOrder,
-  useSharedGlyph
+  subscribeOpaqueSet,
+  useSharedGlyph,
+  type StackedNode
 } from './SharedGlyphLayer'
 
 // Only the PURE parts are unit-testable here: there is no WebGL2, no OffscreenCanvas and no
@@ -24,6 +29,7 @@ beforeEach(() => {
   // order-independent.
   useSharedGlyph.setState({ enabled: false, generation: 0, failed: false })
   setNodeZOrder([])
+  setOpaqueNodeIds([])
 })
 
 describe('nodeOrderSig', () => {
@@ -58,35 +64,46 @@ describe('nodeOrderSig', () => {
     expect(a).not.toBe(b)
   })
 
-  it('does NOT elevate a selected terminal — selection is not a stacking input here', () => {
-    // Round 3 sorted selected nodes last, mirroring React Flow's elevateNodesOnSelect. Round 4
-    // turns that PROP off while the shared layer is active (Canvas.tsx) instead, because the DOM
-    // and the canvas have to agree on ONE order: a selected node whose grid was on top but whose
-    // chrome sat under its neighbour's showed both nodes' contents in the same rectangle. With the
-    // elevation disabled, array order is the whole rule on both sides.
+  it('elevates a SELECTED terminal above the unselected ones, wherever it sits in the array', () => {
+    // React Flow's elevateNodesOnSelect (default on, and now on in EVERY renderer mode) lifts the
+    // selected node's DOM to z 1000; the grids mirror it so canvas and DOM tell the same story.
+    // Round 4 removed the mirroring and turned the prop off instead — rejected in round 5, because
+    // that takes away "selecting/dragging brings a node to the front". The overlap it was trying to
+    // fix is handled by `opaqueNodeIds` (a stacked terminal leaves the canvas entirely) instead.
     const sig = nodeOrderSig([
       { id: 'a', type: 'terminal' },
       { id: 'b', type: 'terminal', selected: true },
       { id: 'c', type: 'terminal' }
     ])
-    expect(idsFromOrderSig(sig)).toEqual(['a', 'b', 'c'])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'c', 'b'])
   })
 
-  it('a multi-select changes nothing at all', () => {
+  it('keeps selected nodes in their own relative order (a multi-select is stable)', () => {
     const sig = nodeOrderSig([
       { id: 'a', type: 'terminal', selected: true },
       { id: 'b', type: 'terminal' },
       { id: 'c', type: 'terminal', selected: true }
     ])
-    expect(idsFromOrderSig(sig)).toEqual(['a', 'b', 'c'])
+    expect(idsFromOrderSig(sig)).toEqual(['b', 'a', 'c'])
   })
 
-  it('selecting and deselecting does not churn the signature (no needless z re-push)', () => {
-    const nodes = [
-      { id: 'a', type: 'terminal' },
-      { id: 'b', type: 'terminal' }
-    ]
-    expect(nodeOrderSig(nodes)).toBe(nodeOrderSig(nodes.map((n) => ({ ...n, selected: true }))))
+  it('an all-selected canvas keeps plain array order', () => {
+    const sig = nodeOrderSig([
+      { id: 'a', type: 'terminal', selected: true },
+      { id: 'b', type: 'terminal', selected: true }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'b'])
+  })
+
+  it('a selected NON-terminal does not reorder the terminals', () => {
+    // The elevation is applied over ALL nodes (that is what the DOM does) and terminals are
+    // filtered out of the result afterwards — so a selected sticky must be invisible here.
+    const sig = nodeOrderSig([
+      { id: 't1', type: 'terminal' },
+      { id: 's1', type: 'sticky', selected: true },
+      { id: 't2', type: 'terminal' }
+    ])
+    expect(idsFromOrderSig(sig)).toEqual(['t1', 't2'])
   })
 
   it('an untyped node is not a terminal (React Flow defaults type to "default")', () => {
@@ -256,6 +273,181 @@ describe('setNodeZOrder', () => {
     setNodeZOrder(['a', 'b'])
     setNodeZOrder([])
     expect(nodeZFor('a')).toBe(0)
+  })
+})
+
+describe('opaqueNodeIds', () => {
+  /** A 100×100 node at (x, y). Sizes come through `measured` (a live canvas) unless overridden. */
+  const at = (
+    id: string,
+    x: number,
+    y: number,
+    extra: Partial<StackedNode> = {}
+  ): StackedNode => ({
+    id,
+    type: 'terminal',
+    position: { x, y },
+    measured: { width: 100, height: 100 },
+    ...extra
+  })
+
+  it('leaves a terminal that overlaps nothing on the shared canvas', () => {
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 200, 0)])).toEqual([])
+  })
+
+  it('marks the UPPER terminal of an overlapping pair, and only it', () => {
+    // The lower one may stay on the canvas: the opaque node above hides it natively, which is the
+    // asymmetry the whole design rests on.
+    expect(opaqueNodeIds([at('low', 0, 0), at('high', 50, 50)])).toEqual(['high'])
+  })
+
+  it('a terminal stacked over a NON-terminal node counts too', () => {
+    // "Reveals another node" is about any kind — a sticky's text under a transparent body is the
+    // same defect as a terminal's.
+    const nodes = [at('note', 0, 0, { type: 'sticky' }), at('t', 20, 20)]
+    expect(opaqueNodeIds(nodes)).toEqual(['t'])
+  })
+
+  it('follows the SELECTION elevation, not raw array order', () => {
+    // Selecting the lower node lifts it above its neighbour in the DOM, so it is now the one whose
+    // body could reveal something — and the neighbour is free to go back on the canvas.
+    const nodes = [at('a', 0, 0, { selected: true }), at('b', 50, 50)]
+    expect(opaqueNodeIds(nodes)).toEqual(['a'])
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 50, 50)])).toEqual(['b'])
+  })
+
+  it('edge-to-edge nodes are not overlapping', () => {
+    // A snapped grid or a tidy row shares boundaries everywhere; treating that as an overlap would
+    // send half a neat canvas to the DOM renderer.
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 100, 0)])).toEqual([])
+  })
+
+  it('does NOT count a node\'s own group frame as something beneath it', () => {
+    // A grouped terminal is inside its frame's rect by construction. Counting it would put every
+    // grouped terminal on the DOM renderer permanently.
+    const group: StackedNode = {
+      id: 'g',
+      type: 'group',
+      position: { x: 0, y: 0 },
+      measured: { width: 400, height: 400 }
+    }
+    const child = at('t', 20, 20, { parentId: 'g' })
+    expect(opaqueNodeIds([group, child])).toEqual([])
+  })
+
+  it('counts an UNRELATED group frame beneath it', () => {
+    const group: StackedNode = {
+      id: 'g',
+      type: 'group',
+      position: { x: 0, y: 0 },
+      measured: { width: 400, height: 400 }
+    }
+    expect(opaqueNodeIds([group, at('t', 20, 20)])).toEqual(['t'])
+  })
+
+  it('resolves a grouped node\'s position through its parent chain', () => {
+    // The child's own `position` is frame-relative: read raw it would sit at (10,10) and miss the
+    // terminal it actually covers at (510,510).
+    const group: StackedNode = {
+      id: 'g',
+      type: 'group',
+      position: { x: 500, y: 500 },
+      measured: { width: 400, height: 400 }
+    }
+    // `out` is placed BEFORE the frame so it is beneath everything and cannot be marked itself —
+    // the assertion is about the child's resolved position and nothing else.
+    const outside = at('out', 510, 510)
+    const child = at('t', 10, 10, { parentId: 'g' })
+    expect(opaqueNodeIds([outside, group, child])).toEqual(['t'])
+  })
+
+  it('ignores collapsed and ⌘M terminals — they hold no grid either way', () => {
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 50, 50, { data: { collapsed: true } })])).toEqual(
+      []
+    )
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 50, 50, { data: { mdMode: true } })])).toEqual([])
+  })
+
+  it('a collapsed terminal is still something to be stacked OVER', () => {
+    // It is an opaque header strip on screen; covering it is a real overlap.
+    const nodes = [at('c', 0, 0, { data: { collapsed: true } }), at('t', 50, 50)]
+    expect(opaqueNodeIds(nodes)).toEqual(['t'])
+  })
+
+  it('falls back to width/height when React Flow has not measured the node yet', () => {
+    const a: StackedNode = { id: 'a', type: 'terminal', position: { x: 0, y: 0 }, width: 100, height: 100 }
+    const b: StackedNode = { id: 'b', type: 'terminal', position: { x: 50, y: 50 }, width: 100, height: 100 }
+    expect(opaqueNodeIds([a, b])).toEqual(['b'])
+  })
+
+  it('a node of unknowable size contributes nothing, in either direction', () => {
+    const sizeless: StackedNode = { id: 'x', type: 'terminal', position: { x: 0, y: 0 } }
+    expect(opaqueNodeIds([sizeless, at('t', 10, 10)])).toEqual([])
+    expect(opaqueNodeIds([at('t', 10, 10), sizeless])).toEqual([])
+  })
+
+  it('survives a parentId cycle instead of spinning', () => {
+    const a = at('a', 0, 0, { parentId: 'b' })
+    const b = at('b', 0, 0, { parentId: 'a' })
+    expect(() => opaqueNodeIds([a, b])).not.toThrow()
+  })
+
+  it('reports every stacked terminal on a pile, not just the top one', () => {
+    expect(opaqueNodeIds([at('a', 0, 0), at('b', 20, 20), at('c', 40, 40)])).toEqual(['b', 'c'])
+  })
+})
+
+describe('setOpaqueNodeIds', () => {
+  it('answers membership', () => {
+    setOpaqueNodeIds(['a', 'b'])
+    expect(nodeIsOpaque('a')).toBe(true)
+    expect(nodeIsOpaque('c')).toBe(false)
+  })
+
+  it('notifies subscribers when the set changes', () => {
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    setOpaqueNodeIds(['a'])
+    setOpaqueNodeIds(['a', 'b'])
+    expect(seen).toHaveBeenCalledTimes(2)
+    unsub()
+  })
+
+  it('does NOT notify when the same MEMBERSHIP arrives in a different order', () => {
+    // This is a set, not a sequence: a node reorder that changes nothing about who overlaps whom
+    // must not wake every terminal on the canvas.
+    setOpaqueNodeIds(['a', 'b'])
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    setOpaqueNodeIds(['b', 'a'])
+    expect(seen).not.toHaveBeenCalled()
+    unsub()
+  })
+
+  it('does NOT notify when the same set is pushed again', () => {
+    setOpaqueNodeIds(['a', 'b'])
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    setOpaqueNodeIds(['a', 'b'])
+    expect(seen).not.toHaveBeenCalled()
+    unsub()
+  })
+
+  it('clears back to empty and notifies once', () => {
+    setOpaqueNodeIds(['a'])
+    const seen = vi.fn()
+    const unsub = subscribeOpaqueSet(seen)
+    setOpaqueNodeIds([])
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(nodeIsOpaque('a')).toBe(false)
+    unsub()
+  })
+
+  it('stops notifying after unsubscribe', () => {
+    const seen = vi.fn()
+    subscribeOpaqueSet(seen)()
+    setOpaqueNodeIds(['z'])
+    expect(seen).not.toHaveBeenCalled()
   })
 })
 

@@ -144,33 +144,32 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **3.8 Overlap occlusion.** Drag two terminals until they overlap: the one on top hides the
       one below — its text does not bleed through, and the lower one's text does not paint over
       the upper node's chrome.
-- [ ] **3.9 Selecting the LOWER of two overlapping terminals.** Click the partially-covered one.
-      **CHANGED in round 4:** clicking no longer raises it. While Shared is on, selection does not
-      elevate anything (`elevateNodesOnSelect={false}`) — whichever node is later in the array is on
-      top in BOTH the DOM and the canvas, selected or not. What you must confirm is that the two
-      agree: the selection ring appears on the lower node, its chrome stays under the upper node's,
-      and its text stays under the upper node's plate. The failure this replaced is the one to watch
-      for — the upper node's crisp chrome with the LOWER node's text legible through its body.
-      Bring a node to the front the ordinary way (drag it / re-create it) rather than by selecting.
-      Also check the flip itself: with a terminal SELECTED, toggle Shared on and then off. The
-      selection is cleared on each transition (deliberate — React Flow only recomputes z on a nodes
-      change, so the prop flip alone would leave that node stuck at z 1000), and no node is left
-      floating above the others afterwards.
-- [ ] **3.9c Node-attached UI that escapes the node box (round 4).** On an overlapping canvas, open
-      the 💬 comments flyout on a terminal that another terminal overlaps, and look at a session
-      node carrying a kanban column half-pill. Both are positioned OUTSIDE their node's rect, and
-      with the elevation off they are no longer lifted above nodes later in the array — so either
-      may be partly covered by a neighbouring terminal, and selecting the node will not fix it.
-      That is the known trade (L15). Judge how often it actually bites: report the overlap depth at
-      which the flyout becomes unusable, if it does.
-- [ ] **3.9b Overlap, contents vs frame (round 4).** With two terminals overlapping, look at the
-      covered region closely. Expected: the upper node's CONTENTS occlude the lower one's
-      completely — no text, no cursor, no selection band from the lower node is readable through
-      the upper node's body. The one artifact that REMAINS is **L15**: the lower node's thin
-      border/frame (and the hairline where its header meets its body) may ghost through the upper
-      node's transparent body window, because that chrome is DOM and the upper node's occluding
-      plate is canvas. A HAIRLINE is expected; **report anything more than a hairline** — a visible
-      band, a readable label, or any of the lower node's text — as a defect, not as L15.
+- [ ] **3.9 Selecting / raising the LOWER of two overlapping terminals (REWRITTEN in round 5).**
+      Round 4's trade — selection stopped elevating anything while Shared was on — is **REVERTED**.
+      Selection elevation is back on in every renderer mode, and what changed instead is that a
+      terminal which sits over another node **leaves the shared canvas** and renders on its own DOM
+      renderer for as long as it is stacked (L15). Confirm the ordinary behaviour is ordinary:
+      click the partially-covered terminal → it comes to the FRONT, chrome and contents together,
+      and nothing of the node it now covers is visible through it. Click the other one → they swap,
+      cleanly, with no intermediate frame in which both are legible in the same rectangle. Drag one
+      over the other and back: the same, throughout the gesture and after it settles.
+- [ ] **3.9c Node-attached UI that escapes the node box (round 5: the round-4 trade is GONE).** The
+      💬 comments flyout (`.term-node__comments`) and the kanban column half-pill (`ColumnPill`) are
+      positioned OUTSIDE their node's rect. With selection elevation restored they are lifted with
+      their node again, so: open a flyout on a terminal that another terminal overlaps, click the
+      node — the flyout must come to the front with it and be fully readable and clickable. Same
+      for a session node's column pill. Anything covered here is a defect now, not a known trade.
+- [ ] **3.9b Overlap, the whole of it (round 5).** With two terminals overlapping, look at the
+      covered region closely. Expected: the upper node hides the lower one **completely** — no text,
+      no cursor, no selection band, **and no frame hairline**. Round 4's L15 ghost (the lower node's
+      1px border showing through the upper node's transparent body) is gone, because the upper node
+      is not a transparent body any more: being stacked put it on the DOM renderer, opaque, with
+      native stacking. **Report ANY trace of the lower node inside the upper node's box as a
+      defect.** The expected tell that this is working is the opposite one: the upper node's text
+      may look very slightly softer than its un-stacked neighbours' at zoom ≠ 1 (DOM renderer vs
+      GPU glyphs). Note whether you can see that difference and how objectionable it is — that is
+      the round-5 question. Also: move the nodes apart again and confirm the upper one goes BACK to
+      the shared canvas (its text sharpens up) once they no longer overlap.
 - [ ] **3.10 Group-parented terminal.** A terminal inside a group frame: its text sits exactly in
       its body (offset chain resolves through the parent), and its paint order relative to
       ungrouped terminals is sane (known limitation L7).
@@ -305,8 +304,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   can land after it. Refreshing the node re-registers at the correct size.
 - **L7 — Group-parented z is an approximation.** The paint order is the node array order with
   selected nodes elevated (mirroring React Flow's `elevateNodesOnSelect`); React Flow additionally
-  gives a grouped node `parentZ + 1`, which the order signature does not model. Overlaps that mix
-  grouped and ungrouped terminals can therefore order differently from the DOM.
+  gives a grouped node `parentZ + 1`, which `effectiveStackOrder` does not model. Overlaps that mix
+  grouped and ungrouped terminals can therefore order differently from the DOM. Round 5 shrinks the
+  blast radius rather than fixing it: a terminal that overlaps anything below it is off the shared
+  canvas entirely (L15), so a mis-ordered pair of GRIDS needs both terminals to believe they are in
+  the clear — and being wrong about the order there costs a trip to the DOM renderer, never a
+  bleed-through, because the two rules read the same `effectiveStackOrder`.
 - **L8 — The kanban card modal stays on xterm's DOM renderer, by design in v1.** The modal is a
   second, co-attached view of the same tmux session living outside the canvas' coordinate space;
   it has no grid, no camera and no z in the shared canvas. Board parity here is a Phase-2 question.
@@ -342,32 +345,36 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   `warnOnCellDrift` logs one `[glyphgrid] atlas cell … does not match …` line per context lifetime,
   so a soft terminal can be told apart from a soft display. Phase 2 (re-rasterize on
   `document.fonts.ready` / per-cell atlas pages).
-- **L15 — Where two terminals overlap, the LOWER one's frame can ghost through the upper one's
-  body.** A shared-mode terminal body is transparent — its text lives on the one shared canvas
-  underneath the node layer — so the upper node's occluding surface is its canvas PLATE, and a
-  plate is painted below all DOM chrome. Contents therefore occlude correctly (the upper plate is
-  drawn after the lower one, so no text, cursor or selection band from the lower node survives),
-  but the lower node's own chrome — its 1px border, the seam under its header — is DOM and paints
-  over the plate. What remains visible is a hairline of the lower node's frame inside the upper
-  node's body window. **This is the residue of a much worse bug, and the trade was deliberate.**
-  Before round 4 the DOM and the canvas ordered the nodes DIFFERENTLY: React Flow's
-  `elevateNodesOnSelect` lifted the selected node's chrome to z 1000 while the canvas painted grids
-  in the order Canvas pushed, so the two disagreed about which node was on top and the user saw one
-  node's crisp chrome with the OTHER node's text readable through it. Turning that prop off while
-  the layer is active (Canvas.tsx, `elevateNodesOnSelect={!glyphLayerActive}`) makes array order
-  the single rule on both sides; the hairline is what is left, and it cannot be removed by any
-  ordering because canvas can never paint over DOM. The two real fixes are Phase 2 questions: draw
-  the node frame into the shared canvas too, or give the plate the node's full chrome geometry.
-  Side effect to be aware of: **clicking a covered terminal no longer brings it to the front** in
-  shared mode (checklist 3.9) — selection is no longer a stacking input there. That reaches
-  node-attached UI that deliberately ESCAPES the node box, too: the 💬 comments flyout
-  (`.term-node__comments`, a sibling of the overflow:hidden root) and the kanban column half-pill
-  (`ColumnPill`, likewise a sibling) are positioned outside their node's rect, and with the
-  elevation off they are no longer lifted above nodes that sit LATER in the array — so on an
-  overlapping canvas a flyout or a pill can be partly covered by a neighbouring terminal, and
-  selecting its node no longer fixes it. Both are transient, node-attached surfaces rather than
-  content, which is why this ships; the Phase-2 fix is the one L15 already needs (make chrome and
-  canvas agree for real, instead of turning one of the two orderings off).
+- **L15 — A terminal that is STACKED OVER another node temporarily leaves the shared renderer.**
+  (Rewritten in round 5. The round-4 entry — a hairline of the lower node's frame ghosting through
+  the upper node's transparent body, plus "selection no longer raises a covered node" — described a
+  trade that was **rejected** and no longer exists.)
+
+  The structural fact: one canvas cannot interleave itself with per-node DOM stacking. A shared-mode
+  terminal is a transparent WINDOW whose text lives on a canvas UNDER the whole node layer, so its
+  only occluding surface is its grid's plate — also under every node's chrome. It can hide another
+  node's canvas text (plate over plate) but never that node's border, header seam or label pill,
+  which paint straight through. No z-ordering in either world fixes this.
+
+  Round 4 tried to make the two orders agree by turning `elevateNodesOnSelect` off in shared mode.
+  That worked and cost too much: dragging or selecting a node stopped bringing it to the front, and
+  the frame hairline remained anyway. Round 5 replaces it with **"glyph in the open, DOM when
+  stacked"**: a terminal renders through the shared canvas only while its body sits over empty
+  canvas. The moment it could reveal a node beneath it, it hands the grid back and renders on
+  xterm's own DOM renderer — opaque body, native stacking, total occlusion. The rule is
+  `opaqueNodeIds` (`canvas/SharedGlyphLayer.tsx`): OPAQUE when the node's rect intersects the rect
+  of any node BELOW it in the effective paint order, or while it is being dragged. A terminal that
+  is only UNDERNEATH others stays on the canvas — the opaque node above hides it natively.
+  Selection elevation is back on everywhere, and the frame ghost is gone with the transparency that
+  caused it.
+
+  **What remains, and what to watch for on device:** a stacked terminal is on the DOM renderer for
+  as long as it is stacked, so its text is very slightly softer than its neighbours' at zoom ≠ 1
+  (checklist 3.9b). The switch itself is the existing teardown/setup machinery that collapse and ⌘M
+  already use, so it also costs one renderer swap per transition; the opaque set is frozen while
+  anything is dragging so a neighbour cannot be swapped twice a frame. Phase 2's answer if the DOM
+  fallback turns out to be frequent enough to matter is a SECOND canvas above the node layer for an
+  elevated tier — the two-tier design this envelope deliberately defers.
 
 ---
 

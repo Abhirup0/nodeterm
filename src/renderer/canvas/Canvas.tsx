@@ -32,7 +32,9 @@ import {
   SharedGlyphLayer,
   idsFromOrderSig,
   nodeOrderSig,
+  opaqueNodeIds,
   setNodeZOrder,
+  setOpaqueNodeIds,
   setSharedGlyphCamera,
   useSharedGlyphActive
 } from './SharedGlyphLayer'
@@ -4963,15 +4965,15 @@ export function Canvas() {
   }, [nodes, markDirty])
 
   // ---- glyphgrid (experimental shared renderer) ----
-  // Both feeds below are INERT unless the resolved renderer mode is 'shared': the hook returns
-  // false for every user today, the signature memo short-circuits on it, and setSharedGlyphCamera
-  // is a field write plus a null check when no engine exists.
+  // Every feed below is INERT unless the resolved renderer mode is 'shared': the hook returns
+  // false for every user today, the signature memo and the opaque-set effect short-circuit on it,
+  // and setSharedGlyphCamera is a field write plus a null check when no engine exists.
   const glyphLayerActive = useSharedGlyphActive()
-  // The terminal nodes' paint order IS the grids' z order — plain ARRAY order, which is exactly
-  // what the DOM does too while the layer is on (see `elevateNodesOnSelect` on <ReactFlow> below
-  // for the invariant that ties the two together). `nodeOrderSig` owns the rule. One string so the
-  // effect below fires on a real order change only — a drag or an edit rebuilds `nodes` many times
-  // per second with the order untouched.
+  // The terminal nodes' paint order IS the grids' z order — array order with SELECTED nodes last,
+  // mirroring React Flow's own `elevateNodesOnSelect` (which stays at its default in every mode).
+  // `nodeOrderSig` owns the rule and explains why mirroring is safe again. One string so the effect
+  // below fires on a real order change only — a drag or an edit rebuilds `nodes` many times per
+  // second with the order untouched.
   const glyphOrderSig = useMemo(
     () => (glyphLayerActive ? nodeOrderSig(nodes) : ''),
     [glyphLayerActive, nodes]
@@ -4980,21 +4982,27 @@ export function Canvas() {
     setNodeZOrder(idsFromOrderSig(glyphOrderSig))
   }, [glyphOrderSig])
 
-  // Flipping the mode changes `elevateNodesOnSelect`, but React Flow computes a node's z only in
-  // `adoptUserNodes` — which runs on a NODES change, not on a prop change. So a node that happens
-  // to be selected at the moment of the flip keeps the z 1000 it was given under the old prop, and
-  // stays wrongly on top (in the DOM only) until something else touches the nodes array. Clearing
-  // the selection is the minimal correct nudge: it is a real nodes change, so every node is
-  // re-adopted under the new rule, and it costs the user nothing (selection is not a stacking input
-  // in shared mode anyway — see L15). Change-gated on both the transition and on anything actually
-  // being selected, and skipped on mount so a project load's restored selection survives.
-  const prevGlyphActiveRef = useRef<boolean | null>(null)
+  // The OPAQUE SET: which terminals must leave the shared canvas and paint their own pixels right
+  // now, because their transparent body would otherwise reveal a node stacked beneath them. The
+  // rule, and why it is the rule, is documented at `opaqueNodeIds`.
+  //
+  // WHEN it runs is this effect's job, and there is exactly one subtlety: it is FROZEN while any
+  // node is being dragged. `nodes` is rebuilt every frame of a drag, and recomputing there would
+  // flip the dragged node's neighbours between the two renderers at 60 Hz — each flip is a real
+  // xterm renderer swap, which is both jank and a chance to land blank. Nothing is lost by
+  // waiting: the DRAGGED node needs nothing from this set (TerminalNode reads React Flow's own
+  // `dragging` prop and goes DOM for the whole gesture, so it occludes correctly the entire time),
+  // and the drag's settle is itself a nodes change, so the set is recomputed exactly once, at rest.
+  // Same cadence as the order signature above — this effect adds one `some()` per nodes change and
+  // an O(n²) rect sweep per SETTLED change, over a node count that is tens.
   useEffect(() => {
-    const prev = prevGlyphActiveRef.current
-    prevGlyphActiveRef.current = glyphLayerActive
-    if (prev === null || prev === glyphLayerActive) return
-    setNodes((ns) => (ns.some((n) => n.selected) ? ns.map((n) => ({ ...n, selected: false })) : ns))
-  }, [glyphLayerActive, setNodes])
+    if (!glyphLayerActive) {
+      setOpaqueNodeIds([])
+      return
+    }
+    if (nodes.some((n) => n.dragging)) return
+    setOpaqueNodeIds(opaqueNodeIds(nodes))
+  }, [glyphLayerActive, nodes])
 
   const zoomRafRef = useRef<number | null>(null)
   const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -7507,22 +7515,6 @@ export function Canvas() {
           zoomActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
-          // INVARIANT (shared glyph layer): the shared canvas can only paint in ONE global order,
-          // so every DOM stacking rule that diverges from array order — `elevateNodesOnSelect`,
-          // React Flow's default-on lift of the selected node to z 1000, is the only one we use —
-          // must be disabled while the shared layer is on, or chrome and text disagree about who
-          // is on top. That disagreement is not cosmetic: a shared-mode terminal body is
-          // TRANSPARENT (the glyphs are on the canvas underneath), so with the two orders split
-          // the user sees the upper node's opaque chrome AND the lower node's text through the
-          // same rectangle — "this node is on top, and I can read the other one through it".
-          // Mirroring the elevation in `nodeOrderSig` (what round 3 did) cannot fix it, because
-          // canvas text can never paint over DOM chrome; only agreeing on array order can.
-          // Dynamic, and false ONLY while shared is active: the default renderer modes have opaque
-          // bodies and keep React Flow's normal selection behavior, untouched. Flipping this prop
-          // is NOT enough on its own — React Flow assigns z in `adoptUserNodes`, which runs on a
-          // nodes change — so the effect above clears the selection on the transition to force a
-          // re-adopt; without it a node selected at the moment of the flip keeps z 1000.
-          elevateNodesOnSelect={!glyphLayerActive}
         >
           <Background
             variant={BackgroundVariant.Dots}

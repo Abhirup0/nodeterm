@@ -16,9 +16,11 @@
  *    `failSharedGlyph()`: warn once, tear the context down, and flip the store's `failed` — the
  *    session-level "everyone back to the DOM renderer" signal that TerminalNode reads.
  * 3. **The seams the rest of the integration reads**: `useSharedGlyph` (mode + generation +
- *    failure), `setNodeZOrder`/`nodeZFor`/`subscribeNodeZOrder` (paint order), and
- *    `setSharedGlyphCamera` (pan/zoom). Every one of them is a no-op while no context exists, so
- *    Canvas can call them unconditionally and a default-mode user pays a null check.
+ *    failure), `setNodeZOrder`/`nodeZFor`/`subscribeNodeZOrder` (paint order),
+ *    `setOpaqueNodeIds`/`nodeIsOpaque`/`subscribeOpaqueSet` (which terminals must leave the shared
+ *    canvas — see the stacking rule above that set), and `setSharedGlyphCamera` (pan/zoom). Every
+ *    one of them is a no-op while no context exists, so Canvas can call them unconditionally and a
+ *    default-mode user pays a null check.
  *
  * The component and the GL singleton have NO unit tests by design — there is no WebGL2, no
  * OffscreenCanvas and no layout in vitest's node environment. The pure parts (order signature,
@@ -180,6 +182,37 @@ let zOrderSig = ''
 const zListeners = new Set<() => void>()
 
 /**
+ * The order React Flow actually PAINTS the nodes in: array order, with selected nodes moved to
+ * the end (stable within each of the two groups). That is `elevateNodesOnSelect` — on by default,
+ * and the only DOM stacking rule this app uses that diverges from array order.
+ *
+ * ONE function, because two consumers must never disagree about it: `nodeOrderSig` (the grids' z)
+ * and `opaqueNodeIds` (which terminals may stay on the shared canvas at all). If the opaque set
+ * were derived from a different order than the z, a terminal could be told it is in the clear by
+ * one rule and painted underneath by the other — the mixed-order soup of round 4, reintroduced
+ * one level down.
+ *
+ * Approximation, deliberately: React Flow also gives a group frame's children a z above the frame
+ * itself, and honours an explicit `zIndex`, neither of which we set. `opaqueNodeIds` is written so
+ * that being wrong here costs a terminal a trip to the DOM renderer, never a bleed-through.
+ */
+export function effectiveStackOrder<T extends { selected?: boolean }>(
+  nodes: readonly T[]
+): readonly T[] {
+  let elevated: T[] | null = null
+  for (const n of nodes) {
+    if (!n.selected) continue
+    if (!elevated) elevated = []
+    elevated.push(n)
+  }
+  // Nothing selected — the overwhelmingly common case — is the input array itself, no copy.
+  if (!elevated) return nodes
+  const base: T[] = []
+  for (const n of nodes) if (!n.selected) base.push(n)
+  return base.concat(elevated)
+}
+
+/**
  * The paint order of the TERMINAL nodes, as one string. Canvas recomputes it per nodes change and
  * only pushes when it differs — a string compare instead of an array diff, the same trick the
  * data-signature effect next to it uses.
@@ -187,28 +220,29 @@ const zListeners = new Set<() => void>()
  * Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
  * churn the signature on every sticky edit.
  *
- * **The rule is plain ARRAY order, and nothing else.** It used to mirror React Flow's
- * `elevateNodesOnSelect` by sorting selected nodes last, because that prop (on by default) lifts a
- * selected node's DOM z-index to 1000 wherever it sits in the array. Mirroring it fixed one half of
- * the overlap and created the other: the shared canvas paints in ONE global order, so with the
- * selected node's grid on top, its text correctly occluded the neighbour's text — while the
- * neighbour's opaque DOM chrome still sat over the selected node's TRANSPARENT body. The user saw
- * crisp chrome from one node and the other node's text through it, in the same rectangle. There is
- * no ordering of the grids that fixes that, because canvas text can never paint over DOM chrome.
+ * **The rule is `effectiveStackOrder` — array order, with SELECTED nodes last** — because that is
+ * what the DOM does: React Flow's `elevateNodesOnSelect` is on by default and lifts a selected
+ * node's z-index to 1000 wherever it sits in the array. The canvas z among the glyph grids mirrors
+ * the DOM elevation, so both worlds tell the same story about who is on top.
  *
- * The fix is upstream: while the shared layer is active Canvas passes `elevateNodesOnSelect={false}`
- * so the DOM follows the array too, and both worlds agree that "later in the array is on top". The
- * elevation this function existed to mirror no longer happens in the only mode that reads this
- * signature, so the selection-awareness is gone with it — see the invariant at that prop.
+ * Round 4 removed the mirroring and turned the PROP off instead. That was the wrong end of the
+ * problem: it did make the two orders agree, but at the cost of "click/drag brings a node to the
+ * front", which the user rejected outright. Round 5 fixes the overlap where it actually lives —
+ * a terminal whose transparent body could reveal a node BENEATH it leaves the shared canvas and
+ * paints itself on its own DOM renderer (`opaqueNodeIds` below). With every overlapping-top
+ * terminal off the canvas, no two grids can be in the configuration this signature used to be
+ * blamed for, so mirroring the elevation is free again.
+ *
+ * It matters mainly for TRANSIENT states — the frames between an overlap starting and the opaque
+ * set being recomputed, and the frames after it clears — since a terminal that is durably stacked
+ * over something is on the DOM renderer and owns no grid at all. Those are precisely the frames in
+ * which a wrong z is visible, which is why the mirroring is worth its handful of lines.
  */
-// `selected` is still in the accepted shape and deliberately unread: it says out loud that the
-// signature SEES the selection and chooses to ignore it, which is the thing a future reader is
-// most likely to try to "fix" back.
 export function nodeOrderSig(
   nodes: readonly { id: string; type?: string; selected?: boolean }[]
 ): string {
   let sig = ''
-  for (const n of nodes) {
+  for (const n of effectiveStackOrder(nodes)) {
     if (n.type !== 'terminal') continue
     sig = sig === '' ? n.id : sig + ORDER_SEP + n.id
   }
@@ -246,6 +280,184 @@ export function subscribeNodeZOrder(fn: () => void): () => void {
   zListeners.add(fn)
   return () => {
     zListeners.delete(fn)
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The opaque set — "glyph in the open, DOM when stacked"
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * THE STACKING RULE OF THE SHARED RENDERER, and the thing to read before touching any of this.
+ *
+ * A shared-mode terminal is a TRANSPARENT WINDOW: its body has no background, its text lives on
+ * the one canvas that sits UNDER the whole node layer, and the only thing it puts between itself
+ * and whatever is behind it is its grid's opaque plate — which is also on that canvas, i.e. also
+ * under every node's DOM chrome. So a glyph terminal cannot occlude a node beneath it the way an
+ * ordinary node does. It can hide the node's canvas TEXT (plate over plate) but never its chrome:
+ * the border, the header seam, a label pill all paint straight through.
+ *
+ * There is no z-ordering that fixes that, in either world — one canvas cannot interleave itself
+ * with per-node DOM stacking. Round 4 tried to make the two orders agree by taking selection
+ * elevation away; that removed "click/drag brings it to the front", which is not negotiable.
+ *
+ * Round 5's rule instead: **a terminal renders through the shared canvas only while it is in the
+ * open.** The moment its body could reveal something underneath, it drops the grid and goes back
+ * to xterm's own DOM renderer — opaque body, native stacking, total occlusion. Concretely a
+ * terminal is OPAQUE (DOM) when either holds:
+ *
+ *  a) its rect intersects the rect of ANY node — of any kind — that is BELOW it in the effective
+ *     paint order (`effectiveStackOrder`), or
+ *  b) it is being DRAGGED (TerminalNode reads React Flow's own `dragging` prop for this, not this
+ *     set — a drag is about to put the node above things, and the flag flips synchronously so the
+ *     visuals are right for the whole gesture rather than one recompute late).
+ *
+ * A terminal that is only UNDERNEATH others stays on the canvas: the opaque node above it hides it
+ * natively, which is the case this whole design leans on. The cost is that a stacked terminal is
+ * rendered by the DOM renderer for as long as it is stacked — its text is very slightly softer at
+ * zoom ≠ 1 than its neighbours', which is the expected tell, not a defect.
+ *
+ * Two deliberate exclusions from "below it":
+ *  - **A node's own ANCESTOR chain.** Every grouped terminal sits inside its group frame's rect by
+ *    construction; counting that as an overlap would put every grouped terminal on the DOM
+ *    renderer forever, which would gut the feature on the canvases most likely to use it.
+ *  - **Nodes with unknowable geometry** (no `measured`, no `width`/`height` — the tick before
+ *    React Flow has measured a fresh node). They contribute nothing in either direction, and the
+ *    measurement lands as an ordinary nodes change that recomputes the set.
+ *
+ * Known gap, small and stated rather than papered over: the EPHEMERAL subagent/loop cards are
+ * merged into React Flow at the `<ReactFlow>` prop and are not in Canvas's `nodes` array, so they
+ * are invisible to this rule. They are display-only cards that live for the length of one turn.
+ */
+
+/** Node shape this derivation reads. Loose on purpose: it must accept a live measured node and a
+ *  freshly deserialized one (`width`/`height`, no `measured`) alike. */
+export interface StackedNode {
+  id: string
+  type?: string
+  selected?: boolean
+  position: { x: number; y: number }
+  parentId?: string
+  width?: number | null
+  height?: number | null
+  measured?: { width?: number | null; height?: number | null }
+  data?: { collapsed?: unknown; mdMode?: unknown }
+}
+
+interface StackRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** A `parentId` chain longer than this is a data bug (or a cycle) — stop walking. Same constant,
+ *  same reason, as `lib/nodeFocus`. */
+const MAX_PARENT_DEPTH = 20
+
+const positiveSize = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+
+/** The node's rect in ABSOLUTE canvas coordinates (a grouped node's `position` is relative to its
+ *  frame, so the parent chain is walked), or null when its size is not knowable yet. */
+function absoluteRect(node: StackedNode, byId: Map<string, StackedNode>): StackRect | null {
+  const w = positiveSize(node.measured?.width) ?? positiveSize(node.width)
+  const h = positiveSize(node.measured?.height) ?? positiveSize(node.height)
+  if (w === null || h === null) return null
+  let { x, y } = node.position
+  let parentId = node.parentId
+  const seen = new Set<string>([node.id])
+  for (let depth = 0; parentId && depth < MAX_PARENT_DEPTH; depth++) {
+    if (seen.has(parentId)) break
+    seen.add(parentId)
+    const parent = byId.get(parentId)
+    if (!parent) break
+    x += parent.position.x
+    y += parent.position.y
+    parentId = parent.parentId
+  }
+  return { x, y, w, h }
+}
+
+/** Strictly overlapping AREA. Edge-to-edge nodes (a snapped grid, a tidy row) share a boundary and
+ *  nothing else — treating that as an overlap would send half a neat canvas to the DOM renderer. */
+function rectsOverlap(a: StackRect, b: StackRect): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/** Whether `ancestorId` is on `node`'s parent chain — see the exclusion note above. */
+function isAncestorOf(node: StackedNode, ancestorId: string, byId: Map<string, StackedNode>): boolean {
+  let parentId = node.parentId
+  const seen = new Set<string>([node.id])
+  for (let depth = 0; parentId && depth < MAX_PARENT_DEPTH; depth++) {
+    if (parentId === ancestorId) return true
+    if (seen.has(parentId)) return false
+    seen.add(parentId)
+    parentId = byId.get(parentId)?.parentId
+  }
+  return false
+}
+
+/**
+ * The terminals that must render on their OWN (opaque, DOM) renderer right now, by the rule
+ * documented above. Pure — Canvas owns WHEN to run it (see the settle gate there), this owns what
+ * the answer is.
+ *
+ * Collapsed / ⌘M terminals are left out: they hold no grid either way, so naming them here would
+ * only churn the pushed signature. They still count as nodes something else can be stacked over —
+ * a collapsed terminal is an opaque header strip, and covering one is a real overlap.
+ */
+export function opaqueNodeIds(nodes: readonly StackedNode[]): string[] {
+  const order = effectiveStackOrder(nodes)
+  const byId = new Map<string, StackedNode>()
+  for (const n of nodes) byId.set(n.id, n)
+  const rects = order.map((n) => absoluteRect(n, byId))
+  const out: string[] = []
+  for (let i = 0; i < order.length; i++) {
+    const node = order[i]
+    if (node.type !== 'terminal') continue
+    if (node.data?.collapsed || node.data?.mdMode) continue
+    const rect = rects[i]
+    if (!rect) continue
+    for (let j = 0; j < i; j++) {
+      const below = rects[j]
+      if (!below || !rectsOverlap(rect, below)) continue
+      if (isAncestorOf(node, order[j].id, byId)) continue
+      out.push(node.id)
+      break
+    }
+  }
+  return out
+}
+
+let opaqueIds = new Set<string>()
+let opaqueSig = ''
+const opaqueListeners = new Set<() => void>()
+
+/**
+ * Publish the opaque set. Change-gated on a SORTED signature — this is a set, not a sequence, so
+ * the same membership arriving in a different order (a node reorder that changes nothing about who
+ * overlaps whom) must not wake every terminal on the canvas.
+ */
+export function setOpaqueNodeIds(ids: readonly string[]): void {
+  const sig = [...ids].sort().join(ORDER_SEP)
+  if (sig === opaqueSig) return
+  opaqueSig = sig
+  opaqueIds = new Set(ids)
+  for (const fn of opaqueListeners) fn()
+}
+
+/** Must this node paint its own pixels right now? Always false while nothing has been pushed,
+ *  which is every default-mode session. */
+export function nodeIsOpaque(id: string): boolean {
+  return opaqueIds.has(id)
+}
+
+/** Terminals subscribe here and re-read `nodeIsOpaque` — same lifecycle as the z subscription. */
+export function subscribeOpaqueSet(fn: () => void): () => void {
+  opaqueListeners.add(fn)
+  return () => {
+    opaqueListeners.delete(fn)
   }
 }
 

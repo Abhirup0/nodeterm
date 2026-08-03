@@ -58,10 +58,12 @@ import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid
 import type { GridHandle } from '../glyphgrid/engine'
 import {
   getSharedGlyphContext,
+  nodeIsOpaque,
   nodeZFor,
   sharedGlyphActive,
   sharedGlyphAvailable,
   subscribeNodeZOrder,
+  subscribeOpaqueSet,
   useSharedGlyph
 } from '../canvas/SharedGlyphLayer'
 import {
@@ -474,6 +476,11 @@ export function TerminalNode({
   data,
   selected,
   parentId,
+  // True for the whole of a node drag, flipped synchronously by React Flow at gesture start and
+  // end. Read only by the glyphgrid participation decision below (a dragged terminal is about to
+  // be above other nodes, so it renders its OWN opaque pixels for the gesture); every other
+  // renderer mode destructures it and never looks at it again.
+  dragging,
   // React Flow's own absolute position (a group parent's chain already resolved), updated per
   // frame during a drag. Read only by the glyphgrid origin sync below; for every other renderer
   // mode these two are destructured and never looked at again.
@@ -558,6 +565,19 @@ export function TerminalNode({
   // to move the RE-SETUP out of the (synchronous) generation notification and into an effect that
   // runs after the font options have reached xterm — see the participation effect below.
   const [glyphEpoch, setGlyphEpoch] = useState(0)
+  // Is this node in the shared layer's OPAQUE SET — i.e. does its body currently sit over another
+  // node, so that a transparent glyph window would let that node show through? Pushed by Canvas
+  // and read back here; see the stacking rule at `opaqueNodeIds`. Always false while the shared
+  // layer is off (nothing is ever pushed), so the subscription below costs a default-mode session
+  // one Set insert per terminal and no renders at all.
+  const [glyphOpaque, setGlyphOpaque] = useState(() => nodeIsOpaque(id))
+  useEffect(() => {
+    const read = (): void => setGlyphOpaque(nodeIsOpaque(id))
+    // Read once on (re-)subscribe: the set can have been pushed between this node's render and
+    // this effect, and nothing would notify us about a change we were not yet listening for.
+    read()
+    return subscribeOpaqueSet(read)
+  }, [id])
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
@@ -596,11 +616,26 @@ export function TerminalNode({
   const skipBlurRef = useRef(false)
   const mdMode = !!data.mdMode
   const collapsed = !!data.collapsed
-  // "This node's terminal is not on screen right now": collapsed hides the body outright
-  // (`display: none`), the ⌘M view covers it with an opaque panel. A glyph grid left registered
-  // through either would keep painting its last frame on the shared canvas at the node's world
-  // rect, with nothing of ours in front of it. Mirrored into a ref for the lifecycle effect's
-  // closures (which cannot see fresh props).
+  // "This node must NOT hold a grid on the shared canvas right now." Four states, two reasons:
+  //
+  //  - NOT ON SCREEN — collapsed hides the body outright (`display: none`), the ⌘M view covers it
+  //    with an opaque panel. A grid left registered through either would keep painting its last
+  //    frame on the shared canvas at the node's world rect, with nothing of ours in front of it.
+  //  - MUST BE OPAQUE — the node is stacked over another node (`glyphOpaque`), or it is being
+  //    DRAGGED, which is the same thing a moment early. A shared-mode body is a transparent window,
+  //    so a terminal that is on top of something has to paint its own pixels or the node beneath it
+  //    shows through. See the stacking rule at `opaqueNodeIds`.
+  //
+  // Mirrored into a ref for the lifecycle effect's closures (which cannot see fresh props), and
+  // read by `setupGlyph` itself — the mount-time setup runs from that effect, not from the
+  // participation effect below, so the gate has to live where every caller passes through it.
+  const glyphOff = collapsed || mdMode || glyphOpaque || dragging
+  const glyphOffRef = useRef(glyphOff)
+  glyphOffRef.current = glyphOff
+  // The NOT-ON-SCREEN half on its own. `setupGlyph`'s gate needs to tell the two reasons apart:
+  // a terminal that is merely covered up has no pixels to accelerate, while one held opaque is
+  // fully visible and painting its own — so the latter must be a WebGL budget client, exactly like
+  // a default-mode terminal. That is the "never both renderers, and never NEITHER" invariant.
   const glyphHiddenRef = useRef(collapsed || mdMode)
   glyphHiddenRef.current = collapsed || mdMode
   // Derive the node's agent once, through the shared helper — the canvas menu decides whether to
@@ -1229,7 +1264,16 @@ export function TerminalNode({
      */
     const setupGlyph = (forcedCell?: { cellW: number; cellH: number }): void => {
       if (disposed || glyphAttach || glyphGrid) return
-      if (glyphHiddenRef.current) return
+      if (glyphOffRef.current) {
+        // Held OFF the shared canvas — and which half of `glyphOff` it is decides the budget
+        // client. Covered up (collapsed / ⌘M): nothing to draw, so no client, exactly as before.
+        // Held OPAQUE (stacked over another node, or being dragged): this terminal is fully
+        // visible and painting its own pixels, so it is a WebGL client like any default-mode
+        // terminal — without this it would end up with NEITHER renderer coordinated and quietly
+        // run on xterm's DOM renderer for as long as the overlap lasts.
+        if (!glyphHiddenRef.current) ensureWebglClient()
+        return
+      }
       // The gate, re-evaluated on every call (mount, generation bump, expand): mode on, session not
       // failed, and a context that actually exists — no WebGL2/OffscreenCanvas returns null here
       // and this terminal simply stays where it is.
@@ -2186,16 +2230,23 @@ export function TerminalNode({
   // settings are in the deps as well as the epoch, so the re-setup still lands after the options
   // even if the two ever arrive in separate renders. Do not move this effect above the one above.
   //
-  // It also owns the two states in which the terminal is NOT on screen although it is mounted:
-  // collapsed (the body is `display: none`) and the ⌘M markdown/chat view (an opaque panel over
-  // the body). Both drop the grid — and re-register on the way back — for the same reason a parked
-  // terminal drops its WebGL context: there is nothing to draw, and a grid left registered keeps
-  // painting its last frame at the node's world rect with nothing of ours in front of it.
+  // It also owns every state in which this node must not be on the shared canvas although it is
+  // mounted — `glyphOff` names them all (collapsed, ⌘M, stacked over another node, being dragged)
+  // and the ref beside it carries the same answer to `setupGlyph`'s own gate. Each drops the grid
+  // and re-registers on the way back, through the SAME teardown/setup machinery that collapse and
+  // ⌘M have always used: `teardownGlyph` clears `glyphMounted` (so `term-node--glyphgrid` comes off
+  // the node root) and removes `glyphgrid-mode` from the xterm element, which is exactly what makes
+  // the body opaque and the DOM rows visible again. Nothing here is a special case for stacking.
+  //
+  // `dragging` flips synchronously at gesture start, so a drag goes DOM before the node has moved a
+  // pixel and stays there until it settles — no mid-gesture flip back, and the drop position's
+  // overlap answer arrives with the settle. HYSTERESIS is otherwise Canvas's job: it freezes the
+  // opaque set while anything is dragging, so a neighbour cannot be swapped renderer twice a frame.
   //
   // No-op (one ref null check) unless this node participates in the shared canvas.
   useEffect(() => {
-    glyphSyncRef.current?.(!collapsed && !mdMode)
-  }, [collapsed, mdMode, glyphEpoch, fontSize, fontFamily])
+    glyphSyncRef.current?.(!glyphOff)
+  }, [glyphOff, glyphEpoch, fontSize, fontFamily])
 
   // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
   // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen
