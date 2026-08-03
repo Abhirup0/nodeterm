@@ -1,0 +1,404 @@
+import { describe, expect, it } from 'vitest'
+import type { GlyphAtlas } from './atlas'
+import { CELL_STRIDE, FLAG_CURSOR, FLAG_SELECTED, packColor, readCell } from './cells'
+import type { GridHandle } from './engine'
+import { GlyphGridRendererAddonCore, type TermInternals } from './addon'
+import type { CellView, ThemeLanes } from './feed'
+
+const THEME: ThemeLanes = {
+  fg: packColor(0xd0, 0xd1, 0xd2, 0xff),
+  bg: packColor(0x10, 0x11, 0x12, 0xff),
+  ansi: Array.from({ length: 256 }, (_, i) => packColor(i, 0x80, 0xff - i, 0xff)),
+  cursorFg: packColor(0x01, 0x02, 0x03, 0xff),
+  cursorBg: packColor(0xfa, 0xfb, 0xfc, 0xff),
+  selectionBg: packColor(0x30, 0x50, 0x80, 0xff)
+}
+
+/** A cell whose code point encodes the ABSOLUTE buffer row it came from, so a packed row can be
+ *  traced back to the buffer row that produced it — which is the whole point of the mapping
+ *  tests (a viewportY off-by-one is otherwise invisible). */
+function rowCodedCell(absRow: number, col: number): CellView {
+  const code = 0x100 + absRow * 16 + col
+  return {
+    getChars: () => String.fromCodePoint(code),
+    getCode: () => code,
+    getWidth: () => 1,
+    isBold: () => 0,
+    isItalic: () => 0,
+    isUnderline: () => 0,
+    isInverse: () => 0,
+    isDim: () => 0,
+    isFgDefault: () => true,
+    isFgPalette: () => false,
+    isFgRGB: () => false,
+    isBgDefault: () => true,
+    isBgPalette: () => false,
+    isBgRGB: () => false,
+    getFgColor: () => 0,
+    getBgColor: () => 0
+  }
+}
+
+interface RecordedRow {
+  row: number
+  /** Copy — the core reuses ONE row buffer, so keeping the live reference would record the last
+   *  frame N times. */
+  cells: Uint32Array
+  /** The buffer INSTANCE handed to updateRow, kept only to assert the reuse contract. */
+  buf: Uint32Array
+}
+
+function recordingHandle(): GridHandle & {
+  rows: RecordedRow[]
+  log: string[]
+  resizes: Array<[number, number]>
+} {
+  const rows: RecordedRow[] = []
+  const log: string[] = []
+  const resizes: Array<[number, number]> = []
+  return {
+    rows,
+    log,
+    resizes,
+    updateRow(row, cells) {
+      log.push(`updateRow:${row}`)
+      rows.push({ row, cells: cells.slice(), buf: cells })
+    },
+    setOrigin() {},
+    setZ() {},
+    resize(cols, r) {
+      log.push(`resize:${cols}x${r}`)
+      resizes.push([cols, r])
+    },
+    dispose() {
+      log.push('dispose')
+    }
+  }
+}
+
+function recordingAtlas(): Pick<GlyphAtlas, 'glyphFor'> {
+  // Identity-ish: the slot IS derived from the code point, so a packed glyph lane names the cell
+  // it came from without a second bookkeeping structure.
+  return { glyphFor: (code) => code }
+}
+
+interface FakeTermOpts {
+  cols?: number
+  rows?: number
+  viewportY?: number
+  baseY?: number
+  cursorX?: number
+  cursorY?: number
+  cursorVisible?: boolean
+  focus?: boolean
+}
+
+function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: Required<FakeTermOpts> } {
+  const state: Required<FakeTermOpts> = {
+    cols: o.cols ?? 4,
+    rows: o.rows ?? 6,
+    viewportY: o.viewportY ?? 0,
+    baseY: o.baseY ?? 0,
+    cursorX: o.cursorX ?? 0,
+    cursorY: o.cursorY ?? 0,
+    cursorVisible: o.cursorVisible ?? true,
+    focus: o.focus ?? true
+  }
+  const workCell = rowCodedCell(-1, -1)
+  return {
+    state,
+    cols: () => state.cols,
+    rows: () => state.rows,
+    viewportY: () => state.viewportY,
+    baseY: () => state.baseY,
+    cursorX: () => state.cursorX,
+    cursorY: () => state.cursorY,
+    cursorVisible: () => state.cursorVisible,
+    readCell: (absRow, col) => rowCodedCell(absRow, col),
+    makeWorkCell: () => workCell,
+    deviceMetrics: () => ({ charW: 16, charH: 34, cellW: 16, cellH: 34 }),
+    dpr: () => 2,
+    theme: () => THEME,
+    hasFocus: () => state.focus
+  }
+}
+
+function make(o: FakeTermOpts = {}): {
+  core: GlyphGridRendererAddonCore
+  term: ReturnType<typeof fakeTerm>
+  handle: ReturnType<typeof recordingHandle>
+} {
+  const term = fakeTerm(o)
+  const handle = recordingHandle()
+  const core = new GlyphGridRendererAddonCore(term, handle, recordingAtlas())
+  return { core, term, handle }
+}
+
+/** The glyph lane of a packed row decodes back to (absRow, col) — see rowCodedCell. */
+function decodeRow(cells: Uint32Array, cols: number): Array<{ absRow: number; col: number }> {
+  const out: Array<{ absRow: number; col: number }> = []
+  for (let c = 0; c < cols; c++) {
+    const g = readCell(cells, c).glyph
+    out.push({ absRow: Math.floor((g - 0x100) / 16), col: (g - 0x100) % 16 })
+  }
+  return out
+}
+
+describe('GlyphGridRendererAddonCore.renderRows', () => {
+  it('packs exactly the requested viewport rows, mapped through viewportY', () => {
+    const { core, handle } = make({ viewportY: 0 })
+    core.renderRows(2, 4)
+    expect(handle.rows.map((r) => r.row)).toEqual([2, 3, 4])
+    for (const rec of handle.rows) {
+      // Every column of the row came from the SAME absolute buffer row, and that row is the
+      // viewport row (viewportY = 0).
+      expect(decodeRow(rec.cells, 4).map((d) => d.absRow)).toEqual([rec.row, rec.row, rec.row, rec.row])
+      expect(decodeRow(rec.cells, 4).map((d) => d.col)).toEqual([0, 1, 2, 3])
+    }
+  })
+
+  it('maps a SCROLLED buffer: viewport row r reads absolute row viewportY + r', () => {
+    const { core, handle } = make({ viewportY: 100, baseY: 140 })
+    core.renderRows(0, 1)
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1])
+    expect(decodeRow(handle.rows[0].cells, 4)[0].absRow).toBe(100)
+    expect(decodeRow(handle.rows[1].cells, 4)[0].absRow).toBe(101)
+  })
+
+  it('clamps the requested range to the grid', () => {
+    const { core, handle } = make({ rows: 3 })
+    core.renderRows(-5, 99)
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1, 2])
+  })
+
+  it('reuses ONE row buffer across rows (allocation-free hot path)', () => {
+    const { core, handle } = make()
+    core.renderRows(0, 3)
+    const first = handle.rows[0].buf
+    for (const rec of handle.rows) expect(rec.buf).toBe(first)
+    expect(first.length).toBe(4 * CELL_STRIDE)
+  })
+
+  it('paints the block cursor on the cursor row, converted from base-relative coords', () => {
+    // Cursor sits at buffer row baseY + cursorY = 140 + 3 = 143; the viewport starts at 140, so
+    // it belongs on viewport row 3.
+    const { core, handle } = make({ viewportY: 140, baseY: 140, cursorY: 3, cursorX: 2 })
+    core.renderRows(0, 5)
+    const flagsOn = (row: number, col: number): number =>
+      readCell(handle.rows.find((r) => r.row === row)!.cells, col).flags & FLAG_CURSOR
+    expect(flagsOn(3, 2)).toBe(FLAG_CURSOR)
+    expect(flagsOn(3, 1)).toBe(0)
+    expect(flagsOn(2, 2)).toBe(0)
+  })
+
+  it('clamps a deferred-wrap cursor (x === cols) onto the last column', () => {
+    const { core, handle } = make({ cols: 4, rows: 2, cursorX: 4, cursorY: 0 })
+    core.renderRows(0, 1)
+    const row0 = handle.rows.find((r) => r.row === 0)!
+    expect(readCell(row0.cells, 3).flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+    expect(readCell(row0.cells, 2).flags & FLAG_CURSOR).toBe(0)
+  })
+
+  it('paints NO cursor while the cursor is hidden or the terminal is blurred', () => {
+    const hidden = make({ cursorVisible: false, cursorY: 1, cursorX: 1 })
+    hidden.core.renderRows(0, 2)
+    for (const rec of hidden.handle.rows)
+      for (let c = 0; c < 4; c++) expect(readCell(rec.cells, c).flags & FLAG_CURSOR).toBe(0)
+
+    const blurred = make({ focus: false, cursorY: 1, cursorX: 1 })
+    blurred.core.renderRows(0, 2)
+    for (const rec of blurred.handle.rows)
+      for (let c = 0; c < 4; c++) expect(readCell(rec.cells, c).flags & FLAG_CURSOR).toBe(0)
+  })
+})
+
+describe('GlyphGridRendererAddonCore.handleResize', () => {
+  it('resizes the grid BEFORE repacking, then repacks every row', () => {
+    const { core, handle } = make({ cols: 4, rows: 6 })
+    handle.log.length = 0
+    handle.rows.length = 0
+    core.handleResize(8, 3)
+    expect(handle.log[0]).toBe('resize:8x3')
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1, 2])
+    // The row buffer follows the new column count — the engine rejects a mismatched length.
+    expect(handle.rows[0].buf.length).toBe(8 * CELL_STRIDE)
+    expect(handle.rows[0].cells.length).toBe(8 * CELL_STRIDE)
+  })
+
+  it('rebuilds dimensions from the new grid size', () => {
+    const { core } = make({ cols: 4, rows: 6 })
+    core.handleResize(10, 5)
+    expect(core.dimensions.device.canvas.width).toBe(16 * 10)
+    expect(core.dimensions.device.canvas.height).toBe(34 * 5)
+    expect(core.dimensions.css.canvas.width).toBe(80) // round(160 / dpr 2)
+    expect(core.dimensions.css.cell.width).toBe(8)
+  })
+})
+
+describe('GlyphGridRendererAddonCore.dimensions', () => {
+  it('mirrors xterm dimension shape at construction', () => {
+    const { core } = make({ cols: 4, rows: 6 })
+    expect(core.dimensions).toEqual({
+      css: { canvas: { width: 32, height: 102 }, cell: { width: 8, height: 17 } },
+      device: {
+        canvas: { width: 64, height: 204 },
+        cell: { width: 16, height: 34 },
+        char: { width: 16, height: 34, left: 0, top: 0 }
+      }
+    })
+  })
+})
+
+describe('GlyphGridRendererAddonCore selection', () => {
+  it('repacks the union of the OLD and NEW spans, and nothing else', () => {
+    const { core, handle } = make({ rows: 8, viewportY: 0 })
+    core.handleSelectionChanged([1, 1], [2, 2], false)
+    handle.rows.length = 0
+    core.handleSelectionChanged([0, 5], [3, 6], false)
+    expect([...new Set(handle.rows.map((r) => r.row))].sort((a, b) => a - b)).toEqual([1, 2, 5, 6])
+  })
+
+  it('repacks the cleared rows when the selection goes away', () => {
+    const { core, handle } = make({ rows: 8 })
+    core.handleSelectionChanged([1, 2], [3, 3], false)
+    handle.rows.length = 0
+    core.handleSelectionChanged(undefined, undefined, false)
+    expect(handle.rows.map((r) => r.row)).toEqual([2, 3])
+    for (const rec of handle.rows)
+      for (let c = 0; c < 4; c++) expect(readCell(rec.cells, c).flags & FLAG_SELECTED).toBe(0)
+  })
+
+  it('marks a LINEAR span: first row from startCol, middle rows full width, last row to endCol', () => {
+    const { core, handle } = make({ rows: 8, cols: 4 })
+    core.handleSelectionChanged([2, 1], [3, 3], false)
+    const sel = (row: number): number[] =>
+      [0, 1, 2, 3].filter(
+        (c) => readCell(handle.rows.find((r) => r.row === row)!.cells, c).flags & FLAG_SELECTED
+      )
+    expect(sel(1)).toEqual([2, 3])
+    expect(sel(2)).toEqual([0, 1, 2, 3])
+    expect(sel(3)).toEqual([0, 1, 2])
+  })
+
+  it('marks a RECTANGULAR (column-select) span identically on every row in range', () => {
+    const { core, handle } = make({ rows: 8, cols: 4 })
+    core.handleSelectionChanged([3, 1], [1, 3], true)
+    const sel = (row: number): number[] =>
+      [0, 1, 2, 3].filter(
+        (c) => readCell(handle.rows.find((r) => r.row === row)!.cells, c).flags & FLAG_SELECTED
+      )
+    // Endpoints arrive in either order; the rectangle spans [min, max).
+    expect(sel(1)).toEqual([1, 2])
+    expect(sel(2)).toEqual([1, 2])
+    expect(sel(3)).toEqual([1, 2])
+  })
+
+  it('translates an absolute span through a scrolled viewport', () => {
+    const { core, handle } = make({ rows: 4, cols: 4, viewportY: 100, baseY: 100 })
+    core.handleSelectionChanged([0, 101], [4, 101], false)
+    expect(handle.rows.map((r) => r.row)).toEqual([1])
+    expect(readCell(handle.rows[0].cells, 0).flags & FLAG_SELECTED).toBe(FLAG_SELECTED)
+  })
+
+  it('ignores a span that lies entirely outside the viewport', () => {
+    const { core, handle } = make({ rows: 4, viewportY: 100 })
+    handle.rows.length = 0
+    core.handleSelectionChanged([0, 10], [4, 12], false)
+    expect(handle.rows).toEqual([])
+  })
+})
+
+describe('GlyphGridRendererAddonCore cursor + focus', () => {
+  it('repacks exactly the old and the new cursor row on a move', () => {
+    const { core, term, handle } = make({ rows: 8, cursorY: 1 })
+    core.renderRows(0, 7)
+    handle.rows.length = 0
+    term.state.cursorY = 5
+    core.handleCursorMove()
+    expect(handle.rows.map((r) => r.row).sort((a, b) => a - b)).toEqual([1, 5])
+  })
+
+  it('repacks one row when the cursor moves within its row', () => {
+    const { core, term, handle } = make({ rows: 8, cursorY: 2, cursorX: 0 })
+    handle.rows.length = 0
+    term.state.cursorX = 3
+    core.handleCursorMove()
+    expect(handle.rows.map((r) => r.row)).toEqual([2])
+    expect(readCell(handle.rows[0].cells, 3).flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+  })
+
+  it('blur repacks the cursor row without the cursor; focus paints it back', () => {
+    const { core, handle } = make({ rows: 8, cursorY: 4, cursorX: 1 })
+    handle.rows.length = 0
+    core.handleBlur()
+    expect(handle.rows.map((r) => r.row)).toEqual([4])
+    expect(readCell(handle.rows[0].cells, 1).flags & FLAG_CURSOR).toBe(0)
+
+    handle.rows.length = 0
+    core.handleFocus()
+    expect(handle.rows.map((r) => r.row)).toEqual([4])
+    expect(readCell(handle.rows[0].cells, 1).flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+  })
+})
+
+describe('GlyphGridRendererAddonCore redraw requests', () => {
+  it('clear() repacks everything and asks xterm for a full redraw', () => {
+    const { core, handle } = make({ rows: 5 })
+    const seen: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => seen.push(e))
+    handle.rows.length = 0
+    core.clear()
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1, 2, 3, 4])
+    expect(seen).toEqual([{ start: 0, end: 4 }])
+  })
+
+  it('a theme change repacks everything and asks for a full redraw', () => {
+    const { core, handle } = make({ rows: 3 })
+    const seen: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => seen.push(e))
+    handle.rows.length = 0
+    core.handleThemeChange()
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1, 2])
+    expect(seen).toEqual([{ start: 0, end: 2 }])
+  })
+
+  it('a disposed redraw subscription stops receiving', () => {
+    const { core } = make()
+    const seen: number[] = []
+    const sub = core.onRequestRedraw(() => seen.push(1))
+    core.clear()
+    sub.dispose()
+    core.clear()
+    expect(seen).toHaveLength(1)
+  })
+})
+
+describe('GlyphGridRendererAddonCore.dispose', () => {
+  it('makes every further call inert — a torn-down terminal must never touch the grid', () => {
+    const { core, handle } = make({ rows: 6 })
+    const seen: number[] = []
+    core.onRequestRedraw(() => seen.push(1))
+    core.dispose()
+    handle.log.length = 0
+    handle.rows.length = 0
+    core.renderRows(0, 5)
+    core.clear()
+    core.handleThemeChange()
+    core.handleResize(9, 9)
+    core.handleSelectionChanged([0, 0], [2, 2], false)
+    core.handleCursorMove()
+    core.handleBlur()
+    core.handleFocus()
+    core.handleCharSizeChanged()
+    core.handleDevicePixelRatioChange()
+    expect(handle.log).toEqual([])
+    expect(handle.rows).toEqual([])
+    expect(seen).toEqual([])
+  })
+
+  it('does NOT dispose the grid handle — the node that registered it owns its lifetime', () => {
+    const { core, handle } = make()
+    core.dispose()
+    expect(handle.log).not.toContain('dispose')
+  })
+})
