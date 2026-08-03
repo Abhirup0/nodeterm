@@ -1,4 +1,5 @@
 import type { GlyphRasterizer } from './atlas'
+import { boxGlyphOps } from './box-glyphs'
 
 export interface RasterFont {
   family: string
@@ -49,7 +50,12 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     full-surface fill would put ink under it. A slot-granular clear (evicting one glyph to
  *     reuse its cell) is a legitimate future need and does not violate this.
  *  2. Every draw is CLIPPED to its cell rect, so a glyph wider than cellW (a CJK cell, an
- *     overhanging italic) cannot bleed into the neighbouring slot's texels. */
+ *     overhanging italic) cannot bleed into the neighbouring slot's texels.
+ *
+ *  And one thing it must not START doing: draw the box-drawing / block-element ranges with the
+ *  FONT. `boxGlyphOps` gets first refusal on every code point (see box-glyphs.ts for why — fonts
+ *  do not fill the cell, so a run of ─ came out as a dashed line and block art as a dark lattice),
+ *  and `fillText` is the fallback for everything it declines. */
 export function createCanvasRasterizer(
   font: RasterFont,
   atlasSizePx: number
@@ -72,8 +78,23 @@ export function createCanvasRasterizer(
       ctx.beginPath()
       ctx.rect(x, y, font.cellW, font.cellH)
       ctx.clip()
-      ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
-      ctx.fillText(String.fromCodePoint(code), x, y + baseline)
+      // Geometry first: these ranges are DEFINED as fractions of the cell, so drawing them is
+      // both more correct and cheaper than trusting the face. The ops are already snapped to
+      // device px (interior edges) and to the exact cell bounds (outer edges), so no seam can
+      // appear between two adjacent cells and no rect lands on a half pixel.
+      const geometry = boxGlyphOps(code, font.cellW, font.cellH)
+      if (geometry) {
+        for (const op of geometry) {
+          ctx.globalAlpha = op.alpha ?? 1
+          ctx.fillRect(x + op.x, y + op.y, op.w, op.h)
+        }
+        // `restore()` puts globalAlpha back anyway; reset it explicitly so a future edit that
+        // moves a draw out of the save/restore pair cannot inherit a shade's alpha.
+        ctx.globalAlpha = 1
+      } else {
+        ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
+        ctx.fillText(String.fromCodePoint(code), x, y + baseline)
+      }
       ctx.restore()
     }
   }

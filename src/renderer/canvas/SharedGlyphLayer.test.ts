@@ -58,32 +58,35 @@ describe('nodeOrderSig', () => {
     expect(a).not.toBe(b)
   })
 
-  it('elevates a SELECTED terminal above the unselected ones, wherever it sits in the array', () => {
-    // React Flow's elevateNodesOnSelect (default on) lifts the selected node's DOM to z 1000; a
-    // grid z that followed the array alone would leave its text under the other grid's plate.
+  it('does NOT elevate a selected terminal — selection is not a stacking input here', () => {
+    // Round 3 sorted selected nodes last, mirroring React Flow's elevateNodesOnSelect. Round 4
+    // turns that PROP off while the shared layer is active (Canvas.tsx) instead, because the DOM
+    // and the canvas have to agree on ONE order: a selected node whose grid was on top but whose
+    // chrome sat under its neighbour's showed both nodes' contents in the same rectangle. With the
+    // elevation disabled, array order is the whole rule on both sides.
     const sig = nodeOrderSig([
       { id: 'a', type: 'terminal' },
       { id: 'b', type: 'terminal', selected: true },
       { id: 'c', type: 'terminal' }
     ])
-    expect(idsFromOrderSig(sig)).toEqual(['a', 'c', 'b'])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'b', 'c'])
   })
 
-  it('keeps selected nodes in their own relative order (a multi-select is stable)', () => {
+  it('a multi-select changes nothing at all', () => {
     const sig = nodeOrderSig([
       { id: 'a', type: 'terminal', selected: true },
       { id: 'b', type: 'terminal' },
       { id: 'c', type: 'terminal', selected: true }
     ])
-    expect(idsFromOrderSig(sig)).toEqual(['b', 'a', 'c'])
+    expect(idsFromOrderSig(sig)).toEqual(['a', 'b', 'c'])
   })
 
-  it('an all-selected canvas keeps plain array order', () => {
-    const sig = nodeOrderSig([
-      { id: 'a', type: 'terminal', selected: true },
-      { id: 'b', type: 'terminal', selected: true }
-    ])
-    expect(idsFromOrderSig(sig)).toEqual(['a', 'b'])
+  it('selecting and deselecting does not churn the signature (no needless z re-push)', () => {
+    const nodes = [
+      { id: 'a', type: 'terminal' },
+      { id: 'b', type: 'terminal' }
+    ]
+    expect(nodeOrderSig(nodes)).toBe(nodeOrderSig(nodes.map((n) => ({ ...n, selected: true }))))
   })
 
   it('an untyped node is not a terminal (React Flow defaults type to "default")', () => {

@@ -187,27 +187,32 @@ const zListeners = new Set<() => void>()
  * Only terminals: they are the only kind that registers a grid, and mixing other kinds in would
  * churn the signature on every sticky edit.
  *
- * **The rule is array order, with SELECTED nodes elevated above unselected ones** (stable within
- * each group) — not array order alone. React Flow's `elevateNodesOnSelect` defaults to true, so
- * selecting a node lifts its DOM z-index to 1000 regardless of where it sits in the array. With a
- * grid z that only followed the array, clicking a terminal that overlaps another would raise its
- * chrome while its TEXT stayed underneath the other grid's opaque plate — the node visibly on top
- * with a hole punched through its glyphs. Mirroring the elevation here is what keeps the canvas and
- * the DOM telling the same story.
+ * **The rule is plain ARRAY order, and nothing else.** It used to mirror React Flow's
+ * `elevateNodesOnSelect` by sorting selected nodes last, because that prop (on by default) lifts a
+ * selected node's DOM z-index to 1000 wherever it sits in the array. Mirroring it fixed one half of
+ * the overlap and created the other: the shared canvas paints in ONE global order, so with the
+ * selected node's grid on top, its text correctly occluded the neighbour's text — while the
+ * neighbour's opaque DOM chrome still sat over the selected node's TRANSPARENT body. The user saw
+ * crisp chrome from one node and the other node's text through it, in the same rectangle. There is
+ * no ordering of the grids that fixes that, because canvas text can never paint over DOM chrome.
+ *
+ * The fix is upstream: while the shared layer is active Canvas passes `elevateNodesOnSelect={false}`
+ * so the DOM follows the array too, and both worlds agree that "later in the array is on top". The
+ * elevation this function existed to mirror no longer happens in the only mode that reads this
+ * signature, so the selection-awareness is gone with it — see the invariant at that prop.
  */
+// `selected` is still in the accepted shape and deliberately unread: it says out loud that the
+// signature SEES the selection and chooses to ignore it, which is the thing a future reader is
+// most likely to try to "fix" back.
 export function nodeOrderSig(
   nodes: readonly { id: string; type?: string; selected?: boolean }[]
 ): string {
-  let base = ''
-  let elevated = ''
+  let sig = ''
   for (const n of nodes) {
     if (n.type !== 'terminal') continue
-    if (n.selected) elevated = elevated === '' ? n.id : elevated + ORDER_SEP + n.id
-    else base = base === '' ? n.id : base + ORDER_SEP + n.id
+    sig = sig === '' ? n.id : sig + ORDER_SEP + n.id
   }
-  if (base === '') return elevated
-  if (elevated === '') return base
-  return base + ORDER_SEP + elevated
+  return sig
 }
 
 export function idsFromOrderSig(sig: string): string[] {

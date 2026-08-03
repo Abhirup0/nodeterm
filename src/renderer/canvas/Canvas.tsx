@@ -4967,12 +4967,11 @@ export function Canvas() {
   // false for every user today, the signature memo short-circuits on it, and setSharedGlyphCamera
   // is a field write plus a null check when no engine exists.
   const glyphLayerActive = useSharedGlyphActive()
-  // The terminal nodes' paint order IS the grids' z order — array order, with SELECTED nodes
-  // elevated above unselected ones, mirroring React Flow's own `elevateNodesOnSelect` (on by
-  // default). `nodeOrderSig` owns that rule; its comment explains why a grid z that ignored
-  // selection punches a hole through the selected node's text. One string so the effect below
-  // fires on a real order change only — a drag or an edit rebuilds `nodes` many times per second
-  // with the order untouched.
+  // The terminal nodes' paint order IS the grids' z order — plain ARRAY order, which is exactly
+  // what the DOM does too while the layer is on (see `elevateNodesOnSelect` on <ReactFlow> below
+  // for the invariant that ties the two together). `nodeOrderSig` owns the rule. One string so the
+  // effect below fires on a real order change only — a drag or an edit rebuilds `nodes` many times
+  // per second with the order untouched.
   const glyphOrderSig = useMemo(
     () => (glyphLayerActive ? nodeOrderSig(nodes) : ''),
     [glyphLayerActive, nodes]
@@ -7492,6 +7491,19 @@ export function Canvas() {
           zoomActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
+          // INVARIANT (shared glyph layer): the shared canvas can only paint in ONE global order,
+          // so every DOM stacking rule that diverges from array order — `elevateNodesOnSelect`,
+          // React Flow's default-on lift of the selected node to z 1000, is the only one we use —
+          // must be disabled while the shared layer is on, or chrome and text disagree about who
+          // is on top. That disagreement is not cosmetic: a shared-mode terminal body is
+          // TRANSPARENT (the glyphs are on the canvas underneath), so with the two orders split
+          // the user sees the upper node's opaque chrome AND the lower node's text through the
+          // same rectangle — "this node is on top, and I can read the other one through it".
+          // Mirroring the elevation in `nodeOrderSig` (what round 3 did) cannot fix it, because
+          // canvas text can never paint over DOM chrome; only agreeing on array order can.
+          // Dynamic, and false ONLY while shared is active: the default renderer modes have opaque
+          // bodies and keep React Flow's normal selection behavior, untouched.
+          elevateNodesOnSelect={!glyphLayerActive}
         >
           <Background
             variant={BackgroundVariant.Dots}

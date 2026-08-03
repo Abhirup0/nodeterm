@@ -54,6 +54,21 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **2.2 Side-by-side parity.** Same screens as 1.3, now in Shared: glyph shapes, spacing,
       baseline and line height match the DOM screenshots. No clipped descenders, no overlap
       between adjacent cells, no visible atlas seams.
+- [ ] **2.2b Box drawing and block art (round 4).** The item the round-3 screenshots failed. Draw a
+      table or a framed TUI (`claude` / `codex` panels, `htop`, `tmux` borders, `lsd --tree`) and a
+      piece of block art (the nodeterm mascot, `▀▄█▌▐`, a `░▒▓` ramp). Expected now that these two
+      ranges are drawn GEOMETRICALLY instead of with the font (`box-glyphs.ts`):
+      **separators are continuous** — a run of `───` shows no gap at any cell boundary, and corners
+      and tees join their arms with no notch; **block elements tile exactly** — `▀`/`▄` and
+      `▌`/`▐` meet on a shared edge with no dark seam and no overlap, the eighth blocks step
+      evenly, and the mascot is the right shape with no dark artifacts; the shade ramp `░▒▓` reads
+      as three distinct densities. Known v1 approximations, not defects: **rounded corners
+      `╭╮╯╰` render SQUARE**, the diagonals `╱╲╳` still come from the font, and the double-line
+      tees `╠╣╦╩` keep the crossing rail continuous where the printed glyph breaks it.
+      The round-3 report's "blockier / heavier than GPU mode" should be GONE for line and block art.
+      If PLAIN TEXT still reads heavier or softer than the per-terminal GPU renderer, that is a
+      **separate finding** — file it against 2.2/2.7, not here, since nothing in this change touches
+      how ordinary glyphs are rasterized.
 - [ ] **2.3 Colors.** `ls --color` and `htop`: foreground/background colors, bold and dim, and the
       256-color/truecolor ramps match the DOM rendering. Reverse-video cells (selected row in
       `htop`, `vim` visual mode) are inverted, not blank.
@@ -126,9 +141,22 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **3.8 Overlap occlusion.** Drag two terminals until they overlap: the one on top hides the
       one below — its text does not bleed through, and the lower one's text does not paint over
       the upper node's chrome.
-- [ ] **3.9 Selecting the LOWER of two overlapping terminals.** Click the partially-covered one:
-      React Flow elevates it, and its TEXT comes up with it — it must not stay occluded by the
-      other node's plate.
+- [ ] **3.9 Selecting the LOWER of two overlapping terminals.** Click the partially-covered one.
+      **CHANGED in round 4:** clicking no longer raises it. While Shared is on, selection does not
+      elevate anything (`elevateNodesOnSelect={false}`) — whichever node is later in the array is on
+      top in BOTH the DOM and the canvas, selected or not. What you must confirm is that the two
+      agree: the selection ring appears on the lower node, its chrome stays under the upper node's,
+      and its text stays under the upper node's plate. The failure this replaced is the one to watch
+      for — the upper node's crisp chrome with the LOWER node's text legible through its body.
+      Bring a node to the front the ordinary way (drag it / re-create it) rather than by selecting.
+- [ ] **3.9b Overlap, contents vs frame (round 4).** With two terminals overlapping, look at the
+      covered region closely. Expected: the upper node's CONTENTS occlude the lower one's
+      completely — no text, no cursor, no selection band from the lower node is readable through
+      the upper node's body. The one artifact that REMAINS is **L15**: the lower node's thin
+      border/frame (and the hairline where its header meets its body) may ghost through the upper
+      node's transparent body window, because that chrome is DOM and the upper node's occluding
+      plate is canvas. A HAIRLINE is expected; **report anything more than a hairline** — a visible
+      band, a readable label, or any of the lower node's text — as a defect, not as L15.
 - [ ] **3.10 Group-parented terminal.** A terminal inside a group frame: its text sits exactly in
       its body (offset chain resolves through the parent), and its paint order relative to
       ungrouped terminals is sane (known limitation L7).
@@ -300,6 +328,24 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   `warnOnCellDrift` logs one `[glyphgrid] atlas cell … does not match …` line per context lifetime,
   so a soft terminal can be told apart from a soft display. Phase 2 (re-rasterize on
   `document.fonts.ready` / per-cell atlas pages).
+- **L15 — Where two terminals overlap, the LOWER one's frame can ghost through the upper one's
+  body.** A shared-mode terminal body is transparent — its text lives on the one shared canvas
+  underneath the node layer — so the upper node's occluding surface is its canvas PLATE, and a
+  plate is painted below all DOM chrome. Contents therefore occlude correctly (the upper plate is
+  drawn after the lower one, so no text, cursor or selection band from the lower node survives),
+  but the lower node's own chrome — its 1px border, the seam under its header — is DOM and paints
+  over the plate. What remains visible is a hairline of the lower node's frame inside the upper
+  node's body window. **This is the residue of a much worse bug, and the trade was deliberate.**
+  Before round 4 the DOM and the canvas ordered the nodes DIFFERENTLY: React Flow's
+  `elevateNodesOnSelect` lifted the selected node's chrome to z 1000 while the canvas painted grids
+  in the order Canvas pushed, so the two disagreed about which node was on top and the user saw one
+  node's crisp chrome with the OTHER node's text readable through it. Turning that prop off while
+  the layer is active (Canvas.tsx, `elevateNodesOnSelect={!glyphLayerActive}`) makes array order
+  the single rule on both sides; the hairline is what is left, and it cannot be removed by any
+  ordering because canvas can never paint over DOM. The two real fixes are Phase 2 questions: draw
+  the node frame into the shared canvas too, or give the plate the node's full chrome geometry.
+  Side effect to be aware of: **clicking a covered terminal no longer brings it to the front** in
+  shared mode (checklist 3.9) — selection is no longer a stacking input there.
 
 ---
 
