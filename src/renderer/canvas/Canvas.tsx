@@ -4980,6 +4980,22 @@ export function Canvas() {
     setNodeZOrder(idsFromOrderSig(glyphOrderSig))
   }, [glyphOrderSig])
 
+  // Flipping the mode changes `elevateNodesOnSelect`, but React Flow computes a node's z only in
+  // `adoptUserNodes` — which runs on a NODES change, not on a prop change. So a node that happens
+  // to be selected at the moment of the flip keeps the z 1000 it was given under the old prop, and
+  // stays wrongly on top (in the DOM only) until something else touches the nodes array. Clearing
+  // the selection is the minimal correct nudge: it is a real nodes change, so every node is
+  // re-adopted under the new rule, and it costs the user nothing (selection is not a stacking input
+  // in shared mode anyway — see L15). Change-gated on both the transition and on anything actually
+  // being selected, and skipped on mount so a project load's restored selection survives.
+  const prevGlyphActiveRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    const prev = prevGlyphActiveRef.current
+    prevGlyphActiveRef.current = glyphLayerActive
+    if (prev === null || prev === glyphLayerActive) return
+    setNodes((ns) => (ns.some((n) => n.selected) ? ns.map((n) => ({ ...n, selected: false })) : ns))
+  }, [glyphLayerActive, setNodes])
+
   const zoomRafRef = useRef<number | null>(null)
   const gestureSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onMove = useCallback(
@@ -7502,7 +7518,10 @@ export function Canvas() {
           // Mirroring the elevation in `nodeOrderSig` (what round 3 did) cannot fix it, because
           // canvas text can never paint over DOM chrome; only agreeing on array order can.
           // Dynamic, and false ONLY while shared is active: the default renderer modes have opaque
-          // bodies and keep React Flow's normal selection behavior, untouched.
+          // bodies and keep React Flow's normal selection behavior, untouched. Flipping this prop
+          // is NOT enough on its own — React Flow assigns z in `adoptUserNodes`, which runs on a
+          // nodes change — so the effect above clears the selection on the transition to force a
+          // re-adopt; without it a node selected at the moment of the flip keeps z 1000.
           elevateNodesOnSelect={!glyphLayerActive}
         >
           <Background

@@ -62,7 +62,10 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       and tees join their arms with no notch; **block elements tile exactly** — `▀`/`▄` and
       `▌`/`▐` meet on a shared edge with no dark seam and no overlap, the eighth blocks step
       evenly, and the mascot is the right shape with no dark artifacts; the shade ramp `░▒▓` reads
-      as three distinct densities. Known v1 approximations, not defects: **rounded corners
+      as three distinct densities. **Look at `░▒▓` up close**: they must be DITHER patterns (a
+      visible stipple of single device pixels, transcribed from xterm's own pattern table), not
+      smooth tints — a flat wash means the geometry path regressed to an alpha fill and will not
+      match the renderer beside it. Known v1 approximations, not defects: **rounded corners
       `╭╮╯╰` render SQUARE**, the diagonals `╱╲╳` still come from the font, and the double-line
       tees `╠╣╦╩` keep the crossing rail continuous where the printed glyph breaks it.
       The round-3 report's "blockier / heavier than GPU mode" should be GONE for line and block art.
@@ -149,6 +152,17 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       and its text stays under the upper node's plate. The failure this replaced is the one to watch
       for — the upper node's crisp chrome with the LOWER node's text legible through its body.
       Bring a node to the front the ordinary way (drag it / re-create it) rather than by selecting.
+      Also check the flip itself: with a terminal SELECTED, toggle Shared on and then off. The
+      selection is cleared on each transition (deliberate — React Flow only recomputes z on a nodes
+      change, so the prop flip alone would leave that node stuck at z 1000), and no node is left
+      floating above the others afterwards.
+- [ ] **3.9c Node-attached UI that escapes the node box (round 4).** On an overlapping canvas, open
+      the 💬 comments flyout on a terminal that another terminal overlaps, and look at a session
+      node carrying a kanban column half-pill. Both are positioned OUTSIDE their node's rect, and
+      with the elevation off they are no longer lifted above nodes later in the array — so either
+      may be partly covered by a neighbouring terminal, and selecting the node will not fix it.
+      That is the known trade (L15). Judge how often it actually bites: report the overlap depth at
+      which the flyout becomes unusable, if it does.
 - [ ] **3.9b Overlap, contents vs frame (round 4).** With two terminals overlapping, look at the
       covered region closely. Expected: the upper node's CONTENTS occlude the lower one's
       completely — no text, no cursor, no selection band from the lower node is readable through
@@ -345,7 +359,15 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   ordering because canvas can never paint over DOM. The two real fixes are Phase 2 questions: draw
   the node frame into the shared canvas too, or give the plate the node's full chrome geometry.
   Side effect to be aware of: **clicking a covered terminal no longer brings it to the front** in
-  shared mode (checklist 3.9) — selection is no longer a stacking input there.
+  shared mode (checklist 3.9) — selection is no longer a stacking input there. That reaches
+  node-attached UI that deliberately ESCAPES the node box, too: the 💬 comments flyout
+  (`.term-node__comments`, a sibling of the overflow:hidden root) and the kanban column half-pill
+  (`ColumnPill`, likewise a sibling) are positioned outside their node's rect, and with the
+  elevation off they are no longer lifted above nodes that sit LATER in the array — so on an
+  overlapping canvas a flyout or a pill can be partly covered by a neighbouring terminal, and
+  selecting its node no longer fixes it. Both are transient, node-attached surfaces rather than
+  content, which is why this ships; the Phase-2 fix is the one L15 already needs (make chrome and
+  canvas agree for real, instead of turning one of the two orderings off).
 
 ---
 

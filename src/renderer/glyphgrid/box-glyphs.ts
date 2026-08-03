@@ -35,22 +35,29 @@
  *   `null`, so `fillText` draws them as before. They do not tile, so the gap problem does not
  *   apply to them.
  * - **Double-line junctions are drawn as rails, not as nested corners.** A double arm is two
- *   parallel light rails; where two double arms meet, each rail stops at the near or the far
- *   perpendicular rail (see `pushDoubleArm`). This is exact for the corners (╔╗╚╝) and the plain
- *   crossings, and slightly over-draws the tees (╠╣╦╩ keep the crossing rail continuous where the
- *   real glyph breaks it). Every case connects edge-to-edge, which is the property that matters.
+ *   parallel light rails; where two double arms meet, each rail stops at the EDGE of the near or
+ *   the far perpendicular rail (see `pushDoubleArm` — stopping at the rail's centre line is what
+ *   left a 1px hole in every ╔╗╚╝ elbow in the first cut of this module). This is exact for the
+ *   corners and the plain crossings, and slightly over-draws the tees (╠╣╦╩ keep the crossing rail
+ *   continuous where the real glyph breaks it). Every case connects edge-to-edge, which is the
+ *   property that matters.
  * - **Heavy/light is a thickness distinction only** — heavy is exactly twice light, which is what
  *   xterm does too.
  */
 
-/** One axis-aligned fill, in CELL-LOCAL device pixels. `alpha` is the shade level (the shade
- *  blocks ░▒▓); absent means fully opaque. Rects only — see the module comment. */
+/**
+ * One axis-aligned, fully OPAQUE fill, in CELL-LOCAL device pixels.
+ *
+ * There is deliberately no alpha channel. The one family that looked like it wanted one — the
+ * shade blocks ░▒▓ — is a dither pattern, not a tint (see `SHADES`), and an alpha field would
+ * make it possible to "simplify" them back into flat washes that no longer match the renderer
+ * beside them. Everything this module draws is ink or nothing.
+ */
 export interface PaintOp {
   x: number
   y: number
   w: number
   h: number
-  alpha?: number
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -149,13 +156,49 @@ const BLOCKS: Readonly<Record<number, readonly (readonly [number, number, number
   0x259f: [[4, 0, 4, 8], [0, 4, 8, 4]] // ▟ upper right + lower left + lower right
 }
 
-/** ░▒▓ — a full-cell fill at a third, a half and two thirds… in practice the conventional
- *  quarter/half/three-quarter ramp every terminal renderer uses. The only contract the rest of the
- *  system relies on is that they are strictly increasing. */
-const SHADES: Readonly<Record<number, number>> = {
-  0x2591: 0.25,
-  0x2592: 0.5,
-  0x2593: 0.75
+/**
+ * ░▒▓ — DITHER PATTERNS, transcribed from xterm's `patternCharacterDefinitions`, which both of its
+ * renderers use.
+ *
+ * Each entry is a bitmap of DEVICE pixels — one array element per pixel, not per fraction of the
+ * cell — tiled from the cell's top-left across the whole cell. `1` is an opaque pixel, `0` is bare
+ * background.
+ *
+ * These are NOT flat alpha fills, and the difference is the whole point. A shade block is a
+ * STIPPLE: at normal reading size the eye integrates the dither into a tint, but the texture is
+ * visible, it does not change with the cell size (the pattern is pinned to device pixels, so a
+ * bigger cell shows more dots rather than bigger ones), and it composites against whatever is
+ * behind it exactly the way the DOM renderer's does. A flat `globalAlpha` fill — what round 4
+ * shipped first — reads as a smooth wash and is instantly distinguishable from the per-terminal
+ * renderer in the side-by-side comparison the checklist asks for.
+ *
+ * The coverage ratios that fall out of the tables are 2/16, 2/8 and 6/8. xterm's own comments label
+ * them 25/50/75%, which the tables do not literally produce; matching xterm's PIXELS is the point
+ * here, not matching its comments, so the tables are transcribed as they are. The contract the
+ * tests hold is the ordering: ░ < ▒ < ▓.
+ */
+const SHADES: Readonly<Record<number, readonly (readonly number[])[]>> = {
+  0x2591: [
+    // ░ LIGHT SHADE — 2 of 16 device px
+    [1, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 1, 0],
+    [0, 0, 0, 0]
+  ],
+  0x2592: [
+    // ▒ MEDIUM SHADE — 2 of 8
+    [1, 0],
+    [0, 0],
+    [0, 1],
+    [0, 0]
+  ],
+  0x2593: [
+    // ▓ DARK SHADE — 6 of 8
+    [0, 1],
+    [1, 1],
+    [1, 0],
+    [1, 1]
+  ]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -179,7 +222,7 @@ export function boxGlyphOps(code: number, cellW: number, cellH: number): PaintOp
 
 function blockOps(code: number, cellW: number, cellH: number): PaintOp[] | null {
   const shade = SHADES[code]
-  if (shade !== undefined) return [{ x: 0, y: 0, w: cellW, h: cellH, alpha: shade }]
+  if (shade) return stippleOps(shade, cellW, cellH)
   const spec = BLOCKS[code]
   if (!spec) return null
   const ops: PaintOp[] = []
@@ -340,14 +383,63 @@ function pushDoubleArm(
     if (opposite === 3) inner = dir === -1 ? far : 0
     else if (!anyPerp) inner = centre - (dir * Math.max(perpSpan, light)) / 2
     else {
+      // Which perpendicular rail does this one corner with? The rail on the SAME side as the
+      // perpendicular arm's direction is the INNER corner and stops at the NEAR rail; the other is
+      // the OUTER corner and runs on to the FAR rail.
+      //
+      // The stop is the rail's own EDGE, not its centre line. A rail of thickness `light` centred
+      // at `centre ± light` spans `centre ± 0.5·light` … `centre ± 1.5·light`, so stopping at the
+      // centre line covers only HALF the rail it is supposed to corner with and leaves a
+      // 1-device-px hole at the elbow — reproducible at every cell size on ╔╗╚╝, and the reason the
+      // header's "exact for the corners" claim was false before round 4. Near edge is
+      // `centre + dir·0.5·light`; far edge is `centre − dir·1.5·light`.
       const matches = bothPerp || (side === -1 && perpA === 3) || (side === 1 && perpB === 3)
-      inner = matches ? centre + dir * light : centre - dir * light
+      inner = matches ? centre + dir * 0.5 * light : centre - dir * 1.5 * light
     }
     const from = dir === -1 ? 0 : inner
     const to = dir === -1 ? inner : far
     if (vertical) push(ops, cellW, cellH, a, from, b, to)
     else push(ops, cellW, cellH, from, a, to, b)
   }
+}
+
+/**
+ * Tile a dither pattern across the cell, one rect per RUN of set pixels in a pattern row.
+ *
+ * Runs rather than individual pixels: ▓ on a retina cell is ~80 tiles, and emitting its six set
+ * pixels separately would be ~480 ops where ~320 will do. This is rasterized once per atlas slot,
+ * so the cost is not on any hot path — but the op list is also what a future direct-to-GPU path
+ * would upload, and a list that is twice as long as it needs to be is a bad default.
+ *
+ * The last tile in each direction is clipped by the cell bound (`push` clamps), so a cell that is
+ * not a whole multiple of the pattern simply shows a partial tile — which is what a repeating
+ * pattern does everywhere else, including xterm's `createPattern`.
+ */
+function stippleOps(pattern: readonly (readonly number[])[], cellW: number, cellH: number): PaintOp[] {
+  const ph = pattern.length
+  const pw = pattern[0].length
+  const ops: PaintOp[] = []
+  for (let ty = 0; ty < cellH; ty += ph) {
+    for (let row = 0; row < ph; row++) {
+      const y = ty + row
+      if (y >= cellH) break
+      for (let tx = 0; tx < cellW; tx += pw) {
+        let col = 0
+        while (col < pw) {
+          if (!pattern[row][col]) {
+            col++
+            continue
+          }
+          const start = col
+          while (col < pw && pattern[row][col]) col++
+          const x0 = tx + start
+          if (x0 >= cellW) break
+          push(ops, cellW, cellH, x0, y, Math.min(tx + col, cellW), y + 1)
+        }
+      }
+    }
+  }
+  return ops
 }
 
 /** The dashed rules: `count` evenly spaced dashes with `count` gaps, centred on the cell's mid
@@ -388,14 +480,31 @@ function dashOps(
  * boundary is the full-cell invariant: `cellW` is fractional in general, so `Math.round(cellW)`
  * would leave a sub-pixel of background between two adjacent ─ cells — the gap this module exists
  * to close. A rect that rounds away to nothing is kept at one pixel: an invisible line is worse
- * than a slightly fat one.
+ * than a slightly fat one — but it is grown INWARD (`span` below), never off the end of the cell.
  */
 function push(ops: PaintOp[], cellW: number, cellH: number, x0: number, y0: number, x1: number, y1: number): void {
-  const x = snap(x0, cellW)
-  const y = snap(y0, cellH)
-  const w = Math.max(1, snap(x1, cellW) - x)
-  const h = Math.max(1, snap(y1, cellH) - y)
+  const [x, w] = span(x0, x1, cellW)
+  const [y, h] = span(y0, y1, cellH)
   ops.push({ x, y, w, h })
+}
+
+/**
+ * One axis of `push`: snap both edges, then guarantee at least one device pixel of extent WITHOUT
+ * leaving the cell.
+ *
+ * The naive `Math.max(1, b - a)` overshoots. `▕` (right one eighth) on a 7.83px-wide cell snaps to
+ * `a = 7`, `b = 7.83`; forcing `w = 1` puts the right edge at 8, a sixth of a pixel outside the
+ * cell. It is harmless in practice — the rasterizer clips every draw to the slot — but a rule that
+ * survives only because someone else catches it is not an invariant, and the next consumer of these
+ * ops (a future GPU path that uploads them directly, say) would not clip. Growing inward keeps
+ * `x + w <= cellW` true by construction.
+ */
+function span(v0: number, v1: number, extent: number): [number, number] {
+  const a = snap(v0, extent)
+  let b = snap(v1, extent)
+  if (b - a >= 1) return [a, b - a]
+  b = Math.min(extent, a + 1)
+  return [Math.max(0, b - 1), b - Math.max(0, b - 1)]
 }
 
 function snap(v: number, extent: number): number {

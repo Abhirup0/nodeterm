@@ -107,6 +107,32 @@ describe('box drawing — the full-cell invariant', () => {
       }
     }
   })
+
+  it('no op ever leaves the cell, at any cell size — growing a thin rect grows it INWARD', () => {
+    // `▕` (right one eighth) on a 7.83px cell snaps to x=7 with 0.83px of room; forcing w=1 used to
+    // put the right edge at 8. Harmless (the rasterizer clips) but an invariant that survives only
+    // because someone else catches it is not one.
+    const sizes: [number, number][] = [
+      [5.3, 9],
+      [7.83, 17.6], // the reported case
+      [10, 20],
+      [13.4, 29.7],
+      [17, 34],
+      [25.5, 51]
+    ]
+    for (const [cw, ch] of sizes) {
+      for (let code = 0x2500; code <= 0x259f; code++) {
+        const list = boxGlyphOps(code, cw, ch)
+        if (!list) continue
+        for (const o of list) {
+          expect(o.x).toBeGreaterThanOrEqual(0)
+          expect(o.y).toBeGreaterThanOrEqual(0)
+          expect(o.x + o.w).toBeLessThanOrEqual(cw)
+          expect(o.y + o.h).toBeLessThanOrEqual(ch)
+        }
+      }
+    }
+  })
 })
 
 describe('box drawing — arms', () => {
@@ -237,6 +263,53 @@ describe('box drawing — doubles and dashes', () => {
     expect(list.some((o) => o.y === 0 && o.h > 4)).toBe(false)
   })
 
+  it('the four double corners have SOLID elbows — no hole where two rails meet', () => {
+    // The round-4 review reproduced a hole at the OUTER elbow of every ╔╗╚╝ at every cell size: a
+    // rail stopped at the perpendicular rail's centre LINE, so it covered only half of the rail it
+    // was supposed to corner with, and a `light × light` square of the elbow was covered by
+    // neither. Note this is NOT caught by asking whether the two rails intersect — they do, just
+    // not over the whole elbow.
+    //
+    // The elbow square is derived from the EMITTED rects (the vertical rail gives its x range, the
+    // horizontal rail its y range) rather than predicted from the cell size, so the check is exact
+    // at any snapping.
+    const corners: [string, -1 | 1, -1 | 1][] = [
+      // [glyph, direction the horizontal arms point, direction the vertical arms point]
+      ['╔', 1, 1],
+      ['╗', -1, 1],
+      ['╚', 1, -1],
+      ['╝', -1, -1]
+    ]
+    for (const [cw, ch] of [
+      [32, 64], // light = 4: a half-rail miss is several px wide
+      [16, 32], // light = 2
+      [10, 20] // light = 1: the smallest representable miss
+    ] as const) {
+      for (const [glyph, hx, vy] of corners) {
+        const list = ops(glyph, cw, ch)
+        expect(list).toHaveLength(4)
+        const set = covered(list, cw, ch)
+        const horizontals = list.filter((o) => o.w > o.h).sort((a, b) => a.y - b.y)
+        const verticals = list.filter((o) => o.h > o.w).sort((a, b) => a.x - b.x)
+        expect(horizontals).toHaveLength(2)
+        expect(verticals).toHaveLength(2)
+        // The OUTER rail of a pair is the one on the far side from where the arms point.
+        const [outerH, innerH] = vy === 1 ? horizontals : [...horizontals].reverse()
+        const [outerV, innerV] = hx === 1 ? verticals : [...verticals].reverse()
+        for (const [h, v, which] of [
+          [outerH, outerV, 'outer'],
+          [innerH, innerV, 'inner']
+        ] as const) {
+          for (let x = Math.floor(v.x); x < Math.ceil(v.x + v.w); x++) {
+            for (let y = Math.floor(h.y); y < Math.ceil(h.y + h.h); y++) {
+              expect(set.has(`${x},${y}`), `${glyph} ${which} elbow (${x},${y}) at ${cw}x${ch}`).toBe(true)
+            }
+          }
+        }
+      }
+    }
+  })
+
   it('╬ crosses as four rails with an OPEN centre', () => {
     const list = ops('╬', 32, 64)
     expect(list).toHaveLength(4)
@@ -305,22 +378,38 @@ describe('block elements', () => {
     expect(three.size).toBe(ur.size + ll.size + lr.size)
   })
 
-  it('the shades are full-cell ALPHA fills, strictly increasing ░ < ▒ < ▓', () => {
-    const light = ops('░')
-    const medium = ops('▒')
-    const dark = ops('▓')
-    for (const l of [light, medium, dark]) {
-      expect(l).toHaveLength(1)
-      expect(l[0]).toMatchObject({ x: 0, y: 0, w: W, h: H })
+  it('the shades are STIPPLES, not flat fills — many 1px rows, none covering the cell', () => {
+    // The parity point: xterm draws ░▒▓ from a device-pixel dither table in BOTH its renderers, so
+    // a single full-cell rect (at any alpha) is instantly distinguishable in a side-by-side.
+    for (const ch of ['░', '▒', '▓']) {
+      const list = ops(ch, 16, 32)
+      expect(list.length).toBeGreaterThan(8)
+      for (const o of list) {
+        expect(o.h).toBe(1) // one device-pixel row per op
+        expect(o.w).toBeLessThan(16) // never spans the cell
+      }
     }
-    expect(light[0].alpha!).toBeLessThan(medium[0].alpha!)
-    expect(medium[0].alpha!).toBeLessThan(dark[0].alpha!)
-    expect(dark[0].alpha!).toBeLessThan(1)
   })
 
-  it('only the shades carry an alpha — everything else is opaque ink', () => {
-    for (const ch of ['─', '┼', '█', '▀', '╬']) {
-      for (const o of ops(ch)) expect(o.alpha).toBeUndefined()
-    }
+  it('shade DENSITY is strictly increasing ░ < ▒ < ▓, and none of them is solid', () => {
+    const density = (ch: string): number => covered(ops(ch, 16, 32), 16, 32).size / (16 * 32)
+    const light = density('░')
+    const medium = density('▒')
+    const dark = density('▓')
+    expect(light).toBeGreaterThan(0)
+    expect(light).toBeLessThan(medium)
+    expect(medium).toBeLessThan(dark)
+    expect(dark).toBeLessThan(1)
+  })
+
+  it('the stipple is pinned to DEVICE pixels — a bigger cell gets more dots, not bigger ones', () => {
+    // This is what makes it a dither rather than a texture: the pattern must not scale with the
+    // cell, or a large cell would show a chunky checkerboard instead of a tint.
+    const small = ops('▓', 16, 32)
+    const large = ops('▓', 32, 64)
+    for (const o of [...small, ...large]) expect(o.h).toBe(1)
+    expect(large.length).toBeGreaterThan(small.length)
+    const d = (l: PaintOp[], w: number, h: number): number => covered(l, w, h).size / (w * h)
+    expect(d(large, 32, 64)).toBeCloseTo(d(small, 16, 32), 2)
   })
 })

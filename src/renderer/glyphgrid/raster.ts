@@ -82,15 +82,12 @@ export function createCanvasRasterizer(
       // both more correct and cheaper than trusting the face. The ops are already snapped to
       // device px (interior edges) and to the exact cell bounds (outer edges), so no seam can
       // appear between two adjacent cells and no rect lands on a half pixel.
+      // The ops are opaque white by construction — including the shade blocks, which are DITHER
+      // patterns rather than tints, so `globalAlpha` is never touched here and the atlas keeps
+      // exactly two states per texel: ink or transparent.
       const geometry = boxGlyphOps(code, font.cellW, font.cellH)
       if (geometry) {
-        for (const op of geometry) {
-          ctx.globalAlpha = op.alpha ?? 1
-          ctx.fillRect(x + op.x, y + op.y, op.w, op.h)
-        }
-        // `restore()` puts globalAlpha back anyway; reset it explicitly so a future edit that
-        // moves a draw out of the save/restore pair cannot inherit a shade's alpha.
-        ctx.globalAlpha = 1
+        for (const op of geometry) ctx.fillRect(x + op.x, y + op.y, op.w, op.h)
       } else {
         ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
         ctx.fillText(String.fromCodePoint(code), x, y + baseline)
