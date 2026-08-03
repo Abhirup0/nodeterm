@@ -2,6 +2,10 @@
 // random lines at ~30Hz, camera drag+wheel-zoom, FPS + draw counters. THE Phase-0 acceptance
 // gate: 60fps pan/zoom, idle frames drawing nothing, one WebGL context total.
 //
+// It opens with all 40 grids framed and reports how many it is actually DRAWING, so the fps
+// figure a tester signs off on is always attributable to a known load — the engine culls, and
+// both of those were once free to lie in opposite directions.
+//
 // Reached only through the dev route in src/renderer/main.tsx
 // (`import.meta.env.DEV && location.hash === '#glyphgrid'`), so this module is dead code in a
 // production build — see the report for the verified chunk split.
@@ -18,6 +22,40 @@ const GRIDS = 40
 const CELL_W = 9
 const CELL_H = 18
 const ATLAS_PX = 1024
+
+// --- Layout. Derived, not duplicated: register() below places grids from these same constants,
+// so the initial camera and the meter can never drift from where the grids actually are. ---
+const PER_ROW = 8
+const PITCH_X = COLS * CELL_W + 40
+const PITCH_Y = ROWS * CELL_H + 60
+const LAYOUT_ROWS = Math.ceil(GRIDS / PER_ROW)
+/** World-space bounding box of every registered grid — 6040 x 2400 at the constants above. */
+const WORLD_W = (Math.min(GRIDS, PER_ROW) - 1) * PITCH_X + COLS * CELL_W
+const WORLD_H = (LAYOUT_ROWS - 1) * PITCH_Y + ROWS * CELL_H
+/** A little air around the fitted layout, so the outermost grids are visibly INSIDE the frame
+ *  rather than clipping its edge — the tester has to be able to count them. */
+const FIT_MARGIN = 0.92
+const ZOOM_MIN = 0.05
+const ZOOM_MAX = 4
+
+/**
+ * The camera the harness OPENS on: the whole layout framed in a `w x h` window.
+ *
+ * This is load-bearing for the acceptance gate, not a nicety. The engine culls per frame, so the
+ * fps the meter reports only describes the grids currently on screen. Opening at
+ * `{x:40, y:40, zoom:1}` put roughly four of the forty grids in a typical window — a tester
+ * following "the meter shows ~60 fps" would have signed off Phase 0 on a tenth of the advertised
+ * load. Starting fitted means the run BEGINS under all 40 and the tester zooms IN from there.
+ */
+function fitCamera(w: number, h: number): { x: number; y: number; zoom: number } {
+  const zoom = Math.min(
+    ZOOM_MAX,
+    Math.max(ZOOM_MIN, Math.min(w / WORLD_W, h / WORLD_H) * FIT_MARGIN)
+  )
+  // screen = world * zoom + pan (see the vertex shader) and the layout's top-left IS the world
+  // origin, so centering is just the leftover margin, halved.
+  return { x: (w - WORLD_W * zoom) / 2, y: (h - WORLD_H * zoom) / 2, zoom }
+}
 
 export function GlyphGridHarness() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -61,8 +99,8 @@ export function GlyphGridHarness() {
           rows: ROWS,
           cellW: CELL_W,
           cellH: CELL_H,
-          originX: (i % 8) * (COLS * CELL_W + 40),
-          originY: Math.floor(i / 8) * (ROWS * CELL_H + 60),
+          originX: (i % PER_ROW) * PITCH_X,
+          originY: Math.floor(i / PER_ROW) * PITCH_Y,
           z: i,
           bgColor: packColor(20, 20, 24, 255)
         })
@@ -90,7 +128,9 @@ export function GlyphGridHarness() {
       }
     }, 33)
 
-    const cam = { x: 40, y: 40, zoom: 1 }
+    // Open framing ALL 40 grids — see fitCamera. Deliberately not recomputed on resize: once the
+    // tester has panned/zoomed, a resize must not yank the camera back out from under them.
+    const cam = fitCamera(window.innerWidth, window.innerHeight)
     engine.setCamera(cam)
     let drag: { x: number; y: number } | null = null
     const onDown = (e: MouseEvent): void => {
@@ -106,7 +146,7 @@ export function GlyphGridHarness() {
       engine.setCamera(cam)
     }
     const onWheel = (e: WheelEvent): void => {
-      const next = Math.min(4, Math.max(0.05, cam.zoom * (e.deltaY < 0 ? 1.1 : 0.9)))
+      const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * (e.deltaY < 0 ? 1.1 : 0.9)))
       // zoom around the cursor: keep the world point under the cursor fixed
       cam.x = e.clientX - ((e.clientX - cam.x) / cam.zoom) * next
       cam.y = e.clientY - ((e.clientY - cam.y) / cam.zoom) * next
@@ -129,8 +169,13 @@ export function GlyphGridHarness() {
     }
     raf = requestAnimationFrame(loop)
     const meter = setInterval(() => {
+      // The DRAWN count, not the registered one: the engine culls per frame, so `GRIDS` alone
+      // would advertise a load the fps figure was never measured under. drawOrder() is pure and
+      // public, and once a second its allocate-filter-sort is free.
+      const drawn = engine.drawOrder().length
       setStats(
-        `${frames} fps · ${draws} draws/s · zoom ${cam.zoom.toFixed(2)} · ${GRIDS} grids · 1 context`
+        `${frames} fps · ${draws} draws/s · zoom ${cam.zoom.toFixed(2)} · ` +
+          `${drawn}/${GRIDS} grids drawn · 1 context`
       )
       frames = 0
       draws = 0
