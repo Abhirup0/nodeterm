@@ -258,8 +258,10 @@ export function GlyphGridHarness() {
     raf = requestAnimationFrame(loop)
     const meter = setInterval(() => {
       // The DRAWN count, not the registered one: the engine culls per frame, so `GRIDS` alone
-      // would advertise a load the fps figure was never measured under. drawOrder() is pure and
-      // public, and once a second its allocate-filter-sort is free.
+      // would advertise a load the fps figure was never measured under. Once a second its
+      // allocate-filter-sort is free. Its one side effect — refreshing each grid's cached
+      // visibility — is idempotent against the camera this loop last drew with, so an out-of-band
+      // call here can only write the answer the next frame would have written anyway.
       const drawn = engine.drawOrder().length
       setStats(
         `${frames} fps · ${draws} draws/s · ${rowsUploaded} rows-up/s · ` +

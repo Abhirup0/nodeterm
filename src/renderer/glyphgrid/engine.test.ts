@@ -387,6 +387,61 @@ describe('lifecycle hardening', () => {
     expect(gl.uploads).toEqual([])
   })
 
+  it('disposeAll frees every grid, empties the draw order and leaves outstanding handles inert', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const a = e.register(spec('a', 0))
+    const b = e.register(spec('b', 40))
+    e.frame()
+    e.disposeAll()
+    // Every GPU buffer freed, in registration order — the layer's teardown / context-loss path.
+    expect(gl.disposed).toEqual(['a', 'b'])
+    expect(e.drawOrder()).toEqual([])
+    // Teardown IS damage: the canvas still holds their pixels until something redraws it.
+    expect(e.frame()).toBe(true)
+
+    gl.created.length = 0
+    gl.uploads.length = 0
+    // Every handle handed out before the sweep must be as inert as one whose own dispose() ran —
+    // a torn-down owner's last writes are a teardown race, and they must neither resurrect a dead
+    // grid nor keep the shared canvas redrawing for a grid nobody draws.
+    a.updateRow(0, rowOf(2))
+    a.setOrigin(99, 99)
+    b.setZ(42)
+    b.resize(4, 4)
+    expect(e.frame()).toBe(false)
+    expect(gl.created).toEqual([])
+    expect(gl.uploads).toEqual([])
+
+    // A stale handle's own dispose() must not double-free a buffer the sweep already released.
+    a.dispose()
+    expect(gl.disposed).toEqual(['a', 'b'])
+    // Idempotent, and an empty sweep is not damage (same change-gating as setCamera/setViewport).
+    e.disposeAll()
+    expect(gl.disposed).toEqual(['a', 'b'])
+    expect(e.frame()).toBe(false)
+  })
+
+  it("a stale handle's resize after disposeAll allocates no GPU buffer", () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame()
+    e.disposeAll()
+    gl.created.length = 0
+    // resize's caller is a size observer that fires on every layout tick, so it is the mutator
+    // most likely to arrive after teardown. createGrid here would allocate a buffer the registry
+    // no longer tracks — nothing would ever dispose it.
+    h.resize(9, 9)
+    e.frame()
+    expect(gl.created).toEqual([])
+    expect(e.drawOrder()).toEqual([])
+  })
+
   it('a throwing GL submission does not lose damage', () => {
     const gl = fakeGL()
     const e = new GlyphGridEngine(gl, atlas())
@@ -466,23 +521,56 @@ describe('per-grid buffers + row-range damage', () => {
     expect(gl.uploads).toEqual([['a', 0, 3]])
   })
 
-  it('a hidden grid defers its upload until it becomes visible', () => {
+  it('a hidden grid defers its upload until it becomes visible, and its writes never wake the engine', () => {
     const gl = fakeGL()
     const e = new GlyphGridEngine(gl, atlas())
     e.setViewport(100, 100, 1)
     e.setCamera({ x: 0, y: 0, zoom: 1 })
     const h = e.register(spec('far', 5000, 0, { rows: 3 }))
-    e.frame() // registration dirties the engine, but the grid is culled → nothing uploaded
-    expect(gl.uploads).toEqual([])
+    expect(e.frame()).toBe(true) // registration dirties the engine, but the grid is culled…
+    expect(gl.uploads).toEqual([]) // …so nothing uploads, and that frame recorded it as hidden
     h.updateRow(1, rowOf(2))
-    e.frame()
+    // Visibility-scoped damage: a hidden grid's write sets ITS range but must NOT schedule a
+    // full-canvas redraw. Forty-five hidden streaming terminals each waking the shared canvas is
+    // the cost this exists to remove — the frame they woke drew nothing of theirs anyway.
+    expect(e.frame()).toBe(false)
     expect(gl.uploads).toEqual([]) // still off-screen: the range persists, un-uploaded
-    e.setCamera({ x: -5000, y: 0, zoom: 1 }) // pan it into view
-    e.frame()
+    // Panning dirties unconditionally — the invariant that makes the optimization safe: the only
+    // things that can CHANGE visibility all dirty, so a grid entering view always gets a frame in
+    // which to replay what it deferred.
+    e.setCamera({ x: -5000, y: 0, zoom: 1 })
+    expect(e.frame()).toBe(true)
     // Everything owed since registration, in ONE upload — not one per deferred frame.
     expect(gl.uploads).toEqual([['far', 0, 3]])
-    e.frame()
+    expect(e.frame()).toBe(false)
     expect(gl.uploads).toHaveLength(1)
+  })
+
+  it('a visible grid keeps waking the engine on every row write', () => {
+    // The other half of the visibility gate: scoping damage must not make a terminal the user is
+    // LOOKING at go quiet. (`spec('a', 0)` sits under the camera.)
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame()
+    h.updateRow(1, rowOf(2))
+    expect(e.frame()).toBe(true)
+    h.updateRow(2, rowOf(2))
+    expect(e.frame()).toBe(true)
+  })
+
+  it('a grid scrolled OUT of view stops waking the engine', () => {
+    // Visibility is re-read at every drawOrder() computation, not latched at registration.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame()
+    e.setCamera({ x: 5000, y: 0, zoom: 1 }) // pan it off-screen
+    e.frame()
+    h.updateRow(1, rowOf(2))
+    expect(e.frame()).toBe(false)
   })
 
   it('drawGrid receives the plate params (bgColor, padPx) with the grid geometry', () => {

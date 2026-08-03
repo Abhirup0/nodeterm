@@ -27,7 +27,12 @@ export interface GridHandle {
   /**
    * Replace one row of cells. `cells` is exactly `cols * CELL_STRIDE` lanes laid out per
    * cells.ts ([glyph, fg, bg, flags] per cell) and is COPIED, so the caller may reuse its
-   * scratch buffer. Marks the engine dirty.
+   * scratch buffer.
+   *
+   * Always marks THIS grid's rows dirty; marks the ENGINE dirty (i.e. schedules a frame) only
+   * while the grid was visible in the last computed draw order — a hidden grid's damage is
+   * deferred, not lost, and rides the frame that brings it back into view. Callers therefore
+   * cannot read a `frame()` of `false` as "my write was dropped".
    *
    * The glyph lane must be a slot obtained from `GlyphAtlas.glyphFor(code, bold, italic)` —
    * never a raw code point. The atlas owns the slot space (0 is the permanently blank slot,
@@ -40,7 +45,8 @@ export interface GridHandle {
   resize(cols: number, rows: number): void
   /** Drops the grid. After this the handle is INERT — every mutator above becomes a silent
    *  no-op rather than a throw: a torn-down owner delivering one last write is a teardown
-   *  race, not a bug, and it must neither mutate a dead grid nor un-idle the shared canvas. */
+   *  race, not a bug, and it must neither mutate a dead grid nor un-idle the shared canvas.
+   *  `GlyphGridEngine.disposeAll()` puts every outstanding handle into the same state. */
   dispose(): void
 }
 
@@ -61,6 +67,24 @@ interface Grid extends GridSpec {
    *  bookkeeping to track disjoint runs. */
   dirtyFrom: number
   dirtyTo: number
+  /** Was this grid in the LAST computed draw order? Refreshed by every `drawOrder()` call and
+   *  read only by `updateRow`, to keep a hidden grid's row writes from waking the shared canvas.
+   *
+   *  Starts TRUE — conservative. A grid that has never been in any draw order (registered, no
+   *  frame yet) must be treated as visible: guessing "hidden" would drop the damage of a grid
+   *  nobody has culled yet. It costs nothing, because `register` dirties the engine anyway.
+   *
+   *  Lives on the GRID rather than in a per-frame set so `updateRow` — the hot path, called per
+   *  terminal row — reads it off the object it already holds. */
+  lastVisible: boolean
+  /** Set by this grid's `dispose()` AND by `disposeAll()`. It is the ONE inertness flag every
+   *  handle reads: a handle closes over its Grid, so marking the grid reaches the handle without
+   *  the engine having to keep a list of live handles (which would be a leak of its own — a
+   *  strong ref to every terminal that ever registered). One handle exists per Grid object
+   *  (register mints exactly one and refuses a duplicate id), so per-grid and per-handle mean the
+   *  same thing here; a re-registration under the same id builds a NEW Grid, leaving the old one
+   *  — and its stale handle — dead. */
+  dead: boolean
 }
 
 /**
@@ -105,21 +129,23 @@ export class GlyphGridEngine {
       // A brand-new grid owes the GPU every row: createGrid only ZEROES the buffer, and the
       // owner's first writes may land before the first frame.
       dirtyFrom: 0,
-      dirtyTo: spec.rows - 1
+      dirtyTo: spec.rows - 1,
+      lastVisible: true,
+      dead: false
     }
     this.grids.set(spec.id, grid)
     this.gl.createGrid(spec.id, spec.cols, spec.rows)
     this.dirty = true
     const engine = this
-    // Per-handle, not per-grid: once THIS handle is disposed every mutator below is a silent
-    // no-op. The constraint is that a stale handle must not un-idle the shared canvas — a
-    // Phase-1b terminal is torn down while its last row write may still be in flight, and a
-    // write that dirtied the engine after dispose would keep one canvas redrawing forever for
-    // a grid nobody draws. Inert rather than throwing: the race is expected at teardown.
-    let disposed = false
+    // Inertness rides on `grid.dead`: once this handle's dispose() — or the engine-wide
+    // disposeAll() — has run, every mutator below is a silent no-op. The constraint is that a
+    // stale handle must not un-idle the shared canvas — a Phase-1b terminal is torn down while
+    // its last row write may still be in flight, and a write that dirtied the engine after
+    // dispose would keep one canvas redrawing forever for a grid nobody draws. Inert rather than
+    // throwing: the race is expected at teardown.
     return {
       updateRow(row, cells) {
-        if (disposed) return
+        if (grid.dead) return
         if (row < 0 || row >= grid.rows)
           throw new Error(`glyphgrid: row ${row} out of range (rows=${grid.rows})`)
         if (cells.length !== grid.cols * CELL_STRIDE)
@@ -129,23 +155,42 @@ export class GlyphGridEngine {
         // on its own; `dirtyFrom` needs the explicit clean check (-1 would win a Math.min).
         grid.dirtyFrom = grid.dirtyFrom < 0 ? row : Math.min(grid.dirtyFrom, row)
         grid.dirtyTo = Math.max(grid.dirtyTo, row)
-        engine.dirty = true
+        // VISIBILITY-SCOPED, and the only mutator that is: a hidden grid's row write owes the GPU
+        // nothing THIS frame (the upload pass skips culled grids anyway), so waking the shared
+        // canvas for it buys a redraw in which nothing of this grid appears. Under the Phase-1b
+        // load — fifty terminals, forty-five of them off-screen and streaming — that is the whole
+        // canvas redrawing at the speed of the busiest invisible node.
+        //
+        // Safe because visibility can only change through `setCamera`/`setViewport`/`register`/
+        // `resize`/`setOrigin`/`setZ`, and every one of those dirties UNCONDITIONALLY. So the
+        // frame that brings a grid into view is always drawn, and its upload pass replays the
+        // range accumulated while it was hidden — deferred, never lost. Do not "optimize" any of
+        // those into a visibility-scoped dirty; that is the leg this stands on.
+        if (grid.lastVisible) engine.dirty = true
       },
       setOrigin(x, y) {
-        if (disposed) return
+        if (grid.dead) return
         if (grid.originX === x && grid.originY === y) return
         grid.originX = x
         grid.originY = y
         engine.dirty = true
       },
       setZ(z) {
-        if (disposed) return
+        if (grid.dead) return
         if (grid.z === z) return
         grid.z = z
         engine.dirty = true
       },
       resize(cols, rows) {
-        if (disposed) return
+        if (grid.dead) return
+        // Identity-checked like dispose(), and for the mirror-image reason: this is the one
+        // mutator that ALLOCATES GPU memory (createGrid), so running it for a grid the registry
+        // no longer points at would leave a buffer nothing can ever dispose — the registry is the
+        // only list of what exists. A second, independent gate on purpose: `dead` and the map are
+        // set together today, and this one is what still holds if a future teardown path drops
+        // one of them. Resize callers are size observers firing on every layout tick, which makes
+        // this the mutator most likely to arrive after teardown.
+        if (engine.grids.get(grid.id) !== grid) return
         // A same-shape resize is a no-op, not a realloc: resize callers are size observers
         // that fire on every layout tick, and reallocating + dirtying there would keep the
         // canvas redrawing forever.
@@ -165,7 +210,7 @@ export class GlyphGridEngine {
       dispose() {
         // The handle goes inert unconditionally — this is its owner declaring teardown, and it
         // holds whether or not the map still points at this grid.
-        disposed = true
+        grid.dead = true
         // Identity-checked: only drop the map entry if it is still THIS grid, so a stale
         // handle can never evict a grid that re-registered under the same id — nor free the GPU
         // buffer that grid is now drawing from.
@@ -175,6 +220,31 @@ export class GlyphGridEngine {
         engine.dirty = true
       }
     }
+  }
+
+  /**
+   * Drop every grid at once: free each GPU buffer, empty the registry, and leave every handle
+   * ever handed out INERT — exactly as if its owner had called `dispose()` itself.
+   *
+   * This is the layer's teardown / context-loss path. On a lost context the grid buffers are
+   * already gone from the driver's side, and the owners (terminal nodes) are still holding live
+   * handles; without a sweep those handles would keep writing rows into a registry whose GPU
+   * objects no longer exist. Reaching them is what `Grid.dead` is for — see its comment: the
+   * engine deliberately keeps no list of handles, so the shared Grid object is the channel.
+   *
+   * Idempotent, and change-gated: sweeping an empty registry changes nothing on screen, so it
+   * must not dirty — the same discipline as setCamera/setViewport, and the reason `frame()` can
+   * promise that an untouched canvas issues zero GL calls.
+   */
+  disposeAll(): void {
+    if (this.grids.size === 0) return
+    for (const g of this.grids.values()) {
+      g.dead = true
+      this.gl.disposeGrid(g.id)
+    }
+    this.grids.clear()
+    // Teardown is damage: the canvas still holds the disposed grids' pixels until it is redrawn.
+    this.dirty = true
   }
 
   setCamera(cam: Camera): void {
@@ -196,7 +266,13 @@ export class GlyphGridEngine {
     this.dirty = true
   }
 
-  /** Visible grid ids in draw order (z ascending, ties by registration order). Pure.
+  /** Visible grid ids in draw order (z ascending, ties by registration order).
+   *
+   *  Not pure: it also CACHES each grid's visibility on the grid (`lastVisible`), which is what
+   *  `updateRow` consults to keep a hidden grid's writes from waking the shared canvas. The cache
+   *  is a pure function of the camera, the viewport and the grid rects — so recomputing it out of
+   *  band (a stats read-out, a test) can only write the same answer the next frame would, and
+   *  every input that could change it dirties the engine.
    *
    *  Culled against the PADDED rect, not the character matrix: a grid draws its opaque plate
    *  (the node body, `padPx` world units wider on every side) before its cells, so a grid whose
@@ -206,14 +282,17 @@ export class GlyphGridEngine {
   drawOrder(): string[] {
     const visible: Rect = visibleWorldRect(this.camera, this.viewW, this.viewH)
     return [...this.grids.values()]
-      .filter((g) =>
-        rectsIntersect(visible, {
+      .filter((g) => {
+        // Written for EVERY grid, not just the survivors — a grid that has just left the
+        // viewport has to learn it is hidden, and only the filter's own answer can tell it.
+        g.lastVisible = rectsIntersect(visible, {
           x: g.originX - g.padPx,
           y: g.originY - g.padPx,
           w: g.cols * g.cellW + 2 * g.padPx,
           h: g.rows * g.cellH + 2 * g.padPx
         })
-      )
+        return g.lastVisible
+      })
       .sort((a, b) => a.z - b.z || a.seq - b.seq)
       .map((g) => g.id)
   }
