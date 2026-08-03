@@ -8,6 +8,7 @@ import {
   setNodeZOrder,
   setSharedGlyphCamera,
   sharedGlyphActive,
+  sharedGlyphAvailable,
   subscribeNodeZOrder,
   useSharedGlyph
 } from './SharedGlyphLayer'
@@ -368,5 +369,63 @@ describe('graceful degrade without a GPU', () => {
       useSharedGlyph.getState().markFailed()
       useSharedGlyph.setState({ enabled: false, failed: false })
     }
+  })
+})
+
+/**
+ * The BOTH-RENDERERS invariant, tested at the one seam that is reachable headless.
+ *
+ * A terminal is either a budget-coordinated per-node WebGL client or a grid on the shared canvas —
+ * never both (the glyph addon's `setRenderer` and `WebglAddon.dispose()` each silently replace the
+ * other's renderer) and never neither. `TerminalNode` decides that from `sharedGlyphAvailable()`,
+ * so the predicate must answer "shared" for a canvas whose context has not been BUILT yet: the
+ * atlas now adopts a live terminal's device cell, which makes "no context yet" the normal state at
+ * a fresh mount and again after every font change.
+ */
+describe('sharedGlyphAvailable', () => {
+  const CELL = { cellW: 15.66, cellH: 31 }
+
+  beforeEach(() => {
+    // `creationAttempted` is a module singleton that survives a store reset, and only
+    // `disposeContext()` clears it — which an enable/disable pair runs, silently (unlike
+    // `markFailed`, which logs). Without this the block would depend on what ran before it.
+    useSharedGlyph.getState().setEnabled(true)
+    useSharedGlyph.getState().setEnabled(false)
+  })
+
+  afterEach(() => {
+    useSharedGlyph.setState({ enabled: false, generation: 0, failed: false })
+  })
+
+  it('is false while the mode is off, and false once the session has failed', () => {
+    expect(sharedGlyphAvailable()).toBe(false)
+    useSharedGlyph.getState().setEnabled(true)
+    useSharedGlyph.getState().markFailed()
+    expect(sharedGlyphAvailable()).toBe(false)
+  })
+
+  it('is TRUE with the mode on and no context built yet — the fresh-mount state', () => {
+    useSharedGlyph.getState().setEnabled(true)
+    // Nothing has asked for a context, so none exists. A probe that reported "not shared" here
+    // would hand every terminal on the canvas a WebGL budget client moments before each of them
+    // attaches a grid.
+    expect(sharedGlyphAvailable()).toBe(true)
+  })
+
+  it('turns false once this machine has PROVED it cannot build a context', () => {
+    useSharedGlyph.getState().setEnabled(true)
+    // No OffscreenCanvas in this environment: creation is attempted and produces nothing.
+    expect(getSharedGlyphContext(CELL)).toBeNull()
+    expect(sharedGlyphAvailable()).toBe(false)
+  })
+
+  it('is TRUE again after a disposal — a font change must not look like a failure', () => {
+    useSharedGlyph.getState().setEnabled(true)
+    expect(getSharedGlyphContext(CELL)).toBeNull() // latches the failed attempt
+    expect(sharedGlyphAvailable()).toBe(false)
+    // Mode off → disposeContext() (the same call a font change makes) → the latch is cleared.
+    useSharedGlyph.getState().setEnabled(false)
+    useSharedGlyph.getState().setEnabled(true)
+    expect(sharedGlyphAvailable()).toBe(true)
   })
 })

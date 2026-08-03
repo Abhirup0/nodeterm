@@ -60,6 +60,7 @@ import {
   getSharedGlyphContext,
   nodeZFor,
   sharedGlyphActive,
+  sharedGlyphAvailable,
   subscribeNodeZOrder,
   useSharedGlyph
 } from '../canvas/SharedGlyphLayer'
@@ -811,6 +812,13 @@ export function TerminalNode({
     // "lost context" placeholder). The callbacks stay dumb and idempotent.
     let webgl: WebglAddon | null = null
     let webglHandle: WebglClientHandle | null = null
+    /** The IntersectionObserver's last verdict, re-stated to any budget client registered after
+     *  it (the observer will not fire again until visibility actually CHANGES, and a fresh client
+     *  starts out believing it is hidden). Declared up here with the handle it belongs to, not
+     *  next to the observer: `ensureWebglClient` can run from the glyph setup at mount, which is
+     *  BEFORE the observer is built — a `let` declared down there would be in its temporal dead
+     *  zone and throw. */
+    let wasVisible = false
     // --- glyphgrid (experimental shared renderer) -----------------------------------------
     // Live only while this terminal paints into the shared canvas instead of its own renderer.
     // All four stay null for the default modes: `setupGlyph()` returns on its first gate without
@@ -1070,6 +1078,38 @@ export function TerminalNode({
     }
     applyFitRef.current = applyFit
 
+    /**
+     * THE BOTH-RENDERERS INVARIANT, in two calls: a terminal is either a budget-coordinated
+     * per-node WebGL client or a grid on the shared canvas — never both, and never neither.
+     *
+     * Holding both is not a cosmetic overlap. The glyph addon's `setRenderer` silently disposes
+     * whatever renderer it replaces, so a webgl grant landing afterwards leaves the coordinator
+     * accounting for a context nobody paints with; and the reverse — `releaseWebgl` running while
+     * a glyph attachment is live — is worse: `WebglAddon.dispose()` puts xterm back on its own DOM
+     * renderer, which disposes OUR addon, and the DOM rows are `visibility: hidden` in glyph mode,
+     * so the node goes blank with a grid still registered.
+     *
+     * That is why `dropWebglClient` runs BEFORE `attachGlyphGrid` and not after it: disposing the
+     * handle releases any live grant synchronously, so xterm is back on its own renderer before we
+     * install ours.
+     *
+     * Both are idempotent, and both are called from the glyph setup/teardown as well as from the
+     * mode probes — the invariant must hold structurally, not because one probe happened to run at
+     * the right moment.
+     */
+    const dropWebglClient = (): void => {
+      if (!webglHandle) return
+      webglHandle.dispose()
+      webglHandle = null
+    }
+    const ensureWebglClient = (): void => {
+      // `disposed` covers unmount/park/respawn, where the cleanup has already disposed the handle
+      // and a fresh registration would be a leak into a coordinator nothing will unregister from.
+      if (disposed || webglHandle) return
+      webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
+      webglHandle.setVisible(wasVisible)
+    }
+
     // --- glyphgrid (experimental shared renderer) -------------------------------------------
     //
     // Lives INSIDE the lifecycle effect, not in an effect of its own, for one reason: React runs
@@ -1120,6 +1160,13 @@ export function TerminalNode({
       term.element?.classList.remove('glyphgrid-mode')
       const restored = attach ? attach.dispose() : true
       grid?.dispose()
+      // The other half of the both-renderers invariant: xterm owns its own pixels again, so it is
+      // a budget client again. Belt and braces — the generation handler and the participation
+      // effect also decide this from the MODE, and either may (correctly) dispose the client again
+      // a moment later. Skipped when the restore failed: that xterm paints nothing, and a webgl
+      // grant onto it would only add a second broken renderer to the first. `ensureWebglClient`
+      // itself refuses once `disposed` is set, which is every unmount/park/respawn path.
+      if (restored) ensureWebglClient()
       return restored
     }
 
@@ -1147,7 +1194,14 @@ export function TerminalNode({
       // from, and `getSharedGlyphContext` answers null rather than guess metrics that would leave
       // every glyph rescaled against the quad it is drawn onto.
       const ctx = getSharedGlyphContext(deviceCellOf(term) ?? undefined)
-      if (!ctx) return
+      // Nothing to paint into (no WebGL2, no OffscreenCanvas, no readable device cell): this
+      // terminal keeps its own renderer, so it must be a budget CLIENT — the other half of the
+      // both-renderers invariant, which is "never both" AND "never neither". Same on every failure
+      // path below.
+      if (!ctx) {
+        ensureWebglClient()
+        return
+      }
       const host = term.element
       const cell = forcedCell ?? cssCellOf(term)
       const offset = host ? screenOffsetInNode(term) : null
@@ -1156,6 +1210,7 @@ export function TerminalNode({
           `${id}:geometry`,
           `no grid for node ${id}: ${!host ? 'no xterm element' : !cell ? 'cell size unavailable' : 'terminal is not laid out inside a node'}`
         )
+        ensureWebglClient()
         return
       }
       glyphBodyOffsetRef.current = offset
@@ -1183,12 +1238,21 @@ export function TerminalNode({
         })
       } catch (err) {
         glyphWarn(`${id}:register`, `could not register a grid for node ${id}: ${String(err)}`)
+        ensureWebglClient()
         return
       }
+      // BEFORE the attach, never after: disposing the budget client releases any live grant
+      // synchronously, and `releaseWebgl` puts xterm back on its own DOM renderer — which, run a
+      // line later, would dispose the glyph addon we are about to install and leave the node blank.
+      // See the both-renderers invariant above.
+      dropWebglClient()
       const attached = attachGlyphGrid(term, handle, ctx.atlas)
       if (!attached) {
         // Nothing was touched (the attach contract) — drop the grid we just made and stay put.
         handle.dispose()
+        // …and this terminal is painting its own pixels after all, so it goes back to being a
+        // budget client. Without this the node would end up with NEITHER renderer coordinated.
+        ensureWebglClient()
         glyphWarn(`${id}:attach`, `node ${id} stays on the DOM renderer: xterm internals not recognised`)
         return
       }
@@ -1827,22 +1891,23 @@ export function TerminalNode({
     // there is no per-terminal context to budget, nothing to acquire on approach and no DOM-strand
     // heal to run — the whole webgl client is skipped rather than registered and left idle.
     //
-    // The decision is made on the MODE and the context — NOT on whether the grid registration then
-    // succeeded. A node that is collapsed right now registers nothing yet but will on expand, and
-    // a terminal cannot be allowed to end up holding both renderers: the glyph addon's
-    // `setRenderer` silently disposes the webgl one, leaving the budget coordinator accounting for
-    // a context nobody paints with and `releaseWebgl` sweeping canvases out from under a live
-    // attachment. Failing the registration (unrecognised internals) leaves this terminal on
-    // xterm's own DOM renderer — correct, just unbudgeted, and warned once. The mode itself is
-    // re-read on every generation bump (the subscription below), never only at mount.
-    const glyphMode = sharedGlyphActive() && getSharedGlyphContext() !== null
-    if (glyphMode) setupGlyph()
-    else webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
-
-    // The IntersectionObserver's last verdict, read by the subscription below when it hands a
-    // fresh budget client this terminal's visibility. Declared here (not with the observer) so it
-    // exists before anything can close over it.
-    let wasVisible = false
+    // The decision is made on the MODE, not on whether the grid registration then succeeded: a
+    // node that is collapsed right now registers nothing yet but will on expand, and a terminal
+    // cannot be allowed to end up holding both renderers (see `dropWebglClient`/`ensureWebglClient`
+    // for exactly how each half of that breaks). A registration that FAILS — unrecognised
+    // internals, no readable geometry — leaves this terminal on xterm's own DOM renderer and
+    // `setupGlyph` arms the budget client from inside that failure path, so it is coordinated
+    // rather than merely warned about. The mode itself is re-read on every generation bump (the
+    // subscription below), never only at mount.
+    //
+    // The probe asks `sharedGlyphAvailable()`, NOT "does a context object exist right now". The
+    // atlas is built from a live terminal's device cell, so the context is created by the first
+    // `setupGlyph` — "none yet" is the normal state at a fresh mount and after every font change,
+    // and reading it as "not shared" would register a budget client on a terminal that attaches a
+    // grid a moment later, i.e. both renderers at once. `setupGlyph`/`teardownGlyph` own the
+    // budget client too, so the invariant holds structurally even if this probe is ever wrong.
+    if (sharedGlyphAvailable()) setupGlyph()
+    else ensureWebglClient()
 
     // ...but the mode can also change UNDER a mounted terminal — the user flips the Settings row
     // with a canvas full of live sessions — so the subscription below is UNCONDITIONAL, not part
@@ -1883,17 +1948,13 @@ export function TerminalNode({
         // below schedules — after this. `setVisible` re-states what the IntersectionObserver last
         // reported, because it will not fire again until visibility actually changes and a fresh
         // client starts out believing it is hidden.
-        // The SAME test the mount above makes — mode AND a context that exists — so a machine
-        // without WebGL2 (where `getSharedGlyphContext()` is null however the setting reads) keeps
-        // its budget client instead of ending up with neither renderer coordinated.
-        const shared = sharedGlyphActive() && getSharedGlyphContext() !== null
-        if (shared && webglHandle) {
-          webglHandle.dispose()
-          webglHandle = null
-        } else if (!shared && !webglHandle) {
-          webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
-          webglHandle.setVisible(wasVisible)
-        }
+        // The SAME test the mount above makes, and it must stay non-creating HERE above all: this
+        // handler runs BEFORE React has applied a new font size to xterm, so a probe that built a
+        // context would rasterize the atlas at the OLD cell and pin every regrid to the new one.
+        // A machine without WebGL2 answers false (creation was attempted and produced nothing) and
+        // keeps its budget client instead of ending up with neither renderer coordinated.
+        if (sharedGlyphAvailable()) dropWebglClient()
+        else ensureWebglClient()
         setGlyphEpoch((n) => n + 1)
       } catch (err) {
         console.warn(`[glyphgrid] generation handler failed for ${id} (continuing)`, err)

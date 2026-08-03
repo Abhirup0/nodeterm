@@ -264,16 +264,20 @@ describe('GlyphGridEngine', () => {
 
   it('uploads the atlas with the rasterizer metrics before beginFrame', () => {
     const gl = fakeGL()
-    const { atlas: a, source } = loadedAtlas(512, 7, 15)
+    // A FRACTIONAL cell on purpose — that is what xterm reports (`charWidth * dpr`), and it is the
+    // only shape in which conflating the sampled EXTENT with the slot PITCH is observable: with an
+    // integer cell the two are equal, so passing either number for the other would pass.
+    const { atlas: a, source } = loadedAtlas(512, 15.66, 31.2)
     const e = new GlyphGridEngine(gl, a)
     e.setViewport(800, 600, 1)
     e.setCamera({ x: 0, y: 0, zoom: 1 })
     e.register(spec('a', 0))
     a.glyphFor(0x41, false, false) // dirties the atlas
     expect(e.frame()).toBe(true)
-    // …including the slot PITCH beside the sampled extent: the shader needs both, and handing it
-    // the extent as the pitch would overlap every slot with its neighbour.
-    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 7, 15, 7, 15)
+    // The extent stays exact (texel:pixel 1:1 against the quad the grid draws) and the pitch is
+    // the whole-texel slot spacing; the shader needs both, and handing it the extent as the pitch
+    // would overlap every slot with its neighbour.
+    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 15.66, 31.2, 16, 32)
     // Stronger than "before the first drawGrid": beginFrame pushes uAtlasCols/uAtlasCell from
     // the values uploadAtlas stored, so an upload landing after it would leave frame 1 sampling
     // slot 0 everywhere and the uniforms permanently one upload stale.

@@ -139,6 +139,29 @@ export function sharedGlyphActive(): boolean {
   return s.enabled && !s.failed
 }
 
+/**
+ * Will this canvas paint terminals into the shared context — whether or not one has been BUILT
+ * yet? This, not the presence of a context object, is the question a terminal asks when deciding
+ * which renderer it belongs to (and therefore whether it takes a WebGL budget client).
+ *
+ * Deliberately non-creating, and deliberately NOT `getSharedGlyphContext(…) !== null`. Since the
+ * atlas adopts a live terminal's device cell, the context now comes into existence at the first
+ * `setupGlyph` — so "no context yet" is the normal state at a fresh mount, and again after every
+ * font change (the layer disposes the context BEFORE it bumps the generation). A caller reading
+ * that as "not shared" would hand every terminal on the canvas a budget client moments before
+ * they all attach grids: the both-renderers hazard. Nor may such a caller build one to find out —
+ * at the font-change bump xterm has not re-measured its cell yet, so a context created there
+ * would rasterize its atlas at the OLD cell while every grid registers against the new one.
+ *
+ * False therefore means only: the mode is off, the session has failed, or this machine has
+ * already proved it cannot build a context (`creationAttempted` with nothing live — a flag every
+ * disposal resets, so a font change never looks like a failure).
+ */
+export function sharedGlyphAvailable(): boolean {
+  if (!sharedGlyphActive()) return false
+  return live !== null || !creationAttempted
+}
+
 /** Reactive form of `sharedGlyphActive()` — Canvas mounts the layer on this. */
 export function useSharedGlyphActive(): boolean {
   return useSharedGlyph((s) => s.enabled && !s.failed)

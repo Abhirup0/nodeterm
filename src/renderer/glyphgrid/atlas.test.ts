@@ -51,22 +51,39 @@ describe('GlyphAtlas', () => {
     expect(atlas.slotRect(10)).toEqual({ u0: 0, v0: 0.2, u1: 0.1, v1: 0.4 })
   })
 
-  it('slotRect agrees with the shader uv derivation for every interesting slot', () => {
-    // What this pins, exactly: `slotRect` against a HAND-TRANSCRIBED copy of gl-webgl2's vertex
-    // shader formula as of Phase 0 — cols = floor(sizePx/cellW), cellUv = [cellW/sizePx,
-    // cellH/sizePx], slotOrigin = (slot % cols, floor(slot / cols)) * cellUv (see `uAtlasCols` /
-    // `uAtlasCell` in VERT). So it catches a change to the CPU side (atlas padding, page metrics,
-    // slot ordering) — and nothing else.
-    //
-    // It is NOT a tie to the live GLSL: the shader side below is this test's own copy, so editing
-    // the real shader leaves this green, and `slotRect` currently has no production caller at all
-    // (the shader derives its uvs itself from the two uniforms). The actual tie — a visual pass,
-    // or pinning the GLSL against a generated line — is owed to Phase 1b.
-    const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100)
-    const cols = Math.floor(100 / atlas.strideX)
-    const cellUv = [10 / 100, 20 / 100]
-    const strideUv = [atlas.strideX / 100, atlas.strideY / 100]
-    for (const slot of [0, 1, cols - 1, cols, cols + 1, atlas.capacity - 1]) {
+  // What this pins, exactly: `slotRect` against a HAND-TRANSCRIBED copy of gl-webgl2's vertex
+  // shader formula — cols = floor(sizePx/strideX), cellUv = [cellW/sizePx, cellH/sizePx],
+  // strideUv = [strideX/sizePx, strideY/sizePx], slotOrigin = (slot % cols, floor(slot / cols)) *
+  // strideUv (see `uAtlasCols` / `uAtlasCell` / `uAtlasStride` in VERT). So it catches a change to
+  // the CPU side (atlas padding, page metrics, slot ordering) — and nothing else.
+  //
+  // Every number on the shader side is computed HERE, from the cell the rasterizer was built with
+  // — never read back off the atlas. Deriving `cols` from `atlas.strideX` would make the test
+  // agree with whatever the atlas decided, including conflating the pitch with the extent.
+  //
+  // It is NOT a tie to the live GLSL: the shader side below is this test's own copy, so editing
+  // the real shader leaves this green, and `slotRect` currently has no production caller at all
+  // (the shader derives its uvs itself from the uniforms). The actual tie — a visual pass, or
+  // pinning the GLSL against a generated line — is owed to Phase 1b.
+  //
+  // Run over an integer cell AND a fractional one: an integer cell has stride === extent, so it
+  // alone cannot tell a pitch/extent conflation from a correct derivation.
+  it.each([
+    { label: 'integer cell (stride === extent)', cellW: 10, cellH: 20, sizePx: 100 },
+    { label: 'fractional device cell (13px font at dpr 2)', cellW: 15.66, cellH: 31.2, sizePx: 512 }
+  ])('slotRect agrees with the shader uv derivation for every interesting slot — $label', ({
+    cellW,
+    cellH,
+    sizePx
+  }) => {
+    const atlas = new GlyphAtlas(fakeRasterizer(cellW, cellH), sizePx)
+    const strideX = Math.ceil(cellW)
+    const strideY = Math.ceil(cellH)
+    const cols = Math.floor(sizePx / strideX)
+    const rows = Math.floor(sizePx / strideY)
+    const cellUv = [cellW / sizePx, cellH / sizePx]
+    const strideUv = [strideX / sizePx, strideY / sizePx]
+    for (const slot of [0, 1, cols - 1, cols, cols + 1, cols * rows - 1]) {
       const u0 = (slot % cols) * strideUv[0]
       const v0 = Math.floor(slot / cols) * strideUv[1]
       expect(atlas.slotRect(slot)).toEqual({ u0, v0, u1: u0 + cellUv[0], v1: v0 + cellUv[1] })
