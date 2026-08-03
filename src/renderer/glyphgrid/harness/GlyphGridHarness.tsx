@@ -84,8 +84,9 @@ export function GlyphGridHarness() {
     // A FRESH engine per effect run: `register` throws on a duplicate id, so reusing an engine
     // across runs (StrictMode double-mount, HMR) would throw on the second pass.
     const engine = new GlyphGridEngine(gl, atlas)
-    // Viewport is set on mount and on resize ONLY — setViewport is not change-gated and resets
-    // the drawing buffer, so calling it per rAF tick would reallocate the backing store 60x/s.
+    // Viewport is set on mount and on resize ONLY. setViewport is change-gated on (w, h, dpr)
+    // now, but the harness must not lean on that: an unchanged call is cheap, a changed one
+    // resets the drawing buffer, so driving it per rAF tick stays the wrong shape.
     const applyViewport = (): void =>
       engine.setViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio)
     applyViewport()

@@ -249,3 +249,56 @@ describe('GlyphGridEngine', () => {
     expect(e.frame()).toBe(true)
   })
 })
+
+describe('lifecycle hardening', () => {
+  it('a disposed handle is inert: writes do nothing and create no damage', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame() // consume registration damage
+    h.dispose()
+    e.frame() // consume dispose damage
+    h.updateRow(0, new Uint32Array(2 * CELL_STRIDE))
+    h.setOrigin(99, 99)
+    h.setZ(42)
+    h.resize(4, 4)
+    expect(e.frame()).toBe(false) // nothing woke the engine
+  })
+
+  it('setViewport with identical (w, h, dpr) is a no-op; a dpr change alone dirties', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 2)
+    e.frame()
+    e.setViewport(800, 600, 2)
+    expect(e.frame()).toBe(false)
+    e.setViewport(800, 600, 3) // dpr-only change must still resize + dirty
+    expect(e.frame()).toBe(true)
+  })
+
+  it('same-shape resize is a no-op (content preserved, no damage)', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame()
+    h.resize(2, 1) // same shape as spec()
+    expect(e.frame()).toBe(false)
+  })
+
+  it('a throwing GL submission does not lose damage', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    const boom = new Error('context lost mid-frame')
+    ;(gl as { beginFrame: unknown }).beginFrame = () => {
+      throw boom
+    }
+    expect(() => e.frame()).toThrow(boom)
+    ;(gl as { beginFrame: unknown }).beginFrame = () => undefined
+    expect(e.frame()).toBe(true) // damage was restored, next frame redraws
+  })
+})

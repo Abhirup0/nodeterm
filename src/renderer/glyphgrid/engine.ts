@@ -35,6 +35,9 @@ export interface GridHandle {
   setOrigin(x: number, y: number): void
   setZ(z: number): void
   resize(cols: number, rows: number): void
+  /** Drops the grid. After this the handle is INERT — every mutator above becomes a silent
+   *  no-op rather than a throw: a torn-down owner delivering one last write is a teardown
+   *  race, not a bug, and it must neither mutate a dead grid nor un-idle the shared canvas. */
   dispose(): void
 }
 
@@ -64,6 +67,9 @@ export class GlyphGridEngine {
   private camera: Camera = { x: 0, y: 0, zoom: 1 }
   private viewW = 1
   private viewH = 1
+  /** Stored so setViewport can change-gate on all THREE inputs. 0 = never sized, so the first
+   *  setViewport always reaches the GL surface even if it passes the current w/h. */
+  private viewDpr = 0
   private dirty = false
   private seq = 0
   /** False until an atlas source has actually reached the GPU — see `atlasUploadPending`. */
@@ -85,8 +91,15 @@ export class GlyphGridEngine {
     this.grids.set(spec.id, grid)
     this.dirty = true
     const engine = this
+    // Per-handle, not per-grid: once THIS handle is disposed every mutator below is a silent
+    // no-op. The constraint is that a stale handle must not un-idle the shared canvas — a
+    // Phase-1b terminal is torn down while its last row write may still be in flight, and a
+    // write that dirtied the engine after dispose would keep one canvas redrawing forever for
+    // a grid nobody draws. Inert rather than throwing: the race is expected at teardown.
+    let disposed = false
     return {
       updateRow(row, cells) {
+        if (disposed) return
         if (row < 0 || row >= grid.rows)
           throw new Error(`glyphgrid: row ${row} out of range (rows=${grid.rows})`)
         if (cells.length !== grid.cols * CELL_STRIDE)
@@ -95,17 +108,20 @@ export class GlyphGridEngine {
         engine.dirty = true
       },
       setOrigin(x, y) {
+        if (disposed) return
         if (grid.originX === x && grid.originY === y) return
         grid.originX = x
         grid.originY = y
         engine.dirty = true
       },
       setZ(z) {
+        if (disposed) return
         if (grid.z === z) return
         grid.z = z
         engine.dirty = true
       },
       resize(cols, rows) {
+        if (disposed) return
         // A same-shape resize is a no-op, not a realloc: resize callers are size observers
         // that fire on every layout tick, and reallocating + dirtying there would keep the
         // canvas redrawing forever.
@@ -118,6 +134,9 @@ export class GlyphGridEngine {
         engine.dirty = true
       },
       dispose() {
+        // The handle goes inert unconditionally — this is its owner declaring teardown, and it
+        // holds whether or not the map still points at this grid.
+        disposed = true
         // Identity-checked: only drop the map entry if it is still THIS grid, so a stale
         // handle can never evict a grid that re-registered under the same id.
         if (engine.grids.get(grid.id) !== grid) return
@@ -134,8 +153,14 @@ export class GlyphGridEngine {
   }
 
   setViewport(w: number, h: number, dpr: number): void {
+    // Change-gated like setCamera, and on the dpr too: the caller is a resize observer that
+    // fires on every layout tick, so an unconditional dirty here would keep the canvas
+    // redrawing forever. A dpr-only change is a real change — same CSS box, different backing
+    // store — so it must still resize and dirty.
+    if (w === this.viewW && h === this.viewH && dpr === this.viewDpr) return
     this.viewW = w
     this.viewH = h
+    this.viewDpr = dpr
     this.gl.resize(w, h, dpr)
     this.dirty = true
   }
@@ -170,29 +195,43 @@ export class GlyphGridEngine {
     const uploadAtlas = this.atlasUploadPending()
     if (!this.dirty && !uploadAtlas) return false
     this.dirty = false
-    if (uploadAtlas && this.atlas.source) {
-      // BEFORE beginFrame, always (it reads back the atlas metrics as uniforms): see the
-      // class contract.
-      this.gl.uploadAtlas(this.atlas.source, this.atlas.sizePx, this.atlas.cellW, this.atlas.cellH)
-      this.atlas.clearDirty()
-      this.atlasUploaded = true
+    // Damage must survive a throwing submission: the dirty flag was already cleared, so a GL
+    // call that throws mid-frame (context lost, a driver error) would otherwise leave the
+    // engine idle on a half-drawn canvas until the next unrelated input. Restore the damage and
+    // RETHROW — the caller owns the error policy, and swallowing here would hide GPU errors.
+    try {
+      if (uploadAtlas && this.atlas.source) {
+        // BEFORE beginFrame, always (it reads back the atlas metrics as uniforms): see the
+        // class contract.
+        this.gl.uploadAtlas(
+          this.atlas.source,
+          this.atlas.sizePx,
+          this.atlas.cellW,
+          this.atlas.cellH
+        )
+        this.atlas.clearDirty()
+        this.atlasUploaded = true
+      }
+      this.gl.beginFrame(this.camera)
+      for (const id of this.drawOrder()) {
+        const g = this.grids.get(id)
+        if (!g) continue
+        this.gl.drawGrid({
+          cells: g.cells,
+          cols: g.cols,
+          rows: g.rows,
+          cellW: g.cellW,
+          cellH: g.cellH,
+          originX: g.originX,
+          originY: g.originY,
+          bgColor: g.bgColor
+        })
+      }
+      this.gl.endFrame()
+    } catch (err) {
+      this.dirty = true
+      throw err
     }
-    this.gl.beginFrame(this.camera)
-    for (const id of this.drawOrder()) {
-      const g = this.grids.get(id)
-      if (!g) continue
-      this.gl.drawGrid({
-        cells: g.cells,
-        cols: g.cols,
-        rows: g.rows,
-        cellW: g.cellW,
-        cellH: g.cellH,
-        originX: g.originX,
-        originY: g.originY,
-        bgColor: g.bgColor
-      })
-    }
-    this.gl.endFrame()
     return true
   }
 }
