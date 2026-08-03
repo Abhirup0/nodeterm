@@ -2,6 +2,18 @@
 // (contextBridge runs before any renderer script), so this is a pure pass-through on
 // desktop. In a browser (Server Edition) we install the WS bridge first, then boot.
 async function bootstrap(): Promise<void> {
+  // Dev-only glyphgrid proving ground. `import.meta.env.DEV` is statically replaced with
+  // `false` in a production build, so this whole branch — and the harness import graph with
+  // it — is dead code rollup drops; the app boot path below is untouched.
+  if (import.meta.env.DEV && location.hash === '#glyphgrid') {
+    const [{ createRoot }, React, { GlyphGridHarness }] = await Promise.all([
+      import('react-dom/client'),
+      import('react'),
+      import('./glyphgrid/harness/GlyphGridHarness')
+    ])
+    createRoot(document.getElementById('root')!).render(React.createElement(GlyphGridHarness))
+    return
+  }
   if (!window.nodeTerminal) {
     // Record the shell BEFORE the bridge installs: affordances that only work under Electron
     // (Reveal in Finder) or only in a browser (HTTP downloads) read this. See bridge/runtime.ts.
