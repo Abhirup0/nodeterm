@@ -74,9 +74,22 @@ function orderPoints(a: SelPoint, b: SelPoint): [SelPoint, SelPoint] {
 }
 
 export class GlyphGridRendererAddonCore {
-  /** Rebuilt on resize / char-size / dpr change; never reassigned in place, so a consumer holding
-   *  the old object sees a consistent snapshot rather than a half-updated one. */
-  dimensions: RendererDims
+  /** Allocated ONCE and mutated in place on resize / char-size / dpr change — never reassigned.
+   *
+   *  xterm's `Viewport` caches this object BY REFERENCE (it keeps whatever `onDimensionsChange`
+   *  handed it) and re-reads only on the next dimensions event — which fires BEFORE our
+   *  `handleResize` runs, since RenderService registered its own listeners first. Hand out a FRESH
+   *  object and the Viewport goes on computing row height and scroll-area geometry from the
+   *  previous font size, with its `syncScrollArea` guard comparing stale to stale so it never
+   *  notices. Identity is the contract here, not an optimization. */
+  readonly dimensions: RendererDims = {
+    css: { canvas: { width: 0, height: 0 }, cell: { width: 0, height: 0 } },
+    device: {
+      canvas: { width: 0, height: 0 },
+      cell: { width: 0, height: 0 },
+      char: { width: 0, height: 0, left: 0, top: 0 }
+    }
+  }
 
   private cols: number
   private rows: number
@@ -118,7 +131,7 @@ export class GlyphGridRendererAddonCore {
     this.workCell = internals.makeWorkCell()
     this.focused = internals.hasFocus()
     this.lastCursorRow = this.cursorViewportRow()
-    this.dimensions = this.buildDims()
+    this.updateDims()
   }
 
   // ---------------------------------------------------------------- xterm renderer surface
@@ -148,7 +161,7 @@ export class GlyphGridRendererAddonCore {
     // The grid must be the new size BEFORE the first row of the new frame reaches it — an
     // updateRow of the new width against the old grid is rejected outright.
     this.handle.resize(cols, rows)
-    this.dimensions = this.buildDims()
+    this.updateDims()
     this.packRows(0, rows - 1)
   }
 
@@ -157,12 +170,12 @@ export class GlyphGridRendererAddonCore {
    *  re-registers every node (see the shared layer), so there is nothing to repack here. */
   handleCharSizeChanged(): void {
     if (this.disposed) return
-    this.dimensions = this.buildDims()
+    this.updateDims()
   }
 
   handleDevicePixelRatioChange(): void {
     if (this.disposed) return
-    this.dimensions = this.buildDims()
+    this.updateDims()
   }
 
   /** Absolute buffer coords, straight from xterm's selection service.
@@ -331,28 +344,29 @@ export class GlyphGridRendererAddonCore {
 
   /** Exactly xterm's own dimension math (DomRenderer._updateDimensions), which is why the shell
    *  hands over DEVICE metrics rather than css ones: css.cell is derived from the ROUNDED css
-   *  canvas, and xterm maps mouse coordinates through it. */
-  private buildDims(): RendererDims {
+   *  canvas, and xterm maps mouse coordinates through it.
+   *
+   *  Every leaf is assigned IN PLACE — see the `dimensions` field. xterm's own renderers write
+   *  their dimensions object the same way, for the same reason. */
+  private updateDims(): void {
     const m = this.internals.deviceMetrics()
     const dpr = this.internals.dpr() || 1
     const cols = Math.max(0, this.cols)
     const rows = Math.max(0, this.rows)
-    const deviceCanvasW = m.cellW * cols
-    const deviceCanvasH = m.cellH * rows
-    const cssCanvasW = Math.round(deviceCanvasW / dpr)
-    const cssCanvasH = Math.round(deviceCanvasH / dpr)
-    return {
-      css: {
-        canvas: { width: cssCanvasW, height: cssCanvasH },
-        // A zero-column grid would make these NaN, which propagates into xterm's mouse math.
-        cell: { width: cols > 0 ? cssCanvasW / cols : 0, height: rows > 0 ? cssCanvasH / rows : 0 }
-      },
-      device: {
-        canvas: { width: deviceCanvasW, height: deviceCanvasH },
-        cell: { width: m.cellW, height: m.cellH },
-        char: { width: m.charW, height: m.charH, left: 0, top: 0 }
-      }
-    }
+    const d = this.dimensions
+    d.device.char.width = m.charW
+    d.device.char.height = m.charH
+    d.device.char.left = 0
+    d.device.char.top = 0
+    d.device.cell.width = m.cellW
+    d.device.cell.height = m.cellH
+    d.device.canvas.width = m.cellW * cols
+    d.device.canvas.height = m.cellH * rows
+    d.css.canvas.width = Math.round(d.device.canvas.width / dpr)
+    d.css.canvas.height = Math.round(d.device.canvas.height / dpr)
+    // A zero-column grid would make these NaN, which propagates into xterm's mouse math.
+    d.css.cell.width = cols > 0 ? d.css.canvas.width / cols : 0
+    d.css.cell.height = rows > 0 ? d.css.canvas.height / rows : 0
   }
 
   private emitRedraw(start: number, end: number): void {

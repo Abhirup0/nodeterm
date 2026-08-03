@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { GlyphAtlas } from './atlas'
 import { CELL_STRIDE, FLAG_CURSOR, FLAG_SELECTED, packColor, readCell } from './cells'
 import type { GridHandle } from './engine'
-import { GlyphGridRendererAddonCore, type TermInternals } from './addon'
+import {
+  GlyphGridRendererAddonCore,
+  type DeviceMetrics,
+  type TermInternals
+} from './addon'
 import type { CellView, ThemeLanes } from './feed'
 
 const THEME: ThemeLanes = {
@@ -225,7 +229,7 @@ describe('GlyphGridRendererAddonCore.handleResize', () => {
     expect(handle.rows[0].cells.length).toBe(8 * CELL_STRIDE)
   })
 
-  it('rebuilds dimensions from the new grid size', () => {
+  it('updates dimensions from the new grid size', () => {
     const { core } = make({ cols: 4, rows: 6 })
     core.handleResize(10, 5)
     expect(core.dimensions.device.canvas.width).toBe(16 * 10)
@@ -236,6 +240,30 @@ describe('GlyphGridRendererAddonCore.handleResize', () => {
 })
 
 describe('GlyphGridRendererAddonCore.dimensions', () => {
+  it('is ONE object, mutated in place — xterm Viewport caches it by reference', () => {
+    const { core, term } = make({ cols: 4, rows: 6 })
+    const dims = core.dimensions
+    const cssCell = dims.css.cell
+    const deviceChar = dims.device.char
+
+    core.handleResize(10, 5)
+    expect(core.dimensions).toBe(dims)
+    expect(core.dimensions.css.cell).toBe(cssCell)
+    expect(cssCell.width).toBe(8)
+    expect(dims.device.canvas.width).toBe(160)
+
+    // A font-size change reaches us as new device metrics + handleCharSizeChanged.
+    term.deviceMetrics = (): DeviceMetrics => ({ charW: 20, charH: 40, cellW: 20, cellH: 40 })
+    core.handleCharSizeChanged()
+    expect(core.dimensions).toBe(dims)
+    expect(deviceChar.width).toBe(20)
+    expect(dims.device.cell.height).toBe(40)
+    expect(cssCell.height).toBe(20) // round(40 * 5 / dpr 2) / 5
+
+    core.handleDevicePixelRatioChange()
+    expect(core.dimensions).toBe(dims)
+  })
+
   it('mirrors xterm dimension shape at construction', () => {
     const { core } = make({ cols: 4, rows: 6 })
     expect(core.dimensions).toEqual({

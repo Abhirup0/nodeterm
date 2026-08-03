@@ -54,15 +54,27 @@ interface XtermCore {
 
 /** Every internal read in this module starts here. Presence-checked rather than cast, so a bumped
  *  xterm that dropped or renamed one of these degrades to "no glyphgrid" instead of throwing
- *  somewhere inside a render tick. */
+ *  somewhere inside a render tick.
+ *
+ *  The LEAVES are checked too, not just the services holding them: `_charSizeService.width/height`
+ *  and `_coreBrowserService.dpr` are ARITHMETIC inputs, and a service that exists but reports
+ *  `undefined` (renamed field, not-yet-measured stub) would sail through a service-level check and
+ *  poison every dimension with NaN — the one thing `updateDims` guards its own math against. Same
+ *  for `buffer.lines.get`, which is called per cell inside a render tick. A partially-shaped
+ *  internal must produce the contracted null, not a broken terminal. */
 function coreOf(term: Terminal): XtermCore | null {
   try {
     const c = (term as unknown as { _core?: Partial<XtermCore> })._core
     if (!c) return null
     if (typeof c._createRenderer !== 'function') return null
     if (!c._renderService || typeof c._renderService.setRenderer !== 'function') return null
+    if (typeof c._renderService.handleResize !== 'function') return null
     if (!c._themeService?.colors || typeof c._themeService.onChangeColors !== 'function') return null
-    if (!c._charSizeService || !c._coreBrowserService || !c._bufferService?.buffer) return null
+    if (!Array.isArray(c._themeService.colors.ansi)) return null
+    const cs = c._charSizeService
+    if (typeof cs?.width !== 'number' || typeof cs?.height !== 'number') return null
+    if (typeof c._coreBrowserService?.dpr !== 'number') return null
+    if (typeof c._bufferService?.buffer?.lines?.get !== 'function') return null
     if (!c.coreService) return null
     return c as XtermCore
   } catch {
@@ -119,13 +131,24 @@ function restoreDomRenderer(term: Terminal): boolean {
   }
 }
 
+/** What a successful attach hands back. `dispose()` returns whether xterm is BACK ON ITS OWN DOM
+ *  RENDERER — false means the terminal is now painting nothing and needs an escalation (respawn),
+ *  the same call TerminalNode's stray-canvas heal makes. Do not ignore it. */
+export interface GlyphGridAttachment {
+  dispose(): boolean
+}
+
+function warnRestoreFailed(context: string): void {
+  console.warn(`[glyphgrid] DOM renderer restore failed (${context}) — terminal needs a refresh`)
+}
+
 /** Point `term` at the shared glyph grid. Returns null — having touched nothing — when the
  *  internals are not what we expect, so the caller simply stays on the DOM renderer. */
 export function attachGlyphGrid(
   term: Terminal,
   handle: GridHandle,
   atlas: GlyphAtlas
-): { dispose(): void } | null {
+): GlyphGridAttachment | null {
   const core = coreOf(term)
   if (!core) return null
   let theme = themeLanes(core._themeService.colors)
@@ -166,7 +189,7 @@ export function attachGlyphGrid(
   } catch {
     // A throw here can leave xterm holding a half-installed renderer (setRenderer disposed the DOM
     // one first), so restore before reporting failure rather than just returning.
-    restoreDomRenderer(term)
+    if (!restoreDomRenderer(term)) warnRestoreFailed('attach')
     return null
   }
 
@@ -179,19 +202,25 @@ export function attachGlyphGrid(
   })
 
   let disposed = false
+  let restored = false
   return {
-    dispose(): void {
-      if (disposed) return
+    dispose(): boolean {
+      if (disposed) return restored
       disposed = true
       try {
         themeSub.dispose()
       } catch {
         // already torn down with the terminal — fine
       }
-      restoreDomRenderer(term)
+      restored = restoreDomRenderer(term)
       // Belt and braces: `setRenderer` disposes the addon for us, but if the restore failed the
       // addon must still go inert so it can never write into a grid the node is about to drop.
       addon.dispose()
+      // NOT silent: a failed restore means xterm is holding a disposed renderer and the terminal
+      // will paint nothing at all — invisible in a log-free teardown, and indistinguishable from
+      // "the pty died" to the user staring at a blank node.
+      if (!restored) warnRestoreFailed('dispose')
+      return restored
     }
   }
 }
