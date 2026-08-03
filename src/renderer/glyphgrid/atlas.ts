@@ -11,7 +11,12 @@ export interface GlyphRasterizer {
 
 export class GlyphAtlas {
   private slots = new Map<string, number>()
-  private nextSlot = 1 // slot 0 is permanently blank
+  /** Slot 0 is permanently blank and is never handed to the rasterizer: every space, every
+   *  unknown code point and every cell of a not-yet-uploaded GPU buffer samples it. Its
+   *  BLANKNESS is a contract on raster.ts — the page starts fully transparent and nothing may
+   *  ever draw at (0,0) — not something this file can enforce, so the two must change together.
+   *  If ink ever lands there, every space on the canvas grows a glyph. */
+  private nextSlot = 1
   private dirtyFlag = false
 
   constructor(
@@ -39,16 +44,35 @@ export class GlyphAtlas {
     return cols * rows
   }
 
+  /** Row-major top-left of a slot, in page PIXELS — the single copy of the layout math.
+   *
+   *  Both consumers must agree exactly: `glyphFor` uses it to place the ink and `slotRect` to
+   *  derive the uv rect the shader samples. Two hand-written copies would drift the moment
+   *  either the page metrics or the padding changed, and the symptom is every glyph rendering
+   *  a fraction of a cell off — not a crash, just permanently wrong text.
+   *
+   *  On a DEGENERATE page (`sizePx < cellW`, so `cols === 0`) `slot % 0` is NaN, which would
+   *  propagate silently into the uv rect. Capacity is 0 there, so no slot is ever allocated and
+   *  the origin is simply (0,0) — the blank slot. */
+  private cellXY(slot: number): { x: number; y: number } {
+    const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
+    if (cols <= 0) return { x: 0, y: 0 }
+    return {
+      x: (slot % cols) * this.rasterizer.cellW,
+      y: Math.floor(slot / cols) * this.rasterizer.cellH
+    }
+  }
+
   glyphFor(code: number, bold: boolean, italic: boolean): number {
     if (code === 0x20 || code === 0) return 0
     const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
+    // Covers the degenerate page too (capacity 0 → 1 >= 0), so nothing is ever rasterized onto a
+    // page that has no room for a single cell.
     if (this.nextSlot >= this.capacity) return 0 // page full — degrade to blank, never throw
     const slot = this.nextSlot++
-    const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
-    const x = (slot % cols) * this.rasterizer.cellW
-    const y = Math.floor(slot / cols) * this.rasterizer.cellH
+    const { x, y } = this.cellXY(slot)
     this.rasterizer.draw(code, bold, italic, x, y)
     this.slots.set(key, slot)
     this.dirtyFlag = true
@@ -56,9 +80,10 @@ export class GlyphAtlas {
   }
 
   slotRect(slot: number): { u0: number; v0: number; u1: number; v1: number } {
-    const cols = Math.floor(this.sizePx / this.rasterizer.cellW)
-    const x = (slot % cols) * this.rasterizer.cellW
-    const y = Math.floor(slot / cols) * this.rasterizer.cellH
+    // A degenerate page has no sampleable area at all: return the ZERO rect rather than let the
+    // division produce NaN, which the shader would turn into undefined texture reads.
+    if (this.capacity <= 0) return { u0: 0, v0: 0, u1: 0, v1: 0 }
+    const { x, y } = this.cellXY(slot)
     return {
       u0: x / this.sizePx,
       v0: y / this.sizePx,

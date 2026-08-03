@@ -1,6 +1,7 @@
 import type { Camera } from './camera'
 import { CELL_STRIDE, unpackColor } from './cells'
 import type { GlyphGL, GridDrawParams } from './gl'
+import { plateRectDevice } from './plate'
 
 const VERT = `#version 300 es
 // One instance per CELL. Two triangles from gl_VertexID (0..5), no vertex buffer.
@@ -95,38 +96,19 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    * is what makes it occlude rather than tint whatever was drawn beneath. Callers therefore pass
    * an OPAQUE bgColor; a translucent one would punch the frame's alpha down to that value.
    *
-   * Two constraints live here and are the easy things to get wrong:
-   *  - The scissor rect is in DEVICE pixels (the drawing buffer), never CSS px — hence the
-   *    `* dpr`, using the ratio captured at `resize` rather than reading devicePixelRatio now.
-   *  - GL's scissor origin is BOTTOM-LEFT while world/CSS Y grows downward, so Y is FLIPPED
-   *    against the drawing buffer height: `y = deviceH - (top + height)`.
+   * The rect math (camera projection, dpr, the Y flip, clamping) lives in the pure
+   * `plate.ts` — it is unit-tested there, since none of it is observable through a GL mock.
+   * What stays here is the GL state dance around it.
    */
   // An arrow const, not a `function` declaration: declarations hoist above the `if (!gl) return`
   // narrowing, so `gl` would be `WebGL2RenderingContext | null` inside the body.
   const drawPlate = (g: GridDrawParams): void => {
-    // world → screen (CSS px): screen = world * zoom + pan, exactly as the vertex shader does.
-    const leftCss = (g.originX - g.padPx) * cam.zoom + cam.x
-    const topCss = (g.originY - g.padPx) * cam.zoom + cam.y
-    const wCss = (g.cols * g.cellW + 2 * g.padPx) * cam.zoom
-    const hCss = (g.rows * g.cellH + 2 * g.padPx) * cam.zoom
-    // CSS px → DEVICE px.
-    const left = Math.round(leftCss * dpr)
-    const top = Math.round(topCss * dpr)
-    const width = Math.round(wCss * dpr)
-    const height = Math.round(hCss * dpr)
-    // Y FLIP: GL scissor origin is bottom-left.
-    const bottom = deviceH - (top + height)
-    // Clamp to the viewport: a scissor rect is allowed to hang outside it, but clamping keeps
-    // the width/height non-negative after the origin is pushed to 0 (a negative extent is a
-    // GL_INVALID_VALUE, and an off-screen grid should simply skip the plate).
-    const x0 = Math.max(0, left)
-    const y0 = Math.max(0, bottom)
-    const x1 = Math.min(deviceW, left + width)
-    const y1 = Math.min(deviceH, bottom + height)
-    if (x1 <= x0 || y1 <= y0) return
+    // Null = the plate covers no pixel of the drawing buffer; skip it entirely.
+    const r = plateRectDevice(g, cam, dpr, deviceW, deviceH)
+    if (!r) return
     const c = unpackColor(g.bgColor)
     gl.enable(gl.SCISSOR_TEST)
-    gl.scissor(x0, y0, x1 - x0, y1 - y0)
+    gl.scissor(r.x, r.y, r.w, r.h)
     gl.clearColor(c.r / 255, c.g / 255, c.b / 255, c.a / 255)
     gl.clear(gl.COLOR_BUFFER_BIT)
     // Disabled again immediately: the scissor is global GL state, and leaving it on would clip

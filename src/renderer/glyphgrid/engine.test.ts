@@ -45,6 +45,10 @@ function fakeGL(): GlyphGL & {
     },
     uploadRows: (id, firstRow, rowCount, _cols, cells) => {
       uploads.push([id, firstRow, rowCount])
+      // Recorded in the SAME log as the draws: a grid's rows must reach its GPU buffer before
+      // the drawGrid that reads them, or that frame draws the previous contents. Two separate
+      // logs could not express the interleaving, which is the only thing being asserted.
+      drawn.push(`UP:${id}`)
       // COPIED: the engine hands over a live subarray VIEW of its CPU-side cells, so a later
       // updateRow would rewrite what an earlier assertion is still looking at.
       uploaded.push(new Uint32Array(cells))
@@ -130,6 +134,19 @@ describe('GlyphGridEngine', () => {
     expect(e.drawOrder()).toEqual(['in'])
   })
 
+  it('culls against the PADDED rect: a grid whose plate still overlaps the viewport is drawn', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    // Cells start exactly at the right viewport edge (x=100, visible world rect is 0..100), so
+    // the character matrix alone is off-screen — but the plate is the node's opaque BODY and
+    // extends padPx further left, into view. Culling on the cell rect would leave a visible strip
+    // of the node body unpainted at every viewport edge.
+    e.register(spec('padded', 100, 0, { padPx: 8 }))
+    e.register(spec('bare', 100, 0, { padPx: 0 }))
+    expect(e.drawOrder()).toEqual(['padded'])
+  })
+
   it('draws in z order ascending, ties by registration order', () => {
     const e = new GlyphGridEngine(fakeGL(), atlas())
     e.setViewport(800, 600, 1)
@@ -149,7 +166,25 @@ describe('GlyphGridEngine', () => {
     e.register(spec('top', 10, 5))
     e.register(spec('offscreen', 5000, 1))
     e.frame()
-    expect(gl.drawn).toEqual(['BEGIN', 'grid@0,0', 'grid@10,0', 'END'])
+    // The upload pass runs to completion BEFORE beginFrame — see the upload-before-draw test.
+    expect(gl.drawn).toEqual(['UP:bottom', 'UP:top', 'BEGIN', 'grid@0,0', 'grid@10,0', 'END'])
+  })
+
+  it('a visible dirty grid uploads its rows before the draw that reads them', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame() // consume the registration upload
+    gl.drawn.length = 0
+    h.updateRow(1, rowOf(2))
+    e.frame()
+    // Ordering, not mere presence: drawGrid reads the grid's own GPU buffer, so an upload landing
+    // after it would paint the PREVIOUS frame's rows and only correct itself on the next damage —
+    // a one-frame-stale terminal that no per-call assertion can see.
+    expect(gl.drawn.indexOf('UP:a')).toBeGreaterThanOrEqual(0)
+    expect(gl.drawn.indexOf('UP:a')).toBeLessThan(gl.drawn.indexOf('grid@0,0'))
   })
 
   it('updateRow rejects a wrong-length row', () => {
@@ -240,6 +275,10 @@ describe('GlyphGridEngine', () => {
     // Stronger than "before the first drawGrid": beginFrame pushes uAtlasCols/uAtlasCell from
     // the values uploadAtlas stored, so an upload landing after it would leave frame 1 sampling
     // slot 0 everywhere and the uniforms permanently one upload stale.
+    // Self-sufficiency first: indexOf returns -1 for a MISSING entry, and -1 is less than every
+    // real index — so without this the two comparisons below would pass just as happily if the
+    // atlas upload had never been recorded at all.
+    expect(gl.drawn.indexOf('ATLAS')).toBeGreaterThanOrEqual(0)
     expect(gl.drawn.indexOf('ATLAS')).toBeLessThan(gl.drawn.indexOf('BEGIN'))
     expect(gl.drawn.indexOf('ATLAS')).toBeLessThan(gl.drawn.indexOf('grid@0,0'))
     expect(a.dirty).toBe(false)

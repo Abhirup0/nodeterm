@@ -46,6 +46,32 @@ describe('GlyphAtlas', () => {
     expect(rect).toEqual({ u0: 0.1, v0: 0, u1: 0.2, v1: 0.2 })
   })
 
+  it('slotRect is correct past row 0', () => {
+    const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100) // 10 cols × 5 rows
+    expect(atlas.slotRect(10)).toEqual({ u0: 0, v0: 0.2, u1: 0.1, v1: 0.4 })
+  })
+
+  it('slotRect agrees with the shader uv derivation for every interesting slot', () => {
+    // gl-webgl2's shader computes: cols = floor(sizePx/cellW); cellUv = [cellW/sizePx, cellH/sizePx];
+    // origin = (slot % cols, floor(slot / cols)) * cellUv. This test IS the tie between the two
+    // copies of the layout math — if either side changes (atlas padding, page metrics), it fails.
+    const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100)
+    const cols = Math.floor(100 / 10)
+    const cellUv = [10 / 100, 20 / 100]
+    for (const slot of [0, 1, cols - 1, cols, cols + 1, atlas.capacity - 1]) {
+      const u0 = (slot % cols) * cellUv[0]
+      const v0 = Math.floor(slot / cols) * cellUv[1]
+      expect(atlas.slotRect(slot)).toEqual({ u0, v0, u1: u0 + cellUv[0], v1: v0 + cellUv[1] })
+    }
+  })
+
+  it('a degenerate page (sizePx < cellW) yields blank slots and a zero rect, never NaN', () => {
+    const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 5)
+    expect(atlas.capacity).toBe(0)
+    expect(atlas.glyphFor(0x41, false, false)).toBe(0)
+    expect(atlas.slotRect(0)).toEqual({ u0: 0, v0: 0, u1: 0, v1: 0 })
+  })
+
   it('sets dirty on new glyphs and clears on demand', () => {
     const atlas = new GlyphAtlas(fakeRasterizer(), 100)
     expect(atlas.dirty).toBe(false)

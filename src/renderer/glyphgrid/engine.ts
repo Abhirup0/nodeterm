@@ -196,16 +196,22 @@ export class GlyphGridEngine {
     this.dirty = true
   }
 
-  /** Visible grid ids in draw order (z ascending, ties by registration order). Pure. */
+  /** Visible grid ids in draw order (z ascending, ties by registration order). Pure.
+   *
+   *  Culled against the PADDED rect, not the character matrix: a grid draws its opaque plate
+   *  (the node body, `padPx` world units wider on every side) before its cells, so a grid whose
+   *  cells have just left the viewport may still owe it a visible strip of body. Culling on the
+   *  cell rect alone would pop that strip away at every viewport edge — and, worse, would skip
+   *  the plate that occludes whatever sits underneath it. */
   drawOrder(): string[] {
     const visible: Rect = visibleWorldRect(this.camera, this.viewW, this.viewH)
     return [...this.grids.values()]
       .filter((g) =>
         rectsIntersect(visible, {
-          x: g.originX,
-          y: g.originY,
-          w: g.cols * g.cellW,
-          h: g.rows * g.cellH
+          x: g.originX - g.padPx,
+          y: g.originY - g.padPx,
+          w: g.cols * g.cellW + 2 * g.padPx,
+          h: g.rows * g.cellH + 2 * g.padPx
         })
       )
       .sort((a, b) => a.z - b.z || a.seq - b.seq)

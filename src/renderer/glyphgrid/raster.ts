@@ -13,8 +13,9 @@ export interface RasterFont {
  *  Two invariants this file must not break:
  *  1. The canvas is left fully TRANSPARENT except where a glyph is drawn — the atlas's slot 0
  *     (the cell at 0,0) is permanently blank and is what every space/unknown glyph samples. So
- *     never clear/fill the canvas here: GlyphAtlas never asks for slot 0, and a fill would put
- *     ink under it.
+ *     never clear/fill the WHOLE canvas here: GlyphAtlas never asks for slot 0, and a
+ *     full-surface fill would put ink under it. A slot-granular clear (evicting one glyph to
+ *     reuse its cell) is a legitimate future need and does not violate this.
  *  2. Every draw is CLIPPED to its cell rect, so a glyph wider than cellW (a CJK cell, an
  *     overhanging italic) cannot bleed into the neighbouring slot's texels. */
 export function createCanvasRasterizer(
