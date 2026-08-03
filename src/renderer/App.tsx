@@ -7,6 +7,7 @@ import { localSession } from './session/localSession'
 import { useSettings } from './state/settings'
 import { useViewMode } from './state/viewMode'
 import { setWebglEnabled } from './terminal/webgl-budget'
+import { resolveTerminalTheme } from './terminal/themes'
 import { resolveGpuRendering } from '../shared/webgl'
 import { isMacPlatform } from '../shared/platform-utils'
 
@@ -20,6 +21,17 @@ export default function App() {
   useEffect(() => {
     setWebglEnabled(resolveGpuRendering(gpu, isMacPlatform()))
   }, [gpu])
+
+  // Publish the active terminal theme's background as a CSS variable. xterm paints its own
+  // background, but the chrome AROUND it does not: the canvas node's body shows through the few px
+  // its xterm host is inset by (and through a co-attach letterbox), and the kanban card modal
+  // frames its terminal in an 8px pad. Without this both keep the app's colour and every
+  // non-default theme renders inside a mismatched frame.
+  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
+  useEffect(() => {
+    const { background } = resolveTerminalTheme(terminalTheme).theme
+    if (background) document.documentElement.style.setProperty('--term-bg', background)
+  }, [terminalTheme])
 
   // Keep the view-mode store's default in sync with the Settings choice, so projects the user
   // hasn't explicitly toggled follow it (and flip live when the setting changes).

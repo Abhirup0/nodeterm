@@ -674,11 +674,42 @@ export interface SpeechSettings {
   shortcut: string
 }
 
+/** xterm cursor shapes, mirrored here so `Settings` doesn't depend on the xterm typings (which
+ *  are renderer-only — `src/shared` is imported by main and the server shell too). */
+export type TerminalCursorStyle = 'block' | 'bar' | 'underline'
+export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'none'
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
   fontFamily: string
   cursorBlink: boolean
+  /** Terminal colour scheme — an id from `renderer/terminal/themes.ts`. Resolution is tolerant
+   *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
+   *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
+  terminalTheme: string
+  /** Weight for normal text. xterm's own default is `normal` (400). */
+  fontWeight: number
+  /** Weight for BOLD text. xterm's own default is `bold` (700). Lowering it is how you keep bold
+   *  legible in a thin font that renders 700 as a smear. */
+  fontWeightBold: number
+  /** Render bold text in the palette's BRIGHT colours (xterm's default, and the historical
+   *  terminal convention). Off keeps bold purely a weight, so colour still means what the program
+   *  said it meant. */
+  drawBoldTextInBrightColors: boolean
+  /** Minimum foreground/background contrast ratio, 1–21. 1 (xterm's default) disables the
+   *  adjustment entirely; 4.5 is WCAG AA, 7 is AAA, 21 forces black or white. Costs per-cell work
+   *  in the renderer, so it stays off unless asked for. */
+  terminalMinContrast: number
+  /** Cursor shape. */
+  cursorStyle: TerminalCursorStyle
+  /** Cursor shape while the terminal does NOT have focus. `outline` (xterm's own default) is what
+   *  tells you at a glance which of a canvas full of terminals is taking your keystrokes. */
+  cursorInactiveStyle: TerminalCursorInactiveStyle
+  /** Line height as a multiple of the font size (1 = xterm's default, i.e. no extra leading). */
+  terminalLineHeight: number
+  /** Extra horizontal space between cells, in CSS pixels (0 = xterm's default). */
+  terminalLetterSpacing: number
   /** Empty string = use the system default shell. */
   defaultShell: string
   gridSize: number
@@ -822,6 +853,18 @@ export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
   cursorBlink: true,
+  // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
+  // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
+  // defaults. Picking a theme is opt-in — an update must not repaint anybody's terminals.
+  terminalTheme: 'nodeterm-dark',
+  fontWeight: 400,
+  fontWeightBold: 700,
+  drawBoldTextInBrightColors: true,
+  terminalMinContrast: 1,
+  cursorStyle: 'block',
+  cursorInactiveStyle: 'outline',
+  terminalLineHeight: 1,
+  terminalLetterSpacing: 0,
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
