@@ -522,6 +522,12 @@ export function TerminalNode({
     if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
   }, [])
   const [naming, setNaming] = useState(false)
+  // Is a glyph grid attached RIGHT NOW? Drives the `term-node--glyphgrid` class on the node ROOT,
+  // which is what turns the node into a transparent window onto the shared canvas (see styles.css).
+  // React state, not an imperative `classList.add`: the root's className is recomputed from
+  // `selected`/`unread`/`working`/… on many renders and React rewrites the whole attribute when it
+  // changes, so a class added behind React's back would be wiped by the next selection change.
+  const [glyphMounted, setGlyphMounted] = useState(false)
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
@@ -1075,6 +1081,9 @@ export function TerminalNode({
       glyphGrid = null
       if (glyphGridRef.current === grid) glyphGridRef.current = null
       if (!attach && !grid) return true
+      // The node goes opaque again in the same commit the rows come back — skipped on the unmount
+      // path, where there is no component left to render it.
+      if (!disposed) setGlyphMounted(false)
       term.element?.classList.remove('glyphgrid-mode')
       const restored = attach ? attach.dispose() : true
       grid?.dispose()
@@ -1148,6 +1157,9 @@ export function TerminalNode({
       glyphAttach = attached
       glyphGridRef.current = handle
       host.classList.add('glyphgrid-mode')
+      // …and the node root gives up its background so the shared canvas shows through; the grid's
+      // own opaque plate is the terminal body's background from here on.
+      setGlyphMounted(true)
       // Paint order. The engine change-gates `setZ`, so a reorder that does not move this node
       // costs one comparison.
       glyphZUnsub = subscribeNodeZOrder(() => handle.setZ(nodeZFor(id)))
@@ -2252,7 +2264,7 @@ export function TerminalNode({
         isUnread ? ' unread' : ''
       }${status?.state === 'working' ? ' working' : ''}${
         status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
-      }`}
+      }${glyphMounted ? ' term-node--glyphgrid' : ''}`}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}

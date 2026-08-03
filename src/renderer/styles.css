@@ -1613,9 +1613,36 @@ body,
   height: 100%;
 }
 
-/* Shared glyph renderer (experimental, `glyphgrid`): this terminal's text is painted by the one
-   GPU canvas in the React Flow pane, so xterm's own text layers must not paint on top of it. The
-   class is added to the `.xterm` element only while a glyph grid is actually attached, and removed
+/* Shared glyph renderer (experimental, `glyphgrid`): a glyph-attached terminal becomes a
+   transparent WINDOW onto the one GPU canvas, which sits between the React Flow background and the
+   nodes (z-index 0 against the renderer's 4 — it cannot simply be raised above them, or a
+   terminal's glyphs would paint over any sticky / editor / subagent chrome that overlaps its body
+   rect; the plate only orders terminals among themselves). So the node root and its body give up
+   their backgrounds, and the grid's own opaque PLATE — the packed theme background, expanded by
+   padPx — becomes the terminal body's background. That is precisely what the plate is for.
+
+   The class is on the root only while a grid is ACTUALLY attached, so collapse, the ⌘M view, a
+   failed attach and every default renderer mode leave the node opaque exactly as today.
+
+   Nothing else needs restoring: every child that covers ground outside the plate already paints its
+   own background (`.term-node__header` var(--panel-header), `.node-tags` var(--panel),
+   `.term-node__find` #2a2a2a, and the body's own overlays). The selection ring and the unread glow
+   are border-color + box-shadow, both independent of the background.
+
+   TWO accepted degradations, both plate GEOMETRY, both Phase 2's call (a rounded / stencilled
+   plate) and both judged on the device checklist:
+     1. the plate is a square rect while the node has border-radius 10px, so the body's corners read
+        square in shared mode;
+     2. the plate covers the grid plus padPx, and a fit leaves up to one cell of slack at the right
+        and bottom of the body — that slack shows the canvas behind the node rather than the
+        terminal background. */
+.term-node--glyphgrid,
+.term-node--glyphgrid .term-node__body {
+  background: transparent;
+}
+
+/* …and xterm's own text layers must not paint over the canvas now showing through. This class is
+   added to the `.xterm` element only while a glyph grid is actually attached, and removed
    the moment it detaches — no default renderer mode ever matches this rule.
 
    `visibility: hidden`, NOT `display: none`: these elements still have to be LAID OUT. xterm
