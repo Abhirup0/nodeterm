@@ -684,6 +684,10 @@ export interface Settings {
   fontSize: number
   fontFamily: string
   cursorBlink: boolean
+  /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
+   *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
+   *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
+  appTheme: 'auto' | 'dark' | 'light'
   /** Terminal colour scheme — an id from `renderer/terminal/themes.ts`. Resolution is tolerant
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
@@ -856,6 +860,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
   // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
   // defaults. Picking a theme is opt-in — an update must not repaint anybody's terminals.
+  // Follows the terminal theme, whose own default is dark — so an install that never touches
+  // either setting keeps the dark chrome it has always had.
+  appTheme: 'auto',
   terminalTheme: 'nodeterm-dark',
   fontWeight: 400,
   fontWeightBold: 700,

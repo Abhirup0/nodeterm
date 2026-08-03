@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
+import { monacoTheme } from '../lib/appTheme'
+import { useAppTheme } from '../state/useAppTheme'
 import { renderMarkdown } from '../lib/markdown'
 import { useSettings } from '../state/settings'
 import { sshFs } from '../terminal/ssh-fs'
@@ -36,6 +38,16 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const modelRef = useRef<monaco.editor.ITextModel | null>(null)
   const savedRef = useRef<string>('')
   const hoveredRef = useRef(false)
+  // Monaco's theme is GLOBAL (see monacoTheme): applied at create from the ref, then re-asserted
+  // here whenever the app appearance changes. The ref exists because the create runs inside an
+  // async lazy-load continuation, where reading the reactive value would capture a stale one.
+  const appTheme = useAppTheme()
+  const appThemeRef = useRef(appTheme)
+  appThemeRef.current = appTheme
+  useEffect(() => {
+    if (editorRef.current) monaco.editor.setTheme(monacoTheme(appTheme))
+  }, [appTheme])
+
   const [dirty, setDirty] = useState(false)
   const [preview, setPreview] = useState(false)
   const [previewHtml, setPreviewHtml] = useState('')
@@ -196,7 +208,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       modelRef.current = model
       editor = monaco.editor.create(el, {
         model,
-        theme: 'vs-dark',
+        theme: monacoTheme(appThemeRef.current),
         fontSize: s.fontSize,
         fontFamily: s.fontFamily,
         minimap: { enabled: false },

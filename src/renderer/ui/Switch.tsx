@@ -18,7 +18,7 @@ export function Switch({
       onClick={() => onChange(!checked)}
       className={cn(
         'relative box-border block h-[24px] w-[42px] shrink-0 cursor-pointer rounded-full border-0 p-0 outline-none transition-colors duration-200',
-        checked ? 'bg-accent' : 'bg-white/15'
+        checked ? 'bg-accent' : 'bg-fill'
       )}
     >
       <span

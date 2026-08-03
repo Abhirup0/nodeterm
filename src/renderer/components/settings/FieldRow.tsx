@@ -26,7 +26,7 @@ export function FieldRow({
           <p className="mt-1 text-[13px] leading-relaxed text-muted">{description}</p>
         ) : null}
         {note ? (
-          <p className="mt-1 text-[12px] leading-relaxed text-[#ff9f0a]">{note}</p>
+          <p className="mt-1 text-[12px] leading-relaxed text-[color:var(--warn)]">{note}</p>
         ) : null}
       </div>
       <div className="shrink-0">{control}</div>

@@ -120,7 +120,7 @@ export function FontPicker({
         onChange={(e) => onChange(e.target.value)}
       />
       {missing ? (
-        <p className="text-[12px] leading-relaxed text-[#ff9f0a]">
+        <p className="text-[12px] leading-relaxed text-[color:var(--warn)]">
           “{primary}” isn’t installed — the next font in the stack is being used.
         </p>
       ) : null}

@@ -35,6 +35,14 @@
   --muted-2: rgba(var(--tint-rgb), 0.25); /* tertiaryLabel */
   --accent: #0a84ff; /* systemBlue */
   --accent-hover: #3a9bff;
+  /* Status hues, named so the light theme can darken them for a white field in one place. */
+  --danger: #ff453a;
+  --warn: #ff9f0a;
+  --caution: #ffd60a;
+  --success: #32d74b;
+  /* Canvas chrome that lives on React Flow props rather than in a rule. */
+  --canvas-dot: #4a4a4a;
+  --minimap-mask: rgba(10, 12, 18, 0.6);
   --git-graph-ref: var(--accent);
   --git-graph-remote-ref: #bf5af2;
   --git-graph-base-ref: #ff9f0a;
@@ -50,6 +58,50 @@
     sans-serif;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
+  /* Tells the engine which way its OWN chrome should go — scrollbars, form controls, the
+     `<select>` popups the settings panel is full of. Without it those stay dark on a light page. */
+  color-scheme: dark;
+}
+
+/* ---- Light appearance ----------------------------------------------------------------------
+   Set by App.tsx from `settings.appTheme` (see lib/appTheme.ts); absent = dark, so an install
+   that never picks one is byte-for-byte unchanged.
+
+   Almost all of this is `--tint-rgb`. Flipping it to black turns every one of the ~280
+   lighten-the-surface overlays into darken-the-surface, at the exact alpha each already used —
+   text, borders, hover fills and gradient stops together. What is left is the handful of opaque
+   surfaces, whose ELEVATION RAMP INVERTS: in dark, further back is darker; in light, further back
+   is greyer and what comes forward goes white. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --tint-rgb: 0, 0, 0;
+  --text-strong: #000;
+
+  --bg: #ffffff; /* content / canvas */
+  --panel: #f5f5f7; /* bars, panels, node chrome */
+  --panel-header: #ebebf0; /* elevated / hover */
+  --panel-2: #ebebf0;
+  --surface-black: #f7f7f9;
+  --surface-sunken: #f0f0f3; /* wells stay GREYER than the page */
+  --surface-deep: #e8e8ed;
+  --surface-raised: #ffffff; /* …while raised surfaces come up to white */
+  --surface-overlay: #ffffff;
+
+  /* systemBlue's light-mode value — the dark one is deliberately lighter for a dark field and
+     loses contrast against white. */
+  --accent: #007aff;
+  --accent-hover: #0a6ed1;
+
+  /* The status hues are tuned for a dark field: on white, yellow and orange fall under any
+     reasonable contrast floor. Darkened here rather than at each of their ~50 call sites. */
+  --danger: #d70015;
+  --warn: #b25000;
+  --caution: #8a6d00;
+  --success: #1c8b34;
+
+  /* Canvas dots read as grid, not as noise: on white the dark-mode grey is far too heavy. */
+  --canvas-dot: #d0d0d6;
+  --minimap-mask: rgba(255, 255, 255, 0.6);
 }
 
 * {
