@@ -103,9 +103,12 @@ export class GlyphGridEngine {
         engine.dirty = true
       },
       resize(cols, rows) {
+        // A same-shape resize is a no-op, not a realloc: resize callers are size observers
+        // that fire on every layout tick, and reallocating + dirtying there would keep the
+        // canvas redrawing forever.
         if (grid.cols === cols && grid.rows === rows) return
-        // Content is re-fed by the owner after a resize; carrying old cells over a shape
-        // change would misalign every row.
+        // Content is re-fed by the owner after a real shape change; carrying old cells over
+        // it would misalign every row.
         grid.cols = cols
         grid.rows = rows
         grid.cells = new Uint32Array(cols * rows * CELL_STRIDE)
