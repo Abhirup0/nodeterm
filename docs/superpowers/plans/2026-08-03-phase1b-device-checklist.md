@@ -94,7 +94,10 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       plate is a SQUARE rect under a node with `border-radius: 10px`, so the body's four corners
       read square. Judge how visible that is at normal zoom, and report any band you still see —
       a band now means the plate rect is not tracking the body, not that it is undersized by
-      design.
+      design. **Judge bands only AFTER a resize gesture settles.** The plate is re-pushed on the
+      ResizeObserver's coalesced tick (80 ms after the last resize event — the same settle the
+      terminal reflow waits for), so dragging a node's edge OUTWARD shows a transient band that
+      closes when you let go. That is expected; a band that survives the settle is the defect.
 - [ ] **2.14 Scroll area after a font change.** Change the font size while shared is on, then look
       at the scrollbar/scroll area geometry: the thumb matches the content, no phantom region.
 - [ ] **2.15 Cursor on a wide glyph.** Put the cursor ON a double-width character (type `日本語`

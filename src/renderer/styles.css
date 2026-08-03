@@ -1632,13 +1632,20 @@ body,
    background) and the strip under the header showed the raw canvas through the node. The selection
    ring and the unread glow are border-color + box-shadow, both independent of the background.
 
-   The plate is the BODY rect (`lib/glyphGridNode.ts` `bodyPlateRect`: the body's offset inside the
-   node plus its client size, pushed on the ResizeObserver's settled tick and carried along by the
-   position effect during a drag). It is deliberately NOT derived from the grid: cols×cellW rarely
-   divides a body exactly, xterm letterboxes the remainder, and nothing else paints it — a
-   grid-sized plate is what left a band of raw dot grid at the bottom and right of every terminal,
-   and tens of pixels of it on a letterboxed co-attach node. Being body-sized, it also swallows the
-   host's asymmetric `4px 2px 2px 6px` padding, which lies inside the body box, on all four sides.
+   The plate is the BODY rect (`lib/glyphGridNode.ts` `bodyPlateRect`, pushed on the
+   ResizeObserver's settled tick and carried along by the position effect during a drag). It is
+   deliberately NOT derived from the grid: cols×cellW rarely divides a body exactly, xterm
+   letterboxes the remainder, and nothing else paints it — a grid-sized plate is what left a band of
+   raw dot grid at the bottom and right of every terminal, and tens of pixels of it on a letterboxed
+   co-attach node. Being body-sized it also swallows the host's asymmetric `4px 2px 2px 6px`
+   padding on all four sides.
+
+   THIS FILE OWNS THE INVARIANT BEHIND THAT. What TerminalNode actually measures is
+   `.term-node__xterm` (the host), NOT `.term-node__body` — see `measurePlateRect` for the full
+   statement. The host's box equals the body's only because the rule below is `position: absolute;
+   inset: 0` and `.term-node__body` has NO padding and NO border. Add padding or a border to the
+   body, or stop the host being inset:0, and the plate silently under-covers again — the exact band
+   this design removed. Change either and the measurement must move to `.term-node__body`.
 
    ONE accepted degradation is left, and it is Phase 2's call (a rounded / stencilled plate),
    judged on the device checklist: the plate is a square rect while the node has border-radius

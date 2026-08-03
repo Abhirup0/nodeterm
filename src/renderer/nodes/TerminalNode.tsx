@@ -317,10 +317,10 @@ function screenOffsetInNode(term: Terminal): Vec2 | null {
 /**
  * The `offsetParent` walk itself — see `screenOffsetInNode` for the coordinate contract.
  *
- * Called with two different elements, which is why it is not folded back into that one. The
- * terminal SCREEN places the grid; the terminal BODY (`.term-node__body`) places the opaque PLATE.
- * The body is the node's transparent window onto the shared canvas, so its offset + client size IS
- * the ground the plate owes — and `.term-node__xterm`'s padding lies inside it, covered for free.
+ * Called with two different elements, which is why it is not folded back into that one:
+ * `.xterm-screen` places the grid, and the terminal HOST (`.term-node__xterm`, which stands in for
+ * the body — see `measurePlateRect` for the CSS invariant that makes it stand in) places the
+ * opaque PLATE.
  */
 function offsetInNode(el: HTMLElement | null): Vec2 | null {
   if (!el) return null
@@ -1128,11 +1128,12 @@ export function TerminalNode({
      * Push the grid to where the terminal screen actually is, and the PLATE to where the body is,
      * re-measuring both offsets inside the node. One null check when this terminal holds no grid.
      *
-     * Two independent rects on purpose (see `GridSpec.plateX`): the grid follows `.xterm-screen`
-     * and the plate follows `.term-node__body`, which is larger — the character matrix rarely
-     * divides the body exactly, and the leftover bands at the bottom/right are transparent node,
-     * i.e. raw canvas, unless the plate covers them. Both mutators change-gate themselves, so a
-     * settle tick that moved neither costs two comparisons.
+     * Two independent rects on purpose (see `GridSpec.plateX`): the grid follows `.xterm-screen`,
+     * the plate follows the host box `.term-node__xterm` standing in for the body (`measurePlateRect`
+     * states the CSS invariant behind that). The plate is the larger of the two — the character
+     * matrix rarely divides the body exactly, and the leftover bands at the bottom/right are
+     * transparent node, i.e. raw canvas, unless the plate covers them. Both mutators change-gate
+     * themselves, so a settle tick that moved neither costs two comparisons.
      */
     const syncGridOrigin = (): void => {
       const grid = glyphGrid
@@ -1147,8 +1148,24 @@ export function TerminalNode({
       if (plate) grid.setPlateRect(plate.x, plate.y, plate.w, plate.h)
     }
 
-    /** The body's world rect — the plate. Null when the body is not laid out inside a React Flow
-     *  node (a parked, detached element): leave the plate where it is rather than collapse it. */
+    /**
+     * The plate's world rect. Null when the element is not laid out inside a React Flow node (a
+     * parked, detached element): leave the plate where it is rather than collapse it.
+     *
+     * **What is measured, and the invariant that makes it correct — the canonical statement; the
+     * other plate comments point here.** `container` is `bodyRef`, which is on
+     * **`.term-node__xterm`** — the HOST, not `.term-node__body`. The plate has to cover the BODY
+     * (that is the element `.term-node--glyphgrid` makes transparent, so every square of it the
+     * plate misses shows raw canvas), and the host's box is the body's box only because
+     * **`.term-node__xterm` is `position: absolute; inset: 0` inside a body that has no padding and
+     * no border**. Its own `4px 2px 2px 6px` padding is inside its border box and `clientWidth/
+     * Height` include it, so the two rects coincide exactly.
+     *
+     * That is a CSS coincidence, not a guarantee. **If the host stops being `inset: 0`, or
+     * `.term-node__body` gains padding or a border, this must measure `.term-node__body` instead**
+     * — otherwise the plate silently under-covers again, which is precisely the band this whole
+     * change removed, and every comment around it would still claim it cannot happen.
+     */
     const measurePlateRect = (): { x: number; y: number; w: number; h: number } | null => {
       const offset = offsetInNode(container)
       if (!offset) return null

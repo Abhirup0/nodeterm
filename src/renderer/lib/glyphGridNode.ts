@@ -48,14 +48,20 @@ export interface WorldRect {
  * (`.term-node--glyphgrid` drops the background from the node root and its body), so the plate IS
  * the terminal's background — every square of body the plate does not cover shows raw canvas
  * through the node. The GRID cannot supply that rect: a body's width/height are not exact cell
- * multiples, so xterm letterboxes the remainder, and the plate is therefore sized to the BODY
- * (`bodyEl.clientWidth/clientHeight`) rather than derived from cols×cellW.
+ * multiples, so xterm letterboxes the remainder, and the plate is therefore sized to the body box
+ * rather than derived from cols×cellW.
+ *
+ * Pure numbers in, so it does not care WHICH element the caller measured — but the caller's choice
+ * is load-bearing and is documented at ONE place: `TerminalNode`'s `measurePlateRect` measures the
+ * HOST (`.term-node__xterm`), which equals the body's box only while the host is `inset: 0` inside
+ * a padding-less, border-less `.term-node__body`. If either changes, the caller must measure
+ * `.term-node__body` instead or the plate silently under-covers again.
  *
  * This replaced a `padPx` scalar taken from the host's asymmetric CSS padding (`4px 2px 2px 6px`,
  * reduced to its 6px maximum). That covered the left/top insets and nothing else, which is exactly
  * why bands showed at the BOTTOM and RIGHT — the fit slack there routinely exceeds 6px, and a
  * letterboxed node's bands are tens of pixels. The padding does not need reading at all now: it
- * lies INSIDE the body box, so a body-sized plate covers it on all four sides.
+ * lies INSIDE the measured box (`clientWidth/Height` include padding), covered on all four sides.
  *
  * `nodePos` + `bodyOffset` is the same LAYOUT sum `bodyWorldRect` does (zoom-independent — the
  * canvas transform scales pixels, not offsets). Non-finite or negative extents (an element that

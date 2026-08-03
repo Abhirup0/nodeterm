@@ -174,10 +174,13 @@ export class GlyphGridEngine {
         // canvas redrawing at the speed of the busiest invisible node.
         //
         // Safe because visibility can only change through `setCamera`/`setViewport`/`register`/
-        // `resize`/`setOrigin`/`setZ`, and every one of those dirties UNCONDITIONALLY. So the
-        // frame that brings a grid into view is always drawn, and its upload pass replays the
-        // range accumulated while it was hidden — deferred, never lost. Do not "optimize" any of
-        // those into a visibility-scoped dirty; that is the leg this stands on.
+        // `resize`/`setOrigin`/`setPlateRect`/`setZ`, and every one of those dirties
+        // UNCONDITIONALLY. (`setPlateRect` belongs on that list: culling is the union of the plate
+        // rect and the cell rect — see `drawOrder` — so the plate is a visibility INPUT, and a
+        // grid can become visible by its plate moving alone.) So the frame that brings a grid into
+        // view is always drawn, and its upload pass replays the range accumulated while it was
+        // hidden — deferred, never lost. Do not "optimize" any of those into a visibility-scoped
+        // dirty; that is the leg this stands on.
         if (grid.lastVisible) engine.dirty = true
       },
       setOrigin(x, y) {
