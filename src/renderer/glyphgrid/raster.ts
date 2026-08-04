@@ -49,9 +49,25 @@ function cssColor(packed: number): string {
  * `cellW - 0.5` would also capture genuinely INTERIOR edges that happen to land half a pixel short:
  * on a 10.5-wide cell the last dash of ┈ (U+2508) rounds to a right edge of exactly 10, and
  * snapping THAT welds it to the next cell's first dash — turning a rule whose gaps are the whole
- * character into a solid ─. The edges nobody could confuse either way (a half block's midline at
- * ~cell/2, an arm's own thickness) are orders of magnitude further out than either number; the
- * cases that decide the constant are the near misses, and they want it small.
+ * character into a solid ─. That is not one glyph's edge case: swept over U+2500–U+259F at 152
+ * fractional cell sizes, 6681 ops sit inside the band a 0.5 tolerance would have swallowed —
+ * U+2504/2505/2508/2509 and U+254c/254d as expected, but also the double rail ║ (U+2551) and
+ * U+2553, i.e. solid stems, not just dashes. The edges nobody could confuse either way (a half
+ * block's midline at ~cell/2, an arm's own thickness) are orders of magnitude further out than
+ * either number; the cases that decide the constant are the near misses, and they want it small.
+ *
+ * The MISS direction — a reaching edge coming back a hair SHORT, which a tight epsilon would fail
+ * to snap, leaving the very grout this exists to remove — cannot happen: `snap` returns the extent
+ * VERBATIM at or past the boundary, and both `span` branches reconstruct `x + w` to exactly that
+ * extent. The same sweep confirms it empirically (zero ops in `(cell - 1e-6, cell)`).
+ *
+ * The one case rounding can still weld is the opposite direction and is not the epsilon's doing:
+ * `snap`'s `Math.round` can push an INTERIOR edge slightly PAST the fractional cell (U+2508/2509 at
+ * cellW 4.95 land on exactly `ceil(cellW)`). The pre-snapping clip cut those at `cellW`; the
+ * whole-texel clip does not, so they now fill the partial texel and get edge-extended. It needs a
+ * cell under ~6 device px (a ~4px font) and can never exceed `ceil(cell)`, so it stays inside the
+ * slot's own box — named here because it is the only remaining path by which a dashed rule can
+ * appear continuous.
  */
 const FAR_EDGE_EPS = 1e-6
 
@@ -293,10 +309,16 @@ export function createCanvasRasterizer(
           // edge-extension comments predicted and the device round then measured: dips of 4–38
           // points surviving on the fractional axis after the gutters were extended.
           //
-          // It is not merely paperable, it is WRONG. In the COMPOSED frame the other half of that
-          // boundary pixel is the NEIGHBOUR CELL'S ink, so the correct colour there is FULL ink;
-          // today's half-blend is the wrong answer even at zoom 1, at the phases where a fragment
-          // lands on it. xterm never meets any of this because its atlas cells are integral device
+          // It is not merely paperable, it is WRONG where it matters most. At an INK|INK boundary
+          // (a block interior, a run of tmux rules — the reported defect) the other half of that
+          // pixel in the COMPOSED frame is the NEIGHBOUR CELL'S ink, so the correct colour is FULL
+          // ink and the snap makes the zoom-1 sample EXACTLY right, not merely closer. At an
+          // ink|background SILHOUETTE edge both spellings are approximations of a partly-covered
+          // pixel: the snap wins on the cell phases the sampler actually lands on at the sizes in
+          // use, and where it loses it is by less than the fractional part of one pixel's coverage
+          // — the same order as the NEAREST-at-1:1 error that has always been there. So expect a
+          // marginally HARDER silhouette on block art at zoom 1; that is this change, not a defect.
+          // xterm never meets any of this because its atlas cells are integral device
           // px — the whole-texel box is the closest thing this atlas has to that, so a glyph that
           // is DEFINED as filling its cell is drawn as filling the box. Step 3's replication then
           // continues real ink into the gutter and the geometry path's residual goes to zero.
@@ -385,9 +407,14 @@ export function createCanvasRasterizer(
       //    neighbouring cell's ink begins mid-texel, so beyond the boundary the colour is solidly
       //    the neighbour's, not a fade to background.
       //
-      //    RESIDUAL, stated so nobody hunts for it: 12.5 points, from the partial texel itself,
-      //    which no gutter content can cancel — it belongs to the cell. Only an axis whose device
-      //    cell extent is fractional has it at all.
+      //    RESIDUAL, stated so nobody hunts for it — AND SO NOBODY CLOSES THE WRONG REPORT: 12.5
+      //    points, from the partial texel itself, which no gutter content can cancel because it
+      //    belongs to the cell. Only an axis whose device cell extent is fractional has it at all,
+      //    and since FAR-EDGE SNAPPING (step 2) it applies to FONT-rendered glyphs ONLY: a
+      //    geometric glyph's partial texel is fully inked before it gets here, so block art and
+      //    box-drawing rules have no residual left. Grout on the mascot or on tmux separators is
+      //    therefore a REAL defect to escalate, not this documented limitation — the device
+      //    checklist (§2.7c residual 0b) classes it as blocking for exactly that reason.
       const prevSmoothing = ctx.imageSmoothingEnabled
       // A 1-texel source stretched over GUTTER_PX texels must REPLICATE, not resample: with
       // smoothing on the copy would fade back towards whatever the gutter held, which is the

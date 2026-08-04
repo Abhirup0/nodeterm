@@ -178,6 +178,13 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       path — and it takes a full-bleed glyph from outside those tables to see it at all. If you do:
       a barely-perceptible softening on the fractional axis, never a dark line. A visible dark line
       is the blocking report — note the display's dpr and whether it appears on one axis or both.
+      **Also check block art at ZOOM 1 while you are here, not only zoomed out.** Far-edge snapping
+      changes what the boundary texel holds, so it changes the 1:1 blit too. At an ink|ink boundary
+      (block interiors, a run of `─`) the snap makes the zoom-1 sample exactly right. At a
+      SILHOUETTE edge — where block art meets background — expect it to read marginally HARDER than
+      before: both spellings approximate a partly-covered pixel, and the difference is under one
+      pixel of coverage. Harder-but-clean is this change. A silhouette that looks NOTCHED, stepped
+      by a whole pixel, or that shifts the art's outline by a visible amount is a finding.
       **Expected residual 1 — the LOD clamp.** The sampler is forbidden to go deeper than mip level 2,
       because that is the deepest level the gutter can keep free of a neighbouring glyph's ink. Past
       roughly 25% the filter therefore cannot get any softer, and slight aliasing comes back. That is

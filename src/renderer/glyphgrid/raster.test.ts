@@ -310,6 +310,50 @@ describe('createCanvasRasterizer', () => {
     ])
   })
 
+  // The pin above draws ONE glyph. The property the widened box clip actually rests on is stronger
+  // — no op of ANY geometric glyph may exceed the whole-texel box on a fractional cell — and the
+  // clip is the only thing standing behind it, so a change to box-glyphs.ts's span/snap arithmetic
+  // could break it without touching this file. Sweeping the two ranges box-glyphs.ts owns makes it
+  // a standing guarantee rather than something re-derived by hand at review time. It also pins the
+  // FAR-EDGE SNAP's own precondition from the other side: `span` never returns a reaching edge
+  // SHORT of the cell extent, so FAR_EDGE_EPS has nothing to bridge and can stay at float noise.
+  it('never lets any box/block glyph escape the whole-texel box, over both ranges', () => {
+    const stub = stubCanvas()
+    active = stub
+    const cellW = 10.5
+    const cellH = 20.5
+    const font = { family: 'monospace', sizePx: 16, cellW, cellH }
+    const colsW = Math.max(1, Math.ceil(cellW))
+    const colsH = Math.max(1, Math.ceil(cellH))
+    const ink0 = 40
+    const r = createCanvasRasterizer(font, 4096)!
+    let drawn = 0
+    let short = 0
+    for (let code = 0x2500; code <= 0x259f; code++) {
+      stub.ops.length = 0
+      r.draw(code, false, false, ink0, ink0, FG, BG)
+      const ink = stub.ops.filter((o) => o.kind === 'fillRect' && o.fill === FG_CSS)
+      if (!ink.length) continue
+      drawn++
+      for (const op of ink) {
+        const [x, y, w, h] = op.args
+        expect(x).toBeGreaterThanOrEqual(ink0)
+        expect(y).toBeGreaterThanOrEqual(ink0)
+        expect(x + w).toBeLessThanOrEqual(ink0 + colsW)
+        expect(y + h).toBeLessThanOrEqual(ink0 + colsH)
+        // No edge may land a HAIR short of the cell extent. That band is what a "reaching" edge
+        // would look like if `span` ever returned float noise instead of the extent verbatim — the
+        // snap would miss it and the grout would survive. Edges further inside are ordinary
+        // interior geometry (a ┈ dash can legitimately end at 10 on a 10.5 cell), which is exactly
+        // what FAR_EDGE_EPS must NOT capture; only the noise band is evidence of a miss.
+        const right = x + w - ink0
+        if (right > cellW - 1e-3 && right < cellW) short++
+      }
+    }
+    expect(drawn).toBeGreaterThan(100)
+    expect(short).toBe(0)
+  })
+
   it('draws the geometric box/block glyphs in the FOREGROUND over the bg fill, never with the font', () => {
     const stub = stubCanvas()
     active = stub
