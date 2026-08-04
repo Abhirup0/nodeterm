@@ -141,9 +141,24 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       motion is where undersampling shows.
       **What should now be true.** Minified text degrades SMOOTHLY, in the same class as GPU mode:
       softer as it shrinks, but not speckling, crawling or shimmering under a pan. The atlas carries
-      a real mip chain and every slot carries a 2-texel gutter filled with its own background, so a
-      minified sample averages texels that belong to this cell instead of undersampling level 0 —
-      which is exactly what made a zoomed-out canvas sparkle before this phase.
+      a real mip chain and every slot carries a 2-texel gutter holding its own edge-extended content,
+      so a minified sample averages texels that belong to this cell instead of undersampling level 0
+      — which is exactly what made a zoomed-out canvas sparkle before this phase.
+      **Also check FULL-BLEED art, not just text (fixed after the 2026-08-04 device round).** Put
+      something made of solid blocks on screen — the **Claude mascot** (the `claude` splash art,
+      U+2580–U+259F) is the reference case — and keep a **tmux pane split** in view so its `│` `─`
+      separators are there too. At ~50% and ~25%: the mascot must read as SOLID, with **no dark
+      "grout" lines along the cell boundaries**, and the separators must stay continuous rather than
+      going dashed. Before the gutters were edge-extended, every cell boundary grew a dark seam — the
+      mip texel was averaging the cell's edge INK with the slot's flat background gutter — so a solid
+      block of mascot came out as a dark lattice. Seams coming back is a **blocking** report: say at
+      which zoom, and whether the dips track the cell pitch.
+      **Expected residual 0 — two adjacent full-bleed slots.** At the worst subpixel phase and mip
+      level 2, a bilinear tap can reach a gutter texel blending THIS slot's edge colour with the
+      NEIGHBOUR's; where two differently-coloured full-bleed cells sit side by side, each can
+      slightly tint the other's outermost sample. Same bounded, accepted class as the old
+      background-vs-background softness — a faint tint at extreme zoom-out, never a seam and never a
+      ghost glyph. Report it only if it reads as more than that.
       **Expected residual 1 — the LOD clamp.** The sampler is forbidden to go deeper than mip level 2,
       because that is the deepest level the gutter can keep free of a neighbouring glyph's ink. Past
       roughly 25% the filter therefore cannot get any softer, and slight aliasing comes back. That is

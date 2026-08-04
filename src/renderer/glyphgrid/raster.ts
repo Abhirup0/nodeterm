@@ -101,8 +101,9 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *  the backing store's format, and an alpha-less canvas would additionally let Chromium turn on
  *  LCD/subpixel antialiasing, whose per-channel coverage the RGBA blit would bake in per channel.
  *
- *  THE PAGE INVARIANT, in one line: the backdrop is per-slot bg over the FULL PITCH rect, and no
- *  slot's INK can reach another slot's texels at any level up to MAX_SAFE_LOD.
+ *  THE PAGE INVARIANT, in one line: every texel of a slot's PITCH rect carries content OWNED BY
+ *  THAT SLOT, and no slot's content can reach another slot's texels at any level up to
+ *  MAX_SAFE_LOD.
  *
  *  Stated that way on purpose — an earlier wording claimed the inter-slot page ground is "never
  *  sampled at LOD <= MAX_SAFE_LOD", which overstates it. Unallocated pitch cells DO enter a level-2
@@ -135,11 +136,19 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     there would bleed into slot 1's minified texels.
  *  2. A slot's whole pitch rect is REPAINTED with its background before it is inked, so reusing a
  *     cell after a reset can never leave a previous glyph's ink or a previous background behind.
- *  3. INK NEVER ENTERS THE GUTTER. Every glyph is clipped to the CELL rect — one gutter inside the
- *     pitch rect on each axis — so two slots' inks stay 2*GUTTER_PX texels apart, which is exactly
- *     the separation `MAX_SAFE_LOD = 2` is derived from (see GUTTER_PX in atlas.ts). A glyph wider
- *     than the cell (a CJK cell, an overhanging italic) is CUT, not allowed to overhang: a soft
- *     edge is a cosmetic loss on one glyph, a ghost glyph in a neighbour's mip is a rendering bug.
+ *  3. NO GLYPH DRAWS NEW GEOMETRY INTO THE GUTTER. Every glyph is clipped to the CELL rect — one
+ *     gutter inside the pitch rect on each axis — so two slots' inks stay 2*GUTTER_PX texels apart,
+ *     which is exactly the separation `MAX_SAFE_LOD = 2` is derived from (see GUTTER_PX in
+ *     atlas.ts). A glyph wider than the cell (a CJK cell, an overhanging italic) is CUT, not
+ *     allowed to overhang: a soft edge is a cosmetic loss on one glyph, a ghost glyph in a
+ *     neighbour's mip is a rendering bug.
+ *
+ *     What the gutter then HOLDS is a separate question, and the answer changed in the 2026-08-04
+ *     device round: it carries this slot's OWN EDGE-EXTENDED CONTENT — background wherever the ink
+ *     does not reach the cell edge (all ordinary text, i.e. bit-identical to the old flat bg fill),
+ *     the edge ink where it does (blocks, box-drawing lines, progress bars). What must never enter
+ *     the gutter is a NEIGHBOUR's content, and pitch tiling still guarantees exactly that. See
+ *     step 3 in `draw` for why a bg-only gutter grew a dark seam between full-bleed cells.
  *  4. The background fill covers the pitch EXACTLY — not more (it would erase a neighbour's
  *     gutter, and with it that neighbour's mip skirt) and not less (a strip of page ground inside
  *     the mip neighbourhood would blend transparency into the slot at LOD 1/2).
@@ -166,6 +175,13 @@ export function createCanvasRasterizer(
   // below has to cover exactly one pitch cell.
   const pitchW = slotPitch(font.cellW)
   const pitchH = slotPitch(font.cellH)
+  // The WHOLE texel columns/rows the cell occupies — the pitch minus its two gutters, by
+  // construction (`slotPitch` is `max(1, ceil(cell)) + 2*GUTTER_PX`). The edge extension works in
+  // these rather than in the fractional cell because a texel is the smallest thing it can copy,
+  // and deriving them from `slotPitch`'s own expression is what keeps "cell box + two gutters ==
+  // pitch" true for a sub-texel cell too.
+  const colsW = Math.max(1, Math.ceil(font.cellW))
+  const colsH = Math.max(1, Math.ceil(font.cellH))
   return {
     cellW: font.cellW,
     cellH: font.cellH,
@@ -189,16 +205,20 @@ export function createCanvasRasterizer(
       //    It also repaints everything a previous tenant of this slot left behind.
       //    UNCLIPPED, and the two candidate clips fail differently: a CELL clip — the one installed
       //    below for the ink — would be actively WRONG here, since it is exactly the gutter (the
-      //    part of the pitch outside the cell) that has to carry this slot's background for the mip
-      //    chain to blend background into background instead of into page ground. A PITCH clip
+      //    part of the pitch outside the cell) that has to carry this slot's own content for the
+      //    mip chain to blend this slot with itself instead of with page ground. A PITCH clip
       //    would merely be REDUNDANT: the rect is already exact and `cellXY` is the only source of
       //    the origin, so there is nothing for it to catch.
+      //    This is the BASE layer of the gutter, not the last word on it: step 3 replaces the parts
+      //    of it that sit against ink with that ink, and leaves the rest exactly as filled here.
       ctx.fillStyle = cssColor(bg)
       ctx.fillRect(x - GUTTER_PX, y - GUTTER_PX, pitchW, pitchH)
       // 2. THE INK, clipped to the CELL rect — never the pitch rect. The cell always fits inside
-      //    the pitch (the pitch rounds the cell UP and adds a gutter on each side), so this clip
-      //    leaves at least GUTTER_PX ink-free texels on every side, which is the separation
-      //    MAX_SAFE_LOD = 2 is derived from. A glyph that overflows the cell is CUT here.
+      //    the pitch (the pitch rounds the cell UP and adds a gutter on each side), so no glyph can
+      //    generate geometry closer than GUTTER_PX to the next slot, which is the separation
+      //    MAX_SAFE_LOD = 2 is derived from. A glyph that overflows the cell is CUT here. (Step 3
+      //    may then COPY this ink outward into our own gutter — a copy of our own content, never a
+      //    reason to relax this clip.)
       ctx.save()
       ctx.beginPath()
       ctx.rect(x, y, font.cellW, font.cellH)
@@ -220,6 +240,74 @@ export function createCanvasRasterizer(
         ctx.fillText(String.fromCodePoint(code), x, y + baseline)
       }
       ctx.restore()
+      // 3. THE EDGE EXTENSION — clamp-to-edge padding, the standard atlas technique. Replicate the
+      //    cell's outermost texel row/column outward into the gutter, so the gutter continues the
+      //    cell instead of falling back to flat background.
+      //
+      //    WHY (device round, 2026-08-04). The Claude mascot — solid block glyphs — grew dark
+      //    "grout" lines along every cell boundary at zoom < 1, and tmux's │ ─ pane separators went
+      //    dashed. The signature was exact: dips at the cell PITCH, deepest ≈ (ink+bg)/2 — a mip
+      //    texel averaging cell-edge INK with the slot's bg-filled gutter. Ordinary text never
+      //    showed it because its outer texels are background anyway; every glyph whose ink TOUCHES
+      //    the cell edge did. GPU mode is immune because CSS downscales the COMPOSED frame, where
+      //    a cell edge blends with the NEIGHBOUR'S ink rather than with per-slot background.
+      //
+      //    The MAX_SAFE_LOD derivation never asked the gutter to be BACKGROUND — it asks that
+      //    levels 0..2 be free of the NEIGHBOUR's texels, which pitch tiling gives regardless of
+      //    what this slot writes into its own gutter. So the gutter may carry this slot's edge
+      //    colour, and then a minified sample at the cell edge keeps averaging ink with ink.
+      //
+      //    THE SAMPLED EXTENT DOES NOT CHANGE. `GlyphAtlas.slotRect` (and the shader's derivation
+      //    of it) still spans exactly the cell — the extension is a mip/filter SKIRT, not extra
+      //    glyph. Growing the uv rect to include the gutter would pull the padding into the glyph
+      //    at zoom 1 and stretch every cell by two texels; that is a different (and wrong) change.
+      //
+      //    UNIFORM, never conditional: this runs for every glyph, including the ones whose ink
+      //    stops short of the edge — there it copies background over background and is a visual
+      //    no-op, bit-identical to what the fill in step 1 already left. Detecting "does this glyph
+      //    bleed?" would cost a readback per slot and buy nothing.
+      //
+      //    OUTSIDE THE CLIP, deliberately: `ctx.restore()` above has dropped the CELL clip, and it
+      //    would eat these strips whole — they land entirely in the gutter, which is the part of
+      //    the pitch that clip exists to exclude.
+      //
+      //    The source is the page CANVAS ITSELF. A self-referencing `drawImage` is well-defined in
+      //    2D canvas (the source region is read as a snapshot before anything is written), which is
+      //    what lets the top/bottom strips below read a row the side strips have just extended.
+      //
+      //    FRACTIONAL CELLS: the cell's outer edge falls inside a texel in general, so the border
+      //    texel being copied may be a partial-coverage ANTIALIASED blend of ink and background.
+      //    Replicating the blend is CORRECT — it is still this slot's own edge colour, and it is
+      //    exactly the colour the sampler would tap just inside the cell.
+      const prevSmoothing = ctx.imageSmoothingEnabled
+      // A 1-texel source stretched over GUTTER_PX texels must REPLICATE, not resample: with
+      // smoothing on the copy would fade back towards whatever the gutter held, which is the
+      // background this whole step exists to get out of the way.
+      ctx.imageSmoothingEnabled = false
+      // ORDER: the two SIDE strips first, over the cell's rows only; then the two full-PITCH-wide
+      // ROW strips. By the time the top strip copies row `y`, that row already carries the side
+      // strips' texels in the left and right gutters — so each corner of the gutter ends up
+      // holding the cell's CORNER texel, which is what a clamp-to-edge pad means. Doing the rows
+      // first (and the sides over the full pitch height) would work equally well; what must not
+      // happen is both passes covering only the cell's own extent, which leaves the four corner
+      // squares as stale background.
+      ctx.drawImage(canvas, x, y, 1, colsH, x - GUTTER_PX, y, GUTTER_PX, colsH)
+      ctx.drawImage(canvas, x + colsW - 1, y, 1, colsH, x + colsW, y, GUTTER_PX, colsH)
+      ctx.drawImage(canvas, x - GUTTER_PX, y, pitchW, 1, x - GUTTER_PX, y - GUTTER_PX, pitchW, GUTTER_PX)
+      ctx.drawImage(
+        canvas,
+        x - GUTTER_PX,
+        y + colsH - 1,
+        pitchW,
+        1,
+        x - GUTTER_PX,
+        y + colsH,
+        pitchW,
+        GUTTER_PX
+      )
+      // Restored rather than left off: the flag is page-wide state, and the next slot's fills are
+      // not this call's business.
+      ctx.imageSmoothingEnabled = prevSmoothing
     }
   }
 }

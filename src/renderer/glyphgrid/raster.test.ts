@@ -4,44 +4,147 @@ import { packColor } from './cells'
 import { createCanvasRasterizer } from './raster'
 
 /**
- * These tests pin the two rects a colored draw uses, because the whole mip story rests on them:
+ * These tests pin the three rects a colored draw uses, because the whole mip story rests on them:
  * the slot's own BACKGROUND covers the FULL PITCH rect (gutter included — that is what makes a
- * level-1/2 texel blend this slot's background with itself rather than with the page ground),
- * while the INK is clipped to the CELL rect and may never touch the gutter (the MAX_SAFE_LOD = 2
- * derivation in `atlas.ts` counts on 2*GUTTER_PX clean texels between two slots' inks).
+ * level-1/2 texel blend this slot's content with itself rather than with the page ground), the
+ * INK is clipped to the CELL rect (a glyph may never draw NEW geometry into the gutter — the
+ * MAX_SAFE_LOD = 2 derivation in `atlas.ts` counts on 2*GUTTER_PX texels of this-slot-only content
+ * between two slots' inks), and the gutter is then EDGE-EXTENDED from the cell's own border texels
+ * so a full-bleed glyph continues into it instead of fading to background.
  *
- * Node has no OffscreenCanvas, so the contract is checked against a recording stub rather than
- * real pixels.
+ * Node has no OffscreenCanvas, so the contract is checked against a stub. The stub does two things:
+ * it RECORDS the op list (order and geometry) and it maintains a tiny PIXEL MODEL of the page.
+ * Both are needed — the replication is uniform by design (it runs for every glyph, and is a visual
+ * no-op when the ink does not reach the cell edge), so the op list alone can never distinguish a
+ * full-bleed glyph's gutter from an ordinary letter's.
  */
 
 interface Op {
-  kind: 'fillRect' | 'fillText' | 'clip' | 'clearRect'
+  kind: 'fillRect' | 'fillText' | 'clip' | 'clearRect' | 'drawImage'
   fill?: string
   args: number[]
   text?: string
+  /** `imageSmoothingEnabled` as it stood when the op was recorded. Only meaningful for drawImage:
+   *  a 1-texel source stretched over the gutter must REPLICATE, never resample. */
+  smoothing?: boolean
+  /** Whether the drawImage source was the rasterizer's OWN canvas — the only source it ever uses. */
+  self?: boolean
 }
 
-function stubCanvas(): { ops: Op[]; restore: () => void } {
+/** The active clip as half-open texel bounds, or `null` for "no clip". */
+type Clip = { x0: number; y0: number; x1: number; y1: number } | null
+
+/**
+ * The pixel model is deliberately HARD-EDGED: it answers "whose content is in this texel", not
+ * "what exact blend". A real canvas antialiases a fractional fill edge, and replicating such a
+ * partial-coverage texel into the gutter is correct precisely because it is still the slot's OWN
+ * edge colour — but a coverage model is not needed to check WHICH slot's content lands where.
+ *
+ * `fillText` paints NOTHING into the model: the stub has no font engine. That is not a gap for
+ * these tests, it is the case they need — an ordinary letter is exactly a glyph whose ink stays
+ * inside the cell, and the model then shows the replication copying background over background.
+ */
+function stubCanvas(sizePx = 256): {
+  ops: Op[]
+  pixelAt: (x: number, y: number) => string
+  /** The page-wide `imageSmoothingEnabled` as it stands NOW — for asserting it was restored. */
+  smoothingNow: () => boolean
+  restore: () => void
+} {
   const ops: Op[] = []
+  const px: string[] = new Array(sizePx * sizePx).fill('')
+  let selfCanvas: unknown = null
+  let clip: Clip = null
+  let pending: { x: number; y: number; w: number; h: number } | null = null
+  const clipStack: Clip[] = []
+
+  const setPixel = (x: number, y: number, color: string): void => {
+    if (x < 0 || y < 0 || x >= sizePx || y >= sizePx) return
+    if (clip && (x < clip.x0 || y < clip.y0 || x >= clip.x1 || y >= clip.y1)) return
+    px[y * sizePx + x] = color
+  }
+  // Texel centres, i.e. the pixel whose centre falls inside [a, a+len). `Math.round` is that rule
+  // for every rect these tests use (all of them start on a whole texel).
+  const paint = (x: number, y: number, w: number, h: number, color: string): void => {
+    for (let j = Math.round(y); j < Math.round(y + h); j++)
+      for (let i = Math.round(x); i < Math.round(x + w); i++) setPixel(i, j, color)
+  }
+
   const ctx = {
     font: '',
     textBaseline: '',
     fillStyle: '',
-    save() {},
-    restore() {},
-    beginPath() {},
+    imageSmoothingEnabled: true,
+    save() {
+      clipStack.push(clip)
+    },
+    restore() {
+      clip = clipStack.pop() ?? null
+    },
+    beginPath() {
+      pending = null
+    },
     rect(x: number, y: number, w: number, h: number) {
       ops.push({ kind: 'clip', args: [x, y, w, h] })
+      pending = { x, y, w, h }
     },
-    clip() {},
+    clip() {
+      if (!pending) return
+      const next = {
+        x0: Math.round(pending.x),
+        y0: Math.round(pending.y),
+        x1: Math.round(pending.x + pending.w),
+        y1: Math.round(pending.y + pending.h)
+      }
+      clip = clip
+        ? {
+            x0: Math.max(clip.x0, next.x0),
+            y0: Math.max(clip.y0, next.y0),
+            x1: Math.min(clip.x1, next.x1),
+            y1: Math.min(clip.y1, next.y1)
+          }
+        : next
+    },
     fillRect(x: number, y: number, w: number, h: number) {
       ops.push({ kind: 'fillRect', fill: ctx.fillStyle, args: [x, y, w, h] })
+      paint(x, y, w, h, ctx.fillStyle)
     },
     clearRect(x: number, y: number, w: number, h: number) {
       ops.push({ kind: 'clearRect', args: [x, y, w, h] })
+      paint(x, y, w, h, '')
     },
     fillText(text: string, x: number, y: number) {
       ops.push({ kind: 'fillText', fill: ctx.fillStyle, args: [x, y], text })
+    },
+    /** Only the 9-argument form, and only with WHOLE-texel destination rects — which is all the
+     *  rasterizer's gutter replication uses. Nearest-neighbour sampling off a SNAPSHOT of the page,
+     *  which is what the spec guarantees for a self-referencing drawImage. */
+    drawImage(
+      src: unknown,
+      sx: number,
+      sy: number,
+      sw: number,
+      sh: number,
+      dx: number,
+      dy: number,
+      dw: number,
+      dh: number
+    ) {
+      ops.push({
+        kind: 'drawImage',
+        args: [sx, sy, sw, sh, dx, dy, dw, dh],
+        smoothing: ctx.imageSmoothingEnabled,
+        self: src === selfCanvas
+      })
+      const snap = px.slice()
+      for (let j = 0; j < dh; j++) {
+        for (let i = 0; i < dw; i++) {
+          const u = Math.floor(sx + ((i + 0.5) * sw) / dw)
+          const v = Math.floor(sy + ((j + 0.5) * sh) / dh)
+          if (u < 0 || v < 0 || u >= sizePx || v >= sizePx) continue
+          setPixel(dx + i, dy + j, snap[v * sizePx + u])
+        }
+      }
     },
     // A face whose line box exactly fills a 20px cell, so the baseline math is not the subject.
     measureText: () => ({ fontBoundingBoxAscent: 16, fontBoundingBoxDescent: 4 })
@@ -51,13 +154,21 @@ function stubCanvas(): { ops: Op[]; restore: () => void } {
     constructor(
       public width: number,
       public height: number
-    ) {}
+    ) {
+      selfCanvas = this
+    }
     getContext(): unknown {
       return ctx
     }
   }
   return {
     ops,
+    pixelAt(x: number, y: number) {
+      return px[y * sizePx + x]
+    },
+    smoothingNow() {
+      return ctx.imageSmoothingEnabled
+    },
     restore() {
       ;(globalThis as Record<string, unknown>).OffscreenCanvas = prev
     }
@@ -68,6 +179,10 @@ const FONT = { family: 'monospace', sizePx: 16, cellW: 10, cellH: 20 }
 /** The pitch this font lays out on: ceil(cell) + a gutter on each side. */
 const PITCH_W = 10 + 2 * GUTTER_PX
 const PITCH_H = 20 + 2 * GUTTER_PX
+/** The WHOLE texel columns/rows a cell occupies — `ceil(cell)`, i.e. the pitch minus its gutters.
+ *  The edge-extension works in these because a texel is the smallest thing it can copy. */
+const COLS_W = 10
+const COLS_H = 20
 
 /** A realistic INK origin — the corner of a pitch cell plus one gutter on each axis, which is
  *  exactly what `GlyphAtlas.cellXY` hands the rasterizer. */
@@ -132,7 +247,13 @@ describe('createCanvasRasterizer', () => {
     expect(Number.isInteger(ink.args[1])).toBe(true)
   })
 
-  it('keeps every ink op inside the CELL rect — the gutter must stay clean for the mip chain', () => {
+  // The claim is about GEOMETRY, not about pixels: no glyph may generate NEW ink outside the cell
+  // rect, because the MAX_SAFE_LOD derivation counts on 2*GUTTER_PX texels between two slots' inks.
+  // The gutter is not required to be BACKGROUND — the edge-extension strips below copy this slot's
+  // own border texels into it, and a copy of the slot's own content is not a second slot's ink. So
+  // this pin filters `fillRect`/`fillText` ops only, and the replication `drawImage`s are checked
+  // separately for their exact (this-slot-only) source and destination rects.
+  it('keeps every ink op inside the CELL rect — no glyph draws new geometry into the gutter', () => {
     const stub = stubCanvas()
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
@@ -226,5 +347,123 @@ describe('createCanvasRasterizer', () => {
     // fill may reach slot 0's pitch rect.
     atlas.glyphFor(0x41, false, false, FG, BG)
     expect(stub.ops.some((o) => o.args[0] < PITCH_W && o.args[1] < PITCH_H)).toBe(false)
+  })
+
+  /**
+   * EDGE-EXTENDED GUTTERS (device round, 2026-08-04). A gutter filled with flat background made the
+   * mip chain average cell-edge INK with background, which drew a dark "grout" line along every
+   * boundary between two full-bleed cells at zoom < 1 (the Claude mascot's block art, tmux's │ ─
+   * pane separators). The fix is the standard atlas one: clamp-to-edge padding — the gutter carries
+   * the cell's own outermost texel row/column, so a minified sample keeps averaging ink with ink.
+   */
+  describe('gutter edge-extension', () => {
+    /** All four replication ops, in the order the rasterizer must emit them. */
+    const strips = (ops: Op[]): Op[] => ops.filter((o) => o.kind === 'drawImage')
+
+    it('replicates the cell border into the gutter — sides first, then full-pitch rows for the corners', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x2588, false, false, INK_X, INK_Y, FG, BG) // █
+
+      // Order is load-bearing: the LEFT/RIGHT strips run first over the cell's rows only, then the
+      // TOP/BOTTOM strips copy a full-PITCH-wide row — by which time that row already holds the
+      // side strips, so each corner of the gutter ends up with the cell's corner texel.
+      expect(strips(stub.ops).map((o) => o.args)).toEqual([
+        // left: the cell's first column, stretched over the left gutter
+        [INK_X, INK_Y, 1, COLS_H, INK_X - GUTTER_PX, INK_Y, GUTTER_PX, COLS_H],
+        // right: its last column, over the right gutter
+        [
+          INK_X + COLS_W - 1,
+          INK_Y,
+          1,
+          COLS_H,
+          INK_X + COLS_W,
+          INK_Y,
+          GUTTER_PX,
+          COLS_H
+        ],
+        // top: the (now side-extended) first row, over the full pitch width
+        [INK_X - GUTTER_PX, INK_Y, PITCH_W, 1, INK_X - GUTTER_PX, INK_Y - GUTTER_PX, PITCH_W, GUTTER_PX],
+        // bottom: mirrored
+        [
+          INK_X - GUTTER_PX,
+          INK_Y + COLS_H - 1,
+          PITCH_W,
+          1,
+          INK_X - GUTTER_PX,
+          INK_Y + COLS_H,
+          PITCH_W,
+          GUTTER_PX
+        ]
+      ])
+      // The source is the page itself — a self-referencing drawImage, which 2D canvas defines as
+      // reading a snapshot.
+      expect(strips(stub.ops).every((o) => o.self)).toBe(true)
+    })
+
+    it('disables image smoothing while replicating and restores it afterwards', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x2588, false, false, INK_X, INK_Y, FG, BG)
+      // A 1-texel source stretched over GUTTER_PX texels has to REPLICATE, not resample: smoothing
+      // would fade the copy back towards whatever the gutter held before.
+      expect(strips(stub.ops).map((o) => o.smoothing)).toEqual([false, false, false, false])
+      // …and the page-wide flag is left as it was found, because the next slot's bg fill and ink
+      // are not this call's business. (Every draw restores it, so the second call still sees it
+      // disabled only for its own strips.)
+      r.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
+      expect(strips(stub.ops).map((o) => o.smoothing)).toEqual(new Array(8).fill(false))
+      expect(stub.smoothingNow()).toBe(true)
+    })
+
+    /** Every texel of the slot's PITCH rect that lies outside its whole-texel cell box. */
+    const gutterTexels = (): { x: number; y: number }[] => {
+      const out: { x: number; y: number }[] = []
+      for (let y = INK_Y - GUTTER_PX; y < INK_Y - GUTTER_PX + PITCH_H; y++)
+        for (let x = INK_X - GUTTER_PX; x < INK_X - GUTTER_PX + PITCH_W; x++)
+          if (x < INK_X || x >= INK_X + COLS_W || y < INK_Y || y >= INK_Y + COLS_H) out.push({ x, y })
+      return out
+    }
+
+    it('a FULL-BLEED glyph leaves the whole gutter — corners included — carrying its ink', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      r.draw(0x2588, false, false, INK_X, INK_Y, FG, BG) // █ fills the cell edge to edge
+      for (const { x, y } of gutterTexels()) expect(`${x},${y}:${stub.pixelAt(x, y)}`).toBe(`${x},${y}:${FG_CSS}`)
+    })
+
+    it('a glyph whose ink stays inside the cell leaves the gutter as background', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      r.draw(0x41, false, false, INK_X, INK_Y, FG, BG) // an ordinary letter — ink nowhere near the edge
+      // Replication still runs (it is uniform, never conditional on where the ink landed); for
+      // ordinary text it copies background over background, i.e. bit-identical to the old bg-filled
+      // gutter. That is why no detection of "does this glyph bleed?" is needed anywhere.
+      for (const { x, y } of gutterTexels()) expect(`${x},${y}:${stub.pixelAt(x, y)}`).toBe(`${x},${y}:${BG_CSS}`)
+    })
+
+    it('a half block continues the ink on ITS side only — the other gutter stays background', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      r.draw(0x258c, false, false, INK_X, INK_Y, FG, BG) // ▌ left half
+
+      const midY = INK_Y + COLS_H / 2
+      // Left gutter: ink, all the way out to the pitch edge.
+      for (let x = INK_X - GUTTER_PX; x < INK_X; x++) expect(stub.pixelAt(x, midY)).toBe(FG_CSS)
+      // Right gutter: background, because the cell's last column is background.
+      for (let x = INK_X + COLS_W; x < INK_X + COLS_W + GUTTER_PX; x++)
+        expect(stub.pixelAt(x, midY)).toBe(BG_CSS)
+      // And the corners follow the side they belong to — the property the strip ORDER buys.
+      expect(stub.pixelAt(INK_X - GUTTER_PX, INK_Y - GUTTER_PX)).toBe(FG_CSS)
+      expect(stub.pixelAt(INK_X + COLS_W + GUTTER_PX - 1, INK_Y - GUTTER_PX)).toBe(BG_CSS)
+      expect(stub.pixelAt(INK_X - GUTTER_PX, INK_Y + COLS_H + GUTTER_PX - 1)).toBe(FG_CSS)
+    })
   })
 })

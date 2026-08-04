@@ -35,24 +35,37 @@ export interface GlyphRasterizer {
 }
 
 /**
- * The ink-free margin, in page texels, on EVERY side of a slot's cell rect. Exported because three
- * modules have to agree on it: this file lays the page out with it, raster.ts fills it with the
- * slot's own background colour, and gl-webgl2.ts offsets its uv derivation by it.
+ * The margin, in page texels, on EVERY side of a slot's cell rect that belongs to this slot alone.
+ * Exported because three modules have to agree on it: this file lays the page out with it,
+ * raster.ts fills it with the slot's own content, and gl-webgl2.ts offsets its uv derivation by it.
+ *
+ * WHAT THE GUTTER CARRIES. Not simply background — the slot's own EDGE-EXTENDED content: raster.ts
+ * fills it with the slot's background and then replicates the cell's outermost texel row/column
+ * outward into it (clamp-to-edge padding). For ordinary text the border texels ARE background, so
+ * that is bit-identical to a flat bg fill; for a glyph whose ink reaches the cell edge (blocks, box
+ * lines, progress bars) the gutter continues the INK, which is what stops a minified sample at the
+ * cell edge from averaging ink with background and drawing a dark seam. See step 3 of `draw` in
+ * raster.ts for the device report that forced this.
  *
  * WHY 2 — the derivation, since this number is what bounds the usable mip chain. A mip level-n
- * texel is the average of an aligned 2^n × 2^n block of level-0 texels. Two slots' inks are
+ * texel is the average of an aligned 2^n × 2^n block of level-0 texels. Two slots' CELLS are
  * separated by 2*GUTTER_PX = 4 texels of gutter (this slot's plus the neighbour's), so a level-n
- * block can only contain ink from BOTH slots once it is wider than that separation, i.e. once
+ * block can only contain content from BOTH slots once it is wider than that separation, i.e. once
  * 2^n > 4 → n >= 3. Levels 0, 1 and 2 therefore never mix a foreign glyph into this slot, which is
- * why gl-webgl2 clamps TEXTURE_MAX_LOD to MAX_SAFE_LOD = 2.
+ * why gl-webgl2 clamps TEXTURE_MAX_LOD to MAX_SAFE_LOD = 2. Note what the derivation does and does
+ * not require: it requires the gutter to hold colours OWNED BY THIS SLOT, which the pitch layout
+ * guarantees whatever raster.ts writes there — it never required them to be background.
  *
  * What the gutter does NOT promise, stated so nobody reads more into it: bilinear filtering WITHIN
- * a level still reaches the adjacent texel, which at level 2 can be a pure-gutter texel holding a
- * blend of this slot's background and the neighbour's. That is a soft edge between two BACKGROUND
- * colours at heavy zoom-out — never a ghost glyph — and it is the residual the LOD clamp accepts.
- * The promise is about INK, and it holds only while raster.ts keeps ink inside the cell rect: ink
- * allowed to overhang into the gutter shortens the ink-to-ink separation and invalidates the
- * derivation above.
+ * a level still reaches the adjacent texel, which at level 2 can be a pure-gutter texel blending
+ * this slot's edge colour with the neighbour's. Usually that is background against background; two
+ * adjacent full-bleed slots make it ink against ink, possibly tinting each other's outermost
+ * sample. Either way it is a soft edge between two slots' EDGE colours at heavy zoom-out — never a
+ * ghost glyph — and it is the residual the LOD clamp accepts. The promise is that no glyph GEOMETRY
+ * is ever drawn outside its cell rect, and it holds only while raster.ts keeps clipping the ink:
+ * ink allowed to overhang into the gutter shortens the cell-to-cell separation and invalidates the
+ * derivation above. (Copying this slot's own edge texels outward does not — a copy of our own
+ * content is not a second slot's ink.)
  */
 export const GUTTER_PX = 2
 

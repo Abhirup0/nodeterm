@@ -8,11 +8,12 @@ import { plateRectDevice } from './plate'
  * The deepest mip level the atlas may ever be sampled at (`TEXTURE_MAX_LOD`).
  *
  * DERIVED FROM `GUTTER_PX`, which is why it is computed rather than typed: a level-n texel is the
- * average of an aligned 2^n x 2^n block of level-0 texels, and two slots' inks are separated by
- * `2 * GUTTER_PX` ink-free texels (this slot's gutter plus its neighbour's — see GUTTER_PX in
- * atlas.ts). A level-n block can therefore only reach ink from BOTH slots once 2^n exceeds that
- * separation, so the last safe level is `floor(log2(2 * GUTTER_PX))` = 2 for the gutter of 2 this
- * atlas lays out. Raising the gutter raises this on its own; the two can never disagree.
+ * average of an aligned 2^n x 2^n block of level-0 texels, and two slots' CELLS are separated by
+ * `2 * GUTTER_PX` texels that belong to one slot or the other and to no third party (this slot's
+ * gutter plus its neighbour's — see GUTTER_PX in atlas.ts). A level-n block can therefore only
+ * reach content from BOTH slots once 2^n exceeds that separation, so the last safe level is
+ * `floor(log2(2 * GUTTER_PX))` = 2 for the gutter of 2 this atlas lays out. Raising the gutter
+ * raises this on its own; the two can never disagree.
  *
  * Levels deeper than this are neither generated nor sampled. `generateMipmap` builds levels
  * `base+1 .. q`, where `q` is clamped by `TEXTURE_MAX_LEVEL` (ES 3.0 §3.8.9) — so setting MAX_LEVEL
@@ -24,8 +25,11 @@ import { plateRectDevice } from './plate'
  * to build fewer levels. It does; that sentence was wrong.)
  *
  * The residual the clamp accepts is stated in GUTTER_PX's comment: at level 2 a bilinear tap can
- * reach a pure-gutter texel holding a blend of two BACKGROUND colours. That is a soft edge between
- * backgrounds at heavy zoom-out, never a ghost glyph.
+ * reach a pure-gutter texel holding a blend of THIS SLOT'S EDGE COLOUR and the NEIGHBOUR'S. For
+ * ordinary text both edges are background, so that is the background-vs-background softness it has
+ * always been; where two full-bleed slots sit side by side (block art, box-drawing rules) the two
+ * edges are ink and can tint each other's outermost sample. Same bounded, accepted class either
+ * way — a soft edge at heavy zoom-out, never a ghost glyph.
  */
 const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
 
@@ -202,7 +206,9 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    *    scale. LINEAR magnification of the same level-0 texels is the same class of bilinear
    *    upscale the CSS transform applies — the user chose parity over the extra sharpness.
    *    An edge tap reaches at most 1 texel outside the cell extent, which is the slot's own
-   *    bg-filled gutter (2 texels) — never a neighbour's ink.
+   *    EDGE-EXTENDED gutter (2 texels) — never a neighbour's ink. Edge-extended rather than
+   *    bg-filled matters here too: on a full-bleed glyph that tap now continues the ink instead of
+   *    darkening towards the background.
    */
   const applyAtlasMinFilter = (zoom: number): void => {
     const wantMin = zoom >= 1 ? gl.NEAREST : gl.LINEAR_MIPMAP_LINEAR
