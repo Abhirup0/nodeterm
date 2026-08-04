@@ -9,27 +9,40 @@ type Created = [string, number, number]
 /** [id, firstRow, rowCount] as passed to uploadRows — the row-range damage assertion. */
 type Upload = [string, number, number]
 
-function fakeGL(): GlyphGL & {
+type FakeGL = GlyphGL & {
   drawn: string[]
   created: Created[]
   disposed: string[]
   uploads: Upload[]
   uploaded: Uint32Array[]
   params: GridDrawParams[]
-} {
+  /** How many times the context rebuilt its GPU objects (`restore`). */
+  restores: number
+  /** Make the next `restore()` throw — a driver that will not rebuild, which the caller must
+   *  answer with a permanent fallback rather than with a retry. */
+  failRestore: boolean
+}
+
+function fakeGL(): FakeGL {
   const drawn: string[] = []
   const created: Created[] = []
   const disposed: string[] = []
   const uploads: Upload[] = []
   const uploaded: Uint32Array[] = []
   const params: GridDrawParams[] = []
-  return {
+  const self: FakeGL = {
     drawn,
     created,
     disposed,
     uploads,
     uploaded,
     params,
+    restores: 0,
+    failRestore: false,
+    restore: (): void => {
+      if (self.failRestore) throw new Error('rebuild failed')
+      self.restores++
+    },
     resize: vi.fn(),
     // Recorded in `drawn` too: the atlas upload MUST land before beginFrame (which pushes the
     // atlas uniforms), let alone before any drawGrid of the same frame — otherwise the shader
@@ -61,6 +74,7 @@ function fakeGL(): GlyphGL & {
     endFrame: () => drawn.push('END'),
     dispose: vi.fn()
   }
+  return self
 }
 
 const atlas = () =>
@@ -880,5 +894,165 @@ describe('cursor params', () => {
     e.frame()
     h.setCursor(CURSOR)
     expect(e.frame()).toBe(false)
+  })
+})
+
+/**
+ * SUSPEND / REVIVE — surviving a lost GPU context.
+ *
+ * The whole design rests on one distinction: a lost context takes the GPU OBJECTS, never the
+ * REGISTRY. Each grid's spec, its CPU-side cells and its z survive, so the handles the terminal
+ * nodes hold stay valid across the entire cycle and nobody has to re-register. That is what makes
+ * a restore a repaint rather than a rebuild of the whole integration.
+ */
+describe('suspendGpu / reviveGpu', () => {
+  it('keeps its registry across a suspend/revive and repaints everything after', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    expect(e.frame()).toBe(true) // registration damage
+    expect(e.frame()).toBe(false) // settled
+
+    e.suspendGpu()
+    expect(gl.disposed).toContain('a')
+
+    e.reviveGpu()
+    // Created once at register, once at revive — the SAME id, i.e. the registry entry survived.
+    expect(gl.created.map((c) => c[0])).toEqual(['a', 'a'])
+    expect(gl.restores).toBe(1)
+    // Everything is dirty again: the fresh buffers are zeroed, so the first frame owes the GPU
+    // every row of every grid.
+    expect(e.frame()).toBe(true)
+    expect(gl.uploads.at(-1)).toEqual(['a', 0, 1])
+
+    // The handle the node holds is still the live one — a write through it still reaches the
+    // canvas, with no re-registration anywhere.
+    h.updateRow(0, rowOf(2))
+    expect(e.frame()).toBe(true)
+  })
+
+  it('submits NO frame while suspended, however much damage arrives', () => {
+    // The constraint the whole cycle stands on: between the loss and the restore there are no GPU
+    // objects, so a frame would draw against deleted buffers — and the driver's catch would read
+    // the throw as a GPU failure and burn the session that is in the middle of recovering.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    e.frame()
+    e.suspendGpu()
+    const before = gl.drawn.length
+    h.updateRow(0, rowOf(2))
+    expect(e.frame()).toBe(false)
+    expect(gl.drawn.length).toBe(before)
+  })
+
+  it('does not wake the canvas on suspend — the loop is being parked, not started', () => {
+    // `markDirty` is the wake signal, and waking here would schedule a frame against the context
+    // that has just gone away.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    e.frame()
+    const woke = vi.fn()
+    e.onDamage(woke)
+    e.suspendGpu()
+    expect(woke).not.toHaveBeenCalled()
+  })
+
+  it('replays the rows written while suspended — deferred, never lost', () => {
+    // The addons keep packing rows through the whole outage (nothing tells them the GPU went
+    // away), and those writes land in the CPU-side cells like any other. The revive owes the GPU
+    // all of them.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 2, plateH: 40 }))
+    e.frame()
+    e.suspendGpu()
+    const row = rowOf(2)
+    row[0] = 7
+    h.updateRow(1, row)
+    e.reviveGpu()
+    e.frame()
+    expect(gl.uploads.at(-1)).toEqual(['a', 0, 2])
+    expect(gl.uploaded.at(-1)?.at(CELL_STRIDE * 2)).toBe(7)
+  })
+
+  it('re-uploads the atlas after a revive — the texture died with the context', () => {
+    const gl = fakeGL()
+    const { atlas: loaded } = loadedAtlas()
+    const e = new GlyphGridEngine(gl, loaded)
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    e.frame()
+    expect(gl.drawn.filter((d) => d === 'ATLAS')).toHaveLength(1)
+    e.suspendGpu()
+    e.reviveGpu()
+    e.frame()
+    expect(gl.drawn.filter((d) => d === 'ATLAS')).toHaveLength(2)
+  })
+
+  it('a revive without a suspend changes nothing — a stray restore must not double-create', () => {
+    // `webglcontextrestored` can arrive for a context we never suspended (a browser that restores
+    // on its own after we have already given up). Rebuilding there would allocate a second buffer
+    // per grid and leak the first.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    e.frame()
+    e.reviveGpu()
+    expect(gl.created).toHaveLength(1)
+    expect(gl.restores).toBe(0)
+  })
+
+  it('a throwing restore leaves the engine suspended, so nothing draws against a dead context', () => {
+    // The caller answers a throw with the permanent fallback; the engine's job is only to stay
+    // safe if it does not — never to retry the rebuild itself.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    e.frame()
+    e.suspendGpu()
+    gl.failRestore = true
+    expect(() => e.reviveGpu()).toThrow()
+    // No grid was re-created, and the frame gate is still shut.
+    expect(gl.created).toHaveLength(1)
+    expect(e.frame()).toBe(false)
+  })
+
+  it('reports whether it is suspended — the layer\'s mount guard reads this', () => {
+    // The engine is a module singleton and the restore policy is scoped to a React effect, so a
+    // mount landing on a suspended engine is the one case no policy is waiting for. Nothing else
+    // can detect it.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.register(spec('a', 0))
+    expect(e.gpuIsSuspended()).toBe(false)
+    e.suspendGpu()
+    expect(e.gpuIsSuspended()).toBe(true)
+    e.reviveGpu()
+    expect(e.gpuIsSuspended()).toBe(false)
+  })
+
+  it('a second suspend is a no-op — the buffers are already gone', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    e.suspendGpu()
+    e.suspendGpu()
+    expect(gl.disposed).toEqual(['a'])
   })
 })

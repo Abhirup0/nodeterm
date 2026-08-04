@@ -183,6 +183,9 @@ export class GlyphGridEngine {
   private seq = 0
   /** False until an atlas source has actually reached the GPU — see `atlasUploadPending`. */
   private atlasUploaded = false
+  /** True between `suspendGpu` and `reviveGpu` — i.e. while the GL context has been lost and the
+   *  GPU objects do not exist. The frame gate reads it; nothing else does. */
+  private gpuSuspended = false
 
   constructor(
     private gl: GlyphGL,
@@ -363,11 +366,17 @@ export class GlyphGridEngine {
    * Drop every grid at once: free each GPU buffer, empty the registry, and leave every handle
    * ever handed out INERT — exactly as if its owner had called `dispose()` itself.
    *
-   * This is the layer's teardown / context-loss path. On a lost context the grid buffers are
-   * already gone from the driver's side, and the owners (terminal nodes) are still holding live
-   * handles; without a sweep those handles would keep writing rows into a registry whose GPU
-   * objects no longer exist. Reaching them is what `Grid.dead` is for — see its comment: the
-   * engine deliberately keeps no list of handles, so the shared Grid object is the channel.
+   * This is the layer's TEARDOWN path — the context being handed back for good (the mode switched
+   * off, a font or dpr rebuild, a permanent failure). **It is NOT the context-loss path**, which is
+   * `suspendGpu` below: that one drops the same GPU objects while KEEPING the registry, and the two
+   * must not be confused. Running THIS on a lost context leaves every terminal on the canvas
+   * holding a dead handle with nothing to re-register into — which is exactly the Phase-1b
+   * behaviour (limitation L9) that the suspend/revive cycle exists to remove.
+   *
+   * Every owner (a terminal node) is still holding a live handle when this runs, and without a
+   * sweep those handles would keep writing rows into a registry whose GPU objects no longer exist.
+   * Reaching them is what `Grid.dead` is for — see its comment: the engine deliberately keeps no
+   * list of handles, so the shared Grid object is the channel.
    *
    * Idempotent, and change-gated: sweeping an empty registry changes nothing on screen, so it
    * must not dirty — the same discipline as setCamera/setViewport, and the reason `frame()` can
@@ -381,6 +390,84 @@ export class GlyphGridEngine {
     }
     this.grids.clear()
     // Teardown is damage: the canvas still holds the disposed grids' pixels until it is redrawn.
+    this.markDirty()
+  }
+
+  /**
+   * Drop every GPU object but KEEP the registry: each grid's spec, its CPU-side cells and its z
+   * survive, so the same handles are valid after `reviveGpu` and no owner has to re-register.
+   * Nothing else may assume a grid's GPU buffer exists — the frame gate below is what enforces
+   * that, since a draw is the only thing that would touch one.
+   *
+   * This is the `webglcontextlost` half of the restore cycle, and it is the OPPOSITE of
+   * `disposeAll`: that one ends the grids (every handle goes inert, the registry empties), this one
+   * ends only the buffers. A lost context that ran `disposeAll` would leave every terminal on the
+   * canvas holding a dead handle, which is the Phase-1b behaviour this task exists to remove.
+   *
+   * **It deliberately does NOT `markDirty`.** Damage is the WAKE signal (see `markDirty`), and
+   * waking here would schedule a frame against the context that has just gone away. The revive
+   * dirties instead, which is the moment there is something to draw with again.
+   */
+  /**
+   * Are the GPU objects currently gone (between a `suspendGpu` and its `reviveGpu`)?
+   *
+   * Exists for ONE caller: the layer's mount path. The engine is a module singleton while the
+   * restore policy that drives this cycle is scoped to a React effect, so a mount that lands on a
+   * suspended engine is a mount whose policy is not waiting for anything — and nothing else can
+   * detect that. See the guard in `SharedGlyphLayer`'s effect.
+   */
+  gpuIsSuspended(): boolean {
+    return this.gpuSuspended
+  }
+
+  suspendGpu(): void {
+    if (this.gpuSuspended) return
+    this.gpuSuspended = true
+    // The buffers are already gone from the driver's side on a real loss, so these are no-ops
+    // there; they are what keeps the GL layer's own grid table honest, and they free properly if
+    // this is ever called against a live context.
+    for (const g of this.grids.values()) this.gl.disposeGrid(g.id)
+  }
+
+  /**
+   * Re-create the GPU objects for every registered grid and mark everything dirty — the
+   * `webglcontextrestored` half.
+   *
+   * ORDER: the GL layer rebuilds ITS objects first (programs, atlas texture — `restore`), because
+   * the per-grid buffers created below are allocated against them. If that throws, nothing here has
+   * changed and the engine stays suspended: the caller's answer is a permanent fallback, and this
+   * must never retry a rebuild on its own.
+   *
+   * NO REPACK IS NEEDED, which is the point of keeping the registry. The CPU side survived a GPU
+   * event untouched: each grid's `cells` still holds every lane the terminal ever wrote, and the
+   * atlas page still holds the rasterized glyphs those lanes name. So marking every row dirty and
+   * re-uploading the atlas reproduces the exact screen that was on the canvas, without asking a
+   * single addon for anything.
+   *
+   * A revive with no suspend is a NO-OP: `webglcontextrestored` can arrive for a context we never
+   * suspended (a browser restoring one we have already given up on), and rebuilding there would
+   * allocate a second buffer per grid and leak the first.
+   */
+  reviveGpu(): void {
+    if (!this.gpuSuspended) return
+    this.gl.restore()
+    for (const g of this.grids.values()) {
+      this.gl.createGrid(g.id, g.cols, g.rows)
+      // A fresh buffer is ZEROED, so every grid owes the GPU all of its rows — exactly the state
+      // `register` starts a brand-new grid in.
+      g.dirtyFrom = 0
+      g.dirtyTo = g.rows - 1
+      // Conservative, for the same reason `register` starts it true: no draw order has been
+      // computed against the new context yet, and guessing "hidden" would drop the damage of a
+      // grid nobody has culled.
+      g.lastVisible = true
+    }
+    // The texture died with the context. The atlas SOURCE (an OffscreenCanvas) did not, so this is
+    // one upload, not a re-rasterization.
+    this.atlasUploaded = false
+    // Cleared BEFORE the dirty: `markDirty` notifies the wake subscribers, and they must find an
+    // engine that can actually draw the frame they are about to schedule.
+    this.gpuSuspended = false
     this.markDirty()
   }
 
@@ -468,6 +555,13 @@ export class GlyphGridEngine {
    *   re-upload rows that did.
    */
   frame(): boolean {
+    // THE FRAME GATE OF THE RESTORE CYCLE. Between a `suspendGpu` and its `reviveGpu` there are no
+    // GPU objects, so a submission would throw against deleted buffers — and the driver's catch
+    // reads a throw as a GPU failure and burns the session that is in the middle of recovering.
+    // The layer parks its loop on the loss as well; this is the floor under that, for the frame
+    // already scheduled when the context went away. Damage accumulated meanwhile is not lost — the
+    // dirty flag and the per-grid ranges are untouched, and the revive re-dirties everything.
+    if (this.gpuSuspended) return false
     const uploadAtlas = this.atlasUploadPending()
     if (!this.dirty && !uploadAtlas) return false
     this.dirty = false

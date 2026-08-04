@@ -13,6 +13,7 @@ import type { GridHandle } from '../glyphgrid/engine'
 import { createFrameLoop, type FrameLoop, type FrameLoopHost } from '../glyphgrid/frame-driver'
 import {
   createBoardFrameGate,
+  createContextLossPolicy,
   createCursorBlinkClock,
   cursorBlinkTarget,
   setCursorBlinkTarget,
@@ -45,6 +46,7 @@ import {
   subscribeOpaqueSet,
   syncAtlasPixelRatio,
   useSharedGlyph,
+  RESTORE_COOLDOWN_MS,
   type AtlasResetSource,
   type CursorBlinkClock,
   type CursorBlinkTarget,
@@ -1818,5 +1820,255 @@ describe('installAtlasResetLog', () => {
     expect(atlas.subs).toBe(0)
     atlas.fire()
     expect(warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('createContextLossPolicy', () => {
+  /**
+   * The whole policy is injected, so the once-only rule, the cooldown and both give-up branches
+   * are exercisable without a GPU, a canvas or a clock — the same split `createBoardFrameGate`
+   * and `createCursorBlinkClock` make.
+   */
+  function harness(): {
+    deps: Parameters<typeof createContextLossPolicy>[0]
+    at(ms: number): void
+    suspends(): number
+    revives(): number
+    failures(): { reason: string; err?: unknown }[]
+    /** Make the next `revive()` throw — a driver that will not rebuild. */
+    breakRevive(): void
+    /** How many watchdog timers are armed right now. */
+    pendingTimers(): number
+    /** Fire every armed timer — "the restore never arrived". */
+    fireTimers(): void
+  } {
+    let clock = 0
+    let suspends = 0
+    let revives = 0
+    let broken = false
+    let handle = 1
+    const timers = new Map<number, () => void>()
+    const failures: { reason: string; err?: unknown }[] = []
+    return {
+      deps: {
+        now: () => clock,
+        suspend: () => {
+          suspends++
+        },
+        revive: () => {
+          if (broken) throw new Error('programs would not rebuild')
+          revives++
+        },
+        fail: (reason, err) => {
+          failures.push({ reason, err })
+        },
+        setTimer: (cb) => {
+          const h = handle++
+          timers.set(h, cb)
+          return h
+        },
+        clearTimer: (h) => {
+          timers.delete(h)
+        }
+      },
+      at: (ms) => {
+        clock = ms
+      },
+      suspends: () => suspends,
+      revives: () => revives,
+      failures: () => failures,
+      breakRevive: () => {
+        broken = true
+      },
+      pendingTimers: () => timers.size,
+      fireTimers: () => {
+        const due = [...timers.values()]
+        timers.clear()
+        for (const cb of due) cb()
+      }
+    }
+  }
+
+  let warn: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
+  it('a first loss suspends and ASKS for a restore', () => {
+    // `preventDefault()` is the request for a `webglcontextrestored` event; Phase 1b never made it
+    // because it had nothing to restore into.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    expect(policy.onLost()).toBe(true)
+    expect(h.suspends()).toBe(1)
+    expect(h.failures()).toEqual([])
+  })
+
+  it('the restore rebuilds and says so on the console', () => {
+    // A SILENT restore is indistinguishable from a freeze to whoever is debugging one, which is
+    // why both branches of this policy warn.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.onRestored()
+    expect(h.revives()).toBe(1)
+    expect(h.failures()).toEqual([])
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toMatch(
+      /context restored/i
+    )
+  })
+
+  it('a SECOND loss inside the cooldown falls back permanently — no retry loop, ever', () => {
+    // The floor under the whole feature, and Phase 1b's behaviour kept as it: a GPU that keeps
+    // taking the context away must not be handed it back over and over, because that turns one
+    // failure into a flicker.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.onRestored()
+    h.at(RESTORE_COOLDOWN_MS - 1)
+    expect(policy.onLost()).toBe(false) // not even asking for a restore this time
+    expect(h.suspends()).toBe(1) // …and no second suspend
+    expect(h.failures()).toHaveLength(1)
+    expect(h.failures()[0].reason).toMatch(/lost again/i)
+    // Terminal: nothing that arrives afterwards may restore anything.
+    policy.onRestored()
+    expect(h.revives()).toBe(1)
+    expect(policy.onLost()).toBe(false)
+    expect(h.failures()).toHaveLength(1)
+  })
+
+  it('a loss AFTER the cooldown is restored again — one restore per context', () => {
+    // The rule is "once per CONTEXT", not "once per session": a machine that sleeps twice in an
+    // afternoon gets its renderer back both times.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.onRestored()
+    h.at(RESTORE_COOLDOWN_MS + 1)
+    expect(policy.onLost()).toBe(true)
+    policy.onRestored()
+    expect(h.revives()).toBe(2)
+    expect(h.failures()).toEqual([])
+  })
+
+  it('a restore that THROWS falls back permanently, carrying the error', () => {
+    // A half-rebuilt context draws nothing, and a canvas of transparent node bodies drawing
+    // nothing looks exactly like a freeze.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    h.breakRevive()
+    policy.onRestored()
+    expect(h.failures()).toHaveLength(1)
+    expect(h.failures()[0].reason).toMatch(/restore threw/i)
+    expect(h.failures()[0].err).toBeInstanceOf(Error)
+    // And it is over: a later restore event cannot re-enter the rebuild.
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
+  })
+
+  it('a restore we never asked for is ignored', () => {
+    // The browser can hand a context back on its own after we have given up. Rebuilding there
+    // would double-create every grid's GPU buffer and leak the first set.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
+    expect(h.failures()).toEqual([])
+  })
+
+  it('a restore that NEVER arrives falls back instead of stranding the canvas', () => {
+    // The worst outcome this policy can produce, and it is worse than the Phase-1b floor it
+    // promises to keep: suspended engine, stopped runtime, and `failed` still FALSE — so every
+    // node keeps a transparent body and keeps writing rows into a canvas that paints nothing, for
+    // the rest of the session, with no second line on the console. `preventDefault()` is only a
+    // REQUEST, and a synthetic `loseContext()` is never auto-restored at all.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    expect(h.pendingTimers()).toBe(1)
+    h.fireTimers()
+    expect(h.failures()).toHaveLength(1)
+    expect(h.failures()[0].reason).toMatch(/never restored/i)
+    // Terminal, like every other give-up branch: a restore that turns up after we have given up
+    // must not rebuild anything.
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
+    expect(h.failures()).toHaveLength(1)
+  })
+
+  it('the watchdog is disarmed by a restore that does arrive', () => {
+    // A timer left running would fail a session that recovered perfectly well.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.onRestored()
+    expect(h.pendingTimers()).toBe(0)
+    h.fireTimers()
+    expect(h.failures()).toEqual([])
+  })
+
+  it('the give-up branches arm no watchdog', () => {
+    // Nothing is waiting for a restore on either terminal path, and a timer that fired afterwards
+    // would log a second, contradictory reason for the same failure.
+    const withinCooldown = harness()
+    const a = createContextLossPolicy(withinCooldown.deps)
+    a.onLost()
+    a.onRestored()
+    withinCooldown.at(RESTORE_COOLDOWN_MS - 1)
+    a.onLost()
+    expect(withinCooldown.pendingTimers()).toBe(0)
+
+    const throwing = harness()
+    const b = createContextLossPolicy(throwing.deps)
+    b.onLost()
+    throwing.breakRevive()
+    b.onRestored()
+    expect(throwing.pendingTimers()).toBe(0)
+  })
+
+  it('the loss itself is announced, not only its outcome', () => {
+    // The one branch a regression could silence without any assertion going red — and the one a
+    // device tester reads first, since it is what says "the canvas is blank ON PURPOSE, wait".
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toMatch(
+      /context lost/i
+    )
+  })
+
+  it('stop() disarms the watchdog, so it cannot fail a session that has moved on', () => {
+    // The layer unmounts for reasons that have nothing to do with a failure — the mode switched
+    // off hands the context back and disposes it. A watchdog firing after that would set the
+    // session's `failed` flag, and re-enabling the mode would then do nothing until a relaunch.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.stop()
+    expect(h.pendingTimers()).toBe(0)
+    h.fireTimers()
+    expect(h.failures()).toEqual([])
+    // …and it is terminal, like every other end state.
+    expect(policy.onLost()).toBe(false)
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
+  })
+
+  it('a duplicate loss for the SAME outage is not a second failure', () => {
+    // Two `webglcontextlost` events before any restore is one outage, not a GPU that failed twice
+    // — suspending again would be harmless but failing the session would not.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    expect(policy.onLost()).toBe(true)
+    expect(h.suspends()).toBe(1)
+    expect(h.failures()).toEqual([])
+    policy.onRestored()
+    expect(h.revives()).toBe(1)
   })
 })
