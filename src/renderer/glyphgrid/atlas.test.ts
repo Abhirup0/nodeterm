@@ -79,6 +79,20 @@ describe('GlyphAtlas', () => {
       expect(new Set(slots).size).toBe(slots.length)
     })
 
+    // packColor's own `>>> 0` note applies one layer up: `0xff << 24` is NEGATIVE in JS, so the
+    // same colour reaches this file as -16777216 from an arithmetic path and as 4278190080 from a
+    // `readCell` lane. Two spellings of one colour would mean two slots holding identical pixels —
+    // wasted page, and resets arriving twice as fast.
+    it('keys a colour by its VALUE, so a signed lane is not a second slot', () => {
+      const r = fakeRasterizer()
+      const atlas = new GlyphAtlas(r, 100)
+      const signed = 0xff << 24 // -16777216
+      const unsigned = 0xff000000 // 4278190080 — the same colour
+      const a = atlas.glyphFor(0x41, false, false, signed, signed)
+      expect(atlas.glyphFor(0x41, false, false, unsigned, unsigned)).toBe(a)
+      expect(r.calls).toHaveLength(1)
+    })
+
     it('the colors ride into the rasterizer untouched (it, not the shader, paints them)', () => {
       const r = fakeRasterizer()
       const atlas = new GlyphAtlas(r, 100)
@@ -369,6 +383,45 @@ describe('GlyphAtlas', () => {
       expect(seen).toBe(1) // subscriber repacked 'A' into the fresh page…
       expect(triggering).toBe(0) // …which filled it again, so 'B' degrades to blank this frame
       expect(atlas.resetCount).toBe(1) // and does NOT recurse into a second reset
+    })
+
+    // REPRODUCED BY REVIEW, and it was a stack overflow, not a slow path: a subscriber's repack
+    // that needs MORE keys than the fresh page holds used to re-enter reset() from inside reset()'s
+    // own notification loop — clearing the page the repack was half-way through writing, and
+    // recursing until the stack died (the throw then vanished into the per-subscriber try/catch,
+    // leaving a half-packed page and no error anywhere).
+    it('a subscriber that overflows the fresh page degrades — it never re-enters the reset', () => {
+      const { r, atlas } = fullAfterOne() // capacity 2 → exactly ONE real slot
+      const got: number[] = []
+      atlas.onReset(() => {
+        // Three allocations into a page that holds one. The first fits; the rest must degrade.
+        got.push(atlas.glyphFor(0x61, false, false, FG, BG))
+        got.push(atlas.glyphFor(0x62, false, false, FG, BG))
+        got.push(atlas.glyphFor(0x63, false, false, FG, BG))
+      })
+      atlas.glyphFor(0x41, false, false, FG, BG) // fills the page
+      r.calls.length = 0
+      expect(() => atlas.glyphFor(0x42, false, false, FG, BG)).not.toThrow()
+      expect(got).toEqual([1, 0, 0])
+      expect(atlas.resetCount).toBe(1) // ONE reset, not one per over-capacity request
+      // And the page holds exactly what the repack managed to write: one clear, one draw.
+      expect(r.calls).toEqual(['CLEAR', `${0x61}||${FG}|${BG}@16,2`])
+    })
+
+    it('recovers on the NEXT request — the guard is scoped to the reset, not sticky', () => {
+      const { atlas } = fullAfterOne()
+      let overflow = true
+      atlas.onReset(() => {
+        if (!overflow) return
+        overflow = false
+        atlas.glyphFor(0x61, false, false, FG, BG) // fills the fresh page
+        atlas.glyphFor(0x62, false, false, FG, BG) // degrades to blank
+      })
+      atlas.glyphFor(0x41, false, false, FG, BG)
+      expect(atlas.glyphFor(0x42, false, false, FG, BG)).toBe(0) // repack took the only slot
+      // A later request, outside any reset, still gets the normal reset-then-allocate treatment.
+      expect(atlas.glyphFor(0x63, false, false, FG, BG)).toBe(1)
+      expect(atlas.resetCount).toBe(2)
     })
 
     it('every subscriber is called, and each one can be disposed independently', () => {

@@ -99,6 +99,8 @@ export class GlyphAtlas {
   private dirtyFlag = false
   private resets = 0
   private resetSubs = new Set<() => void>()
+  /** True only while `reset()` is notifying subscribers. See the guard in `glyphFor`. */
+  private inReset = false
 
   constructor(
     private rasterizer: GlyphRasterizer,
@@ -193,10 +195,19 @@ export class GlyphAtlas {
    * immediately packs into the fresh page and can never write a lane pointing at a slot that no
    * longer holds what it held.
    *
-   * A subscriber MAY call back into `glyphFor` (that is what a repack is), and doing so is safe:
-   * the reset path never recurses, and an allocation that no longer fits the freshly-filled page
-   * degrades to the blank slot instead of resetting again. It is still the wrong shape for the
-   * addon — a full repack inside someone else's pack loop — which is why T4 defers it.
+   * A subscriber MAY call back into `glyphFor` — that is what a repack is — and the reset path is
+   * re-entrancy-GUARDED, not merely re-entrancy-safe: while subscribers are running, an allocation
+   * that would trigger a reset returns the BLANK slot instead (`inReset`). A repack needing more
+   * keys than the fresh page holds is a real case, and letting it reset again would clear the page
+   * that same repack is half-way through writing — measured, on a page with one usable slot and a
+   * subscriber asking for three, as unbounded recursion into a stack overflow that the
+   * per-subscriber catch below then SWALLOWED, leaving a half-packed page and no error anywhere.
+   * Degrading instead costs those cells one frame of blank: the next repack round re-requests them,
+   * and a page genuinely too small for the canvas is the LRU escalation's problem, not a
+   * recursion's.
+   *
+   * A full repack inside someone else's pack loop is still the wrong SHAPE for the addon — which
+   * is why T4 defers it to the redraw path rather than running it here.
    */
   onReset(cb: () => void): GlyphAtlasSubscription {
     this.resetSubs.add(cb)
@@ -219,25 +230,42 @@ export class GlyphAtlas {
   private reset(): void {
     this.slots.clear()
     this.nextSlot = 1
-    this.resets++
     this.rasterizer.clearPage()
+    // Counted only once the page is actually blank: `resetCount` is read as "how many times this
+    // atlas started over", and a clearPage() that threw must not leave a count claiming it did.
+    this.resets++
     this.dirtyFlag = true
-    // Iterate a COPY: a subscriber is allowed to dispose itself (or another) from inside its own
-    // callback, and mutating the live set mid-iteration would skip the next subscriber.
-    for (const cb of [...this.resetSubs]) {
-      try {
-        cb()
-      } catch (err) {
-        // One broken repack must not cost the other subscribers their notification — nor the
-        // frame. The page is already consistent by the time we get here.
-        console.warn('[glyphgrid] atlas onReset subscriber threw:', err)
+    // NOTE: nothing subscribes yet — T3+T4 wire the addon repack; until then a reset leaves stale
+    // lanes rendering WRONG glyphs (worse than the old blank degrade). Do not run a device round
+    // before T4.
+    this.inReset = true
+    try {
+      // Iterate a COPY: a subscriber is allowed to dispose itself (or another) from inside its own
+      // callback, and mutating the live set mid-iteration would skip the next subscriber.
+      for (const cb of [...this.resetSubs]) {
+        try {
+          cb()
+        } catch (err) {
+          // One broken repack must not cost the other subscribers their notification — nor the
+          // frame. The page is already consistent by the time we get here.
+          console.warn('[glyphgrid] atlas onReset subscriber threw:', err)
+        }
       }
+    } finally {
+      // `finally`, so a throw that escapes the loop (it cannot today — every callback is caught —
+      // but a future edit to that catch would) can never leave the atlas permanently unable to
+      // reset again.
+      this.inReset = false
     }
   }
 
   glyphFor(code: number, bold: boolean, italic: boolean, fg: number, bg: number): number {
     if (code === 0x20 || code === 0) return 0
-    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg}|${bg}`
+    // `>>> 0` on both lanes: `0xff << 24` is NEGATIVE in JS (packColor carries the same note), so
+    // one colour can arrive as -16777216 from an arithmetic path and as 4278190080 off a cell
+    // lane. Keying the two spellings separately would put identical pixels in two slots — wasted
+    // page, and resets arriving twice as fast.
+    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
     if (this.nextSlot >= this.capacity) {
@@ -245,9 +273,15 @@ export class GlyphAtlas {
       // included) can never satisfy this request: resetting would blank an empty page and notify
       // every subscriber on EVERY glyph, forever. Degrade to blank instead.
       if (this.capacity <= 1) return 0
+      // RE-ENTRANCY GUARD: we are inside reset()'s notification, i.e. a subscriber's repack, and
+      // it has already refilled the fresh page. Resetting again would clear the very page that
+      // repack is writing and recurse without bound (measured: stack overflow, swallowed by the
+      // per-subscriber catch, page left half-packed). Degrade instead — this cell is blank for one
+      // frame and the NEXT repack round re-requests it. See `onReset`.
+      if (this.inReset) return 0
       this.reset()
-      // A subscriber may have repacked enough rows to fill the fresh page again. Never recurse —
-      // one reset per request — and degrade to blank rather than allocate off the end of the page.
+      // A subscriber may have repacked enough rows to fill the fresh page again. Degrade to blank
+      // rather than allocate off the end of the page.
       if (this.nextSlot >= this.capacity) return 0
     }
     const slot = this.nextSlot++
@@ -268,9 +302,13 @@ export class GlyphAtlas {
   }
 
   /** The uv rect of a slot: the ORIGIN is the ink origin (pitch cell + gutter), the SIZE is the
-   *  exact cell — the three numbers are not interchangeable (see `strideX` and `GUTTER_PX`), and
-   *  the shader must derive its uv the same way (`uAtlasStride` for the pitch, the gutter for the
-   *  origin offset, `uAtlasCell` for the extent). */
+   *  exact cell — the three numbers are not interchangeable (see `strideX` and `GUTTER_PX`).
+   *
+   *  The shader has to derive the same rect (`uAtlasStride` for the pitch, the gutter for the
+   *  origin offset, `uAtlasCell` for the extent). PHASE 1c INTERIM: it does NOT yet — gl-webgl2's
+   *  VERT is still missing the gutter term, so every glyph samples GUTTER_PX texels off until T3
+   *  adds it. This rect, and the uv-tie test that transcribes it, are the CPU-side truth T3
+   *  aligns to. */
   slotRect(slot: number): { u0: number; v0: number; u1: number; v1: number } {
     // A degenerate page has no sampleable area at all: return the ZERO rect rather than let the
     // division produce NaN, which the shader would turn into undefined texture reads.

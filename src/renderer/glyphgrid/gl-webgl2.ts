@@ -28,6 +28,10 @@ void main() {
   vec2 ndc = vec2(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
   float slot = float(aCell.x);
+  // PHASE 1c interim: uv lacks the gutter term — T3 adds uAtlasGutter; glyphs sample 2 texels off
+  // until then. The atlas already lays every slot out with GUTTER_PX of ink-free margin inside its
+  // pitch cell (atlas.ts), so this origin is one gutter short on both axes; the uv-tie test in
+  // atlas.test.ts transcribes the derivation T3 has to land here.
   vec2 slotOrigin = vec2(mod(slot, uAtlasCols), floor(slot / uAtlasCols)) * uAtlasStride;
   vUv = slotOrigin + unit * uAtlasCell;
   vCell = aCell;

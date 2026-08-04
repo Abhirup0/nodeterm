@@ -79,6 +79,28 @@ const OVERLAP_BG = [
 ]
 /** Default grid tint — the 40 disjoint grids' plate and cell background. */
 const BASE_BG = packColor(20, 20, 24, 255)
+/**
+ * The foreground palette the synthetic feed draws from — FOUR entries, and the count is
+ * load-bearing.
+ *
+ * The atlas is keyed by colour (Phase 1c), so the key space this harness generates is
+ * `codes x bold x fg x bg` = 90 x 2 x 4 x 4 = 2880, against a capacity of 3588 slots
+ * (1024px page, 13x22 pitch). A random fg per cell — what this used to do — puts the key space at
+ * ~54k and the page then RESETS several times a second: 30+ full-page clears per second, and,
+ * until T4 wires the repack, every already-uploaded lane pointing at a recycled slot, i.e. a
+ * screen of permanently wrong glyphs. That is a broken harness, not a stress test.
+ */
+const FG_PALETTE = [
+  packColor(200, 200, 160, 255),
+  packColor(160, 210, 200, 255),
+  packColor(220, 170, 170, 255),
+  packColor(180, 200, 240, 255)
+]
+/** ATLAS RESET STRESS. Flip to true to give every cell a random foreground, which blows the key
+ *  space past the page's capacity and exercises reset-on-full continuously. Deliberately a manual
+ *  switch: with it on the glyphs on screen are expected to be WRONG (no repack subscriber yet), so
+ *  it is a test of the reset MACHINERY, never of rendering quality. */
+const ATLAS_RESET_STRESS = false
 /** A little air around the fitted layout, so the outermost grids are visibly INSIDE the frame
  *  rather than clipping its edge — the tester has to be able to count them. */
 const FIT_MARGIN = 0.92
@@ -229,8 +251,11 @@ export function GlyphGridHarness() {
           // gets a valid code point.
           const code = 0x21 + Math.floor(Math.random() * 90)
           // Resolved BEFORE the atlas request: the atlas is keyed by colour, so the slot and the
-          // lane have to be asked for with the same pair.
-          const fg = packColor(180 + Math.floor(Math.random() * 75), 200, 160, 255)
+          // lane have to be asked for with the same pair — and from a BOUNDED palette, or the key
+          // space outgrows the page (see FG_PALETTE / ATLAS_RESET_STRESS).
+          const fg = ATLAS_RESET_STRESS
+            ? packColor(180 + Math.floor(Math.random() * 75), 200, 160, 255)
+            : FG_PALETTE[Math.floor(Math.random() * FG_PALETTE.length)]
           writeCell(
             row,
             c,
