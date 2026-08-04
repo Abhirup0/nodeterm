@@ -135,6 +135,25 @@ export class GlyphGridRendererAddonCore {
   /** Viewport row the cursor was on at the last cursor-move — the row a move has to REPAINT to
    *  erase the old block. Geometric (not focus-gated), so blur/focus and moves stay independent. */
   private lastCursorRow: number
+  /**
+   * Whether the CELLS currently hold an inverted block cursor — i.e. the block-ness of the last pack
+   * that actually covered the cursor row.
+   *
+   * The two halves of the cursor are updated on different schedules: the OVERLAY is re-pushed by
+   * every pack (it is a property of the terminal, not of the rows), while the CELL half only changes
+   * on a pack that covers the cursor row. A style change that flips block-ness between those two —
+   * `cursorInactiveStyle` going `block` → `outline` while the terminal is blurred, then a
+   * drag-select, which packs only the selected rows — would leave an outline drawn AROUND a cell
+   * that is still inverted, or (the other direction) clear the overlay and leave no cursor at all.
+   * Remembering what the cells show is what lets `packRows` notice and repaint the cursor row.
+   *
+   * Kept HERE rather than closing the same gap by subscribing to xterm's
+   * `onSpecificOptionChange('cursorInactiveStyle')` through the shell: that would widen the shell's
+   * private-xterm surface (the thing this whole split exists to keep small) for a setting nobody
+   * touches at runtime, and it would only cover the option — this covers every way the two halves
+   * can drift apart, including a focus change racing a pack.
+   */
+  private cellCursorBlock: boolean
 
   /** Mutable because `readCellBound` closes over it: one closure for the lifetime of the addon
    *  instead of one per packed row. */
@@ -164,6 +183,10 @@ export class GlyphGridRendererAddonCore {
     this.workCell = internals.makeWorkCell()
     this.focused = internals.hasFocus()
     this.lastCursorRow = this.cursorViewportRow()
+    // Seeded from the CURRENT shape rather than from `false`: no row has been packed yet, so there
+    // is no stale block to heal, and seeding the other way would spend one repack of the cursor row
+    // on the first pack of every terminal that misses it.
+    this.cellCursorBlock = this.cursorShape() === 'block'
     this.updateDims()
     // EVERY subscription goes last, and they go TOGETHER. The shell catches a failing construction
     // and restores the DOM renderer without ever holding an addon to dispose, so anything
@@ -485,6 +508,32 @@ export class GlyphGridRendererAddonCore {
       })
       this.handle.updateRow(row, this.rowBuf)
     }
+    this.settleCursorCells(cursorRow, cursorShape === 'block', start, end)
+  }
+
+  /**
+   * Keep the CELL half of the cursor in step with the OVERLAY half across packs.
+   *
+   * Runs after the loop, so the ordinary case is a bookkeeping write: a pack that covered the cursor
+   * row has just repainted it, and what it painted is now what the cells show. The other branch is
+   * the repair — the cursor row was NOT in this range and its block-ness has changed since it was
+   * last packed, which is the `cursorInactiveStyle` flip described on `cellCursorBlock`. Left alone
+   * it shows as an outline drawn around a still-inverted cell, or as no cursor at all.
+   *
+   * TERMINATION, because this re-enters `packRows`: the repack it asks for covers the cursor row by
+   * construction, so the nested call takes the first branch and cannot ask again. A cursor row
+   * outside the grid (scrolled away, hidden by the app) takes neither branch — there is no stale
+   * block to heal there, and asking for a row the pack would clamp away is what a loop would be
+   * made of.
+   */
+  private settleCursorCells(cursorRow: number, block: boolean, start: number, end: number): void {
+    if (cursorRow < 0 || cursorRow >= this.rows) return
+    if (cursorRow >= start && cursorRow <= end) {
+      this.cellCursorBlock = block
+      return
+    }
+    if (this.cellCursorBlock === block) return
+    this.packCursorRow()
   }
 
   /** Column span [start, endExclusive) of the selection on one ABSOLUTE buffer row, or null.

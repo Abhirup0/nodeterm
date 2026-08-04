@@ -242,10 +242,12 @@ export function packViewportRow(
   const selEnd = selection ? selection[1] : -1
   // Only a block is a cell rewrite; every other shape is the overlay pass's business (cursor.ts).
   const blockCursor = (opts.cursorShape ?? 'block') === 'block'
-  // Resolved ONCE per row: the selection colour cannot change mid-row, and blending it per cell
-  // would put a multiply and four roundings in the hot loop for an answer that never differs.
+  // Resolved ONCE per row, and only for a row that HAS a selection: the blend is four roundings, and
+  // `focused === false` is true of every terminal on the canvas except one — computing it per row
+  // regardless would charge a colour nobody paints to every row of every unfocused terminal. The
+  // same standard the `decorations` hoist below is written to.
   const selectionBg =
-    opts.focused === false
+    opts.focused === false && selection
       ? blendLane(theme.selectionBg, theme.bg, INACTIVE_SELECTION_BLEND)
       : theme.selectionBg
   // Hoisted out of the loop: `empty()` is answered ONCE per row rather than once per cell, and a

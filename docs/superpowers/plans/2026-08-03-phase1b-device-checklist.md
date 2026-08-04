@@ -224,8 +224,9 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       clamps sampling). Report it rather than living with it — the revert costs ~0.35 MB per page.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
-- [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
-      **static** — it does not blink even with "Cursor blink" on (known limitation L1).
+- [ ] **2.9 Cursor.** A focused terminal shows a cursor at the right cell (a solid block, with the
+      default setting). It is **static** — it does not blink even with "Cursor blink" on (known
+      limitation L1).
       **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
       glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
       the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still

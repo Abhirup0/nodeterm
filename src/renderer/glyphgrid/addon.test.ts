@@ -633,6 +633,80 @@ describe('GlyphGridRendererAddonCore cursor shape', () => {
     core.handleFocus()
     expect(last(handle)?.shape).toBe('bar')
   })
+
+  it('repacks the cursor row when a style flip changes BLOCK-ness under a pack that misses it', () => {
+    // The two halves run on different schedules: the overlay is re-pushed by EVERY pack, the cell
+    // half only by one that covers the cursor row. Flip `cursorInactiveStyle` from block to outline
+    // on a BLURRED terminal and then do something that packs other rows — a drag-select — and the
+    // outline would be drawn around a cell still holding the inverted block. Self-healing
+    // eventually, but checklist 2.12 walks a tester straight into it.
+    const style = { style: 'block', inactiveStyle: 'block' }
+    const { core, handle } = make({
+      rows: 8,
+      cols: 4,
+      cursorY: 0,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 7)
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+    handle.rows.length = 0
+    style.inactiveStyle = 'outline'
+    core.renderRows(4, 5)
+    expect(handle.rows.map((r) => r.row)).toContain(0)
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(0)
+    expect(last(handle)?.shape).toBe('outline')
+  })
+
+  it('repacks it the other way too — the overlay goes at once, so the block must arrive at once', () => {
+    const style = { style: 'block', inactiveStyle: 'outline' }
+    const { core, handle } = make({
+      rows: 8,
+      cols: 4,
+      cursorY: 0,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 7)
+    expect(last(handle)?.shape).toBe('outline')
+    handle.rows.length = 0
+    style.inactiveStyle = 'block'
+    core.renderRows(4, 5)
+    expect(last(handle)).toBe(null)
+    // Without the repair this terminal would show NO cursor at all until its cursor row happened
+    // to be packed by something else.
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+  })
+
+  it('repairs nothing when the pack already covers the cursor row', () => {
+    // Both halves of the cost/termination argument: the repair re-enters packRows, so it must fire
+    // only when the cursor row is genuinely stale AND is a row a pack can reach.
+    const style = { style: 'block', inactiveStyle: 'block' }
+    const { core, handle } = make({
+      rows: 4,
+      cols: 4,
+      cursorY: 1,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 3)
+    handle.rows.length = 0
+    style.inactiveStyle = 'outline'
+    core.renderRows(1, 1) // the cursor row itself — repainted once, not twice
+    expect(handle.rows.map((r) => r.row)).toEqual([1])
+
+    handle.rows.length = 0
+    style.inactiveStyle = 'block'
+    core.renderRows(3, 3) // flips back, and now the cursor row is NOT in range
+    expect(handle.rows.map((r) => r.row).sort((a, b) => a - b)).toEqual([1, 3])
+  })
 })
 
 /** BLUR AND THE SELECTION — limitation L3.

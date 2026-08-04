@@ -368,7 +368,9 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     gl.uniform2f(cu('uPan'), cam.x, cam.y)
     gl.uniform1f(cu('uZoom'), cam.zoom)
     gl.uniform2f(cu('uView'), view[0], view[1])
-    gl.uniform4fv(cu('uRects'), cursorRectData.subarray(0, n * 4))
+    // WebGL2's srcOffset/srcLength overload, NOT a `subarray`: the view would be an allocation per
+    // cursor per frame, which is precisely what the scratch buffer above exists to avoid.
+    gl.uniform4fv(cu('uRects'), cursorRectData, 0, n * 4)
     const col = unpackColor(c.color)
     gl.uniform4f(cu('uColor'), col.r / 255, col.g / 255, col.b / 255, col.a / 255)
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n)
