@@ -368,34 +368,27 @@ function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
  * (`charWidth * dpr`) and deliberately handed over UNROUNDED — the atlas rounds only its slot
  * PITCH, never the sampled extent.
  *
- * **Why this is not simply `dimensions.device.cell`.** The one moment this number is asked for is
- * the moment it is hardest to read: the shared layer rebuilds its atlas when the window moves to a
- * display with a different pixel ratio (`syncAtlasPixelRatio`), and the epoch bump that makes this
- * node re-register rides the window `resize` — while xterm re-measures off its OWN `matchMedia`
- * dpr listener. Nothing orders those two, so `dimensions.device.cell` can still be the cell of the
- * display we just LEFT, and an atlas built from it would be rebuilt at the old resolution: the very
- * defect the rebuild exists to fix, reintroduced one layer down and invisible except as a
- * `warnOnCellDrift` line.
- *
- * The CSS cell is the one that can be trusted across that window, because xterm derives it BY
- * DIVIDING the device cell by the same dpr (`css.cell.width = device.cell.width / dpr`) — so it is
- * dpr-invariant, `css × dpr` reproduces the device cell exactly whenever xterm is up to date, and
- * it is the CORRECT cell when xterm is not. Hence: prefer xterm's own number, and fall back to the
- * scaled CSS cell only when the two disagree, which is exactly the stale-measurement window.
+ * **It is read RAW, and the dpr rebuild does not change that.** A tie-break against the CSS cell
+ * scaled by `window.devicePixelRatio` was tried here (to guard the re-register that follows a
+ * display change against a measurement taken on the display we left) and reverted, for reasons
+ * worth keeping so it is not tried a third time:
+ *  - There is no staleness window to guard. `CoreBrowserService.dpr` is a live getter over
+ *    `window.devicePixelRatio` — nothing is cached — and the generation bump runs `teardownGlyph()`
+ *    BEFORE it raises the epoch, which restores a fresh `DomRenderer` whose constructor recomputes
+ *    the dimensions against that live dpr. By the time `setupGlyph` reads it, `device.cell` is the
+ *    NEW display's.
+ *  - `css × dpr` does not reproduce it anyway. xterm rounds the CSS canvas
+ *    (`css.canvas.width = round(device.cell.width * cols / dpr)`) and divides that by `cols`, so
+ *    the CSS cell carries a per-terminal residual — the same rounding `addon.ts` documents and
+ *    reproduces.
+ *  - Which made the reading GEOMETRY-dependent: two terminals with the same font on one retina
+ *    display returned different "device cells", tripping `warnOnCellDrift`'s 0.01 threshold on an
+ *    ordinary multi-terminal canvas. That is the line the device checklist arms the tester with,
+ *    so the guard's only lasting effect would have been false positives on the platform being
+ *    promoted.
  */
 function deviceCellOf(term: Terminal): { cellW: number; cellH: number } | null {
-  const device = cellOf(term, 'device')
-  const css = cellOf(term, 'css')
-  if (!css) return device
-  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
-  const scaled = validCellSize(css.cellW * dpr, css.cellH * dpr)
-  if (!device || !scaled) return device ?? scaled
-  // The slack is a CSS-pixel epsilon carried into device space, so the comparison means the same
-  // thing at every ratio: below it the two readings are the same measurement.
-  const eps = CELL_SIZE_EPS * dpr
-  const agree =
-    Math.abs(device.cellW - scaled.cellW) <= eps && Math.abs(device.cellH - scaled.cellH) <= eps
-  return agree ? device : scaled
+  return cellOf(term, 'device')
 }
 
 /** The guarded read behind both cell accessors. Private API, fully guarded: null simply means

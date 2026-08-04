@@ -1101,9 +1101,18 @@ export function setSharedGlyphCamera(cam: Camera): void {
  * view, so switching to a project that is on the board changes it with no view change at all
  * (`TerminalNode` gets away with reading the project id once because a project switch remounts it;
  * this layer stays mounted across switches).
+ *
+ * The `activeProjectId` check is not redundant with `viewFor`, which falls through to the GLOBAL
+ * default view for an id it does not know: with "Default view = kanban" and no active project (at
+ * boot, or after the last project is closed and the WelcomeScreen covers a still-mounted Canvas),
+ * an empty id would report "covered" and stop the loop with no board up. This is the same
+ * predicate Canvas derives `kanbanOpen` from, and it has to stay literally the same one — two
+ * answers to "is the board up" that can disagree is how a canvas ends up not drawing for a reason
+ * nobody can find.
  */
 export function boardCoversCanvas(): boolean {
-  return viewFor(useViewMode.getState(), useProjects.getState().activeProjectId ?? '') === 'kanban'
+  const { activeProjectId } = useProjects.getState()
+  return !!activeProjectId && viewFor(useViewMode.getState(), activeProjectId) === 'kanban'
 }
 
 export interface BoardFrameGate {

@@ -1032,11 +1032,23 @@ describe('syncAtlasPixelRatio', () => {
   })
 
   it('is inert on a context that is already disposed — the re-entry guard', () => {
-    // `pushViewport` runs from the ResizeObserver AND the window `resize` listener, and a display
-    // change fires both. The first disposes; the rest must not bump the epoch again before the
-    // effect has re-run with the fresh context.
     expect(syncAtlasPixelRatio(1, ctx(2, true))).toBe(false)
     expect(useSharedGlyph.getState().generation).toBe(0)
+  })
+
+  it('a SECOND observer firing on the same display change does not bump again', () => {
+    // The guard above only means something because of two facts this asserts together, and which a
+    // pre-disposed literal cannot show. (1) `pushViewport` runs from the ResizeObserver AND the
+    // window `resize` listener, and both close over the SAME context object — so the second call
+    // sees what the first one did. (2) `disposeContext()` flips `disposed` on that live object,
+    // which is what the guard reads; here that write is stood in for explicitly, since this
+    // environment can build no real context to dispose.
+    const same = ctx(2)
+    expect(syncAtlasPixelRatio(1, same)).toBe(true)
+    same.disposed = true // ← what `disposeContext()` does to the live context, inside that call
+    expect(syncAtlasPixelRatio(1, same)).toBe(false)
+    // One display change, ONE re-registration of every grid on the canvas.
+    expect(useSharedGlyph.getState().generation).toBe(1)
   })
 
   it('does not rebuild on an unreadable ratio', () => {

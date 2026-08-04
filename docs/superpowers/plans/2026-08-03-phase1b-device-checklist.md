@@ -390,16 +390,19 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **4.15 dpr change — the atlas is now REBUILT.** Drag the window between the retina display
       and an external 1x monitor, **both directions, and then back again**. Expected: geometry
       stays correct (the drawing buffer follows), and the text on the new display is as sharp as a
-      terminal opened there fresh. Soft or over-sharp text after the move is now a FAILURE, not the
-      documented behaviour — that was L10, and this item is what closes it.
+      terminal opened there fresh. Soft or over-sharp text after the move is now a FAILURE. It used
+      to be documented behaviour — through Phase 1c the atlas was never rebuilt on a display change
+      — and this item is what replaced that limitation.
       **What the rebuild costs, so it is not mis-filed as a bug.** It is the font-change path: the
       shared context is disposed and every terminal re-registers its grid. One repaint of the whole
       canvas at the moment of the move is expected, and a brief flash of DOM-rendered text is fine.
       A terminal left blank, transparent-but-empty, or stuck on the DOM renderer is not.
       **Report specifically:** any `[glyphgrid] atlas cell … does not match …` line in the console
-      after a move — that is a grid registering against a measurement taken on the display we left
-      (see `deviceCellOf`), and it means the rebuild adopted the OLD cell — and whether the SECOND
-      move rebuilds again or the fix latches after the first one.
+      after a move. The re-registration is expected to read the NEW display's cell (the epoch bump
+      tears the grid down first, which restores a DomRenderer that recomputes its dimensions against
+      the live dpr), so that line means the rebuild adopted the OLD one and the sharpness is only
+      half fixed. Also report whether the SECOND move rebuilds again or the fix latches after the
+      first.
 - [ ] **4.16 Kanban board — no frames are drawn under it.** Open the board over a shared-mode
       project: it is fully opaque (no glyphs showing through). Then the part this item exists for,
       which needs BUSY terminals, not idle ones — the idle park already covered idle.
