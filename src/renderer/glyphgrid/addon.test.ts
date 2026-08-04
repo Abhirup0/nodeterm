@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GlyphAtlas } from './atlas'
 import { CELL_STRIDE, FLAG_CURSOR, FLAG_SELECTED, packColor, readCell } from './cells'
+import type { GridCursor } from './cursor'
 import type { GridHandle } from './engine'
 import {
   GlyphGridRendererAddonCore,
@@ -57,14 +58,18 @@ function recordingHandle(): GridHandle & {
   rows: RecordedRow[]
   log: string[]
   resizes: Array<[number, number]>
+  /** Every cursor spec pushed to the grid, newest last — `at(-1)` is what a frame would draw. */
+  cursors: Array<GridCursor | null>
 } {
   const rows: RecordedRow[] = []
   const log: string[] = []
   const resizes: Array<[number, number]> = []
+  const cursors: Array<GridCursor | null> = []
   return {
     rows,
     log,
     resizes,
+    cursors,
     updateRow(row, cells) {
       log.push(`updateRow:${row}`)
       rows.push({ row, cells: cells.slice(), buf: cells })
@@ -73,6 +78,9 @@ function recordingHandle(): GridHandle & {
     // The addon owns CELLS, never geometry — the plate is the node's business. A stub, present
     // only to satisfy the handle contract.
     setPlateRect() {},
+    setCursor(cursor) {
+      cursors.push(cursor)
+    },
     setZ() {},
     resize(cols, r) {
       log.push(`resize:${cols}x${r}`)
@@ -166,9 +174,16 @@ interface FakeTermOpts {
   cursorVisible?: boolean
   focus?: boolean
   decorations?: ReturnType<typeof fakeDecorations>
+  /** xterm's two cursor options, verbatim. ABSENT on purpose in every test that does not name them:
+   *  an xterm build that stopped reporting them must degrade to xterm's own defaults (a focused
+   *  block, a blurred outline), never to no cursor at all. */
+  cursorStyle?: { style?: string; inactiveStyle?: string }
+  /** Columns whose cell reports width 2 — a wide glyph's LEAD. The column after one reports width
+   *  0, exactly as xterm's buffer stores a double-width character. */
+  wideCols?: readonly number[]
 }
 
-type FakeTermState = Required<Omit<FakeTermOpts, 'decorations'>>
+type FakeTermState = Required<Omit<FakeTermOpts, 'decorations' | 'cursorStyle' | 'wideCols'>>
 
 function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState } {
   const state: FakeTermState = {
@@ -191,12 +206,19 @@ function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState 
     cursorX: () => state.cursorX,
     cursorY: () => state.cursorY,
     cursorVisible: () => state.cursorVisible,
-    readCell: (absRow, col) => rowCodedCell(absRow, col),
+    readCell: (absRow, col) => {
+      const wide = o.wideCols ?? []
+      if (wide.includes(col)) return { ...rowCodedCell(absRow, col), getWidth: () => 2 }
+      if (wide.includes(col - 1)) return { ...rowCodedCell(absRow, col), getWidth: () => 0 }
+      return rowCodedCell(absRow, col)
+    },
     makeWorkCell: () => workCell,
     deviceMetrics: () => ({ charW: 16, charH: 34, cellW: 16, cellH: 34 }),
     dpr: () => 2,
     theme: () => THEME,
     hasFocus: () => state.focus,
+    // Absent unless a test names them — see FakeTermOpts.cursorStyle.
+    cursorStyle: o.cursorStyle ? () => o.cursorStyle as { style?: string } : undefined,
     // Absent unless a test asks for them — an xterm build with no decoration service hands the
     // addon exactly this, and every other test in this file is that case.
     decorations: o.decorations?.reader,
@@ -448,6 +470,281 @@ describe('GlyphGridRendererAddonCore cursor + focus', () => {
     core.handleFocus()
     expect(handle.rows.map((r) => r.row)).toEqual([4])
     expect(readCell(handle.rows[0].cells, 1).flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+  })
+})
+
+/** THE CURSOR SHAPE — which half of the renderer draws it, and where.
+ *
+ *  A block is a CELL rewrite (only the cell path can invert the glyph) and every other shape is an
+ *  OVERLAY pushed to the grid. So each test here asserts BOTH halves: the shape that should be drawn
+ *  as an overlay, and the absence of the one that should not be drawn as cells — a bug that put the
+ *  cursor on both paths would paint an opaque quad over the very inversion it just produced. */
+describe('GlyphGridRendererAddonCore cursor shape', () => {
+  const last = (h: ReturnType<typeof recordingHandle>): GridCursor | null | undefined =>
+    h.cursors.at(-1)
+
+  it('pushes NO overlay for a focused block — the cells carry it', () => {
+    const { core, handle } = make({ rows: 4, cursorY: 1, cursorX: 2, cursorStyle: { style: 'block' } })
+    core.renderRows(0, 3)
+    expect(last(handle)).toBe(null)
+    expect(readCell(handle.rows.find((r) => r.row === 1)!.cells, 2).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+  })
+
+  it('pushes a BAR overlay, and leaves the cell un-inverted', () => {
+    const { core, handle } = make({ rows: 4, cursorY: 1, cursorX: 2, cursorStyle: { style: 'bar' } })
+    core.renderRows(0, 3)
+    expect(last(handle)).toEqual({
+      col: 2,
+      row: 1,
+      shape: 'bar',
+      widthCells: 1,
+      color: THEME.cursorBg
+    })
+    expect(readCell(handle.rows.find((r) => r.row === 1)!.cells, 2).flags & FLAG_CURSOR).toBe(0)
+  })
+
+  it('pushes an UNDERLINE overlay for that style', () => {
+    const { core, handle } = make({ rows: 4, cursorY: 0, cursorX: 1, cursorStyle: { style: 'underline' } })
+    core.renderRows(0, 3)
+    expect(last(handle)?.shape).toBe('underline')
+  })
+
+  it('a BLURRED terminal gets the hollow outline xterm draws by default', () => {
+    // The row this task exists for: `outline` is xterm's default `cursorInactiveStyle`, so this is
+    // the DEFAULT path, not an exotic setting. Limitation L2 was that it could not be expressed.
+    const { core, handle } = make({ rows: 4, cursorY: 2, cursorX: 3, focus: false })
+    core.renderRows(0, 3)
+    expect(last(handle)).toEqual({
+      col: 3,
+      row: 2,
+      shape: 'outline',
+      widthCells: 1,
+      color: THEME.cursorBg
+    })
+    expect(readCell(handle.rows.find((r) => r.row === 2)!.cells, 3).flags & FLAG_CURSOR).toBe(0)
+  })
+
+  it('honours an inactive style of none — nothing on either path', () => {
+    const { core, handle } = make({
+      rows: 4,
+      cursorY: 2,
+      cursorX: 3,
+      focus: false,
+      cursorStyle: { inactiveStyle: 'none' }
+    })
+    core.renderRows(0, 3)
+    expect(last(handle)).toBe(null)
+    for (const rec of handle.rows)
+      for (let c = 0; c < 4; c++) expect(readCell(rec.cells, c).flags & FLAG_CURSOR).toBe(0)
+  })
+
+  it('honours an inactive style of BLOCK through the cell path, not the overlay', () => {
+    const { core, handle } = make({
+      rows: 4,
+      cursorY: 2,
+      cursorX: 3,
+      focus: false,
+      cursorStyle: { inactiveStyle: 'block' }
+    })
+    core.renderRows(0, 3)
+    expect(last(handle)).toBe(null)
+    expect(readCell(handle.rows.find((r) => r.row === 2)!.cells, 3).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+  })
+
+  it('clears the overlay when the app hides the cursor', () => {
+    // DECTCEM inside a TUI. A stale overlay would leave a bar sitting in the middle of vim — and
+    // unlike a packed row, nothing else ever erases a grid-level value.
+    const { core, term, handle } = make({
+      rows: 4,
+      cursorY: 1,
+      cursorX: 1,
+      cursorStyle: { style: 'bar' }
+    })
+    core.renderRows(0, 3)
+    expect(last(handle)?.shape).toBe('bar')
+    term.state.cursorVisible = false
+    core.renderRows(0, 3)
+    expect(last(handle)).toBe(null)
+  })
+
+  it('reports widthCells 2 when the cursor sits on a WIDE glyph', () => {
+    // The overlay's half of L13: a bar on 日 is still one hairline, but an underline or an outline
+    // has to span the whole character — which needs the cell's width, not the cursor's column.
+    const { core, handle } = make({
+      rows: 4,
+      cursorY: 0,
+      cursorX: 1,
+      wideCols: [1],
+      cursorStyle: { style: 'underline' }
+    })
+    core.renderRows(0, 3)
+    expect(last(handle)?.widthCells).toBe(2)
+  })
+
+  it('clamps the overlay column exactly as the cell path does (deferred wrap)', () => {
+    const { core, handle } = make({ cols: 4, rows: 2, cursorX: 4, cursorY: 0, cursorStyle: { style: 'bar' } })
+    core.renderRows(0, 1)
+    expect(last(handle)?.col).toBe(3)
+  })
+
+  it('clears the overlay when the cursor scrolls out of the viewport', () => {
+    // The cursor's row is baseY + cursorY - viewportY; scroll back far enough and it is off the top
+    // of the viewport. An overlay is a GRID-level value, so nothing else would erase it — a stale
+    // one would draw a cursor over whatever text scrolled into that row.
+    const { core, term, handle } = make({
+      rows: 4,
+      baseY: 100,
+      viewportY: 100,
+      cursorY: 1,
+      cursorStyle: { style: 'bar' }
+    })
+    core.renderRows(0, 3)
+    expect(last(handle)?.row).toBe(1)
+    term.state.viewportY = 106
+    core.renderRows(0, 3)
+    expect(last(handle)).toBe(null)
+  })
+
+  it('degrades to a block / outline when the shell reports no cursor options at all', () => {
+    // An xterm bump that renames the options must cost the user their chosen SHAPE, never their
+    // cursor — so the fallbacks are xterm's own defaults.
+    const focused = make({ rows: 4, cursorY: 1, cursorX: 1 })
+    focused.core.renderRows(0, 3)
+    expect(focused.handle.cursors.at(-1)).toBe(null)
+    expect(readCell(focused.handle.rows.find((r) => r.row === 1)!.cells, 1).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+
+    const blurred = make({ rows: 4, cursorY: 1, cursorX: 1, focus: false })
+    blurred.core.renderRows(0, 3)
+    expect(blurred.handle.cursors.at(-1)?.shape).toBe('outline')
+  })
+
+  it('follows blur and focus without waiting for a redraw', () => {
+    const { core, handle } = make({ rows: 4, cursorY: 1, cursorX: 1, cursorStyle: { style: 'bar' } })
+    core.renderRows(0, 3)
+    expect(last(handle)?.shape).toBe('bar')
+    core.handleBlur()
+    expect(last(handle)?.shape).toBe('outline')
+    core.handleFocus()
+    expect(last(handle)?.shape).toBe('bar')
+  })
+
+  it('repacks the cursor row when a style flip changes BLOCK-ness under a pack that misses it', () => {
+    // The two halves run on different schedules: the overlay is re-pushed by EVERY pack, the cell
+    // half only by one that covers the cursor row. Flip `cursorInactiveStyle` from block to outline
+    // on a BLURRED terminal and then do something that packs other rows — a drag-select — and the
+    // outline would be drawn around a cell still holding the inverted block. Self-healing
+    // eventually, but checklist 2.12 walks a tester straight into it.
+    const style = { style: 'block', inactiveStyle: 'block' }
+    const { core, handle } = make({
+      rows: 8,
+      cols: 4,
+      cursorY: 0,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 7)
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+    handle.rows.length = 0
+    style.inactiveStyle = 'outline'
+    core.renderRows(4, 5)
+    expect(handle.rows.map((r) => r.row)).toContain(0)
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(0)
+    expect(last(handle)?.shape).toBe('outline')
+  })
+
+  it('repacks it the other way too — the overlay goes at once, so the block must arrive at once', () => {
+    const style = { style: 'block', inactiveStyle: 'outline' }
+    const { core, handle } = make({
+      rows: 8,
+      cols: 4,
+      cursorY: 0,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 7)
+    expect(last(handle)?.shape).toBe('outline')
+    handle.rows.length = 0
+    style.inactiveStyle = 'block'
+    core.renderRows(4, 5)
+    expect(last(handle)).toBe(null)
+    // Without the repair this terminal would show NO cursor at all until its cursor row happened
+    // to be packed by something else.
+    expect(readCell(handle.rows.find((r) => r.row === 0)!.cells, 1).flags & FLAG_CURSOR).toBe(
+      FLAG_CURSOR
+    )
+  })
+
+  it('repairs nothing when the pack already covers the cursor row', () => {
+    // Both halves of the cost/termination argument: the repair re-enters packRows, so it must fire
+    // only when the cursor row is genuinely stale AND is a row a pack can reach.
+    const style = { style: 'block', inactiveStyle: 'block' }
+    const { core, handle } = make({
+      rows: 4,
+      cols: 4,
+      cursorY: 1,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 3)
+    handle.rows.length = 0
+    style.inactiveStyle = 'outline'
+    core.renderRows(1, 1) // the cursor row itself — repainted once, not twice
+    expect(handle.rows.map((r) => r.row)).toEqual([1])
+
+    handle.rows.length = 0
+    style.inactiveStyle = 'block'
+    core.renderRows(3, 3) // flips back, and now the cursor row is NOT in range
+    expect(handle.rows.map((r) => r.row).sort((a, b) => a - b)).toEqual([1, 3])
+  })
+})
+
+/** BLUR AND THE SELECTION — limitation L3.
+ *
+ *  xterm paints an unfocused terminal's selection in a quieter colour; this engine's theme lanes
+ *  carry no inactive colour, so the feed blends toward the plate. The addon's share is the REPAINT:
+ *  blur used to repack the cursor row only, which would have left the selection bright until
+ *  something else happened to touch those rows. */
+describe('GlyphGridRendererAddonCore blur dims the selection', () => {
+  /** THEME.selectionBg blended half-way to THEME.bg — see feed.ts's INACTIVE_SELECTION_BLEND. */
+  const DIMMED = packColor(0x20, 0x31, 0x49, 0xff)
+
+  it('repacks the selected rows on blur, in the inactive colour', () => {
+    const { core, handle } = make({ rows: 8, cols: 4, cursorY: 0 })
+    core.handleSelectionChanged([0, 2], [4, 3], false)
+    handle.rows.length = 0
+    core.handleBlur()
+    expect([...new Set(handle.rows.map((r) => r.row))].sort((a, b) => a - b)).toEqual([0, 2, 3])
+    const row2 = handle.rows.find((r) => r.row === 2)!
+    expect(readCell(row2.cells, 0).bg).toBe(DIMMED)
+    expect(readCell(row2.cells, 0).flags & FLAG_SELECTED).toBe(FLAG_SELECTED)
+  })
+
+  it('paints the ACTIVE colour back on focus', () => {
+    const { core, handle } = make({ rows: 8, cols: 4, cursorY: 0 })
+    core.handleSelectionChanged([0, 2], [4, 3], false)
+    core.handleBlur()
+    handle.rows.length = 0
+    core.handleFocus()
+    const row2 = handle.rows.find((r) => r.row === 2)!
+    expect(readCell(row2.cells, 0).bg).toBe(THEME.selectionBg)
+  })
+
+  it('packs a selection made WHILE blurred in the inactive colour', () => {
+    const { core, handle } = make({ rows: 8, cols: 4, focus: false })
+    core.handleSelectionChanged([0, 2], [4, 3], false)
+    const row2 = handle.rows.find((r) => r.row === 2)!
+    expect(readCell(row2.cells, 0).bg).toBe(DIMMED)
   })
 })
 

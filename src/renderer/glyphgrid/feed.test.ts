@@ -105,7 +105,17 @@ function decoReader(
 function pack(
   cells: readonly (CellView | undefined)[],
   o: Partial<
-    Pick<RowFeedOpts, 'cols' | 'selection' | 'cursorCol' | 'atlas' | 'decorations' | 'bufferRow'>
+    Pick<
+      RowFeedOpts,
+      | 'cols'
+      | 'selection'
+      | 'cursorCol'
+      | 'cursorShape'
+      | 'focused'
+      | 'atlas'
+      | 'decorations'
+      | 'bufferRow'
+    >
   > = {}
 ): { out: Uint32Array; atlas: ReturnType<typeof fakeAtlas> } {
   const atlas = (o.atlas as ReturnType<typeof fakeAtlas>) ?? fakeAtlas()
@@ -117,6 +127,8 @@ function pack(
     theme: THEME,
     selection: o.selection ?? null,
     cursorCol: o.cursorCol ?? -1,
+    cursorShape: o.cursorShape,
+    focused: o.focused,
     decorations: o.decorations,
     bufferRow: o.bufferRow
   })
@@ -344,6 +356,119 @@ describe('packViewportRow — cursor and selection', () => {
     const { out } = pack([makeCell()], { selection: null, cursorCol: -1 })
     expect(readCell(out, 0).flags).toBe(0)
   })
+
+  it('paints BOTH cells of a wide glyph under a block cursor', () => {
+    // The lead is at col 0 and its follower (width 0) at col 1. L13 was: only col 0 got the cursor
+    // colours, so the block covered the left half of 日 and the right half stayed un-inverted.
+    const lead = makeCell({ chars: '日', code: 0x65e5, width: 2, bg: ['rgb', 0x223344] })
+    const follower = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
+    const { out } = pack([lead, follower], { cursorCol: 0, cursorShape: 'block' })
+    for (const col of [0, 1]) {
+      const c = readCell(out, col)
+      expect(c.bg).toBe(THEME.cursorBg)
+      expect(c.fg).toBe(THEME.cursorFg)
+      expect(c.flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+    }
+    // The follower still owns no glyph — the lead's ink covers both columns (Phase 1c contract).
+    expect(readCell(out, 1).glyph).toBe(0)
+  })
+
+  it('carries the cursor no further than the follower of the covered lead', () => {
+    const lead = makeCell({ chars: '日', code: 0x65e5, width: 2 })
+    const follower = makeCell({ code: 0, width: 0 })
+    const after = makeCell({ code: 0x41 })
+    const { out } = pack([lead, follower, after], { cursorCol: 0, cursorShape: 'block' })
+    expect(readCell(out, 2).flags & FLAG_CURSOR).toBe(0)
+    expect(readCell(out, 2).bg).toBe(THEME.bg)
+  })
+
+  it('does not carry a cursor into a stray width-0 cell that follows a NARROW one', () => {
+    // Only a WIDE lead has a follower. A stray zero-width cell after a one-column cell under the
+    // cursor is not the other half of anything, and painting it would smear the block sideways.
+    const narrow = makeCell({ code: 0x41, width: 1 })
+    const stray = makeCell({ code: 0x300, width: 0 })
+    const { out } = pack([narrow, stray], { cursorCol: 0, cursorShape: 'block' })
+    expect(readCell(out, 1).flags & FLAG_CURSOR).toBe(0)
+  })
+
+  it('a NON-block shape leaves the cell alone — the overlay pass draws those', () => {
+    // Only the cell path can invert the glyph, and only a block wants to; bar/underline/outline are
+    // small quads drawn AFTER the cells, so rewriting the cell here would paint the block as well.
+    for (const shape of ['bar', 'underline', 'outline', 'none'] as const) {
+      const { out } = pack([makeCell({ code: 0x41, fg: ['palette', 3] })], {
+        cursorCol: 0,
+        cursorShape: shape
+      })
+      const c = readCell(out, 0)
+      expect(c.fg).toBe(THEME.ansi[3])
+      expect(c.bg).toBe(THEME.bg)
+      expect(c.flags).toBe(0)
+    }
+  })
+
+  it('a non-block shape leaves a wide glyph alone too', () => {
+    const lead = makeCell({ chars: '日', code: 0x65e5, width: 2, bg: ['rgb', 0x223344] })
+    const follower = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
+    const { out } = pack([lead, follower], { cursorCol: 0, cursorShape: 'outline' })
+    for (const col of [0, 1]) {
+      expect(readCell(out, col).bg).toBe(packColor(0x22, 0x33, 0x44, 0xff))
+      expect(readCell(out, col).flags & FLAG_CURSOR).toBe(0)
+    }
+  })
+
+  it('defaults to a block when the caller names no shape', () => {
+    // Every caller that predates cursor styles passes only `cursorCol`, and a block is what it got.
+    const { out } = pack([makeCell({ code: 0x41 })], { cursorCol: 0 })
+    expect(readCell(out, 0).bg).toBe(THEME.cursorBg)
+  })
+})
+
+/** BLUR — the one thing focus changes about a packed row (limitation L3).
+ *
+ *  The cursor's own blurred shape is an OVERLAY and never reaches this module; what does reach it is
+ *  the selection, which xterm's own renderers paint in a separate `selectionInactiveBackground`.
+ *  This engine's theme lanes carry no such colour, so the honest answer is to blend the active one
+ *  toward the plate: same hue, visibly quieter, and it cannot disagree with a theme that never
+ *  defined an inactive colour in the first place. */
+describe('packViewportRow — an unfocused terminal', () => {
+  it('dims the selection toward the plate when the terminal is not focused', () => {
+    const { out } = pack([makeCell({ code: 0x41 })], { selection: [0, 1], focused: false })
+    // selectionBg (0x30,0x50,0x80) blended half-way to the theme background (0x10,0x11,0x12).
+    expect(readCell(out, 0).bg).toBe(packColor(0x20, 0x31, 0x49, 0xff))
+    // Still a selection as far as the flags are concerned — only the paint is quieter.
+    expect(readCell(out, 0).flags).toBe(FLAG_SELECTED)
+  })
+
+  it('asks the atlas for a slot painted on the DIMMED selection background', () => {
+    // The atlas is colour-keyed, so a slot requested in the active colour renders in the active
+    // colour however correct the lanes are — the same trap the selection/cursor ordering exists for.
+    const { atlas } = pack([makeCell({ code: 0x41 })], { selection: [0, 1], focused: false })
+    expect(atlas.colors).toEqual([[THEME.fg, packColor(0x20, 0x31, 0x49, 0xff)]])
+  })
+
+  it('leaves everything OUTSIDE the selection exactly as it was', () => {
+    const cells = [makeCell({ code: 0x41, bg: ['palette', 7] }), makeCell({ code: 0x42 })]
+    const { out } = pack(cells, { selection: [1, 2], focused: false })
+    expect(readCell(out, 0).bg).toBe(THEME.ansi[7])
+  })
+
+  it('keeps the ACTIVE selection colour when the caller says nothing about focus', () => {
+    // Every caller that predates this passes no flag, and a focused terminal is what it meant.
+    const { out } = pack([makeCell({ code: 0x41 })], { selection: [0, 1] })
+    expect(readCell(out, 0).bg).toBe(THEME.selectionBg)
+  })
+
+  it('still lets a block cursor win over the dimmed selection', () => {
+    // A blurred terminal whose inactive style IS a block (a user setting) must not lose its cursor
+    // to the selection band under it — the precedence is a property of the overrides, not of focus.
+    const { out } = pack([makeCell({ code: 0x41 })], {
+      selection: [0, 1],
+      cursorCol: 0,
+      cursorShape: 'block',
+      focused: false
+    })
+    expect(readCell(out, 0).bg).toBe(THEME.cursorBg)
+  })
 })
 
 /** DECORATIONS — a search hit's highlight, and the precedence that makes it readable.
@@ -508,9 +633,11 @@ describe('packViewportRow — the colours the atlas is asked for', () => {
     const cont = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
     const { out, atlas } = pack([wide, cont], { cursorCol: 0 })
     expect(atlas.colors).toEqual([[THEME.cursorFg, THEME.cursorBg]])
-    // The follower carries the lead's RESOLVED colours (not the cursor override, which is a
-    // per-column paint) and asks for no slot of its own.
-    expect(readCell(out, 1).bg).toBe(packColor(0x22, 0x33, 0x44, 0xff))
+    // The follower asks for no slot of its own — it never has — but it now PAINTS in the cursor
+    // pair rather than in the lead's own colours: the block covers the whole character, which is
+    // what closes L13. Its glyph lane stays 0, so the shader paints exactly this bg lane.
+    expect(readCell(out, 1).bg).toBe(THEME.cursorBg)
+    expect(readCell(out, 1).glyph).toBe(0)
   })
 })
 

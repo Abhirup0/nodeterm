@@ -304,6 +304,21 @@ export function attachGlyphGrid(
     dpr: () => core._coreBrowserService.dpr || 1,
     theme: () => theme,
     hasFocus: () => core._coreBrowserService.isFocused,
+    // The PUBLIC options object, not an internal — so this needs no guard in `coreOf` and cannot
+    // refuse an attach. Read live on every pack: the user can change either from Settings → Terminal
+    // at any moment (`applyVisualOptions` writes straight into `term.options`), and a cached copy
+    // would keep drawing yesterday's shape until the terminal happened to be re-created.
+    //
+    // xterm's DEFAULT `cursorInactiveStyle` is `outline` — the hollow box a blurred terminal draws,
+    // and precisely the shape limitation L2 said this engine could not express. So the row that
+    // looks most exotic in the mapping table is in fact the DEFAULT path: every terminal on the
+    // canvas that is not the focused one takes it. The mapping itself lives in `cursor.ts`
+    // (`resolveCursorShape`), where it is pure and unit-tested; this file only hands over the two
+    // strings, and never the focus flag — the addon tracks focus itself, see `TermInternals`.
+    cursorStyle: () => ({
+      style: term.options.cursorStyle,
+      inactiveStyle: term.options.cursorInactiveStyle
+    }),
     // Spread, so a terminal with no usable decoration service leaves all three members undefined —
     // the addon's "this terminal has no highlights" case.
     ...(decorationsOf(core) ?? {})
