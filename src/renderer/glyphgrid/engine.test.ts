@@ -655,6 +655,94 @@ describe('per-grid buffers + row-range damage', () => {
     expect(e.frame()).toBe(false)
   })
 
+})
+
+/** The wake signal the parked rAF driver resumes on — see `createFrameLoop`. The whole point is
+ *  that it fires on the clean→dirty EDGE, so a busy terminal costs one call per frame at most
+ *  instead of one per row write. */
+describe('onDamage', () => {
+  it('fires on the clean→dirty transition and not again while already dirty', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame() // consume the registration damage — the engine is clean from here
+    const woke = vi.fn()
+    e.onDamage(woke)
+    h.updateRow(0, rowOf(2))
+    expect(woke).toHaveBeenCalledTimes(1)
+    // Already dirty: sixty row writes before the next frame are still ONE wake.
+    h.updateRow(1, rowOf(2))
+    h.updateRow(2, rowOf(2))
+    e.setCamera({ x: 5, y: 0, zoom: 1 })
+    expect(woke).toHaveBeenCalledTimes(1)
+  })
+
+  it('fires again after a frame() has cleared the flag', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame()
+    const woke = vi.fn()
+    e.onDamage(woke)
+    h.updateRow(0, rowOf(2))
+    e.frame() // clears the flag
+    h.updateRow(1, rowOf(2))
+    expect(woke).toHaveBeenCalledTimes(2)
+  })
+
+  it('a HIDDEN grid’s updateRow does not fire it', () => {
+    // The visibility-scoped damage rule, restated at the wake seam: a hidden grid's write sets
+    // only ITS row range, so it must neither dirty the engine nor un-park the driver. Waking the
+    // loop for a grid the frame would cull is the exact cost that rule exists to remove.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('far', 5000, 0, { rows: 3 }))
+    e.frame() // registration damage; the grid is culled, so it is recorded as hidden
+    const woke = vi.fn()
+    e.onDamage(woke)
+    h.updateRow(1, rowOf(2))
+    expect(woke).not.toHaveBeenCalled()
+    // …and the frame that brings it back into view still wakes, because the camera dirties
+    // unconditionally — the leg the whole optimization stands on.
+    e.setCamera({ x: -5000, y: 0, zoom: 1 })
+    expect(woke).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops delivering after the subscription is disposed', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0, 0, { rows: 3 }))
+    e.frame()
+    const woke = vi.fn()
+    const sub = e.onDamage(woke)
+    sub.dispose()
+    h.updateRow(0, rowOf(2))
+    expect(woke).not.toHaveBeenCalled()
+  })
+
+  it('restoring damage after a throwing frame wakes the driver again', () => {
+    // The damage-restore path in frame()'s catch is a clean→dirty transition like any other: the
+    // canvas is half-drawn and owes a redraw, so a PARKED driver has to hear about it.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    e.register(spec('a', 0))
+    const woke = vi.fn()
+    e.onDamage(woke)
+    gl.beginFrame = () => {
+      throw new Error('context lost')
+    }
+    expect(() => e.frame()).toThrow('context lost')
+    expect(woke).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('plate params', () => {
   it('drawGrid receives the plate params (bgColor + plate rect) with the grid geometry', () => {
     const gl = fakeGL()
     const e = new GlyphGridEngine(gl, atlas())

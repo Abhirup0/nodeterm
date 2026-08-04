@@ -129,6 +129,8 @@ export class GlyphGridEngine {
    *  setViewport always reaches the GL surface even if it passes the current w/h. */
   private viewDpr = 0
   private dirty = false
+  /** Wake subscribers, notified by `markDirty` on the clean→dirty EDGE only — see `onDamage`. */
+  private damageListeners = new Set<() => void>()
   private seq = 0
   /** False until an atlas source has actually reached the GPU — see `atlasUploadPending`. */
   private atlasUploaded = false
@@ -137,6 +139,43 @@ export class GlyphGridEngine {
     private gl: GlyphGL,
     private atlas: GlyphAtlas
   ) {}
+
+  /**
+   * The ONE writer of the `dirty` flag. Every mutator routes its damage through here, so the wake
+   * signal below cannot drift out of sync with the flag `frame()` gates on — a direct
+   * `dirty = true` somewhere would be damage the parked driver never hears about, and a canvas
+   * that stops repainting until the user drags something.
+   *
+   * Notifies on the clean→dirty TRANSITION only: a terminal streaming output dirties the engine on
+   * every row write, and calling out sixty times per frame would make the wake more expensive than
+   * the loop it saves. Once dirty, the driver is already coming.
+   */
+  private markDirty(): void {
+    if (this.dirty) return
+    this.dirty = true
+    for (const fn of this.damageListeners) fn()
+  }
+
+  /**
+   * Subscribe to damage — the signal the rAF driver parks against (see `createFrameLoop`). Fires
+   * when the engine goes from clean to dirty, i.e. exactly when an idle canvas has something new
+   * to draw.
+   *
+   * Deliberately says nothing about a HIDDEN grid's row writes: those do not dirty the engine (see
+   * `updateRow`), so they do not wake the loop either. Their damage rides the frame that brings
+   * the grid back into view, and every input that can change visibility dirties unconditionally.
+   *
+   * A listener must not call `frame()` inline — it runs inside the mutator that caused the damage,
+   * and the driver's contract is to SCHEDULE.
+   */
+  onDamage(cb: () => void): { dispose(): void } {
+    this.damageListeners.add(cb)
+    return {
+      dispose: () => {
+        this.damageListeners.delete(cb)
+      }
+    }
+  }
 
   register(spec: GridSpec): GridHandle {
     if (this.grids.has(spec.id))
@@ -154,7 +193,7 @@ export class GlyphGridEngine {
     }
     this.grids.set(spec.id, grid)
     this.gl.createGrid(spec.id, spec.cols, spec.rows)
-    this.dirty = true
+    this.markDirty()
     const engine = this
     // Inertness rides on `grid.dead`: once this handle's dispose() — or the engine-wide
     // disposeAll() — has run, every mutator below is a silent no-op. The constraint is that a
@@ -188,14 +227,14 @@ export class GlyphGridEngine {
         // view is always drawn, and its upload pass replays the range accumulated while it was
         // hidden — deferred, never lost. Do not "optimize" any of those into a visibility-scoped
         // dirty; that is the leg this stands on.
-        if (grid.lastVisible) engine.dirty = true
+        if (grid.lastVisible) engine.markDirty()
       },
       setOrigin(x, y) {
         if (grid.dead) return
         if (grid.originX === x && grid.originY === y) return
         grid.originX = x
         grid.originY = y
-        engine.dirty = true
+        engine.markDirty()
       },
       setPlateRect(x, y, w, h) {
         if (grid.dead) return
@@ -208,13 +247,13 @@ export class GlyphGridEngine {
         grid.plateY = y
         grid.plateW = w
         grid.plateH = h
-        engine.dirty = true
+        engine.markDirty()
       },
       setZ(z) {
         if (grid.dead) return
         if (grid.z === z) return
         grid.z = z
-        engine.dirty = true
+        engine.markDirty()
       },
       resize(cols, rows) {
         if (grid.dead) return
@@ -240,7 +279,7 @@ export class GlyphGridEngine {
         engine.gl.createGrid(grid.id, cols, rows)
         grid.dirtyFrom = 0
         grid.dirtyTo = rows - 1
-        engine.dirty = true
+        engine.markDirty()
       },
       dispose() {
         // The handle goes inert unconditionally — this is its owner declaring teardown, and it
@@ -252,7 +291,7 @@ export class GlyphGridEngine {
         if (engine.grids.get(grid.id) !== grid) return
         engine.grids.delete(grid.id)
         engine.gl.disposeGrid(grid.id)
-        engine.dirty = true
+        engine.markDirty()
       }
     }
   }
@@ -279,13 +318,13 @@ export class GlyphGridEngine {
     }
     this.grids.clear()
     // Teardown is damage: the canvas still holds the disposed grids' pixels until it is redrawn.
-    this.dirty = true
+    this.markDirty()
   }
 
   setCamera(cam: Camera): void {
     if (cam.x === this.camera.x && cam.y === this.camera.y && cam.zoom === this.camera.zoom) return
     this.camera = { ...cam }
-    this.dirty = true
+    this.markDirty()
   }
 
   setViewport(w: number, h: number, dpr: number): void {
@@ -298,7 +337,7 @@ export class GlyphGridEngine {
     this.viewH = h
     this.viewDpr = dpr
     this.gl.resize(w, h, dpr)
-    this.dirty = true
+    this.markDirty()
   }
 
   /** Visible grid ids in draw order (z ascending, ties by registration order).
@@ -432,7 +471,7 @@ export class GlyphGridEngine {
       }
       this.gl.endFrame()
     } catch (err) {
-      this.dirty = true
+      this.markDirty()
       throw err
     }
     return true

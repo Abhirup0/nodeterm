@@ -38,6 +38,7 @@ import {
 } from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
+import { createFrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
 import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
 import { createCanvasRasterizer } from '../glyphgrid/raster'
@@ -1064,24 +1065,38 @@ export function SharedGlyphLayer(): JSX.Element {
     // monitor) leaves the CSS box identical while the backing store must change.
     window.addEventListener('resize', pushViewport)
 
-    let raf = 0
-    const tick = (): void => {
-      // The context can be torn down synchronously between the schedule and this callback (font
-      // change, mode switched off). Skipping the frame — and NOT rescheduling — leaves the loop to
-      // the effect run that the accompanying generation bump triggers; the cleanup below cancels
-      // this handle either way.
-      if (ctx.disposed) return
-      try {
-        ctx.engine.frame()
-      } catch (err) {
-        // `frame()` rethrows by contract, having restored its own damage. There is no recovery in
-        // 1b: the whole session goes back to the DOM renderer.
-        failSharedGlyph('frame threw', err)
-        return // no reschedule — the cleanup below still cancels the (already fired) handle
-      }
-      raf = requestAnimationFrame(tick)
+    // The frame loop PARKS when the canvas goes quiet — an always-registered rAF keeps Chromium's
+    // whole frame pipeline ticking at the display's refresh rate to draw nothing. All the
+    // scheduling and the park/heartbeat policy live in `createFrameLoop` (unit-tested there); this
+    // effect only supplies the seams and the wake signals.
+    const loop = createFrameLoop({
+      // The context can be torn down synchronously between a schedule and its callback (font
+      // change, mode switched off); the loop stops itself rather than rescheduling, and the
+      // cleanup below is idempotent either way.
+      alive: () => !ctx.disposed,
+      frame: () => ctx.engine.frame(),
+      // `frame()` rethrows by contract, having restored its own damage. There is no recovery in
+      // 1b: the whole session goes back to the DOM renderer.
+      onError: (err) => failSharedGlyph('frame threw', err),
+      requestFrame: (cb) => requestAnimationFrame(cb),
+      cancelFrame: (h) => cancelAnimationFrame(h),
+      setTimer: (cb, ms) => window.setTimeout(cb, ms),
+      clearTimer: (h) => window.clearTimeout(h)
+    })
+    // THE wake mechanism: the engine funnels every damage write through `markDirty`, which calls
+    // out on the clean→dirty edge. A parked loop resumes on the very next damaging write.
+    const damage = ctx.engine.onDamage(() => loop.wake())
+    // Belt and braces for the background-throttling case (Task 9): a park entered while the window
+    // was occluded must not outlive the return, and a throttled/coalesced rAF can leave the loop
+    // parked with damage pending. Both are cheap — `wake()` only schedules a frame that draws
+    // nothing when there is nothing to draw.
+    const onVisible = (): void => {
+      if (!document.hidden) loop.wake()
     }
-    raf = requestAnimationFrame(tick)
+    const onFocus = (): void => loop.wake()
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisible)
+    loop.start()
 
     // Phase 2 owns real context restoration; here a lost context is simply the end of the shared
     // renderer for this session. `preventDefault()` is deliberately NOT called — that is the
@@ -1090,7 +1105,15 @@ export function SharedGlyphLayer(): JSX.Element {
     canvas.addEventListener('webglcontextlost', onLost)
 
     return () => {
-      cancelAnimationFrame(raf)
+      // Everything the loop owns goes at once — the pending frame, the heartbeat TIMER and the
+      // damage subscription. A surviving timer would keep calling `frame()` on a context this
+      // effect run has let go of, and a surviving subscription would keep a dead loop reachable
+      // from the engine. `stop()` is idempotent, so the `ctx.disposed` and `failSharedGlyph` paths
+      // (which stop the loop themselves) land here safely too.
+      loop.stop()
+      damage.dispose()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisible)
       ro.disconnect()
       window.removeEventListener('resize', pushViewport)
       canvas.removeEventListener('webglcontextlost', onLost)

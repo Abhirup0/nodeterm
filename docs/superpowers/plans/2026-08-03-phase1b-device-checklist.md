@@ -400,6 +400,20 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       node's bottom edge onto the canvas or over the subagent cards. Reason: the 2026-08-04 device
       report, where exactly that happened and **dragging the node was the only way to heal it** (a
       drag re-registers the grid, which re-measures; nothing else did).
+- [ ] **4.19 The rAF driver parks when the canvas is idle.** With shared mode on, leave a canvas of
+      IDLE terminals (nothing streaming, no agent working, mouse still) for ~5 seconds, then look at
+      Activity Monitor (the app's renderer + GPU processes) or DevTools' Performance/Rendering FPS
+      meter: the frame pipeline goes QUIET rather than ticking at the display's refresh rate. Then:
+      - type in one terminal → it repaints **immediately**, no perceptible first-keystroke delay
+        (this is the `onDamage` wake, the mechanism);
+      - pan and zoom the canvas → everything keeps repainting smoothly throughout;
+      - switch to another application for a minute and come back → the canvas is live again
+        (focus/visibilitychange wake).
+      **BLOCKING symptom to name explicitly: if ANY terminal ever stops repainting until you drag
+      it, click it, or resize something, that is a MISSED WAKE** — the failure this design fears,
+      and far worse than the idle CPU it saves. Report it with what the terminal was doing when it
+      froze and how long it stayed frozen (a heartbeat is supposed to heal it within ~1 second, so a
+      freeze that lasts longer than that means the heartbeat is gone too).
 
 ## 5. Failure paths
 
