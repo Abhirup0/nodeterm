@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest'
-import { escapeDroppedPath, pastedFiles, uploadNameFor } from './file-drop'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import {
+  clipboardImages,
+  escapeDroppedPath,
+  pasteHasText,
+  pastedFiles,
+  uploadNameFor
+} from './file-drop'
 
 describe('escapeDroppedPath', () => {
   it('escapes what a shell would otherwise interpret', () => {
@@ -29,12 +35,13 @@ describe('uploadNameFor', () => {
   })
 })
 
-/** Minimal stand-in for the two shapes Chromium actually hands a paste. */
-const clipboard = (opts: { files?: File[]; items?: File[] }): DataTransfer =>
+/** Minimal stand-in for the shapes Chromium actually hands a paste. */
+const clipboard = (opts: { files?: File[]; items?: File[]; text?: string }): DataTransfer =>
   ({
     files: (opts.files ?? []) as unknown as FileList,
     items: (opts.items ?? []).map((f) => ({ kind: 'file', getAsFile: () => f })) as unknown as
-      DataTransferItemList
+      DataTransferItemList,
+    getData: (type: string) => (type === 'text/plain' ? (opts.text ?? '') : '')
   }) as DataTransfer
 
 describe('pastedFiles', () => {
@@ -51,5 +58,51 @@ describe('pastedFiles', () => {
   it('answers empty for a text paste, which is xterm s to handle', () => {
     expect(pastedFiles(clipboard({}))).toEqual([])
     expect(pastedFiles(null)).toEqual([])
+  })
+})
+
+describe('pasteHasText', () => {
+  it('separates an ordinary text paste from one that carried nothing at all', () => {
+    expect(pasteHasText(clipboard({ text: 'hello' }))).toBe(true)
+    // The filtered image-only clipboard: Chromium hands over no files AND no text.
+    expect(pasteHasText(clipboard({}))).toBe(false)
+    expect(pasteHasText(null)).toBe(false)
+  })
+})
+
+describe('clipboardImages', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  /** Stand-in for the async Clipboard API — `read()` is the only member touched. */
+  const stubClipboard = (read: () => Promise<unknown[]>): void => {
+    vi.stubGlobal('navigator', { clipboard: { read } })
+  }
+
+  const item = (types: string[]): unknown => ({
+    types,
+    getType: (t: string) => Promise.resolve(new Blob(['bytes'], { type: t }))
+  })
+
+  it('reads the screenshot the paste event filtered out, and names it', async () => {
+    stubClipboard(async () => [item(['image/png'])])
+    const [file] = await clipboardImages()
+    expect(file.type).toBe('image/png')
+    // A bare Blob has no name; without one the upload overlay and the agent both see nothing.
+    expect(file.name).toMatch(/^pasted-\d{8}-\d{6}\.png$/)
+  })
+
+  it('ignores clipboard entries that hold no image', async () => {
+    stubClipboard(async () => [item(['text/html', 'text/plain'])])
+    expect(await clipboardImages()).toEqual([])
+  })
+
+  it('answers empty where the API is absent — an insecure context, or an older browser', async () => {
+    vi.stubGlobal('navigator', {})
+    expect(await clipboardImages()).toEqual([])
+  })
+
+  it('answers empty when the read is refused, leaving the paste the no-op it already was', async () => {
+    stubClipboard(() => Promise.reject(new DOMException('denied', 'NotAllowedError')))
+    expect(await clipboardImages()).toEqual([])
   })
 })

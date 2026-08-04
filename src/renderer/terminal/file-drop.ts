@@ -24,7 +24,7 @@ const EXT_BY_TYPE: Record<string, string> = {
 
 /** The name to store a file under. Clipboard bytes usually have none, so one is generated from
  *  the MIME type + a timestamp — recognizable in a prompt and unique enough to read back. */
-export function uploadNameFor(file: File): string {
+export function uploadNameFor(file: { name: string; type: string }): string {
   if (file.name) return file.name
   const ext = EXT_BY_TYPE[file.type] ?? (file.type.split('/')[1] || 'bin')
   const stamp = new Date()
@@ -46,6 +46,46 @@ export function pastedFiles(dt: DataTransfer | null): File[] {
     .filter((it) => it.kind === 'file')
     .map((it) => it.getAsFile())
     .filter((f): f is File => !!f)
+}
+
+/** True when the paste carried text. That text is xterm's to handle — and its ABSENCE, on a paste
+ *  that carried no files either, is the signature of the filtered clipboard `clipboardImages`
+ *  exists for. */
+export function pasteHasText(dt: DataTransfer | null): boolean {
+  return !!dt && !!dt.getData('text/plain')
+}
+
+/**
+ * Images that are ON the clipboard but that the paste event refused to hand over.
+ *
+ * Chromium fills `clipboardData` only with formats the paste TARGET can hold, and the element
+ * holding focus inside a terminal node is xterm's helper `<textarea>` — text, and nothing else. A
+ * clipboard carrying just a screenshot has no text flavour to survive that filter, so the handler
+ * is handed an EMPTY `clipboardData` (files 0, items []) and the paste looks like it did nothing.
+ * Observed on Chrome/Windows against the Server Edition; it is why apps that accept pasted images
+ * focus a `contenteditable` rather than a textarea.
+ *
+ * The async Clipboard API is not filtered by the focused element, so ask it directly. It needs a
+ * secure context and the `clipboard-read` permission (granted once per origin, prompted on first
+ * use); a browser without either, or a user who declines, resolves to [] and the paste stays the
+ * no-op it already was. Never throws — same fail-open contract as the rest of this module.
+ */
+export async function clipboardImages(): Promise<File[]> {
+  try {
+    if (!navigator.clipboard?.read) return []
+    const out: File[] = []
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => t.startsWith('image/'))
+      if (!type) continue
+      const blob = await item.getType(type)
+      // Named here rather than left to `localPathFor`: the upload overlay prints this name, and
+      // the clipboard hands over a bare Blob with none.
+      out.push(new File([blob], uploadNameFor({ name: '', type }), { type }))
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 const readAsBase64 = (file: File): Promise<string | null> =>

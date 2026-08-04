@@ -10,7 +10,7 @@ import { useSession } from '../../session/session'
 import { useSettings } from '../../state/settings'
 import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
-import { droppedPaths, pastedFiles } from '../../terminal/file-drop'
+import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
 import { parseOsc52 } from '../../terminal/osc52'
 import {
   attachReplay,
@@ -345,10 +345,17 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   // Capture phase, because xterm's own paste listener sits on the textarea below this wrapper.
   const onPaste = (e: React.ClipboardEvent) => {
     const files = pastedFiles(e.clipboardData)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    void insertFiles(files, { raiseWindow: false })
+    if (files.length) {
+      e.preventDefault()
+      e.stopPropagation()
+      void insertFiles(files, { raiseWindow: false })
+      return
+    }
+    // Files nor text — the filtered image-only clipboard. Same fallback as the canvas node.
+    if (pasteHasText(e.clipboardData)) return
+    void clipboardImages().then((images) => {
+      if (images.length) void insertFiles(images, { raiseWindow: false })
+    })
   }
 
   return (
