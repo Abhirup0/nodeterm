@@ -158,6 +158,17 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *  premultiplied (`UNPACK_PREMULTIPLY_ALPHA_WEBGL` true) and blend `ONE, ONE_MINUS_SRC_ALPHA`, which
  *  makes the average correct instead of double-counted. Device evidence first — it is not built now.
  *
+ *  HALF OF THAT ESCALATION HAS SINCE LANDED, so do not re-do it and do not read the residual above
+ *  as still whole. The BLEND half arrived with the rounded occlusion plate — `gl-webgl2.ts` now sets
+ *  `blendFuncSeparate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA)`, i.e. `ONE` on the
+ *  source ALPHA — which is what the plate's antialiased corner needed and which closes the
+ *  PAGE-BLEED half of this rim on the way: a half-alpha rim texel used to leave the surface only
+ *  three-quarters opaque, so the plate under a cell that had already been painted showed through it.
+ *  It no longer does. What is left is the COLOUR half alone — the non-premultiplied UPLOAD still
+ *  hands the blend an already-darkened average, so the rim reads slightly dark at heavy zoom-out.
+ *  That, and only that, is what the device round now judges, and
+ *  `UNPACK_PREMULTIPLY_ALPHA_WEBGL` is the whole of what would close it.
+ *
  *  The promise that actually matters, and the one the LOD derivation rests on, is about INK.
  *
  *  Unpacked, the four things this file must not break:

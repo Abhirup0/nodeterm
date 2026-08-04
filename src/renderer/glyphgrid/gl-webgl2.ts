@@ -377,11 +377,22 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    * compositing premultiplied — then lets 75% of the page through a pixel that is 50% covered. A
    * bright halo along a soft edge, on the light theme especially.
    *
-   * It changes NOTHING that was already drawn: every source this renderer produced before the
-   * plate became a quad is either fully opaque (cells, cursor overlay) or fully transparent (a
-   * grid's zeroed buffer before its first packed row), and `srcA * srcA` equals `1 * srcA` at both
-   * ends. The plate's antialiased corner is the first partial coverage in the pipeline, and this
-   * is the factor that makes it composite as the coverage it claims.
+   * WHAT IT CHANGES, in three cases — and the third is a FIX, not a side effect:
+   *  - **Fully opaque** sources (a packed cell, the cursor overlay): unaffected. `srcA * srcA` and
+   *    `1 * srcA` are both 1.
+   *  - **Fully transparent** sources (a grid's zeroed buffer before its first packed row):
+   *    unaffected. Both are 0, and the destination keeps its own alpha either way.
+   *  - **PARTIALLY transparent** sources, which the plate's antialiased corner is NOT the first of.
+   *    `raster.ts` documents a pre-existing one and this blend improves it: the atlas is uploaded
+   *    NON-premultiplied, so wherever a mip level averages a slot's opaque background against the
+   *    page's transparent ground — the allocation frontier, the page's right/bottom remainder
+   *    strip, and the whole page right after a `clearPage` repack — a level-2 texel comes out half
+   *    brightness at half alpha, and `LINEAR_MIPMAP_LINEAR` is the min filter at any zoom below 1,
+   *    i.e. in ordinary use. Under the old single-factor blend such a rim texel left `dstA = 0.75`,
+   *    so the PLATE underneath it (and the page under that) showed through a cell that had already
+   *    been painted — the rim's page-bleed half. With `ONE` on the source alpha the surface stays
+   *    fully opaque there, and only the colour half of that residual is left (see `raster.ts` — the
+   *    non-premultiplied UPLOAD is what still double-attenuates the rim's brightness).
    */
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 

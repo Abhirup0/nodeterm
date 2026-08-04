@@ -1757,10 +1757,21 @@ body,
    body, or stop the host being inset:0, and the plate silently under-covers again — the exact band
    this design removed. Change either and the measurement must move to `.term-node__body`.
 
-   ONE accepted degradation is left, and it is Phase 2's call (a rounded / stencilled plate),
-   judged on the device checklist: the plate is a square rect while the node has border-radius
-   10px, so the body's corners read square in shared mode — the node's `overflow: hidden` clips DOM
-   children, and the canvas is not one. */
+   THE PLATE'S SHAPE FOLLOWS THIS RULE'S SET, and that is now a live invariant rather than an
+   accepted degradation. The node's `overflow: hidden` clips DOM children and the canvas is not one,
+   so the plate cannot be clipped by `border-radius` — it draws its own: as of Phase 2 it is a
+   rounded quad whose BOTTOM two corners carry the node's own radius (read at register time from
+   this element's computed `border-bottom-left-radius` minus its border width, since the body is the
+   padding box — see `measurePlateRadius`), while its TOP two stay square.
+
+   Square on top is deliberate and load-bearing. `.term-node__body` is the node root's LAST child,
+   so its bottom edge IS the node's rounded bottom with nothing behind it but canvas, while its top
+   edge is an interior seam against opaque chrome (`.term-node__header`, the labels row,
+   `.term-node__find`, all of which paint their own `var(--panel)`). Rounding the top corners would
+   not shape a visible corner at all — it would carve two wedges of canvas OUT of the body, inside
+   the host's `6px`/`4px` padding where no cell quad covers them. **If the body ever stops being the
+   last child, or anything transparent is placed below it, that rule inverts and
+   `GridDrawParams.plateRadius` has to become a per-corner pair.** */
 .term-node--glyphgrid,
 .term-node--glyphgrid .term-node__body {
   background: transparent;

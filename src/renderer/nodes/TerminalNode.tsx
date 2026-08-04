@@ -1249,6 +1249,15 @@ export function TerminalNode({
      * `radius - border`, so a plate rounded by the OUTER radius would curve slightly tighter than
      * the node's own clip all the way round the corner.
      *
+     * ONE RADIUS AND ONE BORDER — exact for this node, an approximation in general.
+     * `borderBottomLeftRadius` is the HORIZONTAL half of a corner CSS allows to be elliptical, and
+     * `borderBottomWidth` is one of the TWO borders that meet at a bottom corner. Both collapse to a
+     * single number because `.term-node` is authored with one uniform radius and `1px` side and
+     * bottom borders. An elliptical radius or asymmetric side borders would need the vertical half
+     * and the side width as well — and an elliptical corner would additionally need the SDF to take
+     * a `vec2` radius, so this is a two-file change, not a wider `parseFloat`. Same instinct as the
+     * `%` refusal below: this is not a CSS length engine.
+     *
      * Only the bottom corners are shaped, and the GL layer owns that rule rather than this call
      * site — see `GridDrawParams.plateRadius`. The body is the node's last child, so its top
      * corners butt against opaque chrome and are not corners on screen at all.
