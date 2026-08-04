@@ -285,6 +285,16 @@ export class GlyphGridRendererAddonCore {
    * cost of resets being rare; the alternative is a synchronous repack inside a pack loop, which is
    * a correctness problem rather than a cosmetic one.
    *
+   * AND WHY A TERMINAL THAT IS OFF-SCREEN AT RESET TIME STILL HEALS — the mechanism the correctness
+   * above quietly rests on. A redraw request for a grid nobody can see does not evaporate at either
+   * end: xterm's RenderService answers `refreshRows` on a PAUSED terminal (its intersection observer
+   * saw it leave the viewport) by setting `_needsFullRefresh` and flushing that full refresh the
+   * moment the terminal intersects again, and the engine's damage is likewise visibility-scoped
+   * rather than visibility-dropped — the repacked rows are uploaded on the frame that brings the
+   * grid back. Note the timing, because it widens the "one frame" above: the observer lifts the
+   * pause ASYNCHRONOUSLY and the refresh it schedules is debounced, so a grid panned back into view
+   * right after a reset can show stale glyphs for a FEW frames, not exactly one.
+   *
    * Bounded by nothing here on purpose: a page too small for the canvas would reset again on the
    * repack, request another redraw, and settle into a repaint per frame. That is the LRU escalation
    * Phase 2 names, and it needs to be VISIBLE (the atlas logs `resetCount`) rather than smoothed

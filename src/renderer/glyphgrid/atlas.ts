@@ -73,12 +73,11 @@ export function slotPitch(cell: number): number {
  *  renders BLANK while its neighbours are fine. Every headless-auditable path was audited and is
  *  clean — box-glyphs claims nothing below U+0300 and never returns an empty op list, the raster
  *  repaints the slot's whole PITCH rect (unclipped, before the cell clip is installed) ahead of the
- *  ink on BOTH branches, `cellXY` is the single copy of the
- *  layout math and the shader recomputes it identically, `strideX >= cellW + 2*GUTTER_PX` always
- *  (the rasterizer's cell is captured at construction and never re-adopted), and the atlas's dirty
- *  flag is polled by the rAF driver every frame, so no wake-up can be missed. What is left needs a
- *  real font on a real device, which no test here can produce — so the next round collects
- *  evidence instead of guessing. */
+ *  ink on BOTH branches, `cellXY` is the single copy of the layout math and the shader recomputes it
+ *  identically, `strideX >= cellW + 2*GUTTER_PX` always (the rasterizer's cell is captured at
+ *  construction and never re-adopted), and the atlas's dirty flag is polled by the rAF driver every
+ *  frame, so no wake-up can be missed. What is left needs a real font on a real device, which no
+ *  test here can produce — so the next round collects evidence instead of guessing. */
 export interface GlyphSlotAllocation {
   slot: number
   code: number

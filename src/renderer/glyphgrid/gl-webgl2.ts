@@ -14,11 +14,18 @@ import { plateRectDevice } from './plate'
  * separation, so the last safe level is `floor(log2(2 * GUTTER_PX))` = 2 for the gutter of 2 this
  * atlas lays out. Raising the gutter raises this on its own; the two can never disagree.
  *
- * Levels deeper than this are still GENERATED (generateMipmap builds the whole pyramid, and
- * building fewer levels is not something the API offers) — they are simply never sampled, which is
- * what the clamp buys. The residual it accepts is stated in GUTTER_PX's comment: at level 2 a
- * bilinear tap can reach a pure-gutter texel holding a blend of two BACKGROUND colours. That is a
- * soft edge between backgrounds at heavy zoom-out, never a ghost glyph.
+ * Levels deeper than this are neither generated nor sampled. `generateMipmap` builds levels
+ * `base+1 .. q`, where `q` is clamped by `TEXTURE_MAX_LEVEL` (ES 3.0 §3.8.9) — so setting MAX_LEVEL
+ * to this constant BEFORE the generate call is what stops the driver building nine levels nobody may
+ * read (about 0.35 MB per 2048² page, plus the work). MAX_LOD then forbids the SAMPLER from reaching
+ * past it, and the pyramid stays mipmap-COMPLETE because completeness asks only for levels
+ * `base .. q` — exactly the ones a clamped generate produces, which is why LINEAR_MIPMAP_LINEAR is
+ * still a valid min filter here. (An earlier version of this comment claimed the API offers no way
+ * to build fewer levels. It does; that sentence was wrong.)
+ *
+ * The residual the clamp accepts is stated in GUTTER_PX's comment: at level 2 a bilinear tap can
+ * reach a pure-gutter texel holding a blend of two BACKGROUND colours. That is a soft edge between
+ * backgrounds at heavy zoom-out, never a ghost glyph.
  */
 const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
 
@@ -262,6 +269,14 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       // down to 1×1. WebGL2 also allows mipmaps on NPOT textures, so a future page size is not a
       // correctness hazard here — only a rounding one at the deepest levels, which MAX_SAFE_LOD
       // never lets the sampler reach.
+      //
+      // BEFORE the generate, never after: `generateMipmap` builds levels up to `q`, which
+      // TEXTURE_MAX_LEVEL clamps, so setting it here is what makes the pyramid stop at the deepest
+      // level the sampler is allowed to read (MAX_LOD below). Set afterwards it would only hide
+      // levels that had already been built. The texture stays mipmap-COMPLETE — completeness wants
+      // levels base..q and a clamped generate produces exactly those — which is what keeps
+      // LINEAR_MIPMAP_LINEAR a legal min filter.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, MAX_SAFE_LOD)
       gl.generateMipmap(gl.TEXTURE_2D)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
       // The clamp the gutters pay for: levels deeper than MAX_SAFE_LOD may mix a neighbouring

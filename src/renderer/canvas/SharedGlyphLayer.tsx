@@ -30,7 +30,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { create } from 'zustand'
-import { GlyphAtlas, type GlyphSlotAllocation } from '../glyphgrid/atlas'
+import {
+  GUTTER_PX,
+  GlyphAtlas,
+  type GlyphAtlasSubscription,
+  type GlyphSlotAllocation
+} from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
 import type { GlyphGL } from '../glyphgrid/gl'
@@ -39,11 +44,20 @@ import { createCanvasRasterizer } from '../glyphgrid/raster'
 import { useSettings } from '../state/settings'
 
 /** Atlas page edge, in DEVICE pixels. 2048 (not Phase 0's 1024) because the atlas cells are
- *  device-sized: at dpr 2 a 13px terminal font is roughly a 16x32 device cell, so a 1024 page
- *  holds ~2000 glyphs — enough for ASCII plus a little, and nothing like enough for a session
- *  that also shows box drawing, powerline glyphs and CJK. A full page degrades to the blank slot
- *  (GlyphAtlas never throws), i.e. missing text, so the page is sized for the pathological
- *  session rather than the average one. 2048² RGBA = 16 MB of VRAM, once, for the whole canvas. */
+ *  device-sized AND the page is now keyed by COLOUR: at dpr 2 a 13px terminal font is roughly a
+ *  16x32 device cell, which on a 2048 page (slot pitch = the cell plus a gutter each side) leaves
+ *  room for a few thousand `(code, style, fg, bg)` slots. Under the old monochrome keying that was
+ *  a whole session's glyph REPERTOIRE; under colour keying the same repertoire costs one slot per
+ *  colour pair it is ever drawn in, so the page is a working set rather than a cache of everything.
+ *
+ *  Which is why filling it is a NORMAL event, not a failure: `GlyphAtlas` answers a full page by
+ *  clearing it and telling every addon to repack (see its `reset`), so the cost is one expensive
+ *  frame instead of the missing text an earlier version of this comment described. Sizing the page
+ *  generously is therefore about keeping resets RARE (they are logged — see `installAtlasResetLog`),
+ *  not about never reaching the end of it.
+ *
+ *  2048² RGBA = 16 MB, plus the mip chain the minification filter needs — clamped to MAX_SAFE_LOD,
+ *  so levels 1 and 2 only, about 5 MB more. ~21 MB of VRAM, once, for the whole canvas. */
 const ATLAS_PAGE_PX = 2048
 
 /** A cell larger than this would make the atlas page hold almost nothing. The number now comes
@@ -623,6 +637,10 @@ export interface SharedGlyphContext {
 interface LiveContext extends SharedGlyphContext {
   canvas: HTMLCanvasElement
   gl: GlyphGL
+  /** The console reset gauge's subscription, held so teardown can drop it: the atlas dies with the
+   *  context, but a subscription left on a rebuilt-and-then-disposed one would keep a closure alive
+   *  per font change. */
+  resetLog: GlyphAtlasSubscription
   /** Font settings this context was rasterized for — a change tears it down. */
   fontKey: string
   /** Set by `disposeContext`, read by the rAF driver, which holds this object across a frame.
@@ -701,7 +719,20 @@ function glyphDebugTap(): ((info: GlyphSlotAllocation) => void) | undefined {
 
 /** Exposes `window.__glyphgridDump()` → `{ page, ...geometry }`, where `page` is a PNG data URL of
  *  the whole atlas. Installed only under the debug flag; the tester opens the data URL in a tab and
- *  looks for the reported letter. */
+ *  looks for the reported letter.
+ *
+ *  READING THE PNG SINCE THE ATLAS WENT COLOURED. It is no longer white ink on a black page: each
+ *  slot holds the glyph in its real foreground over its real background, so a dark-theme page is
+ *  mostly dark-on-dark and the whole page ground OUTSIDE the allocated slots is TRANSPARENT (it
+ *  renders as the viewer's own backdrop — white in a browser tab, not black). "The letter's cell is
+ *  black" is therefore no longer the test for "missing": the test is whether the cell holds an
+ *  inkless expanse of its own BACKGROUND colour. The same letter can also legitimately appear MANY
+ *  times, once per colour pair it has been drawn in.
+ *
+ *  `gutterPx` and `resetCount` ride along for that reading: a slot's ink starts one gutter inside
+ *  its pitch cell (so `strideX`-based arithmetic alone lands a couple of texels off), and a page
+ *  that has reset is a page whose slot numbering has been reused — a dumped slot index only means
+ *  something alongside the reset count it was taken at. */
 function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: number }): void {
   if (!glyphDebugOn() || typeof window === 'undefined') return
   ;(window as unknown as Record<string, unknown>).__glyphgridDump = async (): Promise<unknown> => {
@@ -712,8 +743,10 @@ function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: num
       cellH: raster.cellH,
       strideX: atlas.strideX,
       strideY: atlas.strideY,
+      gutterPx: GUTTER_PX,
       cols: Math.floor(atlas.sizePx / atlas.strideX),
-      capacity: atlas.capacity
+      capacity: atlas.capacity,
+      resetCount: atlas.resetCount
     }
     // `source` is the rasterizer's OffscreenCanvas; convertToBlob is the only way to read it back.
     if (!source || typeof (source as OffscreenCanvas).convertToBlob !== 'function')
@@ -726,6 +759,56 @@ function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: num
     })
     return { ...geometry, page }
   }
+}
+
+/** The atlas surface the reset log reads. Structural rather than `GlyphAtlas` so the log can be
+ *  exercised without a page full of real glyphs — filling a real one takes a rasterizer, which this
+ *  environment does not have. */
+export interface AtlasResetSource {
+  resetCount: number
+  onReset(cb: () => void): GlyphAtlasSubscription
+}
+
+/** Quiet period after a logged reset. */
+const RESET_LOG_INTERVAL_MS = 1000
+
+/**
+ * Announce atlas page resets on the console.
+ *
+ * NOT gated on the debug flag, unlike the dump and the allocation tap. A reset is the v1
+ * reset-on-full model's pressure gauge: it is supposed to be RARE, and the number that decides
+ * whether Phase 2 has to build real LRU eviction is how often it actually happens in a day's use —
+ * which nobody will have collected if seeing it required knowing to turn a flag on first. It costs a
+ * console line per reset on a canvas where resets are rare, which is the case this design claims.
+ *
+ * THROTTLED, because the case where the claim is wrong is exactly the case that would drown in it: a
+ * page too small for the canvas resets on every repack, i.e. once per frame, and an unthrottled warn
+ * there is both a real frame cost and a console the tester cannot read the rest of. So at most one
+ * line per `RESET_LOG_INTERVAL_MS`, carrying the count of the ones it swallowed — a burst still
+ * reports as a burst, in one line instead of sixty.
+ *
+ * `now` is injected for the tests; production passes nothing.
+ */
+export function installAtlasResetLog(
+  atlas: AtlasResetSource,
+  now: () => number = Date.now
+): GlyphAtlasSubscription {
+  // -Infinity, not 0: the FIRST reset must always print, whatever the clock reads.
+  let lastAt = -Infinity
+  let swallowed = 0
+  return atlas.onReset(() => {
+    const t = now()
+    if (t - lastAt < RESET_LOG_INTERVAL_MS) {
+      swallowed++
+      return
+    }
+    lastAt = t
+    const extra = swallowed > 0 ? ` (+${swallowed} more since the last line)` : ''
+    swallowed = 0
+    console.warn(
+      `[glyphgrid] atlas page reset #${atlas.resetCount} — colour key space full, every row repacks${extra}`
+    )
+  })
 }
 
 function createContext(cell: DeviceCell): LiveContext | null {
@@ -760,7 +843,15 @@ function createContext(cell: DeviceCell): LiveContext | null {
   installGlyphDump(atlas, raster)
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
-  return { engine, atlas, canvas, gl, fontKey: fontKeyOf(fontFamily, fontSize), disposed: false }
+  return {
+    engine,
+    atlas,
+    canvas,
+    gl,
+    resetLog: installAtlasResetLog(atlas),
+    fontKey: fontKeyOf(fontFamily, fontSize),
+    disposed: false
+  }
 }
 
 /** Tear the context down and free the GPU objects. Every registered grid is left holding an
@@ -776,6 +867,7 @@ function disposeContext(): void {
   // than submit against deleted objects (see `LiveContext.disposed`).
   ctx.disposed = true
   try {
+    ctx.resetLog.dispose()
     ctx.engine.disposeAll()
     ctx.gl.dispose()
     // `gl.dispose()` frees the buffers/texture/program but NOT the context itself, and the

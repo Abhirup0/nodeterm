@@ -8,6 +8,7 @@ import {
   gestureTerminalIds,
   hasActiveGesture,
   idsFromOrderSig,
+  installAtlasResetLog,
   nodeIsOpaque,
   nodeOrderSig,
   nodeStackZ,
@@ -22,6 +23,7 @@ import {
   subscribeNodeZOrder,
   subscribeOpaqueSet,
   useSharedGlyph,
+  type AtlasResetSource,
   type StackedNode,
   type StackOrderNode
 } from './SharedGlyphLayer'
@@ -955,5 +957,99 @@ describe('sharedGlyphAvailable', () => {
     useSharedGlyph.getState().setEnabled(false)
     useSharedGlyph.getState().setEnabled(true)
     expect(sharedGlyphAvailable()).toBe(true)
+  })
+})
+
+describe('installAtlasResetLog', () => {
+  /** The atlas surface the log reads, with a manual trigger. */
+  function fakeAtlas(): {
+    source: AtlasResetSource
+    fire(): void
+    subs: number
+  } {
+    const cbs = new Set<() => void>()
+    let count = 0
+    return {
+      source: {
+        get resetCount() {
+          return count
+        },
+        onReset(cb) {
+          cbs.add(cb)
+          return {
+            dispose() {
+              cbs.delete(cb)
+            }
+          }
+        }
+      },
+      fire() {
+        // The real atlas increments its counter BEFORE it notifies (see GlyphAtlas.reset), which is
+        // what lets the log line carry the number of the reset it is reporting.
+        count++
+        for (const cb of [...cbs]) cb()
+      },
+      get subs() {
+        return cbs.size
+      }
+    }
+  }
+
+  let warn: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
+  it('logs the first reset immediately, with its number', () => {
+    const atlas = fakeAtlas()
+    installAtlasResetLog(atlas.source, () => 0)
+    atlas.fire()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain('[glyphgrid] atlas page reset #1')
+  })
+
+  // Resets are supposed to be RARE. A page too small for the canvas resets on every repack instead,
+  // and an unthrottled line there would be a console write per frame — which costs frames itself
+  // and buries the very signal the tester is being asked to report.
+  it('throttles a burst to one line, and says how many it swallowed', () => {
+    const atlas = fakeAtlas()
+    let now = 0
+    installAtlasResetLog(atlas.source, () => now)
+    atlas.fire()
+    now = 100
+    atlas.fire()
+    now = 200
+    atlas.fire()
+    expect(warn).toHaveBeenCalledTimes(1)
+    now = 5000
+    atlas.fire()
+    expect(warn).toHaveBeenCalledTimes(2)
+    const line = String(warn.mock.calls[1][0])
+    expect(line).toContain('#4')
+    expect(line).toContain('+2')
+  })
+
+  it('does not mention swallowed resets when none were', () => {
+    const atlas = fakeAtlas()
+    let now = 0
+    installAtlasResetLog(atlas.source, () => now)
+    atlas.fire()
+    now = 5000
+    atlas.fire()
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(String(warn.mock.calls[1][0])).not.toContain('+')
+  })
+
+  it('unsubscribes on dispose — the context that installed it is gone', () => {
+    const atlas = fakeAtlas()
+    const sub = installAtlasResetLog(atlas.source, () => 0)
+    expect(atlas.subs).toBe(1)
+    sub.dispose()
+    expect(atlas.subs).toBe(0)
+    atlas.fire()
+    expect(warn).not.toHaveBeenCalled()
   })
 })

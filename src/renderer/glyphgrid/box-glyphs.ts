@@ -53,9 +53,10 @@
  * make it possible to "simplify" them back into flat washes that no longer match the renderer
  * beside them. Everything this module draws is ink or nothing.
  *
- * "Opaque" is the atlas's ink colour, not an alpha value: `raster.ts` fills these rects WHITE onto
- * its opaque BLACK page, so a set pixel is coverage 1 and everything else is coverage 0 — the same
- * two states the fillText path produces, and the reason this module never touches `globalAlpha`.
+ * "Opaque" is about the ALPHA, not about a particular colour: `raster.ts` has already filled the
+ * slot with the cell's real BACKGROUND, and it fills these rects in the cell's real FOREGROUND, so a
+ * set pixel is fully fg and every other pixel is left as bg — the same two states the `fillText`
+ * path produces on a colour-keyed atlas, and the reason this module never touches `globalAlpha`.
  */
 export interface PaintOp {
   x: number

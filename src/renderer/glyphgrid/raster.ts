@@ -107,11 +107,21 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *  Stated that way on purpose — an earlier wording claimed the inter-slot page ground is "never
  *  sampled at LOD <= MAX_SAFE_LOD", which overstates it. Unallocated pitch cells DO enter a level-2
  *  texel wherever the page is not yet full: at the allocation frontier, in the page's right/bottom
- *  remainder strip, and throughout a repack that has just called `clearPage`. What enters there is
- *  transparent page ground blended into a slot's edge texel — the same accepted-residual class as
- *  the background-vs-background blend GUTTER_PX's comment already names, and it disappears as the
- *  page fills. The promise that actually matters, and the one the LOD derivation rests on, is about
- *  INK.
+ *  remainder strip, and throughout a repack that has just called `clearPage`.
+ *
+ *  What that looks like is NOT the background-vs-background blend GUTTER_PX's comment names, and the
+ *  two must not be conflated — same accepted-residual STATUS, different visual signature. The atlas
+ *  texture is NON-premultiplied (the default `UNPACK_PREMULTIPLY_ALPHA_WEBGL` is false), so a mip
+ *  level averages rgb and alpha INDEPENDENTLY: an edge texel that is half opaque background and half
+ *  transparent ground comes out as a HALF-BRIGHTNESS colour at HALF alpha, and the `SRC_ALPHA`
+ *  blend then attenuates that already-darkened colour by that same alpha again. The result is a
+ *  darker, slightly translucent rim on the outermost row/column of the affected cells at heavy
+ *  zoom-out, with the node's plate showing through it — bounded, cosmetic, and self-healing as the
+ *  page fills. Should the device round judge it objectionable, the escalation is to upload
+ *  premultiplied (`UNPACK_PREMULTIPLY_ALPHA_WEBGL` true) and blend `ONE, ONE_MINUS_SRC_ALPHA`, which
+ *  makes the average correct instead of double-counted. Device evidence first — it is not built now.
+ *
+ *  The promise that actually matters, and the one the LOD derivation rests on, is about INK.
  *
  *  Unpacked, the four things this file must not break:
  *  1. The page ground starts (and `clearPage` returns to) TRANSPARENT-black. The atlas's slot 0 —

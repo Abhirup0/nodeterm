@@ -83,35 +83,27 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       still on the same column grid as the DOM rendering. A wide glyph is not clipped in half.
 - [ ] **2.6 Combining sequences.** A decomposed grapheme (e.g. `e` + U+0301) renders the BASE
       character — the accent may be missing, but never a lone accent mark on a blank cell.
-- [ ] **2.7 Atlas fidelity at dpr 1 and 2.** On the retina display and on an external 1x display,
-      with a non-default font family and size (e.g. Menlo 11, JetBrains Mono 16): text is crisp,
-      not soft or doubled. The float tie this item used to warn about is **closed**: the atlas is
-      rasterized at xterm's exact device cell (1:1 texels) *and* the filter no longer depends on
-      which side of the λ=0 mag/min boundary a driver resolves to — `MIN_FILTER` is set from the
-      camera (**NEAREST at zoom ≥ 1**, where the snapped pan makes it bit-exact; **LINEAR below 1**,
-      so a zoomed-out thumbnail stays readable), and MAG stays NEAREST. **Report any softness that
-      remains AFTER this**: with the sampler made deterministic, what is left points at the atlas
-      RASTER itself (the canvas rasterizer's antialiasing / baseline rounding, or L14's
-      first-terminal cell latch), not at the sampler. Also zoom OUT past 1 and confirm the text
-      degrades smoothly rather than speckling.
-      **Round 6 addressed exactly that raster.** The atlas is no longer drawn onto transparency:
-      the page is opaque BLACK, the ink is WHITE, and the shader reads coverage off the RED
-      channel — the same backdrop xterm's own `TextureAtlas._drawToCache` hands the platform
-      rasterizer before every `fillText`, and the reason its glyphs come out at full weight on
-      macOS. Judge plain text (a paragraph of prose, `man bash`, a source file) against the
-      per-terminal GPU renderer at dpr 2 and dpr 1. **If a weight/softness gap still remains after
-      this, stop tuning the rasterizer**: the next step is xterm's full approach — a COLOR atlas
-      keyed by `(code, style, fg, bg)` with per-glyph ink-box cropping — which reworks `atlas.ts`,
-      `raster.ts` and the cell/uv contract together and is therefore a **Phase 2** item, not a
-      round-7 patch. Report it as "2.7 raster gap → Phase 2 color atlas".
-      **Round 7b re-tuned the blend, not the raster.** The device read round 7's full 2.2 decode as
-      slightly TOO THICK, which brackets the answer (1.0 = sRGB-space mix read thin, 2.2 read
-      thick). The compositing gamma is now the single named constant `BLEND_GAMMA = 1.45` in
-      `gl-webgl2.ts` — the text-AA blend gamma Skia and FreeType use, and the right family of number
-      because the coverage in our atlas is CoreText's own rasterization, which already carries its
-      light-on-dark compensation. **If weight is still off, report only WHICH WAY** (thick or thin):
-      the fix is that one constant, down toward 1.0 or up toward 2.2. Do not report "not identical"
-      — that is the one answer nothing can be done with.
+- [ ] **2.7 Zoom-1 parity at dpr 1 and 2 (rewritten for Phase 1c — parity is now STRUCTURAL).**
+      Everything this item used to ask about a blend is gone, and so is the blend. Each atlas slot
+      now holds the platform's own rasterization of one glyph **in its real foreground over its real
+      background** — the same thing xterm's `TextureAtlas._drawToCache` builds for the GPU renderer
+      you are comparing against — and at zoom 1 that slot is blitted **1:1** onto the cell: the atlas
+      is rasterized at xterm's exact device cell, `MIN_FILTER` is NEAREST at zoom ≥ 1 (MAG always
+      is), and the pan is snapped to whole device pixels. There is no coverage encoding, no shader
+      mix and no gamma constant left in the pipeline — **`BLEND_GAMMA` and the linear-light blend
+      were DELETED, not retuned.** The acceptance question changed with them: it is no longer "is the
+      weight right", which was a knob, but "are these the same pixels", which is a fact.
+      **How to run it.** On the retina display and on an external 1x display, with a non-default font
+      family and size (e.g. Menlo 11, JetBrains Mono 16), at zoom exactly 1, put a Shared terminal
+      beside a **GPU per terminal** one running the same content. Judge a paragraph of prose,
+      `man bash`, and a source file — and specifically the cases the colour keying introduced: bold,
+      italic, dim, inverse, ANSI-coloured output, a selection band, and a block cursor sitting on a
+      character.
+      **What to report.** Any visible difference, and WHERE it lives: which glyphs, which colours,
+      which dpr, plain vs bold/dim/inverse. A remaining gap can no longer be a blend setting, so
+      "slightly thicker" / "slightly thinner" is no longer an actionable answer — the candidates left
+      are the raster (baseline rounding, the ink clip at the cell rect) and L14's first-terminal cell
+      latch, and those are found by knowing which glyphs are wrong, not by which way.
 - [ ] **2.7b One letter renders BLANK (open bug — this round collects EVIDENCE, not a fix).**
       Reported twice: `ç` in round 5 (which "went away" with no root cause found) and lowercase `x`
       in round 7 — one letter blank all session while its neighbours, including uppercase `X`,
@@ -128,13 +120,56 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       2. Use the app until a letter goes blank. Note **which** letter, and whether its
          uppercase/lowercase/bold/italic variants also fail.
       3. Run `await window.__glyphgridDump()` and open the returned `page` data URL in a new tab —
-         that is a PNG of the whole atlas. **Find the reported letter in it.**
-         - **Not in the atlas (its cell is black)** → the RASTERIZER is the suspect (font, baseline,
-           clip). Report the letter plus the `[glyphgrid] slot … code … at x,y` warn line for it.
+         that is a PNG of the whole atlas. **Find the reported letter in it.** Since Phase 1c the
+         page is COLOURED, which changes how it reads: each cell is that glyph over its own
+         background (a dark theme gives a mostly dark-on-dark page), the ground between allocated
+         slots is TRANSPARENT rather than black (so it shows as the tab's own backdrop), and the same
+         letter legitimately appears once per colour pair it has been drawn in.
+         - **Not in the atlas (its cell is an inkless expanse of its own background colour)** → the
+           RASTERIZER is the suspect (font, baseline, clip). Report the letter plus the
+           `[glyphgrid] slot … code … at x,y fg=… bg=…` warn line for it.
          - **In the atlas, correctly drawn** → the slot→uv mapping or the texture upload is. Report
-           its slot number and the `geometry` block from the dump alongside the PNG.
+           its slot number and the `geometry` block from the dump alongside the PNG. `geometry` also
+           carries `gutterPx` (a slot's ink starts one gutter inside its pitch cell, so stride
+           arithmetic alone lands a couple of texels off) and `resetCount` (a slot INDEX only means
+           something alongside the reset it was taken after — see 2.7c).
       4. Paste the console's `[glyphgrid]` lines for the letter and its working neighbours.
       This instrumentation is temporary and comes out when the bug closes.
+- [ ] **2.7c Zoom-OUT quality (new in Phase 1c — the other half of the parity ask).** Keep the
+      side-by-side from 2.7, then zoom the canvas out to roughly **50%** and again to roughly **25%**
+      and compare the Shared terminals against the GPU-mode one at each stop. Pan while zoomed out —
+      motion is where undersampling shows.
+      **What should now be true.** Minified text degrades SMOOTHLY, in the same class as GPU mode:
+      softer as it shrinks, but not speckling, crawling or shimmering under a pan. The atlas carries
+      a real mip chain and every slot carries a 2-texel gutter filled with its own background, so a
+      minified sample averages texels that belong to this cell instead of undersampling level 0 —
+      which is exactly what made a zoomed-out canvas sparkle before this phase.
+      **Expected residual 1 — the LOD clamp.** The sampler is forbidden to go deeper than mip level 2,
+      because that is the deepest level the gutter can keep free of a neighbouring glyph's ink. Past
+      roughly 25% the filter therefore cannot get any softer, and slight aliasing comes back. That is
+      the accepted trade — a little aliasing at extreme zoom-out instead of a neighbour's glyph
+      bleeding into every cell — and it is not a finding.
+      **Expected residual 2 — the frontier rim.** While the atlas page is still FILLING (a young
+      session, or the frames right after a reset), the mip average at a slot's outer edge includes
+      unallocated, transparent page ground. The texture is non-premultiplied, so rgb and alpha are
+      averaged independently and the blend then attenuates the already-darkened colour by that same
+      alpha again: the outermost row/column of the affected cells reads as a slightly **DARKER,
+      slightly TRANSLUCENT rim** at heavy zoom-out (~25%) — you can see the node's plate through it.
+      It is bounded to one cell edge, purely cosmetic, and **self-heals as the page fills**. **Do not
+      diagnose it as a gutter/bleed failure**: bleed would look like a NEIGHBOURING GLYPH appearing
+      inside a cell, which is a different — and blocking — report. If the rim is objectionable in
+      practice, say so and say at what zoom and how long into the session: the named escalation is
+      uploading the atlas premultiplied (`pixelStorei(UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)` with
+      `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`), which is gated on exactly that device evidence and
+      deliberately not built yet.
+      **Atlas resets, while you are here.** The colour-keyed page is a working set — one slot per
+      `(code, style, fg, bg)` — so filling it is normal, and the answer is to clear it and repack
+      every row. On screen that is ONE frame of full repaint across the shared terminals: a flicker
+      at most, never a blank. Each reset announces itself:
+      `[glyphgrid] atlas page reset #N — colour key space full, every row repacks`, throttled to one
+      line a second, a burst adding `(+K more since the last line)`. **Report the highest `N` you saw
+      and roughly how long the session had run to get there.** "Rare" is this design's claim; frequent
+      resets are the evidence that Phase 2 must build real LRU eviction instead.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
@@ -425,6 +460,15 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   `warnOnCellDrift` logs one `[glyphgrid] atlas cell … does not match …` line per context lifetime,
   so a soft terminal can be told apart from a soft display. Phase 2 (re-rasterize on
   `document.fonts.ready` / per-cell atlas pages).
+
+  **Phase 1c narrows what is latched.** The FACE never was: `ctx.font` is set per draw, so any slot
+  rasterized after a webfont resolves already uses the real face. What used to make that invisible is
+  that a cached slot was cached forever — and the colour-keyed page now CLEARS AND REFILLS when it
+  fills up (2.7c), which re-inks every slot with whatever face is resolved at that moment. So a late
+  webfont propagates to already-cached glyphs on the next reset instead of never. What remains
+  latched for the life of the context is the CELL and the BASELINE, both computed once at
+  construction — i.e. the late-webfont symptom is now "right face, fallback face's metrics", and only
+  a context rebuild fixes that.
 - **L15 — A terminal that is STACKED OVER another node temporarily leaves the shared renderer.**
   (Rewritten in round 5. The round-4 entry — a hairline of the lower node's frame ghosting through
   the upper node's transparent body, plus "selection no longer raises a covered node" — described a
