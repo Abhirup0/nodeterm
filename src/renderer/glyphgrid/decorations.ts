@@ -32,13 +32,17 @@ export interface DecorationReader {
 /**
  * The overrides a cell's decorations impose, or null.
  *
- * WHY 'top' IS SKIPPED. xterm's own renderers walk decorations twice: once at cell level for the
- * `bottom` layer (a background the text is drawn OVER) and once above the text for `top`. This
- * engine has one cell pass, so it can honour the bottom layer exactly and cannot express the top
- * one at all — and painting a top-layer decoration as a cell colour would put it UNDER the glyph,
- * which is the opposite of what it asked for. Search highlights are bottom-layer, which is why this
- * is enough to close L12; a top-layer decoration keeps rendering as nothing, the same as before.
- * A decoration with no layer at all is BOTTOM, matching xterm's own `options.layer ?? 'bottom'`.
+ * WHY 'top' IS SKIPPED, AND WHAT THAT COSTS. Both of xterm's renderers resolve decorations at CELL
+ * level and do it twice in one pass: `bottom` BEFORE the selection is applied, `top` AFTER it — so
+ * a top-layer decoration outranks the selection band, not merely the base colours. This engine
+ * resolves a cell once, in the feed, with the selection last, and expressing "after the selection"
+ * would mean a second override stage.
+ *
+ * That is a DEVIATION, said plainly rather than dressed up as something xterm cannot do either: a
+ * top-layer decoration renders as NOTHING here. It costs nothing today — `registerDecoration` has
+ * no caller anywhere in `src/`, and `@xterm/addon-search`, the reason this module exists, registers
+ * its matches with no layer at all, which is BOTTOM by xterm's own `options.layer ?? 'bottom'`. If a
+ * top-layer decoration is ever shipped, this function is where the second stage has to go.
  *
  * LAST WRITER WINS, per channel, matching the callback order xterm hands out — two decorations on
  * one cell is already ambiguous, and agreeing with the renderer we are replacing is the only

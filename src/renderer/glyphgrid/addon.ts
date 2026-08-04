@@ -153,17 +153,17 @@ export class GlyphGridRendererAddonCore {
     this.focused = internals.hasFocus()
     this.lastCursorRow = this.cursorViewportRow()
     this.updateDims()
-    // Before the atlas subscription on purpose: these two reach xterm's own internals through the
-    // shell, so they are the pair that could plausibly throw, and a throw here leaves NO
-    // subscription behind. (The shell guards them anyway — see glyphgrid-attach.)
+    // EVERY subscription goes last, and they go TOGETHER. The shell catches a failing construction
+    // and restores the DOM renderer without ever holding an addon to dispose, so anything
+    // subscribed before a throw is disposed by nobody and keeps the dead addon reachable from the
+    // object it subscribed to. That is the whole invariant, and it does not care which of these is
+    // likelier to throw — splitting them to put the "riskier" pair first only widens the window it
+    // exists to close.
+    this.atlasResetSub = this.atlas.onReset(() => this.handleAtlasReset())
     const onRegistered = internals.onDecorationRegistered
     const onRemoved = internals.onDecorationRemoved
     if (onRegistered) this.decorationSubs.push(onRegistered(() => this.handleDecorationChange()))
     if (onRemoved) this.decorationSubs.push(onRemoved(() => this.handleDecorationChange()))
-    // LAST, so nothing above can throw after the subscription exists: the shell catches a failing
-    // construction and restores the DOM renderer, and a subscription made before that throw would
-    // never be disposed by anyone.
-    this.atlasResetSub = this.atlas.onReset(() => this.handleAtlasReset())
   }
 
   // ---------------------------------------------------------------- xterm renderer surface
