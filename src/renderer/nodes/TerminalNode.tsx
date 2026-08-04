@@ -17,7 +17,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 // one-frame spinner in that slot reads as a glitch.
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
-import { droppedPaths, pastedFiles } from '../terminal/file-drop'
+import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
@@ -1714,10 +1714,21 @@ export function TerminalNode({ id, data, selected, parentId }: NodeProps<CanvasN
   // keep it from also pasting whatever text the clipboard happened to carry alongside the file.
   const onBodyPaste = (e: React.ClipboardEvent) => {
     const files = pastedFiles(e.clipboardData)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    void insertFiles(files, { raiseWindow: false })
+    if (files.length) {
+      e.preventDefault()
+      e.stopPropagation()
+      void insertFiles(files, { raiseWindow: false })
+      return
+    }
+    // Neither files NOR text: an image-only clipboard that Chromium filtered down to nothing on
+    // its way to xterm's textarea (see clipboardImages). Ask the async API, which isn't filtered.
+    // Deliberately NOT prevented/stopped — there is no text for xterm to paste either way, so a
+    // clipboard that turns out to hold no image is left exactly as the no-op it already was, and
+    // an ordinary text paste never reaches this branch at all.
+    if (pasteHasText(e.clipboardData)) return
+    void clipboardImages().then((images) => {
+      if (images.length) void insertFiles(images, { raiseWindow: false })
+    })
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
