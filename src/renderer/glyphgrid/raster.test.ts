@@ -252,43 +252,60 @@ describe('createCanvasRasterizer', () => {
     expect(Number.isInteger(ink.args[1])).toBe(true)
   })
 
-  // The claim is about GEOMETRY, not about pixels: no glyph may generate NEW ink outside the cell
-  // rect, because the MAX_SAFE_LOD derivation counts on 2*GUTTER_PX texels between two slots' inks.
-  // The gutter is not required to be BACKGROUND — the edge-extension strips below copy this slot's
-  // own border texels into it, and a copy of the slot's own content is not a second slot's ink. So
-  // this pin filters `fillRect`/`fillText` ops only, and the replication `drawImage`s are checked
-  // separately for their exact (this-slot-only) source and destination rects.
-  it('keeps every ink op inside the CELL rect — no glyph draws new geometry into the gutter', () => {
+  // The claim is about GEOMETRY, not about pixels: no glyph may generate NEW ink outside the slot's
+  // own WHOLE-TEXEL CELL BOX, because the MAX_SAFE_LOD derivation counts on 2*GUTTER_PX texels
+  // between two slots' inks. The gutter is not required to be BACKGROUND — the edge-extension
+  // strips below copy this slot's own border texels into it, and a copy of the slot's own content
+  // is not a second slot's ink. So this pin filters `fillRect`/`fillText` ops only, and the
+  // replication `drawImage`s are checked separately for their exact (this-slot-only) rects.
+  //
+  // RE-SCOPED (2026-08-04, far-edge snapping) from the fractional CELL rect to that box —
+  // `max(1, ceil(cell))`, the pitch minus its two gutters. A box/block op whose span REACHES the
+  // fractional cell edge is now grown to the whole texel, so on a fractional axis its ink
+  // legitimately ends past `cellW`. Nothing the LOD derivation rests on moves: the pitch is
+  // `ceil(cell) + 2*GUTTER_PX` by construction, so the box is exactly the pitch minus its gutters
+  // and two slots' inks are still 2*GUTTER_PX texels apart. What is still forbidden — and what this
+  // pin still catches — is ink IN THE GUTTER, which stays reachable only through step 3's
+  // replication of this slot's own texels. The integral case is the old assertion unchanged
+  // (ceil is the identity there); the fractional one is what the re-scope buys.
+  it.each([
+    ['integral 10x20', { cellW: 10, cellH: 20 }],
+    ['fractional 10.5x20.5', { cellW: 10.5, cellH: 20.5 }]
+  ])('keeps every ink op inside the whole-texel CELL BOX on a %s cell', (_label, sizes) => {
     const stub = stubCanvas()
     active = stub
-    const r = createCanvasRasterizer(FONT, 256)!
+    const font = { family: 'monospace', sizePx: 16, ...sizes }
+    const colsW = Math.max(1, Math.ceil(sizes.cellW))
+    const colsH = Math.max(1, Math.ceil(sizes.cellH))
+    const ink0 = 40
+    const r = createCanvasRasterizer(font, 256)!
     stub.ops.length = 0
-    r.draw(0x2588, false, false, INK_X, INK_Y, FG, BG) // █ — the glyph that fills the whole cell
+    r.draw(0x2588, false, false, ink0, ink0, FG, BG) // █ — the glyph that fills the whole cell
 
     const ink = stub.ops.filter((o) => o.kind === 'fillRect' && o.fill === FG_CSS)
     expect(ink.length).toBeGreaterThan(0)
     for (const op of ink) {
       const [x, y, w, h] = op.args
-      expect(x).toBeGreaterThanOrEqual(INK_X)
-      expect(y).toBeGreaterThanOrEqual(INK_Y)
-      expect(x + w).toBeLessThanOrEqual(INK_X + FONT.cellW)
-      expect(y + h).toBeLessThanOrEqual(INK_Y + FONT.cellH)
+      expect(x).toBeGreaterThanOrEqual(ink0)
+      expect(y).toBeGreaterThanOrEqual(ink0)
+      expect(x + w).toBeLessThanOrEqual(ink0 + colsW)
+      expect(y + h).toBeLessThanOrEqual(ink0 + colsH)
     }
-    // And the only fill that is allowed outside the cell is the background one, which is exactly
-    // the pitch rect.
+    // And the only fill that is allowed outside the cell box is the background one, which is
+    // exactly the pitch rect.
     const outside = stub.ops.filter(
       (o) =>
         o.kind === 'fillRect' &&
-        (o.args[0] < INK_X ||
-          o.args[1] < INK_Y ||
-          o.args[0] + o.args[2] > INK_X + FONT.cellW ||
-          o.args[1] + o.args[3] > INK_Y + FONT.cellH)
+        (o.args[0] < ink0 ||
+          o.args[1] < ink0 ||
+          o.args[0] + o.args[2] > ink0 + colsW ||
+          o.args[1] + o.args[3] > ink0 + colsH)
     )
     expect(outside).toEqual([
       {
         kind: 'fillRect',
         fill: BG_CSS,
-        args: [INK_X - GUTTER_PX, INK_Y - GUTTER_PX, PITCH_W, PITCH_H]
+        args: [ink0 - GUTTER_PX, ink0 - GUTTER_PX, colsW + 2 * GUTTER_PX, colsH + 2 * GUTTER_PX]
       }
     ])
   })
@@ -577,6 +594,170 @@ describe('createCanvasRasterizer', () => {
           if (i < c.ink || i >= c.ink + c.colsW || j < c.ink || j >= c.ink + c.colsH)
             frame.push(`${i},${j}`)
       expect(new Set(covered)).toEqual(new Set(frame))
+    })
+  })
+
+  /**
+   * GEOMETRIC FAR-EDGE SNAPPING (device round, 2026-08-04, second screenshot). Edge-extended
+   * gutters removed most of the grout, but a phase-dependent residual dip survived on a FRACTIONAL
+   * axis: the cell's outermost texel is only partly covered, so a full-bleed geometric glyph left it
+   * as a half ink / half background blend that no gutter content can cancel. In the COMPOSED frame
+   * the other half of that boundary pixel is the NEIGHBOUR cell's ink, so full ink is the correct
+   * colour there — xterm never meets this because its atlas cells are integral device px.
+   *
+   * So a box/block op whose span REACHES the far cell edge has that edge snapped outward to the
+   * whole-texel cell box. Two things the tests below have to keep honest: only edges that actually
+   * reach the boundary move (an interior edge — a half block's midline, a dash's tail — must not),
+   * and only the GEOMETRY branch is affected (a font glyph's partial far column is genuine
+   * antialiased content).
+   */
+  describe('geometric far-edge snapping', () => {
+    /** A fractional cell on BOTH axes: 10.5 x 20.5, whole-texel box 11 x 21. */
+    const FRAC = { family: 'monospace', sizePx: 16, cellW: 10.5, cellH: 20.5 }
+    const FRAC_COLS_W = 11
+    const FRAC_COLS_H = 21
+    /** A whole-texel ink origin, as `GlyphAtlas.cellXY` always hands over. */
+    const IX = 40
+
+    /** The ink ops in CELL-LOCAL coordinates — i.e. exactly what the box branch filled. */
+    const inkRects = (ops: Op[], ink = IX): number[][] =>
+      ops
+        .filter((o) => o.kind === 'fillRect' && o.fill === FG_CSS)
+        .map((o) => [o.args[0] - ink, o.args[1] - ink, o.args[2], o.args[3]])
+
+    const drawFrac = (code: number, font = FRAC): ReturnType<typeof stubCanvas> => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(font, 256)!
+      stub.ops.length = 0
+      r.draw(code, false, false, IX, IX, FG, BG)
+      return stub
+    }
+
+    it('grows a FULL-BLEED block to the whole-texel cell box on a fractional cell', () => {
+      const stub = drawFrac(0x2588) // █
+      // 10.5 x 20.5 of ink would leave the outermost texel on each axis half covered; 11 x 21 fills
+      // it. The op still STARTS at 0 — the near edges need no snap, see the dedicated pin below.
+      expect(inkRects(stub.ops)).toEqual([[0, 0, FRAC_COLS_W, FRAC_COLS_H]])
+    })
+
+    it('snaps ONLY the far edge of a right-half block — its interior midline does not move', () => {
+      const stub = drawFrac(0x2590) // ▐ right half
+      // The midline is `round(4/8 * 10.5)` = 5, a genuine INTERIOR edge sitting ~half a cell from
+      // the boundary; the right edge reaches 10.5 and becomes the whole texel 11, i.e. w = 11 - 5.
+      expect(inkRects(stub.ops)).toEqual([[5, 0, FRAC_COLS_W - 5, FRAC_COLS_H]])
+    })
+
+    it('snaps the right end of a horizontal rule, leaving its thickness alone', () => {
+      const stub = drawFrac(0x2500) // ─
+      // The rule spans the cell horizontally (→ snapped) and is one device px thick, centred: its
+      // bottom edge is nowhere near the cell's, so the vertical axis is untouched.
+      expect(inkRects(stub.ops)).toEqual([[0, 10, FRAC_COLS_W, 1]])
+    })
+
+    it('leaves a non-edge-reaching span alone — the two axes are decided independently', () => {
+      const stub = drawFrac(0x2502) // │
+      const [x, y, w, h] = inkRects(stub.ops)[0]
+      // The stem sits at the cell's midline: 1 device px wide, five texels short of the far edge.
+      // Untouched, both position and width.
+      expect([x, w]).toEqual([5, 1])
+      // Its own far edge — the BOTTOM — does reach, and snaps. Nothing about the horizontal axis
+      // follows from that.
+      expect([y, h]).toEqual([0, FRAC_COLS_H])
+    })
+
+    it('does not capture a dashed rule whose last dash merely ends NEAR the far edge', () => {
+      const stub = drawFrac(0x2508) // ┈ — four dashes, deliberately NOT tiling
+      // The guard on the epsilon. On a 10.5-wide cell the last dash rounds to a right edge of 10,
+      // exactly HALF A PIXEL short of the boundary — so the "obvious" `>= cellW - 0.5` tolerance
+      // would weld it to the next cell's first dash and quietly turn ┈ into ─. The gap IS the
+      // character, so the tolerance has to be tight enough to leave it.
+      expect(inkRects(stub.ops)).toEqual([
+        [0, 10, 2, 1],
+        [3, 10, 1, 1],
+        [5, 10, 2, 1],
+        [8, 10, 2, 1]
+      ])
+    })
+
+    it('needs no near-edge snap — an op that starts at the cell edge already starts on a texel', () => {
+      const stub = drawFrac(0x2588)
+      // The ink ORIGIN is a whole texel (`GlyphAtlas.cellXY` derives it from the whole-texel pitch),
+      // and `span`'s `snap` returns a literal 0 for anything at or before the near edge. So the near
+      // edges are flush with a texel boundary by construction and there is nothing to round out.
+      for (const [x, y] of inkRects(stub.ops)) {
+        expect(x).toBe(0)
+        expect(y).toBe(0)
+      }
+      expect(Number.isInteger(IX)).toBe(true)
+    })
+
+    it('clips the GEOMETRY branch to the whole-texel box and the FONT branch to the fractional cell', () => {
+      // Geometry: the clip has to admit the snap, or the widened rects are simply cut back.
+      const geo = drawFrac(0x2588)
+      expect(geo.ops.find((o) => o.kind === 'clip')).toEqual({
+        kind: 'clip',
+        args: [IX, IX, FRAC_COLS_W, FRAC_COLS_H]
+      })
+      active?.restore()
+      active = null
+      // Font: unchanged, and deliberately so. A glyph's partial far column carries genuine
+      // antialiased glyph edge — real content, drawn by the platform rasterizer — and overwriting
+      // or extending it would corrupt pixels rather than complete a shape we generated ourselves.
+      const font = drawFrac(0x41) // 'A'
+      expect(font.ops.find((o) => o.kind === 'clip')).toEqual({
+        kind: 'clip',
+        args: [IX, IX, FRAC.cellW, FRAC.cellH]
+      })
+      expect(font.ops.some((o) => o.kind === 'fillText')).toBe(true)
+    })
+
+    /**
+     * The PIXEL half of the claim, and why it is measured at .25 rather than at the brief's .5.
+     *
+     * The stub's pixel model is hard-edged and assigns a texel by its CENTRE (`Math.round`), so on a
+     * `.5`-fractional cell it already reports the half-covered edge texel as fully inked — the model
+     * cannot distinguish before from after there, which is precisely the kind of "green either way"
+     * assertion that pins nothing. At `.25` the centre of that texel falls OUTSIDE the fractional
+     * cell, so the model leaves it as background until the snap fills it. The `.5` case is pinned
+     * exactly, on op GEOMETRY, by the first test in this block.
+     */
+    it('fills the partial far texel on a fractional cell, and the gutter beyond continues it', () => {
+      const stub = stubCanvas()
+      active = stub
+      // 10.25 x 20.25: whole-texel box 11 x 21, last FULLY covered texel 9 / 19.
+      const r = createCanvasRasterizer({ family: 'monospace', sizePx: 16, cellW: 10.25, cellH: 20.25 }, 256)!
+      r.draw(0x2588, false, false, IX, IX, FG, BG) // █
+
+      // The partial far column and row — texel 10 / 20 — now carry FULL ink rather than a blend
+      // fading to background.
+      expect(stub.pixelAt(IX + 10, IX + 5)).toBe(FG_CSS)
+      expect(stub.pixelAt(IX + 5, IX + 20)).toBe(FG_CSS)
+      // Including the corner where the two meet.
+      expect(stub.pixelAt(IX + 10, IX + 20)).toBe(FG_CSS)
+      // And the gutter past the box continues it, so a minified sample at the boundary keeps
+      // averaging ink with ink all the way out to the pitch edge.
+      for (let g = 0; g < GUTTER_PX; g++) {
+        expect(stub.pixelAt(IX + 11 + g, IX + 5)).toBe(FG_CSS)
+        expect(stub.pixelAt(IX + 5, IX + 21 + g)).toBe(FG_CSS)
+      }
+    })
+
+    it('leaves the STIPPLE shades a stipple — a far-edge dot grows by a partial texel at most', () => {
+      const stub = drawFrac(0x2592) // ▒ — a dither pattern, not a tint
+      const rects = inkRects(stub.ops)
+      // Still a scatter of pattern-sized runs rather than one grown slab: the snap only ever moves
+      // a run's OWN far edge out to the whole texel, so a dot that happens to sit against the cell
+      // edge gains half a texel (1 → 1.5 here) and every other dot is untouched. Half a texel of a
+      // dither dot reads as ~50% tone either way, which is why the shades need no special case.
+      expect(rects.length).toBeGreaterThan(10)
+      for (const [, , w, h] of rects) {
+        expect(w).toBeLessThanOrEqual(1.5)
+        expect(h).toBeLessThanOrEqual(1.5)
+      }
+      // And the tone is still a tone: ▒ is a 2-of-8 pattern, nowhere near a filled cell.
+      const inked = rects.reduce((sum, [, , w, h]) => sum + w * h, 0)
+      expect(inked).toBeLessThan(0.4 * FRAC_COLS_W * FRAC_COLS_H)
     })
   })
 })

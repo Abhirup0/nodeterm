@@ -74,10 +74,15 @@ export interface GlyphRasterizer {
  *    contributes about **6.25%** of the sampled value. Still a tint rather than a ghost glyph, and
  *    it is the honest shape of the residual the LOD clamp accepts.
  *
- * The promise is that no glyph GEOMETRY is ever drawn outside its cell rect, and it holds only
- * while raster.ts keeps clipping the ink: ink allowed to overhang into the gutter shortens the
- * cell-to-cell separation and invalidates the derivation above. (Copying this slot's own edge
- * texels outward does not — a copy of our own content is not a second slot's ink.)
+ * The promise is that no glyph GEOMETRY is ever drawn outside its slot's WHOLE-TEXEL cell box —
+ * `ceil(cell)`, i.e. the pitch minus these two gutters — and it holds only while raster.ts keeps
+ * clipping the ink: ink allowed to overhang into the gutter shortens the cell-to-cell separation
+ * and invalidates the derivation above. (Copying this slot's own edge texels outward does not — a
+ * copy of our own content is not a second slot's ink.) The BOX rather than the fractional cell
+ * since the 2026-08-04 device round: raster.ts snaps a GEOMETRIC glyph's far edges out to the
+ * whole texel, so a fractional axis's partial edge texel comes out fully inked instead of
+ * half-blended. The separation is the same 2*GUTTER_PX either way — the box is exactly what the
+ * pitch was built around.
  */
 export const GUTTER_PX = 2
 

@@ -160,16 +160,24 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       Same weight as before this change (it used to be 25% of the neighbour's *background*), so it
       is the same bounded, accepted class — a faint tint at extreme zoom-out, never a seam and never
       a ghost glyph. Report it only if it reads as more than that.
-      **Expected residual 0b — a fractional device cell keeps a small dip.** A device cell is
-      `charWidth * dpr`, so at most dprs one or both axes are FRACTIONAL and the cell's outermost
-      texel is only partly covered — a genuine ink/background blend that belongs to the cell and
-      cannot be filled in from outside. The gutter beside it continues the last FULLY covered texel,
-      which brings the boundary dip down from 62.5 points (flat bg gutter, the reported bug) to
-      **12.5 points**; sourcing the partial texel instead would have left 37.5. So: a faint reduced
-      dip may survive on an axis whose device cell extent is fractional, and it should read as a
-      barely-perceptible softening, NOT as the dark grout lattice above. If a dip is clearly visible
-      as a dark line, that is the blocking report, not this residual — note the display's dpr and
-      whether it appears on one axis or both.
+      **Expected residual 0b — a fractional device cell, FONT-RENDERED full-bleed glyphs only.**
+      A device cell is `charWidth * dpr`, so at most dprs one or both axes are FRACTIONAL and the
+      cell's outermost texel is only partly covered — an ink/background blend that belongs to the
+      cell and cannot be filled in from outside. Edge-extending the gutter from the last FULLY
+      covered texel brought that boundary dip down from 62.5 points (flat bg gutter, the reported
+      bug) to 12.5, and the second device round measured what was left: 4–38 points, phase-dependent,
+      on the fractional axis.
+      **GEOMETRIC box/block art is now seam-FREE — the mascot and the tmux separators included.**
+      Since the 2026-08-04 far-edge snapping, a box/block op whose span reaches the cell's far edge
+      is grown to the whole texel, so the partial texel is fully inked and the gutter continues real
+      ink: the residual on the geometry path is **zero**, at every phase. Anything that still reads
+      as grout on block art or on `│` `─` is a **blocking** report, not this residual.
+      What remains is the same partial texel under a glyph the FONT drew, where the blend is genuine
+      antialiased glyph edge and overwriting it would corrupt real pixels. That is rare in practice
+      — everything in U+2500–U+259F that `box-glyphs.ts` has an entry for goes through the geometry
+      path — and it takes a full-bleed glyph from outside those tables to see it at all. If you do:
+      a barely-perceptible softening on the fractional axis, never a dark line. A visible dark line
+      is the blocking report — note the display's dpr and whether it appears on one axis or both.
       **Expected residual 1 — the LOD clamp.** The sampler is forbidden to go deeper than mip level 2,
       because that is the deepest level the gutter can keep free of a neighbouring glyph's ink. Past
       roughly 25% the filter therefore cannot get any softer, and slight aliasing comes back. That is

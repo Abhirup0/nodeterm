@@ -36,6 +36,26 @@ function cssColor(packed: number): string {
 }
 
 /**
+ * How close a geometric op's far edge has to come to the cell's far edge to count as REACHING it —
+ * see step 2 of `draw` for what reaching one earns.
+ *
+ * Deliberately tiny, and the tightness is the point. `box-glyphs.ts` emits the two classes of edge
+ * with a real gap between them: `span`/`snap` return the extent VERBATIM for anything at or past
+ * the boundary (that is the full-cell invariant), and a whole device pixel for everything else. So
+ * the epsilon has nothing to bridge — it only absorbs the float noise of reconstructing
+ * `op.x + op.w` from the `[start, extent]` pair `span` handed back.
+ *
+ * A LOOSE tolerance is not the conservative direction, which is easy to get backwards. The obvious
+ * `cellW - 0.5` would also capture genuinely INTERIOR edges that happen to land half a pixel short:
+ * on a 10.5-wide cell the last dash of ┈ (U+2508) rounds to a right edge of exactly 10, and
+ * snapping THAT welds it to the next cell's first dash — turning a rule whose gaps are the whole
+ * character into a solid ─. The edges nobody could confuse either way (a half block's midline at
+ * ~cell/2, an arm's own thickness) are orders of magnitude further out than either number; the
+ * cases that decide the constant are the near misses, and they want it small.
+ */
+const FAR_EDGE_EPS = 1e-6
+
+/**
  * Where the alphabetic baseline sits inside the cell, in device px.
  *
  * The rule a CSS line box uses — HALF-LEADING: the font's natural line box (ascent + descent) is
@@ -136,12 +156,18 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     there would bleed into slot 1's minified texels.
  *  2. A slot's whole pitch rect is REPAINTED with its background before it is inked, so reusing a
  *     cell after a reset can never leave a previous glyph's ink or a previous background behind.
- *  3. NO GLYPH DRAWS NEW GEOMETRY INTO THE GUTTER. Every glyph is clipped to the CELL rect — one
- *     gutter inside the pitch rect on each axis — so two slots' inks stay 2*GUTTER_PX texels apart,
- *     which is exactly the separation `MAX_SAFE_LOD = 2` is derived from (see GUTTER_PX in
- *     atlas.ts). A glyph wider than the cell (a CJK cell, an overhanging italic) is CUT, not
- *     allowed to overhang: a soft edge is a cosmetic loss on one glyph, a ghost glyph in a
- *     neighbour's mip is a rendering bug.
+ *  3. NO GLYPH DRAWS NEW GEOMETRY INTO THE GUTTER. Every glyph is clipped to this slot's own CELL
+ *     BOX — one gutter inside the pitch rect on each axis — so two slots' inks stay 2*GUTTER_PX
+ *     texels apart, which is exactly the separation `MAX_SAFE_LOD = 2` is derived from (see
+ *     GUTTER_PX in atlas.ts). A glyph wider than the cell (a CJK cell, an overhanging italic) is
+ *     CUT, not allowed to overhang: a soft edge is a cosmetic loss on one glyph, a ghost glyph in
+ *     a neighbour's mip is a rendering bug.
+ *
+ *     "Cell box" rather than "cell rect" since the 2026-08-04 device round: the FONT path is
+ *     clipped to the fractional cell exactly as before, while the GEOMETRY path is clipped to the
+ *     WHOLE-TEXEL box (`ceil(cell)`) because its far edges snap out to it — see step 2 in `draw`.
+ *     The separation is unchanged either way: the pitch IS the whole-texel box plus two gutters, so
+ *     the widened clip stops exactly where the gutter starts.
  *
  *     What the gutter then HOLDS is a separate question, and the answer changed in the 2026-08-04
  *     device round: it carries this slot's OWN EDGE-EXTENDED CONTENT — background wherever the ink
@@ -223,17 +249,23 @@ export function createCanvasRasterizer(
       //    of it that sit against ink with that ink, and leaves the rest exactly as filled here.
       ctx.fillStyle = cssColor(bg)
       ctx.fillRect(x - GUTTER_PX, y - GUTTER_PX, pitchW, pitchH)
-      // 2. THE INK, clipped to the CELL rect — never the pitch rect. The cell always fits inside
-      //    the pitch (the pitch rounds the cell UP and adds a gutter on each side), so no glyph can
+      // 2. THE INK, clipped to THIS SLOT'S OWN CELL BOX — never the pitch rect. The box always fits
+      //    inside the pitch (the pitch is the box plus a gutter on each side), so no glyph can
       //    generate geometry closer than GUTTER_PX to the next slot, which is the separation
-      //    MAX_SAFE_LOD = 2 is derived from. A glyph that overflows the cell is CUT here. (Step 3
-      //    may then COPY this ink outward into our own gutter — a copy of our own content, never a
+      //    MAX_SAFE_LOD = 2 is derived from. A glyph that overflows it is CUT here. (Step 3 may
+      //    then COPY this ink outward into our own gutter — a copy of our own content, never a
       //    reason to relax this clip.)
-      ctx.save()
-      ctx.beginPath()
-      ctx.rect(x, y, font.cellW, font.cellH)
-      ctx.clip()
-      ctx.fillStyle = cssColor(fg)
+      //
+      //    WHICH box, though, is decided PER BRANCH, and the two must not be merged into one
+      //    widened clip:
+      //      - GEOMETRY gets the WHOLE-TEXEL box (`colsW`/`colsH`), because its far edges snap out
+      //        to it (see below) and a fractional clip would simply cut the snap back off.
+      //      - the FONT keeps the FRACTIONAL cell. A glyph's partial far column is genuine
+      //        antialiased glyph edge drawn by the platform rasterizer — real content — and letting
+      //        it spill into the extra texel would be overwriting pixels rather than completing a
+      //        shape we generated ourselves.
+      //    Both are inside the pitch, so the LOD derivation is untouched either way.
+      //
       // Geometry first: these ranges are DEFINED as fractions of the cell, so drawing them is
       // both more correct and cheaper than trusting the face. The ops are already snapped to
       // device px (interior edges) and to the exact cell bounds (outer edges), so no seam can
@@ -243,8 +275,48 @@ export function createCanvasRasterizer(
       // reads as foreground PIXELS over the background fill, which is exactly what xterm's own
       // patterns are.
       const geometry = boxGlyphOps(code, font.cellW, font.cellH)
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(x, y, geometry ? colsW : font.cellW, geometry ? colsH : font.cellH)
+      ctx.clip()
+      ctx.fillStyle = cssColor(fg)
       if (geometry) {
-        for (const op of geometry) ctx.fillRect(x + op.x, y + op.y, op.w, op.h)
+        for (const op of geometry) {
+          // FAR-EDGE SNAPPING (device round, 2026-08-04, second mascot screenshot). An op whose
+          // span REACHES the cell's far edge has that edge grown to the whole texel; every other
+          // edge is left exactly where box-glyphs.ts put it.
+          //
+          // WHY. A device cell is `charWidth * dpr` and fractional in general, so the cell's
+          // outermost texel is only PARTLY covered and a full-bleed geometric glyph leaves it as an
+          // ink/background blend (0.5 ink on a .5 axis). Step 3 can continue whatever is beside it
+          // but can never fix the texel itself — it belongs to the cell — which is the residual the
+          // edge-extension comments predicted and the device round then measured: dips of 4–38
+          // points surviving on the fractional axis after the gutters were extended.
+          //
+          // It is not merely paperable, it is WRONG. In the COMPOSED frame the other half of that
+          // boundary pixel is the NEIGHBOUR CELL'S ink, so the correct colour there is FULL ink;
+          // today's half-blend is the wrong answer even at zoom 1, at the phases where a fragment
+          // lands on it. xterm never meets any of this because its atlas cells are integral device
+          // px — the whole-texel box is the closest thing this atlas has to that, so a glyph that
+          // is DEFINED as filling its cell is drawn as filling the box. Step 3's replication then
+          // continues real ink into the gutter and the geometry path's residual goes to zero.
+          //
+          // FONT-rendered glyphs are excluded on purpose (see the clip above), so the residual
+          // survives for full-bleed glyphs drawn by the face — rare, since the block and
+          // box-drawing ranges come through here whenever box-glyphs.ts has an entry for them.
+          //
+          // The STIPPLES (░▒▓) need no special case: a dither run that happens to end on the cell
+          // edge grows by the same partial texel, which reads as ~50% tone either way at the sizes
+          // a shade block is ever looked at.
+          //
+          // NEAR edges need nothing at all. `span`'s `snap` returns a literal 0 for anything at or
+          // before the near edge, and the ink origin is a whole texel (`GlyphAtlas.cellXY` derives
+          // it from the whole-texel pitch) — so a near edge is already flush with a texel boundary
+          // and there is no partial texel to complete.
+          const w = op.x + op.w >= font.cellW - FAR_EDGE_EPS ? colsW - op.x : op.w
+          const h = op.y + op.h >= font.cellH - FAR_EDGE_EPS ? colsH - op.y : op.h
+          ctx.fillRect(x + op.x, y + op.y, w, h)
+        }
       } else {
         ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
         ctx.fillText(String.fromCodePoint(code), x, y + baseline)
