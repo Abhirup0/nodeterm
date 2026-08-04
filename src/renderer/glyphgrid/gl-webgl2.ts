@@ -3,7 +3,7 @@ import { snapPanToDevicePx, type Camera } from './camera'
 import { CELL_STRIDE, unpackColor } from './cells'
 import { cursorOverlays, cursorThicknessWorld, MAX_CURSOR_RECTS } from './cursor'
 import type { GlyphGL, GridDrawParams } from './gl'
-import { plateRectDevice } from './plate'
+import { plateRadiusDevice, plateRectDevice, plateShapeDevice } from './plate'
 
 /**
  * The deepest mip level the atlas may ever be sampled at (`TEXTURE_MAX_LOD`).
@@ -169,6 +169,70 @@ uniform vec4 uColor;
 out vec4 outColor;
 void main() { outColor = uColor; }`
 
+/**
+ * The OCCLUSION PLATE program: one quad per grid, its corners shaped by a rounded-rect SDF.
+ *
+ * It replaced a scissored `gl.clear`, which was a rectangle by construction — and a node has
+ * `border-radius`, while a canvas that is not that node's DOM child cannot be clipped by it. That
+ * mismatch is limitation L4: every shared terminal's body corners read square against its own
+ * rounded chrome. Rounding needs the plate to be DRAWN rather than cleared, which is this program.
+ *
+ * DEVICE SPACE, NOT WORLD SPACE — the one thing that makes it different from every other shader in
+ * this file. A corner radius is authored against the node's own pixels, and the shape has to stay
+ * pixel-exact under a camera the user pans by fractions of a pixel, so the rect and the radius are
+ * projected on the CPU (`plateShapeDevice` / `plateRadiusDevice`, both pure and unit-tested) and
+ * arrive here already in device px. `gl_FragCoord.xy` is in exactly those coordinates. It is also
+ * why NEITHER shader below flips Y: the device rect is already bottom-up, GL's own convention.
+ */
+const PLATE_VERT = `#version 300 es
+uniform vec4 uQuad;   // x, y, w, h in DEVICE px, bottom-left origin — the VISIBLE part of the plate
+uniform vec2 uDevice; // drawing-buffer size in device px
+void main() {
+  int corner = gl_VertexID;
+  vec2 unit = vec2((corner == 1 || corner == 4 || corner == 5) ? 1.0 : 0.0,
+                   (corner == 2 || corner == 3 || corner == 5) ? 1.0 : 0.0);
+  // No Y flip: uQuad is already bottom-up, and so is NDC. Every other vertex shader here starts
+  // from top-left world/CSS coordinates and has to flip; this one would DOUBLE-flip if it did.
+  gl_Position = vec4((uQuad.xy + unit * uQuad.zw) / uDevice * 2.0 - 1.0, 0.0, 1.0);
+}`
+
+const PLATE_FRAG = `#version 300 es
+precision highp float;
+uniform vec4 uRect;    // the WHOLE plate rect (x, y, w, h) in device px — never the clipped one
+uniform float uRadius; // corner radius in device px, already clamped to half the shorter side
+uniform vec4 uColor;
+out vec4 outColor;
+void main() {
+  vec2 halfExtent = uRect.zw * 0.5;
+  vec2 p = gl_FragCoord.xy - (uRect.xy + halfExtent);
+  // ONLY THE BOTTOM CORNERS ARE ROUNDED, and this line is the whole of that rule. The plate rect
+  // is a node BODY, and the body is the node's LAST child: its bottom edge IS the node's bottom
+  // (rounded, with nothing behind it but canvas), while its top edge is an interior seam against
+  // opaque chrome — the header, the labels row, the find bar. Rounding the top corners would not
+  // shape a visible corner at all, it would carve two wedges out of the body that nothing else
+  // paints, i.e. trade L4 for a new artifact. Device Y grows UP, so the node's visual bottom is
+  // the p.y < 0 half.
+  //
+  // The two halves cannot seam: away from a corner the rounded and square fields are IDENTICAL
+  // (the inner box is inset by r on both axes and the distance has r added back), so they agree
+  // exactly along p.y = 0, which is the mid-height of the body and as far from a corner as a
+  // fragment gets.
+  float r = p.y < 0.0 ? uRadius : 0.0;
+  vec2 q = abs(p) - (halfExtent - vec2(r));
+  float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+  // ONE DEVICE PIXEL OF COVERAGE, CENTRED ON THE EDGE — so the corner is antialiased instead of
+  // stepped (a hard corner on the terminal's own background reads as a rendering fault, not as a
+  // shape), while a STRAIGHT edge stays fully opaque. That centring is load-bearing and is where
+  // this deviates from the obvious "1.0 - smoothstep(-1.0, 0.0, d)": the plate's device rect is
+  // rounded to whole pixels, so an edge lands exactly on a pixel BOUNDARY, whose neighbouring
+  // fragment centres sit at d = -0.5 (inside) and d = +0.5 (outside). A window centred on 0 puts
+  // those at alpha 1 and 0 — the same pixels the old clear wrote, exactly. A window running
+  // from -1 to 0 would put the last inside row at alpha 0.5 and let a half-covered line of the
+  // TRANSPARENT node body (i.e. raw canvas) show around all four straight edges: the band this
+  // plate exists to remove.
+  outColor = vec4(uColor.rgb, uColor.a * clamp(0.5 - d, 0.0, 1.0));
+}`
+
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, depth: false })
   if (!gl) return null
@@ -203,6 +267,22 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   /** Scratch for the overlay's rect uniforms — one allocation for the life of the context rather
    *  than one per cursor per frame. */
   const cursorRectData = new Float32Array(MAX_CURSOR_RECTS * 4)
+  /** The plate program, and null when it failed to build. Null is NOT the cursor's kind of
+   *  degrade: without a plate a terminal has no opaque ground at all, and the node body is
+   *  transparent in shared mode — the canvas dot grid would show straight through every terminal,
+   *  and overlapping terminals would stop occluding each other. So the null path falls back to the
+   *  scissored `clear` this program replaced (square corners, i.e. L4) rather than to nothing. */
+  const plateProgram = buildProgram(gl, PLATE_VERT, PLATE_FRAG)
+  const plateUniforms = new Map<string, WebGLUniformLocation | null>()
+  const pu = (name: string): WebGLUniformLocation | null => {
+    if (!plateProgram) return null
+    let loc = plateUniforms.get(name)
+    if (loc === undefined) {
+      loc = gl.getUniformLocation(plateProgram, name)
+      plateUniforms.set(name, loc)
+    }
+    return loc
+  }
   /** One GPU buffer PER GRID, so a change costs only the rows that changed (bufferSubData)
    *  instead of re-uploading every visible grid's whole cell array into one shared buffer. */
   const grids = new Map<string, { buf: WebGLBuffer; cols: number; rows: number }>()
@@ -286,40 +366,117 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
 
   gl.useProgram(program)
   gl.enable(gl.BLEND)
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+  /**
+   * Straight (non-premultiplied) source colours over a PREMULTIPLIED drawing buffer — which is
+   * what `getContext('webgl2', {alpha: true})` gives, since `premultipliedAlpha` defaults to true
+   * and nothing above overrides it.
+   *
+   * The alpha channel needs its OWN source factor, and this used to be a plain `blendFunc`. With
+   * one factor for all four channels the destination alpha comes out as `srcA²` over an empty
+   * buffer, so a fragment at half coverage leaves the surface a QUARTER opaque, and the browser —
+   * compositing premultiplied — then lets 75% of the page through a pixel that is 50% covered. A
+   * bright halo along a soft edge, on the light theme especially.
+   *
+   * WHAT IT CHANGES, in three cases — and the third is a FIX, not a side effect:
+   *  - **Fully opaque** sources (a packed cell, the cursor overlay): unaffected. `srcA * srcA` and
+   *    `1 * srcA` are both 1.
+   *  - **Fully transparent** sources (a grid's zeroed buffer before its first packed row):
+   *    unaffected. Both are 0, and the destination keeps its own alpha either way.
+   *  - **PARTIALLY transparent** sources, which the plate's antialiased corner is NOT the first of.
+   *    `raster.ts` documents a pre-existing one and this blend improves it: the atlas is uploaded
+   *    NON-premultiplied, so wherever a mip level averages a slot's opaque background against the
+   *    page's transparent ground — the allocation frontier, the page's right/bottom remainder
+   *    strip, and the whole page right after a `clearPage` repack — a level-2 texel comes out half
+   *    brightness at half alpha, and `LINEAR_MIPMAP_LINEAR` is the min filter at any zoom below 1,
+   *    i.e. in ordinary use. Under the old single-factor blend such a rim texel left `dstA = 0.75`,
+   *    so the PLATE underneath it (and the page under that) showed through a cell that had already
+   *    been painted — the rim's page-bleed half. With `ONE` on the source alpha the surface stays
+   *    fully opaque there, and only the colour half of that residual is left (see `raster.ts` — the
+   *    non-premultiplied UPLOAD is what still double-attenuates the rim's brightness).
+   */
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
   /**
-   * The occlusion plate: a scissored `clear` of the grid's PLATE rect — the node body's full
-   * world rect, not the character matrix (see `GridDrawParams.plateX`).
+   * The occlusion plate: an opaque quad over the grid's PLATE rect — the node body's full world
+   * rect, not the character matrix (see `GridDrawParams.plateX`) — with its bottom corners rounded
+   * to the node's own radius.
    *
-   * A clear, not a blended quad, on purpose — it WRITES the colour (blending is bypassed), which
-   * is what makes it occlude rather than tint whatever was drawn beneath. Callers therefore pass
-   * an OPAQUE bgColor; a translucent one would punch the frame's alpha down to that value.
+   * **PAINTER ORDER IS UNCHANGED, and saying so is the point of this paragraph.** The plate is
+   * still drawn BEFORE this grid's cells and AFTER every lower grid, exactly where the scissored
+   * `clear` sat; the whole Phase-1a occlusion story is that call order, and moving from a clear to
+   * a BLENDED draw is precisely the change that could break it without looking like it had. It
+   * does not, because the plate is opaque: `bgColor` carries alpha 0xff (`packThemeBg` forces it,
+   * for this reason), and the blend func above at srcA = 1 resolves to `dst = src` for colour AND
+   * alpha — the same bits the clear wrote. Only the corner fragments, where the SDF's
+   * coverage falls below 1, blend at all, and blending is exactly what a rounded corner wants
+   * there. **A translucent bgColor would now TINT what is underneath instead of punching a hole in
+   * the frame's alpha** — a better failure than the clear's, but still not a supported input.
    *
-   * The rect math (camera projection, dpr, the Y flip, clamping) lives in the pure
-   * `plate.ts` — it is unit-tested there, since none of it is observable through a GL mock.
-   * What stays here is the GL state dance around it.
+   * TWO RECTS, and conflating them is the trap. `plateRectDevice` answers which pixels are worth
+   * drawing (clamped to the buffer, null when none are); `plateShapeDevice` answers where the node
+   * ACTUALLY is (unclamped). The quad is drawn over the first — minimal overdraw, and no reliance
+   * on the rasterizer to clip a rect that may sit far outside the viewport — while the SDF, and
+   * the radius clamp, measure against the second. Feeding the clamped rect to the shader would
+   * draw the node's rounded corner at the VIEWPORT edge on any node merely half scrolled off.
+   *
+   * All of that math is pure and lives in `plate.ts`, unit-tested, since none of it is observable
+   * through a GL mock. What stays here is the GL state dance around it.
+   *
+   * COST, stated because it did go up: a scissored clear is a fast path most GPUs answer without
+   * running a fragment shader, and this is a shaded quad over the same area — one invocation of
+   * four arithmetic ops and a `length()` per body pixel per visible grid. It is strictly less work
+   * than the CELL pass over that same area (which fetches a texture per fragment) and it is
+   * culled by the same `drawOrder`, so it does not change the shape of the frame's cost. If it
+   * ever shows up in a profile the escalation is a stencil or a scissored clear plus four small
+   * corner quads — not speculative work.
+   *
+   * STATE TOUCHED, AND RESTORED. (1) the current PROGRAM — switched to the plate program and put
+   * back to the cell program on the way out, the same discipline `drawCursor` follows, since
+   * `beginFrame` binds the cell program once for the whole frame. (2) the `aCell` attribute ARRAY
+   * — disabled here and re-enabled by `drawGrid` for every grid immediately after; a driver that
+   * fetches enabled-but-unused arrays would read the previous grid's buffer at divisor 1. Nothing
+   * else: no buffer is bound (positions come from uniforms and `gl_VertexID`), no texture, no
+   * blend change, no viewport change — and, unlike the clear it replaced, no SCISSOR_TEST, which
+   * is now never enabled at all.
    */
   // An arrow const, not a `function` declaration: declarations hoist above the `if (!gl) return`
   // narrowing, so `gl` would be `WebGL2RenderingContext | null` inside the body.
   const drawPlate = (g: GridDrawParams): void => {
-    // Null = the plate covers no pixel of the drawing buffer; skip it entirely.
-    const r = plateRectDevice(
-      { x: g.plateX, y: g.plateY, w: g.plateW, h: g.plateH },
-      cam,
-      dpr,
-      deviceW,
-      deviceH
-    )
-    if (!r) return
+    const world = { x: g.plateX, y: g.plateY, w: g.plateW, h: g.plateH }
+    // Null = the plate covers no pixel of the drawing buffer; skip it entirely. Kept from the
+    // clear-based version, where it also guarded against a GL_INVALID_VALUE scissor; here it is
+    // purely the early-out that keeps an off-screen node free.
+    const clip = plateRectDevice(world, cam, dpr, deviceW, deviceH)
+    if (!clip) return
     const c = unpackColor(g.bgColor)
-    gl.enable(gl.SCISSOR_TEST)
-    gl.scissor(r.x, r.y, r.w, r.h)
-    gl.clearColor(c.r / 255, c.g / 255, c.b / 255, c.a / 255)
-    gl.clear(gl.COLOR_BUFFER_BIT)
-    // Disabled again immediately: the scissor is global GL state, and leaving it on would clip
-    // the next grid's cells (and the next frame's full-surface clear in beginFrame).
-    gl.disable(gl.SCISSOR_TEST)
+    if (!plateProgram) {
+      // The degrade: no plate program, so fall back to the scissored clear. Square corners (L4)
+      // beat no occlusion at all — see `plateProgram`.
+      gl.enable(gl.SCISSOR_TEST)
+      gl.scissor(clip.x, clip.y, clip.w, clip.h)
+      gl.clearColor(c.r / 255, c.g / 255, c.b / 255, c.a / 255)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      // Disabled again immediately: the scissor is global GL state, and leaving it on would clip
+      // the next grid's cells (and the next frame's full-surface clear in beginFrame).
+      gl.disable(gl.SCISSOR_TEST)
+      return
+    }
+    const shape = plateShapeDevice(world, cam, dpr, deviceH)
+    // `cam.zoom * dpr` is the same world → device scale every extent above went through, so the
+    // radius can never drift out of proportion with the rect it rounds.
+    const radius = plateRadiusDevice(g.plateRadius, cam.zoom * dpr, shape)
+    gl.disableVertexAttribArray(aCellLoc)
+    gl.useProgram(plateProgram)
+    gl.uniform4f(pu('uQuad'), clip.x, clip.y, clip.w, clip.h)
+    gl.uniform2f(pu('uDevice'), deviceW, deviceH)
+    gl.uniform4f(pu('uRect'), shape.x, shape.y, shape.w, shape.h)
+    gl.uniform1f(pu('uRadius'), radius)
+    gl.uniform4f(pu('uColor'), c.r / 255, c.g / 255, c.b / 255, c.a / 255)
+    // Two triangles from gl_VertexID, no vertex buffer — the same trick the cell and cursor
+    // programs use. NOT instanced: there is exactly one plate per grid.
+    gl.drawArrays(gl.TRIANGLES, 0, 6)
+    // RESTORED, always — see the state note above.
+    gl.useProgram(program)
   }
 
   /**
@@ -500,9 +657,11 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       // buffer happened to be bound from the previous grid.
       if (!grid) return
 
-      // --- (1) the plate: an opaque scissored clear of the node BODY's world rect. It is
+      // --- (1) the plate: an opaque rounded quad over the node BODY's world rect. It is
       // drawn BEFORE this grid's cells and AFTER everything below it in z, so painter's order
-      // gives total occlusion of overlapping terminals with no depth buffer.
+      // gives total occlusion of overlapping terminals with no depth buffer. This call site is
+      // where that order lives, and it has not moved — see `drawPlate` on why a blended draw
+      // still occludes.
       drawPlate(g)
 
       // --- (2) the cells, instanced from the grid's own buffer.
@@ -533,6 +692,7 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       gl.deleteTexture(atlasTex)
       gl.deleteProgram(program)
       if (cursorProgram) gl.deleteProgram(cursorProgram)
+      if (plateProgram) gl.deleteProgram(plateProgram)
     }
   }
 }

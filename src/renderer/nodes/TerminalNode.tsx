@@ -1251,6 +1251,51 @@ export function TerminalNode({
     }
 
     /**
+     * The plate's corner radius in WORLD units — how far the node's own bottom corners are
+     * rounded, so the opaque ground the shared canvas paints under this terminal stops reading
+     * square against it (limitation L4). 0 means "square", and every failure below answers 0: a
+     * merely rectangular plate is the shape this renderer has always drawn.
+     *
+     * READ FROM THE NODE'S OWN COMPUTED STYLE, never a literal. **This deliberately does not read
+     * the `--radius-lg` token**: `.term-node` is authored as a literal `border-radius: 10px` while
+     * the token is `12px`, so taking the token would round the plate MORE than the node clips
+     * itself and leave a crescent of canvas inside each bottom corner — the same class of artifact
+     * as L4, mirrored. Asking the element resolves whatever the stylesheet actually says (token,
+     * literal, or a future theme override) and cannot desync from it.
+     *
+     * The BORDER WIDTH is subtracted because `border-radius` describes the BORDER box while the
+     * plate is the body box, which sits one border inside it. CSS rounds that inner box by
+     * `radius - border`, so a plate rounded by the OUTER radius would curve slightly tighter than
+     * the node's own clip all the way round the corner.
+     *
+     * ONE RADIUS AND ONE BORDER — exact for this node, an approximation in general.
+     * `borderBottomLeftRadius` is the HORIZONTAL half of a corner CSS allows to be elliptical, and
+     * `borderBottomWidth` is one of the TWO borders that meet at a bottom corner. Both collapse to a
+     * single number because `.term-node` is authored with one uniform radius and `1px` side and
+     * bottom borders. An elliptical radius or asymmetric side borders would need the vertical half
+     * and the side width as well — and an elliptical corner would additionally need the SDF to take
+     * a `vec2` radius, so this is a two-file change, not a wider `parseFloat`. Same instinct as the
+     * `%` refusal below: this is not a CSS length engine.
+     *
+     * Only the bottom corners are shaped, and the GL layer owns that rule rather than this call
+     * site — see `GridDrawParams.plateRadius`. The body is the node's last child, so its top
+     * corners butt against opaque chrome and are not corners on screen at all.
+     */
+    const measurePlateRadius = (): number => {
+      const root = rootRef.current
+      if (!root) return 0
+      const style = getComputedStyle(root)
+      // A computed `border-radius` is a px length here. A PERCENTAGE resolves as a percentage
+      // string, and parseFloat would turn it into a number that is not a radius at all — refused
+      // rather than guessed, the same way `packThemeBg` refuses a colour form it does not parse.
+      if (style.borderBottomLeftRadius.includes('%')) return 0
+      const radius = parseFloat(style.borderBottomLeftRadius)
+      const border = parseFloat(style.borderBottomWidth)
+      if (!Number.isFinite(radius) || radius <= 0) return 0
+      return Math.max(0, radius - (Number.isFinite(border) ? border : 0))
+    }
+
+    /**
      * Hand the shared canvas back. Order is fixed: the ATTACHMENT first — it is the only thing
      * that can still write into the grid, and disposing it is what puts xterm back on its own DOM
      * renderer — then the grid itself.
@@ -1387,7 +1432,13 @@ export function TerminalNode({
           plateX: plate.x,
           plateY: plate.y,
           plateW: plate.w,
-          plateH: plate.h
+          plateH: plate.h,
+          // Registration-time only, and that is a property of the value rather than a shortcut:
+          // the radius is a stylesheet constant, so unlike the plate RECT nothing moves it while
+          // this node lives, and the paths that could change it (a font/theme generation bump)
+          // tear this grid down and register a fresh one. There is no `setPlateRadius` for the
+          // same reason — see `GridSpec.plateRadius`.
+          plateRadius: measurePlateRadius()
         })
       } catch (err) {
         glyphWarn(`${id}:register`, `could not register a grid for node ${id}: ${String(err)}`)
