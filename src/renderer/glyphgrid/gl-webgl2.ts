@@ -162,10 +162,11 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   /** The camera of the frame in flight — the plate rect is computed on the CPU (world → screen),
    *  so drawGrid needs it. */
   let cam: Camera = { x: 0, y: 0, zoom: 1 }
-  /** Last value pushed to `TEXTURE_MIN_FILTER`, so the per-frame call below costs one comparison
-   *  instead of a driver round trip. 0 is not a valid enum — it means "never set", which is what
-   *  makes the first frame always reach the texture. */
+  /** Last values pushed to `TEXTURE_MIN_FILTER` / `TEXTURE_MAG_FILTER`, so the per-frame call
+   *  below costs one comparison instead of a driver round trip. 0 is not a valid enum — it means
+   *  "never set", which is what makes the first frame always reach the texture. */
   let atlasMinFilter = 0
+  let atlasMagFilter = 0
 
   /**
    * Pick the atlas's MINIFICATION filter from the camera zoom — the fix for "text is nearly, but
@@ -192,14 +193,30 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    *    sampler is clamped to MAX_SAFE_LOD — without both, a minified glyph would average in its
    *    neighbour's ink.
    *
-   * MAG stays NEAREST unconditionally — it was never the ambiguous half.
+   * MAG is zoom-driven too, for GPU-MODE PARITY when zoomed IN (device round, 2026-08-04):
+   *  - **zoom == 1 → NEAREST.** The 1:1 case above — bit-exact, and 1 belongs on the crisp side.
+   *  - **zoom > 1 → LINEAR.** The per-terminal WebglAddon renders 1:1 and lets the canvas's CSS
+   *    transform bilinearly upscale the finished image, so GPU mode is SOFT when zoomed in.
+   *    NEAREST here was measurably sharper but duplicated texels unevenly at fractional zoom
+   *    (stems wobbling 5-6-7 device px), which reads as raggedness next to GPU mode's smooth
+   *    scale. LINEAR magnification of the same level-0 texels is the same class of bilinear
+   *    upscale the CSS transform applies — the user chose parity over the extra sharpness.
+   *    An edge tap reaches at most 1 texel outside the cell extent, which is the slot's own
+   *    bg-filled gutter (2 texels) — never a neighbour's ink.
    */
   const applyAtlasMinFilter = (zoom: number): void => {
-    const want = zoom >= 1 ? gl.NEAREST : gl.LINEAR_MIPMAP_LINEAR
-    if (want === atlasMinFilter) return
-    atlasMinFilter = want
+    const wantMin = zoom >= 1 ? gl.NEAREST : gl.LINEAR_MIPMAP_LINEAR
+    const wantMag = zoom > 1 ? gl.LINEAR : gl.NEAREST
+    if (wantMin === atlasMinFilter && wantMag === atlasMagFilter) return
     gl.bindTexture(gl.TEXTURE_2D, atlasTex)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, want)
+    if (wantMin !== atlasMinFilter) {
+      atlasMinFilter = wantMin
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, wantMin)
+    }
+    if (wantMag !== atlasMagFilter) {
+      atlasMagFilter = wantMag
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, wantMag)
+    }
   }
 
   gl.useProgram(program)
@@ -278,7 +295,6 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       // LINEAR_MIPMAP_LINEAR a legal min filter.
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, MAX_SAFE_LOD)
       gl.generateMipmap(gl.TEXTURE_2D)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
       // The clamp the gutters pay for: levels deeper than MAX_SAFE_LOD may mix a neighbouring
       // slot's ink into this one, so the sampler is forbidden to reach them however far the canvas
       // is zoomed out. `texParameterf` — MAX_LOD is a float parameter, and the `i` form would
