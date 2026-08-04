@@ -247,6 +247,24 @@ describe('createFrameLoop', () => {
     expect(h.scheduled()).toBe(true)
   })
 
+  it('pulse() before start() draws its frame and leaves the loop with NO heartbeat', () => {
+    // Documenting the state rather than defending it. A one-shot on a loop that was never started
+    // parks it without arming the heartbeat, because the heartbeat is armed by the park that
+    // FOLLOWS a running frame — so the loop is left with neither an rAF nor a timer, and only a
+    // later `wake()`/`start()` brings it back. Unreachable through the layer (the board gate starts
+    // the loop before the clock can reach it) and harmless there; asserted so a future change to
+    // `start()`'s or `park()`'s bookkeeping cannot alter it silently.
+    const h = harness()
+    h.loop.pulse()
+    expect(h.scheduled()).toBe(true)
+    h.runFrame()
+    expect(h.frame).toHaveBeenCalledTimes(1)
+    expect(h.scheduled()).toBe(false)
+    expect(h.timer()).toBeNull()
+    h.loop.wake()
+    expect(h.scheduled()).toBe(true)
+  })
+
   it('pulse() after stop() is inert', () => {
     const h = harness()
     h.loop.start()

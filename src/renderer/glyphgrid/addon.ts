@@ -51,6 +51,12 @@ export interface CursorBlinkPhaseTarget {
 export interface CursorBlinkSeam {
   claim(target: CursorBlinkPhaseTarget): void
   release(target: CursorBlinkPhaseTarget): void
+  /** The cursor MOVED: hold it solid and start the period over, exactly as xterm's own
+   *  `CursorBlinkStateManager.restartBlinkAnimation` does. Identity-guarded in the shell like
+   *  `release`, and for a second reason on top of that one — a background terminal streaming output
+   *  moves its cursor constantly, and any of them re-arming the focused terminal's period would
+   *  hold the blink permanently solid. */
+  restart(target: CursorBlinkPhaseTarget): void
 }
 
 /** What the addon needs from a live terminal. Kept minimal so the addon is testable with fakes and
@@ -324,6 +330,19 @@ export class GlyphGridRendererAddonCore {
 
   handleCursorMove(): void {
     if (this.disposed) return
+    // FIRST, before the packs, and only for the terminal that HAS focus. xterm's own cursor holds
+    // solid while you type (`CursorBlinkStateManager.restartBlinkAnimation`), and a STACKED terminal
+    // beside this one is drawing exactly that on xterm's DOM renderer — a shared cursor that kept
+    // flashing through a keystroke is the drift `CURSOR_BLINK_INTERVAL_MS` was matched to prevent.
+    //
+    // Its position in this method is what keeps the restart's repaint inside the clock's bracket:
+    // the clock shows the cursor synchronously from here, so that repaint takes `pulse()`. The two
+    // packs below are ordinary damage — but the engine notifies only on the clean→dirty EDGE, so
+    // whichever write lands first is the one that routes, and a keystroke therefore costs a pulse
+    // rather than a wake. That is fine and deliberate: either route reaches a FRAME, which is the
+    // invariant, and the bracket exists to keep the blink's TIMED repaints off the wake path — not
+    // to make sure typing takes it.
+    if (this.focused) this.internals.blink?.restart(this.blinkSelf)
     const next = this.cursorViewportRow()
     const prev = this.lastCursorRow
     this.lastCursorRow = next

@@ -1,11 +1,22 @@
 import { adoptUserNodes } from '@xyflow/system'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  GlyphGridRendererAddonCore,
+  type CursorBlinkPhaseTarget,
+  type CursorBlinkSeam
+} from '../glyphgrid/addon'
+// The addon's fakes, shared with `glyphgrid/addon.test.ts`. A plain module, not a `.test.ts`:
+// importing a test file makes vitest collect its whole suite a second time under this one.
+import { fakeTerm, recordingAtlas, recordingHandle } from '../glyphgrid/addon-fakes'
+import { FLAG_CURSOR, readCell } from '../glyphgrid/cells'
+import type { GridHandle } from '../glyphgrid/engine'
 import { createFrameLoop, type FrameLoop, type FrameLoopHost } from '../glyphgrid/frame-driver'
 import {
   createBoardFrameGate,
   createCursorBlinkClock,
   cursorBlinkTarget,
   setCursorBlinkTarget,
+  subscribeCursorBlinkRestart,
   subscribeCursorBlinkTarget,
   CURSOR_BLINK_INTERVAL_MS,
   failSharedGlyph,
@@ -23,6 +34,8 @@ import {
   opaqueNodeIds,
   pixelRatioChanged,
   primeOpaqueNodeIds,
+  releaseCursorBlinkTarget,
+  restartCursorBlink,
   setNodeZOrder,
   setOpaqueNodeIds,
   setSharedGlyphCamera,
@@ -1455,6 +1468,56 @@ describe('createCursorBlinkClock', () => {
   it('matches xterm’s own blink period, so a DOM-rendered terminal beside a shared one agrees', () => {
     expect(CURSOR_BLINK_INTERVAL_MS).toBe(600)
   })
+
+  it('a cursor move during a hidden phase shows the cursor again — through pulse, not wake', () => {
+    // The restart is a BLINK repaint like any other, so it has to stay inside the bracket. A
+    // restart routed to `wake()` would be worse than the phase flips this design was built around:
+    // it happens on every keystroke, not twice a second.
+    const h = blinkHarness()
+    h.focus()
+    h.tick()
+    expect(h.phases).toEqual([false])
+    h.loop.pulse.mockClear()
+    h.loop.wake.mockClear()
+
+    h.clock.restart()
+
+    expect(h.phases).toEqual([false, true])
+    expect(h.loop.pulse).toHaveBeenCalledTimes(1)
+    expect(h.loop.wake).not.toHaveBeenCalled()
+  })
+
+  it('a restart re-arms the period, so the cursor stays solid while you type', () => {
+    // Showing it again without restarting the interval would leave the cursor solid only until the
+    // next tick of the OLD period — up to 600 ms, but as little as a millisecond.
+    const h = blinkHarness()
+    h.focus()
+    expect(h.intervalsStarted()).toBe(1)
+    h.clock.restart()
+    expect(h.intervalsCleared()).toBe(1)
+    expect(h.intervalsStarted()).toBe(2)
+    expect(h.running()).toBe(true)
+  })
+
+  it('a restart starts nothing while a gate is holding the clock stopped', () => {
+    // `sync` owns the gates. A restart that started an interval here would blink a cursor the
+    // setting (or the board) has already stopped.
+    const h = blinkHarness({ enabled: false })
+    h.focus()
+    h.clock.restart()
+    expect(h.running()).toBe(false)
+    expect(h.intervalsStarted()).toBe(0)
+  })
+
+  it('a restart with nothing focused, and one after stop(), are both inert', () => {
+    const h = blinkHarness()
+    h.clock.restart()
+    expect(h.running()).toBe(false)
+    h.focus()
+    h.clock.stop()
+    h.clock.restart()
+    expect(h.running()).toBe(false)
+  })
 })
 
 describe('the cursor blink target seam', () => {
@@ -1474,6 +1537,193 @@ describe('the cursor blink target seam', () => {
     off()
     setCursorBlinkTarget(target)
     expect(seen).toHaveBeenCalledTimes(2)
+  })
+
+  it('release only clears the blink for the target that still HOLDS it', () => {
+    // THE late-blur bug, and the reason the comparison lives in this function rather than in the
+    // attach shell (which has no unit tests by design): the browser does not promise that the old
+    // terminal's blur reaches us before the new one's focus, and an unconditional clear would stop
+    // the cursor of the terminal the user just clicked into.
+    const a: CursorBlinkTarget = { setPhase: () => {} }
+    const b: CursorBlinkTarget = { setPhase: () => {} }
+    setCursorBlinkTarget(a)
+    setCursorBlinkTarget(b)
+    releaseCursorBlinkTarget(a)
+    expect(cursorBlinkTarget()).toBe(b)
+    releaseCursorBlinkTarget(b)
+    expect(cursorBlinkTarget()).toBeNull()
+  })
+
+  it('restart notifies only for the target that holds the blink', () => {
+    // A background terminal streaming output moves its cursor constantly; any of them re-arming the
+    // focused terminal's period would hold the blink permanently solid.
+    const seen = vi.fn()
+    const off = subscribeCursorBlinkRestart(seen)
+    const a: CursorBlinkTarget = { setPhase: () => {} }
+    const b: CursorBlinkTarget = { setPhase: () => {} }
+    setCursorBlinkTarget(a)
+    restartCursorBlink(b)
+    expect(seen).not.toHaveBeenCalled()
+    restartCursorBlink(a)
+    expect(seen).toHaveBeenCalledTimes(1)
+    off()
+    restartCursorBlink(a)
+    expect(seen).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * THE PARK, END TO END — the one constraint the whole blink design exists to satisfy.
+ *
+ * The addon's own tests prove it repacks on the caller's stack; the clock's tests above prove it
+ * routes bracketed damage to `pulse()`. Neither alone proves the FEATURE parks, because the trap
+ * lives exactly in the seam between them: an addon that repacked one tick later would satisfy both
+ * and still put an idle canvas back at the display's refresh rate, thirty frames every 600 ms.
+ *
+ * So this wires the REAL addon to the REAL clock through a handle that reports damage the way the
+ * engine does — edge-triggered on the clean→dirty transition, cleared by the frame the loop draws.
+ * It lives on THIS side of the boundary because the dependency direction is canvas → glyphgrid; the
+ * fakes come from `glyphgrid/addon-fakes.ts`, which is a plain module rather than a `.test.ts` so
+ * importing it does not collect the addon's suite a second time.
+ */
+describe('the blink phase through the real clock', () => {
+  function wired(): {
+    core: GlyphGridRendererAddonCore
+    loop: { wake: number; pulse: number }
+    intervalsStarted(): number
+    running(): boolean
+    tick(): void
+    frame(): void
+    /** Does the NEWEST pack of the cursor row carry the block cursor? */
+    cursorPainted(): boolean
+  } {
+    const handle = recordingHandle()
+    let clock: CursorBlinkClock | null = null
+    const loop = { wake: 0, pulse: 0 }
+    // The engine's `markDirty` notifies on the clean→dirty EDGE only, and the FRAME clears the flag
+    // — neither `wake()` nor `pulse()` draws inline, they schedule. Modelling that (rather than one
+    // notification per write) is what makes the counts below mean "frames scheduled", which is the
+    // number the park is about.
+    let dirty = false
+    const damage = (): void => {
+      if (dirty) return
+      dirty = true
+      clock?.routeDamage()
+    }
+    const damaging: GridHandle = {
+      ...handle,
+      updateRow(row, cells) {
+        handle.updateRow(row, cells)
+        damage()
+      },
+      setCursor(cursor) {
+        handle.setCursor(cursor)
+        damage()
+      }
+    }
+
+    let current: CursorBlinkPhaseTarget | null = null
+    // The attach shell's seam, verbatim in behaviour: claim publishes, release and restart are
+    // identity-guarded, and a target change re-syncs the clock (the real one does it through the
+    // layer's subscription).
+    const seam: CursorBlinkSeam = {
+      claim(t) {
+        current = t
+        clock?.sync()
+      },
+      release(t) {
+        if (current !== t) return
+        current = null
+        clock?.sync()
+      },
+      restart(t) {
+        if (current !== t) return
+        clock?.restart()
+      }
+    }
+
+    let fire: (() => void) | null = null
+    let started = 0
+    clock = createCursorBlinkClock({
+      enabled: () => true,
+      covered: () => false,
+      target: () => current,
+      loop: () => ({
+        wake: () => {
+          loop.wake++
+        },
+        pulse: () => {
+          loop.pulse++
+        }
+      }),
+      setInterval: (cb) => {
+        started++
+        fire = cb
+        return started
+      },
+      clearInterval: () => {
+        fire = null
+      }
+    })
+
+    const term = fakeTerm({ rows: 4, cols: 4, cursorY: 1, cursorX: 2, focus: true, blink: seam })
+    const core = new GlyphGridRendererAddonCore(term, damaging, recordingAtlas())
+    return {
+      core,
+      loop,
+      intervalsStarted: () => started,
+      running: () => fire !== null,
+      tick: () => fire?.(),
+      frame: () => {
+        dirty = false
+      },
+      cursorPainted: () => {
+        const rec = [...handle.rows].reverse().find((r) => r.row === 1)
+        if (!rec) throw new Error('the cursor row was never packed')
+        return (readCell(rec.cells, 2).flags & FLAG_CURSOR) !== 0
+      }
+    }
+  }
+
+  it('a phase flip costs ONE pulse and never a wake — the idle park survives the blink', () => {
+    const h = wired()
+    // The addon claimed the blink at construction, so the clock is already ticking.
+    expect(h.running()).toBe(true)
+    for (let i = 0; i < 3; i++) {
+      h.tick()
+      // The frame the pulse scheduled draws and clears the engine's dirty flag, 600 ms before the
+      // next phase — which is what lets the next flip notify at all.
+      h.frame()
+    }
+    expect(h.loop.pulse).toBe(3)
+    expect(h.loop.wake).toBe(0)
+  })
+
+  it('ordinary damage from the SAME addon still takes wake()', () => {
+    // The other half of the routing: only the clock's own bracketed repaint is a pulse. A terminal
+    // writing rows is likely to be followed by more, and a pulse per write would put a scheduling
+    // hop in front of every character.
+    const h = wired()
+    h.core.renderRows(0, 3)
+    expect(h.loop.wake).toBe(1)
+    expect(h.loop.pulse).toBe(0)
+  })
+
+  it('a cursor move during a hidden phase shows the cursor, restarts the period, and pulses', () => {
+    // xterm holds its own cursor solid while you type; without this the shared renderer kept
+    // flashing, so a stacked (DOM-rendered) terminal beside a shared one behaved differently in the
+    // most attention-heavy moment there is — the drift the matched period exists to prevent.
+    const h = wired()
+    h.tick()
+    h.frame()
+    expect(h.cursorPainted()).toBe(false)
+
+    h.core.handleCursorMove()
+
+    expect(h.cursorPainted()).toBe(true)
+    expect(h.intervalsStarted()).toBe(2)
+    expect(h.loop.pulse).toBe(2)
+    expect(h.loop.wake).toBe(0)
   })
 })
 

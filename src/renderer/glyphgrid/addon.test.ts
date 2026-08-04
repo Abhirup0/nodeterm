@@ -1,280 +1,16 @@
 import { describe, expect, it } from 'vitest'
-// TEST-ONLY cross-layer import, and the only one in this directory: the blink is a CONTRACT between
-// the clock (which owns the timing and the damage routing) and this addon (which owns applying a
-// phase), and the trap it exists to avoid lives exactly in the seam between them — see the last
-// describe. `src/renderer/glyphgrid/` itself still imports nothing.
-import { createCursorBlinkClock, type CursorBlinkClock } from '../canvas/SharedGlyphLayer'
-import type { GlyphAtlas } from './atlas'
+import {
+  THEME,
+  fakeBlinkSeam,
+  fakeDecorations,
+  fakeTerm,
+  recordingAtlas,
+  recordingHandle,
+  type FakeTermOpts
+} from './addon-fakes'
 import { CELL_STRIDE, FLAG_CURSOR, FLAG_SELECTED, packColor, readCell } from './cells'
 import type { GridCursor } from './cursor'
-import type { GridHandle } from './engine'
-import {
-  GlyphGridRendererAddonCore,
-  type CursorBlinkPhaseTarget,
-  type CursorBlinkSeam,
-  type DeviceMetrics,
-  type TermInternals
-} from './addon'
-import type { DecorationReader } from './decorations'
-import type { CellView, ThemeLanes } from './feed'
-
-const THEME: ThemeLanes = {
-  fg: packColor(0xd0, 0xd1, 0xd2, 0xff),
-  bg: packColor(0x10, 0x11, 0x12, 0xff),
-  ansi: Array.from({ length: 256 }, (_, i) => packColor(i, 0x80, 0xff - i, 0xff)),
-  cursorFg: packColor(0x01, 0x02, 0x03, 0xff),
-  cursorBg: packColor(0xfa, 0xfb, 0xfc, 0xff),
-  selectionBg: packColor(0x30, 0x50, 0x80, 0xff)
-}
-
-/** A cell whose code point encodes the ABSOLUTE buffer row it came from, so a packed row can be
- *  traced back to the buffer row that produced it — which is the whole point of the mapping
- *  tests (a viewportY off-by-one is otherwise invisible). */
-function rowCodedCell(absRow: number, col: number): CellView {
-  const code = 0x100 + absRow * 16 + col
-  return {
-    getChars: () => String.fromCodePoint(code),
-    getCode: () => code,
-    getWidth: () => 1,
-    isBold: () => 0,
-    isItalic: () => 0,
-    isUnderline: () => 0,
-    isInverse: () => 0,
-    isDim: () => 0,
-    isFgDefault: () => true,
-    isFgPalette: () => false,
-    isFgRGB: () => false,
-    isBgDefault: () => true,
-    isBgPalette: () => false,
-    isBgRGB: () => false,
-    getFgColor: () => 0,
-    getBgColor: () => 0
-  }
-}
-
-interface RecordedRow {
-  row: number
-  /** Copy — the core reuses ONE row buffer, so keeping the live reference would record the last
-   *  frame N times. */
-  cells: Uint32Array
-  /** The buffer INSTANCE handed to updateRow, kept only to assert the reuse contract. */
-  buf: Uint32Array
-}
-
-function recordingHandle(): GridHandle & {
-  rows: RecordedRow[]
-  log: string[]
-  resizes: Array<[number, number]>
-  /** Every cursor spec pushed to the grid, newest last — `at(-1)` is what a frame would draw. */
-  cursors: Array<GridCursor | null>
-} {
-  const rows: RecordedRow[] = []
-  const log: string[] = []
-  const resizes: Array<[number, number]> = []
-  const cursors: Array<GridCursor | null> = []
-  return {
-    rows,
-    log,
-    resizes,
-    cursors,
-    updateRow(row, cells) {
-      log.push(`updateRow:${row}`)
-      rows.push({ row, cells: cells.slice(), buf: cells })
-    },
-    setOrigin() {},
-    // The addon owns CELLS, never geometry — the plate is the node's business. A stub, present
-    // only to satisfy the handle contract.
-    setPlateRect() {},
-    setCursor(cursor) {
-      cursors.push(cursor)
-    },
-    setZ() {},
-    resize(cols, r) {
-      log.push(`resize:${cols}x${r}`)
-      resizes.push([cols, r])
-    },
-    dispose() {
-      log.push('dispose')
-    }
-  }
-}
-
-/** The atlas surface the addon holds: a slot source AND a reset broadcaster.
- *
- *  `fireReset()` is the test's hand on the real atlas's most awkward behaviour — a reset fires
- *  SYNCHRONOUSLY inside a `glyphFor` call, i.e. in the middle of someone's row pack — so
- *  `onGlyphFor` exists to fire it from exactly there. */
-function recordingAtlas(o: { onGlyphFor?: (fire: () => void) => void } = {}): Pick<
-  GlyphAtlas,
-  'glyphFor' | 'onReset'
-> & { fireReset(): void; subCount(): number } {
-  const subs = new Set<() => void>()
-  const fireReset = (): void => {
-    for (const cb of [...subs]) cb()
-  }
-  return {
-    // Identity-ish: the slot IS derived from the code point, so a packed glyph lane names the cell
-    // it came from without a second bookkeeping structure.
-    glyphFor: (code) => {
-      o.onGlyphFor?.(fireReset)
-      return code
-    },
-    onReset: (cb) => {
-      subs.add(cb)
-      return {
-        dispose: (): void => {
-          subs.delete(cb)
-        }
-      }
-    },
-    fireReset,
-    subCount: () => subs.size
-  }
-}
-
-/** The decoration surface the shell hands over: a reader plus the two "something changed" events.
- *  `fire*` is the test's hand on xterm's decoration service — the search addon registering a hit. */
-function fakeDecorations(
-  entries: Array<{ col: number; row: number; layer?: string; bg?: number; fg?: number }> = []
-): {
-  reader: DecorationReader
-  onDecorationRegistered(cb: () => void): { dispose(): void }
-  onDecorationRemoved(cb: () => void): { dispose(): void }
-  fireRegistered(): void
-  fireRemoved(): void
-  subCount(): number
-} {
-  const registered = new Set<() => void>()
-  const removed = new Set<() => void>()
-  const sub = (set: Set<() => void>, cb: () => void): { dispose(): void } => {
-    set.add(cb)
-    return {
-      dispose: (): void => {
-        set.delete(cb)
-      }
-    }
-  }
-  return {
-    reader: {
-      empty: () => entries.length === 0,
-      atCell: (col, row, cb) => entries.filter((e) => e.col === col && e.row === row).forEach(cb)
-    },
-    onDecorationRegistered: (cb) => sub(registered, cb),
-    onDecorationRemoved: (cb) => sub(removed, cb),
-    fireRegistered: () => {
-      for (const cb of [...registered]) cb()
-    },
-    fireRemoved: () => {
-      for (const cb of [...removed]) cb()
-    },
-    subCount: () => registered.size + removed.size
-  }
-}
-
-/** The canvas blink clock's end of the seam, as the attach shell implements it: `release` is
- *  IDENTITY-GUARDED, because browsers do not promise that the blurred terminal's blur reaches us
- *  before the newly focused one's focus. Modelling that here is what makes the handover assertion
- *  mean anything — an unguarded fake would pass against an unguarded shell.
- *
- *  `onRelease` stands in for the clock's own restoring `setPhase(true)`, which is the behaviour
- *  `dispose` has to leave room for. */
-function fakeBlinkSeam(o: { onRelease?: (t: CursorBlinkPhaseTarget) => void } = {}): {
-  seam: CursorBlinkSeam
-  target(): CursorBlinkPhaseTarget | null
-  claims: CursorBlinkPhaseTarget[]
-  releases: CursorBlinkPhaseTarget[]
-} {
-  let current: CursorBlinkPhaseTarget | null = null
-  const claims: CursorBlinkPhaseTarget[] = []
-  const releases: CursorBlinkPhaseTarget[] = []
-  return {
-    seam: {
-      claim(t) {
-        claims.push(t)
-        current = t
-      },
-      release(t) {
-        releases.push(t)
-        if (current !== t) return
-        current = null
-        o.onRelease?.(t)
-      }
-    },
-    target: () => current,
-    claims,
-    releases
-  }
-}
-
-interface FakeTermOpts {
-  cols?: number
-  rows?: number
-  viewportY?: number
-  baseY?: number
-  cursorX?: number
-  cursorY?: number
-  cursorVisible?: boolean
-  focus?: boolean
-  decorations?: ReturnType<typeof fakeDecorations>
-  /** xterm's two cursor options, verbatim. ABSENT on purpose in every test that does not name them:
-   *  an xterm build that stopped reporting them must degrade to xterm's own defaults (a focused
-   *  block, a blurred outline), never to no cursor at all. */
-  cursorStyle?: { style?: string; inactiveStyle?: string }
-  /** Columns whose cell reports width 2 — a wide glyph's LEAD. The column after one reports width
-   *  0, exactly as xterm's buffer stores a double-width character. */
-  wideCols?: readonly number[]
-  /** The blink seam. ABSENT in every test that does not name it — a build with no shared layer
-   *  hands the addon exactly this, and the cursor simply never blinks. */
-  blink?: CursorBlinkSeam
-}
-
-type FakeTermState = Required<
-  Omit<FakeTermOpts, 'decorations' | 'cursorStyle' | 'wideCols' | 'blink'>
->
-
-function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState } {
-  const state: FakeTermState = {
-    cols: o.cols ?? 4,
-    rows: o.rows ?? 6,
-    viewportY: o.viewportY ?? 0,
-    baseY: o.baseY ?? 0,
-    cursorX: o.cursorX ?? 0,
-    cursorY: o.cursorY ?? 0,
-    cursorVisible: o.cursorVisible ?? true,
-    focus: o.focus ?? true
-  }
-  const workCell = rowCodedCell(-1, -1)
-  return {
-    state,
-    cols: () => state.cols,
-    rows: () => state.rows,
-    viewportY: () => state.viewportY,
-    baseY: () => state.baseY,
-    cursorX: () => state.cursorX,
-    cursorY: () => state.cursorY,
-    cursorVisible: () => state.cursorVisible,
-    readCell: (absRow, col) => {
-      const wide = o.wideCols ?? []
-      if (wide.includes(col)) return { ...rowCodedCell(absRow, col), getWidth: () => 2 }
-      if (wide.includes(col - 1)) return { ...rowCodedCell(absRow, col), getWidth: () => 0 }
-      return rowCodedCell(absRow, col)
-    },
-    makeWorkCell: () => workCell,
-    deviceMetrics: () => ({ charW: 16, charH: 34, cellW: 16, cellH: 34 }),
-    dpr: () => 2,
-    theme: () => THEME,
-    hasFocus: () => state.focus,
-    // Absent unless a test names them — see FakeTermOpts.cursorStyle.
-    cursorStyle: o.cursorStyle ? () => o.cursorStyle as { style?: string } : undefined,
-    // Absent unless a test asks for it, like the decorations below.
-    blink: o.blink,
-    // Absent unless a test asks for them — an xterm build with no decoration service hands the
-    // addon exactly this, and every other test in this file is that case.
-    decorations: o.decorations?.reader,
-    onDecorationRegistered: o.decorations?.onDecorationRegistered,
-    onDecorationRemoved: o.decorations?.onDecorationRemoved
-  }
-}
+import { GlyphGridRendererAddonCore, type DeviceMetrics } from './addon'
 
 function make(
   o: FakeTermOpts & { atlas?: ReturnType<typeof recordingAtlas> } = {}
@@ -968,6 +704,33 @@ describe('GlyphGridRendererAddonCore blink target', () => {
     expect(blink.target()).toBe(null)
   })
 
+  it('restarts the blink on a cursor move — but only while it has focus', () => {
+    // xterm's own `restartBlinkAnimation` holds the cursor solid while you type. The FOCUS check is
+    // the addon's own: a background terminal streaming output moves its cursor constantly, and the
+    // fake below deliberately does NOT guard by identity (the module-level `restartCursorBlink`
+    // does that) so this asserts the addon's guard rather than the seam's.
+    const blink = fakeBlinkSeam()
+    const { core } = make({ rows: 8, cols: 4, cursorY: 1, cursorX: 1, blink: blink.seam })
+    core.handleCursorMove()
+    expect(blink.restarts.length).toBe(1)
+
+    core.handleBlur()
+    core.handleCursorMove()
+    expect(blink.restarts.length).toBe(1)
+
+    core.handleFocus()
+    core.handleCursorMove()
+    expect(blink.restarts.length).toBe(2)
+  })
+
+  it('asks for no restart once disposed', () => {
+    const blink = fakeBlinkSeam()
+    const { core } = make({ rows: 8, cols: 4, cursorY: 1, blink: blink.seam })
+    core.dispose()
+    core.handleCursorMove()
+    expect(blink.restarts).toEqual([])
+  })
+
   it('constructs and packs normally when the shell offers no blink seam at all', () => {
     // The degrade: no shared layer, no clock, no blink — Phase 1b's behaviour, not a broken addon.
     const { core, handle } = make({ rows: 4, cols: 4, cursorY: 1, cursorX: 2 })
@@ -979,126 +742,11 @@ describe('GlyphGridRendererAddonCore blink target', () => {
   })
 })
 
-/**
- * THE PARK, END TO END — the one constraint this whole design exists to satisfy.
- *
- * The unit tests above prove the addon repacks on the caller's stack; the clock's own tests prove it
- * routes its bracketed damage to `pulse()`. Neither alone proves the FEATURE parks, because the trap
- * lives exactly in the seam between them: an addon that repacked one tick later would satisfy both
- * and still put an idle canvas back at the display's refresh rate, thirty frames every 600 ms.
- *
- * So this wires the REAL addon to the REAL clock through a handle that reports damage the way the
- * engine does — edge-triggered on the clean→dirty transition, cleared by the frame the loop draws.
- */
-describe('the blink phase through the real clock', () => {
-  function wired(): {
-    core: GlyphGridRendererAddonCore
-    handle: ReturnType<typeof recordingHandle>
-    loop: { wake: number; pulse: number }
-    running(): boolean
-    tick(): void
-    frame(): void
-  } {
-    const handle = recordingHandle()
-    let clock: CursorBlinkClock | null = null
-    const loop = { wake: 0, pulse: 0 }
-    // The engine's `markDirty` notifies on the clean→dirty EDGE only, and the FRAME clears the flag
-    // — neither `wake()` nor `pulse()` draws inline, they schedule. Modelling that (rather than one
-    // notification per write) is what makes the counts below mean "frames scheduled", which is the
-    // number the park is about.
-    let dirty = false
-    const damage = (): void => {
-      if (dirty) return
-      dirty = true
-      clock?.routeDamage()
-    }
-    const damaging: GridHandle = {
-      ...handle,
-      updateRow(row, cells) {
-        handle.updateRow(row, cells)
-        damage()
-      },
-      setCursor(cursor) {
-        handle.setCursor(cursor)
-        damage()
-      }
-    }
-
-    let current: CursorBlinkPhaseTarget | null = null
-    // The attach shell's seam, verbatim in behaviour: claim publishes, release is identity-guarded,
-    // and either change re-syncs the clock (the real one does it through the layer's subscription).
-    const seam: CursorBlinkSeam = {
-      claim(t) {
-        current = t
-        clock?.sync()
-      },
-      release(t) {
-        if (current !== t) return
-        current = null
-        clock?.sync()
-      }
-    }
-
-    let fire: (() => void) | null = null
-    clock = createCursorBlinkClock({
-      enabled: () => true,
-      covered: () => false,
-      target: () => current,
-      loop: () => ({
-        wake: () => {
-          loop.wake++
-        },
-        pulse: () => {
-          loop.pulse++
-        }
-      }),
-      setInterval: (cb) => {
-        fire = cb
-        return 1
-      },
-      clearInterval: () => {
-        fire = null
-      }
-    })
-
-    const term = fakeTerm({ rows: 4, cols: 4, cursorY: 1, cursorX: 2, focus: true, blink: seam })
-    const core = new GlyphGridRendererAddonCore(term, damaging, recordingAtlas())
-    return {
-      core,
-      handle,
-      loop,
-      running: () => fire !== null,
-      tick: () => fire?.(),
-      frame: () => {
-        dirty = false
-      }
-    }
-  }
-
-  it('a phase flip costs ONE pulse and never a wake — the idle park survives the blink', () => {
-    const h = wired()
-    // The addon claimed the blink at construction, so the clock is already ticking.
-    expect(h.running()).toBe(true)
-    for (let i = 0; i < 3; i++) {
-      h.tick()
-      // The frame the pulse scheduled draws and clears the engine's dirty flag, 600 ms before the
-      // next phase — which is what lets the next flip notify at all.
-      h.frame()
-    }
-    expect(h.loop.pulse).toBe(3)
-    expect(h.loop.wake).toBe(0)
-  })
-
-  it('ordinary damage from the SAME addon still takes wake()', () => {
-    // The other half of the routing: only the clock's own bracketed repaint is a pulse. A terminal
-    // writing rows is likely to be followed by more, and a pulse per write would put a scheduling
-    // hop in front of every character.
-    const h = wired()
-    h.core.renderRows(0, 3)
-    expect(h.loop.wake).toBe(1)
-    expect(h.loop.pulse).toBe(0)
-  })
-})
+// The blink's END-TO-END test — the real addon driven by the real clock — lives in
+// `canvas/SharedGlyphLayer.test.ts`, not here: it needs the clock, and the dependency direction is
+// canvas → glyphgrid. Importing the layer from a glyphgrid unit test would drag React, zustand and
+// three stores into this file's module graph. The fakes the two files share live in
+// `addon-fakes.ts` (a plain module, because importing a `.test.ts` collects its suite twice).
 
 /** BLUR AND THE SELECTION — limitation L3.
  *

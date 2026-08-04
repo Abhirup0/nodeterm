@@ -239,6 +239,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       **static** with the setting on is a BUG now (the wiring is complete); report it with which
       shape was selected and whether the terminal had focus. See 4.19 for the frame cost this must
       not have.
+      **Typing holds the cursor SOLID**, the way xterm's own does: type a slow sentence into a
+      shared terminal and the cursor must not flash under your keystrokes — each one restarts the
+      period. The point of this check is the comparison, so do it beside a **stacked** terminal (one
+      node overlapping another, which leaves the shared canvas for xterm's DOM renderer — L15): the
+      two cursors must behave the same, both while typing and while idle. A shared cursor that keeps
+      flashing while you type is the drift the matched 600 ms period exists to prevent.
       **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
       glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
       the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still
@@ -486,7 +492,14 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       idle streak twice a second. Click into a terminal, leave everything else idle, and confirm the
       meter reads ~2 rather than 60. Then click AWAY (focus another app): the last phase leaves the
       cursor shown and the meter drops to quiet — a canvas with no focused terminal has no clock at
-      all.
+      all. **Typing is the other expected exception**, and it is the same mechanism: a cursor move
+      holds the cursor solid and restarts the period, so the meter follows your keystrokes rather
+      than flashing under them.
+      **One innocent way to read 60 that is NOT a routing bug**, worth distinguishing before filing
+      one: if the shared ATLAS resets during a blink repack, the addon asks xterm for a full redraw,
+      and xterm's debounced render pass then packs rows from OUTSIDE the clock's bracket — which
+      takes `wake()`, correctly. The atlas logs its resets (`resetCount`), so check the console
+      before concluding the blink is on the wrong path.
       **BLOCKING symptom to name explicitly: if ANY terminal ever stops repainting until you drag
       it, click it, or resize something, that is a MISSED WAKE** — the failure this design fears,
       and far worse than the idle CPU it saves. Report it with what the terminal was doing when it
