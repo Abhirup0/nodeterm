@@ -24,12 +24,15 @@ import { plateRectDevice } from './plate'
  * still a valid min filter here. (An earlier version of this comment claimed the API offers no way
  * to build fewer levels. It does; that sentence was wrong.)
  *
- * The residual the clamp accepts is stated in GUTTER_PX's comment: at level 2 a bilinear tap can
- * reach a pure-gutter texel holding a blend of THIS SLOT'S EDGE COLOUR and the NEIGHBOUR'S. For
- * ordinary text both edges are background, so that is the background-vs-background softness it has
- * always been; where two full-bleed slots sit side by side (block art, box-drawing rules) the two
- * edges are ink and can tint each other's outermost sample. Same bounded, accepted class either
- * way — a soft edge at heavy zoom-out, never a ghost glyph.
+ * The residual the clamp accepts is stated with its weights in GUTTER_PX's comment. In short: at
+ * level 2 a bilinear tap reaches a gutter texel blending THIS SLOT'S EDGE COLOUR with the
+ * NEIGHBOUR'S, up to 25% of the sampled value at the worst phase — for ordinary text that is the
+ * background-vs-background softness it has always been, and where two full-bleed slots sit side by
+ * side (block art, box-drawing rules) it is ink against ink instead. And that texel is not always
+ * PURE gutter: at one pitch alignment in four the tap's far level-2 texel straddles the neighbour's
+ * first CELL columns, weighting its cell at roughly 6.25% of the sample. That half is PRE-EXISTING
+ * — it is about which texels a tap reaches, not what they hold, so edge extension neither caused
+ * nor changed it. Both are tints at heavy zoom-out, never a ghost glyph.
  */
 const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
 

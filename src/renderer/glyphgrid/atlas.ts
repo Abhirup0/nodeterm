@@ -40,12 +40,14 @@ export interface GlyphRasterizer {
  * raster.ts fills it with the slot's own content, and gl-webgl2.ts offsets its uv derivation by it.
  *
  * WHAT THE GUTTER CARRIES. Not simply background — the slot's own EDGE-EXTENDED content: raster.ts
- * fills it with the slot's background and then replicates the cell's outermost texel row/column
- * outward into it (clamp-to-edge padding). For ordinary text the border texels ARE background, so
- * that is bit-identical to a flat bg fill; for a glyph whose ink reaches the cell edge (blocks, box
- * lines, progress bars) the gutter continues the INK, which is what stops a minified sample at the
- * cell edge from averaging ink with background and drawing a dark seam. See step 3 of `draw` in
- * raster.ts for the device report that forced this.
+ * fills it with the slot's background and then replicates the cell's last FULLY COVERED texel
+ * row/column outward into it (clamp-to-edge padding). For ordinary text those border texels ARE
+ * background, so that is bit-identical to a flat bg fill; for a glyph whose ink reaches the cell
+ * edge (blocks, box lines, progress bars) the gutter continues the INK, which is what stops a
+ * minified sample at the cell edge from averaging ink with background and drawing a dark seam. See
+ * step 3 of `draw` in raster.ts for the device report that forced this and for the coverage table
+ * behind "last fully covered" (a fractional cell's outermost texel is a partial-coverage blend, and
+ * replicating THAT leaves a 37.5-point dip where the last full one leaves 12.5).
  *
  * WHY 2 — the derivation, since this number is what bounds the usable mip chain. A mip level-n
  * texel is the average of an aligned 2^n × 2^n block of level-0 texels. Two slots' CELLS are
@@ -56,16 +58,26 @@ export interface GlyphRasterizer {
  * not require: it requires the gutter to hold colours OWNED BY THIS SLOT, which the pitch layout
  * guarantees whatever raster.ts writes there — it never required them to be background.
  *
- * What the gutter does NOT promise, stated so nobody reads more into it: bilinear filtering WITHIN
- * a level still reaches the adjacent texel, which at level 2 can be a pure-gutter texel blending
- * this slot's edge colour with the neighbour's. Usually that is background against background; two
- * adjacent full-bleed slots make it ink against ink, possibly tinting each other's outermost
- * sample. Either way it is a soft edge between two slots' EDGE colours at heavy zoom-out — never a
- * ghost glyph — and it is the residual the LOD clamp accepts. The promise is that no glyph GEOMETRY
- * is ever drawn outside its cell rect, and it holds only while raster.ts keeps clipping the ink:
- * ink allowed to overhang into the gutter shortens the cell-to-cell separation and invalidates the
- * derivation above. (Copying this slot's own edge texels outward does not — a copy of our own
- * content is not a second slot's ink.)
+ * What the gutter does NOT promise, stated so nobody reads more into it — with the weights, because
+ * "some bleed" and "6% of one colour" are very different reports:
+ *
+ *  - Bilinear filtering WITHIN level 2 still reaches the adjacent texel, and the four gutter
+ *    columns between two cells (two ours, two theirs) can share one level-2 texel. At the worst
+ *    phase a sample taken at our cell edge can therefore carry up to **25% of the NEIGHBOUR's edge
+ *    colour**. Before edge extension that was 25% of the neighbour's BACKGROUND; it is now 25% of
+ *    whatever its edge holds, which for two adjacent full-bleed slots is its ink. Same weight, more
+ *    visible content — a faint tint between block-art cells at heavy zoom-out, never a seam.
+ *  - "A PURE-gutter texel" is too generous as a blanket claim, and this half is PRE-EXISTING —
+ *    edge extension does not change it, since it is about which texels a tap reaches, not what
+ *    they hold. At one pitch alignment in four the FAR level-2 texel of the tap straddles the
+ *    gutter and the neighbour's first CELL columns; weighted through the tap, the neighbour's cell
+ *    contributes about **6.25%** of the sampled value. Still a tint rather than a ghost glyph, and
+ *    it is the honest shape of the residual the LOD clamp accepts.
+ *
+ * The promise is that no glyph GEOMETRY is ever drawn outside its cell rect, and it holds only
+ * while raster.ts keeps clipping the ink: ink allowed to overhang into the gutter shortens the
+ * cell-to-cell separation and invalidates the derivation above. (Copying this slot's own edge
+ * texels outward does not — a copy of our own content is not a second slot's ink.)
  */
 export const GUTTER_PX = 2
 

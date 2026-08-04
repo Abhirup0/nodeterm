@@ -153,12 +153,23 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       mip texel was averaging the cell's edge INK with the slot's flat background gutter — so a solid
       block of mascot came out as a dark lattice. Seams coming back is a **blocking** report: say at
       which zoom, and whether the dips track the cell pitch.
-      **Expected residual 0 — two adjacent full-bleed slots.** At the worst subpixel phase and mip
-      level 2, a bilinear tap can reach a gutter texel blending THIS slot's edge colour with the
-      NEIGHBOUR's; where two differently-coloured full-bleed cells sit side by side, each can
-      slightly tint the other's outermost sample. Same bounded, accepted class as the old
-      background-vs-background softness — a faint tint at extreme zoom-out, never a seam and never a
-      ghost glyph. Report it only if it reads as more than that.
+      **Expected residual 0a — two adjacent full-bleed slots.** At the worst subpixel phase and mip
+      level 2, a bilinear tap reaches a gutter texel blending THIS slot's edge colour with the
+      NEIGHBOUR's — **up to 25%** of the sampled value. Where two differently-coloured full-bleed
+      cells sit side by side, each can therefore tint the other's outermost sample by that much.
+      Same weight as before this change (it used to be 25% of the neighbour's *background*), so it
+      is the same bounded, accepted class — a faint tint at extreme zoom-out, never a seam and never
+      a ghost glyph. Report it only if it reads as more than that.
+      **Expected residual 0b — a fractional device cell keeps a small dip.** A device cell is
+      `charWidth * dpr`, so at most dprs one or both axes are FRACTIONAL and the cell's outermost
+      texel is only partly covered — a genuine ink/background blend that belongs to the cell and
+      cannot be filled in from outside. The gutter beside it continues the last FULLY covered texel,
+      which brings the boundary dip down from 62.5 points (flat bg gutter, the reported bug) to
+      **12.5 points**; sourcing the partial texel instead would have left 37.5. So: a faint reduced
+      dip may survive on an axis whose device cell extent is fractional, and it should read as a
+      barely-perceptible softening, NOT as the dark grout lattice above. If a dip is clearly visible
+      as a dark line, that is the blocking report, not this residual — note the display's dpr and
+      whether it appears on one axis or both.
       **Expected residual 1 — the LOD clamp.** The sampler is forbidden to go deeper than mip level 2,
       because that is the deepest level the gutter can keep free of a neighbouring glyph's ink. Past
       roughly 25% the filter therefore cannot get any softer, and slight aliasing comes back. That is

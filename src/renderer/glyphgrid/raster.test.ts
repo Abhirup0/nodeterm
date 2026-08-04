@@ -118,7 +118,12 @@ function stubCanvas(sizePx = 256): {
     },
     /** Only the 9-argument form, and only with WHOLE-texel destination rects — which is all the
      *  rasterizer's gutter replication uses. Nearest-neighbour sampling off a SNAPSHOT of the page,
-     *  which is what the spec guarantees for a self-referencing drawImage. */
+     *  which is what the spec guarantees for a self-referencing drawImage.
+     *
+     *  `imageSmoothingEnabled` is RECORDED, NOT HONOURED: this model always replicates. So the
+     *  pixel assertions below prove WHICH texel is copied where — they do NOT prove that the real
+     *  canvas replicates rather than resamples. That claim rests entirely on the flag being off,
+     *  which is why it has its own op-level test. */
     drawImage(
       src: unknown,
       sx: number,
@@ -346,7 +351,15 @@ describe('createCanvasRasterizer', () => {
     // The first real glyph starts at slot 1 — i.e. past the origin cell. Not even its background
     // fill may reach slot 0's pitch rect.
     atlas.glyphFor(0x41, false, false, FG, BG)
-    expect(stub.ops.some((o) => o.args[0] < PITCH_W && o.args[1] < PITCH_H)).toBe(false)
+    // Which args carry the DESTINATION differs by op: a drawImage records source-then-dest, so the
+    // reach of a replication strip is args[4..5], not args[0..1] (its source is by construction
+    // inside the slot's own cell, and reading that as the destination would pin nothing).
+    const reachesSlot0 = (o: Op): boolean => {
+      const dx = o.kind === 'drawImage' ? o.args[4] : o.args[0]
+      const dy = o.kind === 'drawImage' ? o.args[5] : o.args[1]
+      return dx < PITCH_W && dy < PITCH_H
+    }
+    expect(stub.ops.some(reachesSlot0)).toBe(false)
   })
 
   /**
@@ -464,6 +477,106 @@ describe('createCanvasRasterizer', () => {
       expect(stub.pixelAt(INK_X - GUTTER_PX, INK_Y - GUTTER_PX)).toBe(FG_CSS)
       expect(stub.pixelAt(INK_X + COLS_W + GUTTER_PX - 1, INK_Y - GUTTER_PX)).toBe(BG_CSS)
       expect(stub.pixelAt(INK_X - GUTTER_PX, INK_Y + COLS_H + GUTTER_PX - 1)).toBe(FG_CSS)
+    })
+
+    /**
+     * FRACTIONAL AND SUB-TEXEL CELLS. `device.cell.width` is `charWidth * dpr` and is fractional in
+     * general, so `ceil` being the identity is a property of the 10x20 font above and of nothing
+     * else. Two things have to hold on a fractional axis:
+     *
+     *  - the strip DESTINATIONS still tile the gutter frame EXACTLY (the pitch rect minus the whole
+     *    texel columns/rows the cell occupies) — no double-covered texel, no missed one, and in
+     *    particular a right/bottom gutter that is exactly GUTTER_PX wide rather than
+     *    `pitch - cell` wide;
+     *  - the strip SOURCE is the last FULLY covered texel, one further in than the cell's outermost
+     *    texel — which on a fractional axis is only PARTIALLY covered by the cell. See the
+     *    coverage table in raster.ts step 3 for why (replicating the partial texel leaves a
+     *    37.5-point dip; sourcing the last full one drops it to 12.5).
+     */
+    const at = (ink: number, sizes: { cellW: number; cellH: number }) => {
+      const cols = (c: number): number => Math.max(1, Math.ceil(c))
+      return {
+        font: { family: 'monospace', sizePx: 16, ...sizes },
+        ink,
+        colsW: cols(sizes.cellW),
+        colsH: cols(sizes.cellH),
+        pitchW: cols(sizes.cellW) + 2 * GUTTER_PX,
+        pitchH: cols(sizes.cellH) + 2 * GUTTER_PX
+      }
+    }
+    /** Source rects of the four strips, in emit order (left, right, top, bottom). */
+    const sources = (ops: Op[]): number[][] => strips(ops).map((o) => o.args.slice(0, 4))
+    /** Destination rects, same order. */
+    const dests = (ops: Op[]): number[][] => strips(ops).map((o) => o.args.slice(4))
+    const texelsOf = (rects: number[][]): string[] => {
+      const out: string[] = []
+      for (const [rx, ry, rw, rh] of rects)
+        for (let j = ry; j < ry + rh; j++) for (let i = rx; i < rx + rw; i++) out.push(`${i},${j}`)
+      return out
+    }
+
+    it('a FRACTIONAL cell sources the last FULLY COVERED column/row, not the partial edge texel', () => {
+      const stub = stubCanvas()
+      active = stub
+      // 10.5 x 20.5: the cell's outermost texel on each axis is only HALF covered.
+      const c = at(40, { cellW: 10.5, cellH: 20.5 })
+      const r = createCanvasRasterizer(c.font, 256)!
+      stub.ops.length = 0
+      r.draw(0x2588, false, false, c.ink, c.ink, FG, BG)
+
+      // ceil(10.5) - 1 = 10 would be the HALF-covered texel; floor(10.5) - 1 = 9 is the last full
+      // one. The partial texel stays exactly where it is — it is genuine cell content.
+      expect(sources(stub.ops)[1]).toEqual([c.ink + 9, c.ink, 1, c.colsH])
+      expect(sources(stub.ops)[3]).toEqual([c.ink - GUTTER_PX, c.ink + 19, c.pitchW, 1])
+      // The near edges are integral by construction (the ink origin is a whole texel), so their
+      // sources are unchanged.
+      expect(sources(stub.ops)[0]).toEqual([c.ink, c.ink, 1, c.colsH])
+      expect(sources(stub.ops)[2]).toEqual([c.ink - GUTTER_PX, c.ink, c.pitchW, 1])
+      // And the right gutter is exactly GUTTER_PX wide — not `pitch - cellW`.
+      expect(dests(stub.ops)[1]).toEqual([c.ink + c.colsW, c.ink, GUTTER_PX, c.colsH])
+      expect(dests(stub.ops)[3]).toEqual([c.ink - GUTTER_PX, c.ink + c.colsH, c.pitchW, GUTTER_PX])
+    })
+
+    it('a SUB-TEXEL cell sources its one (partial) texel rather than indexing off the page', () => {
+      const stub = stubCanvas()
+      active = stub
+      // 0.5 x 0.5: `floor(cell) - 1` is -1, and the clamp is what keeps the source inside the slot.
+      // There is exactly one texel, half covered, and it is the only thing there is to replicate.
+      const c = at(40, { cellW: 0.5, cellH: 0.5 })
+      const r = createCanvasRasterizer(c.font, 256)!
+      stub.ops.length = 0
+      r.draw(0x2588, false, false, c.ink, c.ink, FG, BG)
+
+      expect(c.colsW).toBe(1)
+      expect(sources(stub.ops)[1]).toEqual([c.ink, c.ink, 1, 1])
+      expect(sources(stub.ops)[3]).toEqual([c.ink - GUTTER_PX, c.ink, c.pitchW, 1])
+      expect(dests(stub.ops)[1]).toEqual([c.ink + 1, c.ink, GUTTER_PX, 1])
+    })
+
+    it.each([
+      ['integral 10x20', { cellW: 10, cellH: 20 }],
+      ['fractional 10.5x20.5', { cellW: 10.5, cellH: 20.5 }],
+      ['barely-fractional 10.01x20.99', { cellW: 10.01, cellH: 20.99 }],
+      ['sub-texel 0.5x0.5', { cellW: 0.5, cellH: 0.5 }]
+    ])('tiles the gutter frame EXACTLY on a %s cell', (_label, sizes) => {
+      const stub = stubCanvas()
+      active = stub
+      const c = at(40, sizes)
+      const r = createCanvasRasterizer(c.font, 256)!
+      stub.ops.length = 0
+      r.draw(0x2588, false, false, c.ink, c.ink, FG, BG)
+
+      const covered = texelsOf(dests(stub.ops))
+      // No texel is written twice — the four strips abut, they do not overlap.
+      expect(new Set(covered).size).toBe(covered.length)
+      // And their union is precisely the pitch rect minus the cell's whole-texel box: every gutter
+      // texel gets edge-extended, and not one texel of the cell is overwritten by a strip.
+      const frame: string[] = []
+      for (let j = c.ink - GUTTER_PX; j < c.ink - GUTTER_PX + c.pitchH; j++)
+        for (let i = c.ink - GUTTER_PX; i < c.ink - GUTTER_PX + c.pitchW; i++)
+          if (i < c.ink || i >= c.ink + c.colsW || j < c.ink || j >= c.ink + c.colsH)
+            frame.push(`${i},${j}`)
+      expect(new Set(covered)).toEqual(new Set(frame))
     })
   })
 })

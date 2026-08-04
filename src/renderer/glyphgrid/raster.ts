@@ -182,6 +182,16 @@ export function createCanvasRasterizer(
   // pitch" true for a sub-texel cell too.
   const colsW = Math.max(1, Math.ceil(font.cellW))
   const colsH = Math.max(1, Math.ceil(font.cellH))
+  // The last FULLY COVERED texel column/row of the cell, as an offset from the ink origin — the
+  // SOURCE of the far-edge replication strips (step 3 in `draw` carries the coverage table that
+  // picks it). `floor(cell) - 1` is one formula for both cases: an INTEGRAL 10 gives 9, the cell's
+  // last texel, identical to the `colsW - 1` it replaces; a FRACTIONAL 10.5 also gives 9, stepping
+  // over texel 10 — the half-covered edge texel, whose antialiased ink/background blend is exactly
+  // what must not be smeared across the whole gutter. `max(0, …)` is the sub-texel case
+  // (`cell < 1` → -1): there is no fully covered texel at all, and the slot's single partial one is
+  // the only thing there is to replicate.
+  const lastFullCol = Math.max(0, Math.floor(font.cellW) - 1)
+  const lastFullRow = Math.max(0, Math.floor(font.cellH) - 1)
   return {
     cellW: font.cellW,
     cellH: font.cellH,
@@ -275,39 +285,80 @@ export function createCanvasRasterizer(
       //    2D canvas (the source region is read as a snapshot before anything is written), which is
       //    what lets the top/bottom strips below read a row the side strips have just extended.
       //
-      //    FRACTIONAL CELLS: the cell's outer edge falls inside a texel in general, so the border
-      //    texel being copied may be a partial-coverage ANTIALIASED blend of ink and background.
-      //    Replicating the blend is CORRECT — it is still this slot's own edge colour, and it is
-      //    exactly the colour the sampler would tap just inside the cell.
+      //    FRACTIONAL CELLS — why the far-edge strips source `lastFullCol`/`lastFullRow` rather
+      //    than the cell's outermost texel. A device cell is `charWidth * dpr` and is fractional in
+      //    general, so its outer edge falls INSIDE a texel: that texel is only partially covered by
+      //    the cell, and the rasterizer leaves it as an antialiased blend of ink and background
+      //    (0.5 ink on a .5 cell). It is genuine cell content and STAYS exactly where it is — the
+      //    question is only what the GUTTER beside it should continue.
+      //
+      //    Take a full-bleed cell (ink = 1, background = 0) with a .5-fractional width, and read
+      //    off the level-2 block that straddles the boundary — four columns: the last full column,
+      //    the half-covered edge texel, and the two gutter texels:
+      //
+      //      gutter holds            block                average   dip vs solid ink
+      //      ─────────────────────── ──────────────────── ───────── ────────────────
+      //      background (before)     1, 0.5, 0,   0         37.5%      62.5 pts
+      //      the PARTIAL texel       1, 0.5, 0.5, 0.5      62.5%      37.5 pts
+      //      the last FULL texel     1, 0.5, 1,   1        87.5%      12.5 pts
+      //
+      //    Replicating the partial texel is not wrong — it is still this slot's own edge colour —
+      //    but it carries the half-coverage outward and leaves a visibly reduced grout dip on that
+      //    axis. Sourcing one texel further in is what a COMPOSED-frame downscale would see: the
+      //    neighbouring cell's ink begins mid-texel, so beyond the boundary the colour is solidly
+      //    the neighbour's, not a fade to background.
+      //
+      //    RESIDUAL, stated so nobody hunts for it: 12.5 points, from the partial texel itself,
+      //    which no gutter content can cancel — it belongs to the cell. Only an axis whose device
+      //    cell extent is fractional has it at all.
       const prevSmoothing = ctx.imageSmoothingEnabled
       // A 1-texel source stretched over GUTTER_PX texels must REPLICATE, not resample: with
       // smoothing on the copy would fade back towards whatever the gutter held, which is the
       // background this whole step exists to get out of the way.
       ctx.imageSmoothingEnabled = false
-      // ORDER: the two SIDE strips first, over the cell's rows only; then the two full-PITCH-wide
-      // ROW strips. By the time the top strip copies row `y`, that row already carries the side
-      // strips' texels in the left and right gutters — so each corner of the gutter ends up
-      // holding the cell's CORNER texel, which is what a clamp-to-edge pad means. Doing the rows
-      // first (and the sides over the full pitch height) would work equally well; what must not
-      // happen is both passes covering only the cell's own extent, which leaves the four corner
-      // squares as stale background.
-      ctx.drawImage(canvas, x, y, 1, colsH, x - GUTTER_PX, y, GUTTER_PX, colsH)
-      ctx.drawImage(canvas, x + colsW - 1, y, 1, colsH, x + colsW, y, GUTTER_PX, colsH)
-      ctx.drawImage(canvas, x - GUTTER_PX, y, pitchW, 1, x - GUTTER_PX, y - GUTTER_PX, pitchW, GUTTER_PX)
-      ctx.drawImage(
-        canvas,
-        x - GUTTER_PX,
-        y + colsH - 1,
-        pitchW,
-        1,
-        x - GUTTER_PX,
-        y + colsH,
-        pitchW,
-        GUTTER_PX
-      )
-      // Restored rather than left off: the flag is page-wide state, and the next slot's fills are
-      // not this call's business.
-      ctx.imageSmoothingEnabled = prevSmoothing
+      try {
+        // ORDER: the two SIDE strips first, over the cell's rows only; then the two full-PITCH-wide
+        // ROW strips. By the time the top strip copies row `y`, that row already carries the side
+        // strips' texels in the left and right gutters — so each corner of the gutter ends up
+        // holding the cell's CORNER texel, which is what a clamp-to-edge pad means. Doing the rows
+        // first (and the sides over the full pitch height) would work equally well; what must not
+        // happen is both passes covering only the cell's own extent, which leaves the four corner
+        // squares as stale background.
+        //
+        // The DESTINATIONS tile the gutter frame exactly — the pitch rect minus the cell's
+        // whole-texel box, no overlap and no gap — on a fractional cell too, because `colsW`/`colsH`
+        // come from `slotPitch`'s own expression. Only the far-edge SOURCES step inward.
+        ctx.drawImage(canvas, x, y, 1, colsH, x - GUTTER_PX, y, GUTTER_PX, colsH)
+        ctx.drawImage(canvas, x + lastFullCol, y, 1, colsH, x + colsW, y, GUTTER_PX, colsH)
+        ctx.drawImage(
+          canvas,
+          x - GUTTER_PX,
+          y,
+          pitchW,
+          1,
+          x - GUTTER_PX,
+          y - GUTTER_PX,
+          pitchW,
+          GUTTER_PX
+        )
+        ctx.drawImage(
+          canvas,
+          x - GUTTER_PX,
+          y + lastFullRow,
+          pitchW,
+          1,
+          x - GUTTER_PX,
+          y + colsH,
+          pitchW,
+          GUTTER_PX
+        )
+      } finally {
+        // `finally`, not a trailing assignment: `imageSmoothingEnabled` is PAGE-WIDE state, and a
+        // draw that threw part-way (a context lost mid-repack, say) would otherwise leave every
+        // later slot's fills unsmoothed for the rest of the session — a permanent, invisible change
+        // to a global from a transient failure.
+        ctx.imageSmoothingEnabled = prevSmoothing
+      }
     }
   }
 }
