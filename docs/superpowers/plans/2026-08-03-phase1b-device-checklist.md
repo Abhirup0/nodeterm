@@ -393,6 +393,13 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **4.17 Card modal.** Open a session's card modal while the canvas terminal is on the shared
       canvas: the modal's own terminal renders through xterm's DOM renderer (known limitation L8)
       and both views stay live and correctly sized.
+- [ ] **4.18 Return from another application (stale grid origin).** Give an agent node a long job so
+      it spawns subagents (the header gains the model chip + RUNNING badge), switch to another
+      application for a minute or two, then come back: the terminal's text AND its background plate
+      sit exactly inside the node body — not shifted down/right, with nothing spilling past the
+      node's bottom edge onto the canvas or over the subagent cards. Reason: the 2026-08-04 device
+      report, where exactly that happened and **dragging the node was the only way to heal it** (a
+      drag re-registers the grid, which re-measures; nothing else did).
 
 ## 5. Failure paths
 

@@ -527,6 +527,11 @@ export function TerminalNode({
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
+  // OUR root (`.term-node`), not React Flow's wrapper — the element whose box changes when the
+  // node's CHROME changes (header chips, the find bar). Observed alongside the terminal host so a
+  // chrome change can never leave the glyph grid measured at its old offset; see the second
+  // ResizeObserver in the lifecycle effect.
+  const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
@@ -2001,7 +2006,7 @@ export function TerminalNode({
     // whole pane). One trailing fit per settle is enough — the canvas node frame itself still
     // tracks the drag live; only the terminal reflow waits for the pause.
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
-    const observer = new ResizeObserver(() => {
+    const scheduleSettle = (): void => {
       if (resizeTimer) clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         applyFit()
@@ -2010,8 +2015,39 @@ export function TerminalNode({
         // tick as the fit — a single null check when this terminal holds no grid.
         syncGridOrigin()
       }, 80)
-    })
+    }
+    const observer = new ResizeObserver(scheduleSettle)
     observer.observe(container)
+    // The belt to that braces: the node ROOT, because the screen's offset inside the node is
+    // re-measured in exactly ONE place (`syncGridOrigin`) and the host is the only thing that has
+    // ever armed it. A chrome change normally resizes the host too — the body absorbs the header's
+    // height — so this is usually a duplicate tick, but "usually" is not an invariant, and a chrome
+    // change that repositions the screen WITHOUT changing the host's size would otherwise leave the
+    // grid drawn at the old offset with no path back (the drag path re-derives from the same stale
+    // cache). Deliberately the SAME coalescing timer, so a burst that moves both boxes is still one
+    // trailing tick rather than two fits.
+    const rootObserver = new ResizeObserver(scheduleSettle)
+    if (rootRef.current) rootObserver.observe(rootRef.current)
+
+    // Returning from another application is when a stale grid origin actually shows up (device
+    // report 2026-08-04: text and plate drawn down/right of the body, spilling onto the canvas,
+    // healed only by dragging the node). Electron's `backgroundThrottling` is on by default, so an
+    // occluded window's rendering lifecycle and timers are throttled — the 80 ms settle timer above
+    // is exactly the kind of thing that gets delayed or coalesced away, and both mutators are
+    // change-gated, so a tick that is lost is not retried. These therefore call `syncGridOrigin()`
+    // DIRECTLY: routing them through the timer would hang the heal off the mechanism being worked
+    // around. Cost is two DOM reads and two comparisons per window focus, and one null check for
+    // every terminal in the default renderer modes.
+    const resyncGridOnReturn = (): void => {
+      syncGridOrigin()
+    }
+    const onVisibilityChange = (): void => {
+      // Visible only: the hidden edge measures a window nobody is looking at, and an offset
+      // measured while the page is hidden is no fresher than the one already cached.
+      if (document.visibilityState === 'visible') resyncGridOnReturn()
+    }
+    window.addEventListener('focus', resyncGridOnReturn)
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     // Viewport-scoped WebGL, coordinated by the module-level budget (`webgl-budget.ts`): the
     // IntersectionObserver only REPORTS visibility to the coordinator, which owns the grant decision
@@ -2129,7 +2165,14 @@ export function TerminalNode({
       // pass through here. A remount re-registers (superseding, so a stale unregister is inert).
       unregisterRestart()
       observer.disconnect()
+      rootObserver.disconnect()
       visibilityObserver.disconnect()
+      // Torn down HERE, not through `cleanups`: that array is carried over by a park and only run
+      // at a real teardown, so pushing onto it would stack one more focus listener (closing over a
+      // dead effect's grid) on every park/adopt cycle. These belong to this effect run, exactly
+      // like the two observers above.
+      window.removeEventListener('focus', resyncGridOnReturn)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
       useAgentStatus.getState().setActive(id, false)
@@ -2230,6 +2273,11 @@ export function TerminalNode({
     if (!box) return
     const plate = bodyPlateRect(nodePos, box.offset, box.w, box.h)
     grid.setPlateRect(plate.x, plate.y, plate.w, plate.h)
+    // DO NOT "fix" this by measuring the DOM here. Reading the offset per frame is the obvious
+    // answer to a stale cache and it is the wrong one — this effect runs on every frame of a drag,
+    // for every dragged node. The cache is the right structure; what it needed was more occasions
+    // to be REFRESHED, which is what the lifecycle effect's two ResizeObservers and the window
+    // focus / visibilitychange listeners now provide.
   }, [positionAbsoluteX, positionAbsoluteY])
 
   // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
@@ -2580,6 +2628,7 @@ export function TerminalNode({
       }${status?.state === 'working' ? ' working' : ''}${
         status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
       }${glyphMounted ? ' term-node--glyphgrid' : ''}`}
+      ref={rootRef}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
