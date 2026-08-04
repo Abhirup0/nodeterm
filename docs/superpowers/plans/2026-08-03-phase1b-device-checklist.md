@@ -68,6 +68,11 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       match the renderer beside it. Known v1 approximations, not defects: **rounded corners
       `╭╮╯╰` render SQUARE**, the diagonals `╱╲╳` still come from the font, and the double-line
       tees `╠╣╦╩` keep the crossing rail continuous where the printed glyph breaks it.
+      Also run an agent CLI and check its tool-result connectors (`⎿`) and any `⎾ ⎯ ⏐`
+      line-extension pieces: the elbow's foot must be FULL WIDTH, matching GPU mode. A stub foot was
+      the 2026-08-04 device finding — those four Misc-Technical code points are now drawn
+      geometrically as aliases of `└ ┌ ─ │` instead of being drawn by the font and clipped to the
+      cell. (`⎸ ⎹` are deliberately still font-drawn; see L16.)
       The round-3 report's "blockier / heavier than GPU mode" should be GONE for line and block art.
       If PLAIN TEXT still reads heavier or softer than the per-terminal GPU renderer, that is a
       **separate finding** — file it against 2.2/2.7, not here, since nothing in this change touches
@@ -559,6 +564,28 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
      through. (The node's OWN flyout/pill is fine — selection elevation lifts them with it, which is
      what 3.9c tests.) Fixing this means feeding real chrome geometry into the rule — Phase 2, and
      the same question the "chrome on the canvas" answer settles for free.
+- **L16 — A font-drawn glyph whose INK EXCEEDS ITS CELL is clipped; the overflow is lost.** The
+  rasterizer clips every `fillText` to the slot's own cell (`raster.ts` step 2), because a glyph
+  that reached into the gutter would land in a neighbour's mip neighbourhood. xterm's own
+  `TextureAtlas` has no such limit — it MEASURES each glyph's real bounding box, sizes the slot to
+  the ink and renders a quad of that size, so ink may overhang into the neighbouring cells. That is
+  why GPU mode can show shapes shared mode truncates.
+
+  The 2026-08-04 device round measured one instance: **U+23BF ⎿**, Claude Code's tool-result
+  connector, kept about a third of its horizontal foot (8 px against GPU mode's 28). The **escape
+  hatch used so far** is the geometric table — a glyph we DRAW is full-cell by construction, so the
+  clip has nothing to cut — and that finding was fixed by adding four Misc-Technical aliases
+  (`⎿ ⎾ ⎯ ⏐` → `└ ┌ ─ │`) to `box-glyphs.ts`. Line art is therefore covered; what remains is that an
+  unusual FACE could clip something else that is not line art (an ornate script face, a symbol font
+  with genuine side bearings), and no table entry helps there.
+
+  Deliberately still on the font: `⎸ ⎹` (U+23B8/U+23B9, LEFT/RIGHT VERTICAL BOX LINE) sit flush on
+  the cell EDGE rather than centred like `│`, so they are new geometry, not an alias.
+
+  **Escalation if a non-line-art glyph ever needs the overflow:** do what xterm does — per-glyph
+  bounding boxes, slots sized to the INK rather than to the cell, quads sized to the glyph. That
+  touches the atlas allocator, the slot-rect derivation and the shader's uv maths at once, and it
+  changes what the LOD/gutter argument defends. Phase 2.
 
 ---
 

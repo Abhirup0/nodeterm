@@ -207,6 +207,42 @@ const SHADES: Readonly<Record<number, readonly (readonly number[])[]>> = {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Miscellaneous Technical — the line-art aliases
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Code points OUTSIDE U+2500–U+259F that are the SAME SHAPE as something already in the arm table,
+ * mapped onto their primitive. The map is consulted first in `boxGlyphOps`, so these are drawn by
+ * the geometry above rather than by the font — one copy of the geometry, reached by two names.
+ *
+ * WHY these are here and not left to `fillText` (device round, 2026-08-04). U+23BF ⎿ is Claude
+ * Code's tool-result connector, and in shared mode its horizontal foot rendered as a stub: measured
+ * off the two screenshots at the same content and zoom, GPU per terminal drew the foot from x 48 to
+ * 75 (28 px, about one cell) while shared drew x 51 to 58 (8 px). The foot was not missing, it was
+ * TRUNCATED — the face (or Chromium's fallback for it) draws this glyph's ink wider than the
+ * terminal cell, and `raster.ts` clips every font-drawn glyph to the cell so the overflow is
+ * discarded. xterm's own `TextureAtlas` never meets this: it measures each glyph's real bounding
+ * box and stores/renders it at true size, letting ink overflow into the neighbouring cells, which
+ * is why GPU mode shows the whole foot.
+ *
+ * So this is the same argument the module header makes for U+2500–U+259F, arriving from the other
+ * side: line art that a font draws at whatever size it likes does not survive a per-cell atlas.
+ * DRAWING it removes the dependency entirely — a `└` we generate is full-cell by construction. Do
+ * not "simplify" the map away on the grounds that the font can draw these characters; it can, and
+ * the cell is what cannot hold the result.
+ *
+ * DELIBERATELY NOT HERE: U+23B8 ⎸ and U+23B9 ⎹ (LEFT/RIGHT VERTICAL BOX LINE). They were considered
+ * and rejected — they sit flush on the cell's left/right EDGE, whereas U+2502 │ is CENTRED, so they
+ * are NEW geometry rather than a second name for a shape in the table. They keep using the font.
+ */
+const ALIASES: Readonly<Record<number, number>> = {
+  0x23bf: 0x2514, // ⎿ DENTISTRY SYMBOL LIGHT VERTICAL AND BOTTOM RIGHT → └ (up + right)
+  0x23be: 0x250c, // ⎾ DENTISTRY SYMBOL LIGHT VERTICAL AND TOP RIGHT → ┌ (down + right)
+  0x23af: 0x2500, // ⎯ HORIZONTAL LINE EXTENSION → ─
+  0x23d0: 0x2502 // ⏐ VERTICAL LINE EXTENSION → │
+}
+
+// ---------------------------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------------------------
 
@@ -215,11 +251,15 @@ const SHADES: Readonly<Record<number, readonly (readonly number[])[]>> = {
  * nothing to say about it — the caller then draws the glyph with the font, exactly as before.
  *
  * `null` is the important half of the contract: it is what keeps this module OPT-IN per code
- * point. Everything outside U+2500–U+259F, the diagonals, and any cell size that is not a
- * positive number falls through to `fillText`.
+ * point. Everything outside U+2500–U+259F and the four `ALIASES`, the diagonals, and any cell size
+ * that is not a positive number falls through to `fillText`.
  */
 export function boxGlyphOps(code: number, cellW: number, cellH: number): PaintOp[] | null {
   if (!Number.isFinite(cellW) || !Number.isFinite(cellH) || cellW <= 0 || cellH <= 0) return null
+  // The aliases resolve to a code point in the box-drawing range and then take the ORDINARY path,
+  // so an alias is bit-identical to its primitive at every cell size by construction.
+  const alias = ALIASES[code]
+  if (alias !== undefined) return boxOps(alias, cellW, cellH)
   if (code >= 0x2580 && code <= 0x259f) return blockOps(code, cellW, cellH)
   if (code >= 0x2500 && code <= 0x257f) return boxOps(code, cellW, cellH)
   return null

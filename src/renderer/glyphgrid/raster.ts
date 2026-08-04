@@ -185,6 +185,26 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     The separation is unchanged either way: the pitch IS the whole-texel box plus two gutters, so
  *     the widened clip stops exactly where the gutter starts.
  *
+ *     THE GENERAL CLASS THIS CUT BELONGS TO — name it, because it keeps arriving one glyph at a
+ *     time. A font-drawn glyph whose INK EXCEEDS ITS CELL is clipped here and the overflow is simply
+ *     lost. xterm's own `TextureAtlas` has no such limit: it MEASURES each glyph's real bounding
+ *     box, sizes the atlas slot to the ink, and renders a quad of that size — so ink may overhang
+ *     into the neighbouring cells, which is why GPU mode shows shapes this path truncates. The
+ *     2026-08-04 device round measured one: U+23BF ⎿, Claude Code's tool-result connector, kept
+ *     about a third of its horizontal foot (8 px against GPU mode's 28).
+ *
+ *     THE ESCAPE HATCH USED SO FAR is `box-glyphs.ts`: a glyph we DRAW is full-cell by construction,
+ *     so the clip has nothing to cut. That covers line art — the box-drawing and block ranges, plus
+ *     the handful of Misc-Technical aliases the ⎿ finding added — and it is the right answer for
+ *     that class, since those characters are DEFINED as fractions of the cell.
+ *
+ *     THE REAL ESCALATION, if a NON-line-art glyph ever needs the overflow (an ornate script face, a
+ *     symbol font with genuine side bearings), is to do what xterm does: measure a per-glyph
+ *     bounding box, allocate slots sized to the INK rather than to the cell, and emit quads sized to
+ *     the glyph rather than to the cell. That reaches into the atlas allocator, the slot-rect
+ *     derivation and the shader's uv maths all at once, and it changes what the LOD/gutter argument
+ *     is defending. Phase 2 — do NOT build it now.
+ *
  *     What the gutter then HOLDS is a separate question, and the answer changed in the 2026-08-04
  *     device round: it carries this slot's OWN EDGE-EXTENDED CONTENT — background wherever the ink
  *     does not reach the cell edge (all ordinary text, i.e. bit-identical to the old flat bg fill),

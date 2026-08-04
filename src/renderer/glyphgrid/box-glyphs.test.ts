@@ -332,6 +332,74 @@ describe('box drawing — doubles and dashes', () => {
   })
 })
 
+describe('Misc-Technical line-art aliases', () => {
+  // U+23BF ⎿ is Claude Code's tool-result connector. It is NOT in the box-drawing range, so before
+  // the alias map it fell through to `fillText` and the rasterizer's per-slot clip cut the ink the
+  // face draws past the cell — the device round measured the foot at 8px where GPU mode drew 28.
+  // Each pair below must stay BIT-IDENTICAL to its primitive: the alias delegates, it does not
+  // re-derive the geometry.
+  const ALIASES: [string, string, string][] = [
+    ['⎿', '└', 'U+23BF → U+2514'],
+    ['⎾', '┌', 'U+23BE → U+250C'],
+    ['⎯', '─', 'U+23AF → U+2500'],
+    ['⏐', '│', 'U+23D0 → U+2502']
+  ]
+
+  it('each alias produces exactly its primitive at an INTEGRAL cell', () => {
+    for (const [alias, primitive, label] of ALIASES) {
+      expect(ops(alias), label).toEqual(ops(primitive))
+    }
+  })
+
+  it('each alias produces exactly its primitive at a FRACTIONAL cell', () => {
+    // A fractional cell is where an alias that re-derived its own geometry would drift: `span`/
+    // `snap` treat the boundary and the interior differently, so any second copy of the arm code
+    // would have to reproduce that exactly.
+    for (const [alias, primitive, label] of ALIASES) {
+      expect(ops(alias, 10.5, 20.5), label).toEqual(ops(primitive, 10.5, 20.5))
+    }
+  })
+
+  it('⎿ reaches BOTH its edges — the foot the clip used to eat', () => {
+    const list = ops('⎿')
+    expect(list).toHaveLength(2)
+    const horizontal = list.find((o) => o.w > o.h)!
+    const vertical = list.find((o) => o.h > o.w)!
+    expect(horizontal.x + horizontal.w).toBe(W) // full-width foot, edge to edge
+    expect(vertical.y).toBe(0)
+  })
+
+  it('U+23B8 ⎸ and U+23B9 ⎹ are NOT aliases — they stay on the font', () => {
+    // Deliberate: these sit flush on the cell's left/right EDGE, not centred like │, so they are new
+    // geometry rather than a rename of something in the table.
+    expect(boxGlyphOps(0x23b8, W, H)).toBeNull()
+    expect(boxGlyphOps(0x23b9, W, H)).toBeNull()
+  })
+
+  it('a neighbour outside the map still falls through to the font', () => {
+    expect(boxGlyphOps(0x23fa, W, H)).toBeNull() // ⏺ — Claude Code's bullet, not line art
+    expect(boxGlyphOps(0x23ba, W, H)).toBeNull() // ⎺ horizontal scan line 1
+  })
+
+  it('the map changes nothing in the ranges it sits outside', () => {
+    // The alias gate runs BEFORE the two range gates, so a bug there could shadow a real code
+    // point. Sweep both ranges and the immediate neighbourhood of the aliases.
+    for (let c = 0x2500; c <= 0x259f; c++) {
+      if (c >= 0x2571 && c <= 0x2573) continue
+      expect(boxGlyphOps(c, W, H), c.toString(16)).not.toBeNull()
+    }
+    for (let c = 0x2300; c <= 0x23ff; c++) {
+      if (c === 0x23af || c === 0x23be || c === 0x23bf || c === 0x23d0) continue
+      expect(boxGlyphOps(c, W, H), c.toString(16)).toBeNull()
+    }
+  })
+
+  it('a degenerate cell still declines an alias instead of emitting NaN rects', () => {
+    expect(boxGlyphOps(0x23bf, 0, H)).toBeNull()
+    expect(boxGlyphOps(0x23bf, W, Number.NaN)).toBeNull()
+  })
+})
+
 describe('block elements', () => {
   it('▀ is EXACTLY the top half of the cell', () => {
     const list = ops('▀')
