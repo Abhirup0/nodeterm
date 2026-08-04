@@ -38,11 +38,13 @@ import {
 } from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
-import { createFrameLoop } from '../glyphgrid/frame-driver'
+import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
 import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
 import { createCanvasRasterizer } from '../glyphgrid/raster'
+import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
+import { useViewMode, viewFor } from '../state/viewMode'
 
 /** Atlas page edge, in DEVICE pixels. 2048 (not Phase 0's 1024) because the atlas cells are
  *  device-sized AND the page is now keyed by COLOUR: at dpr 2 a 13px terminal font is roughly a
@@ -1089,6 +1091,95 @@ export function setSharedGlyphCamera(cam: Camera): void {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The board gate — no frames under an opaque overlay
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Is the kanban board currently covering the canvas?
+ *
+ * Read imperatively from both stores because the answer needs both: the board is a PER-PROJECT
+ * view, so switching to a project that is on the board changes it with no view change at all
+ * (`TerminalNode` gets away with reading the project id once because a project switch remounts it;
+ * this layer stays mounted across switches).
+ */
+export function boardCoversCanvas(): boolean {
+  return viewFor(useViewMode.getState(), useProjects.getState().activeProjectId ?? '') === 'kanban'
+}
+
+export interface BoardFrameGate {
+  /** The loop that is currently in charge — always call through this, never capture the result. */
+  loop(): FrameLoop
+  /** Re-read the board flag and act on a change. Cheap and change-gated: a store notification that
+   *  did not move the board costs one comparison. */
+  sync(): void
+  /** Teardown. Stops the current loop for good and makes any later `sync` inert. */
+  stop(): void
+}
+
+/**
+ * Gate the frame loop on the kanban board.
+ *
+ * The board is a FULLY OPAQUE overlay over the whole canvas, so every frame drawn under it is
+ * invisible work. Phase 1c's idle park does not cover this case at all: a canvas of streaming
+ * terminals under the board never goes quiet, so it repaints at the display's refresh rate for
+ * nobody.
+ *
+ * **STOPPING THE LOOP DOES NOT STOP THE FEED, and that distinction is the whole safety of this.**
+ * Nothing about the terminals changes: their PTYs keep running, the addons keep writing rows into
+ * the engine's grid buffers, and `markDirty` keeps recording the damage. The ONLY thing that stops
+ * is the submission of frames. So the buffers stay current the entire time the board is up, and
+ * closing it is a REPAINT of what is already there — not a rebuild, not a re-registration, and not
+ * a screen that has to be re-fed from tmux. Nothing is lost by not drawing it.
+ *
+ * That is also why one frame is drawn IMMEDIATELY on close rather than waiting for the next damage:
+ * the engine is still dirty from everything that arrived under the board, and the next write on an
+ * idle canvas may be minutes away — a finished agent's terminal would sit there showing the rows it
+ * had when the board went up. `start()` schedules that frame; `wake()` alongside it is belt and
+ * braces, and free (it only reschedules a frame that draws nothing when there is nothing to draw).
+ *
+ * **A stopped loop is stopped FOR GOOD** — `createFrameLoop`'s contract, so that a late damage can
+ * never resurrect a loop whose context is gone. Leaving the board therefore builds a FRESH loop
+ * rather than restarting the old one, which is why every caller must reach the loop through
+ * `loop()`: a damage subscription that captured the original would be waking a corpse for the rest
+ * of the session, and a frozen canvas is a far worse failure than a wasted frame.
+ */
+export function createBoardFrameGate(
+  boardOpen: () => boolean,
+  makeLoop: () => FrameLoop
+): BoardFrameGate {
+  let covered = boardOpen()
+  let loop = makeLoop()
+  let torn = false
+  // Mounting WHILE the board is up (a project that opens on the board, a remount behind it) must
+  // not start drawing either — the gate's state is read at construction, not assumed to be "open
+  // canvas". And a loop that is merely NEVER STARTED is not inert: `wake()` starts one, so the
+  // damage subscription would schedule frames under the board through the back door. It has to be
+  // STOPPED, which is also what makes the close path build a fresh one from either entry.
+  if (covered) loop.stop()
+  else loop.start()
+  return {
+    loop: () => loop,
+    sync(): void {
+      if (torn) return
+      const now = boardOpen()
+      if (now === covered) return
+      covered = now
+      if (now) {
+        loop.stop()
+        return
+      }
+      loop = makeLoop()
+      loop.start()
+      loop.wake()
+    },
+    stop(): void {
+      torn = true
+      loop.stop()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The component
 // ---------------------------------------------------------------------------------------------
 
@@ -1154,34 +1245,47 @@ export function SharedGlyphLayer(): JSX.Element {
     // whole frame pipeline ticking at the display's refresh rate to draw nothing. All the
     // scheduling and the park/heartbeat policy live in `createFrameLoop` (unit-tested there); this
     // effect only supplies the seams and the wake signals.
-    const loop = createFrameLoop({
-      // The context can be torn down synchronously between a schedule and its callback (font
-      // change, mode switched off); the loop stops itself rather than rescheduling, and the
-      // cleanup below is idempotent either way.
-      alive: () => !ctx.disposed,
-      frame: () => ctx.engine.frame(),
-      // `frame()` rethrows by contract, having restored its own damage. There is no recovery in
-      // 1b: the whole session goes back to the DOM renderer.
-      onError: (err) => failSharedGlyph('frame threw', err),
-      requestFrame: (cb) => requestAnimationFrame(cb),
-      cancelFrame: (h) => cancelAnimationFrame(h),
-      setTimer: (cb, ms) => window.setTimeout(cb, ms),
-      clearTimer: (h) => window.clearTimeout(h)
-    })
+    //
+    // The gate around it answers the case the park cannot: the kanban board covering the canvas.
+    // It owns starting and stopping (including the "mounted while the board is already up" case),
+    // which is why there is no `loop.start()` here — see `createBoardFrameGate`.
+    const gate = createBoardFrameGate(boardCoversCanvas, () =>
+      createFrameLoop({
+        // The context can be torn down synchronously between a schedule and its callback (font
+        // change, dpr change, mode switched off); the loop stops itself rather than rescheduling,
+        // and the cleanup below is idempotent either way.
+        alive: () => !ctx.disposed,
+        frame: () => ctx.engine.frame(),
+        // `frame()` rethrows by contract, having restored its own damage. There is no recovery in
+        // 1b: the whole session goes back to the DOM renderer.
+        onError: (err) => failSharedGlyph('frame threw', err),
+        requestFrame: (cb) => requestAnimationFrame(cb),
+        cancelFrame: (h) => cancelAnimationFrame(h),
+        setTimer: (cb, ms) => window.setTimeout(cb, ms),
+        clearTimer: (h) => window.clearTimeout(h)
+      })
+    )
     // THE wake mechanism: the engine funnels every damage write through `markDirty`, which calls
-    // out on the clean→dirty edge. A parked loop resumes on the very next damaging write.
-    const damage = ctx.engine.onDamage(() => loop.wake())
+    // out on the clean→dirty edge. A parked loop resumes on the very next damaging write. Reached
+    // through `gate.loop()` and never captured — leaving the board builds a fresh loop, and a
+    // subscription pinned to the stopped one would freeze the canvas for the rest of the session.
+    const damage = ctx.engine.onDamage(() => gate.loop().wake())
     // Belt and braces for the background-throttling case (Task 9): a park entered while the window
     // was occluded must not outlive the return, and a throttled/coalesced rAF can leave the loop
     // parked with damage pending. Both are cheap — `wake()` only schedules a frame that draws
-    // nothing when there is nothing to draw.
+    // nothing when there is nothing to draw, and it is inert while the board is up.
     const onVisible = (): void => {
-      if (!document.hidden) loop.wake()
+      if (!document.hidden) gate.loop().wake()
     }
-    const onFocus = (): void => loop.wake()
+    const onFocus = (): void => gate.loop().wake()
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVisible)
-    loop.start()
+    // Both stores, because either can move the board over this canvas: the view toggle, and a
+    // switch to a project that is already on it. `sync` is change-gated, so the projects store's
+    // chattier notifications (it is rewritten on every node serialization) cost a comparison.
+    const syncBoard = (): void => gate.sync()
+    const unsubView = useViewMode.subscribe(syncBoard)
+    const unsubProjects = useProjects.subscribe(syncBoard)
 
     // Phase 2 owns real context restoration; here a lost context is simply the end of the shared
     // renderer for this session. `preventDefault()` is deliberately NOT called — that is the
@@ -1191,11 +1295,15 @@ export function SharedGlyphLayer(): JSX.Element {
 
     return () => {
       // Everything the loop owns goes at once — the pending frame, the heartbeat TIMER and the
-      // damage subscription. A surviving timer would keep calling `frame()` on a context this
-      // effect run has let go of, and a surviving subscription would keep a dead loop reachable
-      // from the engine. `stop()` is idempotent, so the `ctx.disposed` and `failSharedGlyph` paths
-      // (which stop the loop themselves) land here safely too.
-      loop.stop()
+      // damage subscription — plus the two store subscriptions that can hand it a new one. A
+      // surviving timer would keep calling `frame()` on a context this effect run has let go of, a
+      // surviving damage subscription would keep a dead loop reachable from the engine, and a
+      // surviving board subscription would BUILD a loop against a disposed context. `gate.stop()`
+      // is idempotent and also makes a `sync` still in flight inert, so the `ctx.disposed` and
+      // `failSharedGlyph` paths (which stop the loop themselves) land here safely too.
+      gate.stop()
+      unsubView()
+      unsubProjects()
       damage.dispose()
       window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisible)

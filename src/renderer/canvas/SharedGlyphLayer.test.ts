@@ -1,6 +1,8 @@
 import { adoptUserNodes } from '@xyflow/system'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createFrameLoop, type FrameLoop, type FrameLoopHost } from '../glyphgrid/frame-driver'
 import {
+  createBoardFrameGate,
   failSharedGlyph,
   getSharedGlyphContext,
   effectiveStackOrder,
@@ -1040,6 +1042,174 @@ describe('syncAtlasPixelRatio', () => {
   it('does not rebuild on an unreadable ratio', () => {
     expect(syncAtlasPixelRatio(0, ctx(2))).toBe(false)
     expect(useSharedGlyph.getState().generation).toBe(0)
+  })
+})
+
+/**
+ * The board gate. The kanban board is a fully opaque overlay over the whole canvas, so every frame
+ * drawn under it is invisible work — and the idle park cannot help, because a canvas of STREAMING
+ * terminals under the board never goes quiet.
+ *
+ * The real `createFrameLoop` is driven here rather than a mock of it: what is being asserted is
+ * that a stopped loop really stops (a wake cannot resurrect it) and that a reopened canvas really
+ * draws, and both of those are the frame driver's contract, not this file's.
+ */
+describe('createBoardFrameGate', () => {
+  function harness(): {
+    host: FrameLoopHost
+    /** Run every pending rAF callback. */
+    flushFrames(): number
+    pendingFrames(): number
+    drew(): number
+    loopsMade(): number
+    makeLoop(): FrameLoop
+    /** Rows arriving from a terminal: the engine goes dirty whether or not anyone draws it. */
+    damage(): void
+  } {
+    const frames = new Map<number, () => void>()
+    const timers = new Map<number, () => void>()
+    let handle = 1
+    let dirty = false
+    let drew = 0
+    let loops = 0
+    const host: FrameLoopHost = {
+      frame: () => {
+        if (!dirty) return false
+        dirty = false
+        drew++
+        return true
+      },
+      alive: () => true,
+      onError: () => {},
+      requestFrame: (cb) => {
+        const h = handle++
+        frames.set(h, cb)
+        return h
+      },
+      cancelFrame: (h) => {
+        frames.delete(h)
+      },
+      setTimer: (cb) => {
+        const h = handle++
+        timers.set(h, cb)
+        return h
+      },
+      clearTimer: (h) => {
+        timers.delete(h)
+      }
+    }
+    return {
+      host,
+      flushFrames(): number {
+        const due = [...frames.entries()]
+        frames.clear()
+        for (const [, cb] of due) cb()
+        return due.length
+      },
+      pendingFrames: () => frames.size,
+      drew: () => drew,
+      loopsMade: () => loops,
+      makeLoop: () => {
+        loops++
+        return createFrameLoop(host)
+      },
+      damage: () => {
+        dirty = true
+      }
+    }
+  }
+
+  it('starts drawing when the board is closed', () => {
+    const h = harness()
+    createBoardFrameGate(() => false, h.makeLoop)
+    expect(h.pendingFrames()).toBe(1)
+  })
+
+  it('schedules NOTHING while the board is up, damage included', () => {
+    // The point of the whole gate: rows keep arriving under the board and none of them costs a
+    // frame.
+    const h = harness()
+    const gate = createBoardFrameGate(() => true, h.makeLoop)
+    expect(h.pendingFrames()).toBe(0)
+    h.damage()
+    gate.loop().wake()
+    expect(h.pendingFrames()).toBe(0)
+    expect(h.drew()).toBe(0)
+  })
+
+  it('stops drawing when the board OPENS, and drops the frame already scheduled', () => {
+    const h = harness()
+    let open = false
+    const gate = createBoardFrameGate(() => open, h.makeLoop)
+    expect(h.pendingFrames()).toBe(1)
+    open = true
+    gate.sync()
+    expect(h.pendingFrames()).toBe(0)
+    h.damage()
+    gate.loop().wake()
+    expect(h.pendingFrames()).toBe(0)
+  })
+
+  it('draws ONE frame immediately when the board closes — not on the next damage', () => {
+    // Everything that arrived under the board is still damage on the engine, so the first frame
+    // after the board closes paints the CURRENT screen. Waiting for the next write would leave a
+    // finished agent's terminal showing the rows it had when the board went up.
+    const h = harness()
+    let open = true
+    const gate = createBoardFrameGate(() => open, h.makeLoop)
+    h.damage()
+    expect(h.pendingFrames()).toBe(0)
+    open = false
+    gate.sync()
+    expect(h.pendingFrames()).toBe(1)
+    h.flushFrames()
+    expect(h.drew()).toBe(1)
+  })
+
+  it('hands out the CURRENT loop, so damage wakes the one that is running', () => {
+    // `createFrameLoop.stop()` is terminal by contract, so leaving the board builds a FRESH loop.
+    // A damage subscription that captured the original would be waking a corpse for the rest of
+    // the session — the frozen-canvas failure this gate must not introduce.
+    const h = harness()
+    let open = false
+    const gate = createBoardFrameGate(() => open, h.makeLoop)
+    const first = gate.loop()
+    open = true
+    gate.sync()
+    open = false
+    gate.sync()
+    expect(gate.loop()).not.toBe(first)
+    // The stopped loop adds nothing to what the fresh one has scheduled…
+    const scheduled = h.pendingFrames()
+    first.wake()
+    expect(h.pendingFrames()).toBe(scheduled)
+    // …while the one the gate hands out really is the one drawing.
+    h.damage()
+    h.flushFrames()
+    expect(h.drew()).toBe(1)
+  })
+
+  it('a sync with no change costs nothing — no new loop, no lost frame', () => {
+    const h = harness()
+    const gate = createBoardFrameGate(() => false, h.makeLoop)
+    gate.sync()
+    gate.sync()
+    expect(h.loopsMade()).toBe(1)
+    expect(h.pendingFrames()).toBe(1)
+  })
+
+  it('stop() ends it, and a later sync cannot resurrect it', () => {
+    // Teardown ordering is not guaranteed to beat a store notification that is already in flight.
+    const h = harness()
+    let open = true
+    const gate = createBoardFrameGate(() => open, h.makeLoop)
+    gate.stop()
+    open = false
+    gate.sync()
+    expect(h.pendingFrames()).toBe(0)
+    h.damage()
+    gate.loop().wake()
+    expect(h.pendingFrames()).toBe(0)
   })
 })
 

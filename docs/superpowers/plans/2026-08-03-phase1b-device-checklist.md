@@ -400,9 +400,20 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       after a move — that is a grid registering against a measurement taken on the display we left
       (see `deviceCellOf`), and it means the rebuild adopted the OLD cell — and whether the SECOND
       move rebuilds again or the fix latches after the first one.
-- [ ] **4.16 Kanban board.** Open the board over a shared-mode project: the board is fully opaque
-      (no glyphs showing through), and the idle rAF cost is not noticeable (check CPU/GPU while
-      the board is up with terminals idle).
+- [ ] **4.16 Kanban board — no frames are drawn under it.** Open the board over a shared-mode
+      project: it is fully opaque (no glyphs showing through). Then the part this item exists for,
+      which needs BUSY terminals, not idle ones — the idle park already covered idle.
+      **How to run it.** With half a dozen terminals streaming (`yes`, a build, a busy agent),
+      note the process CPU on the canvas, then open the board and watch it for ~30 s. Expected: it
+      DROPS to roughly what the board costs on its own, and stays there — the loop is stopped, so
+      the streaming rows cost nothing to draw. A canvas-level cost that stays flat when the board
+      goes up means the gate never fired.
+      **Then close the board, and watch the first paint.** Every terminal must show its CURRENT
+      screen immediately — not the rows it had when the board went up, and not a blank body that
+      fills in when the next line arrives. Stopping the loop stops drawing only; the grids keep
+      receiving rows the whole time, so this is a repaint, and anything stale here is the bug.
+      Also switch PROJECTS while the board is up (to a canvas-view project and back): the gate
+      follows the active project, not just the view toggle.
 - [ ] **4.17 Card modal.** Open a session's card modal while the canvas terminal is on the shared
       canvas: the modal's own terminal renders through xterm's DOM renderer (known limitation L8)
       and both views stay live and correctly sized.
@@ -517,9 +528,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L9 — A failure is permanent for the session.** A GL error or a lost context disables the shared
   renderer until the app is relaunched; there is no restore path in Phase 1b (deliberate — a retry
   loop on a bad driver is how you turn one failure into a flicker).
-- **L11 — Grids keep drawing while the kanban board covers the canvas.** The board overlay is
-  opaque, so nothing is visible; it is wasted work, measured by item 4.16 and closed in Phase 2 if
-  it shows up.
 - **L13 — The block cursor on a double-width glyph paints only the left half-cell.** The cursor rect
   is emitted at one cell's width, while a CJK/emoji cell occupies two columns, so the block covers
   the left column and the right half of the glyph stays uncovered. Cosmetic and position-correct
