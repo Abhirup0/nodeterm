@@ -1401,8 +1401,29 @@ export function createCursorBlinkClock(deps: CursorBlinkClockDeps): CursorBlinkC
  */
 export const RESTORE_COOLDOWN_MS = 60_000
 
-/** Everything the policy touches, injected — so the once-only rule and the cooldown are testable
- *  without a GPU, a canvas or a clock, exactly as `createBoardFrameGate`'s policy is. */
+/**
+ * How long a suspended canvas waits for the restore it asked for before giving up.
+ *
+ * **`preventDefault()` is a REQUEST, not a guarantee**, and there are two ordinary ways the restore
+ * never arrives: Chromium declines to restore a context whose GPU process has reset repeatedly, and
+ * a SYNTHETIC loss (`WEBGL_lose_context.loseContext()` — which is how the device checklist forces
+ * one) is never auto-restored at all; only an explicit `restoreContext()` on the same extension
+ * object brings that one back. Without a watchdog both cases strand the session in the worst state
+ * this module can produce: the engine suspended, the runtime stopped, and `failed` still FALSE — so
+ * every node keeps a transparent body and keeps writing rows into a canvas that paints nothing,
+ * with ONE line on the console and no second one ever, until the app is relaunched. That is
+ * strictly worse than the Phase-1b behaviour this task promises to keep as its floor.
+ *
+ * Five seconds: a real restore lands within a few hundred milliseconds (a GPU-process restart being
+ * the slow case), so this is generous by an order of magnitude, while a canvas that is never coming
+ * back stays blank for a blink instead of for a session. A bounded ONE-SHOT is not the retry loop
+ * the design forbids — it never asks for a second restore, it only stops waiting for the first.
+ */
+export const RESTORE_TIMEOUT_MS = 5000
+
+/** Everything the policy touches, injected — so the once-only rule, the cooldown and the watchdog
+ *  are testable without a GPU, a canvas, a clock or a timer, the same split
+ *  `createBoardFrameGate` and `createCursorBlinkClock` make. */
 export interface ContextLossDeps {
   now(): number
   /** Park everything that could draw and drop the engine's GPU objects. */
@@ -1412,6 +1433,8 @@ export interface ContextLossDeps {
   revive(): void
   /** The permanent fallback (`failSharedGlyph`). */
   fail(reason: string, err?: unknown): void
+  setTimer(cb: () => void, ms: number): number
+  clearTimer(handle: number): void
 }
 
 export interface ContextLossPolicy {
@@ -1420,6 +1443,11 @@ export interface ContextLossPolicy {
   onLost(): boolean
   /** Handle `webglcontextrestored`. */
   onRestored(): void
+  /** Teardown: disarm the watchdog and make every later event inert. The watchdog is the one thing
+   *  here that can outlive its owner, and it must not — a timer that fires after the layer has gone
+   *  would fail a session whose context was merely handed back (the mode switched off), which then
+   *  could not be re-enabled without a relaunch. */
+  stop(): void
 }
 
 /**
@@ -1432,15 +1460,17 @@ export interface ContextLossPolicy {
  * and an unacceptable one for the DEFAULT, because a GPU reset — sleep/wake, a driver hiccup —
  * would silently take every user's shared renderer away with no message.
  *
- * Three rules, and the second and third are the floor Phase 1b's behaviour becomes:
+ * Four rules, and every one but the first is the floor Phase 1b's behaviour becomes:
  *  1. A first loss suspends and asks for a restore; the restore rebuilds and resumes.
  *  2. A second loss WITHIN `RESTORE_COOLDOWN_MS` of that restore falls back permanently. The
  *     restore is not retried, the event is not prevented, and the session goes back to the DOM
  *     renderer through the usual funnel.
  *  3. A restore that THROWS falls back permanently too — a half-rebuilt context draws nothing, and
  *     a canvas of transparent node bodies drawing nothing is indistinguishable from a freeze.
+ *  4. A restore that NEVER ARRIVES falls back on a bounded watchdog (`RESTORE_TIMEOUT_MS`). Waiting
+ *     forever is the one outcome that is worse than not restoring at all — see that constant.
  *
- * Both outcomes are announced on the console, and that is a requirement rather than a courtesy: a
+ * Every outcome is announced on the console, and that is a requirement rather than a courtesy: a
  * silent restore looks exactly like a frozen canvas to whoever is debugging one, and a silent
  * fallback looks exactly like a soft-text bug.
  */
@@ -1451,6 +1481,21 @@ export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolic
   let awaiting = false
   /** Terminal: the session has fallen back, and no further event may do anything. */
   let done = false
+  /** The armed watchdog, or 0 for none. Exactly one can exist: it is armed only on the transition
+   *  into `awaiting` and cleared on every way out of it. */
+  let watchdog = 0
+  const disarm = (): void => {
+    if (!watchdog) return
+    deps.clearTimer(watchdog)
+    watchdog = 0
+  }
+  /** The one place a give-up is spelled: disarm first, so no timer can fire a second, contradictory
+   *  reason for a failure that has already been reported. */
+  const giveUp = (reason: string, err?: unknown): void => {
+    disarm()
+    done = true
+    deps.fail(reason, err)
+  }
   return {
     onLost(): boolean {
       if (done) return false
@@ -1458,8 +1503,7 @@ export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolic
       // teardown) is not a second failure — we are already suspended and already waiting.
       if (awaiting) return true
       if (restoredAt !== null && deps.now() - restoredAt < RESTORE_COOLDOWN_MS) {
-        done = true
-        deps.fail(
+        giveUp(
           `the WebGL context was lost again within ${Math.round(
             RESTORE_COOLDOWN_MS / 1000
           )}s of a restore — not restoring a second time`
@@ -1470,6 +1514,14 @@ export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolic
       console.warn(
         '[glyphgrid] WebGL context lost — GPU objects dropped and frames parked; asking the browser to restore it'
       )
+      // Armed BEFORE the suspend, so the wait can never outlive its own bound even if the suspend
+      // path throws on its way through the runtime teardown.
+      watchdog = deps.setTimer(() => {
+        watchdog = 0
+        if (done || !awaiting) return
+        awaiting = false
+        giveUp('the WebGL context was lost and never restored')
+      }, RESTORE_TIMEOUT_MS)
       deps.suspend()
       return true
     },
@@ -1479,11 +1531,13 @@ export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolic
       // session has already been told it is on the DOM renderer.
       if (done || !awaiting) return
       awaiting = false
+      // The wait is over however it ends — a watchdog left running would fail a session that has
+      // just recovered perfectly well.
+      disarm()
       try {
         deps.revive()
       } catch (err) {
-        done = true
-        deps.fail('rebuilding the GPU objects after a context restore threw', err)
+        giveUp('rebuilding the GPU objects after a context restore threw', err)
         return
       }
       // Recorded only on SUCCESS — the cooldown measures "how long did the restored context
@@ -1492,6 +1546,10 @@ export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolic
       console.warn(
         '[glyphgrid] WebGL context restored — GPU objects and every registered grid rebuilt; the canvas repaints in full'
       )
+    },
+    stop(): void {
+      disarm()
+      done = true
     }
   }
 }
@@ -1536,6 +1594,31 @@ export function SharedGlyphLayer(): JSX.Element {
     const canvas = ctx.canvas
     host.appendChild(canvas)
 
+    // THE ONE INVARIANT SPANNING THE MODULE SINGLETON AND THIS EFFECT: the engine's suspended state
+    // outlives the component, while the restore POLICY below is effect-scoped. A layer that
+    // unmounted between a loss and its restore would therefore come back with a policy that is not
+    // waiting for anything (`awaiting` false, so `onRestored` short-circuits) while the engine is
+    // still suspended and `failed` is still false — the stranded canvas again, by a different road.
+    // Unreachable today (every path that unmounts this effect disposes the context first, and a
+    // fresh context is never suspended), which is exactly why it is worth a guard rather than a
+    // comment: nothing enforces that ordering, and a mount is the one moment we can still decide.
+    if (ctx.engine.gpuIsSuspended()) {
+      try {
+        ctx.engine.reviveGpu()
+        console.warn('[glyphgrid] mounted onto a suspended engine — GPU objects rebuilt')
+      } catch (err) {
+        // The context is still gone (its programs will not compile), so there is nothing to mount
+        // onto. `failSharedGlyph` disposes it and re-runs this effect with `failed` true.
+        failSharedGlyph('a suspended engine could not be revived at mount', err)
+        return
+      }
+    }
+
+    // DELIBERATELY OUTSIDE `startRuntime` BELOW — it must keep running through a context outage.
+    // It draws nothing (`setViewport` only resizes the backing store and dirties), and it is what
+    // keeps the GL layer's `deviceW`/`deviceH` current while the context is gone, so the viewport
+    // the rebuild re-pushes is the size the canvas actually is. Moved into the runtime, a window
+    // resized during an outage would come back with its grids culled against a stale viewport.
     const pushViewport = (): void => {
       const dpr = currentDpr()
       // A display change (the window dragged onto a monitor with a different pixel ratio) arrives
@@ -1559,7 +1642,8 @@ export function SharedGlyphLayer(): JSX.Element {
     window.addEventListener('resize', pushViewport)
 
     /**
-     * EVERYTHING THAT CAN DRAW OR SCHEDULE, as one startable/stoppable unit.
+     * EVERYTHING THAT CAN DRAW OR SCHEDULE A FRAME, as one startable/stoppable unit. (The
+     * ResizeObserver above is the deliberate exception — it schedules nothing; see its comment.)
      *
      * It is a unit because a lost context has to take ALL of it down at once and a restore has to
      * bring exactly it back: the rAF chain, the heartbeat timer, the blink clock's interval, the
@@ -1701,7 +1785,9 @@ export function SharedGlyphLayer(): JSX.Element {
         ctx.engine.reviveGpu()
         runtime = startRuntime()
       },
-      fail: (reason, err) => failSharedGlyph(reason, err)
+      fail: (reason, err) => failSharedGlyph(reason, err),
+      setTimer: (cb, ms) => window.setTimeout(cb, ms),
+      clearTimer: (h) => window.clearTimeout(h)
     })
     // `preventDefault()` is the request for a `webglcontextrestored` event, so it is called only
     // when the policy actually intends to use one. Phase 1b never called it at all.
@@ -1716,8 +1802,10 @@ export function SharedGlyphLayer(): JSX.Element {
       // Nothing may outlive the context — this is also the teardown for the `ctx.disposed` and
       // `failSharedGlyph` paths, both of which re-run this effect. `runtime` is read (not captured)
       // so a cleanup after a restore stops the CURRENT runtime rather than the one this effect run
-      // started with.
+      // started with. The policy goes with it, so its watchdog cannot outlive the context it was
+      // waiting on.
       runtime.stop()
+      policy.stop()
       ro.disconnect()
       window.removeEventListener('resize', pushViewport)
       canvas.removeEventListener('webglcontextlost', onLost)

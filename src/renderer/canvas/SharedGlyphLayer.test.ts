@@ -1587,11 +1587,17 @@ describe('createContextLossPolicy', () => {
     failures(): { reason: string; err?: unknown }[]
     /** Make the next `revive()` throw — a driver that will not rebuild. */
     breakRevive(): void
+    /** How many watchdog timers are armed right now. */
+    pendingTimers(): number
+    /** Fire every armed timer — "the restore never arrived". */
+    fireTimers(): void
   } {
     let clock = 0
     let suspends = 0
     let revives = 0
     let broken = false
+    let handle = 1
+    const timers = new Map<number, () => void>()
     const failures: { reason: string; err?: unknown }[] = []
     return {
       deps: {
@@ -1605,6 +1611,14 @@ describe('createContextLossPolicy', () => {
         },
         fail: (reason, err) => {
           failures.push({ reason, err })
+        },
+        setTimer: (cb) => {
+          const h = handle++
+          timers.set(h, cb)
+          return h
+        },
+        clearTimer: (h) => {
+          timers.delete(h)
         }
       },
       at: (ms) => {
@@ -1615,6 +1629,12 @@ describe('createContextLossPolicy', () => {
       failures: () => failures,
       breakRevive: () => {
         broken = true
+      },
+      pendingTimers: () => timers.size,
+      fireTimers: () => {
+        const due = [...timers.values()]
+        timers.clear()
+        for (const cb of due) cb()
       }
     }
   }
@@ -1709,6 +1729,84 @@ describe('createContextLossPolicy', () => {
     policy.onRestored()
     expect(h.revives()).toBe(0)
     expect(h.failures()).toEqual([])
+  })
+
+  it('a restore that NEVER arrives falls back instead of stranding the canvas', () => {
+    // The worst outcome this policy can produce, and it is worse than the Phase-1b floor it
+    // promises to keep: suspended engine, stopped runtime, and `failed` still FALSE — so every
+    // node keeps a transparent body and keeps writing rows into a canvas that paints nothing, for
+    // the rest of the session, with no second line on the console. `preventDefault()` is only a
+    // REQUEST, and a synthetic `loseContext()` is never auto-restored at all.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    expect(h.pendingTimers()).toBe(1)
+    h.fireTimers()
+    expect(h.failures()).toHaveLength(1)
+    expect(h.failures()[0].reason).toMatch(/never restored/i)
+    // Terminal, like every other give-up branch: a restore that turns up after we have given up
+    // must not rebuild anything.
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
+    expect(h.failures()).toHaveLength(1)
+  })
+
+  it('the watchdog is disarmed by a restore that does arrive', () => {
+    // A timer left running would fail a session that recovered perfectly well.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.onRestored()
+    expect(h.pendingTimers()).toBe(0)
+    h.fireTimers()
+    expect(h.failures()).toEqual([])
+  })
+
+  it('the give-up branches arm no watchdog', () => {
+    // Nothing is waiting for a restore on either terminal path, and a timer that fired afterwards
+    // would log a second, contradictory reason for the same failure.
+    const withinCooldown = harness()
+    const a = createContextLossPolicy(withinCooldown.deps)
+    a.onLost()
+    a.onRestored()
+    withinCooldown.at(RESTORE_COOLDOWN_MS - 1)
+    a.onLost()
+    expect(withinCooldown.pendingTimers()).toBe(0)
+
+    const throwing = harness()
+    const b = createContextLossPolicy(throwing.deps)
+    b.onLost()
+    throwing.breakRevive()
+    b.onRestored()
+    expect(throwing.pendingTimers()).toBe(0)
+  })
+
+  it('the loss itself is announced, not only its outcome', () => {
+    // The one branch a regression could silence without any assertion going red — and the one a
+    // device tester reads first, since it is what says "the canvas is blank ON PURPOSE, wait".
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')).toMatch(
+      /context lost/i
+    )
+  })
+
+  it('stop() disarms the watchdog, so it cannot fail a session that has moved on', () => {
+    // The layer unmounts for reasons that have nothing to do with a failure — the mode switched
+    // off hands the context back and disposes it. A watchdog firing after that would set the
+    // session's `failed` flag, and re-enabling the mode would then do nothing until a relaunch.
+    const h = harness()
+    const policy = createContextLossPolicy(h.deps)
+    policy.onLost()
+    policy.stop()
+    expect(h.pendingTimers()).toBe(0)
+    h.fireTimers()
+    expect(h.failures()).toEqual([])
+    // …and it is terminal, like every other end state.
+    expect(policy.onLost()).toBe(false)
+    policy.onRestored()
+    expect(h.revives()).toBe(0)
   })
 
   it('a duplicate loss for the SAME outage is not a second failure', () => {

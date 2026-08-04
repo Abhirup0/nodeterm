@@ -366,11 +366,17 @@ export class GlyphGridEngine {
    * Drop every grid at once: free each GPU buffer, empty the registry, and leave every handle
    * ever handed out INERT — exactly as if its owner had called `dispose()` itself.
    *
-   * This is the layer's teardown / context-loss path. On a lost context the grid buffers are
-   * already gone from the driver's side, and the owners (terminal nodes) are still holding live
-   * handles; without a sweep those handles would keep writing rows into a registry whose GPU
-   * objects no longer exist. Reaching them is what `Grid.dead` is for — see its comment: the
-   * engine deliberately keeps no list of handles, so the shared Grid object is the channel.
+   * This is the layer's TEARDOWN path — the context being handed back for good (the mode switched
+   * off, a font or dpr rebuild, a permanent failure). **It is NOT the context-loss path**, which is
+   * `suspendGpu` below: that one drops the same GPU objects while KEEPING the registry, and the two
+   * must not be confused. Running THIS on a lost context leaves every terminal on the canvas
+   * holding a dead handle with nothing to re-register into — which is exactly the Phase-1b
+   * behaviour (limitation L9) that the suspend/revive cycle exists to remove.
+   *
+   * Every owner (a terminal node) is still holding a live handle when this runs, and without a
+   * sweep those handles would keep writing rows into a registry whose GPU objects no longer exist.
+   * Reaching them is what `Grid.dead` is for — see its comment: the engine deliberately keeps no
+   * list of handles, so the shared Grid object is the channel.
    *
    * Idempotent, and change-gated: sweeping an empty registry changes nothing on screen, so it
    * must not dirty — the same discipline as setCamera/setViewport, and the reason `frame()` can
@@ -402,6 +408,18 @@ export class GlyphGridEngine {
    * waking here would schedule a frame against the context that has just gone away. The revive
    * dirties instead, which is the moment there is something to draw with again.
    */
+  /**
+   * Are the GPU objects currently gone (between a `suspendGpu` and its `reviveGpu`)?
+   *
+   * Exists for ONE caller: the layer's mount path. The engine is a module singleton while the
+   * restore policy that drives this cycle is scoped to a React effect, so a mount that lands on a
+   * suspended engine is a mount whose policy is not waiting for anything — and nothing else can
+   * detect that. See the guard in `SharedGlyphLayer`'s effect.
+   */
+  gpuIsSuspended(): boolean {
+    return this.gpuSuspended
+  }
+
   suspendGpu(): void {
     if (this.gpuSuspended) return
     this.gpuSuspended = true

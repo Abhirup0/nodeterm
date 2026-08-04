@@ -1031,6 +1031,20 @@ describe('suspendGpu / reviveGpu', () => {
     expect(e.frame()).toBe(false)
   })
 
+  it('reports whether it is suspended — the layer\'s mount guard reads this', () => {
+    // The engine is a module singleton and the restore policy is scoped to a React effect, so a
+    // mount landing on a suspended engine is the one case no policy is waiting for. Nothing else
+    // can detect it.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.register(spec('a', 0))
+    expect(e.gpuIsSuspended()).toBe(false)
+    e.suspendGpu()
+    expect(e.gpuIsSuspended()).toBe(true)
+    e.reviveGpu()
+    expect(e.gpuIsSuspended()).toBe(false)
+  })
+
   it('a second suspend is a no-op — the buffers are already gone', () => {
     const gl = fakeGL()
     const e = new GlyphGridEngine(gl, atlas())
