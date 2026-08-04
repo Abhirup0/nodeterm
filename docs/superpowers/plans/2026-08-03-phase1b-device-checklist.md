@@ -495,12 +495,21 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 
 ## 5. Failure paths
 
-- [ ] **5.1 Forced context loss.** Force `WEBGL_lose_context` on the shared canvas: exactly ONE
-      warning in the console, the rAF loop stops, EVERY terminal returns to readable DOM text, and
-      nothing is blank. The mode stays failed for the rest of the session (by design — no retry
-      loop), and the Settings row still reads Shared.
-- [ ] **5.2 Recover from a failure.** After 5.1, switch to Auto and back: terminals render normally
-      on Auto. (A relaunch is what re-arms shared mode.)
+- [ ] **5.1 Forced context loss — the canvas comes BACK.** Force a loss on the shared canvas
+      (`document.querySelector('.glyphgrid-canvas').getContext('webgl2')
+      .getExtension('WEBGL_lose_context').loseContext()`). Expect: a brief blank canvas, then every
+      terminal repaints on the SHARED renderer with its text intact and its cursor where it was —
+      no reload, no re-registration, and terminals that were streaming keep streaming. The console
+      carries exactly TWO glyphgrid lines, one naming the loss and one naming the restore; the
+      Settings row still reads Shared and the mode is NOT failed. Note anything that comes back
+      wrong rather than blank (soft or garbled glyphs would mean the atlas page did not survive the
+      GPU event, which the restore assumes it does).
+- [ ] **5.2 A second loss inside a minute falls back permanently, as designed.** Immediately after
+      5.1 (within 60 s — `RESTORE_COOLDOWN_MS`), force the loss again. Expect: NO second restore,
+      one warning naming the repeat loss, and every terminal back on readable DOM text with nothing
+      blank. The session stays failed until relaunch — that floor is deliberate, because handing a
+      failing GPU its context back over and over is how one failure becomes a flicker. Switching to
+      Auto and back still renders normally on Auto.
 - [ ] **5.3 No WebGL2.** On a machine/profile without WebGL2 (or with it disabled in flags):
       selecting Shared silently leaves every terminal on the DOM renderer — no error dialog, no
       blank terminals.
@@ -570,9 +579,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L8 — The kanban card modal stays on xterm's DOM renderer, by design in v1.** The modal is a
   second, co-attached view of the same tmux session living outside the canvas' coordinate space;
   it has no grid, no camera and no z in the shared canvas. Board parity here is a Phase-2 question.
-- **L9 — A failure is permanent for the session.** A GL error or a lost context disables the shared
-  renderer until the app is relaunched; there is no restore path in Phase 1b (deliberate — a retry
-  loop on a bad driver is how you turn one failure into a flicker).
 - **L14 — The atlas cell and the baseline latch to the FIRST terminal's usable measurement.** The
   atlas is rasterized into xterm's own `dimensions.device.cell`, handed over by whichever terminal
   builds the shared context first, and the baseline is derived from that same font at that moment.

@@ -116,5 +116,22 @@ export interface GlyphGL {
    *  algorithm), so a grid drawn later covers all three. */
   drawGrid(g: GridDrawParams): void
   endFrame(): void
+  /**
+   * Rebuild every GPU object this layer owns, after the drawing context was LOST and the browser
+   * gave it back (`webglcontextrestored`). Programs, the atlas texture and every piece of cached
+   * GL state die with a context; the objects that replace them are new, so nothing may be reused
+   * across the boundary — locations, filter caches and the current program included.
+   *
+   * It does NOT recreate the per-grid buffers: only the engine knows which grids exist and how
+   * large they are, so it re-creates them itself right after this returns (`reviveGpu`). What this
+   * does promise is that the grid table is EMPTY afterwards, so those `createGrid` calls allocate
+   * rather than trying to free buffers that the lost context already took.
+   *
+   * **Throws when the rebuild fails** (a driver that will not compile the cell program against the
+   * fresh context). That is deliberately the same shape as `createWebgl2GL` returning null — the
+   * caller's only correct answer is a permanent fallback to the DOM renderer, and a half-built
+   * context that silently draws nothing would be indistinguishable from a frozen canvas.
+   */
+  restore(): void
   dispose(): void
 }

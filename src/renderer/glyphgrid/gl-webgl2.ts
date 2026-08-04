@@ -236,13 +236,28 @@ void main() {
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, depth: false })
   if (!gl) return null
-  const program = buildProgram(gl, VERT, FRAG)
-  if (!program) return null
+  /**
+   * EVERY GPU OBJECT BELOW IS `let`, NOT `const`, BECAUSE A LOST CONTEXT TAKES ALL OF THEM.
+   *
+   * `webglcontextrestored` hands back the SAME `WebGL2RenderingContext` object with every program,
+   * texture, buffer and uniform location it held deleted — so the whole set is rebuilt by
+   * `restore()` (see `buildGpuObjects`) and re-assigned here. The closures below read these
+   * bindings on every call rather than capturing a value, which is what makes a rebuild invisible
+   * to them.
+   */
+  let program: WebGLProgram | null = null
+  let cursorProgram: WebGLProgram | null = null
+  let plateProgram: WebGLProgram | null = null
+  let atlasTex: WebGLTexture | null = null
+  let aCellLoc = 0
   // Locations are stable for the life of a linked program, and getUniformLocation /
   // getAttribLocation are synchronous driver queries — memoize so the per-frame, per-grid call
-  // sites below stay a plain map lookup instead of a GL round trip.
+  // sites below stay a plain map lookup instead of a GL round trip. CLEARED on a rebuild: a
+  // location belongs to the program it was queried from, and a stale one addresses nothing on the
+  // program that replaced it.
   const uniforms = new Map<string, WebGLUniformLocation | null>()
   const u = (name: string): WebGLUniformLocation | null => {
+    if (!program) return null
     let loc = uniforms.get(name)
     if (loc === undefined) {
       loc = gl.getUniformLocation(program, name)
@@ -250,10 +265,6 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     }
     return loc
   }
-  const aCellLoc = gl.getAttribLocation(program, 'aCell')
-  /** The overlay program, and null when it failed to build. Null is a DEGRADE, not a failure: the
-   *  cells still draw, and the terminal loses only a non-block cursor — never its text. */
-  const cursorProgram = buildProgram(gl, CURSOR_VERT, CURSOR_FRAG)
   const cursorUniforms = new Map<string, WebGLUniformLocation | null>()
   const cu = (name: string): WebGLUniformLocation | null => {
     if (!cursorProgram) return null
@@ -265,14 +276,8 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     return loc
   }
   /** Scratch for the overlay's rect uniforms — one allocation for the life of the context rather
-   *  than one per cursor per frame. */
+   *  than one per cursor per frame. Pure CPU memory, so a context loss does not touch it. */
   const cursorRectData = new Float32Array(MAX_CURSOR_RECTS * 4)
-  /** The plate program, and null when it failed to build. Null is NOT the cursor's kind of
-   *  degrade: without a plate a terminal has no opaque ground at all, and the node body is
-   *  transparent in shared mode — the canvas dot grid would show straight through every terminal,
-   *  and overlapping terminals would stop occluding each other. So the null path falls back to the
-   *  scissored `clear` this program replaced (square corners, i.e. L4) rather than to nothing. */
-  const plateProgram = buildProgram(gl, PLATE_VERT, PLATE_FRAG)
   const plateUniforms = new Map<string, WebGLUniformLocation | null>()
   const pu = (name: string): WebGLUniformLocation | null => {
     if (!plateProgram) return null
@@ -286,7 +291,6 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   /** One GPU buffer PER GRID, so a change costs only the rows that changed (bufferSubData)
    *  instead of re-uploading every visible grid's whole cell array into one shared buffer. */
   const grids = new Map<string, { buf: WebGLBuffer; cols: number; rows: number }>()
-  const atlasTex = gl.createTexture()
   let atlasCols = 1
   let atlasCellUv: [number, number] = [0, 0]
   let atlasStrideUv: [number, number] = [0, 0]
@@ -364,8 +368,6 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     }
   }
 
-  gl.useProgram(program)
-  gl.enable(gl.BLEND)
   /**
    * Straight (non-premultiplied) source colours over a PREMULTIPLIED drawing buffer — which is
    * what `getContext('webgl2', {alpha: true})` gives, since `premultipliedAlpha` defaults to true
@@ -394,7 +396,56 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    *    fully opaque there, and only the colour half of that residual is left (see `raster.ts` — the
    *    non-premultiplied UPLOAD is what still double-attenuates the rim's brightness).
    */
-  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+  const applyBlend = (): void => {
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+  }
+
+  /**
+   * Build (or REBUILD) every GPU object and every piece of context-wide GL state this layer owns.
+   *
+   * Called once at construction and again by `restore()` after a context loss. Returns false when
+   * the CELL program will not build — the one object with no degrade, since without it a terminal
+   * has no text at all. The two other programs may each come back null and are handled where they
+   * are used (see `cursorProgram` / `plateProgram` below).
+   *
+   * Everything reset here is state a context loss takes with it. The filter cache is the trap: it
+   * records what was last pushed to the TEXTURE, and the texture is new — leaving it would make
+   * `applyAtlasMinFilter` skip its first call and hand the sampler a mip-filtered texture with no
+   * mip chain, which samples black. The viewport is the other one: `engine.setViewport` is
+   * change-gated, so nothing re-pushes the size after a restore and the default viewport of a fresh
+   * drawing buffer would be whatever the canvas element happens to be.
+   */
+  const buildGpuObjects = (): boolean => {
+    program = buildProgram(gl, VERT, FRAG)
+    uniforms.clear()
+    cursorUniforms.clear()
+    plateUniforms.clear()
+    if (!program) return false
+    aCellLoc = gl.getAttribLocation(program, 'aCell')
+    /** The overlay program, and null when it failed to build. Null is a DEGRADE, not a failure: the
+     *  cells still draw, and the terminal loses only a non-block cursor — never its text. */
+    cursorProgram = buildProgram(gl, CURSOR_VERT, CURSOR_FRAG)
+    /** The plate program, and null when it failed to build. Null is NOT the cursor's kind of
+     *  degrade: without a plate a terminal has no opaque ground at all, and the node body is
+     *  transparent in shared mode — the canvas dot grid would show straight through every terminal,
+     *  and overlapping terminals would stop occluding each other. So the null path falls back to the
+     *  scissored `clear` this program replaced (square corners, i.e. L4) rather than to nothing. */
+    plateProgram = buildProgram(gl, PLATE_VERT, PLATE_FRAG)
+    atlasTex = gl.createTexture()
+    // "Never set" — see `atlasMinFilter`. The fresh texture carries GL's defaults, whatever the
+    // old one was left holding.
+    atlasMinFilter = 0
+    atlasMagFilter = 0
+    gl.useProgram(program)
+    gl.viewport(0, 0, deviceW, deviceH)
+    gl.enable(gl.BLEND)
+    applyBlend()
+    return true
+  }
+
+  // The first build. A failure here is the same "no shared renderer on this machine" answer as a
+  // missing WebGL2 context, and the caller stays on the DOM renderer.
+  if (!buildGpuObjects()) return null
 
   /**
    * The occlusion plate: an opaque quad over the grid's PLATE rect — the node body's full world
@@ -686,11 +737,26 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     endFrame() {
       /* single-pass for now; flush point reserved for Phase 1 layering */
     },
+    restore() {
+      // NOTHING IS DELETED FIRST, and that is not an oversight: the context that owned these
+      // objects took them with it, so `deleteProgram`/`deleteBuffer` here would be calls against
+      // names that no longer exist. The grid TABLE is emptied instead, because it is CPU-side
+      // bookkeeping that outlived the buffers it points at — leaving it would make the engine's
+      // very next `createGrid` (which frees a live buffer before reallocating, the resize path)
+      // try to delete one of those dead names.
+      grids.clear()
+      if (!buildGpuObjects())
+        // Throwing rather than returning a flag: the interface says so, and the caller's only
+        // correct answer is the permanent fallback. A context whose cell program will not compile
+        // draws nothing, which on a canvas of transparent node bodies is indistinguishable from a
+        // freeze.
+        throw new Error('glyphgrid: the GL programs would not rebuild after a context restore')
+    },
     dispose() {
       for (const grid of grids.values()) gl.deleteBuffer(grid.buf)
       grids.clear()
       gl.deleteTexture(atlasTex)
-      gl.deleteProgram(program)
+      if (program) gl.deleteProgram(program)
       if (cursorProgram) gl.deleteProgram(cursorProgram)
       if (plateProgram) gl.deleteProgram(plateProgram)
     }

@@ -11,10 +11,14 @@
  *    singleton, not component state: it must survive `<SharedGlyphLayer/>` remounting, and it is
  *    created LAZILY — a user who never turns the experimental mode on must never cost a GPU
  *    context, which is why `getSharedGlyphContext()` returns null while the mode is off.
- * 2. **The failure path.** `GlyphGridEngine.frame()` RETHROWS on a GL error by contract (it
- *    restores its damage first), and a lost context is not recoverable in 1b. Both land on
- *    `failSharedGlyph()`: warn once, tear the context down, and flip the store's `failed` — the
- *    session-level "everyone back to the DOM renderer" signal that TerminalNode reads.
+ * 2. **The failure path, and the one recovery.** `GlyphGridEngine.frame()` RETHROWS on a GL error
+ *    by contract (it restores its damage first), and that lands on `failSharedGlyph()`: warn once,
+ *    tear the context down, and flip the store's `failed` — the session-level "everyone back to
+ *    the DOM renderer" signal that TerminalNode reads. A LOST CONTEXT is no longer one of those: it
+ *    arrives as an event rather than a throw, and it is restored ONCE per context
+ *    (`createContextLossPolicy` → `engine.suspendGpu` / `reviveGpu`), because a GPU reset is what
+ *    macOS does on sleep/wake and the shared renderer is meant to be the default. A second loss
+ *    inside the cooldown, or a rebuild that throws, falls back through the same `failSharedGlyph`.
  * 3. **The seams the rest of the integration reads**: `useSharedGlyph` (mode + generation +
  *    failure), `setNodeZOrder`/`nodeZFor`/`subscribeNodeZOrder` (paint order),
  *    `setOpaqueNodeIds`/`nodeIsOpaque`/`subscribeOpaqueSet` (which terminals must leave the shared
@@ -101,9 +105,10 @@ interface SharedGlyphState {
    *  failed. TerminalNode subscribes to exactly this number — the context it then asks for
    *  answers what to do next (a new engine, or null = back to the DOM renderer). */
   generation: number
-  /** Session-level "the shared renderer is off for good" — set by the rAF catch or a lost
-   *  context. Deliberately NOT auto-cleared: a GPU that just threw at us gets one chance per app
-   *  run, and a retry loop is how you turn a bad driver into a flicker. */
+  /** Session-level "the shared renderer is off for good" — set by the rAF catch, or by a context
+   *  loss that the restore policy refused to answer (a second one inside `RESTORE_COOLDOWN_MS`, or
+   *  a rebuild that threw). Deliberately NOT auto-cleared: a GPU that just threw at us gets one
+   *  chance per app run, and a retry loop is how you turn a bad driver into a flicker. */
   failed: boolean
   setEnabled(on: boolean): void
   bumpGeneration(): void
@@ -1381,6 +1386,117 @@ export function createCursorBlinkClock(deps: CursorBlinkClockDeps): CursorBlinkC
 }
 
 // ---------------------------------------------------------------------------------------------
+// Context loss — restore ONCE per context, then fall back for good
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * How soon after a restore a SECOND loss means "this GPU is not coming back".
+ *
+ * A minute, because the two cases it separates are that far apart. A sleep/wake or a driver reset
+ * takes the context away once and the machine then works for hours — that one is worth restoring,
+ * and it is the whole reason this path exists (a GPU reset is what macOS does on wake, and under
+ * Phase 1b it silently dropped every user to the DOM renderer until they relaunched). A GPU that is
+ * genuinely failing takes it away again almost immediately, and restoring THAT in a loop is how one
+ * failure becomes a flicker — the exact trade Phase 1b made by never restoring at all.
+ */
+export const RESTORE_COOLDOWN_MS = 60_000
+
+/** Everything the policy touches, injected — so the once-only rule and the cooldown are testable
+ *  without a GPU, a canvas or a clock, exactly as `createBoardFrameGate`'s policy is. */
+export interface ContextLossDeps {
+  now(): number
+  /** Park everything that could draw and drop the engine's GPU objects. */
+  suspend(): void
+  /** Rebuild the GPU objects and resume. MAY THROW — a rebuild that fails is a permanent
+   *  fallback, never a retry. */
+  revive(): void
+  /** The permanent fallback (`failSharedGlyph`). */
+  fail(reason: string, err?: unknown): void
+}
+
+export interface ContextLossPolicy {
+  /** Handle `webglcontextlost`. Returns whether the caller should `preventDefault()` the event —
+   *  i.e. whether we are asking the browser for a restore at all. */
+  onLost(): boolean
+  /** Handle `webglcontextrestored`. */
+  onRestored(): void
+}
+
+/**
+ * The context-loss policy: **restore ONCE per context, never in a loop.**
+ *
+ * `preventDefault()` on `webglcontextlost` is what asks the browser to fire
+ * `webglcontextrestored`, so it is called only when we intend to use the restore. Phase 1b
+ * deliberately did not call it: there was nothing to restore into, and a session that lost its
+ * context stayed on the DOM renderer until relaunch. That is a fine trade for an experimental mode
+ * and an unacceptable one for the DEFAULT, because a GPU reset — sleep/wake, a driver hiccup —
+ * would silently take every user's shared renderer away with no message.
+ *
+ * Three rules, and the second and third are the floor Phase 1b's behaviour becomes:
+ *  1. A first loss suspends and asks for a restore; the restore rebuilds and resumes.
+ *  2. A second loss WITHIN `RESTORE_COOLDOWN_MS` of that restore falls back permanently. The
+ *     restore is not retried, the event is not prevented, and the session goes back to the DOM
+ *     renderer through the usual funnel.
+ *  3. A restore that THROWS falls back permanently too — a half-rebuilt context draws nothing, and
+ *     a canvas of transparent node bodies drawing nothing is indistinguishable from a freeze.
+ *
+ * Both outcomes are announced on the console, and that is a requirement rather than a courtesy: a
+ * silent restore looks exactly like a frozen canvas to whoever is debugging one, and a silent
+ * fallback looks exactly like a soft-text bug.
+ */
+export function createContextLossPolicy(deps: ContextLossDeps): ContextLossPolicy {
+  /** When the last successful restore landed, or null while this context has never been restored. */
+  let restoredAt: number | null = null
+  /** Have we suspended and asked for a restore that has not arrived yet? */
+  let awaiting = false
+  /** Terminal: the session has fallen back, and no further event may do anything. */
+  let done = false
+  return {
+    onLost(): boolean {
+      if (done) return false
+      // A second `webglcontextlost` for the SAME outage (a duplicate event, a loss racing our own
+      // teardown) is not a second failure — we are already suspended and already waiting.
+      if (awaiting) return true
+      if (restoredAt !== null && deps.now() - restoredAt < RESTORE_COOLDOWN_MS) {
+        done = true
+        deps.fail(
+          `the WebGL context was lost again within ${Math.round(
+            RESTORE_COOLDOWN_MS / 1000
+          )}s of a restore — not restoring a second time`
+        )
+        return false
+      }
+      awaiting = true
+      console.warn(
+        '[glyphgrid] WebGL context lost — GPU objects dropped and frames parked; asking the browser to restore it'
+      )
+      deps.suspend()
+      return true
+    },
+    onRestored(): void {
+      // A restore we did not ask for (the browser handing one back after we have already given up)
+      // must not rebuild anything: the engine would double-create every grid's buffer, and the
+      // session has already been told it is on the DOM renderer.
+      if (done || !awaiting) return
+      awaiting = false
+      try {
+        deps.revive()
+      } catch (err) {
+        done = true
+        deps.fail('rebuilding the GPU objects after a context restore threw', err)
+        return
+      }
+      // Recorded only on SUCCESS — the cooldown measures "how long did the restored context
+      // survive", and a failed rebuild never produced one to measure.
+      restoredAt = deps.now()
+      console.warn(
+        '[glyphgrid] WebGL context restored — GPU objects and every registered grid rebuilt; the canvas repaints in full'
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The component
 // ---------------------------------------------------------------------------------------------
 
@@ -1442,111 +1558,170 @@ export function SharedGlyphLayer(): JSX.Element {
     // monitor) leaves the CSS box identical while the backing store must change.
     window.addEventListener('resize', pushViewport)
 
-    // The frame loop PARKS when the canvas goes quiet — an always-registered rAF keeps Chromium's
-    // whole frame pipeline ticking at the display's refresh rate to draw nothing. All the
-    // scheduling and the park/heartbeat policy live in `createFrameLoop` (unit-tested there); this
-    // effect only supplies the seams and the wake signals.
-    //
-    // The gate around it answers the case the park cannot: the kanban board covering the canvas.
-    // It owns starting and stopping (including the "mounted while the board is already up" case),
-    // which is why there is no `loop.start()` here — see `createBoardFrameGate`.
-    const gate = createBoardFrameGate(boardCoversCanvas, () =>
-      createFrameLoop({
-        // The context can be torn down synchronously between a schedule and its callback (font
-        // change, dpr change, mode switched off); the loop stops itself rather than rescheduling,
-        // and the cleanup below is idempotent either way.
-        alive: () => !ctx.disposed,
-        frame: () => ctx.engine.frame(),
-        // `frame()` rethrows by contract, having restored its own damage. There is no recovery in
-        // 1b: the whole session goes back to the DOM renderer.
-        onError: (err) => failSharedGlyph('frame threw', err),
-        requestFrame: (cb) => requestAnimationFrame(cb),
-        cancelFrame: (h) => cancelAnimationFrame(h),
-        setTimer: (cb, ms) => window.setTimeout(cb, ms),
-        clearTimer: (h) => window.clearTimeout(h)
+    /**
+     * EVERYTHING THAT CAN DRAW OR SCHEDULE, as one startable/stoppable unit.
+     *
+     * It is a unit because a lost context has to take ALL of it down at once and a restore has to
+     * bring exactly it back: the rAF chain, the heartbeat timer, the blink clock's interval, the
+     * damage subscription and the four store/window subscriptions that can wake or rebuild any of
+     * them. A single survivor is a frame submitted against GPU objects that no longer exist — which
+     * the driver's catch reads as a GPU failure and answers by burning the session that is in the
+     * middle of recovering. And a single thing started twice is two rAF chains on one canvas.
+     *
+     * The mount path and the restore path therefore run the same function, and the cleanup below
+     * and the suspend path run the same `stop()`.
+     */
+    const startRuntime = (): { stop(): void } => {
+      // The frame loop PARKS when the canvas goes quiet — an always-registered rAF keeps Chromium's
+      // whole frame pipeline ticking at the display's refresh rate to draw nothing. All the
+      // scheduling and the park/heartbeat policy live in `createFrameLoop` (unit-tested there); this
+      // only supplies the seams and the wake signals.
+      //
+      // The gate around it answers the case the park cannot: the kanban board covering the canvas.
+      // It owns starting and stopping (including the "mounted while the board is already up" case),
+      // which is why there is no `loop.start()` here — see `createBoardFrameGate`.
+      const gate = createBoardFrameGate(boardCoversCanvas, () =>
+        createFrameLoop({
+          // The context can be torn down synchronously between a schedule and its callback (font
+          // change, dpr change, mode switched off); the loop stops itself rather than rescheduling,
+          // and the cleanup below is idempotent either way.
+          alive: () => !ctx.disposed,
+          frame: () => ctx.engine.frame(),
+          // `frame()` rethrows by contract, having restored its own damage. A throw is a GL error
+          // rather than a lost context (that arrives as an EVENT, handled below), and there is no
+          // recovery from it: the whole session goes back to the DOM renderer.
+          onError: (err) => failSharedGlyph('frame threw', err),
+          requestFrame: (cb) => requestAnimationFrame(cb),
+          cancelFrame: (h) => cancelAnimationFrame(h),
+          setTimer: (cb, ms) => window.setTimeout(cb, ms),
+          clearTimer: (h) => window.clearTimeout(h)
+        })
+      )
+      // ONE blink clock for the whole canvas — not one per terminal — because at most one terminal
+      // has focus. It reaches the loop through `gate.loop()` for the same reason the damage
+      // subscription does, and its own repaints take `pulse()` rather than `wake()`; see
+      // `createCursorBlinkClock` for why that distinction is the whole task.
+      const clock = createCursorBlinkClock({
+        enabled: () => useSettings.getState().settings.cursorBlink,
+        covered: boardCoversCanvas,
+        target: cursorBlinkTarget,
+        loop: () => gate.loop(),
+        setInterval: (cb, ms) => window.setInterval(cb, ms),
+        clearInterval: (h) => window.clearInterval(h)
       })
-    )
-    // ONE blink clock for the whole canvas — not one per terminal — because at most one terminal
-    // has focus. It reaches the loop through `gate.loop()` for the same reason the damage
-    // subscription does, and its own repaints take `pulse()` rather than `wake()`; see
-    // `createCursorBlinkClock` for why that distinction is the whole task.
-    const clock = createCursorBlinkClock({
-      enabled: () => useSettings.getState().settings.cursorBlink,
-      covered: boardCoversCanvas,
-      target: cursorBlinkTarget,
-      loop: () => gate.loop(),
-      setInterval: (cb, ms) => window.setInterval(cb, ms),
-      clearInterval: (h) => window.clearInterval(h)
-    })
-    // Mounted with a terminal already focused (a remount, a project switch back) must start the
-    // clock, exactly as the gate reads the board flag at construction rather than assuming.
-    clock.sync()
-    // THE wake mechanism: the engine funnels every damage write through `markDirty`, which calls
-    // out on the clean→dirty edge. A parked loop resumes on the very next damaging write. Reached
-    // through `gate.loop()` and never captured — leaving the board builds a fresh loop, and a
-    // subscription pinned to the stopped one would freeze the canvas for the rest of the session.
-    //
-    // Routed through the clock, which is the only thing that can tell the blink's own repaint from
-    // everybody else's damage: its repaint is isolated in time and takes `pulse()` (one frame, still
-    // parked), while ordinary damage keeps the `wake()` it has always had.
-    const damage = ctx.engine.onDamage(() => clock.routeDamage())
-    // The two gates that can move without the board moving: the blink SETTING and which terminal
-    // holds focus. Both are change-gated inside `sync`.
-    const unsubBlinkTarget = subscribeCursorBlinkTarget(() => clock.sync())
-    const unsubBlinkSetting = useSettings.subscribe(() => clock.sync())
-    // Belt and braces for the background-throttling case (Task 9): a park entered while the window
-    // was occluded must not outlive the return, and a throttled/coalesced rAF can leave the loop
-    // parked with damage pending. Both are cheap — `wake()` only schedules a frame that draws
-    // nothing when there is nothing to draw, and it is inert while the board is up.
-    const onVisible = (): void => {
-      if (!document.hidden) gate.loop().wake()
-    }
-    const onFocus = (): void => gate.loop().wake()
-    window.addEventListener('focus', onFocus)
-    document.addEventListener('visibilitychange', onVisible)
-    // Both stores, because either can move the board over this canvas: the view toggle, and a
-    // switch to a project that is already on it. `sync` is change-gated, so the projects store's
-    // chattier notifications (it is rewritten on every node serialization) cost a comparison.
-    // The board is the blink clock's third gate as well (a stopped loop cannot draw the phase), so
-    // the two are synced together — and the gate goes FIRST, so the clock reads the board through
-    // an already-updated loop.
-    const syncBoard = (): void => {
-      gate.sync()
+      // Mounted with a terminal already focused (a remount, a project switch back, a restore that
+      // never took focus away) must start the clock, exactly as the gate reads the board flag at
+      // construction rather than assuming.
       clock.sync()
+      // THE wake mechanism: the engine funnels every damage write through `markDirty`, which calls
+      // out on the clean→dirty edge. A parked loop resumes on the very next damaging write. Reached
+      // through `gate.loop()` and never captured — leaving the board builds a fresh loop, and a
+      // subscription pinned to the stopped one would freeze the canvas for the rest of the session.
+      //
+      // Routed through the clock, which is the only thing that can tell the blink's own repaint from
+      // everybody else's damage: its repaint is isolated in time and takes `pulse()` (one frame, still
+      // parked), while ordinary damage keeps the `wake()` it has always had.
+      const damage = ctx.engine.onDamage(() => clock.routeDamage())
+      // The two gates that can move without the board moving: the blink SETTING and which terminal
+      // holds focus. Both are change-gated inside `sync`.
+      const unsubBlinkTarget = subscribeCursorBlinkTarget(() => clock.sync())
+      const unsubBlinkSetting = useSettings.subscribe(() => clock.sync())
+      // Belt and braces for the background-throttling case (Task 9): a park entered while the window
+      // was occluded must not outlive the return, and a throttled/coalesced rAF can leave the loop
+      // parked with damage pending. Both are cheap — `wake()` only schedules a frame that draws
+      // nothing when there is nothing to draw, and it is inert while the board is up.
+      const onVisible = (): void => {
+        if (!document.hidden) gate.loop().wake()
+      }
+      const onFocus = (): void => gate.loop().wake()
+      window.addEventListener('focus', onFocus)
+      document.addEventListener('visibilitychange', onVisible)
+      // Both stores, because either can move the board over this canvas: the view toggle, and a
+      // switch to a project that is already on it. `sync` is change-gated, so the projects store's
+      // chattier notifications (it is rewritten on every node serialization) cost a comparison.
+      // The board is the blink clock's third gate as well (a stopped loop cannot draw the phase), so
+      // the two are synced together — and the gate goes FIRST, so the clock reads the board through
+      // an already-updated loop.
+      const syncBoard = (): void => {
+        gate.sync()
+        clock.sync()
+      }
+      const unsubView = useViewMode.subscribe(syncBoard)
+      const unsubProjects = useProjects.subscribe(syncBoard)
+      let stopped = false
+      return {
+        stop(): void {
+          // Idempotent: the suspend path and the effect cleanup can both reach the same runtime
+          // (a lost context that is immediately followed by an unmount), and every member below
+          // would be stopped twice otherwise.
+          if (stopped) return
+          stopped = true
+          // Everything the loop owns goes at once — the pending frame, the heartbeat TIMER and the
+          // damage subscription — plus the two store subscriptions that can hand it a new one. A
+          // surviving timer would keep calling `frame()` on a context this run has let go of, a
+          // surviving damage subscription would keep a dead loop reachable from the engine, and a
+          // surviving board subscription would BUILD a loop against a disposed context.
+          // `gate.stop()` is idempotent and also makes a `sync` still in flight inert, so the
+          // `ctx.disposed` and `failSharedGlyph` paths (which stop the loop themselves) land here
+          // safely too.
+          // The clock goes FIRST, and before `gate.stop()`: it hands the cursor back SHOWN, and
+          // that restoring repaint still wants a live loop to draw it.
+          clock.stop()
+          unsubBlinkTarget()
+          unsubBlinkSetting()
+          gate.stop()
+          unsubView()
+          unsubProjects()
+          damage.dispose()
+          window.removeEventListener('focus', onFocus)
+          document.removeEventListener('visibilitychange', onVisible)
+        }
+      }
     }
-    const unsubView = useViewMode.subscribe(syncBoard)
-    const unsubProjects = useProjects.subscribe(syncBoard)
+    let runtime = startRuntime()
 
-    // Phase 2 owns real context restoration; here a lost context is simply the end of the shared
-    // renderer for this session. `preventDefault()` is deliberately NOT called — that is the
-    // "please fire webglcontextrestored" request, and we have nothing to restore into.
-    const onLost = (): void => failSharedGlyph('context lost')
+    /**
+     * A lost context is now SURVIVABLE — see `createContextLossPolicy` for the once-only rule and
+     * the cooldown that keeps it from becoming a retry loop.
+     *
+     * The two halves are ordered against each other on purpose. On the way DOWN the runtime stops
+     * before the engine drops its GPU objects, so no frame can be submitted in between; on the way
+     * UP the GPU objects are rebuilt before a fresh runtime exists to schedule anything, so the
+     * first frame of the new context has something to draw with. `reviveGpu` throws if the rebuild
+     * fails, and the policy answers that with the permanent fallback — the runtime stays stopped,
+     * which is the correct state for a session that is going back to the DOM renderer.
+     */
+    const policy = createContextLossPolicy({
+      now: () => Date.now(),
+      suspend: () => {
+        runtime.stop()
+        ctx.engine.suspendGpu()
+      },
+      revive: () => {
+        ctx.engine.reviveGpu()
+        runtime = startRuntime()
+      },
+      fail: (reason, err) => failSharedGlyph(reason, err)
+    })
+    // `preventDefault()` is the request for a `webglcontextrestored` event, so it is called only
+    // when the policy actually intends to use one. Phase 1b never called it at all.
+    const onLost = (e: Event): void => {
+      if (policy.onLost()) e.preventDefault()
+    }
+    const onRestored = (): void => policy.onRestored()
     canvas.addEventListener('webglcontextlost', onLost)
+    canvas.addEventListener('webglcontextrestored', onRestored)
 
     return () => {
-      // Everything the loop owns goes at once — the pending frame, the heartbeat TIMER and the
-      // damage subscription — plus the two store subscriptions that can hand it a new one. A
-      // surviving timer would keep calling `frame()` on a context this effect run has let go of, a
-      // surviving damage subscription would keep a dead loop reachable from the engine, and a
-      // surviving board subscription would BUILD a loop against a disposed context. `gate.stop()`
-      // is idempotent and also makes a `sync` still in flight inert, so the `ctx.disposed` and
-      // `failSharedGlyph` paths (which stop the loop themselves) land here safely too.
-      // The clock goes FIRST, and before `gate.stop()`: it hands the cursor back SHOWN, and that
-      // restoring repaint still wants a live loop to draw it. Nothing may outlive the context —
-      // this is also the teardown for the `ctx.disposed` and `failSharedGlyph` paths, both of which
-      // re-run this effect.
-      clock.stop()
-      unsubBlinkTarget()
-      unsubBlinkSetting()
-      gate.stop()
-      unsubView()
-      unsubProjects()
-      damage.dispose()
-      window.removeEventListener('focus', onFocus)
-      document.removeEventListener('visibilitychange', onVisible)
+      // Nothing may outlive the context — this is also the teardown for the `ctx.disposed` and
+      // `failSharedGlyph` paths, both of which re-run this effect. `runtime` is read (not captured)
+      // so a cleanup after a restore stops the CURRENT runtime rather than the one this effect run
+      // started with.
+      runtime.stop()
       ro.disconnect()
       window.removeEventListener('resize', pushViewport)
       canvas.removeEventListener('webglcontextlost', onLost)
+      canvas.removeEventListener('webglcontextrestored', onRestored)
       // The canvas leaves the DOM with the host div; the CONTEXT stays alive for the next mount
       // (a project switch must not cost a context rebuild). Only `failSharedGlyph` and a font
       // change dispose it.
