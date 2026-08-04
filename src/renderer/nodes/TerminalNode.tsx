@@ -367,9 +367,35 @@ function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
  * every glyph is resampled (see `DeviceCell` in the shared layer). Fractional by nature
  * (`charWidth * dpr`) and deliberately handed over UNROUNDED — the atlas rounds only its slot
  * PITCH, never the sampled extent.
+ *
+ * **Why this is not simply `dimensions.device.cell`.** The one moment this number is asked for is
+ * the moment it is hardest to read: the shared layer rebuilds its atlas when the window moves to a
+ * display with a different pixel ratio (`syncAtlasPixelRatio`), and the epoch bump that makes this
+ * node re-register rides the window `resize` — while xterm re-measures off its OWN `matchMedia`
+ * dpr listener. Nothing orders those two, so `dimensions.device.cell` can still be the cell of the
+ * display we just LEFT, and an atlas built from it would be rebuilt at the old resolution: the very
+ * defect the rebuild exists to fix, reintroduced one layer down and invisible except as a
+ * `warnOnCellDrift` line.
+ *
+ * The CSS cell is the one that can be trusted across that window, because xterm derives it BY
+ * DIVIDING the device cell by the same dpr (`css.cell.width = device.cell.width / dpr`) — so it is
+ * dpr-invariant, `css × dpr` reproduces the device cell exactly whenever xterm is up to date, and
+ * it is the CORRECT cell when xterm is not. Hence: prefer xterm's own number, and fall back to the
+ * scaled CSS cell only when the two disagree, which is exactly the stale-measurement window.
  */
 function deviceCellOf(term: Terminal): { cellW: number; cellH: number } | null {
-  return cellOf(term, 'device')
+  const device = cellOf(term, 'device')
+  const css = cellOf(term, 'css')
+  if (!css) return device
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  const scaled = validCellSize(css.cellW * dpr, css.cellH * dpr)
+  if (!device || !scaled) return device ?? scaled
+  // The slack is a CSS-pixel epsilon carried into device space, so the comparison means the same
+  // thing at every ratio: below it the two readings are the same measurement.
+  const eps = CELL_SIZE_EPS * dpr
+  const agree =
+    Math.abs(device.cellW - scaled.cellW) <= eps && Math.abs(device.cellH - scaled.cellH) <= eps
+  return agree ? device : scaled
 }
 
 /** The guarded read behind both cell accessors. Private API, fully guarded: null simply means

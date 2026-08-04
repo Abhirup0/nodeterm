@@ -644,6 +644,9 @@ interface LiveContext extends SharedGlyphContext {
   resetLog: GlyphAtlasSubscription
   /** Font settings this context was rasterized for — a change tears it down. */
   fontKey: string
+  /** The display pixel ratio the atlas was rasterized at — a change tears it down too, through the
+   *  SAME funnel, because the atlas cell is device-sized and latched at construction. */
+  dpr: number
   /** Set by `disposeContext`, read by the rAF driver, which holds this object across a frame.
    *  Teardown is SYNCHRONOUS (a settings change, the mode being switched off) and can land
    *  between a scheduled tick and its callback — a frame submitted after `gl.dispose()` would
@@ -665,6 +668,12 @@ let lastCamera: Camera = { x: 0, y: 0, zoom: 1 }
 
 function fontKeyOf(fontFamily: string, fontSize: number): string {
   return `${fontFamily}|${fontSize}`
+}
+
+/** The display's pixel ratio, guarded for the environments that have no `window` (the test suite)
+ *  or report nothing useful. */
+function currentDpr(): number {
+  return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
 }
 
 /** Sanity-check the cell a caller supplies before it becomes the atlas's fixed geometry. Null =
@@ -815,14 +824,15 @@ export function installAtlasResetLog(
 function createContext(cell: DeviceCell): LiveContext | null {
   if (typeof document === 'undefined' || typeof OffscreenCanvas === 'undefined') return null
   const { fontFamily, fontSize } = useSettings.getState().settings
-  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  const dpr = currentDpr()
   // The atlas is rasterized at DEVICE resolution: the addon reports device-pixel cells, and a
-  // CSS-sized atlas would be visibly soft on every retina display. The dpr is read ONCE, and
-  // deliberately does not join the font key: moving the window to a monitor with a different dpr
-  // leaves the glyphs rasterized for the old one (slightly soft or slightly over-sampled), which
-  // is a Phase-2 sharpness question — rebuilding the atlas there would drop and re-register every
-  // grid on the canvas for a cosmetic gain. The drawing BUFFER does follow the dpr, on every
-  // resize (see the component's `pushViewport`), so geometry is never wrong.
+  // CSS-sized atlas would be visibly soft on every retina display. The dpr is read ONCE and LATCHED
+  // (below, on the context) precisely because it cannot be changed afterwards — the cell, the
+  // baseline and every slot already in the page were rasterized for it. Moving the window to a
+  // display with a different ratio therefore disposes this context and rebuilds it, exactly as a
+  // font change does; `syncAtlasPixelRatio` is the trigger and `rebuildSharedContext` is the shared
+  // funnel. The drawing BUFFER follows the dpr independently, on every resize (see the component's
+  // `pushViewport`), so geometry is never wrong even in the frames before the rebuild lands.
   const devicePx = Math.max(1, fontSize * dpr)
   const { cellW, cellH } = cell
   // Rasterizer FIRST: it needs no GPU, so a missing OffscreenCanvas bails out before a WebGL
@@ -851,6 +861,7 @@ function createContext(cell: DeviceCell): LiveContext | null {
     gl,
     resetLog: installAtlasResetLog(atlas),
     fontKey: fontKeyOf(fontFamily, fontSize),
+    dpr,
     disposed: false
   }
 }
@@ -899,6 +910,22 @@ export function failSharedGlyph(reason: string, err?: unknown): void {
   useSharedGlyph.setState({ failed: true, generation: useSharedGlyph.getState().generation + 1 })
 }
 
+/**
+ * THE re-rasterize path: drop the context and tell every registered terminal to re-evaluate its
+ * participation, which is how they end up re-registering their grids against a freshly built atlas.
+ *
+ * ONE function, because there is now more than one trigger — a font change and a display pixel
+ * ratio change — and they must be the same event. The order is load-bearing and is the same
+ * contract `setEnabled(false)` and `failSharedGlyph` honour: dispose FIRST, announce SECOND, never
+ * dispose without announcing (every registered grid is holding an inert handle until the bump
+ * arrives) and never announce before disposing (a terminal that re-asked for the context in
+ * between would adopt the very context we are about to delete).
+ */
+function rebuildSharedContext(): void {
+  disposeContext()
+  useSharedGlyph.getState().bumpGeneration()
+}
+
 /** Rebuild on a terminal font change: the atlas is rasterized for one font, so a new one means a
  *  new atlas — and the engine's grids are re-registered by their owners on the generation bump.
  *
@@ -910,9 +937,64 @@ function ensureSettingsSubscription(): void {
   settingsUnsub = useSettings.subscribe((s) => {
     if (!live) return
     if (live.fontKey === fontKeyOf(s.settings.fontFamily, s.settings.fontSize)) return
-    disposeContext()
-    useSharedGlyph.getState().bumpGeneration()
+    rebuildSharedContext()
   })
+}
+
+/** Below this, a difference between two pixel ratios is float noise. Real values are far apart
+ *  (1, 1.25, 1.5, 2, 3) and nothing legitimately moves one by a thousandth, while a rebuild costs a
+ *  dropped and re-registered grid on every terminal on the canvas. */
+const DPR_EPS = 0.001
+
+/**
+ * Has the display's pixel ratio moved away from the one the atlas was rasterized at?
+ *
+ * `current` is `window.devicePixelRatio`, which is not a trustworthy number in every environment
+ * (0 on a detached window, NaN through a hostile shim). An unreadable ratio answers "unchanged":
+ * the atlas we hold is the one the display we are on asked for, and throwing it away on a bad
+ * reading is strictly worse than keeping it.
+ */
+export function pixelRatioChanged(builtAt: number, current: number): boolean {
+  if (!Number.isFinite(current) || current <= 0) return false
+  return Math.abs(builtAt - current) > DPR_EPS
+}
+
+/** The context surface the dpr reconciliation reads. Structural rather than `LiveContext` — the
+ *  same trick `AtlasResetSource` uses — so the rebuild decision is exercisable without a GPU. */
+export interface PixelRatioContext {
+  /** The ratio the atlas was rasterized at. */
+  dpr: number
+  /** Already torn down. */
+  disposed: boolean
+}
+
+/**
+ * Rebuild the atlas when the window has moved to a display with a different pixel ratio.
+ *
+ * WHY A REBUILD, AND WHY NOTHING ELSE FIXES IT. The atlas cell IS xterm's DEVICE cell (see
+ * `DeviceCell`) and the baseline is derived from the same font at the same moment — both latched at
+ * construction, along with every slot already rasterized into the page. So a retina window dragged
+ * onto a 1x display keeps a page drawn at twice the resolution its quads are now sampled at, and
+ * the reverse leaves it soft. Nothing downstream rescues that: the grids are registered with the
+ * CSS cell, which is dpr-invariant, so the move triggers no re-registration at all and the page
+ * stays wrong for the life of the context.
+ *
+ * It goes through the font change's funnel deliberately (`rebuildSharedContext`): a dpr change is
+ * the same event with a different trigger, and a second dispose-and-re-register path is a second
+ * place to get the both-renderers invariant wrong.
+ *
+ * Returns whether it rebuilt, so the caller can skip pushing a viewport into a context it has just
+ * disposed.
+ */
+export function syncAtlasPixelRatio(current: number, ctx: PixelRatioContext): boolean {
+  // Re-entry guard. `pushViewport` runs from the ResizeObserver AND the window `resize` listener,
+  // and a display change fires both; `disposeContext()` flips this flag on the context the closure
+  // still holds, so the second call is a no-op instead of a second epoch bump — which would run
+  // teardown/setup twice on every terminal for one display change.
+  if (ctx.disposed) return false
+  if (!pixelRatioChanged(ctx.dpr, current)) return false
+  rebuildSharedContext()
+  return true
 }
 
 /** Fires when a context has just been BUILT. The component listens so it can mount the fresh
@@ -1047,13 +1129,16 @@ export function SharedGlyphLayer(): JSX.Element {
     host.appendChild(canvas)
 
     const pushViewport = (): void => {
+      const dpr = currentDpr()
+      // A display change (the window dragged onto a monitor with a different pixel ratio) arrives
+      // HERE — it fires `resize` with the CSS box unchanged — and it is the one viewport input the
+      // engine cannot absorb, because the ATLAS was rasterized for the old ratio. So it is checked
+      // before the push: on a rebuild the context this closure holds is already gone, and the fresh
+      // one gets its viewport from the re-run effect's own `pushViewport()`.
+      if (syncAtlasPixelRatio(dpr, ctx) || ctx.disposed) return
       // The engine change-gates all three inputs, so calling this from every observer tick is
       // free when nothing actually moved.
-      ctx.engine.setViewport(
-        host.clientWidth,
-        host.clientHeight,
-        typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
-      )
+      ctx.engine.setViewport(host.clientWidth, host.clientHeight, dpr)
     }
     pushViewport()
 

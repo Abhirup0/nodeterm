@@ -387,9 +387,19 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       duplicate grid, no transparent-but-empty body.
 - [ ] **4.14 Alt-screen transitions.** Enter and leave a fullscreen TUI (`htop`, an agent CLI) a
       few times: no flicker of a doubled screen, no leftover rows from the previous screen.
-- [ ] **4.15 dpr change.** Drag the window between the retina display and an external 1x monitor
-      (both directions): geometry stays correct (the drawing buffer follows), text may soften
-      slightly (atlas is not rebuilt — Phase 2), and nothing re-registers or fails.
+- [ ] **4.15 dpr change — the atlas is now REBUILT.** Drag the window between the retina display
+      and an external 1x monitor, **both directions, and then back again**. Expected: geometry
+      stays correct (the drawing buffer follows), and the text on the new display is as sharp as a
+      terminal opened there fresh. Soft or over-sharp text after the move is now a FAILURE, not the
+      documented behaviour — that was L10, and this item is what closes it.
+      **What the rebuild costs, so it is not mis-filed as a bug.** It is the font-change path: the
+      shared context is disposed and every terminal re-registers its grid. One repaint of the whole
+      canvas at the moment of the move is expected, and a brief flash of DOM-rendered text is fine.
+      A terminal left blank, transparent-but-empty, or stuck on the DOM renderer is not.
+      **Report specifically:** any `[glyphgrid] atlas cell … does not match …` line in the console
+      after a move — that is a grid registering against a measurement taken on the display we left
+      (see `deviceCellOf`), and it means the rebuild adopted the OLD cell — and whether the SECOND
+      move rebuilds again or the fix latches after the first one.
 - [ ] **4.16 Kanban board.** Open the board over a shared-mode project: the board is fully opaque
       (no glyphs showing through), and the idle rAF cost is not noticeable (check CPU/GPU while
       the board is up with terminals idle).
@@ -507,9 +517,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L9 — A failure is permanent for the session.** A GL error or a lost context disables the shared
   renderer until the app is relaunched; there is no restore path in Phase 1b (deliberate — a retry
   loop on a bad driver is how you turn one failure into a flicker).
-- **L10 — The atlas is not rebuilt on a dpr change.** Moving the window to a display with a
-  different dpr leaves the glyphs rasterized for the old one (slightly soft or over-sampled).
-  Geometry is unaffected — the drawing buffer follows the dpr on every resize.
 - **L11 — Grids keep drawing while the kanban board covers the canvas.** The board overlay is
   opaque, so nothing is visible; it is wasted work, measured by item 4.16 and closed in Phase 2 if
   it shows up.
@@ -521,15 +528,15 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L14 — The atlas cell and the baseline latch to the FIRST terminal's usable measurement.** The
   atlas is rasterized into xterm's own `dimensions.device.cell`, handed over by whichever terminal
   builds the shared context first, and the baseline is derived from that same font at that moment.
-  Two consequences. A **webfont that resolves later** leaves the atlas on the fallback face's
-  metrics for the life of the context — the text is measured and placed correctly, just against the
-  wrong face's cell — until something disposes the context (a font-family/size change in Settings;
-  L10's dpr change does not). And a terminal whose device cell **diverges** from the atlas's (a dpr
-  change under a live context, a per-terminal letterSpacing) has its glyphs resampled against the
-  quad they are drawn onto, i.e. slightly soft — never misplaced. Both are announced:
-  `warnOnCellDrift` logs one `[glyphgrid] atlas cell … does not match …` line per context lifetime,
-  so a soft terminal can be told apart from a soft display. Phase 2 (re-rasterize on
-  `document.fonts.ready` / per-cell atlas pages).
+  A **webfont that resolves later** therefore leaves the atlas on the fallback face's metrics for
+  the life of the context — the text is measured and placed correctly, just against the wrong
+  face's cell — until something disposes the context (a font-family/size change in Settings, or the
+  dpr rebuild of item 4.15). A terminal whose device cell **diverges** from the atlas's for any
+  other reason (a per-terminal letterSpacing) has its glyphs resampled against the quad they are
+  drawn onto, i.e. slightly soft — never misplaced. Both are announced: `warnOnCellDrift` logs one
+  `[glyphgrid] atlas cell … does not match …` line per context lifetime, so a soft terminal can be
+  told apart from a soft display. Phase 2 (re-rasterize on `document.fonts.ready` / per-cell atlas
+  pages).
 
   **Phase 1c narrows what is latched.** The FACE never was: `ctx.font` is set per draw, so any slot
   rasterized after a webfont resolves already uses the real face. What used to make that invisible is

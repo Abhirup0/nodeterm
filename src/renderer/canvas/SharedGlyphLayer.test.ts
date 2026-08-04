@@ -14,6 +14,7 @@ import {
   nodeStackZ,
   nodeZFor,
   opaqueNodeIds,
+  pixelRatioChanged,
   primeOpaqueNodeIds,
   setNodeZOrder,
   setOpaqueNodeIds,
@@ -22,6 +23,7 @@ import {
   sharedGlyphAvailable,
   subscribeNodeZOrder,
   subscribeOpaqueSet,
+  syncAtlasPixelRatio,
   useSharedGlyph,
   type AtlasResetSource,
   type StackedNode,
@@ -957,6 +959,87 @@ describe('sharedGlyphAvailable', () => {
     useSharedGlyph.getState().setEnabled(false)
     useSharedGlyph.getState().setEnabled(true)
     expect(sharedGlyphAvailable()).toBe(true)
+  })
+})
+
+/**
+ * The dpr rebuild. The atlas cell and the baseline are latched at construction, so a window that
+ * moves between a retina and a 1x display keeps a page rasterized for the display it LEFT — soft on
+ * one, over-sharp on the other, for the life of the context. Nothing downstream rescues it: the
+ * grids register with the CSS cell, which is dpr-invariant, so no re-registration is triggered by
+ * the move. Only a rebuild re-rasterizes, and the rebuild is the FONT change's funnel with a
+ * different trigger.
+ */
+describe('pixelRatioChanged', () => {
+  it('is false for the ratio the atlas was built at', () => {
+    expect(pixelRatioChanged(2, 2)).toBe(false)
+  })
+
+  it('is true in both directions — retina to 1x and back', () => {
+    expect(pixelRatioChanged(2, 1)).toBe(true)
+    expect(pixelRatioChanged(1, 2)).toBe(true)
+  })
+
+  it('ignores float noise — a rebuild costs every grid on the canvas', () => {
+    expect(pixelRatioChanged(2, 2 + 1e-9)).toBe(false)
+  })
+
+  it('sees the fractional ratios a scaled display reports', () => {
+    expect(pixelRatioChanged(2, 1.5)).toBe(true)
+    expect(pixelRatioChanged(1.25, 1.5)).toBe(true)
+  })
+
+  it('treats an unreadable ratio as unchanged, never as a reason to rebuild', () => {
+    // 0 / NaN come out of a detached window or a broken shim. The atlas we have is the one the
+    // display we are on asked for; throwing it away on a bad reading is strictly worse than
+    // keeping it.
+    expect(pixelRatioChanged(2, 0)).toBe(false)
+    expect(pixelRatioChanged(2, NaN)).toBe(false)
+    expect(pixelRatioChanged(2, -1)).toBe(false)
+    expect(pixelRatioChanged(2, Infinity)).toBe(false)
+  })
+})
+
+describe('syncAtlasPixelRatio', () => {
+  /** The structural stand-in for a live context — the same trick `AtlasResetSource` uses, so the
+   *  rebuild decision is exercisable without a GPU. In production `disposed` is flipped by
+   *  `disposeContext()` itself, which is what makes the re-entry guard below real. */
+  const ctx = (dpr: number, disposed = false): { dpr: number; disposed: boolean } => ({
+    dpr,
+    disposed
+  })
+
+  it('does nothing while the display has not changed', () => {
+    expect(syncAtlasPixelRatio(2, ctx(2))).toBe(false)
+    expect(useSharedGlyph.getState().generation).toBe(0)
+  })
+
+  it('rebuilds on a change, bumping the generation EXACTLY once', () => {
+    // One bump, because that is the signal every mounted terminal re-registers on. Two would run
+    // the teardown/setup pair twice for one display change.
+    expect(syncAtlasPixelRatio(1, ctx(2))).toBe(true)
+    expect(useSharedGlyph.getState().generation).toBe(1)
+  })
+
+  it('bumps twice for two distinct changes (2 → 1 → 2), each against the FRESH context', () => {
+    // The second context is a different object because the first was disposed: a display change
+    // that goes there and back must rebuild both times, not latch after the first.
+    expect(syncAtlasPixelRatio(1, ctx(2))).toBe(true)
+    expect(syncAtlasPixelRatio(2, ctx(1))).toBe(true)
+    expect(useSharedGlyph.getState().generation).toBe(2)
+  })
+
+  it('is inert on a context that is already disposed — the re-entry guard', () => {
+    // `pushViewport` runs from the ResizeObserver AND the window `resize` listener, and a display
+    // change fires both. The first disposes; the rest must not bump the epoch again before the
+    // effect has re-run with the fresh context.
+    expect(syncAtlasPixelRatio(1, ctx(2, true))).toBe(false)
+    expect(useSharedGlyph.getState().generation).toBe(0)
+  })
+
+  it('does not rebuild on an unreadable ratio', () => {
+    expect(syncAtlasPixelRatio(0, ctx(2))).toBe(false)
+    expect(useSharedGlyph.getState().generation).toBe(0)
   })
 })
 
