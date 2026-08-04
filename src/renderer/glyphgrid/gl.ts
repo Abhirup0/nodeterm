@@ -41,6 +41,27 @@ export interface GridDrawParams {
   plateW: number
   plateH: number
   /**
+   * The plate's corner radius in WORLD units (CSS px at zoom 1). **0 = a square rect**, which is
+   * exactly the shape the plate had when it was a scissored `clear`, so a caller that says nothing
+   * gets the pre-Phase-2 rectangle bit for bit.
+   *
+   * WHY THE PLATE HAS TO CARRY ONE. The plate is a node BODY (see `plateX`) and a node has
+   * `border-radius`; the shared canvas is not a DOM child of that node, so nothing can clip it to
+   * the node's shape. A square plate under a rounded node is what made every shared terminal's
+   * corners read square against its own chrome (limitation L4).
+   *
+   * WHICH CORNERS ARE ROUNDED IS PART OF THIS CONTRACT: the BOTTOM two, never the top. The plate
+   * rect is the node's body, which is the node's LAST child — its bottom edge is the node's own
+   * bottom (rounded, and behind it nothing but canvas), while its top edge is an interior seam
+   * against opaque chrome (the header, the labels row, the find bar). Rounding the top corners
+   * would not shape a visible corner at all; it would UNCOVER two wedges of body that nothing else
+   * paints, which is a new artifact rather than a fixed one. See PLATE_FRAG in gl-webgl2.ts.
+   *
+   * Scaling and clamping are the implementation's job, per draw (`plateRadiusDevice`): both inputs
+   * — the camera and the plate's device extent — are known only at draw time.
+   */
+  plateRadius: number
+  /**
    * The cursor to draw OVER this grid's cells, or null for none.
    *
    * Only the shapes that are not a block ever arrive here: a block cursor is a CELL REWRITE (the
@@ -90,8 +111,8 @@ export interface GlyphGL {
   ): void
   /** Clears the frame and sets the camera uniforms. */
   beginFrame(camera: Camera): void
-  /** Draws the plate (a scissored clear of the grid's PLATE rect), then the instanced cells from
-   *  the grid's OWN buffer, then the cursor overlay if it has one — in call order (painter's
+  /** Draws the plate (an opaque rounded quad over the grid's PLATE rect), then the instanced cells
+   *  from the grid's OWN buffer, then the cursor overlay if it has one — in call order (painter's
    *  algorithm), so a grid drawn later covers all three. */
   drawGrid(g: GridDrawParams): void
   endFrame(): void

@@ -247,12 +247,24 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       terminal) and back to `outline`. **The outline is the DEFAULT** — every terminal on the canvas
       except the focused one is drawing it, so judge it at normal zoom on a busy canvas, not only on
       one node.
-- [ ] **2.13 Plate geometry.** Look at the four corners and the right/bottom edges of a terminal
-      body. Expected: **no bands anywhere** — the plate is the body rect, so the fit slack at the
-      right/bottom and the padding seams on the left/top are all inside it (the round-2 fix; the
-      previous grid-sized plate is what put them there). The one artifact that REMAINS is L4: the
-      plate is a SQUARE rect under a node with `border-radius: 10px`, so the body's four corners
-      read square. Judge how visible that is at normal zoom, and report any band you still see —
+- [ ] **2.13 Plate geometry, and the rounded corners.** Look at the four corners and the
+      right/bottom edges of a terminal body. Expected: **no bands anywhere** — the plate is the body
+      rect, so the fit slack at the right/bottom and the padding seams on the left/top are all
+      inside it (the round-2 fix; the previous grid-sized plate is what put them there). The plate
+      is a rounded QUAD now rather than a square clear, so the body's two **bottom** corners follow
+      the node's own `border-radius` and no square shoulder pokes out past the node's curve. Put a
+      shared terminal over something that makes the corner visible (a group frame, another node,
+      the light theme) and check four things: the curve **matches the node's own chrome** — compare
+      it with the rounded header at the top of the same node, and with a DOM-renderer terminal
+      beside it, in BOTH themes; the corner is **smooth, not stepped**; the **straight** edges are
+      still opaque edge-to-edge, with no half-lit hairline of canvas along them; and the **top two
+      corners stay square**, which is correct — they sit against the opaque header/labels row and
+      are not corners on screen, so rounding them would carve a notch of canvas out of the body.
+      Then **zoom out to ~0.3 and in to ~3**: the corner keeps its proportion at every zoom, and it
+      never inverts into a corner-shaped hole. Finally **drag a node's bottom edge up until the
+      body collapses to a few pixels tall** — the radius clamps at half the shorter side, so the
+      plate goes stadium-shaped and then to a sliver; what must not appear at any point is a
+      flash of missing background. Report any band you still see —
       a band now means the plate rect is not tracking the body, not that it is undersized by
       design. **Judge bands only AFTER a resize gesture settles.** The plate is re-pushed on the
       ResizeObserver's coalesced tick (80 ms after the last resize event — the same settle the
@@ -479,9 +491,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L1 — The cursor does not blink.** The shared renderer paints a static block cursor regardless
   of the "Cursor blink" setting. Decide on device whether this ships as-is or the setting should be
   gated in shared mode.
-- **L4 — Square plate corners.** The grid's plate is a rectangle; the node has `border-radius: 10px`
-  and cannot clip the canvas (it is not a DOM child), so the body's corners read square in shared
-  mode. Phase 2: rounded/stencilled plate.
 - **L5 — FIXED in round 2 (bands at the bottom/right).** Kept here as the record, because it is the
   one item on this list whose expected observation INVERTED. It used to read: the plate covers the
   grid plus one scalar of host padding (`padPx`, the 6px max of `.term-node__xterm`'s asymmetric
@@ -493,8 +502,9 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   effect during a drag), so it covers the padding, the fit slack and the letterbox bands alike —
   they all lie inside the body box. Verify by items **2.4**, **2.13** and **3.11**: a band now means
   the plate is not TRACKING the body (a bug), not that it is undersized by design.
-  **L4 is unaffected and remains** — the plate's square corners are a separate Phase-2 question
-  (a rounded / stencilled plate), and no rect size fixes them.
+  The plate's square CORNERS were a separate question from its size — no rect size ever fixed them
+  — and they are answered separately too: the plate is a rounded quad as of Phase 2, so the SHAPE
+  is item **2.13** and the SIZE is this entry.
 - **L6 — Adopting a parked terminal after a font change may keep a stale cell size.** The grid is
   registered from the cell xterm reports at adopt time; a font change applied in the same commit
   can land after it. Refreshing the node re-registers at the correct size.

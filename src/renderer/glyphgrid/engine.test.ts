@@ -769,10 +769,27 @@ describe('plate params', () => {
         plateY: -4,
         plateW: 40,
         plateH: 44,
+        // A grid registered without a radius plates a SQUARE rect — bit-for-bit the shape every
+        // grid had before the plate became a quad, which is what keeps this expectation (and the
+        // harness, which registers no radius either) meaning what it always meant.
+        plateRadius: 0,
         // A grid nobody has told about a cursor draws none — the overlay pass is skipped whole.
         cursor: null
       }
     ])
+  })
+
+  it('carries the plate RADIUS from the spec to drawGrid', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    // WORLD units — the node's own corner radius at zoom 1. The engine neither scales nor clamps
+    // it: that is `plateRadiusDevice`'s job, once per draw, because both things it clamps against
+    // (the camera and the plate's device extent) are known only at draw time.
+    e.register(spec('a', 0, 0, { plateRadius: 9 }))
+    e.frame()
+    expect(gl.params.at(-1)).toMatchObject({ plateRadius: 9 })
   })
 })
 

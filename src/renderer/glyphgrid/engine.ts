@@ -26,6 +26,22 @@ export interface GridSpec {
   plateY: number
   plateW: number
   plateH: number
+  /**
+   * The plate's corner radius in world units — the node's own `border-radius`, so the opaque
+   * ground under a rounded node stops reading square (see `GridDrawParams.plateRadius`, which
+   * states which corners it shapes and why).
+   *
+   * OPTIONAL, defaulting to 0 = square, for two reasons that point the same way: 0 reproduces the
+   * plate's pre-Phase-2 shape exactly, and a surface with no rounded chrome of its own (the dev
+   * harness) should not have to name a radius to say so.
+   *
+   * REGISTRATION-TIME ONLY — there is deliberately no `setPlateRadius` on the handle. The radius
+   * comes from a stylesheet constant, not from layout: unlike the plate RECT (which a
+   * ResizeObserver re-pushes on every tick) nothing moves it while a node lives, and the paths
+   * that could change it — a font/theme generation bump — already tear the grid down and register
+   * a fresh one. Add a setter when something can actually change it, not before.
+   */
+  plateRadius?: number
 }
 
 export interface GridHandle {
@@ -514,6 +530,10 @@ export class GlyphGridEngine {
           plateY: g.plateY,
           plateW: g.plateW,
           plateH: g.plateH,
+          // `?? 0` here rather than at registration, so an omitted radius reads as "square" at
+          // the one place that has to answer the GL layer — and `GridSpec.plateRadius` stays
+          // honestly optional instead of being silently rewritten on the grid.
+          plateRadius: g.plateRadius ?? 0,
           cursor: g.cursor
         })
       }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Rect } from './camera'
-import { plateRectDevice } from './plate'
+import { plateRadiusDevice, plateRectDevice, plateShapeDevice } from './plate'
 
 /** A 40×40 world rect at the given origin — the shape a small terminal BODY has. */
 const plate = (over: Partial<Rect> = {}): Rect => ({ x: 10, y: 10, w: 40, h: 40, ...over })
@@ -78,5 +78,77 @@ describe('plateRectDevice', () => {
     // skip the clear.
     expect(plateRectDevice(plate({ w: 0 }), CAM, 1, 200, 100)).toBeNull()
     expect(plateRectDevice(plate({ h: 0 }), CAM, 1, 200, 100)).toBeNull()
+  })
+})
+
+describe('plateShapeDevice', () => {
+  it('agrees with plateRectDevice while the plate is fully on screen', () => {
+    // The two only differ at the viewport edge, so the common case pins them together: a rect
+    // wholly inside the buffer is its own visible part, and the rounded shape must be defined
+    // against exactly the same pixels the clipped draw covers.
+    expect(plateShapeDevice(plate(), CAM, 1, 100)).toEqual({ x: 10, y: 50, w: 40, h: 40 })
+  })
+
+  it('does NOT clamp — the corner must stay where the node is, not at the viewport edge', () => {
+    // The whole reason this exists next to plateRectDevice. Origin (-10,-10) hangs off the left
+    // and the top; the CLAMPED rect starts at x 0, and rounding a corner against that would draw
+    // the node's rounded corner in the MIDDLE of the screen, ten pixels in from an edge the node
+    // does not have there. Flip: 100 - (-10 + 40) = 70.
+    expect(plateShapeDevice(plate({ x: -10, y: -10 }), CAM, 1, 100)).toEqual({
+      x: -10,
+      y: 70,
+      w: 40,
+      h: 40
+    })
+  })
+
+  it('answers a rect even when the plate covers no pixel — visibility is the other function’s job', () => {
+    // Never null: this is a SHAPE, and the caller has already decided (via plateRectDevice) that
+    // there is something to draw. Two responsibilities, two answers.
+    expect(plateShapeDevice(plate({ x: 500 }), CAM, 1, 100)).toEqual({
+      x: 500,
+      y: 50,
+      w: 40,
+      h: 40
+    })
+  })
+
+  it('takes the same camera/dpr hops as the scissor rect', () => {
+    // dpr 2 against a 200-tall buffer: extents double and the flip is taken against the DEVICE
+    // height — 200 - (20 + 80) = 100, exactly as plateRectDevice's own dpr test derives it.
+    expect(plateShapeDevice(plate(), CAM, 2, 200)).toEqual({ x: 20, y: 100, w: 80, h: 80 })
+  })
+})
+
+describe('plateRadiusDevice', () => {
+  it('scales the radius with zoom and dpr', () => {
+    // The radius is authored in WORLD units (CSS px at zoom 1) because that is where the node's
+    // stylesheet defines it; on screen it has to follow the same `zoom * dpr` every extent does,
+    // or a zoomed-in terminal keeps a corner a quarter of its apparent size.
+    expect(plateRadiusDevice(10, 2, { w: 200, h: 100 })).toBe(20)
+  })
+
+  it('never exceeds half the shorter side', () => {
+    // A 10px radius on a 12px-tall plate would round the rect into a stadium and then INVERT the
+    // SDF (the inner box's half-extent goes negative), which paints a corner-shaped hole instead
+    // of a corner. Clamping at half the shorter side is what keeps a COLLAPSING node — a body
+    // dragged down to nothing — from flickering through that inversion.
+    expect(plateRadiusDevice(10, 1, { w: 200, h: 12 })).toBe(6)
+    expect(plateRadiusDevice(10, 1, { w: 8, h: 200 })).toBe(4)
+  })
+
+  it('is 0 for a square plate — every caller that asks for no radius keeps today’s rectangle', () => {
+    expect(plateRadiusDevice(0, 2, { w: 200, h: 100 })).toBe(0)
+  })
+
+  it('is 0 for a degenerate radius, scale or rect rather than a NaN in a uniform', () => {
+    // These reach the shader as a uniform the corner SDF subtracts, so a NaN here would not
+    // round a corner — it would make every fragment of the plate fail the coverage test and the
+    // terminal's whole background disappear. Guarded, like `cursorThicknessWorld`.
+    expect(plateRadiusDevice(-4, 1, { w: 200, h: 100 })).toBe(0)
+    expect(plateRadiusDevice(Number.NaN, 1, { w: 200, h: 100 })).toBe(0)
+    expect(plateRadiusDevice(10, 0, { w: 200, h: 100 })).toBe(0)
+    expect(plateRadiusDevice(10, 1, { w: 0, h: 100 })).toBe(0)
+    expect(plateRadiusDevice(10, 1, { w: 200, h: -5 })).toBe(0)
   })
 })
