@@ -53,7 +53,41 @@ void main() {
   // background color before every fillText. So the page's LUMINANCE is the coverage; its alpha is
   // 1 everywhere now and carries no information.
   float glyph = texture(uAtlas, vUv).r;
-  outColor = mix(bg, vec4(fg.rgb, 1.0), glyph * fg.a);
+  float cov = glyph * fg.a;
+  // THE MIX HAPPENS IN LINEAR LIGHT, NOT IN sRGB.
+  //
+  // Why: xterm's WebglAddon never mixes anything. It asks CoreText to rasterize the glyph in its
+  // REAL fg colour over its REAL bg, so the platform produces the anti-aliased edge pixels itself
+  // (with its own gamma-aware blending — which is what makes light-on-dark text come out full),
+  // and then blits those pixels 1:1. We rasterize white-on-black COVERAGE once and tint it here,
+  // which keeps the atlas key space small (one slot per code point, not per fg/bg pair) but moves
+  // the blend into our shader. A mix() on sRGB-encoded values is a LINEAR interpolation of a
+  // NON-LINEAR quantity: at coverage 0.5 it emits 0.5, which the display shows at ~0.5^2.2 = 22%
+  // of full light instead of 50%. Every mid-coverage edge pixel is under-weighted, and the sum of
+  // that over a glyph's outline is exactly the "WebGL text looks thinner/softer" defect the device
+  // rounds keep reporting.
+  //
+  // Decoding to linear, mixing there, and re-encoding puts that same edge pixel at ~0.73 encoded —
+  // i.e. it weights the AA edge the way CoreText's own blending does, which is what we are trying
+  // to match. pow(2.2) is the shader-standard APPROXIMATION of the sRGB EOTF, not the piecewise
+  // curve (which has a linear toe below 0.04045); the two differ only in the near-black range,
+  // well under a code point of visible difference here, and the approximation costs two pow()s.
+  //
+  // Deliberately NOT stacked on top of this: the extra directional coverage boost some GPU text
+  // stacks use (cov = pow(cov, 1.0/1.2) when fg is brighter than bg). It pulls in the same
+  // direction as this fix with a hand-picked exponent, and with one device signal per round we
+  // could not tell which of the two overshot if round 8 comes back "too heavy". Gamma is a model;
+  // the boost is a knob. Model first.
+  //
+  // If a gap STILL survives this, stop tuning the compositing: the remaining structural difference
+  // is that xterm rasterizes in colour at all. Checklist §2.7 already routes that (colour atlas
+  // keyed by (code, style, fg, bg) with ink-box cropping — a Phase 2 rework, not a shader patch).
+  //
+  // Alpha is NOT gamma-encoded and stays a straight lerp, bit-for-bit what the old
+  // mix(bg, vec4(fg.rgb, 1.0), cov) produced in that lane — the frame's alpha feeds the
+  // SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend and the page composite below it.
+  vec3 lin = mix(pow(bg.rgb, vec3(2.2)), pow(fg.rgb, vec3(2.2)), cov);
+  outColor = vec4(pow(lin, vec3(1.0 / 2.2)), mix(bg.a, 1.0, cov));
 }`
 
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
