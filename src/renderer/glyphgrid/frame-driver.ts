@@ -60,6 +60,20 @@ export interface FrameLoop {
   /** "There is damage" — resume immediately if parked, otherwise just reset the idle streak.
    *  Never draws inline: it runs inside the mutator that caused the damage. Inert after `stop`. */
   wake(): void
+  /**
+   * Draw at most ONE frame and park again immediately, whatever the idle streak was. For repaints
+   * that are known to be ISOLATED IN TIME — the blink clock, which repaints twice a second forever
+   * — where `wake()` is for damage that is likely to be followed by more.
+   *
+   * The difference is the whole reason this member exists. `wake()` resumes the rAF chain, which
+   * then costs `IDLE_FRAMES_BEFORE_PARK` frames before it parks again: thirty frames every 600 ms
+   * is a loop that never parks at all, i.e. the idle canvas back at the display's refresh rate.
+   * A pulse costs exactly one frame.
+   *
+   * A no-op while the loop is already running (that frame draws the repaint anyway) and inert
+   * after `stop`.
+   */
+  pulse(): void
   /** Cancel everything: the pending frame, the heartbeat, and any future wake. Idempotent. */
   stop(): void
 }
@@ -69,6 +83,13 @@ export function createFrameLoop(host: FrameLoopHost): FrameLoop {
   let heartbeat = 0
   let idleFrames = 0
   let stopped = false
+  /** Is the frame currently scheduled a ONE-SHOT (see `pulse`)? A flag on the shared `tick` rather
+   *  than a separate callback, because the two must be convertible: damage that lands between a
+   *  `pulse()` and its frame has to RESUME the loop, and a dedicated one-shot callback would draw
+   *  that damage and then park anyway — swallowing the wake, with the heartbeat already cancelled
+   *  by it. `runLoop` therefore clears this, which is all a wake needs to do to adopt the pending
+   *  frame as its own. */
+  let oneShot = false
 
   const stop = (): void => {
     stopped = true
@@ -76,6 +97,7 @@ export function createFrameLoop(host: FrameLoopHost): FrameLoop {
     if (heartbeat) host.clearTimer(heartbeat)
     raf = 0
     heartbeat = 0
+    oneShot = false
   }
 
   /** Everything that runs a frame shares this: liveness first, error policy second. Returns
@@ -108,13 +130,24 @@ export function createFrameLoop(host: FrameLoopHost): FrameLoop {
       heartbeat = 0
     }
     idleFrames = 0
+    // A frame already scheduled by a `pulse()` is ADOPTED rather than left as a one-shot: see
+    // `oneShot`. Doing it here (and not in `wake`) covers the heartbeat's resume path too.
+    oneShot = false
     if (!raf) raf = host.requestFrame(tick)
   }
 
   const tick = (): void => {
     raf = 0
+    const shot = oneShot
+    oneShot = false
     const { alive, drew } = drawOnce()
     if (!alive) return
+    // A pulse is one frame and then parked again — deliberately regardless of `drew`, which is
+    // ALWAYS true for a blink frame (the phase flip dirtied the engine). Reading that as "the
+    // canvas is busy again" is exactly the loop this path exists to avoid. The idle streak and the
+    // heartbeat armed at the park are both left untouched, so the loop is in the same state it was
+    // in before the pulse.
+    if (shot) return
     idleFrames = drew ? 0 : idleFrames + 1
     if (shouldPark(idleFrames)) park()
     else raf = host.requestFrame(tick)
@@ -146,6 +179,17 @@ export function createFrameLoop(host: FrameLoopHost): FrameLoop {
       // resurrect a loop whose context is gone.
       if (stopped) return
       runLoop()
+    },
+    pulse(): void {
+      // Inert after teardown, like `wake` — a blink tick racing the cleanup must not schedule a
+      // frame against a context that is gone.
+      if (stopped) return
+      // Already running (or a pulse is already pending): that frame draws this repaint too. The
+      // early return is also what keeps `oneShot` off a RUNNING loop's pending frame — setting it
+      // there would turn the next ordinary tick into a park.
+      if (raf) return
+      oneShot = true
+      raf = host.requestFrame(tick)
     },
     stop
   }

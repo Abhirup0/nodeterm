@@ -185,6 +185,105 @@ describe('createFrameLoop', () => {
     expect(h.timer()).toBeNull() // and the heartbeat stood down
   })
 
+  it('pulse draws ONE frame and parks again, without arming the idle streak', () => {
+    // The blink clock's whole reason for existing. Going through `wake()` would draw the frame and
+    // then hold rAF alive for another IDLE_FRAMES_BEFORE_PARK frames — thirty frames every 600 ms
+    // is a continuously running loop, i.e. the idle park silently undone.
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK) // idle → parked
+    const parkedAt = h.frame.mock.calls.length
+    h.loop.pulse()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK) // stops as soon as nothing is scheduled
+    expect(h.frame).toHaveBeenCalledTimes(parkedAt + 1) // exactly one, not thirty
+    expect(h.scheduled()).toBe(false)
+  })
+
+  it('a pulse that DRAWS still parks — the blink frame must not restart the loop', () => {
+    // The frame a blink schedules always draws (the phase flip dirtied the engine), so "it drew"
+    // must NOT be read as "the canvas is busy again" the way `tick` reads it.
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.setDraws([true])
+    h.loop.pulse()
+    h.runFrame()
+    expect(h.scheduled()).toBe(false)
+  })
+
+  it('a pulse leaves the parked heartbeat armed — the safety net survives the blink', () => {
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.loop.pulse()
+    h.runFrame()
+    expect(h.timer()?.ms).toBe(HEARTBEAT_MS)
+  })
+
+  it('a pulse while the loop is RUNNING schedules nothing extra', () => {
+    // The running loop draws the phase on its next frame anyway; a second schedule would be two
+    // rAF callbacks for one frame.
+    const h = harness()
+    const req = vi.spyOn(h.host, 'requestFrame')
+    h.loop.start()
+    expect(req).toHaveBeenCalledTimes(1)
+    h.loop.pulse()
+    h.loop.pulse()
+    expect(req).toHaveBeenCalledTimes(1)
+  })
+
+  it('a wake that lands on a pending pulse keeps the loop RUNNING — the swallowed-wake trap', () => {
+    // The one-shot is a flag on the shared tick, not a separate callback, precisely so this case
+    // works: damage arriving between `pulse()` and its frame must resume the loop rather than be
+    // consumed by a callback that parks again — which would leave a canvas with pending damage
+    // parked and its heartbeat already cancelled.
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.loop.pulse()
+    h.loop.wake()
+    h.setDraws([true])
+    h.runFrame()
+    expect(h.scheduled()).toBe(true)
+  })
+
+  it('pulse() after stop() is inert', () => {
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.loop.stop()
+    const after = h.frame.mock.calls.length
+    h.loop.pulse()
+    expect(h.scheduled()).toBe(false)
+    expect(h.frame).toHaveBeenCalledTimes(after)
+  })
+
+  it('a dead host stops the loop from a pulse too — no timer outlives the context', () => {
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.kill()
+    h.loop.pulse()
+    h.runFrame()
+    expect(h.scheduled()).toBe(false)
+    expect(h.timer()).toBeNull()
+  })
+
+  it('a throwing pulse frame reports and tears down as well', () => {
+    const boom = new Error('context lost')
+    const h = harness()
+    h.loop.start()
+    h.runFrames(IDLE_FRAMES_BEFORE_PARK)
+    h.host.frame = () => {
+      throw boom
+    }
+    h.loop.pulse()
+    h.runFrame()
+    expect(h.errors).toEqual([boom])
+    expect(h.scheduled()).toBe(false)
+    expect(h.timer()).toBeNull()
+  })
+
   it('stop() clears the rAF and the heartbeat, and wake() afterwards is inert', () => {
     const h = harness()
     h.loop.start()
