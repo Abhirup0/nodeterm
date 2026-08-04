@@ -72,7 +72,8 @@ export function slotPitch(cell: number): number {
  *  This exists for ONE open device bug: a single letter (`ç` in round 5, lowercase `x` in round 7)
  *  renders BLANK while its neighbours are fine. Every headless-auditable path was audited and is
  *  clean — box-glyphs claims nothing below U+0300 and never returns an empty op list, the raster
- *  re-paints under the clip before it inks on BOTH branches, `cellXY` is the single copy of the
+ *  repaints the slot's whole PITCH rect (unclipped, before the cell clip is installed) ahead of the
+ *  ink on BOTH branches, `cellXY` is the single copy of the
  *  layout math and the shader recomputes it identically, `strideX >= cellW + 2*GUTTER_PX` always
  *  (the rasterizer's cell is captured at construction and never re-adopted), and the atlas's dirty
  *  flag is polled by the rAF driver every frame, so no wake-up can be missed. What is left needs a
@@ -315,11 +316,10 @@ export class GlyphAtlas {
   /** The uv rect of a slot: the ORIGIN is the ink origin (pitch cell + gutter), the SIZE is the
    *  exact cell — the three numbers are not interchangeable (see `strideX` and `GUTTER_PX`).
    *
-   *  The shader has to derive the same rect (`uAtlasStride` for the pitch, the gutter for the
-   *  origin offset, `uAtlasCell` for the extent). PHASE 1c INTERIM: it does NOT yet — gl-webgl2's
-   *  VERT is still missing the gutter term, so every glyph samples GUTTER_PX texels off until T3
-   *  adds it. This rect, and the uv-tie test that transcribes it, are the CPU-side truth T3
-   *  aligns to. */
+   *  The shader derives the same rect per vertex (`uAtlasStride` for the pitch, `uAtlasGutter` for
+   *  the origin offset, `uAtlasCell` for the extent) rather than reading it from here, because it
+   *  has only the slot INDEX in the cell lane. This rect and the uv-tie test that transcribes it
+   *  are the CPU-side truth that derivation has to keep agreeing with. */
   slotRect(slot: number): { u0: number; v0: number; u1: number; v1: number } {
     // A degenerate page has no sampleable area at all: return the ZERO rect rather than let the
     // division produce NaN, which the shader would turn into undefined texture reads.

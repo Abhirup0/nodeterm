@@ -130,10 +130,10 @@ describe('GlyphAtlas', () => {
   // agree with whatever the atlas decided, including conflating the pitch with the extent.
   //
   // It is NOT a tie to the live GLSL: the shader side below is this test's own copy, so editing
-  // the real shader leaves this green. AND, DURING PHASE 1c, THE LIVE SHADER DOES NOT YET MATCH IT:
-  // the gutter term is Task 3's (`uploadAtlas` has to carry GUTTER_PX and VERT has to add it to
-  // `slotOrigin`). This file is the CPU-side truth T3 aligns to; until it lands, the shader samples
-  // a gutter-sized offset off every glyph.
+  // the real shader leaves this green. The live VERT performs the same derivation (`uAtlasStride`
+  // for the pitch, `uAtlasGutter` for the origin offset, `uAtlasCell` for the extent) — nothing
+  // headless can prove that, which is why this test transcribes the arithmetic independently and
+  // the device round checks the pixels.
   //
   // Run over an integer cell AND a fractional one: an integer cell has stride === extent + 2*gutter
   // on both axes, so it alone cannot tell a pitch/extent conflation from a correct derivation.

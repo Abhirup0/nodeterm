@@ -101,13 +101,28 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *  the backing store's format, and an alpha-less canvas would additionally let Chromium turn on
  *  LCD/subpixel antialiasing, whose per-channel coverage the RGBA blit would bake in per channel.
  *
- *  THE PAGE INVARIANT, in one line: the backdrop is per-slot bg over the FULL PITCH rect; the
- *  inter-slot page ground is transparent-black and is never sampled at LOD <= MAX_SAFE_LOD.
+ *  THE PAGE INVARIANT, in one line: the backdrop is per-slot bg over the FULL PITCH rect, and no
+ *  slot's INK can reach another slot's texels at any level up to MAX_SAFE_LOD.
+ *
+ *  Stated that way on purpose — an earlier wording claimed the inter-slot page ground is "never
+ *  sampled at LOD <= MAX_SAFE_LOD", which overstates it. Unallocated pitch cells DO enter a level-2
+ *  texel wherever the page is not yet full: at the allocation frontier, in the page's right/bottom
+ *  remainder strip, and throughout a repack that has just called `clearPage`. What enters there is
+ *  transparent page ground blended into a slot's edge texel — the same accepted-residual class as
+ *  the background-vs-background blend GUTTER_PX's comment already names, and it disappears as the
+ *  page fills. The promise that actually matters, and the one the LOD derivation rests on, is about
+ *  INK.
+ *
  *  Unpacked, the four things this file must not break:
  *  1. The page ground starts (and `clearPage` returns to) TRANSPARENT-black. The atlas's slot 0 —
  *     the pitch cell at 0,0 — is permanently blank and is what every space/unknown code point
- *     samples; `GlyphAtlas` never asks for slot 0, so nothing is ever drawn there and it stays
- *     transparent, which is what lets the shader leave the plate's own pixels alone.
+ *     names; `GlyphAtlas` never asks for slot 0, so nothing is ever drawn there and it stays
+ *     transparent. Note what that no longer buys: the shader does NOT sample slot 0 for a blank
+ *     cell — it branches on the glyph LANE being 0 and paints the cell's own bg lane, which is
+ *     what keeps a selection or a block cursor visible on an empty cell. Slot 0 staying blank is
+ *     therefore belt-and-braces (a lane that somehow reached it draws nothing rather than a
+ *     stranger's glyph) plus one real duty: it is a mip neighbour like any other slot, and ink
+ *     there would bleed into slot 1's minified texels.
  *  2. A slot's whole pitch rect is REPAINTED with its background before it is inked, so reusing a
  *     cell after a reset can never leave a previous glyph's ink or a previous background behind.
  *  3. INK NEVER ENTERS THE GUTTER. Every glyph is clipped to the CELL rect — one gutter inside the
@@ -161,9 +176,13 @@ export function createCanvasRasterizer(
       //    origin, so the pitch cell's corner is one gutter back on each axis; its extent is the
       //    pitch, which is `ceil(cell) + 2*GUTTER_PX`. Both are whole texels and consecutive pitch
       //    cells are exactly `pitch` apart, so this fill tiles its own slot and touches no other.
-      //    Unclipped on purpose: the rect is already exact, and the fill is what has to reach the
-      //    gutter (a gutter carrying this slot's own background is what makes mip bleed invisible).
       //    It also repaints everything a previous tenant of this slot left behind.
+      //    UNCLIPPED, and the two candidate clips fail differently: a CELL clip — the one installed
+      //    below for the ink — would be actively WRONG here, since it is exactly the gutter (the
+      //    part of the pitch outside the cell) that has to carry this slot's background for the mip
+      //    chain to blend background into background instead of into page ground. A PITCH clip
+      //    would merely be REDUNDANT: the rect is already exact and `cellXY` is the only source of
+      //    the origin, so there is nothing for it to catch.
       ctx.fillStyle = cssColor(bg)
       ctx.fillRect(x - GUTTER_PX, y - GUTTER_PX, pitchW, pitchH)
       // 2. THE INK, clipped to the CELL rect — never the pitch rect. The cell always fits inside

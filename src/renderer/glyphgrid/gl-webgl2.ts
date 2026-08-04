@@ -1,7 +1,26 @@
+import { GUTTER_PX } from './atlas'
 import { snapPanToDevicePx, type Camera } from './camera'
 import { CELL_STRIDE, unpackColor } from './cells'
 import type { GlyphGL, GridDrawParams } from './gl'
 import { plateRectDevice } from './plate'
+
+/**
+ * The deepest mip level the atlas may ever be sampled at (`TEXTURE_MAX_LOD`).
+ *
+ * DERIVED FROM `GUTTER_PX`, which is why it is computed rather than typed: a level-n texel is the
+ * average of an aligned 2^n x 2^n block of level-0 texels, and two slots' inks are separated by
+ * `2 * GUTTER_PX` ink-free texels (this slot's gutter plus its neighbour's — see GUTTER_PX in
+ * atlas.ts). A level-n block can therefore only reach ink from BOTH slots once 2^n exceeds that
+ * separation, so the last safe level is `floor(log2(2 * GUTTER_PX))` = 2 for the gutter of 2 this
+ * atlas lays out. Raising the gutter raises this on its own; the two can never disagree.
+ *
+ * Levels deeper than this are still GENERATED (generateMipmap builds the whole pyramid, and
+ * building fewer levels is not something the API offers) — they are simply never sampled, which is
+ * what the clamp buys. The residual it accepts is stated in GUTTER_PX's comment: at level 2 a
+ * bilinear tap can reach a pure-gutter texel holding a blend of two BACKGROUND colours. That is a
+ * soft edge between backgrounds at heavy zoom-out, never a ghost glyph.
+ */
+const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
 
 const VERT = `#version 300 es
 // One instance per CELL. Two triangles from gl_VertexID (0..5), no vertex buffer.
@@ -13,6 +32,7 @@ uniform vec2 uCell;       // cell size (world px)
 uniform float uCols;
 uniform vec2 uAtlasCell;   // glyph uv EXTENT (u1-u0, v1-v0) — the exact device cell
 uniform vec2 uAtlasStride; // glyph uv PITCH — the whole-texel slot spacing (>= uAtlasCell)
+uniform float uAtlasGutter; // GUTTER_PX / atlasSizePx — the ink-free margin inside the pitch cell
 uniform float uAtlasCols;
 in uvec4 aCell;           // [glyph, fg, bg, flags] — CELL_STRIDE lanes
 out vec2 vUv;
@@ -28,83 +48,71 @@ void main() {
   vec2 ndc = vec2(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
   float slot = float(aCell.x);
-  // PHASE 1c interim: uv lacks the gutter term — T3 adds uAtlasGutter; glyphs sample 2 texels off
-  // until then. The atlas already lays every slot out with GUTTER_PX of ink-free margin inside its
-  // pitch cell (atlas.ts), so this origin is one gutter short on both axes; the uv-tie test in
-  // atlas.test.ts transcribes the derivation T3 has to land here.
-  vec2 slotOrigin = vec2(mod(slot, uAtlasCols), floor(slot / uAtlasCols)) * uAtlasStride;
+  // THREE DIFFERENT NUMBERS, and conflating any two of them shifts every glyph. The slot's PITCH
+  // cell starts at (slot % cols, slot / cols) * uAtlasStride; the INK starts one GUTTER inside that
+  // cell on each axis (the atlas lays every slot out that way so the mip chain has an ink-free
+  // margin — see GUTTER_PX in atlas.ts); the sampled EXTENT is the exact device cell, uAtlasCell,
+  // which is fractional in general and must never be replaced by the pitch. This is the same
+  // derivation GlyphAtlas.slotRect performs on the CPU, and atlas.test.ts's uv-tie test
+  // transcribes it independently of both.
+  vec2 slotOrigin = vec2(mod(slot, uAtlasCols), floor(slot / uAtlasCols)) * uAtlasStride
+                  + vec2(uAtlasGutter);
   vUv = slotOrigin + unit * uAtlasCell;
   vCell = aCell;
 }`
 
 const FRAG = `#version 300 es
 precision highp float;
+// INT PRECISION IS DECLARED, not inherited: GLSL ES 3.00 predeclares only "precision mediump int"
+// for fragment shaders, and mediump is guaranteed no more than 16 bits — which is not enough for
+// the 32-bit RGBA8 colour lane rgba8() shifts apart below. Desktop drivers all give 32 bits
+// anyway, which is why the lanes read correctly before this line existed; saying it makes the
+// blank-cell branch's colour independent of that generosity.
+precision highp int;
 uniform sampler2D uAtlas;
 in vec2 vUv;
 flat in uvec4 vCell;
 out vec4 outColor;
-// The exponent the fg/bg coverage mix is performed under (see main()). NOT 2.2: this is a TEXT-AA
-// blend gamma, not a display EOTF, and the device bracketed it — 1.0 (a plain sRGB-space mix) read
-// thin, 2.2 (the full physical decode) read thick. One named constant so the next nudge, if the
-// reference device still reads a hair off in either direction, is a one-token change.
-const float BLEND_GAMMA = 1.45;
 vec4 rgba8(uint c) {
   return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u),
               float((c >> 24) & 255u)) / 255.0;
 }
 void main() {
-  vec4 bg = rgba8(vCell.z);
-  vec4 fg = rgba8(vCell.y);
-  // COVERAGE COMES OFF THE RED CHANNEL, not alpha. raster.ts paints the atlas page opaque BLACK
-  // and the ink WHITE: giving the platform rasterizer a real backdrop is what gets full-weight
-  // glyphs out of CoreText on macOS (text drawn onto transparency comes out thin and soft), and it
-  // is exactly what xterm's own TextureAtlas does: _drawToCache fills the tile with the
-  // background color before every fillText. So the page's LUMINANCE is the coverage; its alpha is
-  // 1 everywhere now and carries no information.
-  float glyph = texture(uAtlas, vUv).r;
-  float cov = glyph * fg.a;
-  // THE MIX HAPPENS IN LINEAR LIGHT, NOT IN sRGB.
+  // THE ATLAS IS THE PICTURE. Every non-blank slot already holds CoreText's own rasterization of
+  // this exact glyph in its exact foreground over its exact background (raster.ts fills the slot
+  // with the bg and inks the glyph in the fg; the atlas is keyed by both colours), so the whole
+  // fragment stage is one texture read and a blit — precisely what xterm's WebglAddon does.
   //
-  // Why: xterm's WebglAddon never mixes anything. It asks CoreText to rasterize the glyph in its
-  // REAL fg colour over its REAL bg, so the platform produces the anti-aliased edge pixels itself
-  // (with its own gamma-aware blending — which is what makes light-on-dark text come out full),
-  // and then blits those pixels 1:1. We rasterize white-on-black COVERAGE once and tint it here,
-  // which keeps the atlas key space small (one slot per code point, not per fg/bg pair) but moves
-  // the blend into our shader. A mix() on sRGB-encoded values is a LINEAR interpolation of a
-  // NON-LINEAR quantity: at coverage 0.5 it emits 0.5, which the display shows at ~0.5^2.2 = 22%
-  // of full light instead of 50%. Every mid-coverage edge pixel is under-weighted, and the sum of
-  // that over a glyph's outline is exactly the "WebGL text looks thinner/softer" defect the device
-  // rounds kept reporting. Decoding, mixing in linear light and re-encoding is what fixes it.
+  // WHAT WAS DELETED HERE, AND WHY IT MUST NOT COME BACK. This shader used to read a white-on-black
+  // COVERAGE off the red channel and mix the cell's fg/bg lanes by it under a tuned exponent
+  // (BLEND_GAMMA). That mix had no correct setting: the coverage was CoreText's OWN light-on-dark
+  // rasterization, which already carries the platform's font-smoothing compensation, so any
+  // exponent either under- or double-applied it — seven device rounds bracketed 1.0 as too thin and
+  // 2.2 as too thick and never converged. Asking the platform for the colours we actually want
+  // removes the mix, and with it the knob: there is nothing left in this shader to tune, which is
+  // the point of the change rather than a side effect of it. The cost is the key space (one slot
+  // per (code, style, fg, bg) instead of per glyph shape), which the atlas answers with
+  // reset-on-full.
   //
-  // BUT THE EXPONENT IS BLEND_GAMMA (1.45), NOT THE PHYSICAL 2.2 — and that is the whole point of
-  // this paragraph. The coverage in our atlas is not an abstract geometric coverage: it is
-  // CoreText's OWN rasterization of white-on-black, which already carries its font-smoothing
-  // compensation for light-on-dark. Compositing that with the full 2.2 decode applies the
-  // compensation TWICE, and the device duly reported the result as slightly too thick. Text
-  // rasterization stacks land in the same place for the same reason — Skia and FreeType's LCD-filter
-  // era blend AA coverage at a gamma around 1.4-1.5, not at the display's 2.2 — because the value
-  // being blended came out of a text rasterizer, not out of a photograph.
+  // THE BLANK BRANCH KEYS ON THE GLYPH LANE, NEVER ON SAMPLED ALPHA. A cell whose glyph lane is 0
+  // has no slot of its own — space, an unrenderable code point, a not-yet-packed row — so its
+  // background lives only in the bg LANE, and this is the branch that paints it. Slot 0 is
+  // permanently transparent-black, so sampling it (or alpha-testing the sample) would leave the
+  // plate's pixels showing through and a SELECTION OVER WHITESPACE or a BLOCK CURSOR ON AN EMPTY
+  // CELL would simply not be drawn — the severe case, since a shell prompt's cursor sits on a blank
+  // cell most of the time. An alpha test would also be wrong at zoom-out for a second reason: a
+  // minified sample is a mip average, so alpha there is a filtered quantity and not a statement
+  // about which slot the cell owns. The lane is exact at every zoom.
   //
-  // The answer is BRACKETED by device reports, which is why this number is trustworthy rather than
-  // picked: 1.0 (a plain sRGB-space mix, rounds 1-6) read THIN, 2.2 (round 7) read THICK, 1.45 sits
-  // between them. If the reference device still reads a hair off, move BLEND_GAMMA alone — down
-  // toward 1.0 if it looks thick, up toward 2.2 if it looks thin. Nothing else in this shader is a
-  // weight knob.
-  //
-  // Deliberately NOT stacked on top of this: the extra directional coverage boost some GPU text
-  // stacks use (cov = pow(cov, 1.0/1.2) when fg is brighter than bg). It pulls in the same
-  // direction as BLEND_GAMMA, so two knobs would fight over one device signal — and the bracket
-  // above shows a single exponent already spans thin-to-thick. One knob, moved on evidence.
-  //
-  // If a gap STILL survives this, stop tuning the compositing: the remaining structural difference
-  // is that xterm rasterizes in colour at all. Checklist §2.7 already routes that (colour atlas
-  // keyed by (code, style, fg, bg) with ink-box cropping — a Phase 2 rework, not a shader patch).
-  //
-  // Alpha is NOT gamma-encoded and stays a straight lerp, bit-for-bit what the old
-  // mix(bg, vec4(fg.rgb, 1.0), cov) produced in that lane — the frame's alpha feeds the
-  // SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend and the page composite below it.
-  vec3 lin = mix(pow(bg.rgb, vec3(BLEND_GAMMA)), pow(fg.rgb, vec3(BLEND_GAMMA)), cov);
-  outColor = vec4(pow(lin, vec3(1.0 / BLEND_GAMMA)), mix(bg.a, 1.0, cov));
+  // Alpha comes from the lane rather than being forced to 1: the feed packs opaque backgrounds, so
+  // real cells are unaffected, while a grid drawn before its first packed row (a zeroed GPU buffer
+  // — see createGrid) keeps alpha 0 and lets its own plate show through instead of flashing opaque
+  // black over it for a frame.
+  if (vCell.x == 0u) {
+    outColor = rgba8(vCell.z);
+    return;
+  }
+  outColor = texture(uAtlas, vUv);
 }`
 
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
@@ -132,6 +140,10 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   let atlasCols = 1
   let atlasCellUv: [number, number] = [0, 0]
   let atlasStrideUv: [number, number] = [0, 0]
+  /** GUTTER_PX expressed in uv — the ink-free margin the VERT adds to every slot origin. Derived
+   *  from the page size the atlas uploads with, so `uploadAtlas` keeps its signature: the gutter is
+   *  a layout constant both sides already share, not a new piece of per-upload data. */
+  let atlasGutterUv = 0
   let view: [number, number] = [1, 1]
   /** Stored at resize because the plate's scissor rect is in DEVICE pixels and needs the
    *  drawing buffer's height to flip Y — neither is derivable from the CSS-px viewport alone. */
@@ -162,15 +174,21 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    * So make the answer deterministic instead of hoping both sides agree:
    *  - **zoom >= 1 → NEAREST.** The pan is snapped to whole device pixels (`snapPanToDevicePx`)
    *    and the texels are 1:1, so NEAREST is bit-exact — whichever side of the tie the driver
-   *    picks, it now samples the same texel MAG would have.
-   *  - **zoom < 1 → LINEAR.** Genuine minification: several texels really do fall into one pixel,
-   *    and NEAREST there aliases a zoomed-out canvas into unreadable speckle. Thumbnails stay
-   *    readable.
+   *    picks, it now samples the same texel MAG would have. The comparison stays `>=` for exactly
+   *    that reason: zoom 1 IS the tie, and it belongs on the crisp side.
+   *  - **zoom < 1 → LINEAR_MIPMAP_LINEAR.** Genuine minification: several texels really do fall
+   *    into one pixel. Plain LINEAR (what this used to be) averages four LEVEL-0 texels however
+   *    many actually land in the pixel, which is why a zoomed-out canvas shimmered and aliased —
+   *    it is an undersample, not a filter. Trilinear over the mip chain `uploadAtlas` generates is
+   *    the same thing every GPU text stack does, and it is what makes zoom-out read as GPU-mode
+   *    class rather than as speckle. It is safe here only because the slots carry gutters and the
+   *    sampler is clamped to MAX_SAFE_LOD — without both, a minified glyph would average in its
+   *    neighbour's ink.
    *
    * MAG stays NEAREST unconditionally — it was never the ambiguous half.
    */
   const applyAtlasMinFilter = (zoom: number): void => {
-    const want = zoom >= 1 ? gl.NEAREST : gl.LINEAR
+    const want = zoom >= 1 ? gl.NEAREST : gl.LINEAR_MIPMAP_LINEAR
     if (want === atlasMinFilter) return
     atlasMinFilter = want
     gl.bindTexture(gl.TEXTURE_2D, atlasTex)
@@ -228,7 +246,29 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     uploadAtlas(source, sizePx, cellW, cellH, strideX, strideY) {
       gl.bindTexture(gl.TEXTURE_2D, atlasTex)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
+      // THE MIP CHAIN, rebuilt on every upload. A minifying sampler with no chain is either an
+      // undersample (LINEAR over four level-0 texels — the old zoom-out shimmer) or an INCOMPLETE
+      // texture that samples black (any *_MIPMAP_* filter), so the chain has to exist before the
+      // filter below can ask for it, and it has to be regenerated here because texImage2D replaces
+      // level 0 only and leaves the rest stale.
+      //
+      // COST: one full pyramid over the whole page (2048² today) per atlas-dirty upload. That rate
+      // is bounded by GLYPH ALLOCATION, not by frames — the atlas dirties when a new (code, style,
+      // fg, bg) key is rasterized, which on a settled canvas is never. Fine as it stands. If it
+      // ever shows up in a profile the escalation is a dirty-RECT texSubImage2D plus a manual mip
+      // of the touched tiles; that is Phase 2 work and must not be built speculatively.
+      //
+      // The page size is mip-friendly: 2048 is a power of two, so every level is an exact halving
+      // down to 1×1. WebGL2 also allows mipmaps on NPOT textures, so a future page size is not a
+      // correctness hazard here — only a rounding one at the deepest levels, which MAX_SAFE_LOD
+      // never lets the sampler reach.
+      gl.generateMipmap(gl.TEXTURE_2D)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+      // The clamp the gutters pay for: levels deeper than MAX_SAFE_LOD may mix a neighbouring
+      // slot's ink into this one, so the sampler is forbidden to reach them however far the canvas
+      // is zoomed out. `texParameterf` — MAX_LOD is a float parameter, and the `i` form would
+      // silently be the wrong entry point for it.
+      gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MAX_LOD, MAX_SAFE_LOD)
       // MIN belongs to the camera now (see applyAtlasMinFilter), but it is asserted HERE too, and
       // not only in beginFrame: GL's default min filter is NEAREST_MIPMAP_LINEAR, which makes a
       // texture with no mip chain INCOMPLETE (it samples black). Filter params live on the texture
@@ -239,6 +279,9 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       atlasCols = Math.floor(sizePx / strideX)
       atlasCellUv = [cellW / sizePx, cellH / sizePx]
       atlasStrideUv = [strideX / sizePx, strideY / sizePx]
+      // The gutter is a LAYOUT constant shared with the atlas, so it is derived here from the page
+      // size rather than added to this signature — one fewer number for a caller to get wrong.
+      atlasGutterUv = GUTTER_PX / sizePx
     },
     createGrid(id, cols, rows) {
       // Re-creating under a live id is the RESIZE path: drop the old buffer first, or every
@@ -294,6 +337,7 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       gl.uniform1f(u('uAtlasCols'), atlasCols)
       gl.uniform2f(u('uAtlasCell'), atlasCellUv[0], atlasCellUv[1])
       gl.uniform2f(u('uAtlasStride'), atlasStrideUv[0], atlasStrideUv[1])
+      gl.uniform1f(u('uAtlasGutter'), atlasGutterUv)
       gl.uniform1i(u('uAtlas'), 0)
     },
     drawGrid(g: GridDrawParams) {
