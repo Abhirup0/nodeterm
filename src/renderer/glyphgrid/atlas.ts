@@ -13,9 +13,10 @@ export class GlyphAtlas {
   private slots = new Map<string, number>()
   /** Slot 0 is permanently blank and is never handed to the rasterizer: every space, every
    *  unknown code point and every cell of a not-yet-uploaded GPU buffer samples it. Its
-   *  BLANKNESS is a contract on raster.ts — the page starts fully transparent and nothing may
-   *  ever draw at (0,0) — not something this file can enforce, so the two must change together.
-   *  If ink ever lands there, every space on the canvas grows a glyph. */
+   *  BLANKNESS is a contract on raster.ts — the page is opaque BLACK (= coverage 0; ink is white
+   *  and the shader reads the luminance) and nothing may ever draw at (0,0), so slot 0 simply
+   *  stays black — not something this file can enforce, so the two must change together. If ink
+   *  ever lands there, every space on the canvas grows a glyph. */
   private nextSlot = 1
   private dirtyFlag = false
 

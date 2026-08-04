@@ -94,6 +94,16 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       RASTER itself (the canvas rasterizer's antialiasing / baseline rounding, or L14's
       first-terminal cell latch), not at the sampler. Also zoom OUT past 1 and confirm the text
       degrades smoothly rather than speckling.
+      **Round 6 addressed exactly that raster.** The atlas is no longer drawn onto transparency:
+      the page is opaque BLACK, the ink is WHITE, and the shader reads coverage off the RED
+      channel — the same backdrop xterm's own `TextureAtlas._drawToCache` hands the platform
+      rasterizer before every `fillText`, and the reason its glyphs come out at full weight on
+      macOS. Judge plain text (a paragraph of prose, `man bash`, a source file) against the
+      per-terminal GPU renderer at dpr 2 and dpr 1. **If a weight/softness gap still remains after
+      this, stop tuning the rasterizer**: the next step is xterm's full approach — a COLOR atlas
+      keyed by `(code, style, fg, bg)` with per-glyph ink-box cropping — which reworks `atlas.ts`,
+      `raster.ts` and the cell/uv contract together and is therefore a **Phase 2** item, not a
+      round-7 patch. Report it as "2.7 raster gap → Phase 2 color atlas".
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is

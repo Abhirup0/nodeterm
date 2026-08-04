@@ -52,6 +52,10 @@
  * shade blocks ░▒▓ — is a dither pattern, not a tint (see `SHADES`), and an alpha field would
  * make it possible to "simplify" them back into flat washes that no longer match the renderer
  * beside them. Everything this module draws is ink or nothing.
+ *
+ * "Opaque" is the atlas's ink colour, not an alpha value: `raster.ts` fills these rects WHITE onto
+ * its opaque BLACK page, so a set pixel is coverage 1 and everything else is coverage 0 — the same
+ * two states the fillText path produces, and the reason this module never touches `globalAlpha`.
  */
 export interface PaintOp {
   x: number

@@ -46,7 +46,13 @@ vec4 rgba8(uint c) {
 void main() {
   vec4 bg = rgba8(vCell.z);
   vec4 fg = rgba8(vCell.y);
-  float glyph = texture(uAtlas, vUv).a;
+  // COVERAGE COMES OFF THE RED CHANNEL, not alpha. raster.ts paints the atlas page opaque BLACK
+  // and the ink WHITE: giving the platform rasterizer a real backdrop is what gets full-weight
+  // glyphs out of CoreText on macOS (text drawn onto transparency comes out thin and soft), and it
+  // is exactly what xterm's own TextureAtlas does: _drawToCache fills the tile with the
+  // background color before every fillText. So the page's LUMINANCE is the coverage; its alpha is
+  // 1 everywhere now and carries no information.
+  float glyph = texture(uAtlas, vUv).r;
   outColor = mix(bg, vec4(fg.rgb, 1.0), glyph * fg.a);
 }`
 
