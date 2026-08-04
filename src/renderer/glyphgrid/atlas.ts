@@ -9,6 +9,27 @@ export interface GlyphRasterizer {
   readonly source: TexImageSource | null
 }
 
+/** One slot allocation, reported to an optional debug tap. See `GlyphAtlas`'s constructor.
+ *
+ *  This exists for ONE open device bug: a single letter (`ç` in round 5, lowercase `x` in round 7)
+ *  renders BLANK while its neighbours are fine. Every headless-auditable path was audited and is
+ *  clean — box-glyphs claims nothing below U+0300 and never returns an empty op list, the raster
+ *  re-blacks under the clip before it inks on BOTH branches, `cellXY` is the single copy of the
+ *  layout math and the shader recomputes it identically, `strideX = ceil(cellW) >= cellW` always
+ *  (the rasterizer's cell is captured at construction and never re-adopted), and the atlas's dirty
+ *  flag is polled by the rAF driver every frame, so no wake-up can be missed. What is left needs a
+ *  real font on a real device, which no test here can produce — so the next round collects
+ *  evidence instead of guessing. */
+export interface GlyphSlotAllocation {
+  slot: number
+  code: number
+  bold: boolean
+  italic: boolean
+  /** Page-pixel origin the ink was drawn at — `cellXY(slot)`. */
+  x: number
+  y: number
+}
+
 export class GlyphAtlas {
   private slots = new Map<string, number>()
   /** Slot 0 is permanently blank and is never handed to the rasterizer: every space, every
@@ -22,7 +43,12 @@ export class GlyphAtlas {
 
   constructor(
     private rasterizer: GlyphRasterizer,
-    private pageSizePx = 1024
+    private pageSizePx = 1024,
+    /** Optional DEBUG tap, called once per slot allocation (never on a cache hit, never for the
+     *  blank slot). Off in production — the shell only passes one when the device-debug flag is
+     *  set. It must never be able to break rendering, so it is called inside a try/catch AFTER the
+     *  ink and the bookkeeping are already committed. */
+    private onAllocate?: (info: GlyphSlotAllocation) => void
   ) {}
 
   /** The metrics `GlyphGL.uploadAtlas` needs to map a slot index to texels. They are
@@ -102,6 +128,15 @@ export class GlyphAtlas {
     this.rasterizer.draw(code, bold, italic, x, y)
     this.slots.set(key, slot)
     this.dirtyFlag = true
+    // LAST, and guarded: the tap is a debug aid, so a throwing callback must cost a log line, not
+    // the glyph — everything above is already committed by the time it runs.
+    if (this.onAllocate) {
+      try {
+        this.onAllocate({ slot, code, bold, italic, x, y })
+      } catch {
+        /* a debug tap never breaks a frame */
+      }
+    }
     return slot
   }
 

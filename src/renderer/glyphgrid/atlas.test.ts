@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GlyphAtlas, type GlyphRasterizer } from './atlas'
+import { GlyphAtlas, type GlyphRasterizer, type GlyphSlotAllocation } from './atlas'
 
 function fakeRasterizer(cellW = 10, cellH = 20): GlyphRasterizer & { calls: string[] } {
   const calls: string[] = []
@@ -150,5 +150,30 @@ describe('GlyphAtlas', () => {
     expect(atlas.capacity).toBe(2)
     expect(atlas.glyphFor(0x41, false, false)).toBe(1)
     expect(atlas.glyphFor(0x42, false, false)).toBe(0) // full → blank, never throws
+  })
+  describe('debug allocation tap (device instrumentation for the blank-glyph bug)', () => {
+    it('reports each NEW slot with the origin the ink was drawn at, and never on a cache hit', () => {
+      const seen: GlyphSlotAllocation[] = []
+      const atlas = new GlyphAtlas(fakeRasterizer(10, 20), 100, (i) => seen.push(i))
+      atlas.glyphFor(0x78, false, false)
+      atlas.glyphFor(0x78, false, false) // cache hit — must NOT re-report
+      atlas.glyphFor(0x78, true, false) // a different style IS a different slot
+      atlas.glyphFor(0x20, false, false) // the blank slot is never an allocation
+      expect(seen).toEqual([
+        { slot: 1, code: 0x78, bold: false, italic: false, x: 10, y: 0 },
+        { slot: 2, code: 0x78, bold: true, italic: false, x: 20, y: 0 }
+      ])
+    })
+
+    it('a throwing tap costs the log line, not the glyph', () => {
+      const r = fakeRasterizer(10, 20)
+      const atlas = new GlyphAtlas(r, 100, () => {
+        throw new Error('debug tap blew up')
+      })
+      expect(() => atlas.glyphFor(0x78, false, false)).not.toThrow()
+      expect(atlas.glyphFor(0x78, false, false)).toBe(1) // still cached and usable
+      expect(r.calls).toEqual(['120|@10,0']) // ...and rasterized exactly once
+      expect(atlas.dirty).toBe(true)
+    })
   })
 })

@@ -104,6 +104,37 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       keyed by `(code, style, fg, bg)` with per-glyph ink-box cropping — which reworks `atlas.ts`,
       `raster.ts` and the cell/uv contract together and is therefore a **Phase 2** item, not a
       round-7 patch. Report it as "2.7 raster gap → Phase 2 color atlas".
+      **Round 7b re-tuned the blend, not the raster.** The device read round 7's full 2.2 decode as
+      slightly TOO THICK, which brackets the answer (1.0 = sRGB-space mix read thin, 2.2 read
+      thick). The compositing gamma is now the single named constant `BLEND_GAMMA = 1.45` in
+      `gl-webgl2.ts` — the text-AA blend gamma Skia and FreeType use, and the right family of number
+      because the coverage in our atlas is CoreText's own rasterization, which already carries its
+      light-on-dark compensation. **If weight is still off, report only WHICH WAY** (thick or thin):
+      the fix is that one constant, down toward 1.0 or up toward 2.2. Do not report "not identical"
+      — that is the one answer nothing can be done with.
+- [ ] **2.7b One letter renders BLANK (open bug — this round collects EVIDENCE, not a fix).**
+      Reported twice: `ç` in round 5 (which "went away" with no root cause found) and lowercase `x`
+      in round 7 — one letter blank all session while its neighbours, including uppercase `X`,
+      render fine. Every headless-auditable path has been audited and is clean: `boxGlyphOps`
+      claims no code point below U+0300 and never returns an empty op list (so the
+      "claimed-but-drew-nothing" blank is ruled out); `raster.draw` clips, re-blacks and inks in
+      that order on BOTH branches; `cellXY` is the single copy of the layout math and the vertex
+      shader recomputes it identically; `strideX = ceil(cellW) >= cellW` always, and the
+      rasterizer's cell is captured at construction and never re-adopted, so ink can never overflow
+      into a neighbour's slot; and the rAF driver calls `frame()` every frame, so a newly
+      rasterized glyph cannot miss its upload. Reproducing needs a real font on a real device.
+      **How to run this item:**
+      1. In DevTools: `localStorage.setItem('nodeterm.glyphgridDebug','1')`, then reload.
+      2. Use the app until a letter goes blank. Note **which** letter, and whether its
+         uppercase/lowercase/bold/italic variants also fail.
+      3. Run `await window.__glyphgridDump()` and open the returned `page` data URL in a new tab —
+         that is a PNG of the whole atlas. **Find the reported letter in it.**
+         - **Not in the atlas (its cell is black)** → the RASTERIZER is the suspect (font, baseline,
+           clip). Report the letter plus the `[glyphgrid] slot … code … at x,y` warn line for it.
+         - **In the atlas, correctly drawn** → the slot→uv mapping or the texture upload is. Report
+           its slot number and the `geometry` block from the dump alongside the PNG.
+      4. Paste the console's `[glyphgrid]` lines for the letter and its working neighbours.
+      This instrumentation is temporary and comes out when the bug closes.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is

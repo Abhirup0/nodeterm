@@ -39,6 +39,11 @@ uniform sampler2D uAtlas;
 in vec2 vUv;
 flat in uvec4 vCell;
 out vec4 outColor;
+// The exponent the fg/bg coverage mix is performed under (see main()). NOT 2.2: this is a TEXT-AA
+// blend gamma, not a display EOTF, and the device bracketed it — 1.0 (a plain sRGB-space mix) read
+// thin, 2.2 (the full physical decode) read thick. One named constant so the next nudge, if the
+// reference device still reads a hair off in either direction, is a one-token change.
+const float BLEND_GAMMA = 1.45;
 vec4 rgba8(uint c) {
   return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u),
               float((c >> 24) & 255u)) / 255.0;
@@ -65,19 +70,27 @@ void main() {
   // NON-LINEAR quantity: at coverage 0.5 it emits 0.5, which the display shows at ~0.5^2.2 = 22%
   // of full light instead of 50%. Every mid-coverage edge pixel is under-weighted, and the sum of
   // that over a glyph's outline is exactly the "WebGL text looks thinner/softer" defect the device
-  // rounds keep reporting.
+  // rounds kept reporting. Decoding, mixing in linear light and re-encoding is what fixes it.
   //
-  // Decoding to linear, mixing there, and re-encoding puts that same edge pixel at ~0.73 encoded —
-  // i.e. it weights the AA edge the way CoreText's own blending does, which is what we are trying
-  // to match. pow(2.2) is the shader-standard APPROXIMATION of the sRGB EOTF, not the piecewise
-  // curve (which has a linear toe below 0.04045); the two differ only in the near-black range,
-  // well under a code point of visible difference here, and the approximation costs two pow()s.
+  // BUT THE EXPONENT IS BLEND_GAMMA (1.45), NOT THE PHYSICAL 2.2 — and that is the whole point of
+  // this paragraph. The coverage in our atlas is not an abstract geometric coverage: it is
+  // CoreText's OWN rasterization of white-on-black, which already carries its font-smoothing
+  // compensation for light-on-dark. Compositing that with the full 2.2 decode applies the
+  // compensation TWICE, and the device duly reported the result as slightly too thick. Text
+  // rasterization stacks land in the same place for the same reason — Skia and FreeType's LCD-filter
+  // era blend AA coverage at a gamma around 1.4-1.5, not at the display's 2.2 — because the value
+  // being blended came out of a text rasterizer, not out of a photograph.
+  //
+  // The answer is BRACKETED by device reports, which is why this number is trustworthy rather than
+  // picked: 1.0 (a plain sRGB-space mix, rounds 1-6) read THIN, 2.2 (round 7) read THICK, 1.45 sits
+  // between them. If the reference device still reads a hair off, move BLEND_GAMMA alone — down
+  // toward 1.0 if it looks thick, up toward 2.2 if it looks thin. Nothing else in this shader is a
+  // weight knob.
   //
   // Deliberately NOT stacked on top of this: the extra directional coverage boost some GPU text
   // stacks use (cov = pow(cov, 1.0/1.2) when fg is brighter than bg). It pulls in the same
-  // direction as this fix with a hand-picked exponent, and with one device signal per round we
-  // could not tell which of the two overshot if round 8 comes back "too heavy". Gamma is a model;
-  // the boost is a knob. Model first.
+  // direction as BLEND_GAMMA, so two knobs would fight over one device signal — and the bracket
+  // above shows a single exponent already spans thin-to-thick. One knob, moved on evidence.
   //
   // If a gap STILL survives this, stop tuning the compositing: the remaining structural difference
   // is that xterm rasterizes in colour at all. Checklist §2.7 already routes that (colour atlas
@@ -86,8 +99,8 @@ void main() {
   // Alpha is NOT gamma-encoded and stays a straight lerp, bit-for-bit what the old
   // mix(bg, vec4(fg.rgb, 1.0), cov) produced in that lane — the frame's alpha feeds the
   // SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend and the page composite below it.
-  vec3 lin = mix(pow(bg.rgb, vec3(2.2)), pow(fg.rgb, vec3(2.2)), cov);
-  outColor = vec4(pow(lin, vec3(1.0 / 2.2)), mix(bg.a, 1.0, cov));
+  vec3 lin = mix(pow(bg.rgb, vec3(BLEND_GAMMA)), pow(fg.rgb, vec3(BLEND_GAMMA)), cov);
+  outColor = vec4(pow(lin, vec3(1.0 / BLEND_GAMMA)), mix(bg.a, 1.0, cov));
 }`
 
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {

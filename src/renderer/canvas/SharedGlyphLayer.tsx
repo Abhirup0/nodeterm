@@ -30,7 +30,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { create } from 'zustand'
-import { GlyphAtlas } from '../glyphgrid/atlas'
+import { GlyphAtlas, type GlyphSlotAllocation } from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
 import type { GlyphGL } from '../glyphgrid/gl'
@@ -659,6 +659,73 @@ function usableCell(cell: DeviceCell | undefined): DeviceCell | null {
   return { cellW: Math.min(cellW, MAX_CELL_PX), cellH: Math.min(cellH, MAX_CELL_PX) }
 }
 
+/**
+ * TEMPORARY device-debug instrumentation for the blank-single-glyph bug (round 5's `ç`, round 7's
+ * lowercase `x`: one letter renders blank while its neighbours are fine, reproducibly, for the
+ * whole session). It is OFF unless `localStorage['nodeterm.glyphgridDebug'] === '1'`.
+ *
+ * Why instrumentation instead of a fix: every path that can blank ONE slot was audited headlessly
+ * and is clean (see `GlyphSlotAllocation`). Reproducing needs a real font on a real device, so
+ * rather than guess at a fifth candidate, one device round is spent turning the report into a
+ * measurement. Remove this once the bug is closed.
+ *
+ * The dump is the load-bearing half. It answers the one question that halves the search space:
+ * **is the letter missing from the ATLAS, or present in the atlas but blank on screen?**
+ *  - missing in the atlas  → the rasterizer (font/baseline/clip) is the suspect;
+ *  - present in the atlas  → the slot→uv mapping or the texture upload is.
+ * Everything else is downstream of that answer, which is why the tester is asked for the PNG and
+ * not for a longer log.
+ */
+function glyphDebugOn(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('nodeterm.glyphgridDebug') === '1'
+  } catch {
+    // Storage can throw outright (Safari private mode, a locked-down embedder). Debug off is
+    // always a safe answer.
+    return false
+  }
+}
+
+function glyphDebugTap(): ((info: GlyphSlotAllocation) => void) | undefined {
+  if (!glyphDebugOn()) return undefined
+  return ({ slot, code, bold, italic, x, y }): void => {
+    console.warn(
+      `[glyphgrid] slot ${slot} code 0x${code.toString(16)} ${JSON.stringify(
+        String.fromCodePoint(code)
+      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''} at ${x},${y}`
+    )
+  }
+}
+
+/** Exposes `window.__glyphgridDump()` → `{ page, ...geometry }`, where `page` is a PNG data URL of
+ *  the whole atlas. Installed only under the debug flag; the tester opens the data URL in a tab and
+ *  looks for the reported letter. */
+function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: number }): void {
+  if (!glyphDebugOn() || typeof window === 'undefined') return
+  ;(window as unknown as Record<string, unknown>).__glyphgridDump = async (): Promise<unknown> => {
+    const source = atlas.source
+    const geometry = {
+      pageSizePx: atlas.sizePx,
+      cellW: raster.cellW,
+      cellH: raster.cellH,
+      strideX: atlas.strideX,
+      strideY: atlas.strideY,
+      cols: Math.floor(atlas.sizePx / atlas.strideX),
+      capacity: atlas.capacity
+    }
+    // `source` is the rasterizer's OffscreenCanvas; convertToBlob is the only way to read it back.
+    if (!source || typeof (source as OffscreenCanvas).convertToBlob !== 'function')
+      return { ...geometry, page: null }
+    const blob = await (source as OffscreenCanvas).convertToBlob({ type: 'image/png' })
+    const page = await new Promise<string>((resolve) => {
+      const fr = new FileReader()
+      fr.onload = (): void => resolve(String(fr.result))
+      fr.readAsDataURL(blob)
+    })
+    return { ...geometry, page }
+  }
+}
+
 function createContext(cell: DeviceCell): LiveContext | null {
   if (typeof document === 'undefined' || typeof OffscreenCanvas === 'undefined') return null
   const { fontFamily, fontSize } = useSettings.getState().settings
@@ -687,7 +754,8 @@ function createContext(cell: DeviceCell): LiveContext | null {
     'position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none'
   const gl = createWebgl2GL(canvas)
   if (!gl) return null
-  const atlas = new GlyphAtlas(raster, ATLAS_PAGE_PX)
+  const atlas = new GlyphAtlas(raster, ATLAS_PAGE_PX, glyphDebugTap())
+  installGlyphDump(atlas, raster)
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
   return { engine, atlas, canvas, gl, fontKey: fontKeyOf(fontFamily, fontSize), disposed: false }
