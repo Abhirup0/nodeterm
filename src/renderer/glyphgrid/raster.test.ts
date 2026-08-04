@@ -1,17 +1,21 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { GlyphAtlas } from './atlas'
+import { GlyphAtlas, GUTTER_PX } from './atlas'
+import { packColor } from './cells'
 import { createCanvasRasterizer } from './raster'
 
 /**
- * These tests exist for ONE reason: the atlas page is opaque black with white ink, and the shader
- * reads coverage off the RED channel (`gl-webgl2.ts`). If this file ever goes back to rasterizing
- * onto transparency — which is what made plain text render thinner than the per-terminal
- * WebglAddon on macOS — the shader reads 0 everywhere and the terminal goes blank. Node has no
- * OffscreenCanvas, so the contract is checked against a recording stub rather than real pixels.
+ * These tests pin the two rects a colored draw uses, because the whole mip story rests on them:
+ * the slot's own BACKGROUND covers the FULL PITCH rect (gutter included — that is what makes a
+ * level-1/2 texel blend this slot's background with itself rather than with the page ground),
+ * while the INK is clipped to the CELL rect and may never touch the gutter (the MAX_SAFE_LOD = 2
+ * derivation in `atlas.ts` counts on 2*GUTTER_PX clean texels between two slots' inks).
+ *
+ * Node has no OffscreenCanvas, so the contract is checked against a recording stub rather than
+ * real pixels.
  */
 
 interface Op {
-  kind: 'fillRect' | 'fillText' | 'clip'
+  kind: 'fillRect' | 'fillText' | 'clip' | 'clearRect'
   fill?: string
   args: number[]
   text?: string
@@ -32,6 +36,9 @@ function stubCanvas(): { ops: Op[]; restore: () => void } {
     clip() {},
     fillRect(x: number, y: number, w: number, h: number) {
       ops.push({ kind: 'fillRect', fill: ctx.fillStyle, args: [x, y, w, h] })
+    },
+    clearRect(x: number, y: number, w: number, h: number) {
+      ops.push({ kind: 'clearRect', args: [x, y, w, h] })
     },
     fillText(text: string, x: number, y: number) {
       ops.push({ kind: 'fillText', fill: ctx.fillStyle, args: [x, y], text })
@@ -58,11 +65,20 @@ function stubCanvas(): { ops: Op[]; restore: () => void } {
 }
 
 const FONT = { family: 'monospace', sizePx: 16, cellW: 10, cellH: 20 }
+/** The pitch this font lays out on: ceil(cell) + a gutter on each side. */
+const PITCH_W = 10 + 2 * GUTTER_PX
+const PITCH_H = 20 + 2 * GUTTER_PX
 
-/** Packed colour lanes. T2 is what makes them observable in the ops below; for now they only have
- *  to be threaded through the signature. */
-const FG = 0xffffffff
-const BG = 0xff000000
+/** A realistic INK origin — the corner of a pitch cell plus one gutter on each axis, which is
+ *  exactly what `GlyphAtlas.cellXY` hands the rasterizer. */
+const INK_X = PITCH_W + GUTTER_PX
+const INK_Y = PITCH_H + GUTTER_PX
+
+/** Final packed colour lanes, deliberately not black/white so a swapped fg/bg is visible. */
+const FG = packColor(255, 160, 0, 255)
+const BG = packColor(16, 32, 48, 255)
+const FG_CSS = 'rgb(255,160,0)'
+const BG_CSS = 'rgb(16,32,48)'
 
 let active: { restore: () => void } | null = null
 afterEach(() => {
@@ -78,49 +94,127 @@ describe('createCanvasRasterizer', () => {
     ;(globalThis as Record<string, unknown>).OffscreenCanvas = prev
   })
 
-  it('paints the WHOLE page opaque black once at creation — the backdrop coverage 0 means', () => {
+  it('paints NOTHING at creation — the page ground stays transparent-black', () => {
     const stub = stubCanvas()
     active = stub
     createCanvasRasterizer(FONT, 256)
-    expect(stub.ops).toEqual([{ kind: 'fillRect', fill: '#000000', args: [0, 0, 256, 256] }])
+    // The old opaque-black page fill is GONE: the backdrop is now per-slot (the bg fill in
+    // `draw`), and a page-wide fill would put an opaque colour in slot 0, which every space
+    // samples.
+    expect(stub.ops).toEqual([])
   })
 
-  it('re-blacks a slot inside its clip, then draws WHITE ink over that backdrop', () => {
+  it('fills the FULL PITCH rect with bg, then clips the ink to the CELL rect and draws it in fg', () => {
     const stub = stubCanvas()
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
     stub.ops.length = 0
-    r.draw(0x41, false, false, 10, 20, FG, BG) // 'A' into the slot at (10,20)
+    r.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
 
-    expect(stub.ops[0]).toEqual({ kind: 'clip', args: [10, 20, 10, 20] })
-    // The black fill is the slot's own rect — never the page, and the clip above keeps it off the
-    // neighbouring slots even if a future cell size disagreed.
-    expect(stub.ops[1]).toEqual({ kind: 'fillRect', fill: '#000000', args: [10, 20, 10, 20] })
+    // 1. The background covers the pitch cell — its origin is the INK origin minus one gutter on
+    //    each axis, and its extent is the whole pitch (gutters included).
+    expect(stub.ops[0]).toEqual({
+      kind: 'fillRect',
+      fill: BG_CSS,
+      args: [INK_X - GUTTER_PX, INK_Y - GUTTER_PX, PITCH_W, PITCH_H]
+    })
+    // 2. The ink is clipped to the CELL rect, which starts at the ink origin.
+    expect(stub.ops[1]).toEqual({ kind: 'clip', args: [INK_X, INK_Y, FONT.cellW, FONT.cellH] })
+    // 3. The glyph itself, in the foreground colour.
     const ink = stub.ops[2]
     expect(ink.kind).toBe('fillText')
     expect(ink.text).toBe('A')
-    expect(ink.fill).toBe('#ffffff')
-    // Baseline: half-leading of a line box that exactly fills the cell → the ascent, on a WHOLE
-    // device pixel (a fractional baseline would give each glyph a different NEAREST cut).
-    expect(ink.args[1]).toBe(20 + 16)
+    expect(ink.fill).toBe(FG_CSS)
+    // Baseline: unchanged half-leading convention, now measured from the ink origin (i.e. inside
+    // the cell rect, one gutter into the pitch cell), on a WHOLE device pixel.
+    expect(ink.args[0]).toBe(INK_X)
+    expect(ink.args[1]).toBe(INK_Y + 16)
     expect(Number.isInteger(ink.args[1])).toBe(true)
   })
 
-  it('draws the geometric box/block glyphs as WHITE rects (coverage 1), never with the font', () => {
+  it('keeps every ink op inside the CELL rect — the gutter must stay clean for the mip chain', () => {
     const stub = stubCanvas()
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
     stub.ops.length = 0
-    r.draw(0x2588, false, false, 0, 0, FG, BG) // █ full block
+    r.draw(0x2588, false, false, INK_X, INK_Y, FG, BG) // █ — the glyph that fills the whole cell
+
+    const ink = stub.ops.filter((o) => o.kind === 'fillRect' && o.fill === FG_CSS)
+    expect(ink.length).toBeGreaterThan(0)
+    for (const op of ink) {
+      const [x, y, w, h] = op.args
+      expect(x).toBeGreaterThanOrEqual(INK_X)
+      expect(y).toBeGreaterThanOrEqual(INK_Y)
+      expect(x + w).toBeLessThanOrEqual(INK_X + FONT.cellW)
+      expect(y + h).toBeLessThanOrEqual(INK_Y + FONT.cellH)
+    }
+    // And the only fill that is allowed outside the cell is the background one, which is exactly
+    // the pitch rect.
+    const outside = stub.ops.filter(
+      (o) =>
+        o.kind === 'fillRect' &&
+        (o.args[0] < INK_X ||
+          o.args[1] < INK_Y ||
+          o.args[0] + o.args[2] > INK_X + FONT.cellW ||
+          o.args[1] + o.args[3] > INK_Y + FONT.cellH)
+    )
+    expect(outside).toEqual([
+      {
+        kind: 'fillRect',
+        fill: BG_CSS,
+        args: [INK_X - GUTTER_PX, INK_Y - GUTTER_PX, PITCH_W, PITCH_H]
+      }
+    ])
+  })
+
+  it('draws the geometric box/block glyphs in the FOREGROUND over the bg fill, never with the font', () => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(FONT, 256)!
+    stub.ops.length = 0
+    r.draw(0x2591, false, false, INK_X, INK_Y, FG, BG) // ░ — a stipple, fg pixels over bg
 
     expect(stub.ops.some((o) => o.kind === 'fillText')).toBe(false)
     const fills = stub.ops.filter((o) => o.kind === 'fillRect')
-    expect(fills[0].fill).toBe('#000000') // the slot's backdrop
-    expect(fills.slice(1).every((o) => o.fill === '#ffffff')).toBe(true)
+    expect(fills[0].fill).toBe(BG_CSS) // the slot's own backdrop, first
+    expect(fills.slice(1).every((o) => o.fill === FG_CSS)).toBe(true)
     expect(fills.length).toBeGreaterThan(1)
   })
 
-  it('never draws slot 0, so the blank slot every space samples stays black', () => {
+  it('converts both packed lanes to css rgb(), reading the RGB lanes in packColor order', () => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(FONT, 256)!
+    stub.ops.length = 0
+    // A colour whose channels are all different, so a swapped r/b lane cannot pass.
+    r.draw(0x41, false, false, INK_X, INK_Y, packColor(1, 2, 3, 255), packColor(4, 5, 6, 255))
+    expect(stub.ops[0].fill).toBe('rgb(4,5,6)')
+    expect(stub.ops.find((o) => o.kind === 'fillText')!.fill).toBe('rgb(1,2,3)')
+  })
+
+  it('keys off the UNSIGNED lanes — a negative packed colour is the same colour', () => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(FONT, 256)!
+    stub.ops.length = 0
+    // `0xff << 24` is negative in JS; an arithmetic path can hand us that spelling.
+    r.draw(0x41, false, false, INK_X, INK_Y, (0xff << 24) | 0x0000ff, (0xff << 24) | 0x00ff00)
+    expect(stub.ops[0].fill).toBe('rgb(0,255,0)')
+    expect(stub.ops.find((o) => o.kind === 'fillText')!.fill).toBe('rgb(255,0,0)')
+  })
+
+  it('clearPage() blanks the whole page back to transparent-black', () => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(FONT, 256)!
+    stub.ops.length = 0
+    r.clearPage()
+    // clearRect, NOT a fill: the page ground has to go back to transparent-black so slot 0 stays
+    // the blank slot every space samples.
+    expect(stub.ops).toEqual([{ kind: 'clearRect', args: [0, 0, 256, 256] }])
+  })
+
+  it('never draws slot 0, so the blank slot every space samples stays transparent', () => {
     const stub = stubCanvas()
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
@@ -128,8 +222,9 @@ describe('createCanvasRasterizer', () => {
     stub.ops.length = 0
     expect(atlas.glyphFor(0x20, false, false, FG, BG)).toBe(0)
     expect(stub.ops).toEqual([])
-    // The first real glyph starts at slot 1 — i.e. past the origin cell.
+    // The first real glyph starts at slot 1 — i.e. past the origin cell. Not even its background
+    // fill may reach slot 0's pitch rect.
     atlas.glyphFor(0x41, false, false, FG, BG)
-    expect(stub.ops.some((o) => o.args[0] === 0 && o.args[1] === 0)).toBe(false)
+    expect(stub.ops.some((o) => o.args[0] < PITCH_W && o.args[1] < PITCH_H)).toBe(false)
   })
 })

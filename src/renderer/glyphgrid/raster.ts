@@ -1,5 +1,6 @@
-import type { GlyphRasterizer } from './atlas'
+import { GUTTER_PX, slotPitch, type GlyphRasterizer } from './atlas'
 import { boxGlyphOps } from './box-glyphs'
+import { unpackColor } from './cells'
 
 export interface RasterFont {
   family: string
@@ -12,10 +13,27 @@ export interface RasterFont {
   cellH: number
 }
 
-/** The two states a texel of this atlas can be in. Coverage is the LUMINANCE of the page, read off
- *  the red channel in the shader — so "no ink" must be opaque BLACK, not transparency. */
-const INK_OFF = '#000000'
-const INK_ON = '#ffffff'
+/**
+ * A packed colour lane (`packColor`) as a css colour.
+ *
+ * ALPHA IS DROPPED, deliberately. Every lane that reaches this file has been resolved by the feed
+ * into a concrete on-screen colour (default/palette/RGB → inverse → dim → selection/cursor), and
+ * those all carry alpha 255 — xterm's own colour manager packs opaque colours for exactly the same
+ * reason: the terminal's cells are opaque. Emitting `rgba(...)` off a lane would only matter if a
+ * translucent colour ever appeared, and a translucent slot would break the invariant this file
+ * exists to hold (an OPAQUE per-slot backdrop for the platform rasterizer to draw over — see the
+ * header). So an unexpected alpha is ignored rather than honoured.
+ *
+ * `>>> 0` first: `0xff << 24` is NEGATIVE in JS, so a lane can arrive as -16777216 from an
+ * arithmetic path and as 4278190080 off a cell lane. `unpackColor`'s masks happen to give the same
+ * answer for both spellings, so this is not a fix for a live bug — it is the same normalization
+ * `GlyphAtlas.glyphFor` applies to its KEY, kept here so the two can never disagree about what
+ * "the same colour" means.
+ */
+function cssColor(packed: number): string {
+  const { r, g, b } = unpackColor(packed >>> 0)
+  return `rgb(${r},${g},${b})`
+}
 
 /**
  * Where the alphabetic baseline sits inside the cell, in device px.
@@ -62,35 +80,44 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
   return Math.max(1, Math.min(Math.ceil(font.cellH), baseline))
 }
 
-/** Draws WHITE glyphs on an OPAQUE BLACK page (the shader tints); baseline-centered in the cell
- *  like xterm's renderers. Returns null when OffscreenCanvas 2D is unavailable — caller keeps the
- *  DOM renderer.
+/** Draws each glyph in its REAL foreground colour over its REAL background — the colour-keyed
+ *  atlas xterm's own TextureAtlas builds — baseline-centered in the cell like xterm's renderers.
+ *  Returns null when OffscreenCanvas 2D is unavailable — caller keeps the DOM renderer.
  *
- *  WHY THE PAGE IS OPAQUE (round 6 — "plain text is still softer than the WebglAddon"): macOS
- *  rasterizes text drawn onto a TRANSPARENT backdrop thinner and softer than the same text drawn
- *  over an opaque one. xterm's own TextureAtlas never rasterizes onto transparency — read
- *  `_drawToCache` in @xterm/addon-webgl: before every `fillText` it does
- *  `globalCompositeOperation='copy'; fillStyle=backgroundColor.css; fillRect(0,0,w,h)`, i.e. it
- *  hands the platform a fully painted backdrop, and only AFTERWARDS (`clearColor`, on the read-back
- *  ImageData) does it punch the background pixels' alpha to 0. Our atlas is monochrome + tinted in
- *  the shader rather than color-keyed, so we get the same input to the rasterizer the cheap way:
- *  the page is black, the ink is white, and COVERAGE IS THE LUMINANCE — read off the RED channel
- *  by the fragment shader (`gl-webgl2.ts`). The alpha channel is now 1 everywhere and unused.
+ *  THE BACKDROP, AND WHY THIS IS STILL THE ROUND-6 PROPERTY. macOS rasterizes text drawn onto a
+ *  TRANSPARENT backdrop thinner and softer than the same text drawn over an opaque one, which is
+ *  what made plain text look softer than the per-terminal WebglAddon. xterm never rasterizes onto
+ *  transparency either — read `_drawToCache` in @xterm/addon-webgl: before every `fillText` it does
+ *  `globalCompositeOperation='copy'; fillStyle=backgroundColor.css; fillRect(...)`, i.e. it hands
+ *  the platform a fully painted backdrop. Round 6 approximated that with a page-wide opaque BLACK
+ *  fill plus a white-ink/coverage-in-the-red-channel encoding that the shader re-mixed; that
+ *  encoding is GONE (the re-mix had no correct gamma — see atlas.ts's header). The property it was
+ *  protecting is not: every slot's PITCH RECT is filled with that slot's own opaque background
+ *  before any ink lands, so CoreText still draws over an opaque backdrop. The page-wide black fill
+ *  must NOT come back — it would put opaque black in slot 0, which every space samples.
  *
  *  The context is deliberately still `alpha: true` — exactly like xterm's tmp canvas, which is a
  *  plain `document.createElement('canvas')`. The opacity that matters is the PAINTED backdrop, not
  *  the backing store's format, and an alpha-less canvas would additionally let Chromium turn on
- *  LCD/subpixel antialiasing, whose per-channel coverage would make sampling one channel wrong.
+ *  LCD/subpixel antialiasing, whose per-channel coverage the RGBA blit would bake in per channel.
  *
- *  Three invariants this file must not break:
- *  1. The page is opaque BLACK where no glyph has been drawn — coverage 0. The atlas's slot 0
- *     (the cell at 0,0) is permanently blank and is what every space/unknown glyph samples;
- *     `GlyphAtlas` never asks for slot 0, so slot 0 is never drawn and simply stays black.
- *  2. A slot is re-blacked (not cleared to transparency) before it is drawn, so evicting and
- *     reusing a cell can never leave a previous glyph's ink behind as coverage.
- *  3. Every draw is CLIPPED to its cell rect, so a glyph wider than cellW (a CJK cell, an
- *     overhanging italic) cannot bleed into the neighbouring slot's texels — and the per-slot
- *     black fill above is clipped by the same rect, so it can never erase a neighbour.
+ *  THE PAGE INVARIANT, in one line: the backdrop is per-slot bg over the FULL PITCH rect; the
+ *  inter-slot page ground is transparent-black and is never sampled at LOD <= MAX_SAFE_LOD.
+ *  Unpacked, the four things this file must not break:
+ *  1. The page ground starts (and `clearPage` returns to) TRANSPARENT-black. The atlas's slot 0 —
+ *     the pitch cell at 0,0 — is permanently blank and is what every space/unknown code point
+ *     samples; `GlyphAtlas` never asks for slot 0, so nothing is ever drawn there and it stays
+ *     transparent, which is what lets the shader leave the plate's own pixels alone.
+ *  2. A slot's whole pitch rect is REPAINTED with its background before it is inked, so reusing a
+ *     cell after a reset can never leave a previous glyph's ink or a previous background behind.
+ *  3. INK NEVER ENTERS THE GUTTER. Every glyph is clipped to the CELL rect — one gutter inside the
+ *     pitch rect on each axis — so two slots' inks stay 2*GUTTER_PX texels apart, which is exactly
+ *     the separation `MAX_SAFE_LOD = 2` is derived from (see GUTTER_PX in atlas.ts). A glyph wider
+ *     than the cell (a CJK cell, an overhanging italic) is CUT, not allowed to overhang: a soft
+ *     edge is a cosmetic loss on one glyph, a ghost glyph in a neighbour's mip is a rendering bug.
+ *  4. The background fill covers the pitch EXACTLY — not more (it would erase a neighbour's
+ *     gutter, and with it that neighbour's mip skirt) and not less (a strip of page ground inside
+ *     the mip neighbourhood would blend transparency into the slot at LOD 1/2).
  *
  *  And one thing it must not START doing: draw the box-drawing / block-element ranges with the
  *  FONT. `boxGlyphOps` gets first refusal on every code point (see box-glyphs.ts for why — fonts
@@ -105,45 +132,57 @@ export function createCanvasRasterizer(
   const ctx = canvas.getContext('2d', { alpha: true })
   if (!ctx) return null
   ctx.textBaseline = 'alphabetic'
-  // The backdrop, once, for the whole page: every texel starts at coverage 0 AND opaque, which is
-  // what gives the platform rasterizer something to draw over (see the header).
-  ctx.fillStyle = INK_OFF
-  ctx.fillRect(0, 0, atlasSizePx, atlasSizePx)
+  // NOTHING is painted here. A fresh OffscreenCanvas is already transparent-black, which is the
+  // page ground this atlas wants; the backdrop the platform rasterizer needs is per-slot and is
+  // painted in `draw`. (Round 6's page-wide opaque black fill lived here — see the header for why
+  // it must not come back.)
   const baseline = baselineIn(ctx, font)
+  // The slot pitch, from the SAME helper the atlas lays the page out with — the background fill
+  // below has to cover exactly one pitch cell.
+  const pitchW = slotPitch(font.cellW)
+  const pitchH = slotPitch(font.cellH)
   return {
     cellW: font.cellW,
     cellH: font.cellH,
     get source() {
       return canvas
     },
-    /** T2 fills this in: blank the page back to the state `createCanvasRasterizer` leaves it in.
-     *  Kept mechanical here — the atlas's reset path needs the member to exist, and the colour
-     *  contract (transparent-black page, per-slot backdrops) is Task 2's to land. */
+    /** Blank the page back to the state `createCanvasRasterizer` leaves it in: TRANSPARENT-black,
+     *  everywhere. `clearRect`, not a fill — a fill of any colour would give slot 0 (and every
+     *  never-allocated pitch cell) an opaque colour, and slot 0 is what every space samples. */
     clearPage() {
-      ctx.fillStyle = INK_OFF
-      ctx.fillRect(0, 0, atlasSizePx, atlasSizePx)
+      ctx.clearRect(0, 0, atlasSizePx, atlasSizePx)
     },
-    // fg/bg are the FINAL packed colour lanes for this slot. T2 fills this in: fill the whole
-    // PITCH rect (gutter included) with `bg` and paint the glyph/box ops in `fg`, so the atlas
-    // holds CoreText's own coloured pixels. Until then the draw stays monochrome — the signature
-    // is threaded now because the atlas keys on the colours from this task on.
-    draw(code, bold, italic, x, y, _fg, _bg) {
+    /** `x, y` is the INK origin the atlas hands us — already one gutter inside the pitch cell on
+     *  each axis (`GlyphAtlas.cellXY`) — and `fg`/`bg` are the FINAL packed colour lanes for this
+     *  slot. Two DIFFERENT rects are involved; see the header's invariants 3 and 4. */
+    draw(code, bold, italic, x, y, fg, bg) {
+      // 1. THE BACKGROUND, over the whole PITCH rect — gutters included. The atlas passes the INK
+      //    origin, so the pitch cell's corner is one gutter back on each axis; its extent is the
+      //    pitch, which is `ceil(cell) + 2*GUTTER_PX`. Both are whole texels and consecutive pitch
+      //    cells are exactly `pitch` apart, so this fill tiles its own slot and touches no other.
+      //    Unclipped on purpose: the rect is already exact, and the fill is what has to reach the
+      //    gutter (a gutter carrying this slot's own background is what makes mip bleed invisible).
+      //    It also repaints everything a previous tenant of this slot left behind.
+      ctx.fillStyle = cssColor(bg)
+      ctx.fillRect(x - GUTTER_PX, y - GUTTER_PX, pitchW, pitchH)
+      // 2. THE INK, clipped to the CELL rect — never the pitch rect. The cell always fits inside
+      //    the pitch (the pitch rounds the cell UP and adds a gutter on each side), so this clip
+      //    leaves at least GUTTER_PX ink-free texels on every side, which is the separation
+      //    MAX_SAFE_LOD = 2 is derived from. A glyph that overflows the cell is CUT here.
       ctx.save()
       ctx.beginPath()
       ctx.rect(x, y, font.cellW, font.cellH)
       ctx.clip()
-      // Re-black this slot only (the clip keeps it off the neighbours): drawing over a reused cell
-      // must start from coverage 0, and 'source-over' white ink cannot subtract old ink.
-      ctx.fillStyle = INK_OFF
-      ctx.fillRect(x, y, font.cellW, font.cellH)
-      ctx.fillStyle = INK_ON
+      ctx.fillStyle = cssColor(fg)
       // Geometry first: these ranges are DEFINED as fractions of the cell, so drawing them is
       // both more correct and cheaper than trusting the face. The ops are already snapped to
       // device px (interior edges) and to the exact cell bounds (outer edges), so no seam can
       // appear between two adjacent cells and no rect lands on a half pixel.
-      // The ops are opaque white by construction — including the shade blocks, which are DITHER
-      // patterns rather than tints, so `globalAlpha` is never touched here and the atlas keeps
-      // exactly two states per texel: white ink (coverage 1) or the black backdrop (coverage 0).
+      // `PaintOp` is alpha-free by construction (x/y/w/h only) — including the shade blocks, which
+      // are DITHER patterns rather than tints. So `globalAlpha` is never touched here and a stipple
+      // reads as foreground PIXELS over the background fill, which is exactly what xterm's own
+      // patterns are.
       const geometry = boxGlyphOps(code, font.cellW, font.cellH)
       if (geometry) {
         for (const op of geometry) ctx.fillRect(x + op.x, y + op.y, op.w, op.h)

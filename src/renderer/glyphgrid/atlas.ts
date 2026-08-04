@@ -56,6 +56,17 @@ export interface GlyphRasterizer {
  */
 export const GUTTER_PX = 2
 
+/** The slot PITCH for a cell extent, in whole texels — the ONE copy of that arithmetic.
+ *
+ *  Exported because raster.ts needs the identical number: the atlas lays the page out on this
+ *  pitch and the rasterizer fills exactly one pitch rect per slot with that slot's background.
+ *  Two hand-written copies would drift the moment the gutter or the rounding changed, and the
+ *  symptom is a background fill that either leaves a page-ground seam or overwrites a neighbour's
+ *  gutter. See `GlyphAtlas.strideX` for why the pitch is rounded and the sampled extent is not. */
+export function slotPitch(cell: number): number {
+  return Math.max(1, Math.ceil(cell)) + 2 * GUTTER_PX
+}
+
 /** One slot allocation, reported to an optional debug tap. See `GlyphAtlas`'s constructor.
  *
  *  This exists for ONE open device bug: a single letter (`ç` in round 5, lowercase `x` in round 7)
@@ -148,10 +159,10 @@ export class GlyphAtlas {
    * box, and `capacity`/`cellXY` would count slots that cannot hold a pixel.
    */
   get strideX(): number {
-    return Math.max(1, Math.ceil(this.rasterizer.cellW)) + 2 * GUTTER_PX
+    return slotPitch(this.rasterizer.cellW)
   }
   get strideY(): number {
-    return Math.max(1, Math.ceil(this.rasterizer.cellH)) + 2 * GUTTER_PX
+    return slotPitch(this.rasterizer.cellH)
   }
 
   get capacity(): number {
