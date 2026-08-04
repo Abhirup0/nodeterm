@@ -38,7 +38,7 @@ export interface GridHandle {
    * deferred, not lost, and rides the frame that brings it back into view. Callers therefore
    * cannot read a `frame()` of `false` as "my write was dropped".
    *
-   * The glyph lane must be a slot obtained from `GlyphAtlas.glyphFor(code, bold, italic)` —
+   * The glyph lane must be a slot obtained from `GlyphAtlas.glyphFor(code, bold, italic, fg, bg)` —
    * never a raw code point. The atlas owns the slot space (0 is the permanently blank slot,
    * and an unrasterized code degrades to it), so a code point written here would sample an
    * arbitrary neighbouring glyph.

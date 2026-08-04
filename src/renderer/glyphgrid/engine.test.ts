@@ -64,14 +64,20 @@ function fakeGL(): GlyphGL & {
 }
 
 const atlas = () =>
-  new GlyphAtlas({ cellW: 10, cellH: 20, source: null, draw: () => undefined }, 100)
+  new GlyphAtlas(
+    { cellW: 10, cellH: 20, source: null, draw: () => undefined, clearPage: () => undefined },
+    100
+  )
 
 /** An atlas whose rasterizer already has a texture source, so the engine can upload it. */
 function loadedAtlas(sizePx = 512, cellW = 7, cellH = 15) {
   const source = {} as unknown as TexImageSource
   return {
     source,
-    atlas: new GlyphAtlas({ cellW, cellH, source, draw: () => undefined }, sizePx)
+    atlas: new GlyphAtlas(
+      { cellW, cellH, source, draw: () => undefined, clearPage: () => undefined },
+      sizePx
+    )
   }
 }
 
@@ -340,12 +346,14 @@ describe('GlyphGridEngine', () => {
     e.setViewport(800, 600, 1)
     e.setCamera({ x: 0, y: 0, zoom: 1 })
     e.register(spec('a', 0))
-    a.glyphFor(0x41, false, false) // dirties the atlas
+    a.glyphFor(0x41, false, false, 0xffffffff, 0xff000000) // dirties the atlas
     expect(e.frame()).toBe(true)
     // The extent stays exact (texel:pixel 1:1 against the quad the grid draws) and the pitch is
     // the whole-texel slot spacing; the shader needs both, and handing it the extent as the pitch
     // would overlap every slot with its neighbour.
-    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 15.66, 31.2, 16, 32)
+    // The pitch now carries a GUTTER_PX margin on each side (16 + 4, 32 + 4) — the ink-free
+    // ring the mip chain needs. The extent is unchanged: it is still the exact device cell.
+    expect(gl.uploadAtlas).toHaveBeenCalledWith(source, 512, 15.66, 31.2, 20, 36)
     // Stronger than "before the first drawGrid": beginFrame pushes uAtlasCols/uAtlasCell from
     // the values uploadAtlas stored, so an upload landing after it would leave frame 1 sampling
     // slot 0 everywhere and the uniforms permanently one upload stale.
@@ -361,7 +369,7 @@ describe('GlyphGridEngine', () => {
   it('uploads a never-uploaded atlas even when it is not dirty, and only once', () => {
     const gl = fakeGL()
     const { atlas: a } = loadedAtlas()
-    a.glyphFor(0x41, false, false)
+    a.glyphFor(0x41, false, false, 0xffffffff, 0xff000000)
     a.clearDirty() // rasterized elsewhere: has content, reports clean
     const e = new GlyphGridEngine(gl, a)
     e.setViewport(800, 600, 1)

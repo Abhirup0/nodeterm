@@ -1,21 +1,68 @@
-/** Monochrome glyph atlas BOOKKEEPING. Rasterization is injected (GlyphRasterizer) so this
- *  module is pure and unit-testable; the real rasterizer (raster.ts) draws white glyphs onto an
- *  OffscreenCanvas that gl-webgl2.ts uploads as the atlas texture. Colors are per-cell instance
- *  data tinted in the shader — that is what keeps the key space to code|bold|italic. */
+/** COLOR glyph atlas BOOKKEEPING. Rasterization is injected (GlyphRasterizer) so this module is
+ *  pure and unit-testable; the real rasterizer (raster.ts) paints each slot's real background and
+ *  then the glyph in its real foreground onto an OffscreenCanvas that gl-webgl2.ts uploads as the
+ *  atlas texture.
+ *
+ *  WHY COLORED, not monochrome-plus-a-tint. The old atlas stored white-on-black COVERAGE keyed
+ *  `code|bold italic` and the fragment shader mixed fg/bg by it — one slot per glyph shape, at the
+ *  cost of performing the anti-aliasing blend ourselves. That blend is exactly what could never be
+ *  made to match: CoreText's rasterization of light-on-dark text carries its own gamma and
+ *  smoothing compensation, so re-mixing its coverage in the shader was a tuning knob with no
+ *  correct setting (six device rounds of BLEND_GAMMA say so). xterm's own TextureAtlas asks the
+ *  platform to draw the glyph in its REAL colours over its REAL background and blits the result
+ *  1:1; keying on the colours is the price of that, and it is the price this file now pays.
+ *
+ *  The key space therefore grows with the palette, which is what `reset()` below is for. */
 export interface GlyphRasterizer {
   cellW: number
   cellH: number
-  draw(code: number, bold: boolean, italic: boolean, x: number, y: number): void
+  /** Paint one slot. `x, y` is the INK origin in page pixels (already one gutter inside the pitch
+   *  cell — see GUTTER_PX); `fg`/`bg` are packColor lanes, the FINAL per-cell colours with
+   *  selection/cursor already applied by the caller. */
+  draw(
+    code: number,
+    bold: boolean,
+    italic: boolean,
+    x: number,
+    y: number,
+    fg: number,
+    bg: number
+  ): void
+  /** Blank the whole page. Called by `GlyphAtlas.reset()` and by nothing else: the bookkeeping and
+   *  the pixels have to be emptied in the same breath or a stale slot keeps its old ink. */
+  clearPage(): void
   readonly source: TexImageSource | null
 }
+
+/**
+ * The ink-free margin, in page texels, on EVERY side of a slot's cell rect. Exported because three
+ * modules have to agree on it: this file lays the page out with it, raster.ts fills it with the
+ * slot's own background colour, and gl-webgl2.ts offsets its uv derivation by it.
+ *
+ * WHY 2 — the derivation, since this number is what bounds the usable mip chain. A mip level-n
+ * texel is the average of an aligned 2^n × 2^n block of level-0 texels. Two slots' inks are
+ * separated by 2*GUTTER_PX = 4 texels of gutter (this slot's plus the neighbour's), so a level-n
+ * block can only contain ink from BOTH slots once it is wider than that separation, i.e. once
+ * 2^n > 4 → n >= 3. Levels 0, 1 and 2 therefore never mix a foreign glyph into this slot, which is
+ * why gl-webgl2 clamps TEXTURE_MAX_LOD to MAX_SAFE_LOD = 2.
+ *
+ * What the gutter does NOT promise, stated so nobody reads more into it: bilinear filtering WITHIN
+ * a level still reaches the adjacent texel, which at level 2 can be a pure-gutter texel holding a
+ * blend of this slot's background and the neighbour's. That is a soft edge between two BACKGROUND
+ * colours at heavy zoom-out — never a ghost glyph — and it is the residual the LOD clamp accepts.
+ * The promise is about INK, and it holds only while raster.ts keeps ink inside the cell rect: ink
+ * allowed to overhang into the gutter shortens the ink-to-ink separation and invalidates the
+ * derivation above.
+ */
+export const GUTTER_PX = 2
 
 /** One slot allocation, reported to an optional debug tap. See `GlyphAtlas`'s constructor.
  *
  *  This exists for ONE open device bug: a single letter (`ç` in round 5, lowercase `x` in round 7)
  *  renders BLANK while its neighbours are fine. Every headless-auditable path was audited and is
  *  clean — box-glyphs claims nothing below U+0300 and never returns an empty op list, the raster
- *  re-blacks under the clip before it inks on BOTH branches, `cellXY` is the single copy of the
- *  layout math and the shader recomputes it identically, `strideX = ceil(cellW) >= cellW` always
+ *  re-paints under the clip before it inks on BOTH branches, `cellXY` is the single copy of the
+ *  layout math and the shader recomputes it identically, `strideX >= cellW + 2*GUTTER_PX` always
  *  (the rasterizer's cell is captured at construction and never re-adopted), and the atlas's dirty
  *  flag is polled by the rAF driver every frame, so no wake-up can be missed. What is left needs a
  *  real font on a real device, which no test here can produce — so the next round collects
@@ -25,21 +72,33 @@ export interface GlyphSlotAllocation {
   code: number
   bold: boolean
   italic: boolean
-  /** Page-pixel origin the ink was drawn at — `cellXY(slot)`. */
+  /** Page-pixel INK origin the glyph was drawn at — `cellXY(slot)`. */
   x: number
   y: number
+  /** The packed colour lanes the slot was rasterized in — part of its key. */
+  fg: number
+  bg: number
+}
+
+/** What `onReset` hands back. A plain disposable rather than an unsubscribe function so the call
+ *  sites read the same as every other subscription in the renderer. */
+export interface GlyphAtlasSubscription {
+  dispose(): void
 }
 
 export class GlyphAtlas {
   private slots = new Map<string, number>()
   /** Slot 0 is permanently blank and is never handed to the rasterizer: every space, every
    *  unknown code point and every cell of a not-yet-uploaded GPU buffer samples it. Its
-   *  BLANKNESS is a contract on raster.ts — the page is opaque BLACK (= coverage 0; ink is white
-   *  and the shader reads the luminance) and nothing may ever draw at (0,0), so slot 0 simply
-   *  stays black — not something this file can enforce, so the two must change together. If ink
-   *  ever lands there, every space on the canvas grows a glyph. */
+   *  BLANKNESS is a contract on raster.ts — the page starts blank and nothing may ever draw into
+   *  slot 0 — not something this file can enforce, so the two must change together. If ink ever
+   *  lands there, every space on the canvas grows a glyph. Slot 0 is NOT a special case in the
+   *  layout: it sits inside the same gutter every other slot does, so its mip neighbourhood is
+   *  free of slot 1's ink for the same reason theirs are free of each other's. */
   private nextSlot = 1
   private dirtyFlag = false
+  private resets = 0
+  private resetSubs = new Set<() => void>()
 
   constructor(
     private rasterizer: GlyphRasterizer,
@@ -69,8 +128,8 @@ export class GlyphAtlas {
   }
 
   /**
-   * The slot PITCH, in whole texels — the cell rounded UP, so consecutive slots never share a
-   * texel.
+   * The slot PITCH, in whole texels — the cell rounded UP plus a gutter on each side, so
+   * consecutive slots share neither a texel nor a mip neighbourhood.
    *
    * Pitch and extent are separate for one reason. Rounding the CELL to whole texels (what this
    * atlas used to do) means a glyph rasterized into N texels is drawn onto a quad of N±0.5
@@ -80,14 +139,17 @@ export class GlyphAtlas {
    * a fractional origin would put two neighbouring glyphs' anti-aliasing in the SAME boundary
    * texel, and a full-block glyph would then bleed a dim column into an unrelated slot.
    *
-   * The `max(1, …)` is not decoration: a pitch of 0 makes `capacity` infinite and `cellXY`'s
-   * modulo NaN.
+   * The gutter rides on the PITCH, not on the extent: growing the sampled extent would pull the
+   * neighbouring backdrop into every glyph at zoom 1, which is the opposite of the point.
+   *
+   * The `max(1, …)` is not decoration: without it a sub-texel cell would round to a 0-texel ink
+   * box, and `capacity`/`cellXY` would count slots that cannot hold a pixel.
    */
   get strideX(): number {
-    return Math.max(1, Math.ceil(this.rasterizer.cellW))
+    return Math.max(1, Math.ceil(this.rasterizer.cellW)) + 2 * GUTTER_PX
   }
   get strideY(): number {
-    return Math.max(1, Math.ceil(this.rasterizer.cellH))
+    return Math.max(1, Math.ceil(this.rasterizer.cellH)) + 2 * GUTTER_PX
   }
 
   get capacity(): number {
@@ -96,12 +158,22 @@ export class GlyphAtlas {
     return cols * rows
   }
 
-  /** Row-major top-left of a slot, in page PIXELS — the single copy of the layout math.
+  /** How many times the page has been cleared and re-filled. Read by the device-debug log line —
+   *  resets are expected to be rare, and "how rare" is the number that decides whether the v1
+   *  reset-on-full model needs the Phase-2 escalation to real LRU eviction. */
+  get resetCount(): number {
+    return this.resets
+  }
+
+  /** Row-major INK origin of a slot, in page PIXELS — the single copy of the layout math.
    *
    *  Both consumers must agree exactly: `glyphFor` uses it to place the ink and `slotRect` to
    *  derive the uv rect the shader samples. Two hand-written copies would drift the moment
-   *  either the page metrics or the padding changed, and the symptom is every glyph rendering
+   *  either the page metrics or the gutter changed, and the symptom is every glyph rendering
    *  a fraction of a cell off — not a crash, just permanently wrong text.
+   *
+   *  The pitch cell's corner is `(slot % cols) * strideX`; the INK starts one gutter inside it on
+   *  each axis, which is what leaves the ink-free margin the mip chain needs (see GUTTER_PX).
    *
    *  On a DEGENERATE page (`sizePx < strideX`, so `cols === 0`) `slot % 0` is NaN, which would
    *  propagate silently into the uv rect. Capacity is 0 there, so no slot is ever allocated and
@@ -110,29 +182,84 @@ export class GlyphAtlas {
     const cols = Math.floor(this.sizePx / this.strideX)
     if (cols <= 0) return { x: 0, y: 0 }
     return {
-      x: (slot % cols) * this.strideX,
-      y: Math.floor(slot / cols) * this.strideY
+      x: (slot % cols) * this.strideX + GUTTER_PX,
+      y: Math.floor(slot / cols) * this.strideY + GUTTER_PX
     }
   }
 
-  glyphFor(code: number, bold: boolean, italic: boolean): number {
+  /**
+   * Subscribe to page resets. Fired AFTER the page has been blanked and the bookkeeping emptied,
+   * and BEFORE the allocation that triggered the reset lands — so a subscriber that repacks
+   * immediately packs into the fresh page and can never write a lane pointing at a slot that no
+   * longer holds what it held.
+   *
+   * A subscriber MAY call back into `glyphFor` (that is what a repack is), and doing so is safe:
+   * the reset path never recurses, and an allocation that no longer fits the freshly-filled page
+   * degrades to the blank slot instead of resetting again. It is still the wrong shape for the
+   * addon — a full repack inside someone else's pack loop — which is why T4 defers it.
+   */
+  onReset(cb: () => void): GlyphAtlasSubscription {
+    this.resetSubs.add(cb)
+    return {
+      dispose: () => {
+        this.resetSubs.delete(cb)
+      }
+    }
+  }
+
+  /**
+   * Clear the page and start over — xterm's `clearTextureAtlas` model.
+   *
+   * Colour keys grow with the palette, so a single page WILL fill on a busy canvas. The
+   * alternative, evicting one slot at a time, has a dangling-slot problem this design does not:
+   * a lane already uploaded to the GPU keeps pointing at the evicted slot and silently renders
+   * whatever glyph reused it. After a reset NO lane is valid, subscribers are told exactly that,
+   * and every row is repacked — one expensive frame instead of a permanent class of wrong pixels.
+   */
+  private reset(): void {
+    this.slots.clear()
+    this.nextSlot = 1
+    this.resets++
+    this.rasterizer.clearPage()
+    this.dirtyFlag = true
+    // Iterate a COPY: a subscriber is allowed to dispose itself (or another) from inside its own
+    // callback, and mutating the live set mid-iteration would skip the next subscriber.
+    for (const cb of [...this.resetSubs]) {
+      try {
+        cb()
+      } catch (err) {
+        // One broken repack must not cost the other subscribers their notification — nor the
+        // frame. The page is already consistent by the time we get here.
+        console.warn('[glyphgrid] atlas onReset subscriber threw:', err)
+      }
+    }
+  }
+
+  glyphFor(code: number, bold: boolean, italic: boolean, fg: number, bg: number): number {
     if (code === 0x20 || code === 0) return 0
-    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}`
+    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg}|${bg}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
-    // Covers the degenerate page too (capacity 0 → 1 >= 0), so nothing is ever rasterized onto a
-    // page that has no room for a single cell.
-    if (this.nextSlot >= this.capacity) return 0 // page full — degrade to blank, never throw
+    if (this.nextSlot >= this.capacity) {
+      // A page with room for nothing but the blank slot (capacity <= 1, degenerate pages
+      // included) can never satisfy this request: resetting would blank an empty page and notify
+      // every subscriber on EVERY glyph, forever. Degrade to blank instead.
+      if (this.capacity <= 1) return 0
+      this.reset()
+      // A subscriber may have repacked enough rows to fill the fresh page again. Never recurse —
+      // one reset per request — and degrade to blank rather than allocate off the end of the page.
+      if (this.nextSlot >= this.capacity) return 0
+    }
     const slot = this.nextSlot++
     const { x, y } = this.cellXY(slot)
-    this.rasterizer.draw(code, bold, italic, x, y)
+    this.rasterizer.draw(code, bold, italic, x, y, fg, bg)
     this.slots.set(key, slot)
     this.dirtyFlag = true
     // LAST, and guarded: the tap is a debug aid, so a throwing callback must cost a log line, not
     // the glyph — everything above is already committed by the time it runs.
     if (this.onAllocate) {
       try {
-        this.onAllocate({ slot, code, bold, italic, x, y })
+        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg })
       } catch {
         /* a debug tap never breaks a frame */
       }
@@ -140,9 +267,10 @@ export class GlyphAtlas {
     return slot
   }
 
-  /** The uv rect of a slot: the ORIGIN follows the whole-texel pitch, the SIZE is the exact
-   *  cell — the two are not the same number (see `strideX`), and the shader derives its uv the
-   *  same way (`uAtlasStride` for the origin, `uAtlasCell` for the extent). */
+  /** The uv rect of a slot: the ORIGIN is the ink origin (pitch cell + gutter), the SIZE is the
+   *  exact cell — the three numbers are not interchangeable (see `strideX` and `GUTTER_PX`), and
+   *  the shader must derive its uv the same way (`uAtlasStride` for the pitch, the gutter for the
+   *  origin offset, `uAtlasCell` for the extent). */
   slotRect(slot: number): { u0: number; v0: number; u1: number; v1: number } {
     // A degenerate page has no sampleable area at all: return the ZERO rect rather than let the
     // division produce NaN, which the shader would turn into undefined texture reads.

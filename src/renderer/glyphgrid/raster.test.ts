@@ -59,6 +59,11 @@ function stubCanvas(): { ops: Op[]; restore: () => void } {
 
 const FONT = { family: 'monospace', sizePx: 16, cellW: 10, cellH: 20 }
 
+/** Packed colour lanes. T2 is what makes them observable in the ops below; for now they only have
+ *  to be threaded through the signature. */
+const FG = 0xffffffff
+const BG = 0xff000000
+
 let active: { restore: () => void } | null = null
 afterEach(() => {
   active?.restore()
@@ -85,7 +90,7 @@ describe('createCanvasRasterizer', () => {
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
     stub.ops.length = 0
-    r.draw(0x41, false, false, 10, 20) // 'A' into the slot at (10,20)
+    r.draw(0x41, false, false, 10, 20, FG, BG) // 'A' into the slot at (10,20)
 
     expect(stub.ops[0]).toEqual({ kind: 'clip', args: [10, 20, 10, 20] })
     // The black fill is the slot's own rect — never the page, and the clip above keeps it off the
@@ -106,7 +111,7 @@ describe('createCanvasRasterizer', () => {
     active = stub
     const r = createCanvasRasterizer(FONT, 256)!
     stub.ops.length = 0
-    r.draw(0x2588, false, false, 0, 0) // █ full block
+    r.draw(0x2588, false, false, 0, 0, FG, BG) // █ full block
 
     expect(stub.ops.some((o) => o.kind === 'fillText')).toBe(false)
     const fills = stub.ops.filter((o) => o.kind === 'fillRect')
@@ -121,10 +126,10 @@ describe('createCanvasRasterizer', () => {
     const r = createCanvasRasterizer(FONT, 256)!
     const atlas = new GlyphAtlas(r, 256)
     stub.ops.length = 0
-    expect(atlas.glyphFor(0x20, false, false)).toBe(0)
+    expect(atlas.glyphFor(0x20, false, false, FG, BG)).toBe(0)
     expect(stub.ops).toEqual([])
     // The first real glyph starts at slot 1 — i.e. past the origin cell.
-    atlas.glyphFor(0x41, false, false)
+    atlas.glyphFor(0x41, false, false, FG, BG)
     expect(stub.ops.some((o) => o.args[0] === 0 && o.args[1] === 0)).toBe(false)
   })
 })

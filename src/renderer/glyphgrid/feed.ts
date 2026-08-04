@@ -214,7 +214,12 @@ export function packViewportRow(
         // The guard runs on the DERIVED code: a string can start with a lone surrogate just as
         // easily as getCode() can return one, and the rasterizer must never see either.
         const code = glyphCode(cell)
-        if (isRenderableCode(code)) glyph = atlas.glyphFor(code, bold, italic)
+        // The atlas is keyed by COLOUR from Phase 1c on, so the request carries the lanes this
+        // cell resolved to. NOTE, and this is Task 4's to finish: SELECTION and CURSOR are applied
+        // BELOW this line, so a selected/cursor cell currently asks for a slot in its pre-override
+        // colours. Threading the values is all this task does; moving the request after the
+        // overrides (and the ordering audit that goes with it) is the feed rewire.
+        if (isRenderableCode(code)) glyph = atlas.glyphFor(code, bold, italic, fg, bg)
         if (bold) flags |= FLAG_BOLD
         if (italic) flags |= FLAG_ITALIC
         if (cell.isUnderline() !== 0) flags |= FLAG_UNDERLINE

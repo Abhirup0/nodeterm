@@ -116,7 +116,18 @@ export function createCanvasRasterizer(
     get source() {
       return canvas
     },
-    draw(code, bold, italic, x, y) {
+    /** T2 fills this in: blank the page back to the state `createCanvasRasterizer` leaves it in.
+     *  Kept mechanical here — the atlas's reset path needs the member to exist, and the colour
+     *  contract (transparent-black page, per-slot backdrops) is Task 2's to land. */
+    clearPage() {
+      ctx.fillStyle = INK_OFF
+      ctx.fillRect(0, 0, atlasSizePx, atlasSizePx)
+    },
+    // fg/bg are the FINAL packed colour lanes for this slot. T2 fills this in: fill the whole
+    // PITCH rect (gutter included) with `bg` and paint the glyph/box ops in `fg`, so the atlas
+    // holds CoreText's own coloured pixels. Until then the draw stays monochrome — the signature
+    // is threaded now because the atlas keys on the colours from this task on.
+    draw(code, bold, italic, x, y, _fg, _bg) {
       ctx.save()
       ctx.beginPath()
       ctx.rect(x, y, font.cellW, font.cellH)

@@ -688,11 +688,13 @@ function glyphDebugOn(): boolean {
 
 function glyphDebugTap(): ((info: GlyphSlotAllocation) => void) | undefined {
   if (!glyphDebugOn()) return undefined
-  return ({ slot, code, bold, italic, x, y }): void => {
+  return ({ slot, code, bold, italic, x, y, fg, bg }): void => {
     console.warn(
       `[glyphgrid] slot ${slot} code 0x${code.toString(16)} ${JSON.stringify(
         String.fromCodePoint(code)
-      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''} at ${x},${y}`
+      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''} at ${x},${y} fg=${fg.toString(
+        16
+      )} bg=${bg.toString(16)}`
     )
   }
 }

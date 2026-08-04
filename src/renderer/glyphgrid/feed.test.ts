@@ -20,6 +20,9 @@ function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & { calls: Array<[number, boo
   const calls: Array<[number, boolean, boolean]> = []
   return {
     calls,
+    // fg/bg are accepted (the atlas keys on them from Phase 1c on) but not recorded yet: the
+    // colours the feed passes are Task 4's subject, and recording them here would pin the
+    // pre-override values this task deliberately leaves alone.
     glyphFor(code: number, bold: boolean, italic: boolean): number {
       calls.push([code, bold, italic])
       return 900 + calls.length

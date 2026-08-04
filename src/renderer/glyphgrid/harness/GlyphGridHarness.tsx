@@ -228,12 +228,15 @@ export function GlyphGridHarness() {
           // 0x21..0x7a — printable ASCII, so String.fromCodePoint in the rasterizer always
           // gets a valid code point.
           const code = 0x21 + Math.floor(Math.random() * 90)
+          // Resolved BEFORE the atlas request: the atlas is keyed by colour, so the slot and the
+          // lane have to be asked for with the same pair.
+          const fg = packColor(180 + Math.floor(Math.random() * 75), 200, 160, 255)
           writeCell(
             row,
             c,
             // The glyph lane is an ATLAS SLOT, never a raw code point.
-            atlas.glyphFor(code, Math.random() < 0.1, false),
-            packColor(180 + Math.floor(Math.random() * 75), 200, 160, 255),
+            atlas.glyphFor(code, Math.random() < 0.1, false, fg, bg),
+            fg,
             bg,
             Math.random() < 0.05 ? FLAG_BOLD : 0
           )
