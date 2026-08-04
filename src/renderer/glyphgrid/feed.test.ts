@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CELL_STRIDE, FLAG_BOLD, FLAG_CURSOR, FLAG_ITALIC, FLAG_SELECTED, FLAG_UNDERLINE, FLAG_WIDE, packColor, readCell } from './cells'
 import type { GlyphAtlas } from './atlas'
+import type { DecorationReader } from './decorations'
 import { packViewportRow, type CellView, type RowFeedOpts, type ThemeLanes } from './feed'
 
 const THEME: ThemeLanes = {
@@ -80,9 +81,32 @@ function makeCell(
   }
 }
 
+/** A `DecorationReader` over a literal list, plus a walk counter so "the per-cell walk was
+ *  SKIPPED" is assertable — that fast path is the whole reason a canvas with no search open pays
+ *  nothing for this feature. */
+function decoReader(
+  entries: Array<{ col: number; row?: number; layer?: string; bg?: number; fg?: number }>
+): DecorationReader & { walks: number } {
+  const r = {
+    walks: 0,
+    empty: (): boolean => entries.length === 0,
+    atCell: (
+      col: number,
+      row: number,
+      cb: (d: { layer?: string; bg?: number; fg?: number }) => void
+    ): void => {
+      r.walks++
+      entries.filter((e) => e.col === col && (e.row ?? 0) === row).forEach(cb)
+    }
+  }
+  return r
+}
+
 function pack(
   cells: readonly (CellView | undefined)[],
-  o: Partial<Pick<RowFeedOpts, 'cols' | 'selection' | 'cursorCol' | 'atlas'>> = {}
+  o: Partial<
+    Pick<RowFeedOpts, 'cols' | 'selection' | 'cursorCol' | 'atlas' | 'decorations' | 'bufferRow'>
+  > = {}
 ): { out: Uint32Array; atlas: ReturnType<typeof fakeAtlas> } {
   const atlas = (o.atlas as ReturnType<typeof fakeAtlas>) ?? fakeAtlas()
   const cols = o.cols ?? cells.length
@@ -92,7 +116,9 @@ function pack(
     atlas,
     theme: THEME,
     selection: o.selection ?? null,
-    cursorCol: o.cursorCol ?? -1
+    cursorCol: o.cursorCol ?? -1,
+    decorations: o.decorations,
+    bufferRow: o.bufferRow
   })
   return { out, atlas }
 }
@@ -317,6 +343,103 @@ describe('packViewportRow — cursor and selection', () => {
   it('a null selection and cursorCol -1 paint nothing', () => {
     const { out } = pack([makeCell()], { selection: null, cursorCol: -1 })
     expect(readCell(out, 0).flags).toBe(0)
+  })
+})
+
+/** DECORATIONS — a search hit's highlight, and the precedence that makes it readable.
+ *
+ *  The order the feed resolves in is base (default/palette/RGB) → inverse → dim → DECORATION →
+ *  selection → cursor. Both ends of that are load-bearing: a decoration must beat the cell's own
+ *  colours (otherwise a hit on coloured output is invisible), and selection/cursor must beat the
+ *  decoration (a hit inside a drag-selection that punched a hole in the selection band, or a
+ *  cursor that vanished when it landed on a match, both read as a broken terminal rather than as a
+ *  highlight). */
+describe('packViewportRow — decorations', () => {
+  const DECO_BG = packColor(0xff, 0xc8, 0x00, 0xff)
+  const DECO_FG = packColor(0x00, 0x00, 0x00, 0xff)
+
+  it('paints the background a decoration asks for', () => {
+    const { out } = pack([makeCell({ code: 0x41 })], {
+      decorations: decoReader([{ col: 0, bg: DECO_BG }])
+    })
+    expect(readCell(out, 0).bg).toBe(DECO_BG)
+  })
+
+  it('paints the foreground a decoration asks for, leaving the bg resolved', () => {
+    const { out } = pack([makeCell({ code: 0x41, bg: ['palette', 5] })], {
+      decorations: decoReader([{ col: 0, fg: DECO_FG }])
+    })
+    const c = readCell(out, 0)
+    expect(c.fg).toBe(DECO_FG)
+    expect(c.bg).toBe(THEME.ansi[5])
+  })
+
+  it('decorates only the covered columns', () => {
+    const { out } = pack([makeCell({ code: 0x41 }), makeCell({ code: 0x42 })], {
+      decorations: decoReader([{ col: 1, bg: DECO_BG }])
+    })
+    expect(readCell(out, 0).bg).toBe(THEME.bg)
+    expect(readCell(out, 1).bg).toBe(DECO_BG)
+  })
+
+  it('wins over the cell’s OWN colours, including inverse and dim', () => {
+    const { out } = pack([makeCell({ code: 0x41, fg: ['palette', 2], inverse: true, dim: true })], {
+      decorations: decoReader([{ col: 0, bg: DECO_BG, fg: DECO_FG }])
+    })
+    const c = readCell(out, 0)
+    expect(c.bg).toBe(DECO_BG)
+    expect(c.fg).toBe(DECO_FG)
+  })
+
+  it('loses to the SELECTION — a hit inside a drag must not punch a hole in the band', () => {
+    const { out } = pack([makeCell({ code: 0x41 })], {
+      decorations: decoReader([{ col: 0, bg: DECO_BG }]),
+      selection: [0, 1]
+    })
+    expect(readCell(out, 0).bg).toBe(THEME.selectionBg)
+  })
+
+  it('loses to the CURSOR — both colours, so the cursor never disappears onto a match', () => {
+    const { out } = pack([makeCell({ code: 0x41 })], {
+      decorations: decoReader([{ col: 0, bg: DECO_BG, fg: DECO_FG }]),
+      cursorCol: 0
+    })
+    const c = readCell(out, 0)
+    expect(c.bg).toBe(THEME.cursorBg)
+    expect(c.fg).toBe(THEME.cursorFg)
+  })
+
+  it('is keyed by the ABSOLUTE buffer row, not the viewport row', () => {
+    // Decoration markers are keyed by absolute buffer line: pack viewport row 0 of a scrolled
+    // buffer and the lookup must ask for row 100, or every highlight lands on the wrong line the
+    // moment the user scrolls.
+    const deco = decoReader([{ col: 0, row: 100, bg: DECO_BG }])
+    const { out } = pack([makeCell({ code: 0x41 })], { decorations: deco, bufferRow: 100 })
+    expect(readCell(out, 0).bg).toBe(DECO_BG)
+    const miss = pack([makeCell({ code: 0x41 })], { decorations: deco, bufferRow: 7 })
+    expect(readCell(miss.out, 0).bg).toBe(THEME.bg)
+  })
+
+  it('asks the atlas for a slot painted in the DECORATED colours', () => {
+    // The Phase 1c contract: the atlas is colour-keyed and the request happens after every
+    // override, so a highlighted cell's glyph is rasterized onto the highlight.
+    const { atlas } = pack([makeCell({ code: 0x41 })], {
+      decorations: decoReader([{ col: 0, bg: DECO_BG, fg: DECO_FG }])
+    })
+    expect(atlas.colors).toEqual([[DECO_FG, DECO_BG]])
+  })
+
+  it('skips the per-cell walk entirely when nothing is decorated', () => {
+    // The common case: no ⌘F anywhere on the canvas. A call per cell per row per frame into
+    // xterm's decoration service is a real cost, and `empty()` is what buys it back.
+    const deco = decoReader([])
+    pack([makeCell(), makeCell(), makeCell()], { decorations: deco })
+    expect(deco.walks).toBe(0)
+  })
+
+  it('paints nothing when no reader is supplied at all', () => {
+    const { out } = pack([makeCell({ code: 0x41 })])
+    expect(readCell(out, 0).bg).toBe(THEME.bg)
   })
 })
 

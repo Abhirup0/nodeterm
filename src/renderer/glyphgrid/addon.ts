@@ -10,6 +10,7 @@
 
 import type { GlyphAtlas, GlyphAtlasSubscription } from './atlas'
 import { CELL_STRIDE } from './cells'
+import type { DecorationReader } from './decorations'
 import type { GridHandle } from './engine'
 import { packViewportRow, type CellView, type ThemeLanes } from './feed'
 
@@ -47,6 +48,15 @@ export interface TermInternals {
   theme(): ThemeLanes
   /** Read ONCE, at construction — see `focused`. */
   hasFocus(): boolean
+  /** The terminal's decorations — the cell colours a ⌘F hit paints — or undefined.
+   *
+   *  ALL THREE DECORATION MEMBERS ARE OPTIONAL, together: an xterm build whose decoration service
+   *  is missing or reshaped must degrade to "this terminal has no highlights", never to a refused
+   *  attach or a terminal on no renderer at all. The shell decides that once and hands over either
+   *  the whole trio or none of it. */
+  decorations?: DecorationReader
+  onDecorationRegistered?(cb: () => void): { dispose(): void }
+  onDecorationRemoved?(cb: () => void): { dispose(): void }
 }
 
 /** The exact shape of xterm's `IRenderer.dimensions`. RenderService reads it straight off the
@@ -125,6 +135,12 @@ export class GlyphGridRendererAddonCore {
    *  it to repack rows into a grid its node has already dropped. */
   private readonly atlasResetSub: GlyphAtlasSubscription
 
+  /** The terminal's decoration events, empty when it has no decoration service. Disposed with the
+   *  addon for the same reason the atlas subscription is: a live subscription on a terminal that
+   *  outlives its renderer (an attach that was swapped back to DOM) would go on asking a dead addon
+   *  to redraw a grid its node has dropped. */
+  private readonly decorationSubs: Array<{ dispose(): void }> = []
+
   constructor(
     private readonly internals: TermInternals,
     private readonly handle: GridHandle,
@@ -137,6 +153,13 @@ export class GlyphGridRendererAddonCore {
     this.focused = internals.hasFocus()
     this.lastCursorRow = this.cursorViewportRow()
     this.updateDims()
+    // Before the atlas subscription on purpose: these two reach xterm's own internals through the
+    // shell, so they are the pair that could plausibly throw, and a throw here leaves NO
+    // subscription behind. (The shell guards them anyway — see glyphgrid-attach.)
+    const onRegistered = internals.onDecorationRegistered
+    const onRemoved = internals.onDecorationRemoved
+    if (onRegistered) this.decorationSubs.push(onRegistered(() => this.handleDecorationChange()))
+    if (onRemoved) this.decorationSubs.push(onRemoved(() => this.handleDecorationChange()))
     // LAST, so nothing above can throw after the subscription exists: the shell catches a failing
     // construction and restores the DOM renderer, and a subscription made before that throw would
     // never be disposed by anyone.
@@ -259,6 +282,8 @@ export class GlyphGridRendererAddonCore {
     this.disposed = true
     this.redrawListeners.clear()
     this.atlasResetSub.dispose()
+    for (const sub of this.decorationSubs) sub.dispose()
+    this.decorationSubs.length = 0
   }
 
   // ---------------------------------------------------------------- internals
@@ -305,6 +330,24 @@ export class GlyphGridRendererAddonCore {
     this.emitRedraw(0, this.rows - 1)
   }
 
+  /**
+   * A decoration was registered or removed — a ⌘F search adding a hit, or the find bar closing and
+   * dropping all of them. Decorations change cell COLOURS, so the rows have to be re-fed; the ATLAS
+   * is untouched (its slots are keyed by colour, and the ones this asks for next are simply
+   * different keys), so nothing needs clearing.
+   *
+   * DEFERRED, through the same `onRequestRedraw` path an atlas reset uses, and for the same reason:
+   * this fires from wherever the decoration owner happens to be — the search addon's own loop, a
+   * dispose, a marker being trimmed out of the buffer — and packing rows from inside someone else's
+   * call is exactly the re-entrancy `handleAtlasReset` documents at length. Handing the repack to
+   * RenderService also coalesces the burst a search produces (one event per match) into a single
+   * debounced render pass, instead of repacking every row per hit.
+   */
+  private handleDecorationChange(): void {
+    if (this.disposed || this.rows <= 0) return
+    this.emitRedraw(0, this.rows - 1)
+  }
+
   private repackAll(): void {
     if (this.disposed) return
     this.packRows(0, this.rows - 1)
@@ -340,6 +383,9 @@ export class GlyphGridRendererAddonCore {
     // unclamped it matches no column and the cursor simply VANISHES at the end of a full line —
     // which is where a shell prompt spends much of its time.
     const cursorCol = Math.min(this.internals.cursorX(), this.cols - 1)
+    // Read once for the whole range, like the theme: the shell builds the reader once and keeps it
+    // live for the terminal's lifetime.
+    const decorations = this.internals.decorations
     for (let row = start; row <= end; row++) {
       this.absRow = viewportY + row
       packViewportRow(this.rowBuf, this.readCellBound, this.workCell, {
@@ -350,7 +396,11 @@ export class GlyphGridRendererAddonCore {
         // A block cursor on a DOUBLE-WIDTH glyph paints the left half only: the cursor is one
         // column and the glyph is two. Known v1 limitation (the two-column rule needs the wide
         // flag honoured in the shader) — visible, harmless, tracked for Phase 2.
-        cursorCol: row === cursorRow ? cursorCol : -1
+        cursorCol: row === cursorRow ? cursorCol : -1,
+        decorations,
+        // Decoration markers are keyed by ABSOLUTE buffer row, so this is the row the lookup needs
+        // — the viewport row would slide the highlights off their matches on every scroll.
+        bufferRow: this.absRow
       })
       this.handle.updateRow(row, this.rowBuf)
     }

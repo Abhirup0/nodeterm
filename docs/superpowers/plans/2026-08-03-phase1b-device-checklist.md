@@ -345,9 +345,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **3.13 Stacking.** The canvas is ABOVE the dot grid and BELOW node chrome; the bottom-left
       Controls, the minimap and the drawers are all still clickable over a terminal's body.
 - [ ] **3.14 ⌘F in a busy terminal.** Open the find bar and search for a word well up in the
-      scrollback: matches are found and scrolled to, and the counter (`n of m`) is right;
-      KNOWN — the match HIGHLIGHTS are not visible (L12). Navigating next/previous still moves the
-      viewport to each hit, so judge whether searching is usable without the highlight.
+      scrollback: matches are found and scrolled to, the counter (`n of m`) is right, **the matched
+      cells are HIGHLIGHTED, and the highlight follows next/previous** (the active hit reads
+      differently from the rest). Then, with the bar still open, scroll the viewport: the highlights
+      stay on their own matches instead of sliding onto other rows. Close the bar: every highlight
+      goes away, leaving no coloured cell behind. Select a run of text that covers a match — the
+      selection band stays unbroken over it, and the cursor stays visible when it lands on a hit.
 
 ## 4. Lifecycle
 
@@ -510,12 +513,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L11 — Grids keep drawing while the kanban board covers the canvas.** The board overlay is
   opaque, so nothing is visible; it is wasted work, measured by item 4.16 and closed in Phase 2 if
   it shows up.
-- **L12 — Terminal search (⌘F) finds, counts and scrolls, but the match HIGHLIGHTS are invisible.**
-  xterm's search addon marks hits as *decorations*, which are painted by the active renderer at
-  cell level; the shared feed carries cells and theme lanes only, with no decoration input, so the
-  engine has nothing to draw. Search itself is unaffected — the addon still walks the buffer, the
-  `n of m` counter is correct, and each hit is scrolled into view — you simply cannot see which
-  cells matched. Phase 2 (a decoration lane in the feed).
 - **L13 — The block cursor on a double-width glyph paints only the left half-cell.** The cursor rect
   is emitted at one cell's width, while a CJK/emoji cell occupies two columns, so the block covers
   the left column and the right half of the glyph stays uncovered. Cosmetic and position-correct

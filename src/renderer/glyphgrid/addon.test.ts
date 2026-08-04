@@ -7,6 +7,7 @@ import {
   type DeviceMetrics,
   type TermInternals
 } from './addon'
+import type { DecorationReader } from './decorations'
 import type { CellView, ThemeLanes } from './feed'
 
 const THEME: ThemeLanes = {
@@ -116,6 +117,45 @@ function recordingAtlas(o: { onGlyphFor?: (fire: () => void) => void } = {}): Pi
   }
 }
 
+/** The decoration surface the shell hands over: a reader plus the two "something changed" events.
+ *  `fire*` is the test's hand on xterm's decoration service — the search addon registering a hit. */
+function fakeDecorations(
+  entries: Array<{ col: number; row: number; layer?: string; bg?: number; fg?: number }> = []
+): {
+  reader: DecorationReader
+  onDecorationRegistered(cb: () => void): { dispose(): void }
+  onDecorationRemoved(cb: () => void): { dispose(): void }
+  fireRegistered(): void
+  fireRemoved(): void
+  subCount(): number
+} {
+  const registered = new Set<() => void>()
+  const removed = new Set<() => void>()
+  const sub = (set: Set<() => void>, cb: () => void): { dispose(): void } => {
+    set.add(cb)
+    return {
+      dispose: (): void => {
+        set.delete(cb)
+      }
+    }
+  }
+  return {
+    reader: {
+      empty: () => entries.length === 0,
+      atCell: (col, row, cb) => entries.filter((e) => e.col === col && e.row === row).forEach(cb)
+    },
+    onDecorationRegistered: (cb) => sub(registered, cb),
+    onDecorationRemoved: (cb) => sub(removed, cb),
+    fireRegistered: () => {
+      for (const cb of [...registered]) cb()
+    },
+    fireRemoved: () => {
+      for (const cb of [...removed]) cb()
+    },
+    subCount: () => registered.size + removed.size
+  }
+}
+
 interface FakeTermOpts {
   cols?: number
   rows?: number
@@ -125,10 +165,13 @@ interface FakeTermOpts {
   cursorY?: number
   cursorVisible?: boolean
   focus?: boolean
+  decorations?: ReturnType<typeof fakeDecorations>
 }
 
-function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: Required<FakeTermOpts> } {
-  const state: Required<FakeTermOpts> = {
+type FakeTermState = Required<Omit<FakeTermOpts, 'decorations'>>
+
+function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState } {
+  const state: FakeTermState = {
     cols: o.cols ?? 4,
     rows: o.rows ?? 6,
     viewportY: o.viewportY ?? 0,
@@ -153,7 +196,12 @@ function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: Required<FakeT
     deviceMetrics: () => ({ charW: 16, charH: 34, cellW: 16, cellH: 34 }),
     dpr: () => 2,
     theme: () => THEME,
-    hasFocus: () => state.focus
+    hasFocus: () => state.focus,
+    // Absent unless a test asks for them — an xterm build with no decoration service hands the
+    // addon exactly this, and every other test in this file is that case.
+    decorations: o.decorations?.reader,
+    onDecorationRegistered: o.decorations?.onDecorationRegistered,
+    onDecorationRemoved: o.decorations?.onDecorationRemoved
   }
 }
 
@@ -481,6 +529,68 @@ describe('GlyphGridRendererAddonCore atlas resets', () => {
     expect(atlas.subCount()).toBe(0)
     atlas.fireReset()
     expect(seen).toEqual([])
+  })
+})
+
+/** DECORATIONS. The terminal's decoration service colours cells (a ⌘F hit is one), and it changes
+ *  from OUTSIDE the render loop — the search addon registers a decoration per match while nothing
+ *  is being packed. The addon's job is to hand the reader through to the feed keyed by the right
+ *  row, and to get every row repacked when the set changes. */
+describe('GlyphGridRendererAddonCore decorations', () => {
+  const DECO_BG = packColor(0xff, 0xc8, 0x00, 0xff)
+
+  it('feeds decorations keyed by the ABSOLUTE buffer row, not the viewport row', () => {
+    // Viewport starts at absolute 100, so viewport row 1 is absolute 101 — the row the decoration
+    // marker is on. Keyed by the viewport row instead, the highlight would slide with every scroll.
+    const deco = fakeDecorations([{ col: 2, row: 101, bg: DECO_BG }])
+    const { core, handle } = make({ rows: 4, cols: 4, viewportY: 100, baseY: 100, decorations: deco })
+    core.renderRows(0, 3)
+    const row1 = handle.rows.find((r) => r.row === 1)!
+    expect(readCell(row1.cells, 2).bg).toBe(DECO_BG)
+    const row0 = handle.rows.find((r) => r.row === 0)!
+    expect(readCell(row0.cells, 2).bg).toBe(THEME.bg)
+  })
+
+  it('asks for a DEFERRED full redraw when a decoration is registered or removed', () => {
+    // Same mechanism as an atlas reset: a decoration changes cell COLOURS, so every row has to be
+    // re-fed — but the pack itself is xterm's to schedule, never a repack from inside this event.
+    const deco = fakeDecorations()
+    const { core, handle } = make({ rows: 5, decorations: deco })
+    const seen: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => seen.push(e))
+    handle.rows.length = 0
+
+    deco.fireRegistered()
+    expect(handle.rows).toEqual([])
+    expect(seen).toEqual([{ start: 0, end: 4 }])
+
+    deco.fireRemoved()
+    expect(handle.rows).toEqual([])
+    expect(seen).toEqual([
+      { start: 0, end: 4 },
+      { start: 0, end: 4 }
+    ])
+  })
+
+  it('unsubscribes from BOTH decoration events on dispose', () => {
+    const deco = fakeDecorations()
+    const { core } = make({ rows: 3, decorations: deco })
+    const seen: number[] = []
+    core.onRequestRedraw(() => seen.push(1))
+    expect(deco.subCount()).toBe(2)
+    core.dispose()
+    expect(deco.subCount()).toBe(0)
+    deco.fireRegistered()
+    deco.fireRemoved()
+    expect(seen).toEqual([])
+  })
+
+  it('constructs and packs normally when the terminal has no decoration service at all', () => {
+    // The degradation contract: an xterm build without `_decorationService` must render, minus the
+    // highlights — never refuse the attach.
+    const { core, handle } = make({ rows: 2, cols: 2 })
+    core.renderRows(0, 1)
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1])
   })
 })
 

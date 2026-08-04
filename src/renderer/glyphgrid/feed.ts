@@ -6,6 +6,7 @@
  *  xterm's internals, which are the part of that library most likely to move under us. */
 
 import type { GlyphAtlas } from './atlas'
+import { decorationAt, type DecorationReader } from './decorations'
 import {
   FLAG_BOLD,
   FLAG_CURSOR,
@@ -60,6 +61,14 @@ export interface RowFeedOpts {
   selection: readonly [number, number] | null
   /** Block-cursor column on THIS row, or -1. (Bar/underline cursors: Phase 2 — block only.) */
   cursorCol: number
+  /** The terminal's decorations (search highlights and anything else that colours cells), or
+   *  undefined for "this terminal has none" — which is what every caller that predates them passes,
+   *  and what an xterm build with no decoration service degrades to. */
+  decorations?: DecorationReader
+  /** ABSOLUTE buffer row this viewport row shows — the coordinate space decoration markers are
+   *  keyed in. Only read when `decorations` is set; defaults to 0 so every existing caller stays
+   *  valid. */
+  bufferRow?: number
 }
 
 const MAX_CODE_POINT = 0x10ffff
@@ -161,6 +170,13 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *  skipped: this row buffer is REUSED across frames, so "write nothing" would leave the previous
  *  frame's lanes standing at that column. Every column in [0, cols) is always written.
  *
+ *  DECORATIONS (a search hit's highlight is one) sit between the cell's own colours and the
+ *  selection: they OVERRIDE base/inverse/dim — a hit on coloured output has to be visible — and
+ *  LOSE to selection and cursor. That end matters just as much: a highlight that punched a hole in
+ *  a drag-selection band, or that swallowed the cursor when it landed on a match, reads as a broken
+ *  terminal rather than as a highlight. The whole per-cell lookup is skipped when the terminal has
+ *  no decorations at all (the common case), which is what makes an undecorated canvas pay nothing.
+ *
  *  CURSOR and SELECTION are applied last, over whatever the cell resolved to. Selection repaints
  *  only the background (the foreground must stay readable as itself); the cursor repaints both.
  *  On overlap the CURSOR WINS the colors, and BOTH flags stay set — the flags describe the cell's
@@ -183,6 +199,10 @@ export function packViewportRow(
   const { cols, atlas, theme, selection, cursorCol } = opts
   const selStart = selection ? selection[0] : -1
   const selEnd = selection ? selection[1] : -1
+  // Hoisted out of the loop: `empty()` is answered ONCE per row rather than once per cell, and a
+  // terminal with no decorations leaves this null so the per-cell branch below is a null test.
+  const decorations = opts.decorations && !opts.decorations.empty() ? opts.decorations : null
+  const bufferRow = opts.bufferRow ?? 0
 
   // Colors carried from a wide lead into its zero-width follower (see the doc comment).
   let carryPending = false
@@ -246,6 +266,15 @@ export function packViewportRow(
     } else {
       // Past the end of a short line (or no line at all): a blank cell on the theme background.
       carryPending = false
+    }
+
+    // Over the cell's own colours (base/inverse/dim), under the selection and the cursor below.
+    if (decorations) {
+      const deco = decorationAt(decorations, col, bufferRow)
+      if (deco) {
+        if (deco.bg !== undefined) bg = deco.bg
+        if (deco.fg !== undefined) fg = deco.fg
+      }
     }
 
     if (col >= selStart && col < selEnd) {

@@ -19,6 +19,7 @@ import {
 } from '../glyphgrid/addon'
 import type { GlyphAtlas } from '../glyphgrid/atlas'
 import { packColor } from '../glyphgrid/cells'
+import type { DecorationReader } from '../glyphgrid/decorations'
 import type { GridHandle } from '../glyphgrid/engine'
 import type { CellView, ThemeLanes } from '../glyphgrid/feed'
 
@@ -38,6 +39,28 @@ interface XtermLine {
   length: number
   loadCell(col: number, cell: unknown): unknown
 }
+/** One entry of xterm's decoration service, as its own renderers read it: the layer defaults to
+ *  `bottom`, and either colour may be absent (a marker-only decoration colours nothing). */
+interface XtermDecoration {
+  options?: { layer?: string }
+  backgroundColorRGB?: XtermColor
+  foregroundColorRGB?: XtermColor
+}
+/** xterm's `_decorationService`. OPTIONAL everywhere it appears — see `decorationsOf`. */
+interface XtermDecorationService {
+  /** A COPY of the decoration list on every read (`[...this._array].values()` in the bundle), so
+   *  this is read at attach time and on change events only — NEVER per cell. */
+  decorations: Iterable<unknown>
+  forEachDecorationAtCell(
+    col: number,
+    /** ABSOLUTE buffer row — decorations are keyed by their marker's line. */
+    row: number,
+    layer: string | undefined,
+    cb: (d: XtermDecoration) => void
+  ): void
+  onDecorationRegistered(cb: () => void): { dispose(): void }
+  onDecorationRemoved(cb: () => void): { dispose(): void }
+}
 /** The private members of xterm 5.5 we depend on. Names verified against the shipped bundle. */
 interface XtermCore {
   _renderService: { setRenderer(r: unknown): void; handleResize(cols: number, rows: number): void }
@@ -50,6 +73,10 @@ interface XtermCore {
   _coreBrowserService: { dpr: number; isFocused: boolean }
   _bufferService: { buffer: { lines: { get(row: number): XtermLine | undefined } } }
   coreService: { isCursorInitialized: boolean; isCursorHidden: boolean }
+  /** OPTIONAL, unlike every other member here: decorations are an ENHANCEMENT (search highlights),
+   *  so an xterm that dropped or reshaped this service must cost the user their highlights, not
+   *  their renderer. `coreOf` never checks it; `decorationsOf` shape-checks it and answers null. */
+  _decorationService?: Partial<XtermDecorationService>
 }
 
 /** Every internal read in this module starts here. Presence-checked rather than cast, so a bumped
@@ -87,6 +114,104 @@ function coreOf(term: Terminal): XtermCore | null {
 function lane(c: XtermColor | undefined): number {
   const v = ((c?.rgba ?? 0) >>> 8) & 0xffffff
   return packColor((v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff, 0xff)
+}
+
+/** What `decorationsOf` hands the addon: the reader the feed consumes, plus the two change events
+ *  the addon turns into a deferred full repack. All three or none — see `TermInternals`. */
+type DecorationInternals = Pick<
+  TermInternals,
+  'decorations' | 'onDecorationRegistered' | 'onDecorationRemoved'
+>
+
+/** Wrap xterm's decoration service in the feed's `DecorationReader`, or answer null.
+ *
+ *  THE COST MODEL IS THE WHOLE DESIGN HERE. `empty()` is asked once per packed ROW and
+ *  `forEachDecorationAtCell` once per CELL of a decorated terminal, so neither may be expensive:
+ *  - `empty()` reads a COUNTER, never the service's `decorations` getter — that getter copies the
+ *    whole decoration array on every read (`[...this._array].values()`), which per row per frame
+ *    per terminal would be a real allocation storm. The counter is seeded once from that getter
+ *    (so decorations registered BEFORE the shared renderer attached are not missed) and then
+ *    maintained by the same two events the addon repacks on. It only ever errs UPWARD: a missed
+ *    `removed` leaves it high and costs one wasted walk that finds nothing, which is invisible; a
+ *    count that lied LOW would silently hide highlights, so nothing is allowed to zero it.
+ *  - `atCell` reuses ONE entry object across the whole walk. The feed reads its fields inside the
+ *    callback and never retains it (`decorationAt` copies what it wants into locals), so a fresh
+ *    object per decoration per cell would be pure garbage.
+ *
+ *  Colours go through the same `lane()` the theme uses, alpha forced opaque for the same reason:
+ *  the engine's plate owns occlusion, and a translucent highlight would punch a hole in the node. */
+function decorationsOf(core: XtermCore): DecorationInternals | null {
+  const svc = core._decorationService
+  if (!svc || typeof svc.forEachDecorationAtCell !== 'function') return null
+  if (typeof svc.onDecorationRegistered !== 'function') return null
+  if (typeof svc.onDecorationRemoved !== 'function') return null
+  const service = svc as XtermDecorationService
+
+  let count = 0
+  try {
+    for (const _ of service.decorations ?? []) count++
+  } catch {
+    // Unreadable list: start at zero and let the first registration light it up. Guessing "some"
+    // instead would walk every cell of every frame forever on a terminal that has none.
+    count = 0
+  }
+
+  const entry: { layer?: string; bg?: number; fg?: number } = {}
+  const decorations: DecorationReader = {
+    empty: () => count <= 0,
+    atCell: (col, row, cb) => {
+      try {
+        // `undefined` layer = every layer; `decorationAt` drops the top one, which is the same
+        // filter xterm's own renderers apply at cell level.
+        service.forEachDecorationAtCell(col, row, undefined, (d) => {
+          entry.layer = d.options?.layer
+          entry.bg = d.backgroundColorRGB ? lane(d.backgroundColorRGB) : undefined
+          entry.fg = d.foregroundColorRGB ? lane(d.foregroundColorRGB) : undefined
+          cb(entry)
+        })
+      } catch {
+        // A decoration service that threw mid-frame must cost this cell its highlight, not the
+        // frame — this runs inside the pack loop of a live terminal.
+      }
+    }
+  }
+
+  /** Both events are wrapped so a subscribe that throws cannot take the addon's construction down
+   *  with it — the addon treats a no-op disposable as "this terminal simply never changes". */
+  const subscribe = (
+    fn: (cb: () => void) => { dispose(): void },
+    onEvent: () => void,
+    cb: () => void
+  ): { dispose(): void } => {
+    try {
+      return fn(() => {
+        onEvent()
+        cb()
+      })
+    } catch {
+      return { dispose: (): void => {} }
+    }
+  }
+
+  return {
+    decorations,
+    onDecorationRegistered: (cb) =>
+      subscribe(
+        (h) => service.onDecorationRegistered(h),
+        () => {
+          count++
+        },
+        cb
+      ),
+    onDecorationRemoved: (cb) =>
+      subscribe(
+        (h) => service.onDecorationRemoved(h),
+        () => {
+          count = Math.max(0, count - 1)
+        },
+        cb
+      )
+  }
 }
 
 function themeLanes(colors: XtermColors): ThemeLanes {
@@ -178,7 +303,10 @@ export function attachGlyphGrid(
     deviceMetrics: () => deviceMetrics(term, core),
     dpr: () => core._coreBrowserService.dpr || 1,
     theme: () => theme,
-    hasFocus: () => core._coreBrowserService.isFocused
+    hasFocus: () => core._coreBrowserService.isFocused,
+    // Spread, so a terminal with no usable decoration service leaves all three members undefined —
+    // the addon's "this terminal has no highlights" case.
+    ...(decorationsOf(core) ?? {})
   }
 
   let addon: GlyphGridRendererAddonCore
