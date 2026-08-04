@@ -112,6 +112,13 @@ interface Grid extends GridSpec {
  *   sampling slot 0 everywhere and the uniforms permanently one upload stale. A draw that
  *   samples a texture the glyphs have not been uploaded into paints solid blocks; the engine
  *   is the only place that sees both, so it is the enforcer.
+ *
+ * An atlas RESET needs no special handling here, which is worth stating because it looks like it
+ * should: it happens during a row PACK, never inside `frame()` (nothing this class calls allocates
+ * a glyph), and it marks the atlas dirty — so the very next frame re-uploads the cleared and
+ * refilled page before it uploads or draws a single row of it. Rows still naming old slots are the
+ * addon's problem, and it repacks them from the redraw it requests (see
+ * `GlyphGridRendererAddonCore.handleAtlasReset`).
  */
 export class GlyphGridEngine {
   private grids = new Map<string, Grid>()

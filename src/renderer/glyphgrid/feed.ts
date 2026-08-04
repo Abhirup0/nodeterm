@@ -164,7 +164,16 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *  CURSOR and SELECTION are applied last, over whatever the cell resolved to. Selection repaints
  *  only the background (the foreground must stay readable as itself); the cursor repaints both.
  *  On overlap the CURSOR WINS the colors, and BOTH flags stay set — the flags describe the cell's
- *  state (this cell is selected AND under the cursor), only the paint has to pick a winner. */
+ *  state (this cell is selected AND under the cursor), only the paint has to pick a winner.
+ *
+ *  THE ATLAS REQUEST IS THE LAST THING THAT HAPPENS, and it has to be. The atlas is keyed by
+ *  COLOUR: the rasterizer bakes the requested fg/bg into the slot's pixels and the shader blits
+ *  them unmodified, so a slot requested before the overrides is painted in the cell's UNSELECTED,
+ *  UNCURSORED colours and renders that way however correct the lanes are. Which code point / bold /
+ *  italic to draw is decided in the loop below (it depends on the cell, not on the overrides); the
+ *  request itself waits until fg/bg are final. Everything that is NOT a request — the flags, the
+ *  wide-cell carry, the blank branches — is unchanged, so the lanes this writes are what they have
+ *  always been. */
 export function packViewportRow(
   out: Uint32Array,
   readCell: (col: number, into: CellView) => CellView | undefined,
@@ -182,10 +191,15 @@ export function packViewportRow(
 
   for (let col = 0; col < cols; col++) {
     const cell = readCell(col, workCell)
-    let glyph = 0
     let fg = theme.fg
     let bg = theme.bg
     let flags = 0
+    // What this cell will ask the atlas for, decided here and REQUESTED after the overrides below.
+    // 0 is "nothing to draw" — it fails `isRenderableCode`, which is the same answer a blank cell,
+    // a control code and a wide glyph's follower all give.
+    let code = 0
+    let bold = false
+    let italic = false
 
     if (cell) {
       fg = resolveFg(cell, theme)
@@ -209,23 +223,20 @@ export function packViewportRow(
         }
         carryPending = false
       } else {
-        const bold = cell.isBold() !== 0
-        const italic = cell.isItalic() !== 0
+        bold = cell.isBold() !== 0
+        italic = cell.isItalic() !== 0
         // The guard runs on the DERIVED code: a string can start with a lone surrogate just as
         // easily as getCode() can return one, and the rasterizer must never see either.
-        const code = glyphCode(cell)
-        // The atlas is keyed by COLOUR from Phase 1c on, so the request carries the lanes this
-        // cell resolved to. NOTE, and this is Task 4's to finish: SELECTION and CURSOR are applied
-        // BELOW this line, so a selected/cursor cell currently asks for a slot in its pre-override
-        // colours. Threading the values is all this task does; moving the request after the
-        // overrides (and the ordering audit that goes with it) is the feed rewire.
-        if (isRenderableCode(code)) glyph = atlas.glyphFor(code, bold, italic, fg, bg)
+        code = glyphCode(cell)
         if (bold) flags |= FLAG_BOLD
         if (italic) flags |= FLAG_ITALIC
         if (cell.isUnderline() !== 0) flags |= FLAG_UNDERLINE
         if (width === 2) {
           flags |= FLAG_WIDE
           carryPending = true
+          // The lead's RESOLVED colors, captured before the selection/cursor overrides on purpose:
+          // those are decided per COLUMN, so the follower applies whichever ones cover IT. A lead
+          // under the cursor therefore paints one cursor cell, not two.
           carryFg = fg
           carryBg = bg
         } else {
@@ -247,6 +258,8 @@ export function packViewportRow(
       flags |= FLAG_CURSOR
     }
 
+    // fg/bg are FINAL here — this is the only place the atlas may be asked, see the doc comment.
+    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg) : 0
     writeCell(out, col, glyph, fg, bg, flags)
   }
 }

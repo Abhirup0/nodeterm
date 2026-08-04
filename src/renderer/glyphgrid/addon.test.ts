@@ -83,10 +83,37 @@ function recordingHandle(): GridHandle & {
   }
 }
 
-function recordingAtlas(): Pick<GlyphAtlas, 'glyphFor'> {
-  // Identity-ish: the slot IS derived from the code point, so a packed glyph lane names the cell
-  // it came from without a second bookkeeping structure.
-  return { glyphFor: (code) => code }
+/** The atlas surface the addon holds: a slot source AND a reset broadcaster.
+ *
+ *  `fireReset()` is the test's hand on the real atlas's most awkward behaviour — a reset fires
+ *  SYNCHRONOUSLY inside a `glyphFor` call, i.e. in the middle of someone's row pack — so
+ *  `onGlyphFor` exists to fire it from exactly there. */
+function recordingAtlas(o: { onGlyphFor?: (fire: () => void) => void } = {}): Pick<
+  GlyphAtlas,
+  'glyphFor' | 'onReset'
+> & { fireReset(): void; subCount(): number } {
+  const subs = new Set<() => void>()
+  const fireReset = (): void => {
+    for (const cb of [...subs]) cb()
+  }
+  return {
+    // Identity-ish: the slot IS derived from the code point, so a packed glyph lane names the cell
+    // it came from without a second bookkeeping structure.
+    glyphFor: (code) => {
+      o.onGlyphFor?.(fireReset)
+      return code
+    },
+    onReset: (cb) => {
+      subs.add(cb)
+      return {
+        dispose: (): void => {
+          subs.delete(cb)
+        }
+      }
+    },
+    fireReset,
+    subCount: () => subs.size
+  }
 }
 
 interface FakeTermOpts {
@@ -130,15 +157,19 @@ function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: Required<FakeT
   }
 }
 
-function make(o: FakeTermOpts = {}): {
+function make(
+  o: FakeTermOpts & { atlas?: ReturnType<typeof recordingAtlas> } = {}
+): {
   core: GlyphGridRendererAddonCore
   term: ReturnType<typeof fakeTerm>
   handle: ReturnType<typeof recordingHandle>
+  atlas: ReturnType<typeof recordingAtlas>
 } {
   const term = fakeTerm(o)
   const handle = recordingHandle()
-  const core = new GlyphGridRendererAddonCore(term, handle, recordingAtlas())
-  return { core, term, handle }
+  const atlas = o.atlas ?? recordingAtlas()
+  const core = new GlyphGridRendererAddonCore(term, handle, atlas)
+  return { core, term, handle, atlas }
 }
 
 /** The glyph lane of a packed row decodes back to (absRow, col) — see rowCodedCell. */
@@ -401,6 +432,55 @@ describe('GlyphGridRendererAddonCore redraw requests', () => {
     sub.dispose()
     core.clear()
     expect(seen).toHaveLength(1)
+  })
+})
+
+/** ATLAS RESETS. The atlas clears its whole page when the colour key space fills, which leaves
+ *  every already-packed lane pointing at a slot that now holds someone else's glyph. The addon's
+ *  job is to get all its rows repacked — and to do it WITHOUT repacking from inside the reset,
+ *  which fires synchronously in the middle of a `glyphFor` call during someone's row pack. */
+describe('GlyphGridRendererAddonCore atlas resets', () => {
+  it('asks for a DEFERRED full redraw instead of repacking on the spot', () => {
+    const { core, handle, atlas } = make({ rows: 5 })
+    const seen: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => seen.push(e))
+    handle.rows.length = 0
+    atlas.fireReset()
+    // The repack itself is xterm's to schedule: packing here would run inside whatever pack loop
+    // the reset interrupted.
+    expect(handle.rows).toEqual([])
+    expect(seen).toEqual([{ start: 0, end: 4 }])
+  })
+
+  it('a reset fired from INSIDE a row pack does not recurse into the pack loop', () => {
+    // The real shape of the event: the page fills on some cell's glyphFor, mid-row. Every
+    // requested row must still be packed exactly once, and the repack must arrive as a redraw
+    // request rather than as a nested pack.
+    let fired = false
+    const atlas = recordingAtlas({
+      onGlyphFor: (fire) => {
+        if (fired) return
+        fired = true
+        fire()
+      }
+    })
+    const { core, handle } = make({ rows: 4, atlas })
+    const seen: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => seen.push(e))
+    core.renderRows(0, 2)
+    expect(handle.rows.map((r) => r.row)).toEqual([0, 1, 2])
+    expect(seen).toEqual([{ start: 0, end: 3 }])
+  })
+
+  it('unsubscribes from the atlas on dispose — a torn-down terminal owes it no repack', () => {
+    const { core, atlas } = make()
+    const seen: number[] = []
+    core.onRequestRedraw(() => seen.push(1))
+    expect(atlas.subCount()).toBe(1)
+    core.dispose()
+    expect(atlas.subCount()).toBe(0)
+    atlas.fireReset()
+    expect(seen).toEqual([])
   })
 })
 

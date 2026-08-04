@@ -218,8 +218,10 @@ export class GlyphAtlas {
    * and a page genuinely too small for the canvas is the LRU escalation's problem, not a
    * recursion's.
    *
-   * A full repack inside someone else's pack loop is still the wrong SHAPE for the addon — which
-   * is why T4 defers it to the redraw path rather than running it here.
+   * That guard is a floor, not the intended path. A full repack inside someone else's pack loop is
+   * the wrong SHAPE for a subscriber, which is why the renderer addon answers a reset by requesting
+   * a full REDRAW (see `handleAtlasReset`) and lets xterm's render pass do the packing outside this
+   * notification — where the guard above never has to degrade anything to blank.
    */
   onReset(cb: () => void): GlyphAtlasSubscription {
     this.resetSubs.add(cb)
@@ -247,9 +249,10 @@ export class GlyphAtlas {
     // atlas started over", and a clearPage() that threw must not leave a count claiming it did.
     this.resets++
     this.dirtyFlag = true
-    // NOTE: nothing subscribes yet — T3+T4 wire the addon repack; until then a reset leaves stale
-    // lanes rendering WRONG glyphs (worse than the old blank degrade). Do not run a device round
-    // before T4.
+    // The subscriber that matters is the renderer addon (one per attached terminal), which answers
+    // by asking xterm for a full redraw — deferred, never a repack from inside this notification.
+    // A page with NO subscriber (the dev harness feeds the engine directly) keeps rendering its
+    // already-uploaded lanes against the fresh page, i.e. wrong glyphs until something repacks it.
     this.inReset = true
     try {
       // Iterate a COPY: a subscriber is allowed to dispose itself (or another) from inside its own

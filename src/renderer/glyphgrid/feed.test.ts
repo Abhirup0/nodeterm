@@ -15,16 +15,25 @@ const THEME: ThemeLanes = {
 }
 
 /** Records every glyphFor call so "the atlas was NOT called" is assertable, and hands back a
- *  distinct non-zero slot per call so a glyph lane can be traced to the call that produced it. */
-function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & { calls: Array<[number, boolean, boolean]> } {
+ *  distinct non-zero slot per call so a glyph lane can be traced to the call that produced it.
+ *
+ *  Two parallel records rather than one 5-tuple: `calls` is the shape/style key every existing
+ *  assertion reads, and `colors` is the COLOUR key at the same index. The atlas is keyed by both
+ *  from Phase 1c on, so what the feed asks for is as load-bearing as what it writes into the lanes
+ *  — a cell that renders selected but requests a slot painted in its unselected colours is
+ *  invisible in the lanes and wrong on screen. */
+function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
+  calls: Array<[number, boolean, boolean]>
+  colors: Array<[number, number]>
+} {
   const calls: Array<[number, boolean, boolean]> = []
+  const colors: Array<[number, number]> = []
   return {
     calls,
-    // fg/bg are accepted (the atlas keys on them from Phase 1c on) but not recorded yet: the
-    // colours the feed passes are Task 4's subject, and recording them here would pin the
-    // pre-override values this task deliberately leaves alone.
-    glyphFor(code: number, bold: boolean, italic: boolean): number {
+    colors,
+    glyphFor(code: number, bold: boolean, italic: boolean, fg: number, bg: number): number {
       calls.push([code, bold, italic])
+      colors.push([fg, bg])
       return 900 + calls.length
     }
   }
@@ -308,6 +317,77 @@ describe('packViewportRow — cursor and selection', () => {
   it('a null selection and cursorCol -1 paint nothing', () => {
     const { out } = pack([makeCell()], { selection: null, cursorCol: -1 })
     expect(readCell(out, 0).flags).toBe(0)
+  })
+})
+
+/** THE COLOURS THE ATLAS IS ASKED FOR — the whole point of a colour-keyed atlas.
+ *
+ *  The rasterizer bakes the requested fg/bg into the slot's pixels and the shader blits them
+ *  unmodified, so the request must carry the cell's FINAL colours: everything the resolution
+ *  pipeline produces (default/palette/RGB → inverse → dim) AND the selection/cursor overrides that
+ *  are applied last. Asking with the pre-override pair paints a selected cell in its unselected
+ *  colours — a defect the packed lanes cannot show, since those are correct either way. */
+describe('packViewportRow — the colours the atlas is asked for', () => {
+  it('a plain cell asks for the colours it resolved to', () => {
+    const { atlas } = pack([makeCell({ code: 0x41 })])
+    expect(atlas.colors).toEqual([[THEME.fg, THEME.bg]])
+  })
+
+  it('palette and RGB colours reach the atlas resolved, never as indices', () => {
+    const { atlas } = pack([
+      makeCell({ code: 0x41, fg: ['palette', 2], bg: ['palette', 250] }),
+      makeCell({ code: 0x42, fg: ['rgb', 0xaabbcc], bg: ['rgb', 0x123456] })
+    ])
+    expect(atlas.colors).toEqual([
+      [THEME.ansi[2], THEME.ansi[250]],
+      [packColor(0xaa, 0xbb, 0xcc, 0xff), packColor(0x12, 0x34, 0x56, 0xff)]
+    ])
+  })
+
+  it('inverse and dim are baked into the request, in that order', () => {
+    const { atlas } = pack([makeCell({ code: 0x41, fg: ['palette', 2], inverse: true, dim: true })])
+    // inverse swapped the resolved pair, dim halved the foreground that swap left in place.
+    expect(atlas.colors).toEqual([[halve(THEME.bg), THEME.ansi[2]]])
+  })
+
+  it('a SELECTED cell asks for a slot painted on the selection background', () => {
+    const { out, atlas } = pack([makeCell({ code: 0x41, fg: ['palette', 4] })], { selection: [0, 1] })
+    expect(atlas.colors).toEqual([[THEME.ansi[4], THEME.selectionBg]])
+    // …and the lanes still say the same thing, so the slot and the cell can never disagree.
+    const c = readCell(out, 0)
+    expect([c.fg, c.bg]).toEqual([THEME.ansi[4], THEME.selectionBg])
+  })
+
+  it('a CURSOR cell asks for a slot painted in the cursor pair', () => {
+    const { atlas } = pack([makeCell({ code: 0x41, fg: ['palette', 4] })], { cursorCol: 0 })
+    expect(atlas.colors).toEqual([[THEME.cursorFg, THEME.cursorBg]])
+  })
+
+  it('cursor over selection asks for the CURSOR pair — the same winner the lanes record', () => {
+    const { out, atlas } = pack([makeCell({ code: 0x41 })], { selection: [0, 1], cursorCol: 0 })
+    expect(atlas.colors).toEqual([[THEME.cursorFg, THEME.cursorBg]])
+    const c = readCell(out, 0)
+    expect([c.fg, c.bg]).toEqual([THEME.cursorFg, THEME.cursorBg])
+  })
+
+  it('only the covered columns of a selection ask for selection-coloured slots', () => {
+    const cells = [0, 1, 2].map((i) => makeCell({ code: 0x41 + i }))
+    const { atlas } = pack(cells, { selection: [1, 2] })
+    expect(atlas.colors).toEqual([
+      [THEME.fg, THEME.bg],
+      [THEME.fg, THEME.selectionBg],
+      [THEME.fg, THEME.bg]
+    ])
+  })
+
+  it('a wide lead under the cursor asks for the cursor pair, and its follower asks for nothing', () => {
+    const wide = makeCell({ code: 0x4e2d, width: 2, bg: ['rgb', 0x223344] })
+    const cont = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
+    const { out, atlas } = pack([wide, cont], { cursorCol: 0 })
+    expect(atlas.colors).toEqual([[THEME.cursorFg, THEME.cursorBg]])
+    // The follower carries the lead's RESOLVED colours (not the cursor override, which is a
+    // per-column paint) and asks for no slot of its own.
+    expect(readCell(out, 1).bg).toBe(packColor(0x22, 0x33, 0x44, 0xff))
   })
 })
 

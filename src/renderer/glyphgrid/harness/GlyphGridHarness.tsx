@@ -86,9 +86,11 @@ const BASE_BG = packColor(20, 20, 24, 255)
  * The atlas is keyed by colour (Phase 1c), so the key space this harness generates is
  * `codes x bold x fg x bg` = 90 x 2 x 4 x 4 = 2880, against a capacity of 3588 slots
  * (1024px page, 13x22 pitch). A random fg per cell — what this used to do — puts the key space at
- * ~54k and the page then RESETS several times a second: 30+ full-page clears per second, and,
- * until T4 wires the repack, every already-uploaded lane pointing at a recycled slot, i.e. a
- * screen of permanently wrong glyphs. That is a broken harness, not a stress test.
+ * ~54k and the page then RESETS several times a second: 30+ full-page clears per second, and every
+ * already-uploaded lane pointing at a recycled slot, i.e. a screen of permanently wrong glyphs.
+ * This harness feeds the engine DIRECTLY — it is not an xterm terminal, so it has no renderer addon
+ * and therefore no reset subscriber to repack it (see GlyphAtlas.onReset). That is a broken
+ * harness, not a stress test.
  */
 const FG_PALETTE = [
   packColor(200, 200, 160, 255),
@@ -98,8 +100,8 @@ const FG_PALETTE = [
 ]
 /** ATLAS RESET STRESS. Flip to true to give every cell a random foreground, which blows the key
  *  space past the page's capacity and exercises reset-on-full continuously. Deliberately a manual
- *  switch: with it on the glyphs on screen are expected to be WRONG (no repack subscriber yet), so
- *  it is a test of the reset MACHINERY, never of rendering quality. */
+ *  switch: with it on the glyphs on screen are expected to be WRONG (this harness subscribes to no
+ *  reset, see above), so it is a test of the reset MACHINERY, never of rendering quality. */
 const ATLAS_RESET_STRESS = false
 /** A little air around the fitted layout, so the outermost grids are visibly INSIDE the frame
  *  rather than clipping its edge — the tester has to be able to count them. */

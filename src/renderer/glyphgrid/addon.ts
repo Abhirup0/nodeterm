@@ -8,7 +8,7 @@
  *  one injected interface means a bump breaks ONE thin shell instead of the renderer, and lets the
  *  whole render path be unit-tested without a DOM, a canvas or a terminal. */
 
-import type { GlyphAtlas } from './atlas'
+import type { GlyphAtlas, GlyphAtlasSubscription } from './atlas'
 import { CELL_STRIDE } from './cells'
 import type { GridHandle } from './engine'
 import { packViewportRow, type CellView, type ThemeLanes } from './feed'
@@ -120,10 +120,15 @@ export class GlyphGridRendererAddonCore {
   private readonly readCellBound = (col: number, into: CellView): CellView | undefined =>
     this.internals.readCell(this.absRow, col, into)
 
+  /** Live for the addon's whole life; disposed in `dispose()`. The atlas is SHARED by every
+   *  terminal on the canvas, so a subscription left behind holds a torn-down addon alive and asks
+   *  it to repack rows into a grid its node has already dropped. */
+  private readonly atlasResetSub: GlyphAtlasSubscription
+
   constructor(
     private readonly internals: TermInternals,
     private readonly handle: GridHandle,
-    private readonly atlas: Pick<GlyphAtlas, 'glyphFor'>
+    private readonly atlas: Pick<GlyphAtlas, 'glyphFor' | 'onReset'>
   ) {
     this.cols = internals.cols()
     this.rows = internals.rows()
@@ -132,6 +137,10 @@ export class GlyphGridRendererAddonCore {
     this.focused = internals.hasFocus()
     this.lastCursorRow = this.cursorViewportRow()
     this.updateDims()
+    // LAST, so nothing above can throw after the subscription exists: the shell catches a failing
+    // construction and restores the DOM renderer, and a subscription made before that throw would
+    // never be disposed by anyone.
+    this.atlasResetSub = this.atlas.onReset(() => this.handleAtlasReset())
   }
 
   // ---------------------------------------------------------------- xterm renderer surface
@@ -249,9 +258,42 @@ export class GlyphGridRendererAddonCore {
   dispose(): void {
     this.disposed = true
     this.redrawListeners.clear()
+    this.atlasResetSub.dispose()
   }
 
   // ---------------------------------------------------------------- internals
+
+  /**
+   * The shared atlas cleared its page (its colour key space filled), so EVERY lane this addon has
+   * ever packed now names a slot holding some other cell's glyph. All rows have to be repacked.
+   *
+   * DEFERRED, NOT IMMEDIATE, and that is the whole design of this method. A reset fires
+   * synchronously from inside a `glyphFor` call — i.e. from the middle of a `packRows` loop, ours
+   * or another terminal's. Repacking here would re-enter that loop, and the atlas's own guard would
+   * then hand the re-entrant requests the BLANK slot to stop it recursing, so the repack would
+   * produce exactly the empty cells it exists to prevent. Instead we ask xterm for a full redraw
+   * through the same `onRequestRedraw` mechanism `clear()` and a theme change use: RenderService
+   * marks the rows dirty and packs them from its own debounced render pass, outside anybody's loop.
+   *
+   * WHY THE ENGINE'S UPLOAD ORDERING SURVIVES THIS. The engine uploads the atlas before it uploads
+   * rows and both before it draws, and a reset preserves that: it marks the atlas dirty, so the
+   * next frame re-uploads the cleared-and-refilled page BEFORE any row of it is drawn. Within that
+   * frame, the row whose pack triggered the reset carries fresh slots (its remaining cells
+   * allocated into the new page); OTHER rows may still name slots that meant something else in the
+   * old page, and they are repainted one frame late — the frame this redraw request schedules. A
+   * single frame of possibly-stale glyphs on rows nobody has touched, self-healing, is the accepted
+   * cost of resets being rare; the alternative is a synchronous repack inside a pack loop, which is
+   * a correctness problem rather than a cosmetic one.
+   *
+   * Bounded by nothing here on purpose: a page too small for the canvas would reset again on the
+   * repack, request another redraw, and settle into a repaint per frame. That is the LRU escalation
+   * Phase 2 names, and it needs to be VISIBLE (the atlas logs `resetCount`) rather than smoothed
+   * over by a rate limit in the one place that knows the rows are wrong.
+   */
+  private handleAtlasReset(): void {
+    if (this.disposed || this.rows <= 0) return
+    this.emitRedraw(0, this.rows - 1)
+  }
 
   private repackAll(): void {
     if (this.disposed) return
