@@ -2259,6 +2259,13 @@ body,
   background: var(--canvas-bg);
 }
 
+/* Opened via "+" while a project is in kanban view: the board overlay (z 25) is opaque and would
+   hide the default z-5 welcome screen. Lift it above the board + controls (26) + banners (27), but
+   keep it below the tab bar (30) so tabs stay reachable — same relative stacking as on the canvas. */
+.welcome--over-board {
+  z-index: 28;
+}
+
 .welcome__brand {
   display: flex;
   align-items: center;

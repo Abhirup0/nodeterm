@@ -7508,6 +7508,7 @@ export function Canvas() {
             onReopen={reopenProject}
             onDeleteClosed={deleteProject}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
+            overBoard={kanbanOpen}
           />
         )}
 
