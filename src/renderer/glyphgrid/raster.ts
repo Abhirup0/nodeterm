@@ -273,9 +273,14 @@ export function createCanvasRasterizer(
       //    at zoom 1 and stretch every cell by two texels; that is a different (and wrong) change.
       //
       //    UNIFORM, never conditional: this runs for every glyph, including the ones whose ink
-      //    stops short of the edge — there it copies background over background and is a visual
-      //    no-op, bit-identical to what the fill in step 1 already left. Detecting "does this glyph
-      //    bleed?" would cost a readback per slot and buy nothing.
+      //    stops short of the SOURCE texels (`lastFullCol`/`lastFullRow` on the far edges, col/row
+      //    0 on the near ones) — there it copies background over background and is a visual no-op,
+      //    bit-identical to what the fill in step 1 already left. A glyph whose ink reaches the
+      //    last FULL texel but not the partial one beyond it (a wide bold stem on a fractional
+      //    axis, say) does smear that texel's blend into a gutter that used to stay pure
+      //    background — the same bounded, same-direction correction as the full-bleed case below,
+      //    just smaller. Detecting "does this glyph bleed?" would cost a readback per slot and buy
+      //    nothing.
       //
       //    OUTSIDE THE CLIP, deliberately: `ctx.restore()` above has dropped the CELL clip, and it
       //    would eat these strips whole — they land entirely in the gutter, which is the part of
