@@ -225,8 +225,17 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a cursor at the right cell (a solid block, with the
-      default setting). It is **static** — it does not blink even with "Cursor blink" on (known
-      limitation L1).
+      default setting).
+      **Blink.** With Settings → Terminal → "Cursor blink" ON, the cursor of the FOCUSED terminal
+      flashes at xterm's own rate (600 ms shown, 600 ms hidden) while every other terminal on the
+      canvas holds a steady shape; with the setting OFF it is rock steady. Then check the three ways
+      it can STOP, each of which must leave the cursor **shown** rather than stuck invisible: turn
+      the setting off while it happens to be in its hidden phase, click from one terminal into
+      another, and open the kanban board (⌘⇧B) and come back.
+      **Report a static cursor as the state of the wiring, not as a bug, until the hook named in L1
+      lands** — the canvas-level clock ships here (one clock, focused terminal only, drawn through
+      the frame loop's one-shot `pulse()`; see 4.19), but the per-terminal repaint it calls is still
+      owed.
       **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
       glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
       the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still
@@ -454,6 +463,14 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       - pan and zoom the canvas → everything keeps repainting smoothly throughout;
       - switch to another application for a minute and come back → the canvas is live again
         (focus/visibilitychange wake).
+      **The one expected exception to "quiet" is a blinking cursor** (2.9): with a terminal FOCUSED
+      and "Cursor blink" on, the canvas ticks about TWICE A SECOND — one frame per phase flip,
+      drawn through the loop's one-shot `pulse()` — and that is not a missed park. The FAILURE
+      there is the opposite reading: an FPS meter at the display's refresh rate with nothing but a
+      blinking cursor happening means the blink took the `wake()` path and is re-arming the 30-frame
+      idle streak twice a second. Click into a terminal, leave everything else idle, and confirm the
+      meter reads ~2 rather than 60. (Until the phase hook in L1 lands nothing blinks, so this case
+      reads as fully quiet.)
       **BLOCKING symptom to name explicitly: if ANY terminal ever stops repainting until you drag
       it, click it, or resize something, that is a MISSED WAKE** — the failure this design fears,
       and far worse than the idle CPU it saves. Report it with what the terminal was doing when it
@@ -501,9 +518,19 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 
 ## Known limitations (accepted for Phase 1b — verify they are what you see, not that they are absent)
 
-- **L1 — The cursor does not blink.** The shared renderer paints a static block cursor regardless
-  of the "Cursor blink" setting. Decide on device whether this ships as-is or the setting should be
-  gated in shared mode.
+- **L1 — The cursor does not blink YET: the clock ships, the per-terminal phase hook is owed.**
+  Phase 2's blink task built the half that is hard to get right — one canvas-level clock
+  (`createCursorBlinkClock` in `SharedGlyphLayer.tsx`), gated on the setting, on a terminal holding
+  focus and on the board, whose repaint goes through the frame loop's one-shot `pulse()` so an idle
+  canvas ticks twice a second instead of returning to the display's refresh rate (4.19). What is
+  missing is the PRODUCER: nothing calls `setCursorBlinkTarget` yet, because the phase has to be
+  applied by the addon — a block cursor is a CELL rewrite and every other shape is an overlay, so
+  only `GlyphGridRendererAddonCore` can suppress whichever half a terminal is drawing. It needs a
+  `setCursorBlinkPhase(visible)` entry point (repacking the cursor row SYNCHRONOUSLY — a deferred
+  repack escapes the clock's damage bracket and takes the `wake()` path, which is the failure the
+  clock exists to prevent) plus a focus-driven `setCursorBlinkTarget(…)` call from the attach shell.
+  Both files were out of scope for the task that built the clock. Until then the shared renderer
+  paints a static cursor regardless of the setting, exactly as it did in Phase 1b.
 - **L4 — Square plate corners.** The grid's plate is a rectangle; the node has `border-radius: 10px`
   and cannot clip the canvas (it is not a DOM child), so the body's corners read square in shared
   mode. Phase 2: rounded/stencilled plate.

@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createFrameLoop, type FrameLoop, type FrameLoopHost } from '../glyphgrid/frame-driver'
 import {
   createBoardFrameGate,
+  createCursorBlinkClock,
+  cursorBlinkTarget,
+  setCursorBlinkTarget,
+  subscribeCursorBlinkTarget,
+  CURSOR_BLINK_INTERVAL_MS,
   failSharedGlyph,
   getSharedGlyphContext,
   effectiveStackOrder,
@@ -28,6 +33,8 @@ import {
   syncAtlasPixelRatio,
   useSharedGlyph,
   type AtlasResetSource,
+  type CursorBlinkClock,
+  type CursorBlinkTarget,
   type StackedNode,
   type StackOrderNode
 } from './SharedGlyphLayer'
@@ -1222,6 +1229,251 @@ describe('createBoardFrameGate', () => {
     h.damage()
     gate.loop().wake()
     expect(h.pendingFrames()).toBe(0)
+  })
+})
+
+describe('createCursorBlinkClock', () => {
+  /**
+   * Everything the clock touches is injected, so the whole policy — the three gates, the phase, the
+   * teardown and the damage routing — is exercisable without a DOM, a timer or a GPU.
+   *
+   * The fake TARGET damages the engine when it repaints, exactly as the addon's cursor-row repack
+   * does (`updateRow`/`setCursor` → `markDirty` → the layer's damage subscription). That is the
+   * whole point of the harness: the trap this task exists to avoid is not visible unless the
+   * repaint's own damage is modelled.
+   */
+  function blinkHarness(opts: { enabled?: boolean; covered?: boolean } = {}): {
+    clock: CursorBlinkClock
+    phases: boolean[]
+    loop: { wake: ReturnType<typeof vi.fn>; pulse: ReturnType<typeof vi.fn> }
+    intervalsStarted(): number
+    intervalsCleared(): number
+    running(): boolean
+    tick(): void
+    focus(name?: string): CursorBlinkTarget
+    blur(): void
+    setEnabled(on: boolean): void
+    setCovered(on: boolean): void
+    phasesOf(target: CursorBlinkTarget): boolean[]
+  } {
+    const phases: boolean[] = []
+    const perTarget = new Map<CursorBlinkTarget, boolean[]>()
+    const loop = { wake: vi.fn(), pulse: vi.fn() }
+    const state = {
+      enabled: opts.enabled ?? true,
+      covered: opts.covered ?? false,
+      target: null as CursorBlinkTarget | null
+    }
+    let started = 0
+    let cleared = 0
+    let fire: (() => void) | null = null
+
+    const clock = createCursorBlinkClock({
+      enabled: () => state.enabled,
+      covered: () => state.covered,
+      target: () => state.target,
+      loop: () => loop,
+      setInterval: (cb) => {
+        started++
+        fire = cb
+        return started
+      },
+      clearInterval: () => {
+        cleared++
+        fire = null
+      }
+    })
+
+    const focus = (): CursorBlinkTarget => {
+      const target: CursorBlinkTarget = {
+        setPhase(visible: boolean): void {
+          phases.push(visible)
+          const own = perTarget.get(target) ?? []
+          own.push(visible)
+          perTarget.set(target, own)
+          // The repack dirties the engine, synchronously, from inside `setPhase`.
+          clock.routeDamage()
+        }
+      }
+      state.target = target
+      clock.sync()
+      return target
+    }
+
+    return {
+      clock,
+      phases,
+      loop,
+      intervalsStarted: () => started,
+      intervalsCleared: () => cleared,
+      running: () => fire !== null,
+      tick: () => fire?.(),
+      focus,
+      blur: () => {
+        state.target = null
+        clock.sync()
+      },
+      setEnabled: (on) => {
+        state.enabled = on
+        clock.sync()
+      },
+      setCovered: (on) => {
+        state.covered = on
+        clock.sync()
+      },
+      phasesOf: (target) => perTarget.get(target) ?? []
+    }
+  }
+
+  it('has no clock at all while no terminal has focus', () => {
+    // The canvas everybody actually leaves open: terminals on screen, focus in the editor or in
+    // another app. A clock here would be a repaint twice a second for a cursor nobody is on.
+    const h = blinkHarness()
+    h.clock.sync()
+    expect(h.running()).toBe(false)
+    expect(h.intervalsStarted()).toBe(0)
+  })
+
+  it('has no clock while the blink setting is off', () => {
+    const h = blinkHarness({ enabled: false })
+    h.focus()
+    expect(h.running()).toBe(false)
+  })
+
+  it('has no clock while the kanban board covers the canvas', () => {
+    // The board gate has STOPPED the loop, so a phase flip would repack a row nobody draws, every
+    // 600 ms, for as long as the board is up.
+    const h = blinkHarness({ covered: true })
+    h.focus()
+    expect(h.running()).toBe(false)
+  })
+
+  it('starts one clock when a focused terminal and the setting agree', () => {
+    const h = blinkHarness()
+    h.focus()
+    expect(h.running()).toBe(true)
+    expect(h.intervalsStarted()).toBe(1)
+  })
+
+  it('alternates the phase, starting from SHOWN', () => {
+    const h = blinkHarness()
+    h.focus()
+    expect(h.phases).toEqual([]) // a freshly focused terminal gets a full period before it hides
+    h.tick()
+    h.tick()
+    h.tick()
+    expect(h.phases).toEqual([false, true, false])
+  })
+
+  it('repaints through pulse(), NEVER through wake — the park must survive the blink', () => {
+    // THE test of this task. `wake()` would draw the frame and then hold rAF alive for another
+    // IDLE_FRAMES_BEFORE_PARK frames, twice a second, forever.
+    const h = blinkHarness()
+    h.focus()
+    h.tick()
+    h.tick()
+    expect(h.loop.pulse).toHaveBeenCalledTimes(2)
+    expect(h.loop.wake).not.toHaveBeenCalled()
+  })
+
+  it('leaves ORDINARY damage on the wake path — only the blink is a one-shot', () => {
+    // Damage from a terminal writing rows is likely to be followed by more, which is exactly what
+    // `wake()` is for. Routing everything through `pulse()` would cost a scheduling hop per frame
+    // of a streaming terminal.
+    const h = blinkHarness()
+    h.focus()
+    h.clock.routeDamage()
+    expect(h.loop.wake).toHaveBeenCalledTimes(1)
+    expect(h.loop.pulse).not.toHaveBeenCalled()
+  })
+
+  it('a sync that changes nothing does not restart the interval', () => {
+    const h = blinkHarness()
+    h.focus()
+    h.clock.sync()
+    h.clock.sync()
+    expect(h.intervalsStarted()).toBe(1)
+    expect(h.intervalsCleared()).toBe(0)
+  })
+
+  it('turning the setting off stops the clock and hands the cursor back SHOWN', () => {
+    // A cursor left in its hidden phase is an invisible cursor for the rest of the session — the
+    // one way this feature can be worse than not having it.
+    const h = blinkHarness()
+    h.focus()
+    h.tick() // hidden
+    h.setEnabled(false)
+    expect(h.running()).toBe(false)
+    expect(h.phases).toEqual([false, true])
+  })
+
+  it('the board covering the canvas stops the clock the same way', () => {
+    const h = blinkHarness()
+    h.focus()
+    h.tick()
+    h.setCovered(true)
+    expect(h.running()).toBe(false)
+    expect(h.phases).toEqual([false, true])
+  })
+
+  it('losing focus stops the clock, restoring the terminal that had it', () => {
+    const h = blinkHarness()
+    const first = h.focus()
+    h.tick()
+    h.blur()
+    expect(h.running()).toBe(false)
+    expect(h.phasesOf(first)).toEqual([false, true])
+  })
+
+  it('a focus HANDOVER restores the old terminal and starts the new one shown', () => {
+    // The old target is restored BEFORE it is forgotten — afterwards there is no handle to fix it
+    // with, and its cursor would stay hidden until something unrelated repacked its row.
+    const h = blinkHarness()
+    const first = h.focus()
+    h.tick() // first is hidden
+    const second = h.focus()
+    expect(h.phasesOf(first)).toEqual([false, true])
+    expect(h.phasesOf(second)).toEqual([])
+    expect(h.running()).toBe(true)
+    h.tick()
+    expect(h.phasesOf(second)).toEqual([false])
+  })
+
+  it('stop() clears the interval, restores the cursor, and a later sync cannot restart it', () => {
+    // Teardown ordering is not guaranteed to beat a store notification already in flight — the
+    // same discipline `createBoardFrameGate.stop()` keeps.
+    const h = blinkHarness()
+    const first = h.focus()
+    h.tick()
+    h.clock.stop()
+    expect(h.running()).toBe(false)
+    expect(h.phasesOf(first)).toEqual([false, true])
+    h.clock.sync()
+    expect(h.running()).toBe(false)
+  })
+
+  it('matches xterm’s own blink period, so a DOM-rendered terminal beside a shared one agrees', () => {
+    expect(CURSOR_BLINK_INTERVAL_MS).toBe(600)
+  })
+})
+
+describe('the cursor blink target seam', () => {
+  afterEach(() => setCursorBlinkTarget(null))
+
+  it('notifies on a change and not on a repeat', () => {
+    const seen = vi.fn()
+    const off = subscribeCursorBlinkTarget(seen)
+    const target: CursorBlinkTarget = { setPhase: () => {} }
+    setCursorBlinkTarget(target)
+    setCursorBlinkTarget(target)
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(cursorBlinkTarget()).toBe(target)
+    setCursorBlinkTarget(null)
+    expect(seen).toHaveBeenCalledTimes(2)
+    expect(cursorBlinkTarget()).toBeNull()
+    off()
+    setCursorBlinkTarget(target)
+    expect(seen).toHaveBeenCalledTimes(2)
   })
 })
 

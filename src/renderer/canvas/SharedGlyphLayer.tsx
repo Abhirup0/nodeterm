@@ -1189,6 +1189,193 @@ export function createBoardFrameGate(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The blink clock — ONE for the whole canvas
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * xterm's own blink half-period (`CursorBlinkStateManager`'s `BLINK_INTERVAL`): 600 ms shown,
+ * 600 ms hidden.
+ *
+ * Matched deliberately rather than picked. A stacked terminal leaves the shared canvas and paints
+ * itself on xterm's DOM renderer (see the opaque set above), so two terminals on ONE canvas can be
+ * blinking under two different mechanisms at the same moment — ours and xterm's CSS animation. Any
+ * other period would make them visibly drift apart.
+ */
+export const CURSOR_BLINK_INTERVAL_MS = 600
+
+/**
+ * The terminal whose cursor is blinking right now — at most ONE, because at most one terminal has
+ * focus, which is also why the clock is a canvas-level singleton rather than a timer per node.
+ *
+ * THE PRODUCER'S CONTRACT, in three parts, because the clock cannot enforce any of them:
+ *  1. **Set on focus, cleared on blur.** The clock's "is anything focused" gate IS this value; a
+ *     target left behind by a blurred terminal is a repaint twice a second for a cursor nobody is
+ *     on.
+ *  2. **`setPhase` must repaint SYNCHRONOUSLY.** The clock brackets the call to route the damage it
+ *     produces through `pulse()` instead of `wake()` (see `routeDamage`); a phase applied through a
+ *     deferred/debounced redraw would land outside that bracket, take the wake path, and put the
+ *     idle canvas back at the display's refresh rate — the exact failure this whole design avoids.
+ *  3. **Both halves of the cursor.** A block cursor is a CELL rewrite and every other shape is an
+ *     overlay (see `glyphgrid/cursor.ts`), so hiding it for a phase means suppressing whichever of
+ *     the two this terminal is currently drawing — not just the overlay.
+ * A terminal that stops being the target must leave its own cursor SHOWN; the clock restores the
+ * target it still holds, but it cannot reach one that has already been dropped.
+ */
+export interface CursorBlinkTarget {
+  /** Show or hide this terminal's cursor for the current phase. */
+  setPhase(visible: boolean): void
+}
+
+let blinkTarget: CursorBlinkTarget | null = null
+const blinkTargetListeners = new Set<() => void>()
+
+/** Publish the focused terminal (or null on blur). Change-gated: the producer is a focus handler
+ *  that may fire more than once for one focus change. */
+export function setCursorBlinkTarget(target: CursorBlinkTarget | null): void {
+  if (blinkTarget === target) return
+  blinkTarget = target
+  for (const fn of blinkTargetListeners) fn()
+}
+
+export function cursorBlinkTarget(): CursorBlinkTarget | null {
+  return blinkTarget
+}
+
+export function subscribeCursorBlinkTarget(fn: () => void): () => void {
+  blinkTargetListeners.add(fn)
+  return () => {
+    blinkTargetListeners.delete(fn)
+  }
+}
+
+/** Everything the clock touches, injected — so the policy is testable without a timer, a DOM or a
+ *  GPU, exactly as `createBoardFrameGate`'s is. */
+export interface CursorBlinkClockDeps {
+  /** `settings.cursorBlink`. */
+  enabled(): boolean
+  /** Is the kanban board covering the canvas? */
+  covered(): boolean
+  /** The focused terminal, or null. */
+  target(): CursorBlinkTarget | null
+  /** The loop in charge RIGHT NOW — always through the board gate, never captured: leaving the
+   *  board builds a fresh loop and a captured one is a corpse for the rest of the session. */
+  loop(): Pick<FrameLoop, 'wake' | 'pulse'>
+  setInterval(cb: () => void, ms: number): number
+  clearInterval(handle: number): void
+}
+
+export interface CursorBlinkClock {
+  /** Re-read the three gates and act on a change. Change-gated and idempotent, so every store
+   *  notification that could move any of them can call it unconditionally. */
+  sync(): void
+  /** Route ONE damage notification from the engine to the loop. The clock owns this because it is
+   *  the only thing that knows whether the damage is its own. */
+  routeDamage(): void
+  /** Teardown. Restores the cursor, kills the timer, and makes any later `sync` inert. */
+  stop(): void
+}
+
+/**
+ * The canvas's single cursor-blink clock.
+ *
+ * **The trap it exists to avoid.** A blink is a TIMED repaint twice a second, and the repaint
+ * dirties the engine like any other write — so the ordinary path (`onDamage` → `wake()`) would
+ * resume the rAF chain, which then costs `IDLE_FRAMES_BEFORE_PARK` frames before parking again.
+ * Thirty frames every 600 ms is a loop that never parks: Phase 1c's idle park silently undone, on
+ * every canvas that has a focused terminal, which is most of them. `pulse()` (frame-driver) draws
+ * exactly one frame and stays parked — and `routeDamage` is what makes sure the blink's own damage
+ * reaches it instead of `wake()`. **Neither half works alone**: `pulse()` without the routing is
+ * dead code, since the damage listener would have already woken the loop.
+ *
+ * **Gated three ways, and torn down when any of them stops holding**: the blink SETTING, a terminal
+ * holding FOCUS, and the board not covering the canvas (its gate has stopped the loop, so a phase
+ * flip there repacks a row nobody draws). A canvas with no focused terminal has no clock at all —
+ * not a clock that ticks and finds nothing to do.
+ *
+ * **The cursor is always handed back SHOWN.** Every stopping path restores the phase first: a
+ * cursor left hidden is an invisible cursor until something unrelated repacks its row, which is the
+ * one way this feature can be worse than not having it.
+ */
+export function createCursorBlinkClock(deps: CursorBlinkClockDeps): CursorBlinkClock {
+  let handle = 0
+  /** The target we are actually blinking — held rather than re-read, because a stopping path has to
+   *  restore the cursor of the terminal that HAD the clock, not of whoever has focus now. */
+  let current: CursorBlinkTarget | null = null
+  /** Is the cursor currently shown? Starts true: nothing has hidden it yet. */
+  let visible = true
+  /** True only for the duration of a `setPhase` call — see `routeDamage`. */
+  let applying = false
+  let torn = false
+
+  const clearTimer = (): void => {
+    if (!handle) return
+    deps.clearInterval(handle)
+    handle = 0
+  }
+
+  const apply = (next: boolean): void => {
+    visible = next
+    const target = current
+    if (!target) return
+    // The bracket is the whole mechanism: `setPhase` repacks the cursor row synchronously, that
+    // repack calls `markDirty`, and the damage lands back in `routeDamage` while this flag is up.
+    // `finally`, because a throwing addon must not leave every subsequent damage on the pulse path
+    // — that would starve a streaming terminal down to one frame per write.
+    applying = true
+    try {
+      target.setPhase(next)
+    } finally {
+      applying = false
+    }
+  }
+
+  /** Every path that stops blinking goes through here. */
+  const stopClock = (): void => {
+    clearTimer()
+    if (!visible) apply(true)
+  }
+
+  return {
+    sync(): void {
+      if (torn) return
+      const next = deps.target()
+      if (next !== current) {
+        // Restore BEFORE the handover: afterwards there is no handle to fix the old cursor with,
+        // and it would sit hidden until something unrelated repacked its row.
+        stopClock()
+        current = next
+      }
+      if (!deps.enabled() || deps.covered() || !current) {
+        stopClock()
+        return
+      }
+      // Already ticking and every gate still holds — restarting the interval here would re-arm the
+      // period on every unrelated settings write, so a canvas whose settings churn would never
+      // reach a hide at all.
+      if (handle) return
+      // A terminal that has just taken focus starts SHOWN and gets a full period before its first
+      // hide — xterm's own `_restartInterval` does exactly this, and it is what keeps the cursor
+      // solid at the moment the user clicks into a terminal.
+      if (!visible) apply(true)
+      handle = deps.setInterval(() => apply(!visible), CURSOR_BLINK_INTERVAL_MS)
+    },
+    routeDamage(): void {
+      const loop = deps.loop()
+      // Ours: one frame, still parked. Anyone else's: `wake()`, because ordinary damage (a terminal
+      // writing rows) is likely to be followed by more, and a pulse per write would put a
+      // scheduling hop in front of every character.
+      if (applying) loop.pulse()
+      else loop.wake()
+    },
+    stop(): void {
+      torn = true
+      stopClock()
+      current = null
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The component
 // ---------------------------------------------------------------------------------------------
 
@@ -1274,11 +1461,34 @@ export function SharedGlyphLayer(): JSX.Element {
         clearTimer: (h) => window.clearTimeout(h)
       })
     )
+    // ONE blink clock for the whole canvas — not one per terminal — because at most one terminal
+    // has focus. It reaches the loop through `gate.loop()` for the same reason the damage
+    // subscription does, and its own repaints take `pulse()` rather than `wake()`; see
+    // `createCursorBlinkClock` for why that distinction is the whole task.
+    const clock = createCursorBlinkClock({
+      enabled: () => useSettings.getState().settings.cursorBlink,
+      covered: boardCoversCanvas,
+      target: cursorBlinkTarget,
+      loop: () => gate.loop(),
+      setInterval: (cb, ms) => window.setInterval(cb, ms),
+      clearInterval: (h) => window.clearInterval(h)
+    })
+    // Mounted with a terminal already focused (a remount, a project switch back) must start the
+    // clock, exactly as the gate reads the board flag at construction rather than assuming.
+    clock.sync()
     // THE wake mechanism: the engine funnels every damage write through `markDirty`, which calls
     // out on the clean→dirty edge. A parked loop resumes on the very next damaging write. Reached
     // through `gate.loop()` and never captured — leaving the board builds a fresh loop, and a
     // subscription pinned to the stopped one would freeze the canvas for the rest of the session.
-    const damage = ctx.engine.onDamage(() => gate.loop().wake())
+    //
+    // Routed through the clock, which is the only thing that can tell the blink's own repaint from
+    // everybody else's damage: its repaint is isolated in time and takes `pulse()` (one frame, still
+    // parked), while ordinary damage keeps the `wake()` it has always had.
+    const damage = ctx.engine.onDamage(() => clock.routeDamage())
+    // The two gates that can move without the board moving: the blink SETTING and which terminal
+    // holds focus. Both are change-gated inside `sync`.
+    const unsubBlinkTarget = subscribeCursorBlinkTarget(() => clock.sync())
+    const unsubBlinkSetting = useSettings.subscribe(() => clock.sync())
     // Belt and braces for the background-throttling case (Task 9): a park entered while the window
     // was occluded must not outlive the return, and a throttled/coalesced rAF can leave the loop
     // parked with damage pending. Both are cheap — `wake()` only schedules a frame that draws
@@ -1292,7 +1502,13 @@ export function SharedGlyphLayer(): JSX.Element {
     // Both stores, because either can move the board over this canvas: the view toggle, and a
     // switch to a project that is already on it. `sync` is change-gated, so the projects store's
     // chattier notifications (it is rewritten on every node serialization) cost a comparison.
-    const syncBoard = (): void => gate.sync()
+    // The board is the blink clock's third gate as well (a stopped loop cannot draw the phase), so
+    // the two are synced together — and the gate goes FIRST, so the clock reads the board through
+    // an already-updated loop.
+    const syncBoard = (): void => {
+      gate.sync()
+      clock.sync()
+    }
     const unsubView = useViewMode.subscribe(syncBoard)
     const unsubProjects = useProjects.subscribe(syncBoard)
 
@@ -1310,6 +1526,13 @@ export function SharedGlyphLayer(): JSX.Element {
       // surviving board subscription would BUILD a loop against a disposed context. `gate.stop()`
       // is idempotent and also makes a `sync` still in flight inert, so the `ctx.disposed` and
       // `failSharedGlyph` paths (which stop the loop themselves) land here safely too.
+      // The clock goes FIRST, and before `gate.stop()`: it hands the cursor back SHOWN, and that
+      // restoring repaint still wants a live loop to draw it. Nothing may outlive the context —
+      // this is also the teardown for the `ctx.disposed` and `failSharedGlyph` paths, both of which
+      // re-run this effect.
+      clock.stop()
+      unsubBlinkTarget()
+      unsubBlinkSetting()
       gate.stop()
       unsubView()
       unsubProjects()
