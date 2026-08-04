@@ -170,6 +170,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       line a second, a burst adding `(+K more since the last line)`. **Report the highest `N` you saw
       and roughly how long the session had run to get there.** "Rare" is this design's claim; frequent
       resets are the evidence that Phase 2 must build real LRU eviction instead.
+      **If every shared terminal's TEXT goes BLACK the moment you zoom below 100% (and comes back at
+      100%+), that is the mip pyramid clamp** — `TEXTURE_MAX_LEVEL` at the atlas upload in
+      `gl-webgl2.ts` is spec-correct but untested on this GPU, and a driver that disagrees about
+      mipmap completeness samples black below zoom 1. Loud, unmistakable, one-line revert: delete the
+      `TEXTURE_MAX_LEVEL` `texParameteri` call (the full pyramid comes back; `TEXTURE_MAX_LOD` still
+      clamps sampling). Report it rather than living with it — the revert costs ~0.35 MB per page.
 - [ ] **2.8 Selection visual.** Drag-select inside a terminal: the selection band covers exactly
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
