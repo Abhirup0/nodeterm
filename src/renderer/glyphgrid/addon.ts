@@ -10,6 +10,7 @@
 
 import type { GlyphAtlas, GlyphAtlasSubscription } from './atlas'
 import { CELL_STRIDE } from './cells'
+import { resolveCursorShape, type CursorShape, type GridCursor } from './cursor'
 import type { DecorationReader } from './decorations'
 import type { GridHandle } from './engine'
 import { packViewportRow, type CellView, type ThemeLanes } from './feed'
@@ -48,6 +49,17 @@ export interface TermInternals {
   theme(): ThemeLanes
   /** Read ONCE, at construction — see `focused`. */
   hasFocus(): boolean
+  /** xterm's `options.cursorStyle` and `options.cursorInactiveStyle`, verbatim strings.
+   *
+   *  OPTIONAL, and read on every pack rather than cached: the user can change either from Settings
+   *  at any moment, and the option object is the shell's live view of the terminal. A build that
+   *  reports neither degrades to xterm's own defaults (a focused block, a blurred outline) —
+   *  a bumped xterm must cost the user their chosen SHAPE, never their cursor.
+   *
+   *  The FOCUS half is deliberately not read from here: this addon tracks focus itself (see
+   *  `focused`), because whether the browser service's flag has flipped by the time xterm calls
+   *  handleBlur is an ordering detail the cursor's correctness must not rest on. */
+  cursorStyle?(): { style?: string; inactiveStyle?: string }
   /** The terminal's decorations — the cell colours a ⌘F hit paints — or undefined.
    *
    *  ALL THREE DECORATION MEMBERS ARE OPTIONAL, together: an xterm build whose decoration service
@@ -247,13 +259,13 @@ export class GlyphGridRendererAddonCore {
   handleBlur(): void {
     if (this.disposed) return
     this.focused = false
-    this.packCursorRow()
+    this.repaintFocusDependent()
   }
 
   handleFocus(): void {
     if (this.disposed) return
     this.focused = true
-    this.packCursorRow()
+    this.repaintFocusDependent()
   }
 
   /** Not part of xterm's renderer surface — the shell calls it from `_themeService.onChangeColors`.
@@ -280,6 +292,11 @@ export class GlyphGridRendererAddonCore {
    *  (it outlives a renderer swap back to DOM). */
   dispose(): void {
     this.disposed = true
+    // The overlay cursor is a GRID-level value, so — unlike a packed row — nothing will ever
+    // overwrite it. A renderer swapped back to xterm's DOM one would otherwise leave a bar or an
+    // outline painted on the shared canvas under a terminal now drawing its own. A silent no-op when
+    // the owner has already dropped the handle, which is the ordinary teardown order.
+    this.handle.setCursor(null)
     this.redrawListeners.clear()
     this.atlasResetSub.dispose()
     for (const sub of this.decorationSubs) sub.dispose()
@@ -359,6 +376,63 @@ export class GlyphGridRendererAddonCore {
     this.packRows(row, row)
   }
 
+  /** Everything a focus change repaints. The cursor row, because its shape changes (a focused block
+   *  becomes a blurred outline), AND the selected rows, because an unfocused terminal's selection is
+   *  painted in a quieter colour (limitation L3). Repacking only the cursor row — which is what this
+   *  used to do — left the selection band bright until something unrelated happened to touch it. */
+  private repaintFocusDependent(): void {
+    this.packCursorRow()
+    const sel = this.selectionRowRange()
+    if (sel) this.packRows(sel[0], sel[1])
+  }
+
+  /** The shape the cursor takes right now, from the shell's options and OUR focus flag. */
+  private cursorShape(): CursorShape {
+    const opts = this.internals.cursorStyle?.()
+    return resolveCursorShape(this.focused, opts?.style, opts?.inactiveStyle)
+  }
+
+  /**
+   * The overlay cursor this grid should draw, or null.
+   *
+   * Null for a BLOCK as well as for `none`: a block is a cell rewrite (only that path can invert the
+   * glyph under it), and drawing it here too would paint an opaque quad over the inversion the feed
+   * just produced. Null for a hidden cursor (DECTCEM inside a TUI) and for one scrolled out of the
+   * viewport, both for the same reason: the overlay is a GRID-level value, so nothing else would
+   * ever erase a stale one — unlike a packed row, which the next frame rewrites wholesale.
+   */
+  private cursorSpec(): GridCursor | null {
+    const shape = this.cursorShape()
+    if (shape === 'block' || shape === 'none') return null
+    if (!this.internals.cursorVisible()) return null
+    if (this.cols <= 0 || this.rows <= 0) return null
+    const row = this.cursorViewportRow()
+    if (row < 0 || row >= this.rows) return null
+    // Clamped exactly as the cell path clamps it: with a deferred wrap pending the buffer's x sits
+    // ON `cols`, and an overlay drawn there would hang off the right edge of the terminal.
+    const col = Math.min(this.internals.cursorX(), this.cols - 1)
+    const cell = this.internals.readCell(
+      this.internals.baseY() + this.internals.cursorY(),
+      col,
+      this.workCell
+    )
+    return {
+      col,
+      row,
+      shape,
+      // A wide glyph's lead: the cursor covers the whole character, not its left half (L13). Read
+      // from the CELL, since the cursor's column says nothing about how wide what it sits on is.
+      widthCells: cell && cell.getWidth() === 2 ? 2 : 1,
+      color: this.internals.theme().cursorBg
+    }
+  }
+
+  /** Push the current overlay cursor at the grid. Cheap and idempotent — the engine change-gates it
+   *  — which is what lets every pack path call it without reasoning about whether it moved. */
+  private syncCursor(): void {
+    this.handle.setCursor(this.cursorSpec())
+  }
+
   /** The single funnel: every path that changes what a row should look like ends here.
    *
    *  Reads viewport/theme/cursor ONCE for the whole range — they cannot change mid-loop, and
@@ -366,18 +440,24 @@ export class GlyphGridRendererAddonCore {
    *  re-read per row. */
   private packRows(from: number, to: number): void {
     if (this.disposed) return
+    // FIRST, and independent of the range: the overlay cursor is a property of the terminal, not of
+    // the rows this pass happens to touch, and every path that repacks anything is also a path
+    // along which the cursor may have moved, changed shape or gone away.
+    this.syncCursor()
     const start = Math.max(0, from)
     const end = Math.min(this.rows - 1, to)
     if (end < start || this.cols <= 0) return
     const theme = this.internals.theme()
     const viewportY = this.internals.viewportY()
-    // -1 = no cursor anywhere in this pass (hidden by the app, or the terminal is not focused —
-    // xterm draws a hollow outline there, which this engine has no flag for; painting nothing is
-    // the honest v1 degradation and is what handleBlur repacks the row to produce).
-    const cursorRow =
-      this.focused && this.internals.cursorVisible()
-        ? this.internals.baseY() + this.internals.cursorY() - viewportY
-        : -1
+    // -1 = no cursor row in this pass (the app hid it — DECTCEM inside a TUI). NOT focus-gated any
+    // more: a blurred terminal still has a cursor, it just wears a different shape, and which of the
+    // two paths draws it is `cursorShape`'s answer below — not this row's.
+    const cursorRow = this.internals.cursorVisible()
+      ? this.internals.baseY() + this.internals.cursorY() - viewportY
+      : -1
+    // Resolved ONCE for the range: only a `block` is a cell rewrite, and the feed ignores
+    // `cursorCol` for every other shape (the overlay pass draws those — see `cursorSpec`).
+    const cursorShape = this.cursorShape()
     // CLAMPED, exactly as xterm's own renderers do (`Math.min(buffer.x, cols - 1)`): with a
     // deferred wrap pending, the buffer's x sits ON `cols`, one past the last column. Left
     // unclamped it matches no column and the cursor simply VANISHES at the end of a full line —
@@ -393,10 +473,11 @@ export class GlyphGridRendererAddonCore {
         atlas: this.atlas,
         theme,
         selection: this.selectionOnRow(this.absRow),
-        // A block cursor on a DOUBLE-WIDTH glyph paints the left half only: the cursor is one
-        // column and the glyph is two. Known v1 limitation (the two-column rule needs the wide
-        // flag honoured in the shader) — visible, harmless, tracked for Phase 2.
         cursorCol: row === cursorRow ? cursorCol : -1,
+        cursorShape,
+        // Only the SELECTION colour depends on this (an unfocused terminal's band is quieter — L3);
+        // the blurred cursor is a shape, and shapes are the overlay's business.
+        focused: this.focused,
         decorations,
         // Decoration markers are keyed by ABSOLUTE buffer row, so this is the row the lookup needs
         // — the viewport row would slide the highlights off their matches on every scroll.

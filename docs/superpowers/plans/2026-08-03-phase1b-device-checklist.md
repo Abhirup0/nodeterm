@@ -226,13 +226,27 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       the selected cells, with correct fg/bg inversion, and matches what the DOM renderer draws.
 - [ ] **2.9 Cursor.** A focused terminal shows a solid block cursor at the right cell. It is
       **static** — it does not blink even with "Cursor blink" on (known limitation L1).
+      **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
+      glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
+      the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still
+      readable beside it, `underline` is one along the bottom. Change the setting while the terminal
+      is focused: the shape follows immediately, with no refresh. Then **zoom out to ~30% and back**:
+      a bar/underline stays a visible hairline at every step (its thickness is held at one device
+      pixel), never fading away and never growing into a block.
 - [ ] **2.10 Cursor at end of line.** Type until the cursor sits past the last column (deferred
       wrap): the cursor is drawn on the LAST column, not off-screen or on the next row.
 - [ ] **2.11 Cursor hidden by a TUI.** Open a fullscreen CLI that hides the cursor (any agent CLI,
       `less`, `htop`): no stray block cursor is painted anywhere on the grid.
-- [ ] **2.12 Blur.** Click away from a terminal: the cursor DISAPPEARS (the DOM renderer draws a
-      hollow outline — known limitation L2), and the selection stays visible in the same color as
-      when focused (known limitation L3). Judge whether either is acceptable to ship.
+- [ ] **2.12 Blur.** Click away from a terminal. Two things change, and both are the point of the
+      item: the block cursor becomes a **hollow outline** — a one-pixel box around the cell with the
+      glyph inside it readable, which is exactly what xterm's DOM renderer draws for an unfocused
+      terminal — and a selection made before the blur is **dimmer** than it was, in the same hue.
+      Compare a focused and a blurred terminal side by side; the two selections must be
+      distinguishable at a glance. Then set Settings → Terminal → **Inactive cursor style** to
+      `none` (no cursor at all on blur), to `block` (a solid one, glyph inverted, on the blurred
+      terminal) and back to `outline`. **The outline is the DEFAULT** — every terminal on the canvas
+      except the focused one is drawing it, so judge it at normal zoom on a busy canvas, not only on
+      one node.
 - [ ] **2.13 Plate geometry.** Look at the four corners and the right/bottom edges of a terminal
       body. Expected: **no bands anywhere** — the plate is the body rect, so the fit slack at the
       right/bottom and the padding seams on the left/top are all inside it (the round-2 fix; the
@@ -247,9 +261,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - [ ] **2.14 Scroll area after a font change.** Change the font size while shared is on, then look
       at the scrollbar/scroll area geometry: the thumb matches the content, no phantom region.
 - [ ] **2.15 Cursor on a wide glyph.** Put the cursor ON a double-width character (type `日本語`
-      and walk the cursor back over it, or `vim` with the cursor on an emoji): KNOWN — the block
-      covers only the LEFT half-cell of the glyph instead of both columns (L13). Confirm that is
-      what you see, and judge how visible it is at normal zoom.
+      and walk the cursor back over it, or `vim` with the cursor on an emoji). The block covers
+      **both columns** — the whole character, with no un-inverted right half — and walking off it
+      leaves nothing behind. Repeat with **Cursor style = underline** (the rule runs the full width
+      of the character, not half of it) and with the terminal **blurred** (the outline boxes the
+      whole character). `bar` is the deliberate exception: it stays ONE hairline on the left edge,
+      because it marks the insertion point rather than the cell.
 
 ## 3. Interactions
 
@@ -462,10 +479,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L1 — The cursor does not blink.** The shared renderer paints a static block cursor regardless
   of the "Cursor blink" setting. Decide on device whether this ships as-is or the setting should be
   gated in shared mode.
-- **L2 — A blurred terminal paints no cursor.** xterm's DOM renderer draws a hollow outline for an
-  unfocused terminal; the engine has no outline flag, so the cursor simply disappears on blur.
-- **L3 — Selection does not dim on blur.** The theme lanes carry no *inactive* selection color, so
-  an unfocused terminal's selection keeps the active color.
 - **L4 — Square plate corners.** The grid's plate is a rectangle; the node has `border-radius: 10px`
   and cannot clip the canvas (it is not a DOM child), so the body's corners read square in shared
   mode. Phase 2: rounded/stencilled plate.
@@ -513,11 +526,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 - **L11 — Grids keep drawing while the kanban board covers the canvas.** The board overlay is
   opaque, so nothing is visible; it is wasted work, measured by item 4.16 and closed in Phase 2 if
   it shows up.
-- **L13 — The block cursor on a double-width glyph paints only the left half-cell.** The cursor rect
-  is emitted at one cell's width, while a CJK/emoji cell occupies two columns, so the block covers
-  the left column and the right half of the glyph stays uncovered. Cosmetic and position-correct
-  (the cursor is on the right cell); Phase 2, with the same wide-cell geometry work as the rest of
-  the plate/rect family.
 - **L14 — The atlas cell and the baseline latch to the FIRST terminal's usable measurement.** The
   atlas is rasterized into xterm's own `dimensions.device.cell`, handed over by whichever terminal
   builds the shared context first, and the baseline is derived from that same font at that moment.

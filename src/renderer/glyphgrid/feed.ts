@@ -6,6 +6,7 @@
  *  xterm's internals, which are the part of that library most likely to move under us. */
 
 import type { GlyphAtlas } from './atlas'
+import type { CursorShape } from './cursor'
 import { decorationAt, type DecorationReader } from './decorations'
 import {
   FLAG_BOLD,
@@ -59,8 +60,18 @@ export interface RowFeedOpts {
   theme: ThemeLanes
   /** Selection span on THIS viewport row, in columns [startCol, endColExclusive), or null. */
   selection: readonly [number, number] | null
-  /** Block-cursor column on THIS row, or -1. (Bar/underline cursors: Phase 2 — block only.) */
+  /** The cursor's column on THIS row, or -1. */
   cursorCol: number
+  /** The shape the cursor at `cursorCol` takes. Only `block` is expressible as a cell rewrite —
+   *  inverting the glyph needs the atlas asked for the swapped colours, which only this pass can do
+   *  — so every other shape is drawn as an OVERLAY after the cells and leaves this row untouched
+   *  (see `cursor.ts`). Defaults to `block`: every caller that predates cursor styles passes only a
+   *  column, and a block is what it meant. */
+  cursorShape?: CursorShape
+  /** Whether the terminal has focus. The only thing it changes HERE is the selection colour — the
+   *  blurred cursor is an overlay and never reaches this module. Defaults to true, so a caller that
+   *  says nothing keeps the active colours it has always had. */
+  focused?: boolean
   /** The terminal's decorations (search highlights and anything else that colours cells), or
    *  undefined for "this terminal has none" — which is what every caller that predates them passes,
    *  and what an xterm build with no decoration service degrades to. */
@@ -137,6 +148,25 @@ function dimLane(c: number): number {
   )
 }
 
+/**
+ * How far an UNFOCUSED terminal's selection is blended toward the plate — limitation L3's fix.
+ *
+ * A fixed factor rather than a colour, because there is no colour to read: `ThemeLanes` carries one
+ * selection background, and xterm's own `selectionInactiveBackground` is a theme entry most themes
+ * (including nodeterm's) never define. Blending toward the background keeps the hue the theme chose
+ * and simply quiets it, which cannot disagree with a theme that never stated an inactive colour.
+ * Half-way is enough to read as "not this one" at a glance without making the selection vanish.
+ */
+const INACTIVE_SELECTION_BLEND = 0.5
+
+/** Blend two packed lanes per channel, `t` of the way from `a` to `b`. Alpha rides along, which is
+ *  a no-op for the opaque lanes this feed deals in and correct if one ever is not. */
+function blendLane(a: number, b: number, t: number): number {
+  const mix = (shift: number): number =>
+    Math.round(((a >>> shift) & 0xff) + ((((b >>> shift) & 0xff) - ((a >>> shift) & 0xff)) * t))
+  return packColor(mix(0), mix(8), mix(16), mix(24))
+}
+
 function resolveFg(cell: CellView, theme: ThemeLanes): number {
   if (cell.isFgPalette()) return paletteLane(theme, cell.getFgColor(), theme.fg)
   if (cell.isFgRGB()) return rgbLane(cell.getFgColor())
@@ -170,6 +200,13 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *  skipped: this row buffer is REUSED across frames, so "write nothing" would leave the previous
  *  frame's lanes standing at that column. Every column in [0, cols) is always written.
  *
+ *  THE BLOCK CURSOR REACHES THE FOLLOWER, and that is the fix for limitation L13. The cursor is one
+ *  COLUMN and a wide glyph is two, so applying the override to the cursor's column alone painted the
+ *  left half of 日 and left the right half un-inverted. A cursor sitting on a wide LEAD therefore
+ *  carries into its follower (and nowhere else — not past it, and not into a stray zero-width cell
+ *  that follows a narrow one). The follower's glyph lane stays 0, per the Phase 1c contract, so the
+ *  shader paints its bg lane — which is now the cursor colour.
+ *
  *  DECORATIONS (a search hit's highlight is one) sit between the cell's own colours and the
  *  selection: they OVERRIDE base/inverse/dim — a hit on coloured output has to be visible — and
  *  LOSE to selection and cursor. That end matters just as much: a highlight that punched a hole in
@@ -181,6 +218,10 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *  only the background (the foreground must stay readable as itself); the cursor repaints both.
  *  On overlap the CURSOR WINS the colors, and BOTH flags stay set — the flags describe the cell's
  *  state (this cell is selected AND under the cursor), only the paint has to pick a winner.
+ *
+ *  An UNFOCUSED terminal's selection is blended toward the plate (`INACTIVE_SELECTION_BLEND`) —
+ *  limitation L3. Only the selection: the blurred CURSOR is a shape (xterm's hollow outline), and a
+ *  shape is an overlay drawn after the cells, so `focused` changes nothing else in this pass.
  *
  *  THE ATLAS REQUEST IS THE LAST THING THAT HAPPENS, and it has to be. The atlas is keyed by
  *  COLOUR: the rasterizer bakes the requested fg/bg into the slot's pixels and the shader blits
@@ -199,6 +240,14 @@ export function packViewportRow(
   const { cols, atlas, theme, selection, cursorCol } = opts
   const selStart = selection ? selection[0] : -1
   const selEnd = selection ? selection[1] : -1
+  // Only a block is a cell rewrite; every other shape is the overlay pass's business (cursor.ts).
+  const blockCursor = (opts.cursorShape ?? 'block') === 'block'
+  // Resolved ONCE per row: the selection colour cannot change mid-row, and blending it per cell
+  // would put a multiply and four roundings in the hot loop for an answer that never differs.
+  const selectionBg =
+    opts.focused === false
+      ? blendLane(theme.selectionBg, theme.bg, INACTIVE_SELECTION_BLEND)
+      : theme.selectionBg
   // Hoisted out of the loop: `empty()` is answered ONCE per row rather than once per cell, and a
   // terminal with no decorations leaves this null so the per-cell branch below is a null test.
   const decorations = opts.decorations && !opts.decorations.empty() ? opts.decorations : null
@@ -208,9 +257,16 @@ export function packViewportRow(
   let carryPending = false
   let carryFg = 0
   let carryBg = 0
+  /** Was the wide lead we are carrying from the one the BLOCK cursor covers? Separate from the
+   *  colour carry because the colours are captured PRE-override and the cursor is applied post — the
+   *  follower has to re-apply it, not inherit an already-overridden pair. */
+  let carryCursor = false
 
   for (let col = 0; col < cols; col++) {
     const cell = readCell(col, workCell)
+    // Whether the block cursor paints THIS column: its own column, or the follower half of a wide
+    // glyph whose lead it covers (set in the width-0 branch below).
+    let cursorHere = blockCursor && col === cursorCol
     let fg = theme.fg
     let bg = theme.bg
     let flags = 0
@@ -240,8 +296,11 @@ export function packViewportRow(
         if (carryPending) {
           fg = carryFg
           bg = carryBg
+          // The other half of the character the cursor is on — see the doc comment's L13 note.
+          if (carryCursor) cursorHere = true
         }
         carryPending = false
+        carryCursor = false
       } else {
         bold = cell.isBold() !== 0
         italic = cell.isItalic() !== 0
@@ -254,18 +313,22 @@ export function packViewportRow(
         if (width === 2) {
           flags |= FLAG_WIDE
           carryPending = true
-          // The lead's RESOLVED colors, captured before the selection/cursor overrides on purpose:
-          // those are decided per COLUMN, so the follower applies whichever ones cover IT. A lead
-          // under the cursor therefore paints one cursor cell, not two.
+          // The lead's RESOLVED colors, captured before the selection/decoration overrides on
+          // purpose: those are decided per COLUMN, so the follower applies whichever ones cover IT.
+          // The CURSOR is the one exception, carried explicitly — a block on a wide glyph covers
+          // the whole character (L13), which a per-column rule alone cannot express.
           carryFg = fg
           carryBg = bg
+          carryCursor = cursorHere
         } else {
           carryPending = false
+          carryCursor = false
         }
       }
     } else {
       // Past the end of a short line (or no line at all): a blank cell on the theme background.
       carryPending = false
+      carryCursor = false
     }
 
     // Over the cell's own colours (base/inverse/dim), under the selection and the cursor below.
@@ -278,10 +341,10 @@ export function packViewportRow(
     }
 
     if (col >= selStart && col < selEnd) {
-      bg = theme.selectionBg
+      bg = selectionBg
       flags |= FLAG_SELECTED
     }
-    if (col === cursorCol) {
+    if (cursorHere) {
       fg = theme.cursorFg
       bg = theme.cursorBg
       flags |= FLAG_CURSOR

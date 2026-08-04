@@ -1,6 +1,7 @@
 import { GUTTER_PX } from './atlas'
 import { snapPanToDevicePx, type Camera } from './camera'
 import { CELL_STRIDE, unpackColor } from './cells'
+import { cursorOverlays, cursorThicknessWorld, MAX_CURSOR_RECTS } from './cursor'
 import type { GlyphGL, GridDrawParams } from './gl'
 import { plateRectDevice } from './plate'
 
@@ -129,6 +130,45 @@ void main() {
   outColor = texture(uAtlas, vUv);
 }`
 
+/**
+ * The CURSOR OVERLAY program: flat-coloured quads drawn over a grid's cells.
+ *
+ * It exists because a bar / underline / outline cursor is not expressible as a cell. The cell path
+ * can only repaint a whole cell (which is exactly what a BLOCK cursor is, and why a block never
+ * reaches this program), so every other shape has to be geometry drawn on top.
+ *
+ * IT DOES NOT SAMPLE THE ATLAS, and must not: these quads are pure colour, and reading the texture
+ * would both cost a fetch per fragment and make the cursor's appearance depend on whatever slot the
+ * uv happened to land in. One instance per rect, positions taken from a uniform array rather than a
+ * vertex buffer — the whole cursor is at most four small rects (`MAX_CURSOR_RECTS`), so a buffer per
+ * frame would be more bookkeeping and more GL calls than the draw itself.
+ *
+ * The camera uniforms are duplicated rather than shared: uniforms live on a PROGRAM, so there is no
+ * such thing as sharing them between two. They are pushed per cursor draw (at most one per grid, and
+ * only for a grid that has one) instead of per frame, which keeps a canvas of terminals with block
+ * cursors — the default — at exactly zero extra GL calls.
+ */
+const CURSOR_VERT = `#version 300 es
+uniform vec2 uPan;
+uniform float uZoom;
+uniform vec2 uView;
+uniform vec4 uRects[${MAX_CURSOR_RECTS}]; // (x, y, w, h) in WORLD px, one per instance
+void main() {
+  vec4 r = uRects[gl_InstanceID];
+  int corner = gl_VertexID;
+  vec2 unit = vec2((corner == 1 || corner == 4 || corner == 5) ? 1.0 : 0.0,
+                   (corner == 2 || corner == 3 || corner == 5) ? 1.0 : 0.0);
+  vec2 world = r.xy + unit * r.zw;
+  vec2 screen = world * uZoom + uPan;
+  gl_Position = vec4(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0, 0.0, 1.0);
+}`
+
+const CURSOR_FRAG = `#version 300 es
+precision highp float;
+uniform vec4 uColor;
+out vec4 outColor;
+void main() { outColor = uColor; }`
+
 export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
   const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, depth: false })
   if (!gl) return null
@@ -147,6 +187,22 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     return loc
   }
   const aCellLoc = gl.getAttribLocation(program, 'aCell')
+  /** The overlay program, and null when it failed to build. Null is a DEGRADE, not a failure: the
+   *  cells still draw, and the terminal loses only a non-block cursor — never its text. */
+  const cursorProgram = buildProgram(gl, CURSOR_VERT, CURSOR_FRAG)
+  const cursorUniforms = new Map<string, WebGLUniformLocation | null>()
+  const cu = (name: string): WebGLUniformLocation | null => {
+    if (!cursorProgram) return null
+    let loc = cursorUniforms.get(name)
+    if (loc === undefined) {
+      loc = gl.getUniformLocation(cursorProgram, name)
+      cursorUniforms.set(name, loc)
+    }
+    return loc
+  }
+  /** Scratch for the overlay's rect uniforms — one allocation for the life of the context rather
+   *  than one per cursor per frame. */
+  const cursorRectData = new Float32Array(MAX_CURSOR_RECTS * 4)
   /** One GPU buffer PER GRID, so a change costs only the rows that changed (bufferSubData)
    *  instead of re-uploading every visible grid's whole cell array into one shared buffer. */
   const grids = new Map<string, { buf: WebGLBuffer; cols: number; rows: number }>()
@@ -264,6 +320,62 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
     // Disabled again immediately: the scissor is global GL state, and leaving it on would clip
     // the next grid's cells (and the next frame's full-surface clear in beginFrame).
     gl.disable(gl.SCISSOR_TEST)
+  }
+
+  /**
+   * The cursor overlay for one grid — the bar / underline / outline a cell cannot express.
+   *
+   * Damage-driven like everything else: this runs inside a frame the engine decided to draw, and the
+   * engine only decides that when something changed (`setCursor` is change-gated). Nothing here
+   * schedules, times or holds the rAF loop awake — a blinking cursor is Task 3's `pulse()`, not a
+   * timer hidden in the GL layer.
+   *
+   * The GEOMETRY is computed here rather than carried in `GridDrawParams` because it depends on the
+   * CAMERA: the mark is a hairline, defined in device pixels, so its world-unit thickness changes
+   * with every zoom tick (`cursorThicknessWorld`). Recomputing it per draw is four multiplications;
+   * pushing a new spec through the engine on every zoom step would be damage on every frame of a
+   * pinch gesture.
+   */
+  const drawCursor = (g: GridDrawParams): void => {
+    const c = g.cursor
+    if (!c || !cursorProgram) return
+    const rects = cursorOverlays(
+      c.shape,
+      c.widthCells,
+      cursorThicknessWorld(cam.zoom, dpr),
+      g.cellW,
+      g.cellH
+    )
+    // Empty for a block (the cell path drew it), for `none`, and for a degenerate cell. No program
+    // switch, no draw call — which is what keeps the default block cursor free.
+    if (rects.length === 0) return
+    const baseX = g.originX + c.col * g.cellW
+    const baseY = g.originY + c.row * g.cellH
+    const n = Math.min(rects.length, MAX_CURSOR_RECTS)
+    for (let i = 0; i < n; i++) {
+      const r = rects[i]
+      cursorRectData[i * 4] = baseX + r.x
+      cursorRectData[i * 4 + 1] = baseY + r.y
+      cursorRectData[i * 4 + 2] = r.w
+      cursorRectData[i * 4 + 3] = r.h
+    }
+    // The cell attribute array is disabled for the duration: it is enabled with divisor 1 and bound
+    // to the GRID's buffer, and this instanced draw asks for as many instances as there are rects.
+    // A driver that fetches enabled-but-unused arrays would read past a small grid's buffer.
+    // `drawGrid` re-enables it per grid, so nothing downstream depends on it staying on.
+    gl.disableVertexAttribArray(aCellLoc)
+    gl.useProgram(cursorProgram)
+    gl.uniform2f(cu('uPan'), cam.x, cam.y)
+    gl.uniform1f(cu('uZoom'), cam.zoom)
+    gl.uniform2f(cu('uView'), view[0], view[1])
+    gl.uniform4fv(cu('uRects'), cursorRectData.subarray(0, n * 4))
+    const col = unpackColor(c.color)
+    gl.uniform4f(cu('uColor'), col.r / 255, col.g / 255, col.b / 255, col.a / 255)
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n)
+    // RESTORED, always: `beginFrame` binds the cell program once for the whole frame, so leaving
+    // this one current would make the NEXT grid draw its cells through a shader that paints flat
+    // rectangles — a canvas of blank coloured boxes after the first terminal with a bar cursor.
+    gl.useProgram(program)
   }
 
   return {
@@ -405,6 +517,10 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       gl.vertexAttribIPointer(aCellLoc, 4, gl.UNSIGNED_INT, CELL_STRIDE * 4, 0)
       gl.vertexAttribDivisor(aCellLoc, 1)
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, g.cols * g.rows)
+
+      // --- (3) the cursor overlay, ON TOP of this grid's own cells and UNDER whatever grid is
+      // drawn after it — the same painter's order the plate and the cells already obey.
+      drawCursor(g)
     },
     endFrame() {
       /* single-pass for now; flush point reserved for Phase 1 layering */
@@ -414,6 +530,7 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       grids.clear()
       gl.deleteTexture(atlasTex)
       gl.deleteProgram(program)
+      if (cursorProgram) gl.deleteProgram(cursorProgram)
     }
   }
 }

@@ -768,8 +768,100 @@ describe('plate params', () => {
         plateX: -6,
         plateY: -4,
         plateW: 40,
-        plateH: 44
+        plateH: 44,
+        // A grid nobody has told about a cursor draws none — the overlay pass is skipped whole.
+        cursor: null
       }
     ])
+  })
+})
+
+/** THE CURSOR OVERLAY — the per-grid spec the GL layer turns into a bar / underline / outline.
+ *
+ *  The engine's job here is exactly the job it does for the plate: hold the latest value, gate it on
+ *  change, and hand it to `drawGrid`. It never computes geometry (that is `cursor.ts`) and never
+ *  learns what a shape looks like. */
+describe('cursor params', () => {
+  const CURSOR = { col: 3, row: 1, shape: 'bar' as const, widthCells: 1, color: 0xff00ffff }
+
+  it('a cursor set on the handle reaches drawGrid', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    h.setCursor(CURSOR)
+    e.frame()
+    expect(gl.params.at(-1)?.cursor).toEqual(CURSOR)
+  })
+
+  it('is change-gated — re-setting the same cursor draws nothing', () => {
+    // The caller re-derives this whenever it packs rows (the cursor's position comes from the same
+    // buffer state), so an unconditional dirty here would keep the shared canvas redrawing forever
+    // — the same discipline as setPlateRect.
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    h.setCursor(CURSOR)
+    expect(e.frame()).toBe(true)
+    h.setCursor({ ...CURSOR })
+    expect(e.frame()).toBe(false)
+    // Every field is compared, not just the position: a shape, width or colour change repaints too.
+    h.setCursor({ ...CURSOR, col: 4 })
+    expect(e.frame()).toBe(true)
+    h.setCursor({ ...CURSOR, col: 4, shape: 'underline' })
+    expect(e.frame()).toBe(true)
+    h.setCursor({ ...CURSOR, col: 4, shape: 'underline', widthCells: 2 })
+    expect(e.frame()).toBe(true)
+    h.setCursor({ ...CURSOR, col: 4, shape: 'underline', widthCells: 2, color: 1 })
+    expect(e.frame()).toBe(true)
+  })
+
+  it('clearing it is a change once, and a no-op thereafter', () => {
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    h.setCursor(CURSOR)
+    e.frame()
+    h.setCursor(null)
+    expect(e.frame()).toBe(true)
+    expect(gl.params.at(-1)?.cursor).toBe(null)
+    h.setCursor(null)
+    expect(e.frame()).toBe(false)
+  })
+
+  it('a HIDDEN grid’s cursor change does not wake the canvas, and rides the frame that reveals it', () => {
+    // Visibility-scoped, like updateRow and for the same reason: a cursor moves on every keystroke,
+    // and forty-five off-screen terminals typing would each wake the shared canvas for a grid the
+    // frame culls anyway. Safe for the same reason too — the cursor is a VALUE on the grid, not a
+    // range that could be lost, and every input that can change visibility dirties unconditionally.
+    const gl = fakeGL()
+    const e = new GlyphGridEngine(gl, atlas())
+    e.setViewport(100, 100, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('far', 5000))
+    e.frame() // registration damage; the grid is culled, so it is recorded as hidden
+    const woke = vi.fn()
+    e.onDamage(woke)
+    h.setCursor(CURSOR)
+    expect(woke).not.toHaveBeenCalled()
+    expect(e.frame()).toBe(false)
+    e.setCamera({ x: -5000, y: 0, zoom: 1 })
+    expect(e.frame()).toBe(true)
+    expect(gl.params.at(-1)?.cursor).toEqual(CURSOR)
+  })
+
+  it('setCursor on a disposed handle is inert — it must not un-idle the canvas', () => {
+    const e = new GlyphGridEngine(fakeGL(), atlas())
+    e.setViewport(800, 600, 1)
+    e.setCamera({ x: 0, y: 0, zoom: 1 })
+    const h = e.register(spec('a', 0))
+    h.dispose()
+    e.frame()
+    h.setCursor(CURSOR)
+    expect(e.frame()).toBe(false)
   })
 })

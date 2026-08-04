@@ -1,6 +1,7 @@
 import type { GlyphAtlas } from './atlas'
 import { rectsIntersect, visibleWorldRect, type Camera, type Rect } from './camera'
 import { CELL_STRIDE } from './cells'
+import type { GridCursor } from './cursor'
 import type { GlyphGL } from './gl'
 
 /** One registered grid: a cols×rows character matrix placed in world space. `z` is the node
@@ -53,6 +54,19 @@ export interface GridHandle {
    * ResizeObserver) calls both and each change-gates itself.
    */
   setPlateRect(x: number, y: number, w: number, h: number): void
+  /**
+   * The cursor drawn OVER this grid's cells, or null for none.
+   *
+   * Only non-block shapes belong here: a block cursor is expressed in the CELL data (the feed swaps
+   * that cell's colours so the glyph inverts), and an overlay quad would paint over the inversion it
+   * just produced. The owner decides which — see `cursor.ts`.
+   *
+   * Change-gated on every field, and its damage is VISIBILITY-SCOPED like `updateRow`'s: the cursor
+   * moves on every keystroke, so an off-screen terminal being typed into must not wake the shared
+   * canvas. Safe for a simpler reason than the row ranges — the cursor is a VALUE, replayed from the
+   * grid on whatever frame draws it next, so nothing can be lost by deferring it.
+   */
+  setCursor(cursor: GridCursor | null): void
   setZ(z: number): void
   resize(cols: number, rows: number): void
   /** Drops the grid. After this the handle is INERT — every mutator above becomes a silent
@@ -60,6 +74,21 @@ export interface GridHandle {
    *  race, not a bug, and it must neither mutate a dead grid nor un-idle the shared canvas.
    *  `GlyphGridEngine.disposeAll()` puts every outstanding handle into the same state. */
   dispose(): void
+}
+
+/** Are two cursor specs the same paint? Null-tolerant, field-by-field — the handle re-derives its
+ *  spec from live buffer state, so equality is what keeps a re-derivation from dirtying the
+ *  engine. */
+function sameCursor(a: GridCursor | null, b: GridCursor | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.col === b.col &&
+    a.row === b.row &&
+    a.shape === b.shape &&
+    a.widthCells === b.widthCells &&
+    a.color === b.color
+  )
 }
 
 interface Grid extends GridSpec {
@@ -89,6 +118,10 @@ interface Grid extends GridSpec {
    *  Lives on the GRID rather than in a per-frame set so `updateRow` — the hot path, called per
    *  terminal row — reads it off the object it already holds. */
   lastVisible: boolean
+  /** The overlay cursor drawn after this grid's cells, or null. Not part of `GridSpec`: a grid is
+   *  registered before its terminal has ever packed a row, so "no cursor yet" is the only honest
+   *  starting state and every owner would otherwise have to spell it out. */
+  cursor: GridCursor | null
   /** Set by this grid's `dispose()` AND by `disposeAll()`. It is the ONE inertness flag every
    *  handle reads: a handle closes over its Grid, so marking the grid reaches the handle without
    *  the engine having to keep a list of live handles (which would be a leak of its own — a
@@ -189,6 +222,7 @@ export class GlyphGridEngine {
       dirtyFrom: 0,
       dirtyTo: spec.rows - 1,
       lastVisible: true,
+      cursor: null,
       dead: false
     }
     this.grids.set(spec.id, grid)
@@ -248,6 +282,19 @@ export class GlyphGridEngine {
         grid.plateW = w
         grid.plateH = h
         engine.markDirty()
+      },
+      setCursor(cursor) {
+        if (grid.dead) return
+        if (sameCursor(grid.cursor, cursor)) return
+        // COPIED, not aliased: the owner re-derives one spec object per pack and would otherwise be
+        // free to mutate the value the next frame draws from — and the change gate above would
+        // never see the difference, so the canvas would keep drawing a cursor that has moved.
+        grid.cursor = cursor ? { ...cursor } : null
+        // Visibility-scoped, the ONLY mutator besides updateRow that is — see the interface comment
+        // and the long argument in updateRow. The frame that brings a hidden grid back into view is
+        // always drawn (every visibility input dirties unconditionally) and reads `grid.cursor` as
+        // it stands then, so nothing is lost by not waking the canvas for an off-screen keystroke.
+        if (grid.lastVisible) engine.markDirty()
       },
       setZ(z) {
         if (grid.dead) return
@@ -466,7 +513,8 @@ export class GlyphGridEngine {
           plateX: g.plateX,
           plateY: g.plateY,
           plateW: g.plateW,
-          plateH: g.plateH
+          plateH: g.plateH,
+          cursor: g.cursor
         })
       }
       this.gl.endFrame()

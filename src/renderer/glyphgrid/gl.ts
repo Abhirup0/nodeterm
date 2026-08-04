@@ -1,4 +1,5 @@
 import type { Camera } from './camera'
+import type { GridCursor } from './cursor'
 
 /** Per-draw parameters for one grid: where/how big it sits in world space, plus the plate.
  *
@@ -39,6 +40,19 @@ export interface GridDrawParams {
   plateY: number
   plateW: number
   plateH: number
+  /**
+   * The cursor to draw OVER this grid's cells, or null for none.
+   *
+   * Only the shapes that are not a block ever arrive here: a block cursor is a CELL REWRITE (the
+   * feed swaps the cell's colours, which is the only way to invert the glyph under it), so the cell
+   * data already carries it and an overlay would paint an opaque quad over the inversion. See
+   * `cursor.ts` — `cursorOverlays` answers `[]` for `block` for the same reason.
+   *
+   * The GEOMETRY is not carried: the rects depend on the camera (a hairline is defined in device
+   * pixels), so the implementation derives them per draw from `cursor.ts`'s pure functions rather
+   * than having the engine recompute a spec on every zoom tick.
+   */
+  cursor: GridCursor | null
 }
 
 /** Everything engine.ts is allowed to know about the GPU. Draw order is the painter's
@@ -76,8 +90,9 @@ export interface GlyphGL {
   ): void
   /** Clears the frame and sets the camera uniforms. */
   beginFrame(camera: Camera): void
-  /** Draws the plate (a scissored clear of the grid's PLATE rect) and then the instanced cells
-   *  from the grid's OWN buffer, in call order (painter's algorithm). */
+  /** Draws the plate (a scissored clear of the grid's PLATE rect), then the instanced cells from
+   *  the grid's OWN buffer, then the cursor overlay if it has one — in call order (painter's
+   *  algorithm), so a grid drawn later covers all three. */
   drawGrid(g: GridDrawParams): void
   endFrame(): void
   dispose(): void
