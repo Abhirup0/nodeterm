@@ -1220,6 +1220,11 @@ export const CURSOR_BLINK_INTERVAL_MS = 600
  *     the two this terminal is currently drawing — not just the overlay.
  * A terminal that stops being the target must leave its own cursor SHOWN; the clock restores the
  * target it still holds, but it cannot reach one that has already been dropped.
+ *
+ * THE PRODUCER is `GlyphGridRendererAddonCore` — `setCursorBlinkPhase` for (2) and (3), published
+ * on its own focus edges for (1) through the `blink` seam the attach shell supplies
+ * (`terminal/glyphgrid-attach.ts`). It has to be the addon: it is the only thing that tracks which
+ * terminal has focus and the only thing that holds both halves of a cursor.
  */
 export interface CursorBlinkTarget {
   /** Show or hide this terminal's cursor for the current phase. */

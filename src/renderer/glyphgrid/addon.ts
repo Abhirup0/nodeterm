@@ -27,6 +27,32 @@ export interface DeviceMetrics {
   cellH: number
 }
 
+/** This terminal's end of the canvas cursor-blink clock: the clock hands the focused terminal its
+ *  phase through here. Declared structurally rather than imported from the shared layer — this
+ *  directory imports nothing — and it is the same shape as the layer's `CursorBlinkTarget`. */
+export interface CursorBlinkPhaseTarget {
+  setPhase(visible: boolean): void
+}
+
+/**
+ * How the addon publishes WHICH terminal the canvas's single blink clock should be driving.
+ *
+ * The addon is the only thing that can answer it: it tracks focus itself (see `focused`), and a
+ * focused block cursor produces no overlay at all, so focus is invisible from the engine side.
+ *
+ * OPTIONAL, like the decorations: a build with no shared layer hands over nothing and the cursor
+ * simply never blinks — Phase 1b's behaviour, not a broken renderer.
+ *
+ * `release(target)` rather than a bare `setTarget(null)`, and it is IDENTITY-GUARDED by the shell:
+ * browsers do not promise that the blurred terminal's blur reaches us before the newly focused
+ * one's focus, and an unconditional clear on a late blur would stop the cursor of the terminal the
+ * user just clicked into — the only one that is supposed to be blinking.
+ */
+export interface CursorBlinkSeam {
+  claim(target: CursorBlinkPhaseTarget): void
+  release(target: CursorBlinkPhaseTarget): void
+}
+
 /** What the addon needs from a live terminal. Kept minimal so the addon is testable with fakes and
  *  survives xterm minor bumps. */
 export interface TermInternals {
@@ -60,6 +86,8 @@ export interface TermInternals {
    *  `focused`), because whether the browser service's flag has flipped by the time xterm calls
    *  handleBlur is an ordering detail the cursor's correctness must not rest on. */
   cursorStyle?(): { style?: string; inactiveStyle?: string }
+  /** The canvas's blink clock, or undefined on a build that has none. See `CursorBlinkSeam`. */
+  blink?: CursorBlinkSeam
   /** The terminal's decorations — the cell colours a ⌘F hit paints — or undefined.
    *
    *  ALL THREE DECORATION MEMBERS ARE OPTIONAL, together: an xterm build whose decoration service
@@ -155,6 +183,24 @@ export class GlyphGridRendererAddonCore {
    */
   private cellCursorBlock: boolean
 
+  /**
+   * Whether the canvas's blink clock currently wants this terminal's cursor SHOWN.
+   *
+   * A third reason a cursor may not be drawn this instant, independent of focus and of the app's
+   * own DECTCEM state — see `cursorShown`, which is the single place the three meet. True whenever
+   * no clock is driving this terminal, so every terminal that is not the blink target (and every
+   * terminal at all, on a build with no shared layer) draws exactly as it did before.
+   */
+  private blinkVisible = true
+
+  /** ONE object for the addon's lifetime, handed to the clock on every focus edge. Identity is the
+   *  contract, not an optimization: the clock is change-gated on it (`next !== current`, and
+   *  `setCursorBlinkTarget` compares by reference), so a fresh object per focus event would restart
+   *  the blink period every time a focus notification arrived. */
+  private readonly blinkSelf: CursorBlinkPhaseTarget = {
+    setPhase: (visible: boolean): void => this.setCursorBlinkPhase(visible)
+  }
+
   /** Mutable because `readCellBound` closes over it: one closure for the lifetime of the addon
    *  instead of one per packed row. */
   private absRow = 0
@@ -199,6 +245,12 @@ export class GlyphGridRendererAddonCore {
     const onRemoved = internals.onDecorationRemoved
     if (onRegistered) this.decorationSubs.push(onRegistered(() => this.handleDecorationChange()))
     if (onRemoved) this.decorationSubs.push(onRemoved(() => this.handleDecorationChange()))
+    // LAST, and after the subscriptions, for the same reason they go last: this publishes the addon
+    // into a CANVAS-LEVEL singleton, and a construction that threw afterwards would leave it there
+    // with nobody holding an addon to release it. Seeded rather than waited for, because a mode
+    // switch or a remount attaches to a terminal the user is already typing in — a clock that only
+    // learned about focus on the next focus EVENT would leave that cursor static.
+    this.publishBlinkTarget()
   }
 
   // ---------------------------------------------------------------- xterm renderer surface
@@ -283,12 +335,38 @@ export class GlyphGridRendererAddonCore {
     if (this.disposed) return
     this.focused = false
     this.repaintFocusDependent()
+    // AFTER the repaint: releasing makes the clock restore this cursor to its shown phase, and it
+    // must restore the blurred SHAPE, which `repaintFocusDependent` has just established.
+    this.publishBlinkTarget()
   }
 
   handleFocus(): void {
     if (this.disposed) return
     this.focused = true
     this.repaintFocusDependent()
+    this.publishBlinkTarget()
+  }
+
+  /**
+   * The canvas blink clock's phase for THIS terminal — show or hide its cursor for the half-period.
+   *
+   * SYNCHRONOUS, and that is the contract rather than an implementation detail. The clock brackets
+   * this call so the damage it produces is routed to the frame loop's one-shot `pulse()` instead of
+   * `wake()` (see `CursorBlinkTarget` in `canvas/SharedGlyphLayer.tsx`): a repack deferred to a
+   * redraw request — the way an atlas reset and a decoration change defer theirs — would land
+   * OUTSIDE that bracket, take the wake path, and re-arm the 30-frame idle streak twice a second.
+   * That is Phase 1c's idle park silently undone on every canvas with a focused terminal, i.e. the
+   * exact failure the clock exists to prevent. So the row is packed here, on the caller's stack;
+   * this must never become an `emitRedraw`.
+   *
+   * BOTH halves go together, which is why only the addon can apply a phase: `packRows` re-pushes
+   * the overlay (`syncCursor`) before it packs, and `cursorShown()` gates the cell half in the same
+   * breath — so a block's cell inversion and every other shape's overlay disappear on one phase.
+   */
+  setCursorBlinkPhase(visible: boolean): void {
+    if (this.disposed || this.blinkVisible === visible) return
+    this.blinkVisible = visible
+    this.packCursorRow()
   }
 
   /** Not part of xterm's renderer surface — the shell calls it from `_themeService.onChangeColors`.
@@ -314,6 +392,11 @@ export class GlyphGridRendererAddonCore {
    *  The grid HANDLE is deliberately not disposed — the node that registered it owns its lifetime
    *  (it outlives a renderer swap back to DOM). */
   dispose(): void {
+    // BEFORE `disposed`, deliberately: the clock restores the phase from inside its release path,
+    // and an addon already flipped inert would swallow that `setPhase(true)` — leaving the last
+    // packed row without the cursor the blink happened to be hiding. Identity-guarded in the shell,
+    // so a terminal torn down after another has taken focus cannot stop the new one's blink.
+    this.releaseBlinkTarget()
     this.disposed = true
     // The overlay cursor is a GRID-level value, so — unlike a packed row — nothing will ever
     // overwrite it. A renderer swapped back to xterm's DOM one would otherwise leave a bar or an
@@ -409,6 +492,31 @@ export class GlyphGridRendererAddonCore {
     if (sel) this.packRows(sel[0], sel[1])
   }
 
+  /** Tell the canvas's blink clock whether this terminal is the one to blink. Called on every focus
+   *  edge and once at construction; `dispose` uses `releaseBlinkTarget` directly, because by then
+   *  the answer is "nobody" whatever the focus flag says. */
+  private publishBlinkTarget(): void {
+    if (this.focused) this.internals.blink?.claim(this.blinkSelf)
+    else this.releaseBlinkTarget()
+  }
+
+  private releaseBlinkTarget(): void {
+    this.internals.blink?.release(this.blinkSelf)
+  }
+
+  /**
+   * Is the cursor drawn at all right now?
+   *
+   * Two independent reasons it may not be — the app's own DECTCEM state (a TUI hiding it) and the
+   * blink clock's phase — and every path that draws EITHER half asks this one question, which is
+   * what keeps the cell half and the overlay half from ever disagreeing about a phase. Focus is
+   * deliberately not in here: a blurred terminal still has a cursor, it just wears a different
+   * shape (see `cursorShape`).
+   */
+  private cursorShown(): boolean {
+    return this.blinkVisible && this.internals.cursorVisible()
+  }
+
   /** The shape the cursor takes right now, from the shell's options and OUR focus flag. */
   private cursorShape(): CursorShape {
     const opts = this.internals.cursorStyle?.()
@@ -420,14 +528,15 @@ export class GlyphGridRendererAddonCore {
    *
    * Null for a BLOCK as well as for `none`: a block is a cell rewrite (only that path can invert the
    * glyph under it), and drawing it here too would paint an opaque quad over the inversion the feed
-   * just produced. Null for a hidden cursor (DECTCEM inside a TUI) and for one scrolled out of the
-   * viewport, both for the same reason: the overlay is a GRID-level value, so nothing else would
-   * ever erase a stale one — unlike a packed row, which the next frame rewrites wholesale.
+   * just produced. Null for a cursor that is not shown right now (`cursorShown` — DECTCEM inside a
+   * TUI, or the blink's hidden phase) and for one scrolled out of the viewport, both for the same
+   * reason: the overlay is a GRID-level value, so nothing else would ever erase a stale one —
+   * unlike a packed row, which the next frame rewrites wholesale.
    */
   private cursorSpec(): GridCursor | null {
     const shape = this.cursorShape()
     if (shape === 'block' || shape === 'none') return null
-    if (!this.internals.cursorVisible()) return null
+    if (!this.cursorShown()) return null
     if (this.cols <= 0 || this.rows <= 0) return null
     const row = this.cursorViewportRow()
     if (row < 0 || row >= this.rows) return null
@@ -472,10 +581,13 @@ export class GlyphGridRendererAddonCore {
     if (end < start || this.cols <= 0) return
     const theme = this.internals.theme()
     const viewportY = this.internals.viewportY()
-    // -1 = no cursor row in this pass (the app hid it — DECTCEM inside a TUI). NOT focus-gated any
-    // more: a blurred terminal still has a cursor, it just wears a different shape, and which of the
-    // two paths draws it is `cursorShape`'s answer below — not this row's.
-    const cursorRow = this.internals.cursorVisible()
+    // -1 = no cursor row in this pass — the app hid it (DECTCEM inside a TUI) or the blink clock is
+    // in its hidden phase. The two share this branch on purpose: `settleCursorCells` already knows
+    // that a cursor row of -1 means "there is no block to keep in step with", so a phase costs no
+    // repair repack and can never paint a block back onto the row it just cleared. NOT focus-gated:
+    // a blurred terminal still has a cursor, it just wears a different shape, and which of the two
+    // paths draws it is `cursorShape`'s answer below — not this row's.
+    const cursorRow = this.cursorShown()
       ? this.internals.baseY() + this.internals.cursorY() - viewportY
       : -1
     // Resolved ONCE for the range: only a `block` is a cell rewrite, and the feed ignores

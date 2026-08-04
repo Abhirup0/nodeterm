@@ -232,10 +232,13 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       it can STOP, each of which must leave the cursor **shown** rather than stuck invisible: turn
       the setting off while it happens to be in its hidden phase, click from one terminal into
       another, and open the kanban board (⌘⇧B) and come back.
-      **Report a static cursor as the state of the wiring, not as a bug, until the hook named in L1
-      lands** — the canvas-level clock ships here (one clock, focused terminal only, drawn through
-      the frame loop's one-shot `pulse()`; see 4.19), but the per-terminal repaint it calls is still
-      owed.
+      **A block cursor blinks as a whole cell and every other shape as a hairline overlay — walk at
+      least one of each** (Settings → Terminal → Cursor style), because the two are drawn by
+      different halves of the renderer and a phase that hid only one would show as a cursor that
+      goes hollow instead of away, or as an inverted cell with no mark on it. A cursor that is
+      **static** with the setting on is a BUG now (the wiring is complete); report it with which
+      shape was selected and whether the terminal had focus. See 4.19 for the frame cost this must
+      not have.
       **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
       glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
       the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still
@@ -481,8 +484,9 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       there is the opposite reading: an FPS meter at the display's refresh rate with nothing but a
       blinking cursor happening means the blink took the `wake()` path and is re-arming the 30-frame
       idle streak twice a second. Click into a terminal, leave everything else idle, and confirm the
-      meter reads ~2 rather than 60. (Until the phase hook in L1 lands nothing blinks, so this case
-      reads as fully quiet.)
+      meter reads ~2 rather than 60. Then click AWAY (focus another app): the last phase leaves the
+      cursor shown and the meter drops to quiet — a canvas with no focused terminal has no clock at
+      all.
       **BLOCKING symptom to name explicitly: if ANY terminal ever stops repainting until you drag
       it, click it, or resize something, that is a MISSED WAKE** — the failure this design fears,
       and far worse than the idle CPU it saves. Report it with what the terminal was doing when it
@@ -530,19 +534,6 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 
 ## Known limitations (accepted for Phase 1b — verify they are what you see, not that they are absent)
 
-- **L1 — The cursor does not blink YET: the clock ships, the per-terminal phase hook is owed.**
-  Phase 2's blink task built the half that is hard to get right — one canvas-level clock
-  (`createCursorBlinkClock` in `SharedGlyphLayer.tsx`), gated on the setting, on a terminal holding
-  focus and on the board, whose repaint goes through the frame loop's one-shot `pulse()` so an idle
-  canvas ticks twice a second instead of returning to the display's refresh rate (4.19). What is
-  missing is the PRODUCER: nothing calls `setCursorBlinkTarget` yet, because the phase has to be
-  applied by the addon — a block cursor is a CELL rewrite and every other shape is an overlay, so
-  only `GlyphGridRendererAddonCore` can suppress whichever half a terminal is drawing. It needs a
-  `setCursorBlinkPhase(visible)` entry point (repacking the cursor row SYNCHRONOUSLY — a deferred
-  repack escapes the clock's damage bracket and takes the `wake()` path, which is the failure the
-  clock exists to prevent) plus a focus-driven `setCursorBlinkTarget(…)` call from the attach shell.
-  Both files were out of scope for the task that built the clock. Until then the shared renderer
-  paints a static cursor regardless of the setting, exactly as it did in Phase 1b.
 - **L5 — FIXED in round 2 (bands at the bottom/right).** Kept here as the record, because it is the
   one item on this list whose expected observation INVERTED. It used to read: the plate covers the
   grid plus one scalar of host padding (`padPx`, the 6px max of `.term-node__xterm`'s asymmetric

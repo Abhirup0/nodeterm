@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest'
+// TEST-ONLY cross-layer import, and the only one in this directory: the blink is a CONTRACT between
+// the clock (which owns the timing and the damage routing) and this addon (which owns applying a
+// phase), and the trap it exists to avoid lives exactly in the seam between them — see the last
+// describe. `src/renderer/glyphgrid/` itself still imports nothing.
+import { createCursorBlinkClock, type CursorBlinkClock } from '../canvas/SharedGlyphLayer'
 import type { GlyphAtlas } from './atlas'
 import { CELL_STRIDE, FLAG_CURSOR, FLAG_SELECTED, packColor, readCell } from './cells'
 import type { GridCursor } from './cursor'
 import type { GridHandle } from './engine'
 import {
   GlyphGridRendererAddonCore,
+  type CursorBlinkPhaseTarget,
+  type CursorBlinkSeam,
   type DeviceMetrics,
   type TermInternals
 } from './addon'
@@ -164,6 +171,41 @@ function fakeDecorations(
   }
 }
 
+/** The canvas blink clock's end of the seam, as the attach shell implements it: `release` is
+ *  IDENTITY-GUARDED, because browsers do not promise that the blurred terminal's blur reaches us
+ *  before the newly focused one's focus. Modelling that here is what makes the handover assertion
+ *  mean anything — an unguarded fake would pass against an unguarded shell.
+ *
+ *  `onRelease` stands in for the clock's own restoring `setPhase(true)`, which is the behaviour
+ *  `dispose` has to leave room for. */
+function fakeBlinkSeam(o: { onRelease?: (t: CursorBlinkPhaseTarget) => void } = {}): {
+  seam: CursorBlinkSeam
+  target(): CursorBlinkPhaseTarget | null
+  claims: CursorBlinkPhaseTarget[]
+  releases: CursorBlinkPhaseTarget[]
+} {
+  let current: CursorBlinkPhaseTarget | null = null
+  const claims: CursorBlinkPhaseTarget[] = []
+  const releases: CursorBlinkPhaseTarget[] = []
+  return {
+    seam: {
+      claim(t) {
+        claims.push(t)
+        current = t
+      },
+      release(t) {
+        releases.push(t)
+        if (current !== t) return
+        current = null
+        o.onRelease?.(t)
+      }
+    },
+    target: () => current,
+    claims,
+    releases
+  }
+}
+
 interface FakeTermOpts {
   cols?: number
   rows?: number
@@ -181,9 +223,14 @@ interface FakeTermOpts {
   /** Columns whose cell reports width 2 — a wide glyph's LEAD. The column after one reports width
    *  0, exactly as xterm's buffer stores a double-width character. */
   wideCols?: readonly number[]
+  /** The blink seam. ABSENT in every test that does not name it — a build with no shared layer
+   *  hands the addon exactly this, and the cursor simply never blinks. */
+  blink?: CursorBlinkSeam
 }
 
-type FakeTermState = Required<Omit<FakeTermOpts, 'decorations' | 'cursorStyle' | 'wideCols'>>
+type FakeTermState = Required<
+  Omit<FakeTermOpts, 'decorations' | 'cursorStyle' | 'wideCols' | 'blink'>
+>
 
 function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState } {
   const state: FakeTermState = {
@@ -219,6 +266,8 @@ function fakeTerm(o: FakeTermOpts = {}): TermInternals & { state: FakeTermState 
     hasFocus: () => state.focus,
     // Absent unless a test names them — see FakeTermOpts.cursorStyle.
     cursorStyle: o.cursorStyle ? () => o.cursorStyle as { style?: string } : undefined,
+    // Absent unless a test asks for it, like the decorations below.
+    blink: o.blink,
     // Absent unless a test asks for them — an xterm build with no decoration service hands the
     // addon exactly this, and every other test in this file is that case.
     decorations: o.decorations?.reader,
@@ -706,6 +755,348 @@ describe('GlyphGridRendererAddonCore cursor shape', () => {
     style.inactiveStyle = 'block'
     core.renderRows(3, 3) // flips back, and now the cursor row is NOT in range
     expect(handle.rows.map((r) => r.row).sort((a, b) => a - b)).toEqual([1, 3])
+  })
+})
+
+/** THE BLINK PHASE — the producer half of the canvas's cursor-blink clock.
+ *
+ *  The clock (`canvas/SharedGlyphLayer.tsx`) owns the timing; the addon is the only thing that can
+ *  APPLY a phase, because a block cursor is a CELL rewrite and every other shape is an OVERLAY and
+ *  only this class holds both. So every test here asserts BOTH halves: a phase that hid one and not
+ *  the other would leave an inverted cell under a cleared overlay, or a bar hanging beside a cursor
+ *  that is supposed to be gone. */
+describe('GlyphGridRendererAddonCore.setCursorBlinkPhase', () => {
+  const lastCursor = (h: ReturnType<typeof recordingHandle>): GridCursor | null | undefined =>
+    h.cursors.at(-1)
+  /** The cursor flag on the NEWEST pack of a row — the older packs are still in the log, and a
+   *  blink is precisely a sequence of packs of the same row. */
+  const cursorFlag = (
+    h: ReturnType<typeof recordingHandle>,
+    row: number,
+    col: number
+  ): number => {
+    const rec = [...h.rows].reverse().find((r) => r.row === row)
+    if (!rec) throw new Error(`row ${row} was never packed`)
+    return readCell(rec.cells, col).flags & FLAG_CURSOR
+  }
+
+  it('hides BOTH halves of a block cursor for the hidden phase, and brings both back', () => {
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 1, cursorX: 2 })
+    core.renderRows(0, 3)
+    expect(cursorFlag(handle, 1, 2)).toBe(FLAG_CURSOR)
+    // A block never uses the overlay — the cells carry it, which is why the overlay alone could
+    // never have implemented this.
+    expect(lastCursor(handle)).toBe(null)
+
+    core.setCursorBlinkPhase(false)
+    expect(cursorFlag(handle, 1, 2)).toBe(0)
+    expect(lastCursor(handle)).toBe(null)
+
+    core.setCursorBlinkPhase(true)
+    expect(cursorFlag(handle, 1, 2)).toBe(FLAG_CURSOR)
+  })
+
+  it('hides the OVERLAY half too — a bar cursor blinks on the same phase', () => {
+    const { core, handle } = make({
+      rows: 4,
+      cols: 4,
+      cursorY: 1,
+      cursorX: 2,
+      cursorStyle: { style: 'bar' }
+    })
+    core.renderRows(0, 3)
+    expect(lastCursor(handle)?.shape).toBe('bar')
+
+    core.setCursorBlinkPhase(false)
+    expect(lastCursor(handle)).toBe(null)
+    expect(cursorFlag(handle, 1, 2)).toBe(0)
+
+    core.setCursorBlinkPhase(true)
+    expect(lastCursor(handle)?.shape).toBe('bar')
+  })
+
+  it('repacks the cursor row SYNCHRONOUSLY, and asks for NO redraw', () => {
+    // THE contract. The clock brackets this call to route the damage it produces through the frame
+    // loop's one-shot `pulse()`; a repack handed to `onRequestRedraw` (as an atlas reset or a
+    // decoration change is) would land outside that bracket, take `wake()`, and re-arm the 30-frame
+    // idle streak twice a second.
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 2, cursorX: 0 })
+    const redraws: Array<{ start: number; end: number }> = []
+    core.onRequestRedraw((e) => redraws.push(e))
+    handle.rows.length = 0
+
+    core.setCursorBlinkPhase(false)
+
+    expect(handle.rows.map((r) => r.row)).toEqual([2])
+    expect(redraws).toEqual([])
+  })
+
+  it('is change-gated — the same phase twice costs one pack', () => {
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 2, cursorX: 0 })
+    handle.rows.length = 0
+    core.setCursorBlinkPhase(false)
+    core.setCursorBlinkPhase(false)
+    expect(handle.rows.map((r) => r.row)).toEqual([2])
+  })
+
+  it('is inert after dispose — a clock tick racing a teardown must not touch the grid', () => {
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 2, cursorX: 0 })
+    core.dispose()
+    handle.log.length = 0
+    core.setCursorBlinkPhase(false)
+    expect(handle.log).toEqual([])
+  })
+
+  it('a pack that misses the cursor row during a hidden phase neither repairs nor resurrects it', () => {
+    // A hidden phase is the same "no cursor row in this pass" case DECTCEM already produces, so
+    // `settleCursorCells` takes neither branch: no repair repack, and certainly no block painted
+    // back onto a row the blink just cleared.
+    const { core, handle } = make({ rows: 8, cols: 4, cursorY: 0, cursorX: 1 })
+    core.renderRows(0, 7)
+    core.setCursorBlinkPhase(false)
+    handle.rows.length = 0
+    core.renderRows(4, 5)
+    expect(handle.rows.map((r) => r.row)).toEqual([4, 5])
+  })
+
+  it('the block-ness repair still fires once the phase returns', () => {
+    // Constraint: hiding the cursor must not corrupt `cellCursorBlock`. Flip block-ness WHILE the
+    // cursor is hidden and pack rows that miss it — the bookkeeping the repair reads is stale by
+    // construction — then show the cursor again and the row must come back as an outline: cells
+    // un-inverted, overlay pushed.
+    const style = { style: 'block', inactiveStyle: 'block' }
+    const { core, handle } = make({
+      rows: 8,
+      cols: 4,
+      cursorY: 0,
+      cursorX: 1,
+      focus: false,
+      cursorStyle: style
+    })
+    core.renderRows(0, 7)
+    expect(cursorFlag(handle, 0, 1)).toBe(FLAG_CURSOR)
+
+    core.setCursorBlinkPhase(false)
+    style.inactiveStyle = 'outline'
+    core.renderRows(4, 5)
+    handle.rows.length = 0
+
+    core.setCursorBlinkPhase(true)
+    expect(handle.rows.map((r) => r.row)).toEqual([0])
+    expect(cursorFlag(handle, 0, 1)).toBe(0)
+    expect(lastCursor(handle)?.shape).toBe('outline')
+  })
+
+  it('a cursor the APP has hidden stays hidden through a shown phase', () => {
+    // DECTCEM and the blink are independent reasons not to draw; neither may override the other.
+    const { core, handle } = make({
+      rows: 4,
+      cols: 4,
+      cursorY: 1,
+      cursorX: 1,
+      cursorVisible: false
+    })
+    core.renderRows(0, 3)
+    core.setCursorBlinkPhase(false)
+    core.setCursorBlinkPhase(true)
+    expect(cursorFlag(handle, 1, 1)).toBe(0)
+    expect(lastCursor(handle)).toBe(null)
+  })
+})
+
+/** WHICH terminal blinks — the focus edge the clock's only gate is built on. */
+describe('GlyphGridRendererAddonCore blink target', () => {
+  it('claims the blink at construction when the terminal already has focus', () => {
+    // A mode switch or a remount attaches to a terminal the user is already typing in; a clock
+    // that only learned about focus on the NEXT focus event would leave that cursor static.
+    const blink = fakeBlinkSeam()
+    const { core } = make({ blink: blink.seam, focus: true })
+    expect(blink.target()).not.toBe(null)
+    core.dispose()
+  })
+
+  it('claims nothing while the terminal is blurred', () => {
+    const blink = fakeBlinkSeam()
+    make({ blink: blink.seam, focus: false })
+    expect(blink.claims).toEqual([])
+    expect(blink.target()).toBe(null)
+  })
+
+  it('claims on focus, releases on blur, and hands over the SAME object every time', () => {
+    // Identity is the contract: the clock is change-gated on it (`next !== current`), so a fresh
+    // object per focus event would restart the blink period on every notification.
+    const blink = fakeBlinkSeam()
+    const { core } = make({ blink: blink.seam, focus: false })
+    core.handleFocus()
+    const first = blink.target()
+    expect(first).not.toBe(null)
+    core.handleBlur()
+    expect(blink.target()).toBe(null)
+    core.handleFocus()
+    expect(blink.target()).toBe(first)
+  })
+
+  it('a LATE blur cannot steal the blink from the terminal that just took focus', () => {
+    // Browsers do not promise the blur of the old terminal reaches us before the focus of the new
+    // one. An unconditional clear on blur would stop the cursor of the terminal the user just
+    // clicked into — which is the only terminal that is supposed to be blinking.
+    const blink = fakeBlinkSeam()
+    const a = make({ blink: blink.seam, focus: true })
+    const b = make({ blink: blink.seam, focus: false })
+    b.core.handleFocus()
+    const bTarget = blink.target()
+    a.core.handleBlur()
+    expect(blink.target()).toBe(bTarget)
+  })
+
+  it('releases BEFORE it goes inert, so the clock can hand the cursor back shown', () => {
+    // The clock restores the phase from inside its release path. If dispose had already flipped the
+    // addon inert, that restore would be a silent no-op and the last packed row would keep the
+    // cursor the blink happened to be hiding — an invisible cursor on a node swapped back to the
+    // DOM renderer.
+    const blink = fakeBlinkSeam({ onRelease: (t) => t.setPhase(true) })
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 1, cursorX: 2, blink: blink.seam })
+    core.renderRows(0, 3)
+    core.setCursorBlinkPhase(false)
+    handle.rows.length = 0
+
+    core.dispose()
+
+    const rec = [...handle.rows].reverse().find((r) => r.row === 1)
+    expect(rec).toBeDefined()
+    expect(readCell(rec!.cells, 2).flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
+    expect(blink.target()).toBe(null)
+  })
+
+  it('constructs and packs normally when the shell offers no blink seam at all', () => {
+    // The degrade: no shared layer, no clock, no blink — Phase 1b's behaviour, not a broken addon.
+    const { core, handle } = make({ rows: 4, cols: 4, cursorY: 1, cursorX: 2 })
+    core.renderRows(0, 3)
+    core.handleFocus()
+    core.handleBlur()
+    core.dispose()
+    expect(handle.rows.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * THE PARK, END TO END — the one constraint this whole design exists to satisfy.
+ *
+ * The unit tests above prove the addon repacks on the caller's stack; the clock's own tests prove it
+ * routes its bracketed damage to `pulse()`. Neither alone proves the FEATURE parks, because the trap
+ * lives exactly in the seam between them: an addon that repacked one tick later would satisfy both
+ * and still put an idle canvas back at the display's refresh rate, thirty frames every 600 ms.
+ *
+ * So this wires the REAL addon to the REAL clock through a handle that reports damage the way the
+ * engine does — edge-triggered on the clean→dirty transition, cleared by the frame the loop draws.
+ */
+describe('the blink phase through the real clock', () => {
+  function wired(): {
+    core: GlyphGridRendererAddonCore
+    handle: ReturnType<typeof recordingHandle>
+    loop: { wake: number; pulse: number }
+    running(): boolean
+    tick(): void
+    frame(): void
+  } {
+    const handle = recordingHandle()
+    let clock: CursorBlinkClock | null = null
+    const loop = { wake: 0, pulse: 0 }
+    // The engine's `markDirty` notifies on the clean→dirty EDGE only, and the FRAME clears the flag
+    // — neither `wake()` nor `pulse()` draws inline, they schedule. Modelling that (rather than one
+    // notification per write) is what makes the counts below mean "frames scheduled", which is the
+    // number the park is about.
+    let dirty = false
+    const damage = (): void => {
+      if (dirty) return
+      dirty = true
+      clock?.routeDamage()
+    }
+    const damaging: GridHandle = {
+      ...handle,
+      updateRow(row, cells) {
+        handle.updateRow(row, cells)
+        damage()
+      },
+      setCursor(cursor) {
+        handle.setCursor(cursor)
+        damage()
+      }
+    }
+
+    let current: CursorBlinkPhaseTarget | null = null
+    // The attach shell's seam, verbatim in behaviour: claim publishes, release is identity-guarded,
+    // and either change re-syncs the clock (the real one does it through the layer's subscription).
+    const seam: CursorBlinkSeam = {
+      claim(t) {
+        current = t
+        clock?.sync()
+      },
+      release(t) {
+        if (current !== t) return
+        current = null
+        clock?.sync()
+      }
+    }
+
+    let fire: (() => void) | null = null
+    clock = createCursorBlinkClock({
+      enabled: () => true,
+      covered: () => false,
+      target: () => current,
+      loop: () => ({
+        wake: () => {
+          loop.wake++
+        },
+        pulse: () => {
+          loop.pulse++
+        }
+      }),
+      setInterval: (cb) => {
+        fire = cb
+        return 1
+      },
+      clearInterval: () => {
+        fire = null
+      }
+    })
+
+    const term = fakeTerm({ rows: 4, cols: 4, cursorY: 1, cursorX: 2, focus: true, blink: seam })
+    const core = new GlyphGridRendererAddonCore(term, damaging, recordingAtlas())
+    return {
+      core,
+      handle,
+      loop,
+      running: () => fire !== null,
+      tick: () => fire?.(),
+      frame: () => {
+        dirty = false
+      }
+    }
+  }
+
+  it('a phase flip costs ONE pulse and never a wake — the idle park survives the blink', () => {
+    const h = wired()
+    // The addon claimed the blink at construction, so the clock is already ticking.
+    expect(h.running()).toBe(true)
+    for (let i = 0; i < 3; i++) {
+      h.tick()
+      // The frame the pulse scheduled draws and clears the engine's dirty flag, 600 ms before the
+      // next phase — which is what lets the next flip notify at all.
+      h.frame()
+    }
+    expect(h.loop.pulse).toBe(3)
+    expect(h.loop.wake).toBe(0)
+  })
+
+  it('ordinary damage from the SAME addon still takes wake()', () => {
+    // The other half of the routing: only the clock's own bracketed repaint is a pulse. A terminal
+    // writing rows is likely to be followed by more, and a pulse per write would put a scheduling
+    // hop in front of every character.
+    const h = wired()
+    h.core.renderRows(0, 3)
+    expect(h.loop.wake).toBe(1)
+    expect(h.loop.pulse).toBe(0)
   })
 })
 

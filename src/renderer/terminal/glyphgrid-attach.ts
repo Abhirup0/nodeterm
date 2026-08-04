@@ -12,6 +12,7 @@
  *  behavior we ship today. */
 
 import type { Terminal } from '@xterm/xterm'
+import { cursorBlinkTarget, setCursorBlinkTarget } from '../canvas/SharedGlyphLayer'
 import {
   GlyphGridRendererAddonCore,
   type DeviceMetrics,
@@ -319,6 +320,22 @@ export function attachGlyphGrid(
       style: term.options.cursorStyle,
       inactiveStyle: term.options.cursorInactiveStyle
     }),
+    // The canvas's cursor-blink clock lives in the shared layer and drives exactly ONE terminal —
+    // the focused one — so the addon publishes its own focus edges through here. It is the addon
+    // that knows: it tracks focus itself (xterm's handleFocus/handleBlur, see `TermInternals`), and
+    // it is also the only thing that can suppress BOTH halves of a cursor for a phase.
+    //
+    // Not read from xterm at all, so this widens no private surface: the two calls below are ours.
+    // `release` is IDENTITY-GUARDED because the browser does not promise the blurred terminal's
+    // blur reaches us before the newly focused one's focus — an unconditional
+    // `setCursorBlinkTarget(null)` on a late blur would stop the cursor of the terminal the user
+    // just clicked into.
+    blink: {
+      claim: (target) => setCursorBlinkTarget(target),
+      release: (target) => {
+        if (cursorBlinkTarget() === target) setCursorBlinkTarget(null)
+      }
+    },
     // Spread, so a terminal with no usable decoration service leaves all three members undefined —
     // the addon's "this terminal has no highlights" case.
     ...(decorationsOf(core) ?? {})
